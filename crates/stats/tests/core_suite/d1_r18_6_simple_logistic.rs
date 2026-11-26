@@ -11,12 +11,15 @@
 //! - Heinze, G., & Schemper, M. (2002). A solution to the problem of separation in logistic regression. *Statistics in Medicine*, 21(16), 2409-2419.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, DataSheet, SimpleLogisticSpec, SubcolumnMode, TableArchetype,
-    TableKind, XyTable,
+    AnalysisKind, AnalysisSpec, Cell, CellValue, ChecklistStatus, ColumnDesignHint, ColumnTable, DataSheet, SimpleLogisticSpec, SubcolumnMode,
+    TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_stats::simple_logistic::{SimpleLogisticSeparation, run_simple_logistic_analysis, simple_logistic_regression};
 use curvebook_stats::{StatsError, run_analysis};
+use curvebook_testkit::assert_rel_close;
+
+use crate::common::{run_kind, xy_multi_sheet};
 
 fn assert_close(actual: f64, expected: f64, tol: f64, label: &str) {
     assert!(
@@ -262,4 +265,135 @@ fn result_sheet_includes_tabs_overlay_unknown_predictions_and_separation_checkli
     assert!(sep_res.checklist.iter().any(|c| c.status == ChecklistStatus::Violated));
     assert_eq!(sep_res.fitted_curves.len(), 1);
     assert!(!sep_res.fitted_curves[0].converged);
+}
+
+#[test]
+fn simple_logistic_aud05_profile_ci_scales_replicates_guards_and_roc_overlays() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+    let y11 = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let x_base: Vec<f64> = (0..=10).map(f64::from).collect();
+    let x_age: Vec<f64> = (50..=60).map(f64::from).collect();
+    let x_year: Vec<f64> = (2010..=2020).map(f64::from).collect();
+    let x_steep: Vec<f64> = (0..=10).map(|i| (i as f64) * 1e-3).collect();
+
+    // AUD-05-01 (Venzon & Moolgavkar 1988): Shift/scale invariance of profile-likelihood CIs & X50.
+    let (rb, ra, ry, rs) = (
+        simple_logistic_regression(&x_base, &y11, &[(11, 5.0)], 0.5, conf).unwrap(),
+        simple_logistic_regression(&x_age, &y11, &[], 0.5, conf).unwrap(),
+        simple_logistic_regression(&x_year, &y11, &[], 0.5, conf).unwrap(),
+        simple_logistic_regression(&x_steep, &y11, &[], 0.5, conf).unwrap(),
+    );
+    assert_close(rb.profile_ci_beta1.lower.unwrap(), 0.126_317_167_5, 1e-6, "base ci_b1.lo");
+    assert_close(rb.profile_ci_beta1.upper.unwrap(), 1.816_098_763_8, 1e-6, "base ci_b1.hi");
+    for (r, lbl) in [(&ra, "age"), (&ry, "year")] {
+        assert_close(r.profile_ci_beta1.lower.unwrap(), rb.profile_ci_beta1.lower.unwrap(), 1e-8, lbl);
+        assert_close(r.profile_ci_beta1.upper.unwrap(), rb.profile_ci_beta1.upper.unwrap(), 1e-8, lbl);
+    }
+    assert_close(ry.odds_ratio_ci_beta1.lower.unwrap(), rb.odds_ratio_ci_beta1.lower.unwrap(), 1e-7, "year or1.lo");
+    assert_close(ry.odds_ratio_ci_beta1.upper.unwrap(), rb.odds_ratio_ci_beta1.upper.unwrap(), 1e-7, "year or1.hi");
+    assert_close(ry.profile_ci_beta0.lower.unwrap(), -3_660.348_752, 1e-3, "year ci_b0.lo");
+    assert_close(ry.profile_ci_beta0.upper.unwrap(), -254.717_654, 1e-3, "year ci_b0.hi");
+    assert_close(ry.x50.unwrap(), rb.x50.unwrap() + 2010.0, 1e-8, "year x50");
+    assert_close(ry.x50_profile_ci.lower.unwrap(), rb.x50_profile_ci.lower.unwrap() + 2010.0, 1e-6, "year x50.lo");
+    assert_close(ry.x50_profile_ci.upper.unwrap(), rb.x50_profile_ci.upper.unwrap() + 2010.0, 1e-6, "year x50.hi");
+    assert_close(rs.x50.unwrap() * 1e3, rb.x50.unwrap(), 1e-8, "steep x50");
+    assert_close(rs.x50_profile_ci.lower.unwrap() * 1e3, rb.x50_profile_ci.lower.unwrap(), 1e-6, "steep x50.lo");
+    assert_close(rs.x50_profile_ci.upper.unwrap() * 1e3, rb.x50_profile_ci.upper.unwrap(), 1e-6, "steep x50.hi");
+
+    // AUD-05-02: XY replicate-X averaging & pre-summarized negative-SD rejection.
+    let xm = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+    let y10 = [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let mut xy_rep = XyTable::new(SubcolumnMode::Single, 1, 10).unwrap();
+    xy_rep.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(3) };
+    xy_rep.x_cells = xm.iter().map(|&v| vec![Cell::number(v - 1.0), Cell::number(v), Cell::number(v + 1.0)]).collect();
+    for (r, &yv) in y10.iter().enumerate() {
+        xy_rep.data_sets[0].cells[r][0] = Cell::number(yv);
+    }
+    let res_rep =
+        run_kind(&DataSheet::new("xy-xr", "XR", TableArchetype::Xy(xy_rep)).unwrap(), AnalysisKind::SimpleLogisticRegression(Default::default()))
+            .unwrap();
+    let o10 = simple_logistic_regression(&xm, &y10, &[], 0.5, conf).unwrap();
+    assert_close(res_rep.lookup_scalar("Beta0", Some(0)).unwrap(), o10.beta0, 1e-10, "rep X beta0");
+    assert_close(res_rep.lookup_scalar("Beta1", Some(0)).unwrap(), o10.beta1, 1e-10, "rep X beta1");
+    let mut xy_bad = XyTable::new(SubcolumnMode::Single, 1, 10).unwrap();
+    xy_bad.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSdN };
+    xy_bad.x_cells =
+        xm.iter().enumerate().map(|(r, &v)| vec![Cell::number(v), Cell::number(if r == 2 { -2.0 } else { 0.5 }), Cell::number(3.0)]).collect();
+    for (r, &yv) in y10.iter().enumerate() {
+        xy_bad.data_sets[0].cells[r][0] = Cell::number(yv);
+    }
+    assert!(
+        run_kind(&DataSheet::new("xy-xb", "XB", TableArchetype::Xy(xy_bad)).unwrap(), AnalysisKind::SimpleLogisticRegression(Default::default()))
+            .is_err()
+    );
+
+    // AUD-05-25: Extreme X scales (1e-13 sub-picomolar & 1e16 huge) preserve beta1 & finite X50.
+    let (x7, y7) = ([1.0, 2.0, 3.0, 4.0, 5.0, 2.0, 4.0], [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0]);
+    let r_u7 = simple_logistic_regression(&x7, &y7, &[], 0.5, conf).unwrap();
+    let r_t7 = simple_logistic_regression(&x7.map(|v| v * 1e-13), &y7, &[], 0.5, conf).unwrap();
+    assert!(r_t7.converged && r_t7.separation == SimpleLogisticSeparation::None);
+    assert_rel_close(r_t7.beta1 * 1e-13, r_u7.beta1, 1e-9, "sub-picomolar beta1");
+    assert_rel_close(r_t7.x50.unwrap() * 1e13, r_u7.x50.unwrap(), 1e-9, "sub-picomolar x50");
+    let r_h10 = simple_logistic_regression(&xm.map(|v| v * 1e16), &y10, &[], 0.5, conf).unwrap();
+    assert!(r_h10.converged);
+    assert_rel_close(r_h10.x50.unwrap(), o10.x50.unwrap() * 1e16, 1e-9, "huge-X x50");
+
+    // AUD-05-26: Centered prediction CI & sigmoid overlay bands stay cancellation-free at 1e8 / 1.7e9 offsets.
+    let base_mid = rb.row_predictions.iter().find(|r| r.is_unknown_row).unwrap();
+    for off in [1.0e8_f64, 1.7e9] {
+        let xo: Vec<f64> = x_base.iter().map(|&v| v + off).collect();
+        let ro = simple_logistic_regression(&xo, &y11, &[(11, 5.0 + off)], 0.5, conf).unwrap();
+        assert!(ro.converged);
+        for (pb, po) in rb.row_predictions.iter().zip(&ro.row_predictions) {
+            assert_close(po.predicted_prob, pb.predicted_prob, 1e-9, "off pred p");
+            assert_close(po.prob_ci.0, pb.prob_ci.0, 1e-8, "off pred lo");
+            assert_close(po.prob_ci.1, pb.prob_ci.1, 1e-8, "off pred hi");
+        }
+        let rs_ov = run_kind(
+            &xy_multi_sheet("xy-ts", &xo, &[("Y", &y11)]),
+            AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec { confidence_bands: true, plot_segments: Some(10), ..Default::default() }),
+        )
+        .unwrap();
+        let mid = &rs_ov.fitted_curves.iter().find(|c| c.equation_id == "simple_logistic").unwrap().points[5];
+        assert_close(mid.y, base_mid.predicted_prob, 1e-9, "overlay mid p");
+        assert_close(mid.ci_lower.unwrap(), base_mid.prob_ci.0, 1e-8, "overlay mid lo");
+        assert_close(mid.ci_upper.unwrap(), base_mid.prob_ci.1, 1e-8, "overlay mid hi");
+    }
+
+    // AUD-05-27: DimensionMismatch & non-finite Y rejection.
+    assert!(matches!(
+        simple_logistic_regression(&[1.0, 2.0, 3.0, 4.0, 5.0], &[0.0, 1.0, 1.0], &[], 0.5, conf),
+        Err(StatsError::DimensionMismatch { expected: 5, actual: 3 })
+    ));
+    for bad_y in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).unwrap();
+        for (r, yv) in [0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0, bad_y].into_iter().enumerate() {
+            xy.x_cells[r][0] = Cell::number((r + 1) as f64);
+            xy.data_sets[0].cells[r][0] = Cell { value: CellValue::Number(yv), excluded: false };
+        }
+        assert!(matches!(
+            run_kind(&DataSheet::new("xy-by", "BY", TableArchetype::Xy(xy)).unwrap(), AnalysisKind::SimpleLogisticRegression(Default::default())),
+            Err(StatsError::InvalidParameter { .. })
+        ));
+    }
+
+    // AUD-13-06 & AUD-13-16: Multi-dataset per-dataset scalars & simple_logistic-before-ROC overlay order & AUC parity.
+    let xs_m = [-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let (y0, y1) = ([0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+    let rs_m =
+        run_kind(&xy_multi_sheet("xy-m", &xs_m, &[("DrugA", &y0), ("DrugB", &y1)]), AnalysisKind::SimpleLogisticRegression(Default::default()))
+            .unwrap();
+    assert!(rs_m.lookup_scalar("Beta1", Some(0)).unwrap() > 0.0 && rs_m.lookup_scalar("Beta1", Some(1)).unwrap() < 0.0);
+    assert!(rs_m.lookup_scalar("Beta0", Some(0)).unwrap().is_finite() && rs_m.lookup_scalar("Beta0", Some(1)).unwrap().is_finite());
+    assert!(
+        rs_m.lookup_scalar("X50", Some(0)).is_some()
+            && rs_m.lookup_scalar("X50", Some(1)).is_some()
+            && rs_m.scalars.iter().all(|s| s.data_set_index.is_some())
+    );
+    let order: Vec<(&str, usize)> = rs_m.fitted_curves.iter().map(|c| (c.equation_id.as_str(), c.data_set_index)).collect();
+    assert_eq!(order, vec![("simple_logistic", 0), ("ROC", 0), ("simple_logistic", 1), ("ROC", 1)]);
+    let mut rpts: Vec<(f64, f64)> = rs_m.fitted_curves[1].points.iter().map(|p| (p.x, p.y)).collect();
+    rpts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    let auc: f64 = rpts.windows(2).map(|w| 0.5 * (w[1].0 - w[0].0) * (w[0].1 + w[1].1)).sum();
+    assert_close(auc, rs_m.lookup_scalar("ROC_AUC", Some(0)).unwrap(), 1e-10, "SL ROC overlay AUC ds0");
 }

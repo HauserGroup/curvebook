@@ -11,7 +11,7 @@ use curvebook_format::{
 };
 use serde_json::{Value, json};
 
-use super::common::{assert_bad_inputs, ok_cmd};
+use super::common::{assert_bad_inputs, assert_bad_pointer, ds, err_cmd, ok_cmd};
 
 #[test]
 fn only_stage4_retained_aliases_remain_in_registry_schemas() {
@@ -88,6 +88,32 @@ fn canonical_calls_emit_zero_warnings_and_retained_aliases_warn_only_live_caller
     let replay_out =
         session.execute_with_caller("sheet.rename", json!({ "id": "d1", "new_title": "Replayed" }), Caller::Replay, &cancel).expect("replay");
     assert!(replay_out.warnings.is_empty(), "Replay caller must suppress deprecation warnings: {:?}", replay_out.warnings);
+
+    // AUD-02-25: conflicting canonical + deprecated alias rejected at `/new_title`; equal values accepted with warning.
+    assert_bad_pointer(&mut session, "sheet.rename", json!({ "sheet_id": "d1", "title": "Canonical", "new_title": "Conflicting" }), "/new_title");
+    let eq_ok = ok_cmd(&mut session, "sheet.rename", json!({ "sheet_id": "d1", "title": "Same Title", "new_title": "Same Title" }));
+    assert!(ds(&session, "d1").title == "Same Title" && !eq_ok.warnings.is_empty());
+
+    // AUD-02-26: error messages never advertise retired aliases.
+    ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "cols": 2, "rows": 2 }));
+    ok_cmd(&mut session, "layout.create", json!({ "sheet_id": "lay-1" }));
+    for (cmd_id, params, must_contain, forbidden) in [
+        ("table.setCells", json!({ "sheet_id": "d1" }), None, &["`cells`"][..]),
+        ("table.paste", json!({ "sheet_id": "d1" }), None, &["`tsv`", "`grid`"]),
+        ("table.pasteLink", json!({ "target_sheet_id": "d1" }), Some("`source_path`"), &["`path`"]),
+        ("table.importCsv", json!({}), None, &["/`text`", "`csv`/`text`"]),
+        ("table.importPzfx", json!({}), None, &["`xml`/`text`"]),
+        ("layout.addPanel", json!({ "sheet_id": "lay-1", "kind": "text" }), None, &["`text`"]),
+        ("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "formula": "1 + 1" }), None, &["`column`"]),
+    ] {
+        let msg = err_cmd(&mut session, cmd_id, params).to_string();
+        if let Some(req) = must_contain {
+            assert!(msg.contains(req), "`{cmd_id}` missing `{req}`: {msg}");
+        }
+        for bad in forbidden {
+            assert!(!msg.contains(bad), "`{cmd_id}` advertised retired `{bad}`: {msg}");
+        }
+    }
 }
 
 #[test]

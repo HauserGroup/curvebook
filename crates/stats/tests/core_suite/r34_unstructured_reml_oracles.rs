@@ -4,13 +4,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, DataSheet, FactorialAnovaSpec, GroupedTable, MultiplicityMethod, MultiplicitySpec,
-    RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultTabKind, SheetId, SubcolumnMode, TableArchetype,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, DataSheet, FactorialAnovaSpec, GroupedTable,
+    MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec, OneWayMethod, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultTabKind,
+    SheetId, SubcolumnMode, TableArchetype,
 };
 use curvebook_math::linalg::{DenseMatrix, sym_eigen};
 use curvebook_stats::StatsError;
 use curvebook_stats::anova::{UnstructuredFallbackReason, fit_random_intercept_reml, fit_unstructured_rm_reml, run_factorial_anova};
 use curvebook_testkit::assert_approx_eq;
+
+use crate::common::{grouped_sheet_fill, run_kind};
 
 fn sum_contrast_one_way_matrix(tps: &[usize], t_levels: usize) -> DenseMatrix {
     let mut raw = Vec::with_capacity(tps.len() * t_levels);
@@ -738,4 +741,167 @@ fn r34_factorial_dunnett_unmatched_control_column_returns_typed_error() {
         matches!(err, StatsError::InvalidParameter { name: "control_column", value } if (value - 9.0).abs() < 1e-12),
         "expected InvalidParameter control_column=9, got {err:?}"
     );
+}
+
+fn lcg_next_norm(state: &mut u64) -> f64 {
+    let mut u01 = || {
+        *state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        ((*state >> 11) as f64) / ((1_u64 << 53) as f64)
+    };
+    (-2.0 * u01().max(1e-12).ln()).sqrt() * (std::f64::consts::TAU * u01()).cos()
+}
+
+#[test]
+fn r34_aud05_unstructured_caps_and_mcar_indefinite_scatter() {
+    // AUD-05-14: Fisher budget / timepoint caps & rank-deficient fallback skip Fisher allocation (contracted Hotelling T^2 verified in r34_oracle_1).
+    let mut tab40 = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 40, 50).unwrap();
+    for c in 0..40 {
+        for r in 0..50 {
+            tab40.data_sets[c].cells[r][0] = Cell::number(10.0 + 0.1 * c as f64 + 0.3 * r as f64 + ((r * 7 + c * 13) % 5) as f64 * 0.05);
+        }
+    }
+    assert!(matches!(
+        run_kind(
+            &DataSheet::new("col40", "Col40", TableArchetype::Column(tab40)).unwrap(),
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: false },
+                mixed_effects_reml: true,
+                residual_covariance: ResidualCovariance::Unstructured,
+                ..Default::default()
+            })
+        ),
+        Err(StatsError::InvalidParameter { name: "unstructured_covariance_params" | "unstructured_fisher_work", .. })
+    ));
+    let (c65, t65): (Vec<_>, Vec<_>) = ((0..2).flat_map(|s| std::iter::repeat_n(s, 65)).collect(), (0..2).flat_map(|_| 0..65).collect());
+    let y65: Vec<f64> = (0..130).map(|i| (i % 7) as f64 + 1.0).collect();
+    let l65: Vec<String> = (0..65).map(|i| format!("T{i}")).collect();
+    assert!(matches!(
+        fit_unstructured_rm_reml(&DenseMatrix::from_row_major(130, 1, vec![1.0; 130]).unwrap(), &y65, &c65, &t65, &l65, &[]),
+        Err(StatsError::InvalidParameter { name: "unstructured_timepoints", .. })
+    ));
+    let g68 =
+        grouped_sheet_fill("g68", 8, 6, 2, |c, r, s| Some(5.0 + r as f64 + 0.5 * c as f64 + s as f64 * 1.3 + ((r * 3 + c + s) % 4) as f64 * 0.2));
+    let r68 = run_kind(
+        &g68,
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+            repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
+            residual_covariance: ResidualCovariance::Unstructured,
+            mixed_effects_reml: true,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert!(r68.checklist.iter().any(|c| c.status == ChecklistStatus::Warn && c.assumption.contains("Unstructured")));
+
+    // AUD-05-40: Incomplete MCAR datasets with indefinite raw pairwise scatter do not false-flag SingularCovarianceEstimate.
+    let mut verified = 0_usize;
+    let labels4: Vec<String> = (0..4).map(|i| format!("T{i}")).collect();
+    for trial in 0..800_u64 {
+        let mut st = 0x1000_0000_0000_0000_u64.wrapping_add(trial.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let (mut grid, mut c_ids, mut t_ids, mut y) = ([[None; 4]; 15], Vec::new(), Vec::new(), Vec::new());
+        for (s, row) in grid.iter_mut().enumerate() {
+            for (t, cell) in row.iter_mut().enumerate() {
+                let val = 10.0 + t as f64 + lcg_next_norm(&mut st);
+                st = st.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                if ((st >> 11) as f64) / ((1_u64 << 53) as f64) >= 0.15 {
+                    *cell = Some(val);
+                    c_ids.push(s);
+                    t_ids.push(t);
+                    y.push(val);
+                }
+            }
+        }
+        if (0..4).any(|i| (i..4).any(|j| grid.iter().filter(|r| r[i].is_some() && r[j].is_some()).count() < 8)) {
+            continue;
+        }
+        let means: [f64; 4] = std::array::from_fn(|t| {
+            let v: Vec<f64> = grid.iter().filter_map(|r| r[t]).collect();
+            v.iter().sum::<f64>() / v.len() as f64
+        });
+        let mut cov_raw = vec![0.0_f64; 16];
+        for i in 0..4 {
+            for j in i..4 {
+                let (mut acc, mut cnt) = (0.0, 0_usize);
+                for row in &grid {
+                    if let (Some(vi), Some(vj)) = (row[i], row[j]) {
+                        acc += (vi - means[i]) * (vj - means[j]);
+                        cnt += 1;
+                    }
+                }
+                let v = acc / cnt as f64;
+                (cov_raw[i * 4 + j], cov_raw[j * 4 + i]) = (v, v);
+            }
+        }
+        let min_ev = sym_eigen(&DenseMatrix::from_row_major(4, 4, cov_raw).unwrap()).unwrap().eigenvalues.into_iter().fold(f64::INFINITY, f64::min);
+        if min_ev >= -1e-3 {
+            continue;
+        }
+        let fit = fit_unstructured_rm_reml(&sum_contrast_one_way_matrix(&t_ids, 4), &y, &c_ids, &t_ids, &labels4, &[("Time", 1, 3)]).unwrap();
+        assert!(fit.converged && fit.fallback_reason.is_none());
+        let flat: Vec<f64> = fit.covariance_matrix.iter().flatten().copied().collect();
+        assert!(sym_eigen(&DenseMatrix::from_row_major(4, 4, flat).unwrap()).unwrap().eigenvalues.iter().all(|&ev| ev > 0.0));
+        verified += 1;
+        if verified >= 5 {
+            break;
+        }
+    }
+    assert!(verified >= 5);
+}
+
+#[test]
+fn r34_aud05_trailing_rows_and_bfgs_restart() {
+    // AUD-05-58: RowFactorMatched Unstructured ignores untitled blank trailing rows, flags titled or interior empty rows.
+    let mut g = GroupedTable::new(SubcolumnMode::RawReplicates(6), 2, 10).unwrap();
+    for r in 0..4 {
+        g.row_titles[r] = format!("Day {}", r + 1);
+        for c in 0..2 {
+            for s in 0..6 {
+                g.data_sets[c].cells[r][s] =
+                    Cell::number(10.0 + 1.5 * r as f64 + 2.0 * c as f64 + 0.8 * s as f64 + (((r * 3 + c * 5 + s) % 4) as f64 - 1.5) * 0.25);
+            }
+        }
+    }
+    let rfm_k = AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::RowFactorMatched,
+        residual_covariance: ResidualCovariance::Unstructured,
+        ..Default::default()
+    });
+    let r_tr = run_kind(&DataSheet::new("rfm-tr", "T", TableArchetype::Grouped(g.clone())).unwrap(), rfm_k.clone()).unwrap();
+    let cl_tr = r_tr.checklist.iter().find(|c| c.assumption == "Unstructured covariance REML").unwrap();
+    assert!(cl_tr.status == ChecklistStatus::Info && !cl_tr.explanation.contains("Excluded all-missing timepoint"));
+    g.row_titles[4] = String::from("Day 5");
+    let r_ti = run_kind(&DataSheet::new("rfm-ti", "T", TableArchetype::Grouped(g)).unwrap(), rfm_k.clone()).unwrap();
+    let cl_ti = r_ti.checklist.iter().find(|c| c.assumption == "Unstructured covariance REML").unwrap();
+    assert!(cl_ti.status == ChecklistStatus::Warn && cl_ti.explanation.contains("Day 5") && !cl_ti.explanation.contains("Row 6"));
+    let sh_int = grouped_sheet_fill("rfm-in", 2, 8, 6, |c, r, s| {
+        [0, 1, 3]
+            .iter()
+            .position(|&x| x == r)
+            .map(|idx| 10.0 + 1.5 * idx as f64 + 2.0 * c as f64 + 0.8 * s as f64 + (((idx * 3 + c * 5 + s) % 4) as f64 - 1.5) * 0.25)
+    });
+    let r_in = run_kind(&sh_int, rfm_k).unwrap();
+    let cl_in = r_in.checklist.iter().find(|c| c.assumption == "Unstructured covariance REML").unwrap();
+    assert!(cl_in.status == ChecklistStatus::Warn && cl_in.explanation.contains("Row 3"));
+
+    // AUD-05-59 (part 2): Curved anisotropic t=5, C=30 surface (cond ~150, 3 missing obs) converges via BFGS restart.
+    let l_true: [[f64; 5]; 5] =
+        [[0.5, 0.0, 0.0, 0.0, 0.0], [0.4, 0.7, 0.0, 0.0, 0.0], [-0.6, 0.5, 1.0, 0.0, 0.0], [0.8, -0.7, 0.8, 1.4, 0.0], [-1.0, 0.9, -1.1, 1.2, 2.0]];
+    let mut st = 0xABCD_1234_9876_5432_u64;
+    let (mut c5, mut t5, mut y5) = (Vec::new(), Vec::new(), Vec::new());
+    for s in 0..30_usize {
+        let z: [f64; 5] = std::array::from_fn(|_| lcg_next_norm(&mut st));
+        for (t, l_row) in l_true.iter().enumerate() {
+            if (s == 3 && t == 2) || (s == 11 && t == 4) || (s == 19 && t == 1) {
+                continue;
+            }
+            let e_t: f64 = (0..=t).map(|k| l_row[k] * z[k]).sum();
+            c5.push(s);
+            t5.push(t);
+            y5.push(20.0 + 1.5 * t as f64 + e_t);
+        }
+    }
+    let labels5: Vec<String> = (1..=5).map(|i| format!("T{i}")).collect();
+    let fit5 = fit_unstructured_rm_reml(&sum_contrast_one_way_matrix(&t5, 5), &y5, &c5, &t5, &labels5, &[("Time", 1, 4)]).unwrap();
+    assert!(fit5.converged && fit5.fallback_reason.is_none());
+    assert!(fit5.kenward_roger_df[0].is_finite() && fit5.kenward_roger_df[0] > 1.0 && fit5.fixed_terms[0].f_statistic.is_some_and(f64::is_finite));
 }

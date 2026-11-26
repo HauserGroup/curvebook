@@ -183,3 +183,36 @@ fn one_site_competition_ligand_depletion_mass_balance_grad_and_fit() {
     assert_approx_eq(dataset_param_val(&res_g, 0, "KdNM"), true_fit[2], 1e-5, 1e-5, "global KdNM");
     assert_approx_eq(dataset_param_val(&res_g, 0, "LogKi"), true_fit[3], 1e-5, 1e-5, "global LogKi");
 }
+
+#[test]
+fn aud_03_16_ligand_depletion_overflow_huge_ns_and_tight_binding() {
+    let total_dep = get_builtin_model("one_site_total_ligand_depletion").unwrap();
+    let spec_dep = get_builtin_model("one_site_specific_ligand_depletion").unwrap();
+
+    let expected_ovf = 8e153 * 0.5 * (3.0 - 5.0_f64.sqrt());
+    let y_ovf = total_dep.eval(&[8e153], &[8e153, 8e147, 0.0, 2000.0, 0.5], 0).unwrap();
+    assert!(y_ovf <= 8e153);
+    assert_approx_eq(y_ovf, expected_ovf, 1e140, 1e-13, "Swillens total 8e153 overflow");
+
+    for huge_ns in [1e150_f64, 1e300] {
+        let y_ns = total_dep.eval(&[1e5], &[3200.0, 2.5e-3, huge_ns, 2000.0, 0.5], 0).unwrap();
+        assert!(y_ns.is_finite() && y_ns > 0.0 && y_ns <= 1e5, "NS={huge_ns}: Y={y_ns}");
+        assert_approx_eq(y_ns, 1e5, 1e-6, 1e-12, &format!("Swillens total NS={huge_ns}"));
+    }
+
+    let y_tb_exact = 1e5 - 2e-6 / (1e-11 + 1e-11_f64.hypot(2e-3));
+    let y_tb = total_dep.eval(&[1e5], &[1e5, 1e-17, 0.0, 2000.0, 0.5], 0).unwrap();
+    assert!(y_tb < 1e5, "tight-binding must not collapse free ligand to 0");
+    assert_approx_eq(y_tb, y_tb_exact, 1e-10, 1e-12, "Swillens tight-binding Kd_cpm=1e-11");
+
+    for &(bmax, kd, ns, x) in &[(3200.0, 0.0025, 0.04, 5000.0), (500.0, 0.001, 0.0, 200.0), (1e5, 1e-17, 1.0, 1e5), (1e5, 0.01, 50.0, 2e4)] {
+        let y = total_dep.eval(&[x], &[bmax, kd, ns, 2000.0, 0.5], 0).unwrap();
+        let (kd_cpm, l_free) = (kd * 0.5 * 1000.0 * 2000.0, x - y);
+        assert!((0.0..=x).contains(&y));
+        assert_approx_eq(y, bmax * l_free / (kd_cpm + l_free) + ns * l_free, 1e-9, 1e-11, &format!("mass balance {bmax}/{kd}/{ns}/{x}"));
+    }
+
+    assert_approx_eq(spec_dep.eval(&[8e153], &[8e153, 8e153, 0.0], 0).unwrap(), expected_ovf, 1e140, 1e-13, "Swillens specific overflow");
+    assert_approx_eq(spec_dep.eval(&[1e5], &[1e5, 1e-11, 0.0], 0).unwrap(), y_tb_exact, 1e-10, 1e-12, "Swillens specific tight-binding");
+    assert_approx_eq(spec_dep.eval(&[1e5], &[3200.0, 2500.0, 1e150], 0).unwrap(), 1.28e-145, 1e-156, 1e-12, "Swillens specific huge NS");
+}

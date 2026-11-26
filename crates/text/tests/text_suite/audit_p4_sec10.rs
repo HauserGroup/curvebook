@@ -3,177 +3,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use curvebook_testkit::TempDirGuard;
-use curvebook_text::glyph_paths::outline_ttf_glyph;
+use curvebook_text::glyph_paths::{outline_ttf_glyph, outline_visual_rich_text_rotated_with_fonts_and_ttf};
 use curvebook_text::metrics::reorder_rich_text_bidi_with_direction;
 use curvebook_text::{RichSpan, RichText, SpanWeight, SystemFontSet, TextDirection, TrueTypeFont, outline_rich_text_with_fonts};
 
-fn push_u16(buf: &mut Vec<u8>, v: u16) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
+use super::sfnt_fixture::build_glyf_font;
 
-fn push_i16(buf: &mut Vec<u8>, v: i16) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn push_u32(buf: &mut Vec<u8>, v: u32) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-/// Build an SFNT TrueType font mapping `codepoint` -> `gid 1`, with either a 3-vertex triangle
-/// glyph or a multi-contour glyph having `contours` triangles.
 fn build_synthetic_glyf_sfnt(family_name: &str, codepoint: u16, contours: u16) -> Vec<u8> {
-    let num_glyphs: u16 = 2;
-
-    let mut head = vec![0u8; 54];
-    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
-    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
-    // Short `loca` format (`indexToLocFormat = 0`).
-    head[50..52].copy_from_slice(&0i16.to_be_bytes());
-
-    let mut hhea = vec![0u8; 36];
-    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    hhea[4..6].copy_from_slice(&800i16.to_be_bytes());
-    hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes());
-    hhea[8..10].copy_from_slice(&90i16.to_be_bytes());
-    hhea[34..36].copy_from_slice(&num_glyphs.to_be_bytes());
-
-    let total_points = u16::try_from(usize::from(contours) * 3).expect("points fit u16");
-    let mut maxp = vec![0u8; 32];
-    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
-    maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
-    maxp[6..8].copy_from_slice(&total_points.to_be_bytes());
-    maxp[8..10].copy_from_slice(&contours.to_be_bytes());
-
-    let mut hmtx = Vec::with_capacity(usize::from(num_glyphs) * 4);
-    push_u16(&mut hmtx, 600);
-    push_i16(&mut hmtx, 50);
-    push_u16(&mut hmtx, 760);
-    push_i16(&mut hmtx, 50);
-
-    // Build simple `glyf` entry for `gid 1`: `contours` distinct triangles.
-    let mut glyph1 = Vec::new();
-    push_i16(&mut glyph1, i16::try_from(contours).expect("contours fit i16"));
-    push_i16(&mut glyph1, 100);
-    push_i16(&mut glyph1, 0);
-    push_i16(&mut glyph1, 600);
-    push_i16(&mut glyph1, 700);
-    for c in 0..contours {
-        push_u16(&mut glyph1, c * 3 + 2);
-    }
-    push_u16(&mut glyph1, 0); // instructionLength = 0
-    // Flags: 0x01 (on-curve) | 0x02 (u8 x) | 0x10 (positive x) | 0x04 (u8 y) | 0x20 (positive y).
-    let n_pts = usize::from(total_points);
-    glyph1.resize(glyph1.len() + n_pts, 0x37);
-    // x deltas
-    for c in 0..contours {
-        glyph1.push(if c == 0 { 10 } else { 1 });
-        glyph1.push(20);
-        glyph1.push(5);
-    }
-    // y deltas
-    for c in 0..contours {
-        glyph1.push(if c == 0 { 10 } else { 1 });
-        glyph1.push(0);
-        glyph1.push(25);
-    }
-    while !glyph1.len().is_multiple_of(4) {
-        glyph1.push(0);
-    }
-
-    let glyf = glyph1;
-    // Short `loca`: gid 0 empty [0, 0], gid 1 [0, glyf.len()/2].
-    let mut loca = Vec::new();
-    push_u16(&mut loca, 0);
-    push_u16(&mut loca, 0);
-    push_u16(&mut loca, u16::try_from(glyf.len() / 2).expect("short loca fits u16"));
-
-    // Format 4 cmap mapping single BMP `codepoint` -> gid 1 (`delta = 1 - codepoint`).
-    let mut cmap = Vec::new();
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 1);
-    push_u16(&mut cmap, 3);
-    push_u16(&mut cmap, 1);
-    push_u32(&mut cmap, 12);
-    push_u16(&mut cmap, 4);
-    push_u16(&mut cmap, 32);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 4); // segCountX2 = 4 (2 segments)
-    push_u16(&mut cmap, 4);
-    push_u16(&mut cmap, 1);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, codepoint);
-    push_u16(&mut cmap, 0xFFFF);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, codepoint);
-    push_u16(&mut cmap, 0xFFFF);
-    let delta = 1_i32 - i32::from(codepoint);
-    push_u16(&mut cmap, u16::try_from(delta.rem_euclid(65_536)).expect("idDelta fits u16"));
-    push_i16(&mut cmap, 1);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 0);
-
-    let mut post = vec![0u8; 32];
-    post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes());
-
-    let mut str_buf = Vec::new();
-    for unit in family_name.encode_utf16() {
-        push_u16(&mut str_buf, unit);
-    }
-    let mut name = Vec::new();
-    push_u16(&mut name, 0);
-    push_u16(&mut name, 1);
-    push_u16(&mut name, 18);
-    push_u16(&mut name, 3);
-    push_u16(&mut name, 1);
-    push_u16(&mut name, 0x0409);
-    push_u16(&mut name, 1);
-    push_u16(&mut name, u16::try_from(str_buf.len()).expect("name len"));
-    push_u16(&mut name, 0);
-    name.extend_from_slice(&str_buf);
-
-    let mut os2 = vec![0u8; 96];
-    os2[0..2].copy_from_slice(&4u16.to_be_bytes());
-    os2[4..6].copy_from_slice(&400u16.to_be_bytes());
-    os2[62..64].copy_from_slice(&0x0040u16.to_be_bytes());
-    os2[68..70].copy_from_slice(&800i16.to_be_bytes());
-    os2[70..72].copy_from_slice(&(-200i16).to_be_bytes());
-
-    let tables = [
-        (*b"OS/2", os2),
-        (*b"cmap", cmap),
-        (*b"glyf", glyf),
-        (*b"head", head),
-        (*b"hhea", hhea),
-        (*b"hmtx", hmtx),
-        (*b"loca", loca),
-        (*b"maxp", maxp),
-        (*b"name", name),
-        (*b"post", post),
-    ];
-    let dir_size = 12 + tables.len() * 16;
-    let mut font = Vec::new();
-    push_u32(&mut font, 0x0001_0000);
-    push_u16(&mut font, u16::try_from(tables.len()).expect("table count"));
-    push_u16(&mut font, 128);
-    push_u16(&mut font, 3);
-    push_u16(&mut font, 4);
-
-    let mut offset = dir_size;
-    for (tag, data) in &tables {
-        font.extend_from_slice(tag);
-        push_u32(&mut font, 0);
-        push_u32(&mut font, u32::try_from(offset).expect("table offset"));
-        push_u32(&mut font, u32::try_from(data.len()).expect("table len"));
-        offset += (data.len() + 3) & !3;
-    }
-    for (_, data) in &tables {
-        font.extend_from_slice(data);
-        while !font.len().is_multiple_of(4) {
-            font.push(0);
-        }
-    }
-    font
+    build_glyf_font(family_name, family_name, -200, codepoint, contours)
 }
 
 #[test]
@@ -204,6 +41,20 @@ fn sec10_04_non_latin_outlining_uses_system_font_set_while_cleanroom_stays_deter
     assert_eq!(fallback.len(), 1);
     assert_eq!(fallback[0].commands.len(), 10, "expected cleanroom hollow tofu box (10 cmds): {:?}", fallback[0].commands);
     assert_ne!(glyphs[1].commands, fallback[0].commands, "custom SFNT triangle must replace cleanroom tofu box");
+
+    // Combining mark mapped to an empty zero-contour glyph in preferred TTF must fall back to cleanroom vector outline.
+    let empty_macron = build_glyf_font("EmptyMacron", "EmptyMacron", -200, 0x0304, 0);
+    let empty_ttf = TrueTypeFont::parse_checked(&empty_macron).expect("parse empty macron font");
+    assert!(outline_ttf_glyph(&empty_ttf, '\u{0304}', 0.0, 0.0, 12.0, false).expect("mapped empty").is_empty());
+    let attached =
+        outline_visual_rich_text_rotated_with_fonts_and_ttf(&RichText::plain("x\u{0304}"), 0.0, 0.0, 12.0, 0.0, &cleanroom, Some(&empty_ttf));
+    assert_eq!(attached.len(), 2);
+    assert_eq!(attached[1].codepoint, '\u{0304}');
+    assert!(!attached[1].commands.is_empty(), "combining macron must fall back to cleanroom outline");
+    let standalone =
+        outline_visual_rich_text_rotated_with_fonts_and_ttf(&RichText::plain("\u{0304}"), 0.0, 0.0, 12.0, 0.0, &cleanroom, Some(&empty_ttf));
+    assert_eq!(standalone.len(), 1);
+    assert!(!standalone[0].commands.is_empty(), "standalone combining macron must fall back when TTF glyph is empty");
 }
 
 #[test]
@@ -269,4 +120,52 @@ fn sec10_10_manifest_path_containment_allows_double_dots_in_names_and_rejects_tr
 
     let loaded = SystemFontSet::from_fonts_dir(&bundle);
     assert_eq!(loaded.face_count(), 2, "Foo..Bar.ttf and sub/Nested..Font.ttf must load while ../, ../../, sub/../, and /abs paths are rejected");
+
+    // Repeated manifest entries deduplicate to 1 loaded face (no OOM amplification).
+    let dedup_dir = root.join("dedup_bundle");
+    let dedup_fonts = dedup_dir.join("fonts");
+    std::fs::create_dir_all(&dedup_fonts).expect("mkdir dedup_fonts");
+    std::fs::write(dedup_fonts.join("a.ttf"), &valid_a).expect("write a.ttf");
+    std::fs::write(dedup_fonts.join("manifest.txt"), "a.ttf\n".repeat(1_000)).expect("write repeated manifest");
+    assert_eq!(SystemFontSet::from_fonts_dir(&dedup_dir).face_count(), 1, "repeated manifest entries must deduplicate");
+
+    // > MAX_DIR_FONTS (64) distinct manifest entries are capped at 64.
+    let cap_dir = root.join("cap_bundle");
+    let cap_fonts = cap_dir.join("fonts");
+    std::fs::create_dir_all(&cap_fonts).expect("mkdir cap_fonts");
+    let mut cap_manifest = String::new();
+    for idx in 0..72u16 {
+        let name = format!("f{idx:03}.ttf");
+        std::fs::write(cap_fonts.join(&name), build_synthetic_glyf_sfnt(&format!("CapFont{idx}"), 0x0041, 1)).expect("write cap font");
+        cap_manifest.push_str(&name);
+        cap_manifest.push('\n');
+    }
+    std::fs::write(cap_fonts.join("manifest.txt"), &cap_manifest).expect("write cap manifest");
+    assert_eq!(SystemFontSet::from_fonts_dir(&cap_dir).face_count(), 64, "manifest font loading must respect MAX_DIR_FONTS=64");
+
+    // Symlinked font file, symlinked subdirectory, and symlinked manifest must all be rejected.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let outside_dir = root.join("outside_dir");
+        std::fs::create_dir_all(&outside_dir).expect("mkdir outside_dir");
+        let outside_font = outside_dir.join("secret.ttf");
+        std::fs::write(&outside_font, &evil).expect("write outside font");
+
+        let sym_bundle = root.join("sym_bundle");
+        let sym_fonts = sym_bundle.join("fonts");
+        std::fs::create_dir_all(&sym_fonts).expect("mkdir sym_fonts");
+        symlink(&outside_font, sym_fonts.join("escape.ttf")).expect("symlink escape.ttf");
+        symlink(&outside_dir, sym_fonts.join("sub")).expect("symlink sub dir");
+        std::fs::write(sym_fonts.join("manifest.txt"), "escape.ttf\nsub/secret.ttf\n").expect("write sym manifest");
+        assert_eq!(SystemFontSet::from_fonts_dir(&sym_bundle).face_count(), 0, "symlinked files/dirs must never load");
+
+        let outside_manifest = root.join("outside_manifest.txt");
+        std::fs::write(&outside_manifest, "a.ttf\n").expect("write outside manifest");
+        let sym_manifest_bundle = root.join("sym_manifest_bundle");
+        std::fs::create_dir_all(sym_manifest_bundle.join("fonts")).expect("mkdir");
+        symlink(&outside_manifest, sym_manifest_bundle.join("fonts").join("manifest.txt")).expect("symlink manifest");
+        assert_eq!(SystemFontSet::from_fonts_dir(&sym_manifest_bundle).face_count(), 0);
+    }
 }

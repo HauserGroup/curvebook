@@ -14,8 +14,15 @@ use curvebook_text::metrics::{
     measure_text_pt, parse_truetype_font_info, system_cjk_font_candidates,
 };
 use curvebook_text::number::{AxisTickFormat, LocaleNumberPolicy, format_axis_tick, format_axis_tick_with_format, format_pvalue_label};
-use curvebook_text::{BUNDLED_FONTS, EquationSegment, TextError, has_bundled_fonts_feature, parse_equation_segments};
+use curvebook_text::{
+    BUNDLED_FONTS, EquationSegment, SystemFontSet, TextError, TextMeasurer, UiTextStyle, has_bundled_fonts_feature, parse_equation_segments,
+};
 use proptest::{prelude::any, prop_assert, prop_assert_eq, proptest};
+
+use super::sfnt_fixture::{
+    assemble_sfnt, build_cmap4_subtable, build_cmap12_subtable, build_glyf_font, build_head, build_hhea, build_maxp_v05, build_name_table,
+    build_post_v3, push_i16, push_u16, wrap_cmap_subtables,
+};
 
 // ---------------------------------------------------------------------------
 // 1. Markup & Template Hook Tests
@@ -184,6 +191,18 @@ fn expand_template_hooks_resolves_single_pass_and_preserves_missing_or_literal_b
     // Unclosed hook stays literal.
     let unclosed = expand_template_hooks("open {{incomplete", |_| Some(String::from("ignored")));
     assert_eq!(unclosed, "open {{incomplete");
+
+    // Unmatched markup & template delimiters must stay linear-time (no quadratic rescan).
+    let (lt_in, amp_in, hook_in) = ("<".repeat(100_000), "&".repeat(100_000), "{{".repeat(50_000));
+    let start = std::time::Instant::now();
+    let (p_lt, p_amp, exp) = (parse_markup(&lt_in), parse_markup(&amp_in), expand_template_hooks(&hook_in, |_| Some(String::from("X"))));
+    let elapsed = start.elapsed();
+    assert_eq!(p_lt.plain_text(), lt_in);
+    assert_eq!(p_amp.plain_text(), amp_in);
+    assert_eq!(exp, hook_in);
+    assert!(elapsed.as_secs_f64() < 2.0, "expected linear-time parse/expand, took {elapsed:?}");
+    assert_eq!(parse_markup("<b>x</b> &alpha; &#x00000000000041;").plain_text(), "x \u{03B1} A");
+    assert_eq!(expand_template_hooks("a={{k}} tail {{unclosed", |k| (k == "k").then(|| String::from("1"))), "a=1 tail {{unclosed");
 }
 
 #[test]
@@ -359,168 +378,56 @@ fn bundled_fonts_feature_and_tables_match_configuration() {
 /// Build a valid minimal SFNT/TrueType buffer with `head`, `hhea`, `maxp`, `cmap` (format 4 + optional format 12),
 /// `hmtx`, `loca`, and `glyf` (glyph 0 empty, glyph 1 simple square, glyph 2 compound shifted glyph).
 fn build_synthetic_ttf(include_cmap_fmt12: bool) -> Vec<u8> {
-    fn push_u16(buf: &mut Vec<u8>, v: u16) {
-        buf.extend_from_slice(&v.to_be_bytes());
-    }
-    fn push_i16(buf: &mut Vec<u8>, v: i16) {
-        buf.extend_from_slice(&v.to_be_bytes());
-    }
-    fn push_u32(buf: &mut Vec<u8>, v: u32) {
-        buf.extend_from_slice(&v.to_be_bytes());
-    }
-
-    // `head` (54 bytes): unitsPerEm = 1000, indexToLocFormat = 0 (short)
-    let mut head = vec![0u8; 54];
-    head[18..20].copy_from_slice(&1000u16.to_be_bytes());
-    head[50..52].copy_from_slice(&0i16.to_be_bytes());
-
-    // `hhea` (36 bytes): ascender = 800, descender = -200, lineGap = 100, numberOfHMetrics = 3
-    let mut hhea = vec![0u8; 36];
-    hhea[4..6].copy_from_slice(&800i16.to_be_bytes());
-    hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes());
-    hhea[8..10].copy_from_slice(&100i16.to_be_bytes());
-    hhea[34..36].copy_from_slice(&3u16.to_be_bytes());
-
-    // `maxp` (6 bytes): numGlyphs = 3
-    let mut maxp = Vec::new();
-    push_u32(&mut maxp, 0x0000_5000);
-    push_u16(&mut maxp, 3);
-
-    // `hmtx`: glyph 0 -> 500, glyph 1 -> 600, glyph 2 -> 650
     let mut hmtx = Vec::new();
     for adv in [500u16, 600, 650] {
         push_u16(&mut hmtx, adv);
         push_i16(&mut hmtx, 50);
     }
-
-    // `cmap` format 4 mapping 'A' (65) -> gid 1, 'B' (66) -> gid 2, sentinel 0xFFFF -> 0.
-    let mut cmap4 = Vec::new();
-    push_u16(&mut cmap4, 4); // format
-    push_u16(&mut cmap4, 32); // length
-    push_u16(&mut cmap4, 0); // language
-    push_u16(&mut cmap4, 4); // segCountX2 = 2 * 2
-    push_u16(&mut cmap4, 4); // searchRange
-    push_u16(&mut cmap4, 1); // entrySelector
-    push_u16(&mut cmap4, 0); // rangeShift
-    push_u16(&mut cmap4, 66); // endCode[0]
-    push_u16(&mut cmap4, 0xFFFF); // endCode[1]
-    push_u16(&mut cmap4, 0); // reservedPad
-    push_u16(&mut cmap4, 65); // startCode[0]
-    push_u16(&mut cmap4, 0xFFFF); // startCode[1]
-    push_i16(&mut cmap4, -64); // idDelta[0]: 65 + (-64) = 1
-    push_i16(&mut cmap4, 1); // idDelta[1]: 65535 + 1 = 0 (mod 65536)
-    push_u16(&mut cmap4, 0); // idRangeOffset[0]
-    push_u16(&mut cmap4, 0); // idRangeOffset[1]
-
-    // Optional `cmap` format 12 mapping U+1D400 ('𝐀') -> gid 1.
-    let mut cmap12 = Vec::new();
+    let mut subtables = vec![(3, 1, build_cmap4_subtable(&[(65, 66, -64, 0), (0xFFFF, 0xFFFF, 1, 0)], &[]))];
     if include_cmap_fmt12 {
-        push_u16(&mut cmap12, 12);
-        push_u16(&mut cmap12, 0);
-        push_u32(&mut cmap12, 28); // length
-        push_u32(&mut cmap12, 0); // language
-        push_u32(&mut cmap12, 1); // numGroups
-        push_u32(&mut cmap12, 0x1D400);
-        push_u32(&mut cmap12, 0x1D400);
-        push_u32(&mut cmap12, 1);
+        subtables.push((3, 10, build_cmap12_subtable(&[(0x1D400, 0x1D400, 1)])));
     }
-
-    let num_subtables: u16 = if include_cmap_fmt12 { 2 } else { 1 };
-    let header_len = 4usize + usize::from(num_subtables) * 8;
-    let mut cmap = Vec::new();
-    push_u16(&mut cmap, 0); // version
-    push_u16(&mut cmap, num_subtables);
-    push_u16(&mut cmap, 3); // platform Microsoft
-    push_u16(&mut cmap, 1); // Unicode BMP
-    push_u32(&mut cmap, header_len as u32);
-    if include_cmap_fmt12 {
-        push_u16(&mut cmap, 3);
-        push_u16(&mut cmap, 10); // Unicode full repertoire
-        push_u32(&mut cmap, (header_len + cmap4.len()) as u32);
-    }
-    cmap.extend_from_slice(&cmap4);
-    cmap.extend_from_slice(&cmap12);
-
-    // `glyf`:
-    // gid 0 -> empty (0 bytes)
-    // gid 1 -> simple rectangle (100,0) -> (100,700) -> (500,700) -> (500,0), all on-curve
+    // gid 1: simple rectangle (100,0)->(100,700)->(500,700)->(500,0)
     let mut glyph1 = Vec::new();
-    push_i16(&mut glyph1, 1); // numberOfContours = 1
-    push_i16(&mut glyph1, 100);
-    push_i16(&mut glyph1, 0);
-    push_i16(&mut glyph1, 500);
-    push_i16(&mut glyph1, 700);
-    push_u16(&mut glyph1, 3); // endPtsOfContours[0] = 3 (4 points)
-    push_u16(&mut glyph1, 0); // instructionLength
-    // flags: on-curve (0x01), non-short x/y (16-bit signed)
+    for v in [1i16, 100, 0, 500, 700] {
+        push_i16(&mut glyph1, v);
+    }
+    push_u16(&mut glyph1, 3);
+    push_u16(&mut glyph1, 0);
     glyph1.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
-    // x deltas: +100, 0, +400, 0
-    for dx in [100i16, 0, 400, 0] {
-        push_i16(&mut glyph1, dx);
+    for d in [100i16, 0, 400, 0, 0, 700, 0, -700] {
+        push_i16(&mut glyph1, d);
     }
-    // y deltas: 0, +700, 0, -700
-    for dy in [0i16, 700, 0, -700] {
-        push_i16(&mut glyph1, dy);
-    }
-    if !glyph1.len().is_multiple_of(2) {
-        glyph1.push(0);
-    }
-
-    // gid 2 -> compound glyph referencing gid 1 shifted by (+50, +100)
+    // gid 2: compound glyph referencing gid 1 shifted by (+50, +100)
     let mut glyph2 = Vec::new();
-    push_i16(&mut glyph2, -1); // numberOfContours < 0 => compound
-    push_i16(&mut glyph2, 150);
-    push_i16(&mut glyph2, 100);
-    push_i16(&mut glyph2, 550);
-    push_i16(&mut glyph2, 800);
-    push_u16(&mut glyph2, 0x0003); // ARG_1_AND_2_ARE_WORDS (0x01) | ARGS_ARE_XY_VALUES (0x02)
-    push_u16(&mut glyph2, 1); // component glyph_index = 1
-    push_i16(&mut glyph2, 50); // dx = 50
-    push_i16(&mut glyph2, 100); // dy = 100
-    if !glyph2.len().is_multiple_of(2) {
-        glyph2.push(0);
+    for v in [-1i16, 150, 100, 550, 800] {
+        push_i16(&mut glyph2, v);
     }
+    push_u16(&mut glyph2, 0x0003);
+    push_u16(&mut glyph2, 1);
+    push_i16(&mut glyph2, 50);
+    push_i16(&mut glyph2, 100);
 
-    let g1_off = 0usize;
-    let g2_off = glyph1.len();
-    let end_off = glyph1.len() + glyph2.len();
+    let (g2_off, end_off) = (glyph1.len(), glyph1.len() + glyph2.len());
     let mut glyf = Vec::with_capacity(end_off);
     glyf.extend_from_slice(&glyph1);
     glyf.extend_from_slice(&glyph2);
-
-    // `loca` (short format: offsets divided by 2)
     let mut loca = Vec::new();
-    for off in [0usize, g1_off, g2_off, end_off] {
+    for off in [0usize, 0, g2_off, end_off] {
         push_u16(&mut loca, (off / 2) as u16);
     }
-
-    let tables: [([u8; 4], Vec<u8>); 7] =
-        [(*b"cmap", cmap), (*b"glyf", glyf), (*b"head", head), (*b"hhea", hhea), (*b"hmtx", hmtx), (*b"loca", loca), (*b"maxp", maxp)];
-
-    let num_tables = tables.len() as u16;
-    let dir_size = 12 + tables.len() * 16;
-    let mut font = Vec::new();
-    push_u32(&mut font, 0x0001_0000);
-    push_u16(&mut font, num_tables);
-    push_u16(&mut font, 64);
-    push_u16(&mut font, 2);
-    push_u16(&mut font, 48);
-
-    let mut cur_offset = dir_size;
-    for (tag, data) in &tables {
-        font.extend_from_slice(tag);
-        push_u32(&mut font, 0); // checksum (not checked)
-        push_u32(&mut font, cur_offset as u32);
-        push_u32(&mut font, data.len() as u32);
-        cur_offset += (data.len() + 3) & !3;
-    }
-    for (_, data) in &tables {
-        font.extend_from_slice(data);
-        while !font.len().is_multiple_of(4) {
-            font.push(0);
-        }
-    }
-    font
+    assemble_sfnt(
+        0x0001_0000,
+        vec![
+            (*b"cmap", wrap_cmap_subtables(&subtables)),
+            (*b"glyf", glyf),
+            (*b"head", build_head(0)),
+            (*b"hhea", build_hhea(800, -200, 100, 3)),
+            (*b"hmtx", hmtx),
+            (*b"loca", loca),
+            (*b"maxp", build_maxp_v05(3)),
+        ],
+    )
 }
 
 #[test]
@@ -1011,6 +918,45 @@ fn parse_truetype_font_info_handles_format12_and_rejects_hostile_sfnt() {
     let mut oob = full.clone();
     oob[12 + 12..12 + 16].copy_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
     assert!(matches!(parse_truetype_font_info(&oob), Err(TextError::InvalidSfnt { .. })));
+
+    // i16::MIN descender does not panic/wrap and clamps cleanly to 0.65 * size in SystemFontSet::measure.
+    let min_desc_bytes = build_glyf_font("MinDesc", "MinDesc", i16::MIN, 0x0041, 1);
+    let min_desc_ttf = TrueTypeFont::parse_checked(&min_desc_bytes).expect("parse i16::MIN descender font");
+    assert_eq!(min_desc_ttf.descent(), i16::MIN);
+    let set = SystemFontSet::from_sfnt_bytes(&[("MinDesc", &min_desc_bytes)]);
+    assert_eq!(set.face_count(), 1);
+    assert!((set.measure(&UiTextStyle::ui_sans(10.0), "A", 96).descent_px - 6.5).abs() < 1e-6);
+
+    // Format 12 (3,10) takes priority over Format 4 (3,1) without truncating supplementary mappings.
+    let num_glyphs: u16 = 65_200;
+    let cmap = wrap_cmap_subtables(&[
+        (3, 1, build_cmap4_subtable(&[(0x0041, 0xFE40, 1 - 0x0041_i16, 0), (0xFFFF, 0xFFFF, 1, 0)], &[])),
+        (3, 10, build_cmap12_subtable(&[(0x0041, 0x0041, 2), (0x10400, 0x10410, 500)])),
+    ]);
+    let mut hmtx = vec![0u8; 4 + usize::from(num_glyphs - 1) * 2];
+    hmtx[0..2].copy_from_slice(&600u16.to_be_bytes());
+    let dual_bytes = assemble_sfnt(
+        0x0001_0000,
+        vec![
+            (*b"cmap", cmap),
+            (*b"head", build_head(0)),
+            (*b"hhea", build_hhea(800, -200, 0, 1)),
+            (*b"hmtx", hmtx),
+            (*b"maxp", build_maxp_v05(num_glyphs)),
+            (*b"name", build_name_table("DualCmap", "DualCmap")),
+            (*b"post", build_post_v3()),
+        ],
+    );
+    let dual_ttf = TrueTypeFont::parse_checked(&dual_bytes).expect("parse dual-cmap font");
+    let dual_info = dual_ttf.inspect_info().expect("inspect dual-cmap font");
+    assert_eq!((dual_ttf.glyph_id('A'), dual_info.glyph_id('A')), (Some(2), 2));
+    assert_eq!((dual_ttf.glyph_id('\u{10400}'), dual_info.glyph_id('\u{10400}')), (Some(500), 500));
+
+    // PostScript name sanitization strips PDF Name delimiter '#' and special chars.
+    let hash_bytes = build_glyf_font("HashFont", "MyFont#20Name/(Bad)%[]", -200, 0x0041, 1);
+    let hash_info = TrueTypeFont::parse_checked(&hash_bytes).expect("parse hash ps").inspect_info().expect("inspect hash ps");
+    assert!(!hash_info.postscript_name.contains('#'));
+    assert_eq!(hash_info.postscript_name, "MyFont20NameBad");
 }
 
 #[test]

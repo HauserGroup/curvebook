@@ -3,16 +3,19 @@
 //! Regression tests for engine-level [`ExternalPathPolicy`] confinement (`R1-S12-01` / `R1-S07-02`).
 
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use curvebook_doc::{
     CellCoord, CellValue, ErrorCode, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument,
     SheetCellRange, SheetId,
 };
-use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_engine::{Caller, ExternalPathPolicy, PATH_PARAM_KEYS, Session};
+use curvebook_format::zip::ZipWriter;
 use curvebook_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
 use serde_json::json;
 
-use super::common::TempWorkspace;
+use super::common::{TempWorkspace, col_sheet, ok_cmd, session_with};
 
 fn build_doc_with_external_link(external_path: &str) -> ProjectDocument {
     let mut builder = Session::from_document(ProjectDocument::new("Stored Link Doc").expect("doc"));
@@ -180,6 +183,46 @@ fn reject_external_policy_and_non_regular_file_guards() {
     assert_eq!(import_err.code, ErrorCode::PathEscape);
 
     locked.execute("table.importCsv", json!({ "csv": "X,Y\n1,2\n" })).expect("inline csv should still succeed");
+
+    // AUD-02-18: external link created via table.pasteLink is blocked once policy switches to RejectExternal.
+    let mut s_pl = session_with("PL", vec![col_sheet("col-1", "G", &[("A", &[1.0, 2.0])])]);
+    ok_cmd(
+        &mut s_pl,
+        "table.pasteLink",
+        json!({ "target_sheet_id": "col-1", "source_path": inside_csv.to_string_lossy(), "mode": "overwrite", "anchor": { "row": 0, "col": 0 } }),
+    );
+    s_pl.set_path_policy(ExternalPathPolicy::RejectExternal);
+    assert_eq!(s_pl.execute("project.recalculate", json!({ "include_external_links": true })).unwrap_err().code, ErrorCode::PathEscape);
+
+    // AUD-13-02: Caller::Ui enforces Workdir policy on outside CSV and XLSX imports.
+    let (outside_csv, outside_xlsx) = (ws.outside.join("out.csv"), ws.outside.join("out.xlsx"));
+    fs::write(&outside_csv, "X,Y\n1,2\n").unwrap();
+    let mut zw = ZipWriter::new();
+    zw.add_file("xl/workbook.xml", b"<workbook/>".to_vec()).unwrap();
+    fs::write(&outside_xlsx, zw.finish().unwrap()).unwrap();
+    let mut s_ui = Session::new().with_path_policy(ExternalPathPolicy::workdir(&ws.workdir).unwrap());
+    let cancel = AtomicBool::new(false);
+    assert_eq!(
+        s_ui.execute_with_caller("table.importCsv", json!({ "path": outside_csv.to_string_lossy(), "link": false }), Caller::Ui, &cancel)
+            .unwrap_err()
+            .code,
+        ErrorCode::PathEscape
+    );
+    assert_eq!(
+        s_ui.execute_with_caller("table.importXlsx", json!({ "path": outside_xlsx.to_string_lossy() }), Caller::Ui, &cancel).unwrap_err().code,
+        ErrorCode::PathEscape
+    );
+
+    // AUD-13-23: PATH_PARAM_KEYS covers all path keys and project.save / set_file_path preserve canonical path under Workdir.
+    for k in ["dir", "directory", "destination_path", "unpacked_dir", "output_path"] {
+        assert!(PATH_PARAM_KEYS.contains(&k), "PATH_PARAM_KEYS missing `{k}`");
+    }
+    let save_out = ok_cmd(&mut s_ui, "project.save", json!({ "path": "folder/saved.curvebook" }));
+    let expected_canon = fs::canonicalize(ws.workdir.join("folder/saved.curvebook")).unwrap();
+    assert_eq!(Path::new(save_out.payload["path"].as_str().unwrap()), expected_canon.as_path());
+    assert_eq!(s_ui.file_path(), Some(expected_canon.as_path()));
+    s_ui.set_file_path(Some(PathBuf::from("folder/saved.curvebook")), false);
+    assert_eq!(s_ui.file_path(), Some(expected_canon.as_path()));
 
     // 2. Non-regular files (directories, /dev/null, FIFOs) are rejected without opening/blocking.
     let mut wd_session = Session::from_document(ProjectDocument::new("NonRegular").expect("doc"))

@@ -10,12 +10,12 @@ use curvebook_chart::{
     TextAnchor, compile_graph, compile_layout,
 };
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, Cell, ColumnDesignHint,
-    ColumnTable, ConfidenceLevel, ConnectingLineStyle, CropInsetsPt, CurveSamplePoint, DataSheet, DiagnosticPlotKind, EquationDisplayMode,
-    FittedCurveOverlay, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, ImageBorderSpec, ImageMimeKind, JournalWidthPreset,
-    LayoutItem, LayoutSheet, LayoutSpec, LineConnectionKind, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec,
-    OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseBracketSpec, ProjectDocument, ProjectImageAsset, RectPt as DocRectPt, RegressionOverlaySpec,
-    ResultSheet, SheetId, SubcolumnMode, TableArchetype, XyTable, content_addressed_asset_id,
+    AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, Cell, ConfidenceLevel,
+    ConnectingLineStyle, CropInsetsPt, CurveSamplePoint, DataSheet, DiagnosticPlotKind, EquationDisplayMode, FittedCurveOverlay, FramePreset,
+    GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, ImageBorderSpec, ImageMimeKind, JournalWidthPreset, LayoutItem, LayoutSheet,
+    LayoutSpec, LineConnectionKind, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod,
+    PValueFormat, PairwiseBracketSpec, ProjectDocument, ProjectImageAsset, RectPt as DocRectPt, RegressionOverlaySpec, ResultSheet, SheetId,
+    SubcolumnMode, TableArchetype, XyTable, content_addressed_asset_id,
 };
 use curvebook_engine::Session;
 use curvebook_palette::{LineDashStyle, MarkerStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
@@ -26,18 +26,16 @@ use curvebook_text::parse_markup;
 use image::{DynamicImage, ImageFormat, Rgb, RgbImage, Rgba, RgbaImage};
 use serde_json::json;
 
+use super::common::{TempDir, col_sheet, ok_cmd};
+
 type TestResult = Result<(), Box<dyn Error>>;
 
 fn encode_alpha_quadrant_png(w: u32, h: u32) -> Result<Vec<u8>, Box<dyn Error>> {
-    let img = RgbaImage::from_fn(w, h, |x, y| {
-        let right = x >= w / 2;
-        let bottom = y >= h / 2;
-        match (right, bottom) {
-            (false, false) => Rgba([220, 40, 40, 140]),
-            (true, false) => Rgba([25, 160, 70, 255]),
-            (false, true) => Rgba([30, 80, 220, 255]),
-            (true, true) => Rgba([235, 185, 25, 180]),
-        }
+    let img = RgbaImage::from_fn(w, h, |x, y| match (x >= w / 2, y >= h / 2) {
+        (false, false) => Rgba([220, 40, 40, 140]),
+        (true, false) => Rgba([25, 160, 70, 255]),
+        (false, true) => Rgba([30, 80, 220, 255]),
+        (true, true) => Rgba([235, 185, 25, 180]),
     });
     let mut out = Vec::new();
     DynamicImage::ImageRgba8(img).write_to(&mut Cursor::new(&mut out), ImageFormat::Png)?;
@@ -45,13 +43,8 @@ fn encode_alpha_quadrant_png(w: u32, h: u32) -> Result<Vec<u8>, Box<dyn Error>> 
 }
 
 fn encode_rgb_jpeg(w: u32, h: u32) -> Result<Vec<u8>, Box<dyn Error>> {
-    let img = RgbImage::from_fn(w, h, |x, y| {
-        #[allow(clippy::cast_possible_truncation)]
-        let r = ((x * 255) / w.max(1)) as u8;
-        #[allow(clippy::cast_possible_truncation)]
-        let b = ((y * 255) / h.max(1)) as u8;
-        Rgb([r, 128, b])
-    });
+    #[allow(clippy::cast_possible_truncation)]
+    let img = RgbImage::from_fn(w, h, |x, y| Rgb([((x * 255) / w.max(1)) as u8, 128, ((y * 255) / h.max(1)) as u8]));
     let mut out = Vec::new();
     DynamicImage::ImageRgb8(img).write_to(&mut Cursor::new(&mut out), ImageFormat::Jpeg)?;
     Ok(out)
@@ -66,13 +59,103 @@ struct InteropFixtures {
     stress_scene: ChartScene,
 }
 
+fn build_stress_scene(png_bytes: &[u8]) -> Result<ChartScene, Box<dyn Error>> {
+    let mut stress = ChartScene::new("scene-stress", "Vector & Typography Stress <Probe>", 420.0, 300.0, Some(Rgba8::WHITE));
+    stress.primitives.push(ScenePrimitive::PushClip { rect: RectPt::new(16.0, 16.0, 180.0, 120.0) });
+    stress.primitives.push(ScenePrimitive::PushClip { rect: RectPt::new(36.0, 30.0, 140.0, 90.0) });
+    stress.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(RectPt::new(10.0, 10.0, 200.0, 130.0)),
+        fill: Some(FillPaint::solid(OKABE_ITO_BLUE.with_alpha(95))),
+        stroke: Some(StrokePaint {
+            color: OKABE_ITO_VERMILION.with_alpha(190),
+            width_pt: 2.0,
+            dash: LineDashStyle::Dashed,
+            cap: LineCap::Round,
+            join: LineJoin::Bevel,
+        }),
+        clip: None,
+    });
+    stress.primitives.push(ScenePrimitive::Path {
+        path: Path2D {
+            commands: vec![
+                PathCmd::MoveTo(PointPt::new(20.0, 120.0)),
+                PathCmd::CubicTo { c1: PointPt::new(70.0, 10.0), c2: PointPt::new(130.0, 140.0), to: PointPt::new(190.0, 40.0) },
+            ],
+        },
+        fill: None,
+        stroke: Some(StrokePaint {
+            color: Rgba8::rgba(20, 20, 20, 220),
+            width_pt: 2.5,
+            dash: LineDashStyle::Solid,
+            cap: LineCap::Square,
+            join: LineJoin::Round,
+        }),
+        clip: None,
+    });
+    stress.primitives.push(ScenePrimitive::PopClip);
+    stress.primitives.push(ScenePrimitive::PopClip);
+
+    let dashes = [
+        LineDashStyle::Solid,
+        LineDashStyle::Dashed,
+        LineDashStyle::Dotted,
+        LineDashStyle::DashDot,
+        LineDashStyle::DashDotDot,
+        LineDashStyle::LongDash,
+    ];
+    for (idx, dash) in dashes.into_iter().enumerate() {
+        let y = 152.0 + (idx as f64) * 14.0;
+        for (x0, x1, color, width_pt) in
+            [(16.0, 196.0, Rgba8::rgba(25, 95, 165, 220), 1.6), (206.0, 260.0, Rgba8::rgba(190, 50, 25, 220), if idx == 5 { 0.0 } else { 0.25 })]
+        {
+            stress.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(x0, y), PointPt::new(x1, y)),
+                fill: None,
+                stroke: Some(StrokePaint { color, width_pt, dash, cap: LineCap::Butt, join: LineJoin::Miter }),
+                clip: None,
+            });
+        }
+    }
+
+    let rgba_img = image::load_from_memory(png_bytes)?.to_rgba8();
+    let (rw, rh) = rgba_img.dimensions();
+    stress.primitives.push(ScenePrimitive::RasterImage(SceneRasterImage {
+        asset_id: String::from("stress-png-rot"),
+        media_type: ImageMimeKind::Png,
+        pixel_size: (rw, rh),
+        rgba: rgba_img.into_raw(),
+        bounds_pt: RectPt::new(280.0, 24.0, 96.0, 72.0),
+        crop: CropInsetsPt { left_pt: 8.0, right_pt: 6.0, top_pt: 5.0, bottom_pt: 5.0 },
+        rotation_deg: 22.5,
+        clip: Some(RectPt::new(270.0, 14.0, 120.0, 100.0)),
+    }));
+    stress.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: parse_markup("<b>K<sub>m</sub></b> = 10<sup>-3</sup> µM · αβγΔσχΩ · ±≤≥∞×÷°Å\nLine 2: <i>e\u{0301}</i> &amp; <i>x\u{0302}</i> < \"1\""),
+        anchor_pt: PointPt::new(210.0, 260.0),
+        anchor: TextAnchor::Middle,
+        font_size_pt: 10.0,
+        rotation_deg: 0.0,
+        color: Rgba8::rgba(20, 20, 20, 230),
+    }));
+    stress.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: parse_markup("Rotated 30°: μ<sub>eff</sub>"),
+        anchor_pt: PointPt::new(330.0, 180.0),
+        anchor: TextAnchor::End,
+        font_size_pt: 9.5,
+        rotation_deg: -30.0,
+        color: OKABE_ITO_VERMILION,
+    }));
+    Ok(stress)
+}
+
 fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     let mut doc = ProjectDocument::new("R17_2_ExportInterop")?;
 
     // 1. XY Broken Axis + Semi-Transparent Band + Rich Typography + Dash Thresholds + 2D Equation
     let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 8)?;
-    let pts = [(1.0, 12.0), (3.0, 22.0), (6.0, 48.0), (9.0, 74.0), (110.0, 88.0), (140.0, 93.0), (170.0, 96.0), (195.0, 98.0)];
-    for (r, (x, y)) in pts.into_iter().enumerate() {
+    for (r, (x, y)) in
+        [(1.0, 12.0), (3.0, 22.0), (6.0, 48.0), (9.0, 74.0), (110.0, 88.0), (140.0, 93.0), (170.0, 96.0), (195.0, 98.0)].into_iter().enumerate()
+    {
         xy.set_x_cell(r, Cell::number(x))?;
         xy.data_sets[0].cells[r][0] = Cell::number(y - 3.5);
         xy.data_sets[0].cells[r][1] = Cell::number(y + 3.5);
@@ -81,19 +164,13 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
 
     let fit_spec = AnalysisSpec::new("fit-xy", "d-xy", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("michaelis_menten")))?;
     let mut fit_res = ResultSheet::new(fit_spec)?;
-    let mut curve_pts = Vec::new();
-    for i in 1..=200 {
-        let x = f64::from(i);
-        let y = 100.0 * x / (18.0 + x);
-        curve_pts.push(CurveSamplePoint {
-            x,
-            y,
-            ci_lower: Some((y - 6.0).max(0.0)),
-            ci_upper: Some((y + 6.0).min(108.0)),
-            pred_lower: None,
-            pred_upper: None,
-        });
-    }
+    let curve_pts = (1..=200)
+        .map(|i| {
+            let x = f64::from(i);
+            let y = 100.0 * x / (18.0 + x);
+            CurveSamplePoint { x, y, ci_lower: Some((y - 6.0).max(0.0)), ci_upper: Some((y + 6.0).min(108.0)), pred_lower: None, pred_upper: None }
+        })
+        .collect();
     fit_res.fitted_curves.push(FittedCurveOverlay {
         data_set_index: 0,
         equation_id: String::from("michaelis_menten"),
@@ -109,24 +186,15 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     g_xy.spec.y_axis.title = String::from("<i>Response</i><sub>norm</sub> (%)");
     g_xy.spec.x_axis.break_ornament = BreakOrnament::DoubleSlash;
     g_xy.spec.x_axis.gap_width_pt = 12.0;
-    g_xy.spec.x_axis.segments = vec![
-        AxisSegment {
-            min: Some(0.0),
-            max: Some(10.0),
-            scale: AxisScale::Linear,
-            length_share: 0.5,
-            major_tick_interval: Some(5.0),
-            minor_ticks_per_interval: 0,
-        },
-        AxisSegment {
-            min: Some(100.0),
-            max: Some(200.0),
-            scale: AxisScale::Linear,
-            length_share: 0.5,
-            major_tick_interval: Some(50.0),
-            minor_ticks_per_interval: 0,
-        },
-    ];
+    let seg = |min, max, major_tick_interval| AxisSegment {
+        min: Some(min),
+        max: Some(max),
+        scale: AxisScale::Linear,
+        length_share: 0.5,
+        major_tick_interval: Some(major_tick_interval),
+        minor_ticks_per_interval: 0,
+    };
+    g_xy.spec.x_axis.segments = vec![seg(0.0, 10.0, 5.0), seg(100.0, 200.0, 50.0)];
     g_xy.spec.y_axis.thresholds = vec![
         AxisThreshold {
             value: 50.0,
@@ -179,15 +247,16 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     doc.add_graph_sheet(g_xy.clone())?;
 
     // 2. Column + Pairwise Significance Brackets
-    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 4, 5)?;
-    let groups = [[10.0, 11.0, 10.5, 9.8, 10.2], [10.4, 10.9, 10.3, 10.1, 10.6], [18.2, 19.4, 17.9, 18.7, 19.0], [27.2, 28.6, 26.9, 28.0, 28.2]];
-    for (c, vals) in groups.iter().enumerate() {
-        col.data_sets[c].title = format!("Arm α{}", c + 1);
-        for (r, &v) in vals.iter().enumerate() {
-            col.data_sets[c].cells[r][0] = Cell::number(v);
-        }
-    }
-    let col_ds = DataSheet::new("d-col", "Treatment Arms", TableArchetype::Column(col))?;
+    let col_ds = col_sheet(
+        "d-col",
+        "Treatment Arms",
+        &[
+            ("Arm α1", &[10.0, 11.0, 10.5, 9.8, 10.2]),
+            ("Arm α2", &[10.4, 10.9, 10.3, 10.1, 10.6]),
+            ("Arm α3", &[18.2, 19.4, 17.9, 18.7, 19.0]),
+            ("Arm α4", &[27.2, 28.6, 26.9, 28.0, 28.2]),
+        ],
+    );
     doc.add_data_sheet(col_ds.clone())?;
 
     let mut anova_spec = AnalysisSpec::new(
@@ -202,46 +271,26 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     )?;
     anova_spec.p_value_format = PValueFormat::Apa;
     anova_spec.confidence_level = ConfidenceLevel::DEFAULT_95;
-    let anova_res = curvebook_stats::run_analysis(&col_ds, &anova_spec)?;
-    doc.add_result_sheet(anova_res)?;
+    doc.add_result_sheet(curvebook_stats::run_analysis(&col_ds, &anova_spec)?)?;
 
-    let mut g_col = GraphSheet::new_uninitialized_for_data("g-col-brackets", doc.data_sheet(&SheetId::new("d-col")).ok_or("missing d-col")?)?;
+    let mut g_col = GraphSheet::new_uninitialized_for_data("g-col-brackets", &col_ds)?;
     g_col.spec.title = String::from("Tukey HSD (p ≤ 0.001, μg/mL)");
     g_col.spec.frame_preset = FramePreset::OpenL;
+    let bracket = |group_a, group_b, style, label_mode, hide_if_non_significant, stroke_width_pt| PairwiseBracketSpec {
+        result_sheet_id: SheetId::new("res-anova"),
+        group_a,
+        group_b,
+        style,
+        label_mode,
+        hide_if_non_significant,
+        stroke_width_pt,
+        font_size_pt: 8.5,
+        bracket_step_pt: 14.0,
+    };
     g_col.spec.comparisons = vec![
-        PairwiseBracketSpec {
-            result_sheet_id: SheetId::new("res-anova"),
-            group_a: 0,
-            group_b: 2,
-            style: BracketStyle::Square,
-            label_mode: BracketLabelMode::NumericPOrQ,
-            hide_if_non_significant: true,
-            stroke_width_pt: 1.0,
-            font_size_pt: 8.5,
-            bracket_step_pt: 14.0,
-        },
-        PairwiseBracketSpec {
-            result_sheet_id: SheetId::new("res-anova"),
-            group_a: 2,
-            group_b: 3,
-            style: BracketStyle::HalfTick,
-            label_mode: BracketLabelMode::SummaryStars,
-            hide_if_non_significant: true,
-            stroke_width_pt: 1.0,
-            font_size_pt: 8.5,
-            bracket_step_pt: 14.0,
-        },
-        PairwiseBracketSpec {
-            result_sheet_id: SheetId::new("res-anova"),
-            group_a: 0,
-            group_b: 3,
-            style: BracketStyle::CurlyBrace,
-            label_mode: BracketLabelMode::Custom(String::from("Δμ ≥ 17 ***")),
-            hide_if_non_significant: false,
-            stroke_width_pt: 1.1,
-            font_size_pt: 8.5,
-            bracket_step_pt: 14.0,
-        },
+        bracket(0, 2, BracketStyle::Square, BracketLabelMode::NumericPOrQ, true, 1.0),
+        bracket(2, 3, BracketStyle::HalfTick, BracketLabelMode::SummaryStars, true, 1.0),
+        bracket(0, 3, BracketStyle::CurlyBrace, BracketLabelMode::Custom(String::from("Δμ ≥ 17 ***")), false, 1.1),
     ];
     doc.add_graph_sheet(g_col.clone())?;
 
@@ -261,47 +310,27 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     doc.add_graph_sheet(g_hm.clone())?;
 
     // 4. Embedded PNG + JPEG Assets & Multi-panel DoubleColumn174Mm Page Layout
-    let png_bytes = encode_alpha_quadrant_png(96, 72)?;
-    let png_id = content_addressed_asset_id(&png_bytes);
-    doc.upsert_image_asset(ProjectImageAsset {
-        asset_id: png_id.clone(),
-        media_type: ImageMimeKind::Png,
-        pixel_size: (96, 72),
-        bytes: png_bytes.clone(),
-    })?;
-    let jpg_bytes = encode_rgb_jpeg(80, 60)?;
-    let jpg_id = content_addressed_asset_id(&jpg_bytes);
-    doc.upsert_image_asset(ProjectImageAsset {
-        asset_id: jpg_id.clone(),
-        media_type: ImageMimeKind::Jpeg,
-        pixel_size: (80, 60),
-        bytes: jpg_bytes.clone(),
-    })?;
+    let (png_bytes, jpg_bytes) = (encode_alpha_quadrant_png(96, 72)?, encode_rgb_jpeg(80, 60)?);
+    let (png_id, jpg_id) = (content_addressed_asset_id(&png_bytes), content_addressed_asset_id(&jpg_bytes));
+    for (asset_id, media_type, pixel_size, bytes) in
+        [(png_id.clone(), ImageMimeKind::Png, (96, 72), png_bytes.clone()), (jpg_id.clone(), ImageMimeKind::Jpeg, (80, 60), jpg_bytes)]
+    {
+        doc.upsert_image_asset(ProjectImageAsset { asset_id, media_type, pixel_size, bytes })?;
+    }
 
     let mut layout_spec = LayoutSpec::from_preset(JournalWidthPreset::DoubleColumn174Mm);
     layout_spec.align_plot_origins = true;
+    let live = |id: &str, graph: &GraphSheet, x, y| LayoutItem::LiveGraph {
+        id: id.to_owned(),
+        graph_sheet_id: graph.id.clone(),
+        bounds_pt: DocRectPt::new(x, y, 226.0, 154.0),
+        scale_percent: 100.0,
+        badge_override: None,
+    };
     layout_spec.items = vec![
-        LayoutItem::LiveGraph {
-            id: String::from("panel-a"),
-            graph_sheet_id: g_xy.id.clone(),
-            bounds_pt: DocRectPt::new(14.0, 12.0, 226.0, 154.0),
-            scale_percent: 100.0,
-            badge_override: None,
-        },
-        LayoutItem::LiveGraph {
-            id: String::from("panel-b"),
-            graph_sheet_id: g_col.id.clone(),
-            bounds_pt: DocRectPt::new(14.0, 174.0, 226.0, 154.0),
-            scale_percent: 100.0,
-            badge_override: None,
-        },
-        LayoutItem::LiveGraph {
-            id: String::from("panel-c"),
-            graph_sheet_id: g_hm.id.clone(),
-            bounds_pt: DocRectPt::new(252.0, 12.0, 226.0, 154.0),
-            scale_percent: 100.0,
-            badge_override: None,
-        },
+        live("panel-a", &g_xy, 14.0, 12.0),
+        live("panel-b", &g_col, 14.0, 174.0),
+        live("panel-c", &g_hm, 252.0, 12.0),
         LayoutItem::EmbeddedImage {
             id: String::from("panel-d-png"),
             asset_id: png_id,
@@ -332,122 +361,24 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
     let layout = LayoutSheet::new(SheetId::new("lay-multipanel"), "Multi-Panel Figure 1", layout_spec)?;
     doc.add_layout_sheet(layout.clone())?;
 
-    let xy_broken_scene = compile_graph(&g_xy, &doc)?;
-    let brackets_scene = compile_graph(&g_col, &doc)?;
-    let heatmap_scene = compile_graph(&g_hm, &doc)?;
-    let layout_scene = compile_layout(&layout, &doc)?;
-
-    // 5. Targeted Vector & Raster Stress Scene
-    let mut stress = ChartScene::new("scene-stress", "Vector & Typography Stress <Probe>", 420.0, 300.0, Some(Rgba8::WHITE));
-    let outer_clip = RectPt::new(16.0, 16.0, 180.0, 120.0);
-    let inner_clip = RectPt::new(36.0, 30.0, 140.0, 90.0);
-    stress.primitives.push(ScenePrimitive::PushClip { rect: outer_clip });
-    stress.primitives.push(ScenePrimitive::PushClip { rect: inner_clip });
-    stress.primitives.push(ScenePrimitive::Path {
-        path: Path2D::rect(RectPt::new(10.0, 10.0, 200.0, 130.0)),
-        fill: Some(FillPaint::solid(OKABE_ITO_BLUE.with_alpha(95))),
-        stroke: Some(StrokePaint {
-            color: OKABE_ITO_VERMILION.with_alpha(190),
-            width_pt: 2.0,
-            dash: LineDashStyle::Dashed,
-            cap: LineCap::Round,
-            join: LineJoin::Bevel,
-        }),
-        clip: None,
-    });
-    stress.primitives.push(ScenePrimitive::Path {
-        path: Path2D {
-            commands: vec![
-                PathCmd::MoveTo(PointPt::new(20.0, 120.0)),
-                PathCmd::CubicTo { c1: PointPt::new(70.0, 10.0), c2: PointPt::new(130.0, 140.0), to: PointPt::new(190.0, 40.0) },
-            ],
-        },
-        fill: None,
-        stroke: Some(StrokePaint {
-            color: Rgba8::rgba(20, 20, 20, 220),
-            width_pt: 2.5,
-            dash: LineDashStyle::Solid,
-            cap: LineCap::Square,
-            join: LineJoin::Round,
-        }),
-        clip: None,
-    });
-    stress.primitives.push(ScenePrimitive::PopClip);
-    stress.primitives.push(ScenePrimitive::PopClip);
-
-    // Every dash variant across regular, hairline, and zero-width edge cases
-    let dashes = [
-        LineDashStyle::Solid,
-        LineDashStyle::Dashed,
-        LineDashStyle::Dotted,
-        LineDashStyle::DashDot,
-        LineDashStyle::DashDotDot,
-        LineDashStyle::LongDash,
-    ];
-    for (idx, dash) in dashes.into_iter().enumerate() {
-        let y = 152.0 + (idx as f64) * 14.0;
-        stress.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(16.0, y), PointPt::new(196.0, y)),
-            fill: None,
-            stroke: Some(StrokePaint { color: Rgba8::rgba(25, 95, 165, 220), width_pt: 1.6, dash, cap: LineCap::Butt, join: LineJoin::Miter }),
-            clip: None,
-        });
-        stress.primitives.push(ScenePrimitive::Path {
-            path: Path2D::line(PointPt::new(206.0, y), PointPt::new(260.0, y)),
-            fill: None,
-            stroke: Some(StrokePaint {
-                color: Rgba8::rgba(190, 50, 25, 220),
-                width_pt: if idx == 5 { 0.0 } else { 0.25 },
-                dash,
-                cap: LineCap::Butt,
-                join: LineJoin::Miter,
-            }),
-            clip: None,
-        });
-    }
-
-    // Embedded RGBA PNG decoded into SceneRasterImage + rotated cropped instance
-    let rgba_img = image::load_from_memory(&png_bytes)?.to_rgba8();
-    let (rw, rh) = rgba_img.dimensions();
-    stress.primitives.push(ScenePrimitive::RasterImage(SceneRasterImage {
-        asset_id: String::from("stress-png-rot"),
-        media_type: ImageMimeKind::Png,
-        pixel_size: (rw, rh),
-        rgba: rgba_img.into_raw(),
-        bounds_pt: RectPt::new(280.0, 24.0, 96.0, 72.0),
-        crop: CropInsetsPt { left_pt: 8.0, right_pt: 6.0, top_pt: 5.0, bottom_pt: 5.0 },
-        rotation_deg: 22.5,
-        clip: Some(RectPt::new(270.0, 14.0, 120.0, 100.0)),
-    }));
-
-    // Rich typography stress: superscript/subscript/Greek/Unicode/combining marks/multiline/rotated
-    stress.primitives.push(ScenePrimitive::Text(PositionedText {
-        rich: parse_markup("<b>K<sub>m</sub></b> = 10<sup>-3</sup> µM · αβγΔσχΩ · ±≤≥∞×÷°Å\nLine 2: <i>e\u{0301}</i> &amp; <i>x\u{0302}</i> < \"1\""),
-        anchor_pt: PointPt::new(210.0, 260.0),
-        anchor: TextAnchor::Middle,
-        font_size_pt: 10.0,
-        rotation_deg: 0.0,
-        color: Rgba8::rgba(20, 20, 20, 230),
-    }));
-    stress.primitives.push(ScenePrimitive::Text(PositionedText {
-        rich: parse_markup("Rotated 30°: μ<sub>eff</sub>"),
-        anchor_pt: PointPt::new(330.0, 180.0),
-        anchor: TextAnchor::End,
-        font_size_pt: 9.5,
-        rotation_deg: -30.0,
-        color: OKABE_ITO_VERMILION,
-    }));
-
-    Ok(InteropFixtures { doc, xy_broken_scene, brackets_scene, heatmap_scene, layout_scene, stress_scene: stress })
+    Ok(InteropFixtures {
+        xy_broken_scene: compile_graph(&g_xy, &doc)?,
+        brackets_scene: compile_graph(&g_col, &doc)?,
+        heatmap_scene: compile_graph(&g_hm, &doc)?,
+        layout_scene: compile_layout(&layout, &doc)?,
+        stress_scene: build_stress_scene(&png_bytes)?,
+        doc,
+    })
 }
 
 fn load_host_ttf() -> Option<Vec<u8>> {
-    let candidates = [
+    [
         "/System/Library/Fonts/Supplemental/Arial.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ];
-    candidates.iter().find_map(|p| fs::read(p).ok())
+    ]
+    .iter()
+    .find_map(|p| fs::read(p).ok())
 }
 
 fn write_if_dump(dir: Option<&Path>, name: &str, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -458,16 +389,25 @@ fn write_if_dump(dir: Option<&Path>, name: &str, bytes: &[u8]) -> Result<(), Box
     Ok(())
 }
 
+fn u32_be(b: &[u8], off: usize, label: &str) -> Result<u32, String> {
+    Ok(u32::from_be_bytes(b.get(off..off + 4).ok_or_else(|| format!("OOB {label}"))?.try_into().map_err(|_| label.to_owned())?))
+}
+
+fn u32_le(b: &[u8], off: usize, label: &str) -> Result<u32, String> {
+    Ok(u32::from_le_bytes(b.get(off..off + 4).ok_or_else(|| format!("OOB {label}"))?.try_into().map_err(|_| label.to_owned())?))
+}
+
+fn u16_le(b: &[u8], off: usize, label: &str) -> Result<u16, String> {
+    Ok(u16::from_le_bytes(b.get(off..off + 2).ok_or_else(|| format!("OOB {label}"))?.try_into().map_err(|_| label.to_owned())?))
+}
+
 fn parse_png_phys(bytes: &[u8]) -> Result<(u32, u32, u32, u32, u8), String> {
     if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         return Err(String::from("invalid PNG signature"));
     }
-    let mut pos = 8usize;
-    let mut width = 0u32;
-    let mut height = 0u32;
-    let mut phys = None;
+    let (mut pos, mut width, mut height, mut phys) = (8usize, 0u32, 0u32, None);
     while pos + 12 <= bytes.len() {
-        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().map_err(|_| String::from("chunk len"))?) as usize;
+        let len = u32_be(bytes, pos, "chunk len")? as usize;
         let kind = &bytes[pos + 4..pos + 8];
         let data_start = pos + 8;
         let data_end = data_start.checked_add(len).ok_or_else(|| String::from("chunk overflow"))?;
@@ -476,13 +416,10 @@ fn parse_png_phys(bytes: &[u8]) -> Result<(u32, u32, u32, u32, u8), String> {
         }
         let data = &bytes[data_start..data_end];
         if kind == b"IHDR" && data.len() >= 8 {
-            width = u32::from_be_bytes(data[0..4].try_into().map_err(|_| String::from("IHDR w"))?);
-            height = u32::from_be_bytes(data[4..8].try_into().map_err(|_| String::from("IHDR h"))?);
+            width = u32_be(data, 0, "IHDR w")?;
+            height = u32_be(data, 4, "IHDR h")?;
         } else if kind == b"pHYs" && data.len() == 9 {
-            let ppu_x = u32::from_be_bytes(data[0..4].try_into().map_err(|_| String::from("pHYs x"))?);
-            let ppu_y = u32::from_be_bytes(data[4..8].try_into().map_err(|_| String::from("pHYs y"))?);
-            let unit = data[8];
-            phys = Some((ppu_x, ppu_y, unit));
+            phys = Some((u32_be(data, 0, "pHYs x")?, u32_be(data, 4, "pHYs y")?, data[8]));
         }
         pos = data_end + 4;
         if kind == b"IEND" {
@@ -497,37 +434,21 @@ fn verify_tiff_ifd_metadata(bytes: &[u8], expected_dpi: u32, expected_comp: u16)
     if bytes.len() < 8 || &bytes[0..4] != b"II*\0" {
         return Err(String::from("invalid little-endian TIFF header"));
     }
-    let ifd_off = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| String::from("IFD offset"))?) as usize;
-    if ifd_off + 2 > bytes.len() {
-        return Err(String::from("truncated TIFF IFD"));
-    }
-    let count = u16::from_le_bytes(bytes[ifd_off..ifd_off + 2].try_into().map_err(|_| String::from("IFD count"))?) as usize;
-    let mut comp = None;
-    let mut res_unit = None;
-    let mut extra_samples = None;
-    let mut x_res = None;
-    let mut y_res = None;
+    let ifd_off = u32_le(bytes, 4, "IFD offset")? as usize;
+    let count = u16_le(bytes, ifd_off, "IFD count")? as usize;
+    let (mut comp, mut res_unit, mut extra_samples, mut x_res, mut y_res) = (None, None, None, None, None);
     for i in 0..count {
-        let e_off = ifd_off + 2 + i * 12;
-        if e_off + 12 > bytes.len() {
+        let e = ifd_off + 2 + i * 12;
+        if e + 12 > bytes.len() {
             return Err(String::from("truncated TIFF IFD entry"));
         }
-        let tag = u16::from_le_bytes(bytes[e_off..e_off + 2].try_into().map_err(|_| String::from("tag"))?);
-        let typ = u16::from_le_bytes(bytes[e_off + 2..e_off + 4].try_into().map_err(|_| String::from("type"))?);
-        let val_or_off = u32::from_le_bytes(bytes[e_off + 8..e_off + 12].try_into().map_err(|_| String::from("val"))?);
-        let inline_u16 = u16::from_le_bytes(bytes[e_off + 8..e_off + 10].try_into().map_err(|_| String::from("u16"))?);
-        let read_rational = |off: usize| -> Result<(u32, u32), String> {
-            if off + 8 > bytes.len() {
-                return Err(String::from("rational OOB"));
-            }
-            let num = u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| String::from("num"))?);
-            let den = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().map_err(|_| String::from("den"))?);
-            Ok((num, den))
-        };
+        let (tag, typ, val_or_off, inline_u16) =
+            (u16_le(bytes, e, "tag")?, u16_le(bytes, e + 2, "type")?, u32_le(bytes, e + 8, "val")?, u16_le(bytes, e + 8, "u16")?);
+        let rational = |off: usize| Ok::<_, String>((u32_le(bytes, off, "num")?, u32_le(bytes, off + 4, "den")?));
         match (tag, typ) {
             (259, 3) => comp = Some(inline_u16),
-            (282, 5) => x_res = Some(read_rational(val_or_off as usize)?),
-            (283, 5) => y_res = Some(read_rational(val_or_off as usize)?),
+            (282, 5) => x_res = Some(rational(val_or_off as usize)?),
+            (283, 5) => y_res = Some(rational(val_or_off as usize)?),
             (296, 3) => res_unit = Some(inline_u16),
             (338, 3) => extra_samples = Some(inline_u16),
             _ => {}
@@ -552,24 +473,19 @@ fn verify_emf_interop_stream(bytes: &[u8], expect_extcreatepen: bool) -> Result<
     if bytes.len() < 88 || !bytes.len().is_multiple_of(4) {
         return Err(format!("invalid EMF byte length {}", bytes.len()));
     }
-    let sig = u32::from_le_bytes(bytes[40..44].try_into().map_err(|_| String::from("EMF sig"))?);
+    let sig = u32_le(bytes, 40, "EMF sig")?;
     if sig != 0x464D_4520 {
         return Err(format!("invalid EMF signature {sig:#x}"));
     }
-    let mut off = 0usize;
-    let mut saw_ext_pen = false;
-    let mut saw_eof = false;
+    let (mut off, mut saw_ext_pen, mut saw_eof) = (0usize, false, false);
     while off + 8 <= bytes.len() {
-        let i_type = u32::from_le_bytes(bytes[off..off + 4].try_into().map_err(|_| String::from("EMF iType"))?);
-        let n_size = u32::from_le_bytes(bytes[off + 4..off + 8].try_into().map_err(|_| String::from("EMF nSize"))?) as usize;
+        let i_type = u32_le(bytes, off, "EMF iType")?;
+        let n_size = u32_le(bytes, off + 4, "EMF nSize")? as usize;
         if n_size < 8 || !n_size.is_multiple_of(4) || off + n_size > bytes.len() {
             return Err(format!("corrupt EMF record type={i_type} size={n_size}"));
         }
-        if i_type == 95 {
-            saw_ext_pen = true;
-        } else if i_type == 14 {
-            saw_eof = true;
-        }
+        saw_ext_pen |= i_type == 95;
+        saw_eof |= i_type == 14;
         off += n_size;
     }
     if !saw_eof || off != bytes.len() {
@@ -609,62 +525,42 @@ fn export_comprehensive_interop_suite_and_verify_structure() -> TestResult {
         }
         write_if_dump(dump_ref, &format!("{slug}.editable.svg"), svg_editable.as_bytes())?;
 
-        let svg_outlined = render_svg(scene, &SvgExportOptions { outline_text: true, ..SvgExportOptions::default() })?;
-        validate_svg_structure(&svg_outlined)?;
-        assert!(!svg_outlined.contains("<text"), "{slug}.outlined.svg leaked <text>");
-        assert!(!svg_outlined.contains("stroke-width=\"0.000\""), "{slug}.outlined.svg emitted 0-width stroke");
-        write_if_dump(dump_ref, &format!("{slug}.outlined.svg"), svg_outlined.as_bytes())?;
-
-        let svg_embed = render_svg(scene, &SvgExportOptions { embed_fonts: true, ..SvgExportOptions::default() })?;
-        validate_svg_structure(&svg_embed)?;
-        assert!(svg_embed.contains("<text"), "{slug}.embedfonts.svg missing editable <text>");
-        assert!(!svg_embed.contains("stroke-width=\"0.000\""), "{slug}.embedfonts.svg emitted 0-width stroke");
-        write_if_dump(dump_ref, &format!("{slug}.embedfonts.svg"), svg_embed.as_bytes())?;
+        for (suffix, opts, expect_text) in [
+            ("outlined.svg", SvgExportOptions { outline_text: true, ..SvgExportOptions::default() }, false),
+            ("embedfonts.svg", SvgExportOptions { embed_fonts: true, ..SvgExportOptions::default() }, true),
+        ] {
+            let svg = render_svg(scene, &opts)?;
+            validate_svg_structure(&svg)?;
+            assert_eq!(svg.contains("<text"), expect_text, "{slug}.{suffix} <text> check");
+            assert!(!svg.contains("stroke-width=\"0.000\""), "{slug}.{suffix} emitted 0-width stroke");
+            write_if_dump(dump_ref, &format!("{slug}.{suffix}"), svg.as_bytes())?;
+        }
 
         // 2. PDF variants
-        let pdf17 = render_pdf(
-            scene,
-            &PdfExportOptions {
-                title: Some(format!("CurveBook Interop {slug}")),
-                version: PdfVersion::Pdf17,
-                color_space: PdfColorSpace::Srgb,
-                ..PdfExportOptions::default()
-            },
-        )?;
-        assert!(pdf17.starts_with(b"%PDF-1.7"));
-        write_if_dump(dump_ref, &format!("{slug}.pdf17_srgb.pdf"), &pdf17)?;
-
-        let pdf14 = render_pdf(
-            scene,
-            &PdfExportOptions {
-                title: Some(format!("CurveBook Interop {slug}")),
-                version: PdfVersion::Pdf14,
-                color_space: PdfColorSpace::Srgb,
-                ..PdfExportOptions::default()
-            },
-        )?;
-        assert!(pdf14.starts_with(b"%PDF-1.4"));
-        write_if_dump(dump_ref, &format!("{slug}.pdf14_srgb.pdf"), &pdf14)?;
-
-        let pdf_cmyk = render_pdf(
-            scene,
-            &PdfExportOptions {
-                title: Some(format!("CurveBook Interop {slug}")),
-                version: PdfVersion::Pdf17,
-                color_space: PdfColorSpace::Cmyk,
-                ..PdfExportOptions::default()
-            },
-        )?;
-        write_if_dump(dump_ref, &format!("{slug}.pdf17_cmyk.pdf"), &pdf_cmyk)?;
-
-        let pdf_outlined = render_pdf(
-            scene,
-            &PdfExportOptions { title: Some(format!("CurveBook Interop {slug}")), outline_text: true, ..PdfExportOptions::default() },
-        )?;
-        let out_txt = String::from_utf8_lossy(&pdf_outlined);
-        assert!(!out_txt.contains("/Font <<"), "{slug}.pdf17_outlined.pdf Page /Resources leaked /Font dictionary");
-        write_if_dump(dump_ref, &format!("{slug}.pdf17_outlined.pdf"), &pdf_outlined)?;
-
+        for (suffix, version, color_space, outline_text, prefix) in [
+            ("pdf17_srgb.pdf", PdfVersion::Pdf17, PdfColorSpace::Srgb, false, Some(&b"%PDF-1.7"[..])),
+            ("pdf14_srgb.pdf", PdfVersion::Pdf14, PdfColorSpace::Srgb, false, Some(&b"%PDF-1.4"[..])),
+            ("pdf17_cmyk.pdf", PdfVersion::Pdf17, PdfColorSpace::Cmyk, false, None),
+            ("pdf17_outlined.pdf", PdfVersion::Pdf17, PdfColorSpace::Srgb, true, None),
+        ] {
+            let pdf = render_pdf(
+                scene,
+                &PdfExportOptions {
+                    title: Some(format!("CurveBook Interop {slug}")),
+                    version,
+                    color_space,
+                    outline_text,
+                    ..PdfExportOptions::default()
+                },
+            )?;
+            if let Some(p) = prefix {
+                assert!(pdf.starts_with(p));
+            }
+            if outline_text {
+                assert!(!String::from_utf8_lossy(&pdf).contains("/Font <<"), "{slug}.{suffix} Page /Resources leaked /Font dictionary");
+            }
+            write_if_dump(dump_ref, &format!("{slug}.{suffix}"), &pdf)?;
+        }
         if let Some(ref ttf) = host_ttf {
             let pdf_ttf = render_pdf(
                 scene,
@@ -683,12 +579,10 @@ fn export_comprehensive_interop_suite_and_verify_structure() -> TestResult {
         write_if_dump(dump_ref, &format!("{slug}.emf"), &emf)?;
 
         // 4. PNG & TIFF at 300 and 600 DPI
-        for dpi in [300u16, 600u16] {
-            let spec = RenderTargetSpec::from_scene_dpi(scene, dpi)?;
-            let raster = render_scene(scene, spec)?;
+        for (dpi, expected_ppu) in [(300u16, 11_811u32), (600, 23_622)] {
+            let raster = render_scene(scene, RenderTargetSpec::from_scene_dpi(scene, dpi)?)?;
             let png = encode_png(&raster)?;
             let (pw, ph, px, py, unit) = parse_png_phys(&png)?;
-            let expected_ppu = if dpi == 300 { 11_811 } else { 23_622 };
             assert!(pw > 0 && ph > 0 && unit == 1 && px == expected_ppu && py == expected_ppu, "{slug} PNG pHYs mismatch at {dpi} DPI");
             write_if_dump(dump_ref, &format!("{slug}_{dpi}dpi.png"), &png)?;
 
@@ -697,7 +591,7 @@ fn export_comprehensive_interop_suite_and_verify_structure() -> TestResult {
                 verify_emf_interop_stream(&emf_ras, false)?;
                 write_if_dump(dump_ref, &format!("{slug}_{dpi}dpi_raster.emf"), &emf_ras)?;
                 for (cname, comp, tag) in
-                    [("deflate", TiffCompression::Deflate, 8u16), ("lzw", TiffCompression::Lzw, 5u16), ("none", TiffCompression::None, 1u16)]
+                    [("deflate", TiffCompression::Deflate, 8u16), ("lzw", TiffCompression::Lzw, 5), ("none", TiffCompression::None, 1)]
                 {
                     let tiff = encode_tiff(&raster, comp)?;
                     verify_tiff_ifd_metadata(&tiff, 300, tag)?;
@@ -724,43 +618,27 @@ fn export_comprehensive_interop_suite_and_verify_structure() -> TestResult {
     write_if_dump(dump_ref, "06_multipage_all.pdf", &multipage_pdf)?;
 
     // 6. Verify Engine export.* command execution produces valid SVG/PDF/PNG/TIFF artifacts cleanly.
-    struct TempDirCleanup(PathBuf);
-    impl Drop for TempDirCleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-    let _guard;
-    let engine_dir = if let Some(root) = dump_ref {
-        _guard = None;
-        root.to_path_buf()
-    } else {
-        let dir = std::env::temp_dir().join(format!("cb-r17-2-engine-{}", std::process::id()));
-        fs::create_dir_all(&dir)?;
-        let path = dir.clone();
-        _guard = Some(TempDirCleanup(dir));
-        path
-    };
+    let tmp = if dump_ref.is_none() { Some(TempDir::try_new("r17-2-engine")?) } else { None };
+    let engine_dir = dump_ref.unwrap_or_else(|| tmp.as_ref().unwrap().path());
     let mut session = Session::from_document(fixtures.doc.clone());
+
     let engine_svg = engine_dir.join("engine_layout_cmd.svg");
-    let _ = session.execute("export.svg", json!({ "sheet_id": "lay-multipanel", "path": engine_svg.to_string_lossy() }))?;
+    ok_cmd(&mut session, "export.svg", json!({ "sheet_id": "lay-multipanel", "path": engine_svg.to_string_lossy() }));
     let engine_svg_str = fs::read_to_string(&engine_svg)?;
     validate_svg_structure(&engine_svg_str)?;
-    assert!(engine_svg_str.contains("xmlns:xlink=\"http://www.w3.org/1999/xlink\""));
-    assert!(engine_svg_str.contains("xlink:href=\"data:"));
+    assert!(engine_svg_str.contains("xmlns:xlink=\"http://www.w3.org/1999/xlink\"") && engine_svg_str.contains("xlink:href=\"data:"));
 
     let engine_pdf = engine_dir.join("engine_layout_cmd.pdf");
-    let _ = session.execute("export.pdf", json!({ "sheet_id": "lay-multipanel", "path": engine_pdf.to_string_lossy() }))?;
+    ok_cmd(&mut session, "export.pdf", json!({ "sheet_id": "lay-multipanel", "path": engine_pdf.to_string_lossy() }));
     assert!(fs::read(&engine_pdf)?.starts_with(b"%PDF-1.7"));
 
     let engine_png = engine_dir.join("engine_layout_cmd.png");
-    let _ = session.execute("export.png", json!({ "sheet_id": "lay-multipanel", "dpi": 300, "path": engine_png.to_string_lossy() }))?;
+    ok_cmd(&mut session, "export.png", json!({ "sheet_id": "lay-multipanel", "dpi": 300, "path": engine_png.to_string_lossy() }));
     let (_, _, px, py, unit) = parse_png_phys(&fs::read(&engine_png)?)?;
     assert_eq!((px, py, unit), (11_811, 11_811, 1));
 
     let engine_tiff = engine_dir.join("engine_layout_cmd.tiff");
-    let _ = session.execute("export.tiff", json!({ "sheet_id": "lay-multipanel", "dpi": 300, "path": engine_tiff.to_string_lossy() }))?;
+    ok_cmd(&mut session, "export.tiff", json!({ "sheet_id": "lay-multipanel", "dpi": 300, "path": engine_tiff.to_string_lossy() }));
     verify_tiff_ifd_metadata(&fs::read(&engine_tiff)?, 300, 8)?;
-
     Ok(())
 }

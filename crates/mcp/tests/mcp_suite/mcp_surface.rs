@@ -5,16 +5,19 @@
 //! - `initialize` instructions & capabilities, `resources/list` + `resources/read`, `prompts/list` + `prompts/get`
 //! - `WorkdirGuard` path-escape refusal across `open_file`, `save_file`, `export`, and command path params.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::Path;
+use std::rc::Rc;
 
 use curvebook_doc::{Cell, DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_engine::cmd::{CommandGroup, Effects, registry};
+use curvebook_engine::{EngineError, ExternalPathPolicy, Session};
 use curvebook_mcp::{
-    ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, McpServerState, ResourceError, ToolAnnotations, call_tool, command_id_to_mcp_tool_name, list_tools,
-    list_tools_for_group, list_tools_for_state, read_resource, serve,
+    ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, GuiSessionHost, McpServerState, ResourceError, ToolAnnotations, ToolCallError, call_tool,
+    command_id_to_mcp_tool_name, list_tools, list_tools_for_group, list_tools_for_state, read_resource, serve,
 };
 use serde_json::{Value, json};
 
@@ -666,4 +669,90 @@ fn ui_state_and_filesystem_write_tools_report_worst_case_annotations() {
             assert!(!ann.read_only_hint, "command `{}` ({name}) has CHANGES_UI_STATE -> readOnlyHint=false", spec.id);
         }
     }
+}
+
+#[test]
+fn path_policy_extra_keys_gui_tab_screenshot_and_batch_cap_overflow() {
+    // 1. RejectExternal & Workdir extra path keys (`dir`, `directory`, `destination_path`, `unpacked_dir`, `output_path`).
+    let td = TempDir::new("policy_keys").unwrap();
+    let csv = td.child("in.csv");
+    fs::write(&csv, "X,Y\n1,2\n").unwrap();
+    let (out_cb, out_csv) = (td.child("out.curvebook"), td.child("out.csv"));
+    let mut state = McpServerState::new();
+    state.session_mut().set_path_policy(ExternalPathPolicy::RejectExternal);
+    for (tool, args) in [
+        ("open_file", json!({ "path": csv.display().to_string() })),
+        ("save_file", json!({ "path": out_cb.display().to_string() })),
+        ("export", json!({ "format": "csv", "output_path": out_csv.display().to_string() })),
+        ("command_run", json!({ "command_id": "project.save", "params": { "path": out_cb.display().to_string() } })),
+        ("command_run", json!({ "command_id": "project.save", "params": { "destination_path": out_cb.display().to_string() } })),
+        ("command_batch", json!({ "commands": [{ "command_id": "project.save", "params": { "output_path": out_cb.display().to_string() } }] })),
+    ] {
+        let res = call_tool(&mut state, tool, args).unwrap();
+        assert!(res.is_error && res.structured_content.unwrap()["code"] == json!("path_escape"), "{tool}");
+    }
+    assert!(!out_cb.exists() && !out_csv.exists());
+
+    let wd = td.child("wd");
+    fs::create_dir_all(&wd).unwrap();
+    let mut sandboxed = McpServerState::with_workdir(&wd).unwrap();
+    for key in ["dir", "directory", "destination_path", "unpacked_dir", "output_path"] {
+        let mut obj = serde_json::Map::new();
+        obj.insert(key.to_owned(), json!("../escape.out"));
+        let res = call_tool(&mut sandboxed, "command_run", json!({ "command_id": "project.save", "params": Value::Object(obj) })).unwrap();
+        assert!(res.is_error && res.structured_content.unwrap()["code"] == json!("path_escape"), "{key}");
+    }
+
+    // 2. `ui_switch_tab` normalizes integer index -> string; path-only `ui_screenshot` succeeds cleanly.
+    struct RecHost(Session, Rc<RefCell<Vec<(String, Value)>>>, Rc<RefCell<Option<Value>>>);
+    impl GuiSessionHost for RecHost {
+        fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError> {
+            self.1.borrow_mut().push((method.to_owned(), params));
+            Ok(self.2.borrow_mut().take().unwrap_or_else(|| json!({ "ok": true })))
+        }
+        fn hosted_session(&self) -> Option<&Session> {
+            Some(&self.0)
+        }
+        fn hosted_session_mut(&mut self) -> Option<&mut Session> {
+            Some(&mut self.0)
+        }
+        fn sync_after_session_mutation(&mut self) {}
+    }
+    let (calls, next_reply) = (Rc::new(RefCell::new(Vec::new())), Rc::new(RefCell::new(None)));
+    let mut gui = McpServerState::with_gui_host(Box::new(RecHost(Session::new(), Rc::clone(&calls), Rc::clone(&next_reply))));
+    assert!(!call_tool(&mut gui, "ui_switch_tab", json!({ "tab": 1 })).unwrap().is_error);
+    *next_reply.borrow_mut() =
+        Some(json!({ "path": "/tmp/shot.png", "width_px": 2400, "height_px": 1800, "dpi": 300, "byte_len": 13_000_000, "inline_omitted": true }));
+    let shot = call_tool(&mut gui, "ui_screenshot", json!({ "target": "full_window" })).unwrap();
+    assert!(!shot.is_error && shot.structured_content.as_ref().and_then(|v| v.get("inline_omitted")) == Some(&json!(true)));
+    assert_eq!(calls.borrow()[0].1["tab"], json!("1"));
+
+    // 3. `command_batch` step cap = 1000; live response overflow after `project.save` flags persisted fs side effects,
+    //    while pre-execution rejection reports `rolled_back: true` and `filesystem_side_effects_persisted: false`.
+    let mut headless = McpServerState::new();
+    let too_many: Vec<Value> = (0..1_001).map(|_| json!({ "command_id": "project.inspect", "params": {} })).collect();
+    assert!(
+        matches!(call_tool(&mut headless, "command_batch", json!({ "commands": too_many })), Err(ToolCallError::InvalidParams(ref m)) if m.contains("1000"))
+    );
+
+    let mut live = McpServerState::with_control_port(49813).unwrap().with_control_handler(|method, params| {
+        if method == "command.batch" {
+            if params["commands"].as_array().map_or(0, Vec::len) == 2 {
+                return Err(String::from("control response exceeds maximum control line size (16777216 bytes)"));
+            }
+            return Err(String::from("command.batch exceeds maximum step limit (1000)"));
+        }
+        Ok(json!({}))
+    });
+    let ovf = call_tool(&mut live, "command_batch", json!({ "atomic": true, "commands": [{ "command_id": "project.save", "params": { "path": "saved.curvebook" } }, { "command_id": "project.inspect", "params": {} }] })).unwrap();
+    let sc = ovf.structured_content.unwrap();
+    assert!(ovf.is_error && sc["filesystem_side_effects_persisted"] == json!(true) && sc["failed_index"] == json!(1));
+    let pre = call_tool(
+        &mut live,
+        "command_batch",
+        json!({ "atomic": true, "commands": [{ "command_id": "project.save", "params": { "path": "saved.curvebook" } }] }),
+    )
+    .unwrap();
+    let psc = pre.structured_content.unwrap();
+    assert!(pre.is_error && psc["rolled_back"] == json!(true) && psc["filesystem_side_effects_persisted"] == json!(false));
 }

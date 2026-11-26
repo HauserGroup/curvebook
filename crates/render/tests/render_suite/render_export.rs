@@ -946,3 +946,50 @@ fn layout_2000x60_at_360_dpi_and_oversized_direct_rejections() {
         matches!(render_scene(&layout_scene, forged_px).unwrap_err(), RenderError::InvalidTarget { ref message } if message.contains("67108864"))
     );
 }
+
+#[test]
+fn rasterizer_offscreen_and_extreme_bezier_coords_stay_safe_and_bounded() {
+    let small_diamond = |cx: f64, cy: f64, r: f64| Path2D {
+        commands: vec![
+            PathCmd::MoveTo(PointPt::new(cx, cy - r)),
+            PathCmd::LineTo(PointPt::new(cx + r, cy)),
+            PathCmd::LineTo(PointPt::new(cx, cy + r)),
+            PathCmd::LineTo(PointPt::new(cx - r, cy)),
+            PathCmd::Close,
+        ],
+    };
+
+    // 1. i32::MAX and 2^32 + 50 off-screen markers must neither panic nor wrap onto the visible canvas.
+    let wrap_x = 4_294_967_296.0_f64 + 50.0;
+    let mut offscreen = ChartScene::new("offscreen-poly", "Offscreen Small Poly", 120.0, 120.0, Some(Rgba8::WHITE));
+    for (path, color, stroke) in [
+        (small_diamond(f64::from(i32::MAX), 50.0, 4.0), Rgba8::rgb(220, 0, 0), Some(StrokePaint::solid(Rgba8::BLACK, 1.0))),
+        (small_diamond(wrap_x, 50.0, 4.0), Rgba8::rgb(0, 0, 220), Some(StrokePaint::solid(Rgba8::BLACK, 1.0))),
+        (Path2D::rect(RectPt::new(wrap_x, 50.0, 6.0, 6.0)), Rgba8::rgb(0, 200, 0), None),
+    ] {
+        offscreen.primitives.push(ScenePrimitive::Path { path, fill: Some(FillPaint::solid(color)), stroke, clip: None });
+    }
+    let img = render_scene(&offscreen, RenderTargetSpec { width_px: 120, height_px: 120, dpi: 72 }).expect("render must not panic");
+    assert!(img.rgba.as_chunks::<4>().0.iter().all(|px| *px == [255, 255, 255, 255]), "phantom off-screen marker leaked onto canvas");
+
+    // 2. 5,000 extreme-coordinate (1e160) cubics + straddling quad must stay bounded in < 2.0s.
+    let mut bez = ChartScene::new("extreme-bez", "Extreme Beziers", 100.0, 100.0, Some(Rgba8::WHITE));
+    let mut path = Path2D::new();
+    path.commands.push(PathCmd::MoveTo(PointPt::new(1e160, 1e160)));
+    for i in 0..5_000u32 {
+        let off = f64::from(i) * 1e155;
+        path.commands.push(PathCmd::CubicTo {
+            c1: PointPt::new(1e160 + off, 1e160 + 1e158),
+            c2: PointPt::new(1e160 + off + 1e158, 1e160),
+            to: PointPt::new(1e160 + off + 2e158, 1e160),
+        });
+    }
+    path.commands.push(PathCmd::MoveTo(PointPt::new(-1e160, 50.0)));
+    path.commands.push(PathCmd::QuadTo { control: PointPt::new(0.0, 1e160), to: PointPt::new(1e160, 50.0) });
+    bez.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+
+    let t0 = std::time::Instant::now();
+    let _ = render_scene(&bez, RenderTargetSpec { width_px: 100, height_px: 100, dpi: 72 }).expect("render extreme beziers");
+    let elapsed = t0.elapsed();
+    assert!(elapsed.as_secs_f64() < 2.0, "extreme-coord bezier flattening must stay bounded, took {elapsed:?}");
+}

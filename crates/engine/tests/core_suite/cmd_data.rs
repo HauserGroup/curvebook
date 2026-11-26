@@ -3,14 +3,17 @@
 use std::sync::atomic::AtomicBool;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ConstantValue, FramePreset, GraphSheet, HookSource, InfoSheet, JournalWidthPreset,
-    LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt,
-    ResultScalarEntry, ResultSheet, ResultStatus, SheetId, TableArchetype, TableKind, VariableRole,
+    AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ConstantValue, ErrorCode, FramePreset, GraphSheet, HookSource, InfoSheet,
+    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, NonlinearFitSpec, ParameterRule, ParameterScope,
+    ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetCellRange, SheetId, TableArchetype, TableKind, VariableRole,
 };
-use curvebook_engine::{Caller, Session, cmd};
+use curvebook_engine::{Caller, Session, cmd, dag};
 use serde_json::{Value, json};
 
-use super::common::{TempDir, cell_num, cell_val, cleanroom_pzfx_xml, ds, err_cmd, gs, info, ls, ok_cmd, rs, run_cmds, x_num, xy_sheet};
+use super::common::{
+    TempDir, assert_bad_input, assert_bad_inputs, assert_err_code, cell_num, cell_val, cleanroom_pzfx_xml, col_sheet, ds, err_cmd, gs, info, ls,
+    ok_cmd, rs, run_cmds, session_with, x_num, xy_sheet,
+};
 
 #[test]
 fn sheet_create_all_eight_archetypes_auto_family_and_inspect() {
@@ -635,4 +638,133 @@ fn safety_guards_oversized_inputs_bad_base64_and_catalog_aliases() {
     assert_eq!(cell_num(&session, "d1", 0, 0, 0), None);
     assert_eq!(cell_num(&session, "d1", 1, 0, 0), None);
     assert_eq!(cell_val(&session, "mv-alias", 0, 0, 0).map(|c| c.value), Some(CellValue::Text(String::from("new"))));
+}
+
+#[test]
+fn aud_02_01_02_03_07_11_16_20_data_bounds_frozen_links_simulate_and_rename() {
+    // AUD-02-01: table.excludeCells target="x" rejects nonzero col and counts accurately.
+    let mut s_xy = session_with("XY", vec![xy_sheet("xy-1", "Dose", "X", &[1.0, 2.0, 3.0, 4.0], &[("Drug A", &[10.0, 20.0, 30.0, 40.0])])]);
+    assert_bad_input(
+        &mut s_xy,
+        "table.excludeCells",
+        json!({ "sheet_id": "xy-1", "target": "x", "row_start": 0, "row_end": 2, "col_start": 0, "col_end": 1_000_000_000_usize }),
+    );
+    let ex = ok_cmd(
+        &mut s_xy,
+        "table.excludeCells",
+        json!({ "sheet_id": "xy-1", "target": "x", "row_start": 0, "row_end": 2, "col_start": 0, "col_end": 0 }),
+    );
+    assert_eq!(ex.payload["updated_count"], 3);
+    let d_xy = ds(&s_xy, "xy-1");
+    assert!(
+        d_xy.x_or_time_cell(0, 0).is_some_and(|c| c.excluded)
+            && d_xy.x_or_time_cell(2, 0).is_some_and(|c| c.excluded)
+            && d_xy.x_or_time_cell(3, 0).is_some_and(|c| !c.excluded)
+    );
+
+    // AUD-02-16: transform.run simulate rejects zero row_count/replicates and preserves row_count=1.
+    assert_bad_inputs(
+        &mut s_xy,
+        &[
+            ("transform.run", json!({ "source_sheet_id": "xy-1", "kind": "simulate", "row_count": 0, "replicates": 2 })),
+            ("transform.run", json!({ "source_sheet_id": "xy-1", "kind": "simulate", "row_count": 5, "replicates": 0 })),
+        ],
+    );
+    ok_cmd(
+        &mut s_xy,
+        "transform.run",
+        json!({ "sheet_id": "sim-one", "source_sheet_id": "xy-1", "kind": "simulate", "row_count": 1, "replicates": 1 }),
+    );
+    assert_eq!(rs(&s_xy, "sim-one").analyzable_data.as_ref().map(|d| d.archetype.row_count()), Some(1));
+
+    // AUD-02-02: pasteLink & clear_cell_range clamp unbounded ranges; AUD-02-20: sheet.rename rejects whitespace-only titles.
+    let mut s_col = session_with("Col", vec![col_sheet("col-1", "Groups", &[("Ctrl", &[1.0, 2.0]), ("Drug", &[3.0, 4.0])])]);
+    run_cmds(
+        &mut s_col,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "col-dst", "kind": "column", "cols": 2, "rows": 2 })),
+            ("stats.run", json!({ "sheet_id": "res-1", "source_sheet_id": "col-1", "kind": "descriptive" })),
+        ],
+    );
+    let pl = ok_cmd(
+        &mut s_col,
+        "table.pasteLink",
+        json!({ "target_sheet_id": "col-dst", "source_sheet_id": "col-1", "source_range": { "start": { "row": 0, "col": 0, "subcol": 0 }, "end": { "row": 1_000_000_000_usize, "col": 1_000_000_000_usize, "subcol": 0 } }, "propagate_title_header": true }),
+    );
+    assert_eq!((&pl.payload["rows_placed"], &pl.payload["cols_placed"]), (&json!(2), &json!(2)));
+    let mut doc = s_col.document().clone();
+    if let Some(dst) = doc.data_sheet_mut(&SheetId::new("col-dst")) {
+        dst.linked_regions[0].target_range = SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(usize::MAX, usize::MAX, 0));
+    }
+    assert!(!dag::recalculate_project_with_report(&mut doc).expect("recalc").updated_data_sheets.is_empty());
+    assert_bad_inputs(
+        &mut s_col,
+        &[("sheet.rename", json!({ "sheet_id": "col-1", "title": "   \t  " })), ("sheet.rename", json!({ "sheet_id": "res-1", "title": "   " }))],
+    );
+    assert_eq!(ds(&s_col, "col-1").title, "Groups");
+    assert!(rs(&s_col, "res-1").analysis.custom_title.is_none());
+
+    // AUD-02-03: randomizeGroups rejects huge subject_count without OOM.
+    let mut s = Session::new();
+    assert_bad_inputs(
+        &mut s,
+        &[
+            ("table.randomizeGroups", json!({ "groups": ["Vehicle", "Drug"], "subject_count": 100_000_000_usize })),
+            ("table.randomizeGroups", json!({ "groups": ["Vehicle", "Drug"], "subject_count": 1_000_001_usize })),
+        ],
+    );
+    assert_eq!(
+        ok_cmd(&mut s, "table.randomizeGroups", json!({ "groups": ["Vehicle", "Drug"], "subject_count": 6, "seed": 7 })).payload["subject_count"],
+        6
+    );
+
+    // AUD-02-07: frozen DataSheet protected from paired InfoSheet delete and upstream XY convertArchetype.
+    ok_cmd(&mut s, "sheet.createData", json!({ "sheet_id": "d1", "kind": "xy", "cols": 1, "rows": 3, "auto_info": true }));
+    let info_id = ds(&s, "d1").info_sheet_id.clone().expect("info_sheet_id");
+    ok_cmd(&mut s, "sheet.freeze", json!({ "sheet_id": "d1" }));
+    assert_err_code(&mut s, "sheet.delete", json!({ "sheet_id": info_id.as_str(), "cascade": true }), ErrorCode::FrozenSheet);
+    assert_eq!(ds(&s, "d1").info_sheet_id.as_ref(), Some(&info_id));
+    run_cmds(
+        &mut s,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "src-xy", "kind": "xy", "cols": 1, "rows": 3 })),
+            ("table.setXCells", json!({ "sheet_id": "src-xy", "values": [1.0, 2.0, 3.0] })),
+            ("table.setCells", json!({ "sheet_id": "src-xy", "rows": [[10.0], [20.0], [30.0]] })),
+            ("sheet.createData", json!({ "sheet_id": "dst-frozen", "kind": "column", "cols": 1, "rows": 3 })),
+            ("table.pasteLink", json!({ "target_sheet_id": "dst-frozen", "source_sheet_id": "src-xy" })),
+            ("sheet.freeze", json!({ "sheet_id": "dst-frozen" })),
+        ],
+    );
+    assert_err_code(
+        &mut s,
+        "table.convertArchetype",
+        json!({ "sheet_id": "src-xy", "target_kind": "MultipleVariables", "allow_lossy": true }),
+        ErrorCode::FrozenSheet,
+    );
+    assert_eq!(ds(&s, "dst-frozen").linked_regions.len(), 1);
+
+    // AUD-02-11: table.importCsv link=true rejects overlapping anchor with Conflict and mints unique IDs for disjoint links.
+    let tmp = TempDir::new("aud0211");
+    let (csv_a, csv_b) = (tmp.child("a.csv"), tmp.child("b.csv"));
+    std::fs::write(&csv_a, "1,10\n2,20\n").expect("write a");
+    std::fs::write(&csv_b, "3,30\n4,40\n").expect("write b");
+    ok_cmd(&mut s, "sheet.createData", json!({ "sheet_id": "lnk", "kind": "column", "cols": 5, "rows": 4 }));
+    ok_cmd(
+        &mut s,
+        "table.importCsv",
+        json!({ "sheet_id": "lnk", "path": csv_a.to_string_lossy(), "link": true, "has_header": false, "anchor": { "row": 0, "col": 0 } }),
+    );
+    assert_err_code(
+        &mut s,
+        "table.importCsv",
+        json!({ "sheet_id": "lnk", "path": csv_b.to_string_lossy(), "link": true, "has_header": false, "anchor": { "row": 0, "col": 0 } }),
+        ErrorCode::Conflict,
+    );
+    ok_cmd(
+        &mut s,
+        "table.importCsv",
+        json!({ "sheet_id": "lnk", "path": csv_b.to_string_lossy(), "link": true, "has_header": false, "anchor": { "row": 0, "col": 3 } }),
+    );
+    let regions = &ds(&s, "lnk").linked_regions;
+    assert!(regions.len() == 2 && regions[0].id != regions[1].id);
 }

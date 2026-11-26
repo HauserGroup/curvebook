@@ -5,6 +5,8 @@ use curvebook_palette::Rgba8;
 use curvebook_render::encode_emf;
 use curvebook_text::RichText;
 
+use super::emf_and_budget::{read_i32_le, read_u32_le};
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 const EMR_POLYBEZIER: u32 = 2;
@@ -15,18 +17,6 @@ const EMR_BEGINPATH: u32 = 59;
 const EMR_ENDPATH: u32 = 60;
 const EMR_CLOSEFIGURE: u32 = 61;
 const EMR_EXTTEXTOUTW: u32 = 84;
-
-fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
-    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
-    u32::from_le_bytes(arr.unwrap_or([0; 4]))
-}
-
-fn read_i32_le(bytes: &[u8], off: usize) -> i32 {
-    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
-    assert!(arr.is_some(), "i32_le offset {off} out of bounds");
-    i32::from_le_bytes(arr.unwrap_or([0; 4]))
-}
 
 fn collect_records(emf: &[u8]) -> Vec<(u32, usize)> {
     let mut out = Vec::new();

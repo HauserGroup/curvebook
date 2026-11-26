@@ -10,13 +10,13 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, DataSheet, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec, OneWayMethod,
-    PairwiseComparisonRecord, SheetId, TableArchetype,
+    AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec, MultiplicityMethod, MultiplicitySpec,
+    OneWayAnovaSpec, OneWayMethod, PairwiseComparisonRecord, ResultSheet, SheetId, TableArchetype,
 };
 use curvebook_stats::StatsError;
 use curvebook_stats::anova::run_one_way_anova;
 use curvebook_stats::cld::{
-    CldGroupInput, CldOptions, CldOrdering, CldPairwiseInput, CldResult, column_letter_token, compute_cld, compute_cld_from_details,
+    CldGroupInput, CldOptions, CldOrdering, CldPairwiseInput, CldResult, MAX_CLD_COLUMNS, column_letter_token, compute_cld, compute_cld_from_details,
     compute_cld_from_matrix, compute_cld_from_records, compute_cld_from_result_sheet,
 };
 use curvebook_stats::multiplicity::{GroupComparisonInput, compare_groups_pairwise};
@@ -462,4 +462,43 @@ fn rejects_non_finite_duplicate_and_inconsistent_inputs_cleanly() {
         },
     ];
     assert!(matches!(compute_cld_from_records(&conflicting_recs, None, CldOptions::default()), Err(StatsError::IncompatibleAnalysisSpec { .. })));
+}
+
+#[test]
+fn piepho_aud05_30_complexity_cap_blocks_exponential_matching_graph() {
+    let n = 40;
+    let groups: Vec<CldGroupInput> = (0..n).map(|i| CldGroupInput { index: i, label: format!("G{i}"), mean: (n - i) as f64 }).collect();
+    let mut sig = vec![vec![false; n]; n];
+    for p in 0..(n / 2) {
+        (sig[2 * p][2 * p + 1], sig[2 * p + 1][2 * p]) = (true, true);
+    }
+    assert!(matches!(
+        compute_cld_from_matrix(&groups, &sig, CldOptions::default()),
+        Err(StatsError::InvalidParameter { name: "cld_complexity_limit", value }) if value > MAX_CLD_COLUMNS as f64
+    ));
+    let src = make_col_sheet("cld-cap", &[("A", &[1.0, 2.0])]);
+    let mut rs = ResultSheet::new(AnalysisSpec::new("res-cld", src.id, AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap()).unwrap();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            rs.pairwise_comparisons.push(PairwiseComparisonRecord {
+                group_a: i,
+                group_b: j,
+                label_a: format!("G{i}"),
+                label_b: format!("G{j}"),
+                estimate_diff: Some((j as f64) - (i as f64)),
+                raw_p_or_q: if sig[i][j] { 0.001 } else { 0.5 },
+                is_fdr_q: false,
+                significant: sig[i][j],
+            });
+        }
+    }
+    assert!(matches!(
+        compute_cld_from_result_sheet(&rs, None, CldOptions::default()),
+        Err(StatsError::InvalidParameter { name: "cld_complexity_limit", .. })
+    ));
+    let mut all_diff = vec![vec![true; n]; n];
+    for (i, row) in all_diff.iter_mut().enumerate() {
+        row[i] = false;
+    }
+    assert_eq!(compute_cld_from_matrix(&groups, &all_diff, CldOptions::default()).unwrap().letter_count, n);
 }

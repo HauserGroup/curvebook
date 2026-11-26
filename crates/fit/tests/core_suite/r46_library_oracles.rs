@@ -1,14 +1,17 @@
 //! Regression reproducers and D1 primary-literature oracle tests for R4.6 equation library fixes.
 
 use curvebook_doc::{ParameterRule, ParameterScope};
+use curvebook_fit::library::curves::CURVE_EQUATION_IDS;
+use curvebook_fit::library::pharma::PHARMA_EQUATION_IDS;
 use curvebook_fit::{
     DataPoint, DatasetSeries, EquationCategory, FitStatus, SolverConfig, format_model_equation_tex, get_builtin_model, list_builtin_equations,
 };
 use curvebook_testkit::{assert_approx_eq, log_relative_error};
 
 use crate::common::{
-    assert_grad_matches_fd, assert_params_approx, cfg_rules, dataset_param_val, fit_default, fit_with, rule_const, rule_local, rule_local_init,
-    series_from_pts, series_xy, xy_pts,
+    assert_converged, assert_grad_matches_fd, assert_params_approx, cfg_fast, cfg_rules, dataset_param_val, exec_nl, find_derived, find_param_ds,
+    fit_default, fit_with, linspace, nl_fast, param_ds_val, rule_const, rule_local, rule_local_init, series_from_pts, series_xy, xy_pts,
+    xy_sheet_single,
 };
 
 #[test]
@@ -299,4 +302,232 @@ fn r46_8_logistic_growth_and_operational_model_oracles() {
     );
     assert_eq!(res_op.status, FitStatus::Converged);
     assert_params_approx(&res_op, 0, &[("LogKA", log_ka, 1e-5, 1e-5), ("LogTau", log_tau, 1e-5, 1e-5), ("n", n, 1e-5, 1e-5)], "op");
+}
+
+#[test]
+fn aud_03_15_28_29_multidataset_short_span_offset_x_and_nanomolar_seeds() {
+    // AUD-03-15: multi-dataset initial_guess partitions by min data_set_index (invariant under column index shifts).
+    let two_ds = |a: usize, b: usize, xs: &[f64], ya: &[f64], yb: &[f64]| -> Vec<DataPoint> {
+        xs.iter()
+            .zip(ya)
+            .enumerate()
+            .map(|(row, (&x, &y))| DataPoint { data_set_index: a, row, ..DataPoint::xy(x, y) })
+            .chain(xs.iter().zip(yb).enumerate().map(|(row, (&x, &y))| DataPoint { data_set_index: b, row, ..DataPoint::xy(x, y) }))
+            .collect()
+    };
+    let xs_b = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let (y_tot, y_ns): (Vec<f64>, Vec<f64>) =
+        (xs_b.iter().map(|&x| 1200.0 * x / (3.0 + x) + 15.0 * x + 40.0).collect(), xs_b.iter().map(|&x| 15.0 * x + 40.0).collect());
+    for id in ["one_site_total_and_ns_global", "two_site_total_and_ns_global"] {
+        let m = get_builtin_model(id).unwrap();
+        let g01 = m.initial_guess(&two_ds(0, 1, &xs_b, &y_tot, &y_ns));
+        assert_eq!(g01, m.initial_guess(&two_ds(1, 2, &xs_b, &y_tot, &y_ns)), "{id} (1,2)");
+        assert_eq!(g01, m.initial_guess(&two_ds(3, 7, &xs_b, &y_tot, &y_ns)), "{id} (3,7)");
+    }
+    let lx = linspace(-11.0, -5.0, 13);
+    let cx: Vec<f64> = lx.iter().map(|&e| 10.0_f64.powf(e)).collect();
+    let (y_ctrl, y_shft): (Vec<f64>, Vec<f64>) = (
+        lx.iter().map(|&x| 5.0 + 95.0 / (1.0 + 10.0_f64.powf(-8.0 - x))).collect(),
+        lx.iter().map(|&x| 5.0 + 95.0 / (1.0 + 10.0_f64.powf(-7.0 - x))).collect(),
+    );
+    let (m_srl, m_src) = (get_builtin_model("ec50_shift_ratio_log").unwrap(), get_builtin_model("ec50_shift_ratio_conc").unwrap());
+    let gl12 = m_srl.initial_guess(&two_ds(1, 2, &lx, &y_ctrl, &y_shft));
+    assert_eq!(m_srl.initial_guess(&two_ds(0, 1, &lx, &y_ctrl, &y_shft)), gl12);
+    assert_approx_eq(gl12[4], 10.0, 0.5, 0.05, "sr_log ratio");
+    let gc12 = m_src.initial_guess(&two_ds(1, 2, &cx, &y_ctrl, &y_shft));
+    assert_eq!(m_src.initial_guess(&two_ds(0, 1, &cx, &y_ctrl, &y_shft)), gc12);
+    assert_approx_eq(gc12[2], 1e-8, 5e-9, 0.25, "sr_conc EC50Control");
+    assert_approx_eq(gc12[4], 10.0, 1.0, 0.15, "sr_conc EC50Ratio");
+
+    let xs_l = [0.0, 1.0, 2.0, 4.0, 5.0];
+    let (yl0, yl1): (Vec<f64>, Vec<f64>) = (xs_l.iter().map(|&x| 2.0 * x + 1.0).collect(), xs_l.iter().map(|&x| -x + 10.0).collect());
+    let m_lines = get_builtin_model("two_lines_intersection").unwrap();
+    let g_l12 = m_lines.initial_guess(&two_ds(1, 2, &xs_l, &yl0, &yl1));
+    assert_eq!(m_lines.initial_guess(&two_ds(0, 1, &xs_l, &yl0, &yl1)), g_l12);
+    assert_approx_eq(g_l12[0], 3.0, 1e-12, 1e-12, "XCross");
+    assert_approx_eq(g_l12[1], 7.0, 1e-12, 1e-12, "YCross");
+
+    // AUD-03-28: unclamped short-span PlateauThenDecay, PlateauThenAssoc, and TwoGaussians.
+    let ts = linspace(0.0, 0.1, 21);
+    let y_dec: Vec<f64> = ts.iter().map(|&t| if t < 0.02 { 100.0 } else { 10.0 + 90.0 * (-50.0 * (t - 0.02)).exp() }).collect();
+    let y_ass: Vec<f64> = ts.iter().map(|&t| if t < 0.02 { 10.0 } else { 10.0 + 90.0 * (1.0 - (-50.0 * (t - 0.02)).exp()) }).collect();
+    for (id, ys, checks) in [
+        (
+            "plateau_followed_by_one_phase_decay",
+            y_dec.as_slice(),
+            &[("Y0", 100.0, 1e-3, 1e-4), ("X0", 0.02, 1e-4, 1e-3), ("Plateau", 10.0, 1e-3, 1e-4), ("K", 50.0, 1e-2, 1e-3)][..],
+        ),
+        ("plateau_followed_by_one_phase_association", y_ass.as_slice(), &[("X0", 0.02, 1e-4, 1e-3), ("K", 50.0, 1e-2, 1e-3)]),
+    ] {
+        let m = get_builtin_model(id).unwrap();
+        let g = m.initial_guess(&xy_pts(&ts, ys));
+        assert!(g[1] > 0.0 && g[1] < 0.1, "{id} X0 seed out of span: {}", g[1]);
+        let fit = fit_default(m.as_ref(), &[series_xy(0, id, &ts, ys)]);
+        assert_converged(&fit, id);
+        assert!(fit.r_squared > 0.999_999);
+        assert_params_approx(&fit, 0, checks, id);
+    }
+    let g_tg = get_builtin_model("sum_of_two_gaussians")
+        .unwrap()
+        .initial_guess(&linspace(0.0, 0.05, 11).into_iter().map(|x| DataPoint::xy(x, 10.0)).collect::<Vec<_>>());
+    assert!(g_tg[1] > 0.0 && g_tg[1] < 0.05 && g_tg[4] > 0.0 && g_tg[4] < 0.05);
+    assert_approx_eq(g_tg[2], 0.05 / 8.0, 1e-12, 1e-12, "TwoGaussians SD1");
+
+    // AUD-03-29: ExponentialGrowth/MalthusianGrowth offset X + 24 linear-concentration pharma nanomolar seeds & 100 pM fits.
+    let (years, offset_x): ([f64; 6], [f64; 6]) = ([2000.0, 2002.0, 2004.0, 2006.0, 2008.0, 2010.0], [100.0, 120.0, 140.0, 160.0, 180.0, 200.0]);
+    for id in ["exponential_growth", "malthusian_growth"] {
+        let m = get_builtin_model(id).unwrap();
+        let ys_mod: Vec<f64> = years.iter().map(|&x| 10.0 * (0.05 * (x - 2000.0)).exp()).collect();
+        let fit = fit_default(m.as_ref(), &[series_xy(0, "Years", &years, &ys_mod)]);
+        assert!(matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous));
+        let (y0_f, k_f) = (param_ds_val(&fit, 0, "Y0"), param_ds_val(&fit, 0, "k"));
+        assert_approx_eq(k_f, 0.05, 1e-7, 1e-6, &format!("{id} k"));
+        assert_approx_eq(m.eval(&[2000.0], &[y0_f, k_f], 0).unwrap(), 10.0, 1e-5, 1e-5, &format!("{id} Y(2000)"));
+        assert_approx_eq(m.eval(&[2010.0], &[y0_f, k_f], 0).unwrap(), 10.0 * 0.5_f64.exp(), 1e-5, 1e-5, &format!("{id} Y(2010)"));
+
+        let ys_off: Vec<f64> = offset_x.iter().map(|&x| 5.0 * (0.04 * (x - 100.0)).exp()).collect();
+        let fit_off = fit_default(m.as_ref(), &[series_xy(0, "Offset", &offset_x, &ys_off)]);
+        assert_converged(&fit_off, &format!("{id} offset"));
+        assert_params_approx(&fit_off, 0, &[("k", 0.04, 1e-7, 1e-6), ("Y0", 5.0 * (-4.0_f64).exp(), 1e-9, 1e-6)], id);
+
+        let ys_steep: Vec<f64> = years.iter().map(|&x| 10.0 * (100.0_f64.ln() / 10.0 * (x - 2000.0)).exp()).collect();
+        let seed = m.initial_guess(&xy_pts(&years, &ys_steep));
+        assert!(seed[0].is_finite() && seed[0] > 0.0 && seed[1].is_finite());
+        for &x in &years {
+            assert!((seed[1] * x).abs() <= 600.0 + 1e-9 && m.eval(&[x], &seed, 0).is_some());
+        }
+    }
+
+    let nm_xs: Vec<f64> = linspace(-12.0, -8.0, 17).into_iter().map(|e| 10.0_f64.powf(e)).collect();
+    let nm_ys: Vec<f64> = nm_xs.iter().map(|&x| 100.0 * x / (1e-10 + x)).collect();
+    let nm_pts = xy_pts(&nm_xs, &nm_ys);
+    for &(id, p_idx) in &[
+        ("agonist_vs_response_3pl", 2),
+        ("agonist_vs_response_4pl", 2),
+        ("agonist_vs_response_normalized", 0),
+        ("agonist_vs_response_normalized_var", 0),
+        ("agonist_vs_response_5pl", 2),
+        ("bell_shaped_dose_response_conc", 3),
+        ("biphasic_dose_response_conc", 3),
+        ("agonist_vs_response_ecf", 2),
+        ("absolute_ic50_4pl_conc", 2),
+        ("ec50_shift_gaddum_schild_conc", 2),
+        ("ec50_shift_gaddum_schild_unity_conc", 2),
+        ("ec50_shift_ratio_conc", 2),
+        ("allosteric_ec50_shift_conc", 2),
+        ("operational_model_agonist_conc", 2),
+        ("operational_model_depletion_conc", 2),
+        ("one_site_specific_binding", 1),
+        ("two_sites_specific_binding", 1),
+        ("one_site_total_and_ns_global", 1),
+        ("one_site_specific_ligand_depletion", 1),
+        ("allosteric_modulator_saturation", 1),
+        ("michaelis_menten", 1),
+        ("allosteric_sigmoidal_kinetics", 1),
+        ("substrate_inhibition", 1),
+        ("competitive_inhibition", 1),
+    ] {
+        let c_seed = get_builtin_model(id).unwrap().initial_guess(&nm_pts)[p_idx];
+        assert!((1e-13..1e-8).contains(&c_seed), "{id} param[{p_idx}]={c_seed:e}");
+    }
+    for (id, pname) in [
+        ("michaelis_menten", "Km"),
+        ("one_site_specific_binding", "Kd"),
+        ("agonist_vs_response_4pl", "EC50"),
+        ("agonist_vs_response_normalized", "EC50"),
+    ] {
+        let m = get_builtin_model(id).unwrap();
+        let fit = fit_with(m.as_ref(), &[series_xy(0, id, &nm_xs, &nm_ys)], &cfg_fast());
+        assert_converged(&fit, id);
+        assert_approx_eq(param_ds_val(&fit, 0, pname), 1e-10, 1e-15, 1e-5, &format!("{id} {pname}"));
+    }
+    let ys_ctrl: Vec<f64> = nm_xs.iter().map(|&x| 5.0 + 95.0 * x / (1e-10 + x)).collect();
+    let ys_shft: Vec<f64> = nm_xs.iter().map(|&x| 5.0 + 95.0 * x / (1e-9 + x)).collect();
+    let fit_sr = fit_with(m_src.as_ref(), &[series_xy(0, "Ctrl", &nm_xs, &ys_ctrl), series_xy(1, "Shifted", &nm_xs, &ys_shft)], &cfg_fast());
+    assert_converged(&fit_sr, "sr_conc 100 pM");
+    assert_params_approx(&fit_sr, 0, &[("EC50Control", 1e-10, 1e-15, 1e-5), ("EC50Ratio", 10.0, 1e-4, 1e-5)], "sr_conc");
+}
+
+#[test]
+fn aud_03_42_derived_scalars_operational_agonism_and_builtin_nan_sweep() {
+    // 1. Subnormal/extreme params never emit non-finite DerivedScalar values.
+    for &(id, params) in &[
+        ("one_phase_decay", &[100.0, 10.0, 1e-320][..]),
+        ("one_phase_association", &[10.0, 100.0, 1e-320]),
+        ("exponential_plateau", &[100.0, 10.0, 1e-320]),
+        ("two_phase_association", &[10.0, 100.0, 50.0, 1e-320, 1e-320]),
+        ("log_exponential_growth", &[1.0, 1e-320]),
+        ("linear_quadratic_percent_surviving", &[1e305, 1e-14]),
+        ("gaussian_area", &[1e305, 0.0, 1e-14]),
+        ("standard_sine_wave", &[1.0, 1e-320, 0.0]),
+        ("boltzmann_sigmoid", &[-1e308, 1e308, 0.0, 1.0]),
+    ] {
+        let scalars = get_builtin_model(id).unwrap().derived_transforms(params);
+        assert!(scalars.iter().all(|s| s.value.is_finite()), "{id}: {scalars:?}");
+    }
+
+    // 2. OperationalAgonism guards, saturation, FD grad, bounds, and derived KA/Tau.
+    let op = get_builtin_model("operational_model_agonist").unwrap();
+    let mut g_op = [0.0; 5];
+    assert!(op.eval(&[-6.0], &[5.0, 95.0, -6.0, 0.8, 0.0], 0).is_none());
+    assert!(op.eval(&[-6.0], &[5.0, 95.0, -6.0, 0.8, -1.5], 0).is_none());
+    assert!(!op.grad(&[-6.0], &[5.0, 95.0, -6.0, 0.8, -1.5], 0, &mut g_op));
+    assert_eq!(op.eval(&[0.0], &[5.0, 95.0, -6.0, 10.0, 100.0], 0), Some(95.0));
+    assert_grad_matches_fd(op.as_ref(), &[-5.5], &[5.0, 95.0, -6.0, 0.8, 1.3], 0, 1e-6);
+    assert_eq!(op.default_bounds()[4].0, Some(1e-4));
+    let op_d = op.derived_transforms(&[5.0, 95.0, -6.0, 0.5, 1.3]);
+    assert_approx_eq(op_d.iter().find(|d| d.name == "KA").unwrap().value, 1e-6, 1e-18, 1e-12, "op KA");
+    assert_approx_eq(op_d.iter().find(|d| d.name == "Tau").unwrap().value, 10.0_f64.powf(0.5), 1e-12, 1e-12, "op Tau");
+
+    // 3. Legacy binding/kinetics/NIST eval & grad NaN/non-positive guards.
+    let (mut g2, mut g3) = ([0.0; 2], [0.0; 3]);
+    for id in ["one_site_specific_binding", "michaelis_menten"] {
+        let m = get_builtin_model(id).unwrap();
+        for p in [[100.0, -1.0], [100.0, 0.0], [f64::NAN, 2.0]] {
+            assert!(!m.grad(&[5.0], &p, 0, &mut g2), "{id} grad accepted {p:?}");
+        }
+    }
+    let kcat = get_builtin_model("kcat_enzyme_kinetics").unwrap();
+    assert!(!kcat.grad(&[5.0], &[10.0, -1.0, 2.0], 0, &mut g3) && !kcat.grad(&[5.0], &[10.0, 0.0, 2.0], 0, &mut g3));
+    let danwood = get_builtin_model("nist_danwood").unwrap();
+    assert!(danwood.eval(&[1.0], &[1.0, f64::NAN], 0).is_none());
+    assert!(!danwood.grad(&[1.0], &[1.0, f64::NAN], 0, &mut g2) && !danwood.grad(&[f64::NAN], &[1.0, 2.0], 0, &mut g2));
+
+    // 4. Exhaustive NaN/Inf sweep across all 124 pharma/curves (strict None on NaN) and all 151 built-ins (always finite).
+    for &id in PHARMA_EQUATION_IDS.iter().chain(CURVE_EQUATION_IDS.iter()) {
+        let m = get_builtin_model(id).unwrap();
+        let base_p = vec![2.0; m.param_count()];
+        assert!(m.eval(&[f64::NAN], &base_p, 0).is_none(), "{id} x=NaN");
+        for k in 0..base_p.len() {
+            let mut p = base_p.clone();
+            p[k] = f64::NAN;
+            assert!(m.eval(&[1.0], &p, 0).is_none(), "{id} param[{k}]=NaN");
+        }
+    }
+    for entry in list_builtin_equations() {
+        let m = get_builtin_model(&entry.id).unwrap();
+        let base_p = vec![2.0; m.param_count()];
+        for x_bad in [f64::NAN, f64::INFINITY] {
+            assert!(m.eval(&[x_bad], &base_p, 0).is_none_or(f64::is_finite), "{} x={x_bad}", entry.id);
+        }
+        for k in 0..base_p.len() {
+            for p_bad in [f64::NAN, f64::INFINITY] {
+                let mut p = base_p.clone();
+                p[k] = p_bad;
+                assert!(m.eval(&[1.0], &p, 0).is_none_or(f64::is_finite), "{} p[{k}]={p_bad}", entry.id);
+            }
+        }
+    }
+
+    // 5. Flat one_phase_decay + non-finite DSL [Transforms] derived scalar omitted from ResultSheet::scalars.
+    let decay = get_builtin_model("one_phase_decay").unwrap();
+    let fit_flat = fit_with(decay.as_ref(), &[series_xy(0, "Flat", &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[42.0; 6])], &cfg_fast());
+    assert!(matches!(fit_flat.status, FitStatus::Converged | FitStatus::Ambiguous));
+    assert!(fit_flat.derived_scalars[0].iter().all(|s| s.value.is_finite()));
+    let _ = (find_derived(&fit_flat, 0, "Span"), find_param_ds(&fit_flat, 0, "K"));
+
+    let mut nl_der = nl_fast("custom_nan_derived");
+    nl_der.custom_dsl = Some("[Equation]\nY = m * X + b\n[Transforms]\nBad = 1 / (m - 2)\nGood = m * 10\n".to_owned());
+    let res_der = exec_nl(&xy_sheet_single("xy-der", "Der", "A", &[1.0, 2.0, 3.0, 4.0], &[3.0, 5.0, 7.0, 9.0]), nl_der);
+    assert!(res_der.scalars.iter().all(|s| s.value.is_finite()));
 }

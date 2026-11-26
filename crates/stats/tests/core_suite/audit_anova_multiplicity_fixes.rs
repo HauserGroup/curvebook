@@ -10,17 +10,18 @@ use curvebook_doc::{
     OneWayMethod, PValueStackMethod, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultStatus, SubcolumnMode, SumOfSquaresType,
     TableArchetype, ThreeWayColumnGrouping, VariableRole,
 };
-use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
-    dunnett_two_sided_p_loadings, max_studentized_range_isf, max_studentized_range_sf, student_t_two_sided_isf, student_t_two_sided_p,
+    dunnett_two_sided_p_loadings, f_sf, max_studentized_range_isf, max_studentized_range_sf, student_t_two_sided_isf, student_t_two_sided_p,
 };
 use curvebook_math::linalg::DenseMatrix;
+use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::StatsError;
 use curvebook_stats::anova::{
-    FactorialObservations, RmSphericityCorrection, fit_factorial_anova, fit_multi_vc_reml, fit_multi_vc_reml_with_df_method,
-    fit_random_intercept_reml, fit_random_intercept_reml_with_df_method, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity,
-    fit_unstructured_rm_reml, fit_unstructured_rm_reml_with_df_method, nested_one_way_anova, ordinary_one_way_anova, ordinary_one_way_from_summary,
-    rm_one_way_anova, run_factorial_anova, run_nested_analysis, run_one_way_anova, unequal_variance_one_way_anova,
+    FactorialObservations, RmSphericityCorrection, compute_anova_effect_sizes_for_n, fit_factorial_anova, fit_multi_vc_reml,
+    fit_multi_vc_reml_with_df_method, fit_random_intercept_reml, fit_random_intercept_reml_with_df_method, fit_rm_two_way_anova,
+    fit_rm_two_way_anova_with_sphericity, fit_unstructured_rm_reml, fit_unstructured_rm_reml_with_df_method, nested_one_way_anova,
+    nested_one_way_anova_with_df_method, ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova, run_factorial_anova,
+    run_nested_analysis, run_one_way_anova, unequal_variance_one_way_anova,
 };
 use curvebook_stats::multiplicity::{
     MultiplicityProcedure, adjust_benjamini_hochberg, adjust_benjamini_yekutieli, adjust_bonferroni, adjust_holm_bonferroni, adjust_holm_sidak,
@@ -31,8 +32,9 @@ use curvebook_stats::two_group::multiple_row_t_tests;
 use curvebook_testkit::assert_approx_eq;
 
 use crate::common::{
-    assert_close, cell_bool, cell_ci_finite, cell_num, cell_p, col_sheet, col_sheet_hint, contingency_sheet, group_input, group_input_slice,
-    grouped_sheet_fill, nested_sheet, nested_table, presum_col_sheet, run_kind, run_kind_conf, run_kind_sel, scalar, scalar_ds, spec_for, tab_by_id,
+    assert_close, cell_bool, cell_ci_finite, cell_num, cell_p, col_sheet, col_sheet_hint, col_sheet_opts, contingency_sheet, group_input,
+    group_input_slice, grouped_sheet_fill, mv_cells_sheet, nested_sheet, nested_table, presum_col_sheet, run_kind, run_kind_conf, run_kind_sel,
+    scalar, scalar_ds, spec_for, tab_by_id,
 };
 
 fn build_grouped_grid(id: &str, n_rows: usize, n_cols: usize, n_rep: usize) -> DataSheet {
@@ -852,6 +854,7 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     .unwrap();
     let tb = tab_by_id(&r_b, "multiple-comparisons-simple-a-within-b");
     assert_eq!(tb.rows.len(), 9);
+    assert!(tb.footnotes.iter().any(|f| f.contains("9 simple-effect")));
     assert_approx_eq(cell_p(&tb.rows[0][5]), (9.0 * cell_p(&tb.rows[0][4])).min(1.0), 1e-12, 1e-10, "3x3 Bonf m=9");
     let r_tuk = run_kind(
         &sh33,
@@ -1220,4 +1223,668 @@ fn audit_r1_s02_07_zero_variance_posthoc_and_bky_edge() {
         .is_finite()
     );
     let _ = (run_one_way_anova, run_nested_analysis);
+}
+
+fn sum_contrast_two_way(a_ids: &[usize], b_ids: &[usize], a_lvls: usize, b_lvls: usize) -> DenseMatrix {
+    let (da, db) = (a_lvls - 1, b_lvls - 1);
+    let mut raw = Vec::with_capacity(a_ids.len() * (1 + da + db + da * db));
+    for (&a, &b) in a_ids.iter().zip(b_ids) {
+        let ca: Vec<f64> = (0..da)
+            .map(|i| {
+                if a == da {
+                    -1.0
+                } else if a == i {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let cb: Vec<f64> = (0..db)
+            .map(|i| {
+                if b == db {
+                    -1.0
+                } else if b == i {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        raw.push(1.0);
+        raw.extend_from_slice(&ca);
+        raw.extend_from_slice(&cb);
+        raw.extend(ca.iter().flat_map(|&va| cb.iter().map(move |&vb| va * vb)));
+    }
+    DenseMatrix::from_row_major(a_ids.len(), 1 + da + db + da * db, raw).unwrap()
+}
+
+fn cluster_g_matrix(cluster_ids: &[usize]) -> (DenseMatrix, usize) {
+    let mut remap = BTreeMap::<usize, usize>::new();
+    let mapped: Vec<usize> = cluster_ids
+        .iter()
+        .map(|&c| {
+            let n = remap.len();
+            *remap.entry(c).or_insert(n)
+        })
+        .collect();
+    let ms = mapped.as_slice();
+    let g: Vec<f64> = ms.iter().flat_map(|&ci| ms.iter().map(move |&cj| if ci == cj { 1.0 } else { 0.0 })).collect();
+    (DenseMatrix::from_row_major(ms.len(), ms.len(), g).unwrap(), remap.len())
+}
+
+#[test]
+fn anova_aud05_capacity_dense_allocation_and_mv_factorial_guards() {
+    // AUD-05-13: Factorial interaction expansion & REML design column caps.
+    for (id, n_fac, n_rows, n_lvls, order) in [("mv25", 25_usize, 30_usize, 2_usize, 25_usize), ("mv200", 200, 20, 10, 2)] {
+        let mut mv = MultipleVariablesTable::new(n_fac + 1, n_rows).unwrap();
+        mv.variables[0].lock_role(VariableRole::Continuous);
+        mv.variables[0].cells = (0..n_rows).map(|r| Cell::number(1.0 + (r as f64) * 0.5)).collect();
+        for f in 1..=n_fac {
+            mv.variables[f].lock_role(VariableRole::Categorical);
+            mv.variables[f].cells =
+                (0..n_rows).map(|r| Cell::text(format!("L{}", if n_lvls == 2 { (r >> (f % 4)) & 1 } else { (r + f) % n_lvls }))).collect();
+        }
+        let sh = DataSheet::new(id, id, TableArchetype::MultipleVariables(mv)).unwrap();
+        let spec = FactorialAnovaSpec {
+            response_column: Some(0),
+            multifactor_columns: (1..=n_fac).collect(),
+            max_interaction_order: order,
+            ..Default::default()
+        };
+        assert!(matches!(
+            run_kind(&sh, AnalysisKind::FactorialAnova(spec)),
+            Err(StatsError::InvalidParameter { name: "factorial_terms" | "factorial_design_columns", .. })
+        ));
+    }
+    let obs25 = FactorialObservations {
+        factor_names: (0..25).map(|i| format!("F{i}")).collect(),
+        factor_levels: vec![vec!["A".into(), "B".into()]; 25],
+        rows: (0..30).map(|r| ((0..25).map(|f| (r + f) % 2).collect(), r as f64)).collect(),
+    };
+    assert!(matches!(
+        fit_factorial_anova(&obs25, 25, SumOfSquaresType::TypeIII),
+        Err(StatsError::InvalidParameter { name: "factorial_terms" | "factorial_design_columns", .. })
+    ));
+    let reml_both = AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
+        mixed_effects_reml: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        run_kind(&grouped_sheet_fill("g-big", 60, 100, 1, |c, r, _| Some((r + c) as f64)), reml_both.clone()),
+        Err(StatsError::InvalidParameter { name: "factorial_design_columns", .. })
+    ));
+
+    // AUD-05-15: Checked dense matrix allocations across RM two-way sphericity, multi-VC REML, and nested ANOVA.
+    let rm_big: Vec<Vec<Vec<f64>>> = (0..2).map(|s| (0..101).map(|r| (0..100).map(|c| (r + c + s) as f64).collect()).collect()).collect();
+    assert!(matches!(
+        fit_rm_two_way_anova(&rm_big, "A", "B", RepeatedMeasuresDesign::BothFactorsMatched),
+        Err(StatsError::Math(MathError::InvalidParameter { name: "matrix_elements", .. }))
+    ));
+    assert!(matches!(
+        run_kind(&grouped_sheet_fill("g-mvc", 3, 500, 7, |c, r, s| Some((r + c + s) as f64)), reml_both),
+        Err(StatsError::Math(MathError::InvalidParameter { name: "matrix_elements", .. }))
+    ));
+    let mut n_big = curvebook_doc::NestedTable::new(1_000, 2, 51).unwrap();
+    for (g, grp) in n_big.groups.iter_mut().enumerate() {
+        for (r, row) in grp.cells.iter_mut().enumerate() {
+            (row[0], row[1]) = (Cell::number((g + r) as f64), Cell::number((g + r + 1) as f64));
+        }
+    }
+    assert!(matches!(nested_one_way_anova(&n_big, false), Err(StatsError::Math(MathError::InvalidParameter { name: "matrix_elements", .. }))));
+
+    // AUD-05-43: MV factorial rejects RM/REML/Unstructured and duplicate/overlapping factor columns.
+    let mv_sh = mv_cells_sheet(
+        "mv-fac",
+        &[
+            ("Y", Some(VariableRole::Continuous), &[10.1, 10.5, 14.2, 14.8, 12.0, 12.6, 19.1, 19.7].map(Cell::number)),
+            ("A", Some(VariableRole::Categorical), &["A0", "A0", "A0", "A0", "A1", "A1", "A1", "A1"].map(Cell::text)),
+            ("B", Some(VariableRole::Categorical), &["B0", "B0", "B1", "B1", "B0", "B0", "B1", "B1"].map(Cell::text)),
+        ],
+    );
+    let base = FactorialAnovaSpec { response_column: Some(0), multifactor_columns: vec![1, 2], ..Default::default() };
+    for bad in [
+        FactorialAnovaSpec { repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched, ..base.clone() },
+        FactorialAnovaSpec { mixed_effects_reml: true, ..base.clone() },
+        FactorialAnovaSpec { residual_covariance: ResidualCovariance::Unstructured, ..base.clone() },
+    ] {
+        assert!(matches!(run_kind(&mv_sh, AnalysisKind::FactorialAnova(bad)), Err(StatsError::IncompatibleAnalysisSpec { .. })));
+    }
+    for cols in [vec![1, 1], vec![0, 1]] {
+        assert!(matches!(
+            run_kind(&mv_sh, AnalysisKind::FactorialAnova(FactorialAnovaSpec { multifactor_columns: cols, ..base.clone() })),
+            Err(StatsError::InvalidParameter { name: "multifactor_columns", .. })
+        ));
+    }
+    assert!(scalar(&run_kind(&mv_sh, AnalysisKind::FactorialAnova(base)).unwrap(), "A: F") > 0.0);
+}
+
+#[test]
+fn anova_aud05_reml_empty_cells_stationarity_and_picomolar_scale() {
+    // AUD-05-17 (Searle 1987): 3x3 pure-interaction empty cell (2,2) Type III df & relabeling invariance across all 3 REML solvers.
+    let means33: [[Option<f64>; 3]; 3] = [[Some(10.0), Some(-10.0), Some(0.0)], [Some(-10.0), Some(10.0), Some(0.0)], [Some(0.0), Some(0.0), None]];
+    let build33 = |perm: [usize; 3]| {
+        let (mut a, mut b, mut y, mut s, mut rows) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (ao, row) in means33.iter().enumerate() {
+            for (bi, &mu) in row.iter().enumerate() {
+                if let Some(m) = mu {
+                    for (si, &e) in [-0.012, -0.004, 0.001, 0.006, 0.009].iter().enumerate() {
+                        let v = m + e + 0.002 * (si as f64 - 2.0);
+                        a.push(perm[ao]);
+                        b.push(bi);
+                        y.push(v);
+                        s.push(ao * 5 + si);
+                        rows.push((vec![perm[ao], bi], v));
+                    }
+                }
+            }
+        }
+        (a, b, y, s, rows)
+    };
+    let ((a0, b0, y0, s0, obs0), (a1, b1, y1, s1, _)) = (build33([0, 1, 2]), build33([2, 1, 0]));
+    let ols = fit_factorial_anova(
+        &FactorialObservations {
+            factor_names: vec!["A".into(), "B".into()],
+            factor_levels: vec![vec!["A0".into(), "A1".into(), "A2".into()], vec!["B0".into(), "B1".into(), "B2".into()]],
+            rows: obs0,
+        },
+        2,
+        SumOfSquaresType::TypeIII,
+    )
+    .unwrap();
+    let ols_a = ols.terms.iter().find(|t| t.name == "A").unwrap();
+    assert!(ols_a.df == 1.0 && ols_a.f_statistic.unwrap() < 1.0);
+
+    let (x0, x1) = (sum_contrast_two_way(&a0, &b0, 3, 3), sum_contrast_two_way(&a1, &b1, 3, 3));
+    let terms: &[(&str, usize, usize)] = &[("A", 1, 2), ("B", 3, 2), ("A × B", 5, 4)];
+    let chk33 = |t0: &[curvebook_stats::anova::FactorialAnovaTerm], t1: &[curvebook_stats::anova::FactorialAnovaTerm], tol: f64, chk_b_p: bool| {
+        assert_close(t0[0].df, 1.0, 1e-12, "df_A");
+        assert_close(t0[2].df, 3.0, 1e-12, "df_AB");
+        assert!(t0[0].f_statistic.unwrap() < 1.0);
+        assert_approx_eq(t0[0].f_statistic.unwrap(), t1[0].f_statistic.unwrap(), tol, tol, "relabel F_A");
+        if chk_b_p {
+            assert_close(t0[1].df, 1.0, 1e-12, "df_B");
+            assert_approx_eq(t0[0].p_value.unwrap(), t1[0].p_value.unwrap(), tol, tol, "relabel P_A");
+        }
+    };
+    let (ri0, ri1) = (fit_random_intercept_reml(&x0, &y0, &s0, terms).unwrap(), fit_random_intercept_reml(&x1, &y1, &s1, terms).unwrap());
+    chk33(&ri0.fixed_terms, &ri1.fixed_terms, 1e-6, true);
+    let ((gs0, cs0), (gs1, cs1)) = (cluster_g_matrix(&s0), cluster_g_matrix(&s1));
+    let (mvc0, mvc1) = (
+        fit_multi_vc_reml(&x0, &y0, &[("Subject", gs0, cs0)], terms).unwrap(),
+        fit_multi_vc_reml(&x1, &y1, &[("Subject", gs1, cs1)], terms).unwrap(),
+    );
+    chk33(&mvc0.fixed_terms, &mvc1.fixed_terms, 1e-5, false);
+    let tp3 = ["B0".into(), "B1".into(), "B2".into()];
+    let (un0, un1) =
+        (fit_unstructured_rm_reml(&x0, &y0, &s0, &b0, &tp3, terms).unwrap(), fit_unstructured_rm_reml(&x1, &y1, &s1, &b1, &tp3, terms).unwrap());
+    chk33(&un0.fixed_terms, &un1.fixed_terms, 1e-4, false);
+
+    // 2x2 empty cell (1,1): all 3 terms retained (df=0, F/P None) across all 3 solvers + finite sheet scalars.
+    let (mut a22, mut b22, mut y22, mut s22) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (a, b, mu) in [(0, 0, 10.0), (0, 1, 20.0), (1, 0, 15.0)] {
+        for s in 0..4 {
+            a22.push(a);
+            b22.push(b);
+            y22.push(mu + 0.3 * s as f64);
+            s22.push(a * 4 + s);
+        }
+    }
+    let (x22, t22) = (sum_contrast_two_way(&a22, &b22, 2, 2), &[("A", 1, 1), ("B", 2, 1), ("A × B", 3, 1)][..]);
+    let ri22 = fit_random_intercept_reml(&x22, &y22, &s22, t22).unwrap();
+    assert_eq!((ri22.fixed_terms.len(), ri22.satterthwaite_df.len()), (3, 3));
+    assert!(ri22.fixed_terms.iter().all(|t| t.df == 0.0 && t.f_statistic.is_none() && t.p_value.is_none()));
+    assert!(ri22.kenward_roger_df.iter().all(|v| v.is_nan()));
+    let (gs22, cs22) = cluster_g_matrix(&s22);
+    let mvc22 = fit_multi_vc_reml(&x22, &y22, &[("Subject", gs22, cs22)], t22).unwrap();
+    let un22 = fit_unstructured_rm_reml(&x22, &y22, &s22, &b22, &["B0".into(), "B1".into()], t22).unwrap();
+    assert!(
+        mvc22.fixed_terms.len() == 3
+            && un22.fixed_terms.len() == 3
+            && mvc22.fixed_terms[2].f_statistic.is_none()
+            && un22.fixed_terms[2].f_statistic.is_none()
+    );
+    let sh22 = grouped_sheet_fill("g22", 2, 2, 4, |c, r, s| match (r, c) {
+        (0, 0) => Some(10.0 + 0.3 * s as f64),
+        (0, 1) => Some(20.0 + 0.3 * s as f64),
+        (1, 0) => Some(15.0 + 0.3 * s as f64),
+        _ => None,
+    });
+    let res22 = run_kind(
+        &sh22,
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+            repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
+            fit_reml_on_missing: true,
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert!(res22.scalars.iter().all(|s| s.value.is_finite()));
+
+    // AUD-05-41 (Gilmour, Thompson & Cullis 1995): AI+EM stationarity guard & 1e-4 scale invariance on ill-conditioned multi-VC design.
+    let subj_eff = [-120.0, -85.0, -40.0, -10.0, 15.0, 45.0, 80.0, 115.0];
+    let (mut ai, mut bi, mut cs, mut csa, mut csb, mut yi) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (s, &se) in subj_eff.iter().enumerate() {
+        for a in 0..2_usize {
+            for b in 0..3_usize {
+                if (s == 1 && a == 1 && b == 2) || (s == 6 && a == 0 && b == 1) {
+                    continue;
+                }
+                let sa = if a == 0 { -0.02 } else { 0.02 } * (s as f64 - 3.5);
+                let sb = (b as f64 - 1.0) * ((s % 4) as f64 - 1.5) * 2.5;
+                ai.push(a);
+                bi.push(b);
+                cs.push(s);
+                csa.push(s * 2 + a);
+                csb.push(s * 3 + b);
+                yi.push(50.0 + se + 4.0 * a as f64 + 3.0 * b as f64 + sa + sb + (((s * 11 + a * 5 + b * 3 + s * a * b) % 7) as f64 - 3.0) * 0.4);
+            }
+        }
+    }
+    let (xm, m_terms) = (sum_contrast_two_way(&ai, &bi, 2, 3), &[("A", 1, 1), ("B", 2, 2), ("A × B", 4, 2)][..]);
+    let ((g_s, n_s), (g_sa, n_sa), (g_sb, n_sb)) = (cluster_g_matrix(&cs), cluster_g_matrix(&csa), cluster_g_matrix(&csb));
+    let fit_ill = fit_multi_vc_reml(
+        &xm,
+        &yi,
+        &[("Subject", g_s.clone(), n_s), ("Subject × A", g_sa.clone(), n_sa), ("Subject × B", g_sb.clone(), n_sb)],
+        m_terms,
+    )
+    .unwrap();
+    assert!(fit_ill.converged && fit_ill.reml_log_lik.is_finite() && fit_ill.sigma2_error > 0.0 && fit_ill.variance_components[0].1 > 1000.0);
+    let yi_sc: Vec<f64> = yi.iter().map(|&v| v * 1e-4).collect();
+    let fit_sc = fit_multi_vc_reml(&xm, &yi_sc, &[("Subject", g_s, n_s), ("Subject × A", g_sa, n_sa), ("Subject × B", g_sb, n_sb)], m_terms).unwrap();
+    assert!(fit_sc.converged);
+    for (t0, t1) in fit_ill.fixed_terms.iter().zip(&fit_sc.fixed_terms) {
+        assert_approx_eq(t0.f_statistic.unwrap(), t1.f_statistic.unwrap(), 1e-4, 1e-4, "Multi-VC scale F");
+    }
+
+    // AUD-05-24: Picomolar (1e-11) scale invariance for multi-VC REML & nested ICC / % variance.
+    let (sc, se6) = (1e-11_f64, [-3.0, -1.8, -0.6, 0.7, 1.9, 2.8]);
+    let mk_rm = |k: f64| {
+        grouped_sheet_fill("rm-p", 2, 2, 6, |c, r, s| {
+            Some((10.0 + se6[s] + 1.5 * r as f64 + 2.0 * c as f64 + 0.15 * (((s + r + c) % 3) as f64 - 1.0)) * k)
+        })
+    };
+    let rm_k = AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
+        mixed_effects_reml: true,
+        ..Default::default()
+    });
+    let (rm_u, rm_p) = (run_kind(&mk_rm(1.0), rm_k.clone()).unwrap(), run_kind(&mk_rm(sc), rm_k).unwrap());
+    assert!(scalar(&rm_u, "REML ICC") > 0.5);
+    assert_approx_eq(scalar(&rm_p, "REML ICC"), scalar(&rm_u, "REML ICC"), 1e-5, 1e-5, "picomolar multi-VC ICC");
+    let vc_tab = tab_by_id(&rm_p, "mixed-reml");
+    let pct_c = vc_tab.column_headers.iter().position(|h| h == "% of total").unwrap();
+    assert_approx_eq(vc_tab.rows.iter().map(|r| cell_num(&r[pct_c])).sum(), 100.0, 1e-4, 1e-4, "picomolar multi-VC %");
+
+    let n_base = [[[10.0, 10.2, 9.8], [13.0, 13.1, 12.9], [16.0, 16.2, 15.8]], [[20.0, 20.1, 19.9], [23.0, 23.2, 22.8], [26.0, 26.1, 25.9]]];
+    let mk_n = |k: f64| {
+        let s: [[[f64; 3]; 3]; 2] = n_base.map(|g| g.map(|b| b.map(|v| v * k)));
+        nested_sheet("np", &[("C", &[&s[0][0], &s[0][1], &s[0][2]]), ("D", &[&s[1][0], &s[1][1], &s[1][2]])])
+    };
+    let n_k = AnalysisKind::NestedComparison(NestedAnalysisSpec::default());
+    let (n_u, n_p) = (run_kind(&mk_n(1.0), n_k.clone()).unwrap(), run_kind(&mk_n(sc), n_k).unwrap());
+    assert_approx_eq(scalar(&n_p, "ICC (subcluster)"), scalar(&n_u, "ICC (subcluster)"), 1e-5, 1e-5, "picomolar nested ICC");
+    assert_approx_eq(tab_by_id(&n_p, "variance-components").rows.iter().map(|r| cell_num(&r[2])).sum(), 100.0, 1e-4, 1e-4, "picomolar nested %");
+}
+
+#[test]
+fn anova_aud05_nested_gls_posthoc_t_summary_and_lazy_p() {
+    // AUD-05-19 & AUD-05-20: Simpson-reversal unbalanced nested table uses REML GLS (not raw pooled means).
+    let u0a = &[99.6, 100.4, 99.8, 100.2, 100.1, 99.9, 100.3, 99.7, 100.0, 100.0][..];
+    let u = [&[9.8, 10.2][..], &[69.8, 70.2], &[69.9, 70.1], &[89.7, 90.3], &[89.9, 90.1]];
+    let g2: &[(&str, &[&[f64]])] = &[("G0", &[u0a, u[0]]), ("G1", &[u[1], u[2]])];
+    let r2 = nested_one_way_anova(&nested_table(g2), true).unwrap();
+    let t2 = r2.t_nested.unwrap();
+    assert!(t2 < 0.0);
+    assert_approx_eq(t2 * t2, r2.f_among_groups, 1e-9, 1e-9, "t_nested^2 == F");
+    let n_sp = |two_g, method| {
+        AnalysisKind::NestedComparison(NestedAnalysisSpec {
+            two_group_t_test: two_g,
+            multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true },
+            ..Default::default()
+        })
+    };
+    let out2 = run_kind(&nested_sheet("ns2", g2), n_sp(true, MultiplicityMethod::None)).unwrap();
+    let (md, se) = (scalar(&out2, "Mean difference"), scalar(&out2, "SE of difference"));
+    assert!(md < -14.0 && md > -16.0);
+    assert_approx_eq(scalar(&out2, "Nested t"), md / se, 1e-8, 1e-8, "Nested t == md/se");
+
+    let sh3 = nested_sheet("ns3", &[("G0", &[u0a, u[0]]), ("G1", &[u[1], u[2]]), ("G2", &[u[3], u[4]])]);
+    let g01 = cell_num(&tab_by_id(&run_kind(&sh3, n_sp(false, MultiplicityMethod::TukeyHsd)).unwrap(), "multiple-comparisons").rows[0][0]);
+    assert!(g01 < -14.0 && g01 > -16.0);
+    for bad in [MultiplicityMethod::GamesHowell, MultiplicityMethod::TamhaneT2, MultiplicityMethod::DunnettT3, MultiplicityMethod::DunnRankSum] {
+        assert!(matches!(run_kind(&sh3, n_sp(false, bad)), Err(StatsError::IncompatibleAnalysisSpec { .. })));
+    }
+
+    // AUD-05-20: sigma_u^2 == 0 exact REML df=3.0 (not Welch 2.0), m_g=1 inherits REML df > 3.5, Nakagawa-Schielzeth (2013) R^2.
+    let out_zu = run_kind(
+        &nested_sheet(
+            "nzu",
+            &[
+                ("Low", &[&[10.0, 12.0, 8.0, 11.0, 9.0], &[9.5, 11.5, 8.5, 10.5, 10.0]]),
+                ("Mid", &[&[15.0, 17.0, 13.0, 16.0, 14.0], &[14.5, 16.5, 13.5, 15.5, 15.0]]),
+                ("High", &[&[20.0, 22.0, 18.0, 21.0, 19.0], &[19.5, 21.5, 18.5, 20.5, 20.0]]),
+            ],
+        ),
+        n_sp(false, MultiplicityMethod::TukeyHsd),
+    )
+    .unwrap();
+    assert_close(scalar(&out_zu, "Subcluster variance"), 0.0, 1e-10, "sigma_u^2 == 0");
+    let zu_df = scalar(&out_zu, "Group denominator df");
+    assert_close(zu_df, 3.0, 1e-6, "REML df = c - g = 3");
+    for row in &tab_by_id(&out_zu, "multiple-comparisons").rows {
+        assert_close(cell_num(&row[3]), zu_df, 1e-6, "pair uses exact REML df");
+    }
+    let out_m1 = run_kind(
+        &nested_sheet(
+            "nm1",
+            &[
+                ("Single", &[&[10.0, 11.0, 9.0, 10.5, 9.5]]),
+                ("M1", &[&[15.0, 16.0, 14.0, 15.5, 14.5], &[15.2, 16.2, 14.2, 15.7, 14.7], &[14.8, 15.8, 13.8, 15.3, 14.3]]),
+                ("M2", &[&[20.0, 21.0, 19.0, 20.5, 19.5], &[20.2, 21.2, 19.2, 20.7, 19.7], &[19.8, 20.8, 18.8, 20.3, 19.3]]),
+            ],
+        ),
+        n_sp(false, MultiplicityMethod::TukeyHsd),
+    )
+    .unwrap();
+    assert!(cell_num(&tab_by_id(&out_m1, "multiple-comparisons").rows[0][3]) > 3.5);
+
+    let out_tr = run_kind(
+        &nested_sheet(
+            "ntr",
+            &[
+                ("D1", &[&[10.0, 10.4, 9.6], &[14.0, 14.3, 13.7], &[12.0, 12.2, 11.8]]),
+                ("D2", &[&[15.0, 15.4, 14.6], &[19.0, 19.3, 18.7], &[17.0, 17.2, 16.8]]),
+                ("D3", &[&[20.0, 20.4, 19.6], &[24.0, 24.3, 23.7], &[22.0, 22.2, 21.8]]),
+            ],
+        ),
+        n_sp(false, MultiplicityMethod::LinearTrend),
+    )
+    .unwrap();
+    let tr_tab = tab_by_id(&out_tr, "linear-trend");
+    let r2_c = tr_tab.column_headers.iter().position(|h| h == "R squared").unwrap();
+    let exp_r2 = (50.0 / 3.0) / ((50.0 / 3.0) + scalar(&out_tr, "Subcluster variance") + scalar(&out_tr, "Residual variance"));
+    assert_approx_eq(cell_num(&tr_tab.rows[0][r2_c]), exp_r2, 1e-4, 1e-4, "Nakagawa-Schielzeth marginal R^2");
+
+    // AUD-05-57 (part 4): Nested two_group_t_test emits 90% CI scalars & nested-t-summary tab; AUD-05-59 (part 1): exact f_sf.
+    let out_nt = run_kind_conf(
+        &nested_sheet(
+            "ntci",
+            &[
+                ("Control", &[&[10.0, 10.4, 9.6], &[11.2, 11.5, 10.9], &[10.5, 10.8, 10.2]]),
+                ("Treated", &[&[15.0, 15.3, 14.7], &[16.1, 16.4, 15.8], &[15.6, 15.9, 15.3]]),
+            ],
+        ),
+        n_sp(true, MultiplicityMethod::None),
+        90.0,
+    )
+    .unwrap();
+    let (d, s, df, lo, hi) = (
+        scalar(&out_nt, "Mean difference"),
+        scalar(&out_nt, "SE of difference"),
+        scalar(&out_nt, "Group denominator df"),
+        scalar(&out_nt, "90% CI lower"),
+        scalar(&out_nt, "90% CI upper"),
+    );
+    let tc = student_t_two_sided_isf(0.10, df).unwrap();
+    assert_approx_eq(scalar(&out_nt, "Nested t"), d / s, 1e-9, 1e-9, "nested-t t");
+    assert_approx_eq(lo, d - tc * s, 1e-9, 1e-9, "nested-t 90% lo");
+    assert_approx_eq(hi, d + tc * s, 1e-9, 1e-9, "nested-t 90% hi");
+    let st = tab_by_id(&out_nt, "nested-t-summary");
+    assert_eq!(st.row_labels, vec!["Control - Treated"]);
+    let (tlo, thi) = cell_ci_finite(&st.rows[0][5]);
+    assert_approx_eq(tlo, lo, 1e-12, 1e-12, "tab CI lo");
+    assert_approx_eq(thi, hi, 1e-12, 1e-12, "tab CI hi");
+
+    let tab3 = nested_table(&[
+        ("A", &[&[10.0, 10.5, 9.5], &[12.0, 12.2, 11.8]]),
+        ("B", &[&[15.0, 15.4, 14.6], &[17.5, 17.8, 17.2]]),
+        ("C", &[&[21.0, 21.3, 20.7], &[23.0, 23.1, 22.9]]),
+    ]);
+    for df_m in [MixedModelDfMethod::KenwardRoger, MixedModelDfMethod::Satterthwaite] {
+        let r = nested_one_way_anova_with_df_method(&tab3, false, df_m).unwrap();
+        let adf2 = if df_m == MixedModelDfMethod::KenwardRoger { r.df2_groups_kenward_roger } else { r.df2_groups_satterthwaite };
+        assert_approx_eq(r.p_among_groups, f_sf(r.f_among_groups, r.df1_groups, adf2).unwrap(), 1e-10, 1e-10, "nested f_sf");
+    }
+}
+
+fn run_ow_rm(sh: &DataSheet, gg: bool, mult: MultiplicityMethod, cov: ResidualCovariance) -> curvebook_doc::ResultSheet {
+    run_kind(
+        sh,
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg },
+            residual_covariance: cov,
+            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+            ..Default::default()
+        }),
+    )
+    .unwrap()
+}
+
+#[test]
+fn anova_aud05_rm_posthoc_and_effect_sizes() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-18 & AUD-05-55 (Steiger 2004): Zero within-error CIs are None; multi-way zero-other-SS keeps eta^2 CI None.
+    let z_ow = ordinary_one_way_anova(&[("A", &[10.0; 3]), ("B", &[20.0; 3])], conf).unwrap();
+    assert!(z_ow.f_statistic.is_infinite() && z_ow.f_statistic.is_sign_positive() && z_ow.p_value == 0.0);
+    assert!(
+        z_ow.effect_sizes.eta_squared == 1.0
+            && z_ow.effect_sizes.partial_eta_squared == 1.0
+            && z_ow.effect_sizes.cohens_f.is_infinite()
+            && z_ow.effect_sizes.cohens_f.is_sign_positive()
+    );
+    assert_eq!((z_ow.effect_sizes.eta_squared_ci, z_ow.effect_sizes.partial_eta_squared_ci, z_ow.effect_sizes.cohens_f_ci), (None, None, None));
+    let z_dir = compute_anova_effect_sizes_for_n(150.0, 0.0, 150.0, 1.0, 4.0, 6, conf);
+    assert_eq!((z_dir.eta_squared_ci, z_dir.partial_eta_squared_ci, z_dir.cohens_f_ci), (None, None, None));
+    let mw_es = compute_anova_effect_sizes_for_n(40.0, 100.0, 140.0, 1.0, 36.0, 40, conf);
+    assert!(mw_es.eta_squared_ci.is_none() && mw_es.partial_eta_squared_ci.is_some() && mw_es.cohens_f_ci.is_some());
+    let ow_es = compute_anova_effect_sizes_for_n(40.0, 100.0, 140.0, 1.0, 36.0, 38, conf);
+    assert!(ow_es.eta_squared_ci.is_some() && ow_es.eta_squared_ci == ow_es.partial_eta_squared_ci);
+
+    // AUD-05-21: Factorial rejects LinearTrend & DunnRankSum (3x3 simple-effects Bonferroni m=9 & footnote verified above).
+    let g33 = build_grouped_grid("f21", 3, 3, 3);
+    for rm in [RepeatedMeasuresDesign::None, RepeatedMeasuresDesign::ColumnFactorMatched] {
+        for bad in [MultiplicityMethod::LinearTrend, MultiplicityMethod::DunnRankSum] {
+            let sp = FactorialAnovaSpec {
+                repeated_measures: rm,
+                mixed_effects_reml: rm != RepeatedMeasuresDesign::None,
+                multiplicity: MultiplicitySpec { method: bad, threshold: 0.05, report_confidence_intervals: false },
+                ..Default::default()
+            };
+            assert!(matches!(run_kind(&g33, AnalysisKind::FactorialAnova(sp)), Err(StatsError::IncompatibleAnalysisSpec { .. })));
+        }
+    }
+
+    // AUD-05-22 (Maxwell & Delaney 2004): RM one-way GG=true subject-level contrasts for Tukey/Dunnett/NK/LinearTrend.
+    let c1 = [10.0, 12.0, 11.0, 13.0, 9.5, 14.0, 10.5, 12.5, 11.5, 13.5];
+    let d12 = [0.50, 0.54, 0.48, 0.56, 0.52, 0.51, 0.55, 0.49, 0.53, 0.55];
+    let d13 = [-18.0, 15.0, -14.0, 20.0, -16.0, 17.0, -15.0, 19.0, -17.0, 14.0];
+    let (c2, c3): (Vec<f64>, Vec<f64>) = (c1.iter().zip(&d12).map(|(a, d)| a + d).collect(), c1.iter().zip(&d13).map(|(a, d)| a + d).collect());
+    let sh_gg = col_sheet_hint("rm-gg", ColumnDesignHint::PairedRepeatedMeasures, &[("C1", &c1), ("C2", &c2), ("C3", &c3)]);
+    let m12 = d12.iter().sum::<f64>() / 10.0;
+    let exp_se12 = (d12.iter().map(|&d| (d - m12).powi(2)).sum::<f64>() / 90.0).sqrt();
+    for m in [MultiplicityMethod::TukeyHsd, MultiplicityMethod::Dunnett { control_column: 0 }, MultiplicityMethod::NewmanKeuls] {
+        let r = run_ow_rm(&sh_gg, true, m, ResidualCovariance::CompoundSymmetry);
+        let mc = tab_by_id(&r, "multiple-comparisons");
+        assert_approx_eq(cell_num(&mc.rows[0][1]), exp_se12, 1e-12, 1e-12, "RM GG subject SE");
+        assert!(cell_num(&mc.rows[0][3]) == 9.0 && cell_p(&mc.rows[0][4]) < 1e-6);
+    }
+    let r_lt = run_ow_rm(&sh_gg, true, MultiplicityMethod::LinearTrend, ResidualCovariance::CompoundSymmetry);
+    let ml = d13.iter().sum::<f64>() / 10.0;
+    let exp_f_lt = (ml / (d13.iter().map(|&v| (v - ml).powi(2)).sum::<f64>() / 90.0).sqrt()).powi(2);
+    assert_approx_eq(scalar(&r_lt, "Linear trend F"), exp_f_lt, 1e-10, 1e-10, "RM GG LT F");
+    assert_approx_eq(scalar(&r_lt, "Linear trend P"), f_sf(exp_f_lt, 1.0, 9.0).unwrap(), 1e-10, 1e-10, "RM GG LT P");
+    assert_close(cell_num(&tab_by_id(&r_lt, "linear-trend").rows[0][2]), 9.0, 1e-12, "RM GG LT DFd");
+    let r_sph = run_ow_rm(&sh_gg, false, MultiplicityMethod::TukeyHsd, ResidualCovariance::CompoundSymmetry);
+    let mc_sph = tab_by_id(&r_sph, "multiple-comparisons");
+    assert!(cell_num(&mc_sph.rows[0][3]) == 18.0 && cell_num(&mc_sph.rows[0][1]) > 2.0);
+
+    // AUD-05-23: Newman-Keuls preserves level mean ordering when a level has an empty cell (A2, B2).
+    let nk_sh =
+        grouped_sheet_fill("nk-e", 3, 3, 3, |c, r, s| if r == 2 && c == 2 { None } else { Some(100.0 + 5.0 * r as f64 + [-6.0, 0.0, 6.0][s]) });
+    let r_nk = run_kind(
+        &nk_sh,
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: false },
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let ta = tab_by_id(&r_nk, "multiple-comparisons-factor-a");
+    let adj_nk = ta.column_headers.iter().position(|h| h.to_ascii_lowercase().contains("adj")).unwrap();
+    let (i01, i02) = (
+        ta.row_labels.iter().position(|l| l.contains("Row 1") && l.contains("Row 2")).unwrap(),
+        ta.row_labels.iter().position(|l| l.contains("Row 1") && l.contains("Row 3")).unwrap(),
+    );
+    let exp_02 = max_studentized_range_sf(cell_num(&ta.rows[i02][2]), 1, 3, cell_num(&ta.rows[i02][3])).unwrap();
+    let raw_01 = max_studentized_range_sf(cell_num(&ta.rows[i01][2]), 1, 2, cell_num(&ta.rows[i01][3])).unwrap();
+    let wrong_01 = max_studentized_range_sf(cell_num(&ta.rows[i01][2]), 1, 3, cell_num(&ta.rows[i01][3])).unwrap();
+    let p_01 = cell_p(&ta.rows[i01][adj_nk]);
+    assert_approx_eq(cell_p(&ta.rows[i02][adj_nk]), exp_02, 1e-10, 1e-10, "NK A0-A2 span 3");
+    assert_approx_eq(p_01, raw_01.max(exp_02), 1e-10, 1e-10, "NK A0-A1 span 2");
+    assert!((p_01 - wrong_01).abs() > 1e-4);
+}
+
+#[test]
+fn anova_aud05_rm_sphericity_missing_and_summary_guards() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+    // AUD-05-42: Missing-cell RM one-way GG=true + CompoundSymmetry emits diagnostics-only Warn & footnote.
+    let rm_miss = col_sheet_opts(
+        "rm-gg-m",
+        ColumnDesignHint::PairedRepeatedMeasures,
+        &[
+            ("T1", &[Some(10.0), Some(12.0), Some(11.0), Some(13.0), Some(9.5), Some(14.0)]),
+            ("T2", &[Some(11.0), None, Some(12.2), Some(14.1), Some(10.4), Some(15.2)]),
+            ("T3", &[Some(18.0), Some(15.0), Some(20.0), Some(17.0), Some(22.0), Some(16.0)]),
+        ],
+    );
+    let r_cs = run_ow_rm(&rm_miss, true, MultiplicityMethod::None, ResidualCovariance::CompoundSymmetry);
+    assert!(r_cs.scalars.iter().any(|s| s.key == "REML sigma^2 (subject)"));
+    let w_cl =
+        r_cs.checklist.iter().find(|c| c.status == ChecklistStatus::Warn && c.assumption == "Geisser-Greenhouse sphericity adjustment").unwrap();
+    assert!(w_cl.remediation.is_none());
+    assert!(tab_by_id(&r_cs, "rm-one-way-anova").footnotes.iter().any(|f| f.contains("Geisser-Greenhouse") && f.contains("CompoundSymmetry")));
+    for (gg, cov) in [(false, ResidualCovariance::CompoundSymmetry), (true, ResidualCovariance::Unstructured)] {
+        assert!(
+            !run_ow_rm(&rm_miss, gg, MultiplicityMethod::None, cov)
+                .checklist
+                .iter()
+                .any(|c| c.assumption == "Geisser-Greenhouse sphericity adjustment")
+        );
+    }
+
+    // AUD-05-56: Zero-SE incomplete RM linear trend diverges; summary ANOVA overflow/cap guards.
+    let rm_nl = col_sheet_opts(
+        "rm-nl",
+        ColumnDesignHint::PairedRepeatedMeasures,
+        &[
+            ("C1", &[Some(10.0), Some(12.0), Some(14.0), Some(16.0), Some(18.0)]),
+            ("C2", &[Some(15.0), None, Some(19.0), Some(21.0), Some(23.0)]),
+            ("C3", &[Some(20.0), Some(22.0), Some(24.0), Some(26.0), Some(28.0)]),
+        ],
+    );
+    let r_nl = run_ow_rm(&rm_nl, false, MultiplicityMethod::LinearTrend, ResidualCovariance::CompoundSymmetry);
+    assert!((scalar(&r_nl, "Linear trend F") > 1e8 || scalar(&r_nl, "Linear trend F").is_infinite()) && scalar(&r_nl, "Linear trend P") < 1e-10);
+    assert!(matches!(
+        ordinary_one_way_from_summary(&[group_input(0, "A", 1e200, 1e200, 0.0), group_input(1, "B", 1e200, -1e200, 0.0)], conf),
+        Err(StatsError::InvalidParameter { name: "group_n", .. })
+    ));
+    for ovf in [
+        [group_input(0, "A", 10.0, 1e308, 0.0), group_input(1, "B", 10.0, -1e308, 0.0)],
+        [group_input(0, "A", 10.0, 1.0, 1e200), group_input(1, "B", 10.0, 2.0, 1e200)],
+    ] {
+        assert!(matches!(ordinary_one_way_from_summary(&ovf, conf), Err(StatsError::Math(MathError::DomainError { .. }))));
+    }
+
+    // AUD-05-57 (parts 1-3): 2-level RM sphericity NaN/df=0 suppression & Bartlett zero-variance contract.
+    let rm1 = rm_one_way_anova(&[vec![10.0, 12.5], vec![11.2, 13.4], vec![9.8, 12.1], vec![10.5, 13.0]]).unwrap();
+    assert!(rm1.sphericity.mauchly_p.is_nan() && rm1.sphericity.mauchly_df == 0.0 && rm1.sphericity.greenhouse_geisser_eps == 1.0);
+    let rm2_d = vec![
+        vec![vec![10.0, 14.0], vec![12.0, 18.0]],
+        vec![vec![11.0, 15.2], vec![13.5, 19.1]],
+        vec![vec![12.0, 16.1], vec![14.2, 20.4]],
+        vec![vec![13.0, 17.5], vec![15.0, 21.2]],
+    ];
+    let rm2 =
+        fit_rm_two_way_anova_with_sphericity(&rm2_d, "A", "B", RepeatedMeasuresDesign::BothFactorsMatched, RmSphericityCorrection::None).unwrap();
+    for s in [&rm2.sphericities.row, &rm2.sphericities.column, &rm2.sphericities.interaction] {
+        let s = s.as_ref().unwrap();
+        assert!(s.mauchly_p.is_nan() && s.mauchly_df == 0.0 && s.greenhouse_geisser_eps == 1.0);
+    }
+    let rm_both =
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec { repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched, ..Default::default() });
+    assert!(
+        !run_kind(&grouped_sheet_fill("rm22", 2, 2, 4, |c, r, s| Some(rm2_d[s][r][c])), rm_both.clone())
+            .unwrap()
+            .tabs
+            .iter()
+            .any(|t| t.id == "rm-sphericity")
+    );
+    let mut sh23 = grouped_sheet_fill("rm23", 3, 2, 4, |c, r, s| {
+        Some(10.0 + 2.0 * r as f64 + 3.0 * c as f64 + 0.5 * s as f64 + ((r + c * 2 + s) % 3) as f64 * 0.2)
+    });
+    if let TableArchetype::Grouped(g) = &mut sh23.archetype {
+        (g.row_factor_title, g.column_factor_title) = ("Row2".into(), "Col3".into());
+    }
+    let out23 = run_kind(&sh23, rm_both).unwrap();
+    let sph23 = tab_by_id(&out23, "rm-sphericity");
+    assert!(!sph23.row_labels.iter().any(|l| l == "Row2") && sph23.row_labels.iter().any(|l| l == "Col3"));
+
+    let b1 = ordinary_one_way_anova(&[("A", &[5.0; 3]), ("B", &[5.0, 6.0, 7.0])], conf).unwrap();
+    assert!(
+        b1.variance_tests.bartlett_chi2.is_infinite() && b1.variance_tests.bartlett_chi2.is_sign_positive() && b1.variance_tests.bartlett_p == 0.0
+    );
+    let b2 = ordinary_one_way_anova(&[("A", &[5.0; 3]), ("B", &[8.0; 3])], conf).unwrap();
+    assert_eq!((b2.variance_tests.bartlett_chi2, b2.variance_tests.bartlett_p), (0.0, 1.0));
+}
+
+#[test]
+fn multiplicity_aud05_08_09_bky_sub_1e6_and_welch_posthoc_scaling() {
+    // AUD-05-08 (Benjamini, Krieger & Yekutieli 2006 Def. 6): sub-1e-6 fdr_q oracle & invalid q -> NaN.
+    let (q, mut raw_p, mut strong) = (1e-7_f64, vec![9.5e-8; 9], vec![1e-9; 5]);
+    raw_p.push(0.5);
+    strong.extend([0.5; 5]);
+    let exp_first = (10.0 * 9.5e-8 / 9.0) * (1.0 + q);
+    for &v in &adjust_two_stage_bky(&raw_p, q)[..9] {
+        assert_close(v, exp_first, 1e-18, "BKY q=1e-7");
+        assert!(v > q);
+    }
+    assert_eq!(analyze_pvalue_stack(&raw_p, PValueStackMethod::TwoStageBky, q).unwrap().discovery_count, 0);
+    for &v in &adjust_two_stage_bky(&strong, q)[..5] {
+        assert_close(v, 1e-9 * (1.0 + q), 1e-20, "BKY strong q=1e-7");
+        assert!(v <= q);
+    }
+    for bad_q in [0.0, -0.05, 1.0, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let out = adjust_two_stage_bky(&raw_p, bad_q);
+        assert!(out.len() == raw_p.len() && out.iter().all(|v| v.is_nan()));
+    }
+
+    // AUD-05-09 (Games & Howell 1976; Welch 1947): unequal-variance post-hoc n>=2 guard & scaled Welch df.
+    let n1 = [group_input(0, "G1", 1.0, 10.0, 0.0), group_input(1, "G2", 1.0, 11.0, 0.0), group_input(2, "G3", 5.0, 12.0, 1.0)];
+    let huge = [group_input(0, "A", 20.0, 0.0, 1e100), group_input(1, "B", 20.0, 1e100, 1e100)];
+    let tiny = [group_input(0, "A", 20.0, 0.0, 1e-100), group_input(1, "B", 20.0, 1e-100, 1e-102)];
+    let (exp_se, exp_df) = (1e100 * (2.0_f64 / 20.0).sqrt(), (1.0 + 1e-4_f64).powi(2) / (1.0 / 19.0 + 1e-8_f64 / 19.0));
+    for proc in [MultiplicityProcedure::GamesHowell, MultiplicityProcedure::TamhaneT2, MultiplicityProcedure::DunnettT3] {
+        assert!(matches!(
+            compare_groups_with_procedure(&n1, 1.0, 4.0, proc, 0.05, true),
+            Err(StatsError::InsufficientSampleSize { required: 2, actual: 1, .. })
+        ));
+        let rh = compare_groups_with_procedure(&huge, 0.0, 1.0, proc, 0.05, true).unwrap();
+        assert!(rh[0].df == 38.0 && (rh[0].se_diff - exp_se).abs() / exp_se < 1e-12);
+        assert_close(compare_groups_with_procedure(&tiny, 0.0, 1.0, proc, 0.05, true).unwrap()[0].df, exp_df, 1e-10, "tiny Welch df");
+    }
+    assert!(matches!(
+        compare_groups_with_procedure(
+            &[group_input(0, "A", 1.5, 1.0, 0.5), group_input(1, "B", 5.0, 2.0, 0.5)],
+            1.0,
+            4.0,
+            MultiplicityProcedure::GamesHowell,
+            0.05,
+            false
+        ),
+        Err(StatsError::InsufficientSampleSize { required: 2, .. })
+    ));
 }

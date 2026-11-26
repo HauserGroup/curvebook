@@ -17,6 +17,8 @@ use curvebook_stats::column::run_descriptive_analysis;
 use curvebook_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
 use curvebook_text::LocaleNumberPolicy;
 
+use super::common::scene_texts as plain_texts;
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type LineSeg = ((f64, f64), (f64, f64), LineDashStyle);
 type ScaleCase = (AxisScale, Vec<(f64, f64)>, Vec<AdditionalTick>, Vec<&'static str>, Vec<&'static str>);
@@ -41,17 +43,6 @@ fn line_primitives(scene: &ChartScene) -> Vec<LineSeg> {
         }
     }
     out
-}
-
-fn plain_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn filled_circle_centers(scene: &ChartScene) -> Vec<(f64, f64)> {

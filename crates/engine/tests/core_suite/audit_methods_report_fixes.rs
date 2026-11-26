@@ -663,4 +663,41 @@ fn audit_113_114_mi_settings_and_nonlinear_rules_and_102_pb() {
             && !dsl_rep.contains("BogusParam")
             && dsl_rep.contains("Ignored 1 unrecognized and 0 superseded duplicate")
     );
+
+    // AUD-02-27: missing result sheet returns ErrorCode::NotFound.
+    assert_eq!(
+        generate_methods_report(&synth_doc, &SheetId::new("missing-res"), ReportFormat::PlainText).unwrap_err().code,
+        curvebook_doc::ErrorCode::NotFound
+    );
+
+    // AUD-02-23: Power info hooks resolve `N per group` on dirty fallback and fail result sheet on OOB Alpha = 1.5.
+    let mut s_pwr = Session::new();
+    ok_cmd(&mut s_pwr, "sheet.createData", json!({ "sheet_id": "col-1", "kind": "column", "cols": 2, "rows": 2, "auto_info": true }));
+    let info_id = s_pwr.document().data_sheet(&SheetId::new("col-1")).unwrap().info_sheet_id.clone().unwrap();
+    run_cmds(
+        &mut s_pwr,
+        &[
+            ("info.setConstant", json!({ "sheet_id": info_id.as_str(), "name": "Alpha", "value": 0.05 })),
+            ("info.setConstant", json!({ "sheet_id": info_id.as_str(), "name": "N per group", "value": 25.0 })),
+            (
+                "stats.run",
+                json!({ "sheet_id": "pwr-1", "source_sheet_id": "col-1", "kind": "power", "solve_target": "Power", "info_sheet_id": info_id.as_str(), "sample_size": 10, "effect_size": 0.8 }),
+            ),
+        ],
+    );
+    let mut dirty_doc = s_pwr.document().clone();
+    dirty_doc.result_sheet_mut(&SheetId::new("pwr-1")).unwrap().status = ResultStatus::Dirty;
+    assert!(rep_txt(&dirty_doc, "pwr-1").contains("25"));
+    ok_cmd(&mut s_pwr, "info.setConstant", json!({ "sheet_id": info_id.as_str(), "name": "Alpha", "value": 1.5 }));
+    assert!(matches!(rs(&s_pwr, "pwr-1").status, ResultStatus::Failed { .. }));
+
+    // AUD-13-25: Deming methods report includes X-intercept extension and custom plot X bounds.
+    let mut s_dem = session_with("Dem", vec![xy_sheet("xy-1", "D", "X", &[2.0, 4.0, 6.0, 8.0, 10.0], &[("A", &[5.1, 8.9, 13.2, 16.8, 21.1])])]);
+    ok_cmd(
+        &mut s_dem,
+        "fit.run",
+        json!({ "sheet_id": "dem-1", "source_sheet_id": "xy-1", "kind": "deming", "extend_line_to_x_intercept": true, "plot_x_min": 0.0, "plot_x_max": 25.0 }),
+    );
+    let dem_rep = rep_txt(s_dem.document(), "dem-1");
+    assert!(dem_rep.contains("X-intercept") && dem_rep.contains("25"), "{dem_rep}");
 }

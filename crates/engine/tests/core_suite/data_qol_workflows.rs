@@ -1,12 +1,17 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use curvebook_doc::{CellCoord, MAX_SHEETS_PER_PROJECT, ProjectDocument, ResultStatus, SheetId, TableKind};
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, CellCoord, MAX_SHEETS_PER_PROJECT, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
+    ProjectDocument, ResultSheet, ResultStatus, SheetId, TableKind, TransformAnalysisSpec,
+};
 use curvebook_engine::Session;
 use curvebook_format::is_unpacked_project_dir;
 use curvebook_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
 use serde_json::{Value, json};
 
-use super::common::{TempDir, cell_num, cell_val, col_sheet, ds, err_cmd, ok_cmd, rs, run_cmds, tab_metric};
+use super::common::{
+    TempDir, assert_bad_inputs, cell_num, cell_val, col_sheet, ds, err_cmd, ok_cmd, rs, run_cmds, session_with, tab_metric, xy_sheet,
+};
 
 #[test]
 fn g2_paste_link_missing_or_deleted_external_file_fails_loudly() {
@@ -196,6 +201,26 @@ fn qol2_import_tidy_long_rows_and_european_csv() {
     assert!(session.document().data_sheet(&SheetId::new(sid_csv)).is_none());
     assert!(session.redo().expect("redo tidy csv"));
     assert!(session.document().data_sheet(&SheetId::new(sid_csv)).is_some());
+
+    // AUD-02-22: importTidyLong conflicting mapping rejected, uppercase COMMA decimal_sep accepted; info.setConstant rejects contradictory value/kind.
+    ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "d-info", "kind": "column", "cols": 1, "rows": 2, "auto_info": true }));
+    assert_bad_inputs(
+        &mut session,
+        &[
+            (
+                "table.importTidyLong",
+                json!({ "headers": ["grp", "val"], "rows": [["A", "1,5"], ["B", "2,5"]], "mapping": { "group_col": "grp", "value_col": "val" }, "group_col": "grp" }),
+            ),
+            ("info.setConstant", json!({ "sheet_id": "d-info", "name": "k1", "value": null, "kind": "number" })),
+            ("info.setConstant", json!({ "sheet_id": "d-info", "name": "k2", "value": 42.0, "kind": "date" })),
+            ("info.setConstant", json!({ "sheet_id": "d-info", "name": "k3", "value": "abc", "kind": "empty" })),
+        ],
+    );
+    ok_cmd(
+        &mut session,
+        "table.importTidyLong",
+        json!({ "sheet_id": "tidy-ok", "headers": ["grp", "val"], "rows": [["A", "1,5"], ["B", "2,5"]], "decimal_sep": "COMMA", "group_col": "grp", "value_col": "val" }),
+    );
 }
 
 #[test]
@@ -254,6 +279,67 @@ fn qol3_exclude_cells_with_reason_recalculates_and_audit_report() {
         err_cmd(&mut session, "table.excludeCellsWithReason", json!({ "sheet_id": "s1", "row": 0, "col": 0, "reason_tag": "   " })).to_string();
     assert!(bad_tag_err.contains("reason_tag"));
     assert_eq!(ds(&session, "s1").exclusion_note(CellCoord::new(2, 0, 0)).map(|n| n.reason_tag.as_str()), Some("Outlier"));
+
+    // AUD-02-08: large range excludeCellsWithReason stays sorted and deduplicated across overwrites.
+    ok_cmd(&mut session, "sheet.createData", json!({ "sheet_id": "big", "kind": "column", "cols": 10, "rows": 200 }));
+    let b_out = ok_cmd(
+        &mut session,
+        "table.excludeCellsWithReason",
+        json!({ "sheet_id": "big", "reason_tag": "qc_batch", "note": "plate rim artifact", "timestamp_utc": "2026-11-25T00:00:00Z", "range": { "start": { "row": 0, "col": 0 }, "end": { "row": 199, "col": 9 } } }),
+    );
+    assert_eq!(b_out.payload["count"], 2000);
+    let d_big = ds(&session, "big");
+    assert!(d_big.exclusion_notes.len() == 2000 && d_big.exclusion_notes.windows(2).all(|w| w[0].coord < w[1].coord));
+    ok_cmd(
+        &mut session,
+        "table.excludeCellsWithReason",
+        json!({ "sheet_id": "big", "reason_tag": "updated_reason", "timestamp_utc": "2026-11-25T01:00:00Z", "coords": [[5, 3], [0, 0]] }),
+    );
+    assert_eq!(ds(&session, "big").exclusion_notes.len(), 2000);
+    assert_eq!(ds(&session, "big").exclusion_note(CellCoord::new(5, 3, 0)).unwrap().reason_tag, "updated_reason");
+
+    // AUD-02-06: convertArchetype XY -> MultipleVariables remaps pcr_outcome_column, stratify_column, and Dunnett control_column.
+    let mut doc = session_with("Remap", vec![xy_sheet("xy-1", "XY", "X", &[1.0, 2.0, 3.0, 4.0, 5.0], &[("Y", &[10.0, 20.0, 30.0, 40.0, 50.0])])])
+        .document()
+        .clone();
+    for (id, kind) in [
+        (
+            "res-pca",
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: Some(0) }),
+        ),
+        (
+            "res-samp",
+            AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
+                seed: 1,
+                sample_size: 3,
+                stratify_column: Some(0),
+                proportional_allocation: true,
+            }),
+        ),
+        (
+            "res-mrow",
+            AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+                multiplicity: MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 0 }, ..Default::default() },
+                ..Default::default()
+            }),
+        ),
+    ] {
+        doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new(id, "xy-1", kind).unwrap()).unwrap()).unwrap();
+    }
+    let mut s_rm = Session::from_document(doc);
+    ok_cmd(&mut s_rm, "table.convertArchetype", json!({ "sheet_id": "xy-1", "target_kind": "MultipleVariables", "allow_lossy": true }));
+    assert!(matches!(rs(&s_rm, "res-pca").analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(1), .. })));
+    assert!(matches!(
+        rs(&s_rm, "res-samp").analysis.kind,
+        AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { stratify_column: Some(1), .. })
+    ));
+    assert!(matches!(
+        rs(&s_rm, "res-mrow").analysis.kind,
+        AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 1 }, .. },
+            ..
+        })
+    ));
 }
 
 #[test]

@@ -22,18 +22,9 @@ use curvebook_stats::roc::run_roc_analysis;
 use curvebook_stats::survival::run_survival_analysis;
 use curvebook_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use super::common::{all_points_finite, scene_texts as plain_texts};
 
-fn plain_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
-}
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn censor_tick_x_coords(scene: &ChartScene) -> Vec<f64> {
     scene
@@ -51,23 +42,6 @@ fn censor_tick_x_coords(scene: &ChartScene) -> Vec<f64> {
             _ => None,
         })
         .collect()
-}
-
-fn all_points_finite(scene: &ChartScene) -> bool {
-    scene.primitives.iter().all(|p| match p {
-        ScenePrimitive::Path { path, .. } => path.commands.iter().all(|c| match *c {
-            PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => pt.x.is_finite() && pt.y.is_finite(),
-            PathCmd::QuadTo { control, to } => control.x.is_finite() && control.y.is_finite() && to.x.is_finite() && to.y.is_finite(),
-            PathCmd::CubicTo { c1, c2, to } => {
-                c1.x.is_finite() && c1.y.is_finite() && c2.x.is_finite() && c2.y.is_finite() && to.x.is_finite() && to.y.is_finite()
-            }
-            PathCmd::Close => true,
-        }),
-        ScenePrimitive::Text(t) => t.anchor_pt.x.is_finite() && t.anchor_pt.y.is_finite(),
-        ScenePrimitive::RasterImage(img) => img.bounds_pt.x.is_finite() && img.bounds_pt.y.is_finite(),
-        ScenePrimitive::PushClip { rect } => rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite(),
-        ScenePrimitive::PopClip => true,
-    })
 }
 
 fn km_spec_default() -> SurvivalAnalysisSpec {

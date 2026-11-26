@@ -1,19 +1,22 @@
+use std::time::Instant;
+
 use crate::common::{
-    RawZipEntry, build_archive_zip_from_value, build_raw_zip, build_zip_entries, col_sheet, make_import_link_spec, raw_datasheet,
-    result_sheet_with_kind, sample_dose_project, xy_sheet,
+    RawZipEntry, build_archive_zip_from_value, build_raw_zip, build_zip_entries, col_sheet, make_import_link_spec, make_result_sheet, raw_datasheet,
+    result_sheet_with_kind, sample_column_project, sample_dose_project, xlsx_single_sheet_zip, xy_sheet,
 };
 use curvebook_doc::{
-    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, FactorialAnovaSpec,
-    GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinearRegressionSpec, LinkBorderColor, LinkSource,
-    LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MixedModelDfMethod, MultipleVariablesTable, NestedAnalysisSpec, NestedTable, NonlinearFitSpec,
-    OneWayAnovaSpec, PartsOfWholeTable, PlacementMode, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultStatus,
-    SequenceProgression, SheetCellRange, SheetId, SourceCellId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    AnalysisKind, BaselineOperation, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DemingErrorSpec,
+    DocError, FactorialAnovaSpec, FloatingNote, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoConstant, InfoSheet,
+    InternalLinkKind, LinearRegressionSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, MixedModelDfMethod,
+    MultipleVariablesTable, NestedAnalysisSpec, NestedTable, NonlinearFitSpec, NoteId, OneWayAnovaSpec, PartsOfWholeTable, PlacementMode,
+    PowerAnalysisSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ResidualCovariance, ResultStatus, SequenceProgression, SheetCellRange,
+    SheetId, SourceCellId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_format::{
-    ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ZipArchive, ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv,
-    filter_delimited_text, import_csv_to_datasheet, instantiate_template_bytes, migrate_document_json, open_archive_bytes,
-    open_archive_bytes_with_limits, open_project_bytes, open_template_bytes, parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid,
-    save_project_bytes, save_template_bytes, validate_project_document,
+    ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, XlsxImportOptions, ZipArchive, ZipLimits, ZipWriter, apply_csv_import_link,
+    export_datasheet_to_csv, filter_delimited_text, import_csv_to_datasheet, import_csv_to_datasheet_with_x_mode, import_xlsx_bytes_with_options,
+    instantiate_template_bytes, migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_project_bytes, open_template_bytes,
+    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, save_project_bytes, save_template_bytes, validate_project_document,
 };
 use serde_json::{Value, json};
 
@@ -560,4 +563,272 @@ fn gap_06_05_levene_test_schema_v8_upgrades_v7_and_rejects_future_before_serde()
         ),
         "expected UnsupportedSchemaVersion(9, 8) before serde, got {future_err:?}"
     );
+}
+
+#[test]
+fn save_validation_parity_and_false_eocd_comment_skip() {
+    // Save must reject every invalid sheet state that open rejects.
+    let mut docs: Vec<(&str, ProjectDocument)> = Vec::new();
+    let mut d = sample_column_project("Neg Note");
+    d.data_sheets[0].floating_notes.push(FloatingNote {
+        id: NoteId::new("n1"),
+        fill_color: FloatingNote::DEFAULT_FILL,
+        bounds_pt: RectPt { x: 0.0, y: 0.0, width: -10.0, height: 20.0 },
+        minimized: false,
+        body_markdown: String::from("bad"),
+    });
+    docs.push(("neg_note", d));
+    let mut d = sample_column_project("Ws Const");
+    let mut info = InfoSheet::new_preseeded("info-1", "Info").unwrap();
+    info.constants.push(InfoConstant { name: String::from("   "), value: curvebook_doc::ConstantValue::Empty, units: None });
+    d.info_sheets.push(info);
+    docs.push(("ws_const", d));
+    let mut d = sample_column_project("Empty Info Note");
+    let mut info = InfoSheet::new_preseeded("info-1", "Info").unwrap();
+    info.floating_notes.push(FloatingNote::new("  ", RectPt::new(0.0, 0.0, 50.0, 50.0), "note"));
+    d.info_sheets.push(info);
+    docs.push(("empty_info_note", d));
+    let mut d = sample_column_project("Bad Power");
+    let mut rs = make_result_sheet("res-1", "data-1", ResultStatus::UpToDate);
+    rs.analysis.kind = AnalysisKind::PowerAnalysis(PowerAnalysisSpec { alpha: 1.5, ..Default::default() });
+    d.result_sheets.push(rs);
+    docs.push(("bad_power", d));
+    let mut d = sample_column_project("NaN Linear");
+    let mut rs = make_result_sheet("res-1", "data-1", ResultStatus::UpToDate);
+    rs.analysis.kind = AnalysisKind::LinearRegression(LinearRegressionSpec {
+        fixed_point: Some((f64::NAN, 0.0)),
+        deming_error: DemingErrorSpec::VarianceRatio { lambda: 1.0 },
+        ..Default::default()
+    });
+    d.result_sheets.push(rs);
+    docs.push(("nan_linear", d));
+    for (label, doc) in docs {
+        assert!(save_project_bytes(&doc).is_err(), "{label}");
+    }
+    assert!(open_project_bytes(&save_project_bytes(&sample_column_project("Valid")).unwrap()).is_ok());
+
+    // ZIP EOCD scan skips false EOCD signature embedded in trailing comment, while rejecting multi-disk-only ZIP.
+    let mut fake_eocd = Vec::with_capacity(32);
+    fake_eocd.extend_from_slice(b"note:");
+    fake_eocd.extend_from_slice(&0x0605_4b50_u32.to_le_bytes());
+    for v in [1_u16, 0, 1, 1] {
+        fake_eocd.extend_from_slice(&v.to_le_bytes());
+    }
+    fake_eocd.extend_from_slice(&[0_u8; 10]);
+    let zip = build_raw_zip(&[RawZipEntry::stored(b"hello.txt", b"world")], &fake_eocd);
+    assert_eq!(ZipArchive::from_bytes(&zip).unwrap().get("hello.txt"), Some(b"world".as_slice()));
+    let mut only_bad = vec![0_u8; 22];
+    only_bad[0..4].copy_from_slice(&0x0605_4b50_u32.to_le_bytes());
+    only_bad[4..6].copy_from_slice(&2_u16.to_le_bytes());
+    assert!(matches!(ZipArchive::from_bytes(&only_bad), Err(FormatError::InvalidZip { .. })));
+}
+
+#[test]
+fn csv_baseline_edge_cases_predicate_rejection_quoted_asterisks_and_detect_bounds() {
+    // Baseline adjustments clear zero, missing, excluded, and overflow to Empty.
+    let pct = rearrange_and_baseline_grid(
+        &[vec![Cell::number(0.0), Cell::number(10.0)], vec![Cell::number(5.0), Cell::number(20.0)]],
+        &ImportPlacementSpec::default(),
+        ImportBaselineAdjustment::PercentOfFirstRow,
+    );
+    assert_eq!(pct, vec![vec![Cell::empty(), Cell::number(100.0)], vec![Cell::empty(), Cell::number(200.0)]]);
+    assert_eq!(
+        rearrange_and_baseline_grid(
+            &[vec![Cell::number(1e-308)], vec![Cell::number(1e5)]],
+            &ImportPlacementSpec::default(),
+            ImportBaselineAdjustment::PercentOfFirstRow
+        )[1][0],
+        Cell::empty()
+    );
+    let sub_row = rearrange_and_baseline_grid(
+        &[vec![Cell::excluded_number(10.0), Cell::number(-f64::MAX)], vec![Cell::number(42.0), Cell::number(f64::MAX)]],
+        &ImportPlacementSpec::default(),
+        ImportBaselineAdjustment::SubtractFirstRow,
+    );
+    assert_eq!(sub_row[1], vec![Cell::empty(), Cell::empty()]);
+    let sub_col = rearrange_and_baseline_grid(
+        &[vec![Cell::empty(), Cell::number(99.0)], vec![Cell::number(10.0), Cell::number(25.0)]],
+        &ImportPlacementSpec::default(),
+        ImportBaselineAdjustment::SubtractColumn(0),
+    );
+    assert_eq!((&sub_col[0][1], &sub_col[1][0], &sub_col[1][1]), (&Cell::empty(), &Cell::number(0.0), &Cell::number(15.0)));
+
+    // filter_delimited_text baseline Difference/Ratio, thousands grouping, and exclude_row_predicate rejection.
+    let diff = filter_delimited_text(
+        "Base,Resp\n10,25\n20,50\n",
+        ',',
+        '.',
+        true,
+        &ImportFilterSpec { baseline: Some((0, BaselineOperation::Difference)), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(diff.cells, vec![vec![Cell::number(0.0), Cell::number(15.0)], vec![Cell::number(0.0), Cell::number(30.0)]]);
+    let ratio = filter_delimited_text(
+        "Base,Resp\n0,25\n5,20\n",
+        ',',
+        '.',
+        true,
+        &ImportFilterSpec { baseline: Some((0, BaselineOperation::Ratio)), ..Default::default() },
+    )
+    .unwrap();
+    assert_eq!(ratio.cells, vec![vec![Cell::empty(), Cell::empty()], vec![Cell::number(1.0), Cell::number(4.0)]]);
+    let tsv = filter_delimited_text("Dose\tSignal\n1,234.56\t2,500.00\n", '\t', '.', true, &ImportFilterSpec::default()).unwrap();
+    assert_eq!(tsv.cells, vec![vec![Cell::number(1234.56), Cell::number(2500.0)]]);
+    let pred = ImportFilterSpec { exclude_row_predicate: Some(String::from("B > 10")), ..Default::default() };
+    assert!(matches!(filter_delimited_text("A,B\n1,20\n", ',', '.', true, &pred), Err(FormatError::InvalidPipeline { .. })));
+    let mut target = col_sheet("c1", 2, 2);
+    let link = ImportLinkSpec {
+        source: LinkSource::ExternalDelimitedFile { path: String::from("in.csv"), delimiter: ',', decimal_separator: '.' },
+        filter: pred,
+        placement: ImportPlacementSpec::default(),
+    };
+    assert!(matches!(
+        apply_csv_import_link(&mut target, "A,B\n1,20\n", &link, true, ImportBaselineAdjustment::None, "lnk-1", "test"),
+        Err(FormatError::InvalidPipeline { .. })
+    ));
+    assert!(target.linked_regions.is_empty());
+
+    // Quoted asterisk & [excluded] escape round-trip + external CSV active quoted text.
+    let cells = vec![
+        Cell::text("\"hello\"*"),
+        Cell::text("\"\"*"),
+        Cell::text("[excluded]:literal"),
+        Cell::text("[excluded]\\:literal"),
+        Cell::excluded_text("\"hello\"*"),
+        Cell::excluded_text("[excluded]:nested"),
+        Cell::excluded_text("a,b"),
+        Cell::excluded_text("NA"),
+    ];
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, cells.len()).unwrap();
+    col.data_sets[0].title = String::from("Labels");
+    col.data_sets[0].cells = cells.iter().map(|c| vec![c.clone()]).collect();
+    let opts = CsvOptions::csv();
+    let exported = export_datasheet_to_csv(&DataSheet::new("s-q", "Q", TableArchetype::Column(col)).unwrap(), &opts).unwrap();
+    parse_delimited_records(&exported, &opts).unwrap();
+    let TableArchetype::Column(ref re_col) =
+        import_csv_to_datasheet("s-q-re", "Re", &exported, TableKind::Column, SubcolumnMode::Single, &opts).unwrap().archetype
+    else {
+        panic!("expected Column")
+    };
+    assert_eq!(re_col.data_sets[0].cells.iter().map(|r| r[0].clone()).collect::<Vec<_>>(), cells);
+    let ext = import_csv_to_datasheet("ext", "Ext", "Col\n\"\"\"label\"\"*\"\n", TableKind::Column, SubcolumnMode::Single, &opts).unwrap();
+    assert_eq!(ext.cell(CellCoord::new(0, 0, 0)), Some(&Cell::text("\"label\"*")));
+
+    // CsvOptions::detect stops early on tall (100k rows) and wide (50k cols) inputs.
+    let mut tall = String::from("X;Y\n");
+    for i in 0..100_000 {
+        tall.push_str(&format!("{i},5;{},25\n", i + 1));
+    }
+    let t0 = Instant::now();
+    let det = CsvOptions::detect(&tall);
+    assert!((det.delimiter, det.decimal_separator) == (';', ',') && t0.elapsed().as_millis() < 500);
+    let wide = (0..50_000).map(|i| format!("c{i}")).collect::<Vec<_>>().join(",");
+    let t1 = Instant::now();
+    assert!(CsvOptions::detect(&wide).delimiter == ',' && t1.elapsed().as_millis() < 500);
+}
+
+#[test]
+fn multi_subcolumn_x_and_quoted_locale_numbers_roundtrip() {
+    let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSdN }, SubcolumnMode::MeanSdN, 2, 2).unwrap();
+    (xy.x_title, xy.data_sets[0].title, xy.data_sets[1].title) = (String::from("Dose"), String::from("DrugA"), String::from("DrugB"));
+    xy.x_cells = vec![vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)], vec![Cell::number(2.0), Cell::number(0.2), Cell::number(3.0)]];
+    xy.data_sets[0].cells =
+        vec![vec![Cell::number(10.0), Cell::number(1.0), Cell::number(3.0)], vec![Cell::number(20.0), Cell::number(2.0), Cell::number(3.0)]];
+    xy.data_sets[1].cells =
+        vec![vec![Cell::number(30.0), Cell::number(3.0), Cell::number(4.0)], vec![Cell::number(40.0), Cell::number(4.0), Cell::number(4.0)]];
+    let csv = export_datasheet_to_csv(&DataSheet::new("xy-mx", "Multi X", TableArchetype::Xy(xy)).unwrap(), &CsvOptions::csv()).unwrap();
+    let TableArchetype::Xy(ref re_xy) =
+        import_csv_to_datasheet("xy-re", "Multi X", &csv, TableKind::Xy, SubcolumnMode::MeanSdN, &CsvOptions::csv()).unwrap().archetype
+    else {
+        panic!("expected Xy")
+    };
+    assert_eq!(re_xy.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSdN });
+    assert_eq!(
+        (re_xy.x_title.as_str(), re_xy.data_sets.len(), re_xy.data_sets[0].title.as_str(), re_xy.data_sets[1].title.as_str()),
+        ("Dose", 2, "DrugA", "DrugB")
+    );
+    assert_eq!(
+        (&re_xy.x_cells[0], &re_xy.data_sets[0].cells[0], &re_xy.data_sets[1].cells[1]),
+        (
+            &vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)],
+            &vec![Cell::number(10.0), Cell::number(1.0), Cell::number(3.0)],
+            &vec![Cell::number(40.0), Cell::number(4.0), Cell::number(4.0)]
+        )
+    );
+
+    let TableArchetype::Xy(ref leg_xy) = import_csv_to_datasheet(
+        "xy-leg",
+        "Leg",
+        "X,X:2,X:3,A:Mean,A:SD,A:N\n1,0.1,3,10,1,3\n",
+        TableKind::Xy,
+        SubcolumnMode::MeanSdN,
+        &CsvOptions::csv(),
+    )
+    .unwrap()
+    .archetype
+    else {
+        panic!("expected Xy")
+    };
+    assert_eq!(leg_xy.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(3) });
+    assert_eq!(
+        (leg_xy.data_sets.len(), leg_xy.data_sets[0].title.as_str(), &leg_xy.x_cells[0], &leg_xy.data_sets[0].cells[0]),
+        (1, "A", &vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)], &vec![Cell::number(10.0), Cell::number(1.0), Cell::number(3.0)])
+    );
+
+    let xlsx_rows = r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Dose:Mean</t></is></c><c r="B1" t="inlineStr"><is><t>Dose:SD</t></is></c><c r="C1" t="inlineStr"><is><t>Dose:N</t></is></c><c r="D1" t="inlineStr"><is><t>DrugA:Mean</t></is></c><c r="E1" t="inlineStr"><is><t>DrugA:SD</t></is></c><c r="F1" t="inlineStr"><is><t>DrugA:N</t></is></c></row><row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>0.1</v></c><c r="C2"><v>3</v></c><c r="D2"><v>10</v></c><c r="E2"><v>1</v></c><c r="F2"><v>3</v></c></row>"#;
+    let TableArchetype::Xy(ref x_xy) = import_xlsx_bytes_with_options(
+        &xlsx_single_sheet_zip("MultiX", xlsx_rows),
+        &XlsxImportOptions { table_kind: Some(TableKind::Xy), subcolumn_mode: SubcolumnMode::MeanSdN, ..Default::default() },
+    )
+    .unwrap()
+    .document
+    .data_sheets[0]
+        .archetype
+    else {
+        panic!("expected Xy")
+    };
+    assert_eq!(
+        (&x_xy.x_mode, x_xy.data_sets.len(), &x_xy.x_cells[0], &x_xy.data_sets[0].cells[0]),
+        (
+            &XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSdN },
+            1,
+            &vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)],
+            &vec![Cell::number(10.0), Cell::number(1.0), Cell::number(3.0)]
+        )
+    );
+
+    let no_hdr = CsvOptions { header_rows: 0, ..CsvOptions::csv() };
+    let TableArchetype::Xy(ref h_xy) =
+        import_csv_to_datasheet_with_x_mode("xy-h", "H", "1,0.1,3,10\n", TableKind::Xy, SubcolumnMode::Single, Some(SubcolumnMode::MeanSdN), &no_hdr)
+            .unwrap()
+            .archetype
+    else {
+        panic!("expected Xy")
+    };
+    assert_eq!(
+        (&h_xy.x_cells[0], &h_xy.data_sets[0].cells[0]),
+        (&vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)], &vec![Cell::number(10.0)])
+    );
+
+    // Quoted comma-grouped US/int and EU decimal-comma numbers.
+    let us_csv = "X,Y\n10,950\n20,\"1,250.5\"\n30,\"2,500.0*\"\n40,\"a,b*\"\n";
+    let us_opts = CsvOptions::detect(us_csv);
+    assert_eq!((us_opts.delimiter, us_opts.decimal_separator, us_opts.thousands_separator), (',', '.', Some(',')));
+    let us = import_csv_to_datasheet("us-q", "US", us_csv, TableKind::Xy, SubcolumnMode::Single, &us_opts).unwrap();
+    for (r, exp) in [(0, Cell::number(950.0)), (1, Cell::number(1250.5)), (2, Cell::excluded_number(2500.0)), (3, Cell::text("a,b*"))] {
+        assert_eq!(us.cell(CellCoord::new(r, 0, 0)), Some(&exp));
+    }
+    let int_csv = "X,Y\n10,\"1,250\"\n20,\"2,500\"\n";
+    let int_opts = CsvOptions::detect(int_csv);
+    assert_eq!(int_opts.thousands_separator, Some(','));
+    let int_s = import_csv_to_datasheet("us-i", "Int", int_csv, TableKind::Xy, SubcolumnMode::Single, &int_opts).unwrap();
+    assert_eq!(
+        (int_s.cell(CellCoord::new(0, 0, 0)), int_s.cell(CellCoord::new(1, 0, 0))),
+        (Some(&Cell::number(1250.0)), Some(&Cell::number(2500.0)))
+    );
+    let eu_csv = "X,Y\n10,\"1,25\"\n20,\"2,50\"\n";
+    let eu_opts = CsvOptions::detect(eu_csv);
+    assert_eq!((eu_opts.delimiter, eu_opts.decimal_separator), (',', ','));
+    let eu = import_csv_to_datasheet("eu-q", "EU", eu_csv, TableKind::Xy, SubcolumnMode::Single, &eu_opts).unwrap();
+    assert_eq!((eu.cell(CellCoord::new(0, 0, 0)), eu.cell(CellCoord::new(1, 0, 0))), (Some(&Cell::number(1.25)), Some(&Cell::number(2.50))));
 }

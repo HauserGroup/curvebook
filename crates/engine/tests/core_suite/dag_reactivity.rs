@@ -3,26 +3,29 @@
 //! cycle rejection rollback, and downstream graph style/annotation preservation.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::sync::atomic::AtomicBool;
+
 use curvebook_chart::compile_graph;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BracketLabelMode, BracketStyle, Cell, CellCoord, ConstantValue, DataSheet,
-    DescriptiveSpec, EmbeddedTableStyle, ErrorPropagationMode, FloatingNote, GraphAnnotation, GraphSheet, GraphicalDataObject, HookSource,
+    DescriptiveSpec, EmbeddedTableStyle, ErrorCode, ErrorPropagationMode, FloatingNote, GraphAnnotation, GraphSheet, GraphicalDataObject, HookSource,
     ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec,
     LinearRegressionSpec, LinkSource, LinkedDataRegion, MathTransformPreset, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
     NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, PairwiseBracketSpec, ParameterRule, ParameterScope, PlacementMode,
     ProjectDocument, RectPt, RegressionOverlaySpec, ReplicateLineMode, ResultSheet, ResultStatus, SheetCellRange, SheetId, TableArchetype,
     TickLabelFormat, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme, WhiskerMethod,
 };
-use curvebook_engine::dag::{recalculate_project, recalculate_project_with_report, topological_order};
+use curvebook_engine::dag::{recalculate_project, recalculate_project_with_report, recalculate_project_with_report_cancellable, topological_order};
 use curvebook_engine::guard::run_guarded;
-use curvebook_engine::{EngineError, Session};
+use curvebook_engine::methods_report::{ReportFormat, generate_methods_report};
+use curvebook_engine::{Caller, EngineError, Session};
 use curvebook_fit::get_builtin_model;
 use curvebook_format::{open_project_bytes, save_project_bytes};
 use curvebook_palette::{MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde_json::json;
 
-use super::common::{approx_eq, col_sheet, ok_cmd, rs, xy_sheet};
+use super::common::{approx_eq, assert_bad_input, assert_err_code, col_sheet, ok_cmd, rs, run_cmds, session_with, xy_sheet};
 
 fn make_dose_response_sheet(id: &str, info_id: Option<&str>, xs: &[f64], true_params: [f64; 4]) -> DataSheet {
     let model = get_builtin_model("log_agonist_vs_response_4pl").expect("4PL builtin");
@@ -783,4 +786,95 @@ fn transient_failed_analysis_preserves_result_sheet_floating_notes() {
             && !recovered.scalars.is_empty()
             && recovered.floating_notes == vec![expected_note]
     );
+}
+
+#[test]
+fn aud_02_27_and_13_04_07_22_dag_cycles_failed_fits_source_resolution_and_cancellation() {
+    // AUD-02-27: self-referential ResultSheet returns ErrorCode::CycleDetected.
+    let mut doc_cyc = session_with("Cyc", vec![col_sheet("col-1", "G", &[("A", &[1.0, 2.0])])]).document().clone();
+    doc_cyc
+        .result_sheets
+        .push(ResultSheet::new(AnalysisSpec::new("self-cyc", "self-cyc", AnalysisKind::DescriptiveStats(Default::default())).unwrap()).unwrap());
+    assert_eq!(topological_order(&doc_cyc).unwrap_err().code, ErrorCode::CycleDetected);
+
+    // AUD-13-04: DAG preserves Failed(SolverFailed) from Ok nonlinear fit (empty scalars/curves) and fit.run surfaces SolverFailed.
+    let mut s_fail =
+        session_with("FailFit", vec![xy_sheet("xy-1", "D", "X", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[("A", &[100.0, 1.0, 99.0, 2.0, 98.0, 3.0])])]);
+    let mut doc_f = s_fail.document().clone();
+    let mut nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    nl.max_iters = 1;
+    doc_f.add_result_sheet(ResultSheet::new(AnalysisSpec::new("fit-fail", "xy-1", AnalysisKind::NonlinearRegression(nl)).unwrap()).unwrap()).unwrap();
+    let rep_f = recalculate_project_with_report(&mut doc_f).unwrap();
+    let rf = doc_f.result_sheet(&SheetId::new("fit-fail")).unwrap();
+    assert!(matches!(rf.status, ResultStatus::Failed { code: ErrorCode::SolverFailed, .. }) && rf.scalars.is_empty() && rf.fitted_curves.is_empty());
+    assert!(rep_f.failed_result_sheets.iter().any(|f| f.as_str() == "fit-fail"));
+    assert_err_code(
+        &mut s_fail,
+        "fit.run",
+        json!({ "sheet_id": "fit-fail-cmd", "source_sheet_id": "xy-1", "equation_id": "log_agonist_vs_response_4pl", "max_iters": 1 }),
+        ErrorCode::SolverFailed,
+    );
+
+    // AUD-13-07: multi-hop graph source resolution prefers analyzable_data, keeps terminal tab_rows bounds, and rejects Failed upstream/direct sources with Conflict.
+    let mut s_hop = session_with("Hop", vec![xy_sheet("xy-1", "D", "X", &[1.0, 2.0, 3.0, 4.0], &[("A", &[10.0, 40.0, 70.0, 100.0])])]);
+    run_cmds(
+        &mut s_hop,
+        &[
+            ("transform.run", json!({ "sheet_id": "norm-1", "source_sheet_id": "xy-1", "kind": "normalize" })),
+            ("transform.run", json!({ "sheet_id": "prune-2", "source_sheet_id": "norm-1", "kind": "prune_rows", "every_k_rows": 2 })),
+            ("stats.run", json!({ "sheet_id": "desc-3", "source_sheet_id": "prune-2", "kind": "descriptive" })),
+            ("graph.create", json!({ "sheet_id": "g-prune", "data_sheet_id": "prune-2" })),
+        ],
+    );
+    assert_eq!(rs(&s_hop, "prune-2").analyzable_data.as_ref().unwrap().archetype.row_count(), 2);
+    assert_bad_input(
+        &mut s_hop,
+        "graph.formatSelectedPoints",
+        json!({ "sheet_id": "g-prune", "overrides": [{ "series_index": 0, "point_index": 2, "hidden": true }] }),
+    );
+    let g_out = ok_cmd(&mut s_hop, "graph.create", json!({ "sheet_id": "g-chain", "data_sheet_id": "desc-3", "kind": "ResidualPlot" }));
+    assert_eq!((&g_out.payload["data_sheet_id"], &g_out.payload["title"]), (&json!("desc-3"), &json!("Descriptive statistics")));
+    let desc_rows = rs(&s_hop, "desc-3").tabs.iter().map(|t| t.rows.len()).max().unwrap_or(0);
+    assert!(desc_rows > 4);
+    ok_cmd(
+        &mut s_hop,
+        "graph.formatSelectedPoints",
+        json!({ "sheet_id": "g-chain", "overrides": [{ "series_index": 0, "point_index": desc_rows - 1, "hidden": true }] }),
+    );
+    assert!(!generate_methods_report(s_hop.document(), &SheetId::new("desc-3"), ReportFormat::PlainText).unwrap().is_empty());
+
+    let mut d_fail1 = s_hop.document().clone();
+    d_fail1.result_sheet_mut(&SheetId::new("norm-1")).unwrap().status =
+        ResultStatus::Failed { code: ErrorCode::SolverFailed, message: "boom".into() };
+    assert_err_code(
+        &mut Session::from_document(d_fail1),
+        "graph.create",
+        json!({ "sheet_id": "g-f1", "data_sheet_id": "norm-1" }),
+        ErrorCode::Conflict,
+    );
+
+    let mut d_fail2 = s_hop.document().clone();
+    d_fail2.result_sheet_mut(&SheetId::new("prune-2")).unwrap().status =
+        ResultStatus::Failed { code: ErrorCode::SolverFailed, message: "upstream failed".into() };
+    let mut s_f2 = Session::from_document(d_fail2);
+    for (cmd_id, params) in [
+        ("graph.create", json!({ "sheet_id": "g-f2", "data_sheet_id": "desc-3" })),
+        ("graph.formatSelectedPoints", json!({ "sheet_id": "g-chain", "overrides": [{ "series_index": 0, "point_index": 0, "hidden": true }] })),
+        ("graph.formatSelectedPoints", json!({ "sheet_id": "g-prune", "overrides": [{ "series_index": 0, "point_index": 0, "hidden": true }] })),
+    ] {
+        assert_err_code(&mut s_f2, cmd_id, params, ErrorCode::Conflict);
+    }
+
+    // AUD-13-22: cooperative cancellation stops DAG, project.recalculate, and analyze.run leaving ResultStatus::Dirty.
+    let mut doc_c = session_with("Cancel", vec![col_sheet("col-1", "G", &[("A", &[1.0, 2.0, 3.0]), ("B", &[4.0, 5.0, 6.0])])]).document().clone();
+    doc_c
+        .add_result_sheet(ResultSheet::new(AnalysisSpec::new("res-c", "col-1", AnalysisKind::DescriptiveStats(Default::default())).unwrap()).unwrap())
+        .unwrap();
+    let cancelled = AtomicBool::new(true);
+    assert_eq!(recalculate_project_with_report_cancellable(&mut doc_c, Some(&cancelled)).unwrap_err().code, ErrorCode::Cancelled);
+    assert_eq!(doc_c.result_sheet(&SheetId::new("res-c")).unwrap().status, ResultStatus::Dirty);
+    let mut s_c = Session::from_document(doc_c);
+    assert_eq!(s_c.execute_with_caller("project.recalculate", json!({}), Caller::Cli, &cancelled).unwrap_err().code, ErrorCode::Cancelled);
+    assert_eq!(s_c.execute_with_caller("analyze.run", json!({}), Caller::Cli, &cancelled).unwrap_err().code, ErrorCode::Cancelled);
+    assert_eq!(rs(&s_c, "res-c").status, ResultStatus::Dirty);
 }

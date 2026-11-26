@@ -8,10 +8,11 @@ use curvebook_doc::analysis::{
     resolve_analysis_descriptor,
 };
 use curvebook_doc::{
-    AnalysisKind, AreaUnderCurveSpec, BlandAltmanSpec, ContingencyMethod, ContingencySpec, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec,
-    KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MultipleRowTestsSpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec,
-    SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AreaUnderCurveSpec, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod,
+    DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting, LeveneTestSpec,
+    LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec,
+    SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -243,4 +244,87 @@ fn lookup_helpers_resolve_every_descriptor_and_reject_unknown_queries() {
     assert_eq!(descriptor_by_serde_variant("NonExistentVariant"), None);
     assert_eq!(descriptor_by_ui_catalog_id("stats.unknown"), None);
     assert_eq!(resolve_analysis_descriptor("  "), None);
+}
+
+#[test]
+fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
+    assert!(AnalysisKindId::Multivariate.descriptor().accepts_canonical_param_key("pcr_outcome_column"));
+    let cases = [
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: Some(0) }),
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true }),
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+            k_means_k: Some(3),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: Some(6),
+        }),
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+            imputations_m: 5,
+            max_iters: 10,
+            seed: 7,
+            response_column: Some(0),
+            predictor_columns: vec![1, 2],
+        }),
+        AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: true }),
+        AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 }),
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+            log_rank_mantel_cox: true,
+            gehan_breslow_wilcoxon: false,
+            trend_test: false,
+            asymmetrical_greenwood_ci: true,
+            multiplicity: MultiplicitySpec::default(),
+            mv_time_column: Some(0),
+            mv_status_column: Some(1),
+            mv_group_column: Some(2),
+        }),
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+            time_column: 0,
+            status_column: 1,
+            predictor_columns: vec![2],
+            reference_levels: Vec::new(),
+            tie_method: CoxTieMethod::Efron,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: Some(MathTransformPreset::Log10),
+            y_transform: None,
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::ColumnMin,
+            hundred_anchor: NormalizeAnchor::ColumnMax,
+            output_percent: true,
+            per_data_set: true,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
+            seed: 1,
+            row_count: 10,
+            replicates: 2,
+            x_min: 0.0,
+            x_max: 10.0,
+            equation_id: String::from("four_pl"),
+            parameters: vec![(String::from("Top"), 100.0)],
+            noise: SimulationNoise::None,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
+            seed: 1,
+            sample_size: 5,
+            stratify_column: Some(0),
+            proportional_allocation: true,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: Some(String::from("[A] > 0")),
+            target_archetype: TableKind::Column,
+            derived_columns: vec![DerivedColumnFormula::new("D", "[A] * 2")],
+        }),
+    ];
+    for kind in cases {
+        let desc = kind.descriptor();
+        let val = serde_json::to_value(&kind).unwrap();
+        let inner = val.as_object().unwrap().get(desc.serde_variant).unwrap().as_object().unwrap();
+        for sub_obj in inner.values().filter_map(|v| v.as_object()) {
+            for key in sub_obj.keys() {
+                assert!(desc.accepts_canonical_param_key(key), "descriptor `{}` missing key `{key}`", desc.slug);
+            }
+        }
+    }
 }

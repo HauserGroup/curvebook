@@ -222,3 +222,23 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
     );
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn mac_menu_accelerator_parses_plus_and_slash() {
+    use curvebook::mac_menu::parse_muda_accelerator;
+    for (spec, expected) in [
+        ("Cmd++", true),
+        ("Cmd+Shift++", true),
+        ("+", true),
+        ("Cmd+/", true),
+        ("Cmd+Shift+/", true),
+        ("/", true),
+        ("Cmd+/ / Ctrl+/", true),
+        ("Cmd+K / Ctrl+K", true),
+        ("Cmd+", false),
+        ("++", false),
+    ] {
+        assert_eq!(parse_muda_accelerator(spec).is_some(), expected, "{spec}");
+    }
+}

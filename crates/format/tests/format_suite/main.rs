@@ -24,7 +24,6 @@ mod r17_5_legacy_import_hardening;
 mod r17_6_xlsx_uncached_formulas;
 mod r17_7_import_and_schema_v8;
 mod recovery_and_interop_parity;
-mod rem_audit_format;
 mod rv_ledger_format;
 mod schemas_doc_parity;
 mod unpacked_and_pzfx_budget;

@@ -1,11 +1,14 @@
-use crate::common::{build_zip_entries, pzfx_doc, result_sheet_with_kind, rnum};
+use crate::common::{build_zip_entries, col_sheet, make_result_sheet, pzfx_doc, pzfx_tables, result_sheet_with_kind, rnum, xlsx_single_sheet_zip};
 use curvebook_doc::{
-    AnalysisKind, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, FittedCurveOverlay, OneWayAnovaSpec, PairwiseComparisonRecord,
-    ResultCell, ResultScalarEntry, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, TableKind, VariableRole,
+    AnalysisKind, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, FittedCurveOverlay, OneWayAnovaSpec,
+    PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultStatus, ResultTab, ResultTabKind, SheetId, SourceCellId, SubcolumnMode,
+    TableArchetype, TableKind, VariableRole,
 };
+use curvebook_format::xml::decode_xml_entities;
 use curvebook_format::{
     CsvOptions, FormatError, ImportWarningKind, XmlLimits, ZipLimits, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
-    import_prism_bytes, import_prism_bytes_with_limits, import_pzfx_str, parse_delimited_records, parse_xml, parse_xml_with_limits,
+    import_prism_bytes, import_prism_bytes_with_limits, import_pzfx_str, import_xlsx_bytes, parse_delimited_records, parse_xml,
+    parse_xml_with_limits,
 };
 use serde_json::json;
 
@@ -21,6 +24,18 @@ fn xml_parser_handles_bom_comments_cdata_entities_and_security_bounds() {
     assert!(matches!(parse_xml("<!DOCTYPE foo [<!ENTITY bar \"baz\">]><Root/>"), Err(FormatError::XmlParse { .. })));
     let limits = XmlLimits { max_bytes: 4096, max_depth: 3, max_nodes: 100 };
     assert!(matches!(parse_xml_with_limits("<A><B><C><D/></C></B></A>", limits), Err(FormatError::XmlDepthExceeded { depth: 4, max: 3 })));
+
+    // NUL and forbidden XML 1.0 C0/nonchar entities rejected everywhere; whitespace refs accepted.
+    for bad in ["&#0;", "&#x0;", "&#x00;", "&#1;", "&#8;", "&#11;", "&#x0C;", "&#31;", "&#xFFFE;", "&#xFFFF;"] {
+        assert!(matches!(decode_xml_entities(bad, 0), Err(FormatError::XmlParse { .. })), "{bad}");
+        assert!(matches!(parse_xml(&format!("<Root>{bad}</Root>")), Err(FormatError::XmlParse { .. })), "{bad}");
+    }
+    let bad_pzfx =
+        pzfx_tables("<Table TableType=\"OneWay\"><Title>T</Title><YColumn><Title>A</Title><Subcolumn><d>Dose&#0;1</d></Subcolumn></YColumn></Table>");
+    assert!(matches!(import_pzfx_str(&bad_pzfx), Err(FormatError::XmlParse { .. })));
+    let bad_xlsx = xlsx_single_sheet_zip("Nul", r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Sample&#x0;A</t></is></c></row>"#);
+    assert!(matches!(import_xlsx_bytes(&bad_xlsx), Err(FormatError::XmlParse { .. })));
+    assert_eq!(parse_xml("<Root>a&#9;b&#10;c&#13;d&#32;e</Root>").unwrap().plain_text(), "a\tb\nc\rd e");
 }
 
 #[test]
@@ -204,4 +219,54 @@ fn result_sheet_tidy_csv_and_structured_json_export() {
 fn prism_zip_importer_uses_neutral_default_title_when_manifest_title_missing() {
     let zip = build_zip_entries(&[("manifest.json", br#"{"title":"   "}"#), ("data/values.csv", b"Group,Response\nA,1.5\nB,2.5\n")]);
     assert_eq!(import_prism_bytes(&zip).unwrap().document.title, "Imported Project");
+}
+
+#[test]
+fn result_exports_preserve_outliers_pred_bands_footnotes_and_analyzable_data() {
+    let mut rs = make_result_sheet("fit-rout", "data-1", ResultStatus::UpToDate);
+    rs.tabs[0].footnotes = vec![String::from("ROUT Q = 1%"), String::from("=formula_note")];
+    rs.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("four_pl"),
+        converged: true,
+        ambiguous: false,
+        points: vec![CurveSamplePoint {
+            x: -7.0,
+            y: 50.0,
+            ci_lower: Some(45.0),
+            ci_upper: Some(55.0),
+            pred_lower: Some(35.0),
+            pred_upper: Some(65.0),
+        }],
+    });
+    rs.eliminated_outliers.push(SourceCellId { sheet_id: SheetId::new("data-1"), row: 2, col: 0, subcol: 1 });
+    let mut cleaned = col_sheet("fit-rout-cleaned", 1, 1);
+    cleaned.set_cell(CellCoord::new(0, 0, 0), Cell::number(42.0)).unwrap();
+    rs.analyzable_data = Some(cleaned);
+
+    let opts = CsvOptions::csv();
+    let tidy = parse_delimited_records(&export_result_sheet_tidy_csv(&rs, &opts), &opts).unwrap();
+    assert_eq!((tidy[0].len(), tidy[0][19].as_str(), tidy[0][20].as_str()), (21, "pred_lower", "pred_upper"));
+    assert!(tidy.iter().all(|r| r.len() == 21));
+    assert!(tidy.iter().any(|r| r[2] == "curve_point" && r[14] == "45" && r[15] == "55" && r[19] == "35" && r[20] == "65"));
+    assert!(tidy.iter().any(|r| r[2] == "tab_footnote" && r[3] == "summary" && r[8] == "ROUT Q = 1%"));
+    assert!(tidy.iter().any(|r| r[2] == "tab_footnote" && r[8] == "'=formula_note"));
+    assert!(tidy.iter().any(|r| r[2] == "eliminated_outlier" && r[3] == "data-1" && r[6] == "row_2" && r[7] == "col_0_sub_1"));
+
+    let jv: serde_json::Value = serde_json::from_str(&export_result_sheet_json(&rs, false).unwrap()).unwrap();
+    assert_eq!(
+        (
+            &jv["eliminated_outliers"][0]["sheet_id"],
+            &jv["eliminated_outliers"][0]["row"],
+            &jv["eliminated_outliers"][0]["subcol"],
+            &jv["analyzable_data"]["id"]
+        ),
+        (&json!("data-1"), &json!(2), &json!(1), &json!("fit-rout-cleaned"))
+    );
+    if let Some(ref mut ad) = rs.analyzable_data
+        && let TableArchetype::Column(ref mut ct) = ad.archetype
+    {
+        ct.data_sets[0].cells[0][0] = Cell { value: CellValue::Number(f64::NAN), excluded: false };
+    }
+    assert!(matches!(export_result_sheet_json(&rs, false), Err(FormatError::NonFiniteFloat { .. })));
 }

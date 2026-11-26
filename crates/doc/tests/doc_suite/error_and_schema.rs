@@ -1,10 +1,12 @@
 //! Verification tests for structured L1 error codes, `RemediationKind`, and Draft 2020-12 JSON Schema helpers (`C2`).
 
+use curvebook_doc::analysis::ALL_ANALYSIS_DESCRIPTORS;
 use curvebook_doc::layout::{LayoutItemLimitError, MAX_LAYOUT_ITEMS};
 use curvebook_doc::{
-    Cell, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ContingencyTable, DRAFT_2020_12_SCHEMA_URI, DataSetColumn, DataSheet,
-    DocError, ErrorCategory, ErrorCode, GroupedTable, JournalWidthPreset, JsonSchema, LayoutItem, LayoutSpec, MAX_SUBCOLUMNS, MultipleVariablesTable,
-    NestedTable, PROJECT_DOCUMENT_SCHEMA_ID, PartsOfWholeTable, ProjectDocument, RectPt, RemediationKind, ResultStatus, SequenceProgression, SheetId,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ContingencyTable, DRAFT_2020_12_SCHEMA_URI,
+    DataSetColumn, DataSheet, DemingErrorSpec, DocError, ErrorCategory, ErrorCode, GroupedTable, JournalWidthPreset, JsonSchema, LayoutItem,
+    LayoutSpec, LinearRegressionSpec, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedTable, PROJECT_DOCUMENT_SCHEMA_ID, PartsOfWholeTable,
+    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SequenceProgression, SheetId,
     SubcolumnMode, SurvivalTable, TableArchetype, VariableColumn, XColumnMode, XyTable, array_schema, bool_schema, enum_schema, integer_schema,
     number_schema, object_schema, project_document_schema, string_schema, transpose_cell_grid,
 };
@@ -123,6 +125,19 @@ fn schema_helpers_produce_valid_draft_2020_12_json() {
     assert!(doc_val["$defs"]["RemediationKind"]["enum"].as_array().expect("RemediationKind enum").len() == RemediationKind::ALL.len());
     assert!(doc_val["$defs"]["ChecklistItem"]["properties"]["remediation"].is_object());
     assert!(doc_val["$defs"]["ResultStatus"]["oneOf"].is_array());
+
+    // Every AnalysisKind variant (including R18 FitSplineLowess, SimpleLogisticRegression, LeveneTest) appears in AnalysisSpec.kind schema.
+    let kind_prop = doc_schema.defs.get("AnalysisSpec").expect("AnalysisSpec $def").properties.get("kind").expect("kind property");
+    assert_eq!(kind_prop.any_of.len(), 2);
+    let (power_props, other_props) = (&kind_prop.any_of[0].properties, &kind_prop.any_of[1].properties);
+    for req in ["FitSplineLowess", "SimpleLogisticRegression", "LeveneTest"] {
+        assert!(other_props.contains_key(req), "missing {req} in schema");
+    }
+    assert!(power_props.contains_key("PowerAnalysis"));
+    for desc in &ALL_ANALYSIS_DESCRIPTORS {
+        assert!(power_props.contains_key(desc.serde_variant) || other_props.contains_key(desc.serde_variant), "missing {}", desc.serde_variant);
+    }
+    assert_eq!(power_props.len() + other_props.len(), ALL_ANALYSIS_DESCRIPTORS.len());
 }
 
 #[test]
@@ -306,4 +321,74 @@ fn r1_s05_02_transpose_ragged_cell_grid_is_bounded() {
     assert!(transpose_cell_grid(&[]).is_empty());
     let rect = vec![vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)], vec![Cell::number(4.0), Cell::number(5.0), Cell::number(6.0)]];
     assert_eq!(transpose_cell_grid(&transpose_cell_grid(&rect)), rect);
+}
+
+#[test]
+fn non_finite_linear_regression_and_result_pvalue_rejected() {
+    let cases = [
+        (LinearRegressionSpec { fixed_point: Some((f64::NAN, 0.0)), ..Default::default() }, "analysis.fixed_point.x0"),
+        (LinearRegressionSpec { fixed_point: Some((0.0, f64::INFINITY)), ..Default::default() }, "analysis.fixed_point.y0"),
+        (
+            LinearRegressionSpec {
+                deming_model_ii: true,
+                deming_error: DemingErrorSpec::StandardDeviations { sd_x: f64::NAN, sd_y: 1.0 },
+                ..Default::default()
+            },
+            "analysis.deming_error.sd_x",
+        ),
+        (
+            LinearRegressionSpec {
+                deming_model_ii: true,
+                deming_error: DemingErrorSpec::StandardDeviations { sd_x: 1.0, sd_y: f64::NEG_INFINITY },
+                ..Default::default()
+            },
+            "analysis.deming_error.sd_y",
+        ),
+        (
+            LinearRegressionSpec {
+                deming_model_ii: true,
+                deming_error: DemingErrorSpec::VarianceRatio { lambda: f64::INFINITY },
+                ..Default::default()
+            },
+            "analysis.deming_error.lambda",
+        ),
+    ];
+    for (spec, expected_path) in cases {
+        let kind = AnalysisKind::LinearRegression(spec);
+        assert!(AnalysisSpec::new("lin-bad", "data-1", kind.clone()).is_err(), "{expected_path}");
+        let mut raw = AnalysisSpec::new("lin-raw", "data-1", AnalysisKind::LinearRegression(Default::default())).unwrap();
+        raw.kind = kind;
+        assert_eq!(raw.first_non_finite_float().as_deref(), Some(expected_path));
+        assert!(raw.validate_structural().is_err());
+        let mut doc = ProjectDocument::new("Finite Check").unwrap();
+        let mut rs = ResultSheet::new(AnalysisSpec::new("lin-rs", "data-1", AnalysisKind::LinearRegression(Default::default())).unwrap()).unwrap();
+        rs.analysis.kind = raw.kind;
+        doc.result_sheets.push(rs);
+        assert_eq!(doc.first_non_finite_float().as_deref(), Some(format!("lin-rs.{expected_path}").as_str()));
+    }
+    let valid = LinearRegressionSpec {
+        deming_model_ii: true,
+        fixed_point: Some((1.5, 2.5)),
+        deming_error: DemingErrorSpec::StandardDeviations { sd_x: 0.5, sd_y: 0.25 },
+        ..Default::default()
+    };
+    assert_eq!(AnalysisSpec::new("lin-ok", "data-1", AnalysisKind::LinearRegression(valid)).unwrap().first_non_finite_float(), None);
+
+    let make_p_sheet = |raw: f64| {
+        let mut rs = ResultSheet::new(AnalysisSpec::new("res-p", "data-1", AnalysisKind::DescriptiveStats(Default::default())).unwrap()).unwrap();
+        rs.tabs.push(ResultTab {
+            id: String::from("summary"),
+            title: String::from("Summary"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("P value")],
+            row_labels: vec![String::from("Row 1")],
+            rows: vec![vec![ResultCell::PValue { raw, formatted: String::from("0.0123"), stars: String::from("*") }]],
+            footnotes: Vec::new(),
+        });
+        rs
+    };
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(matches!(make_p_sheet(bad).validate(), Err(DocError::InvalidCellValue { reason: "result.tabs.rows.p_value", .. })), "{bad:?}");
+    }
+    make_p_sheet(0.0123).validate().unwrap();
 }

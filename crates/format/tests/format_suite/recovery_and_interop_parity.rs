@@ -558,3 +558,23 @@ fn r1_s11_03_stale_owner_cannot_clobber_active_owner_snapshot_or_journal() {
     let (_, post_b) = open_dir_journal(dir.path(), "owner-C", 5_000, 20_000).unwrap();
     assert_eq!((post_b.snapshot.as_deref(), post_b.recovered_commands), (Some(b"LIVE-SNAPSHOT-B".as_slice()), vec![json!({ "from": "B" })]));
 }
+
+#[test]
+fn recovery_journal_rejects_seq_overflow_before_appending() {
+    let mut backend = MemoryJournalBackend::new();
+    backend
+        .append_journal_line(&JournalOpRecord::new(u64::MAX - 1, json!({"command_id": "noop", "params": {}})).unwrap().to_ndjson_line().unwrap())
+        .unwrap();
+    let (mut j, rep) = CrashRecoveryJournal::open_or_recover(backend, "owner-1", 60_000, 1_000).unwrap();
+    assert_eq!((rep.recovered_seqs, j.record_command(json!({"command_id": "last", "params": {}})).unwrap()), (vec![u64::MAX - 1], u64::MAX));
+
+    let before = j.backend().read_journal_bytes().unwrap();
+    assert!(matches!(j.record_command(json!({"command_id": "overflow", "params": {}})), Err(FormatError::Io(ref m)) if m.contains("overflow")));
+    assert_eq!(j.backend().read_journal_bytes().unwrap(), before);
+
+    let (mut reopened, rep2) = CrashRecoveryJournal::open_or_recover(j.abandon(), "owner-2", 60_000, 100_000).unwrap();
+    assert_eq!(rep2.recovered_seqs, vec![u64::MAX - 1, u64::MAX]);
+    let before2 = reopened.backend().read_journal_bytes().unwrap();
+    assert!(reopened.record_command(json!({"command_id": "overflow2", "params": {}})).is_err());
+    assert_eq!(reopened.backend().read_journal_bytes().unwrap(), before2);
+}

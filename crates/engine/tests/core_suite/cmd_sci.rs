@@ -4,13 +4,16 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BreakOrnament, Cell, DataSheet, FramePreset, GraphKind, NonlinearFitSpec, ResultStatus, ResultTabKind, SheetId,
-    VariableRole,
+    AnalysisKind, AnalysisSpec, BracketLabelMode, BreakOrnament, Cell, DataSheet, DemingErrorSpec, FramePreset, GraphKind, NonlinearFitSpec,
+    PointStyleOverride, ProjectDocument, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableRole, XColumnMode, XyTable,
 };
 use curvebook_engine::{Session, cmd, cmd::helpers::compile_sheet_scene};
 use serde_json::{Value, json};
 
-use super::common::{TempDir, col_sheet, err_cmd, gs, mv_sheet, ok_cmd, rs, run_cmds, session_with, survival_sheet, xy_4pl_sheet};
+use super::common::{
+    TempDir, assert_bad_input, assert_bad_inputs, col_sheet, err_cmd, gs, mv_sheet, ok_cmd, rs, run_cmds, scalar, session_with, survival_sheet,
+    xy_4pl_sheet, xy_sheet,
+};
 
 fn anova_col(id: &str, offset: f64) -> DataSheet {
     let v: Vec<f64> = [10.2, 11.0, 9.8, 10.5, 10.1].iter().map(|x| x + offset).collect();
@@ -181,6 +184,10 @@ fn test_4pl_fit_graph_overlay_styling_and_all_exports() {
     let pdf_out = ok_cmd(&mut session, "export.pdf", json!({ "sheet_id": "g-4pl", "color_space": "cmyk", "path": pdf_path.to_string_lossy() }));
     assert!(pdf_out.payload["byte_len"].as_u64().unwrap() > 100 && pdf_out.payload["base64"].as_str().unwrap().len() > 100);
     assert!(std::fs::read(&pdf_path).unwrap().starts_with(b"%PDF-"));
+    // AUD-02-21: export.pdf grayscale & rejecting both sheet_id and sheet_ids.
+    let gray = ok_cmd(&mut session, "export.pdf", json!({ "sheet_id": "g-4pl", "color_space": "grayscale" }));
+    assert!(gray.payload["byte_len"].as_u64().unwrap() > 100 && gray.payload["color_space"] == "Grayscale");
+    assert_bad_input(&mut session, "export.pdf", json!({ "sheet_id": "g-4pl", "sheet_ids": ["g-4pl"] }));
 
     let png_out = ok_cmd(&mut session, "export.png", json!({ "sheet_id": "g-4pl", "dpi": 150, "path": png_path.to_string_lossy() }));
     assert!(png_out.payload["byte_len"].as_u64().unwrap() > 100);
@@ -217,6 +224,19 @@ fn test_stats_anova_auto_brackets_update_params_and_retarget() {
         "graph.addComparisonBrackets",
         json!({ "sheet_id": "g-col", "result_sheet_id": "stat-anova", "group_a": "Vehicle", "group_b": "High Dose", "style": "curly", "label_mode": "numeric" }),
     );
+    // AUD-02-14: bracket label_mode rejects blank and preserves case in Custom label.
+    assert_bad_input(
+        &mut session,
+        "graph.addComparisonBrackets",
+        json!({ "sheet_id": "g-col", "result_sheet_id": "stat-anova", "label_mode": "   " }),
+    );
+    ok_cmd(
+        &mut session,
+        "graph.addComparisonBrackets",
+        json!({ "sheet_id": "g-col", "result_sheet_id": "stat-anova", "group_a": "Vehicle", "group_b": "Low Dose", "label_mode": "P < 0.001 (Bonferroni)" }),
+    );
+    let custom_br = gs(&session, "g-col").spec.comparisons.iter().find(|b| b.group_a == 0 && b.group_b == 1).expect("Vehicle vs Low Dose bracket");
+    assert_eq!(custom_br.label_mode, BracketLabelMode::Custom("P < 0.001 (Bonferroni)".into()));
     assert!(compile_sheet_scene(session.document(), &SheetId::new("g-col")).unwrap().width_pt > 0.0);
 
     ok_cmd(
@@ -416,4 +436,137 @@ fn test_malformed_and_non_ascii_color_strings_rejected_without_panic() {
         assert!(err.to_string().contains("invalid hex"), "unexpected error for `{bad_color}`: {err}");
     }
     ok_cmd(&mut session, "graph.setSeries", json!({ "sheet_id": "g1", "series_index": 0, "color": "#1F77B4CC" }));
+}
+
+#[test]
+fn aud_02_04_10_15_22_24_and_ext_01_fit_graph_validation_and_x_scale_warnings() {
+    // AUD-02-04: linear/deming fit.run preserves standard_addition, extend_line_to_x_intercept, and Deming VarianceRatio.
+    let mut s_xy = session_with("XY", vec![xy_sheet("xy-1", "Dose", "X", &[1.0, 2.0, 3.0, 4.0, 5.0], &[("Drug A", &[3.1, 4.9, 7.2, 8.8, 11.1])])]);
+    run_cmds(
+        &mut s_xy,
+        &[
+            (
+                "fit.run",
+                json!({ "sheet_id": "lin-std", "source_sheet_id": "xy-1", "kind": "linear", "standard_addition": true, "extend_line_to_x_intercept": true }),
+            ),
+            ("fit.run", json!({ "sheet_id": "dem-eq", "source_sheet_id": "xy-1", "kind": "deming" })),
+            (
+                "fit.run",
+                json!({ "sheet_id": "dem-ratio", "source_sheet_id": "xy-1", "kind": "deming", "deming_error": { "VarianceRatio": { "lambda": 10.0 } }, "extend_line_to_x_intercept": true }),
+            ),
+        ],
+    );
+    let AnalysisKind::LinearRegression(ref lin) = rs(&s_xy, "lin-std").analysis.kind else { panic!("expected LinearRegression") };
+    assert!(lin.standard_addition && lin.extend_line_to_x_intercept);
+    let AnalysisKind::LinearRegression(ref dem) = rs(&s_xy, "dem-ratio").analysis.kind else { panic!("expected Deming") };
+    assert!(dem.deming_error == DemingErrorSpec::VarianceRatio { lambda: 10.0 } && dem.extend_line_to_x_intercept);
+    assert!((scalar(&s_xy, "dem-eq", "Slope") - scalar(&s_xy, "dem-ratio", "Slope")).abs() > 1e-6);
+
+    // AUD-02-10: graph title stays synced across create, initialize, setSpec, and explicit inner spec.title.
+    for (cmd_id, params, exp_sheet, exp_spec) in [
+        ("graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "xy-1", "title": "Created Title" }), "Created Title", "Created Title"),
+        ("graph.initialize", json!({ "sheet_id": "g1", "kind": "xy", "title": "Initialized Title" }), "Initialized Title", "Initialized Title"),
+        ("graph.setSpec", json!({ "sheet_id": "g1", "title": "SetSpec Title" }), "SetSpec Title", "SetSpec Title"),
+        (
+            "graph.setSpec",
+            json!({ "sheet_id": "g1", "title": "Sheet Label", "spec": { "title": "Explicit Inner Spec Title" } }),
+            "Sheet Label",
+            "Explicit Inner Spec Title",
+        ),
+    ] {
+        ok_cmd(&mut s_xy, cmd_id, params);
+        assert_eq!((gs(&s_xy, "g1").title.as_str(), gs(&s_xy, "g1").spec.title.as_str()), (exp_sheet, exp_spec));
+    }
+
+    // AUD-02-24: formatSelectedPoints mode="clear" removes stale out-of-bounds point override.
+    let mut doc_oob = s_xy.document().clone();
+    doc_oob.graph_sheet_mut(&SheetId::new("g1")).unwrap().spec.point_overrides.push(PointStyleOverride {
+        series_index: 0,
+        point_index: 99,
+        subcol: None,
+        hidden: true,
+        ..Default::default()
+    });
+    let mut s_oob = Session::from_document(doc_oob);
+    let clr = ok_cmd(
+        &mut s_oob,
+        "graph.formatSelectedPoints",
+        json!({ "sheet_id": "g1", "mode": "clear", "points": [{ "series_index": 0, "point_index": 99 }] }),
+    );
+    assert!(clr.payload["override_count"] == 0 && gs(&s_oob, "g1").spec.point_overrides.is_empty());
+
+    // AUD-02-15 & AUD-02-22(1,2): misplaced create_graph/spec conflicts, strict graph.addAnnotation & edit.pasteResultTable validation.
+    let mut s_v = session_with("Val", vec![col_sheet("col-1", "G", &[("A", &[1.0, 2.0, 3.0]), ("B", &[4.0, 5.0, 6.0])])]);
+    run_cmds(
+        &mut s_v,
+        &[
+            ("stats.run", json!({ "sheet_id": "res-1", "source_sheet_id": "col-1", "kind": "descriptive" })),
+            ("graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "col-1" })),
+        ],
+    );
+    let spec_v = serde_json::to_value(AnalysisSpec::new("res-spec", "col-1", AnalysisKind::DescriptiveStats(Default::default())).unwrap()).unwrap();
+    assert_bad_inputs(
+        &mut s_v,
+        &[
+            ("stats.run", json!({ "source_sheet_id": "col-1", "kind": "descriptive", "create_graph": true })),
+            ("transform.run", json!({ "source_sheet_id": "col-1", "kind": "normalize", "graph_sheet_id": "g-99" })),
+            ("analysis.run", json!({ "create_graph": true })),
+            ("analysis.run", json!({ "sheet_id": "other-id", "spec": spec_v })),
+            ("analysis.run", json!({ "source_sheet_id": "other-src", "spec": spec_v })),
+            (
+                "graph.addAnnotation",
+                json!({ "sheet_id": "g1", "annotation": { "TextBox": { "bounds_pt": { "x": 10.0, "y": 10.0, "width": 80.0, "height": 20.0 }, "markdown": "hi", "bordered": false } }, "kind": "text" }),
+            ),
+            ("graph.addAnnotation", json!({ "sheet_id": "g1", "kind": "text", "text": "hi", "bordred": true })),
+            ("graph.addAnnotation", json!({ "sheet_id": "g1", "kind": "text", "text": "hi", "x_pt": "not_a_number" })),
+            ("graph.addAnnotation", json!({ "sheet_id": "g1", "kind": "shape", "shape": "triangle" })),
+            ("edit.pasteResultTable", json!({ "source_sheet_id": "res-1", "target_sheet_id": "g1", "style": { "bogus_key": true } })),
+        ],
+    );
+
+    // EXT-01: fit.run default equation picks agonist_vs_response_4pl vs log_agonist_vs_response_4pl by X scale, surfaces scale/identifiability warnings, and inspects multi-subcolumn X.
+    let (raw_xs, raw_ys) = ([0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0], [2.0, 5.0, 18.0, 50.0, 82.0, 95.0, 99.0]);
+    let mut s_raw = session_with("Raw", vec![xy_sheet("xy-1", "D", "X", &raw_xs, &[("A", &raw_ys)])]);
+    assert_eq!(
+        ok_cmd(&mut s_raw, "fit.run", json!({ "sheet_id": "fit-raw", "source_sheet_id": "xy-1" })).payload["equation_id"],
+        "agonist_vs_response_4pl"
+    );
+    assert!(matches!(&rs(&s_raw, "fit-raw").analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "agonist_vs_response_4pl"));
+
+    let mut s_log = session_with("Log", vec![xy_sheet("xy-1", "D", "X", &[-9.0, -8.0, -7.0, -6.0, -5.0, -4.0, -3.0], &[("A", &raw_ys)])]);
+    assert_eq!(
+        ok_cmd(&mut s_log, "fit.run", json!({ "sheet_id": "fit-log", "source_sheet_id": "xy-1" })).payload["equation_id"],
+        "log_agonist_vs_response_4pl"
+    );
+
+    let mut s_mis = session_with(
+        "Mis",
+        vec![xy_sheet("xy-1", "D", "X", &[1.0, 10.0, 100.0, 1_000.0, 10_000.0, 100_000.0], &[("A", &[2.0, 12.0, 48.0, 85.0, 97.0, 99.0])])],
+    );
+    let mis =
+        ok_cmd(&mut s_mis, "fit.run", json!({ "sheet_id": "fit-mis", "source_sheet_id": "xy-1", "equation_id": "log_agonist_vs_response_4pl" }));
+    assert!(!mis.payload["scale_warnings"].as_array().unwrap().is_empty() && !mis.warnings.is_empty());
+    assert!(mis.payload["ambiguous"].is_boolean() && mis.payload["fit_status"].is_string() && mis.payload["identifiability_warnings"].is_array());
+
+    let mut s_amb =
+        session_with("Amb", vec![xy_sheet("xy-1", "D", "X", &[-9.0, -8.5, -8.0, -7.5, -7.0, -6.5], &[("A", &[1.0, 1.3, 2.2, 4.5, 9.8, 21.0])])]);
+    let amb = ok_cmd(
+        &mut s_amb,
+        "fit.run",
+        json!({ "sheet_id": "fit-amb", "source_sheet_id": "xy-1", "equation_id": "log_agonist_vs_response_4pl", "identify_unstable_parameters": true }),
+    );
+    assert!(amb.payload["ambiguous"].as_bool().unwrap() || !amb.payload["identifiability_warnings"].as_array().unwrap().is_empty());
+
+    let mut mx =
+        XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(2) }, SubcolumnMode::Single, 1, raw_xs.len())
+            .unwrap();
+    for (r, (&x, &y)) in raw_xs.iter().zip(&raw_ys).enumerate() {
+        (mx.x_cells[r][0], mx.x_cells[r][1], mx.data_sets[0].cells[r][0]) = (Cell::empty(), Cell::number(x), Cell::number(y));
+    }
+    let mut doc_mx = ProjectDocument::new("Multi-X").unwrap();
+    doc_mx.add_data_sheet(DataSheet::new("xy-mx", "Multi-X", TableArchetype::Xy(mx)).unwrap()).unwrap();
+    assert_eq!(
+        ok_cmd(&mut Session::from_document(doc_mx), "fit.run", json!({ "sheet_id": "fit-mx", "source_sheet_id": "xy-mx" })).payload["equation_id"],
+        "agonist_vs_response_4pl"
+    );
 }

@@ -29,8 +29,5 @@ mod r35_anova_reml_oracles;
 mod r35_power_multiplicity_oracles;
 mod r35_survival_twogroup_oracles;
 mod r36_rm_reml_oracles;
-mod rem_aud05_anova;
-mod rem_aud05_core;
-mod rem_aud05_reg_cat_surv;
 mod wave21_r97_r912_clustering;
 mod wave22c_wf29_wf43;

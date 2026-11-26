@@ -8,6 +8,7 @@ use curvebook_doc::{
     GlmSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, PassingBablokSpec, ResultCell, ResultTabKind, SubcolumnMode,
     SurvivalAnalysisSpec, TableArchetype, VariableRole, XColumnMode, XyTable,
 };
+use curvebook_math::dist::student_t_two_sided_isf;
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::rng::DeterministicRng;
 use curvebook_math::sum::SummaryMoments;
@@ -15,13 +16,13 @@ use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::StatsError;
 use curvebook_stats::multiplicity::{adjust_holm_sidak, adjust_sidak};
 use curvebook_stats::multivariate::{
-    MAX_CLUSTERING_N, MultipleImputationConfig, cophenetic_correlation, cophenetic_distance_matrix, correlation_matrix, cut_dendrogram,
-    hierarchical_clustering_with_metrics, kendall_tau_b, kmeans_pp, kmeans_pp_with_distance, mice_predictive_mean_matching, pairwise_distance_matrix,
-    pca_analysis, rubin_pool_estimates, spearman_correlation,
+    LinkageMethod, MAX_CLUSTERING_N, MultipleImputationConfig, cophenetic_correlation, cophenetic_distance_matrix, correlation_matrix,
+    cut_dendrogram, hierarchical_clustering, hierarchical_clustering_with_metrics, kendall_tau_b, kmeans_pp, kmeans_pp_with_distance,
+    mice_predictive_mean_matching, pairwise_distance_matrix, pca_analysis, rubin_pool_estimates, spearman_correlation,
 };
 use curvebook_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression, passing_bablok_regression};
 use curvebook_stats::survival::{CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve, log_rank_trend_test};
-use curvebook_testkit::assert_approx_eq;
+use curvebook_testkit::{assert_approx_eq, assert_rel_close};
 
 use crate::common::{
     assert_close, cell_num, cell_p, mv_cells_sheet, mv_num_sheet, mv_opt_sheet, obs, presum_col_sheet, run_kind, run_kind_sel, scalar, scalar_opt,
@@ -1010,4 +1011,297 @@ fn audit_fa_sec06_02_multivariate_presummarized_xy_parity_and_horn_pa() {
     )
     .unwrap();
     assert!(scalar(&r550, "cophenetic_r").is_finite() && !r550.tabs.iter().any(|t| t.id == "clustering-distance-matrix"));
+}
+
+#[test]
+fn audit_aud05_regression_glm_and_passing_bablok_edge_oracles() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-03 (Passing-Bablok CUSUM sheet label) & AUD-05-34 (k_offset=0 tied-X swap invariance).
+    let pb_sh = xy_sheet("pb-lbl", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[1.5, 2.1, 3.9, 4.5, 6.3, 6.9]);
+    let pb_rs = run_kind(&pb_sh, AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 0, y_column: 1 })).unwrap();
+    assert!(tab_by_id(&pb_rs, "pb-summary").row_labels.iter().any(|l| l == "CUSUM standardized H / sqrt(L + l)"));
+    let (pb1, pb2) = (
+        passing_bablok_regression(&[1.0, 2.0, 2.0, 3.0, 4.0], &[1.0, 1.0, 3.0, 3.0, 4.0], conf).unwrap(),
+        passing_bablok_regression(&[1.0, 2.0, 2.0, 3.0, 4.0], &[1.0, 3.0, 1.0, 3.0, 4.0], conf).unwrap(),
+    );
+    assert_eq!((pb1.k_offset, pb2.k_offset, pb1.valid_slopes), (0, 0, pb2.valid_slopes));
+    assert_close(pb1.slope, pb2.slope, 1e-12, "PB tied-X swap slope");
+
+    // AUD-05-10 (Durbin & Watson 1950): Tiny-scale MLR adj R^2 & exact DW = 0.0 on constant nonzero no-intercept residuals.
+    let y_u = [1.2, 1.8, 3.5, 3.1, 5.4, 5.1, 7.6, 7.2, 9.5, 9.1];
+    let y_t: Vec<f64> = y_u.iter().map(|&v| v * 1e-16).collect();
+    let x10 = DenseMatrix::from_row_major(10, 2, (1..=10).flat_map(|i| [1.0, i as f64]).collect()).unwrap();
+    let nm2 = ["Intercept".into(), "X".into()];
+    let (ru, rt) = (
+        multiple_linear_regression(&x10, &y_u, &nm2, true, false, conf).unwrap(),
+        multiple_linear_regression(&x10, &y_t, &nm2, true, false, conf).unwrap(),
+    );
+    assert_close(rt.r_squared, ru.r_squared, 1e-12, "tiny y R^2");
+    assert_close(rt.adjusted_r_squared, ru.adjusted_r_squared, 1e-12, "tiny y adj R^2");
+    let dw0 = multiple_linear_regression(
+        &DenseMatrix::from_row_major(4, 1, vec![1.0, -1.0, 1.0, -1.0]).unwrap(),
+        &[1.0; 4],
+        &["X".into()],
+        false,
+        false,
+        conf,
+    )
+    .unwrap();
+    assert_close(dw0.durbin_watson, 0.0, 1e-12, "exact DW = 0.0");
+
+    // AUD-05-28 & AUD-05-32: Rare-event logistic convergence & shifted-predictor (1e6) invariance for Logistic & Poisson.
+    let n_rare = 60_000_usize;
+    let x_rare: Vec<f64> = (0..n_rare).flat_map(|i| [1.0, (i % 20) as f64 - 9.5]).collect();
+    let mut y_rare = vec![0.0_f64; n_rare];
+    for idx in [5, 10_008, 20_012, 30_014, 40_016] {
+        y_rare[idx] = 1.0;
+    }
+    let rare = multiple_logistic_regression(&DenseMatrix::from_row_major(n_rare, 2, x_rare).unwrap(), &y_rare, &nm2, false, conf).unwrap();
+    assert!(rare.converged && !rare.separation_detected);
+
+    let y_bin = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let y_cnt = [1.0, 2.0, 2.0, 3.0, 5.0, 4.0, 7.0, 9.0, 11.0, 15.0, 20.0];
+    let m0 = DenseMatrix::from_row_major(11, 2, (0..=10).flat_map(|i| [1.0, i as f64]).collect()).unwrap();
+    let ms = DenseMatrix::from_row_major(11, 2, (0..=10).flat_map(|i| [1.0, i as f64 + 1_000_000.0]).collect()).unwrap();
+    let (l0, ls) = (
+        multiple_logistic_regression(&m0, &y_bin, &nm2, false, conf).unwrap(),
+        multiple_logistic_regression(&ms, &y_bin, &nm2, false, conf).unwrap(),
+    );
+    assert!(ls.converged);
+    assert_close(ls.terms[1].beta, l0.terms[1].beta, 1e-7, "shifted logistic beta1");
+    assert_close(ls.terms[1].se, l0.terms[1].se, 1e-7, "shifted logistic se1");
+    let (p0, ps) =
+        (multiple_poisson_regression(&m0, &y_cnt, &nm2, false, conf).unwrap(), multiple_poisson_regression(&ms, &y_cnt, &nm2, false, conf).unwrap());
+    assert!(ps.converged);
+    assert_close(ps.terms[1].beta, p0.terms[1].beta, 1e-7, "shifted poisson beta1");
+    assert_close(ps.terms[1].se, p0.terms[1].se, 1e-7, "shifted poisson se1");
+
+    // AUD-13-06 (Logistic GLM): Emits an "ROC" FittedCurveOverlay whose trapezoidal AUC matches DeLong ROC AUC.
+    let xs_roc = [-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0];
+    let ys_roc = [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let glm_res =
+        run_kind(&mv_num_sheet("mv-glm", &[("Outcome", &ys_roc), ("Dose", &xs_roc)]), glm_kind(GlmFamily::Logistic, 0, vec![1], vec![], false))
+            .unwrap();
+    let mut pts: Vec<(f64, f64)> = glm_res.fitted_curves.iter().find(|c| c.equation_id == "ROC").unwrap().points.iter().map(|p| (p.x, p.y)).collect();
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+    let trap_auc: f64 = pts.windows(2).map(|w| 0.5 * (w[1].0 - w[0].0) * (w[0].1 + w[1].1)).sum();
+    assert_close(trap_auc, scalar(&glm_res, "ROC AUC"), 1e-10, "Logistic GLM ROC overlay AUC");
+}
+
+#[test]
+fn audit_aud05_survival_cox_ties_multiscale_signed_zero_and_design_guards() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-07 (Harrell 1982): Covariate-symmetric Cox Harrell C-index tie tolerance (220.5/354, not 270.5/354).
+    let mut sym_rows: Vec<(f64, bool, [f64; 2])> =
+        vec![(0.5, true, [2.0, 2.0]), (0.6, true, [2.0, 2.0]), (0.7, true, [2.0, 2.0]), (11.5, false, [2.0, 2.0])];
+    for t in 1..=5 {
+        sym_rows.extend([(t as f64, true, [0.1, 0.2]), (t as f64, true, [0.2, 0.1])]);
+    }
+    for t in 6..=10 {
+        sym_rows.extend([(t as f64, t < 10, [0.3, 0.0]), (t as f64, t < 10, [0.0, 0.3])]);
+    }
+    sym_rows.extend([(0.8, true, [0.0, 0.0]), (11.0, false, [0.0, 0.0]), (12.0, false, [0.0, 0.0]), (13.0, false, [0.0, 0.0])]);
+    let sym: Vec<_> = sym_rows.iter().map(|&(t, e, x)| CoxSubject { time: t, event: e, x: x.to_vec() }).collect();
+    let sym_sw: Vec<_> = sym_rows.iter().map(|&(t, e, x)| CoxSubject { time: t, event: e, x: vec![x[1], x[0]] }).collect();
+    let r_sym = cox_ph_regression(&sym, &["x1".into(), "x2".into()], CoxTieMethod::Breslow, conf).unwrap();
+    let r_sw = cox_ph_regression(&sym_sw, &["x2".into(), "x1".into()], CoxTieMethod::Breslow, conf).unwrap();
+    assert!(r_sym.converged && r_sym.covariates[0].beta > 0.1);
+    assert_close(r_sym.covariates[0].beta, r_sym.covariates[1].beta, 1e-12, "sym beta0 == beta1");
+    assert_close(r_sym.concordance.unwrap(), 220.5 / 354.0, 1e-12, "exact tied Harrell C-index");
+    assert_close(r_sym.concordance.unwrap(), r_sw.concordance.unwrap(), 1e-12, "Harrell C-index swap symmetry");
+
+    // AUD-05-29 (Cox 1972): Separation respects tie method (Breslow/Efron finite interior MLE; Exact monotone separation).
+    let tie_sub: Vec<_> = [(1.0, true, 2.0), (1.0, true, 1.0), (2.0, false, 1.0), (2.0, false, 0.0), (2.0, false, 0.0)]
+        .into_iter()
+        .map(|(time, event, x)| CoxSubject { time, event, x: vec![x] })
+        .collect();
+    for (tie, exp_b) in [(CoxTieMethod::Breslow, 1.289_9), (CoxTieMethod::Efron, 1.490_4)] {
+        let r = cox_ph_regression(&tie_sub, &["X".into()], tie, conf).unwrap();
+        assert!(r.converged && r.covariates[0].se.is_finite() && r.covariates[0].se > 0.0);
+        assert_close(r.covariates[0].beta, exp_b, 5e-3, "tied Cox beta");
+    }
+    assert!(!cox_ph_regression(&tie_sub, &["X".into()], CoxTieMethod::Exact, conf).unwrap().converged);
+
+    // AUD-05-31: Cox Exact ties DoS budget cap.
+    let big_sub: Vec<_> = (0..2_000)
+        .map(|i| CoxSubject { time: if i < 1_000 { 1.0 } else { 2.0 }, event: i < 1_000, x: (0..20).map(|j| ((i + j) % 7) as f64).collect() })
+        .collect();
+    let names20: Vec<String> = (0..20).map(|j| format!("X{j}")).collect();
+    assert!(matches!(
+        cox_ph_regression(&big_sub, &names20, CoxTieMethod::Exact, conf),
+        Err(StatsError::InvalidParameter { name: "cox_exact_ties_budget", .. })
+    ));
+
+    // AUD-05-33: Cox multi-scale covariate standardization (Age vs molar 1e-8 Conc).
+    let (ev, age, conc) = (
+        [true, true, true, true, false, true, false, true, false, false],
+        [40.0, 55.0, 45.0, 65.0, 50.0, 70.0, 35.0, 60.0, 42.0, 48.0],
+        [1.0, 4.0, 2.0, 3.0, 5.0, 2.5, 4.5, 1.5, 3.5, 6.0],
+    );
+    let sc = 1e-8_f64;
+    let s_u: Vec<_> = (0..10).map(|i| CoxSubject { time: (i + 1) as f64, event: ev[i], x: vec![age[i], conc[i]] }).collect();
+    let s_m: Vec<_> = (0..10).map(|i| CoxSubject { time: (i + 1) as f64, event: ev[i], x: vec![age[i], conc[i] * sc] }).collect();
+    let (ru, rm) = (
+        cox_ph_regression(&s_u, &["Age".into(), "Conc".into()], CoxTieMethod::Efron, conf).unwrap(),
+        cox_ph_regression(&s_m, &["Age".into(), "Conc".into()], CoxTieMethod::Efron, conf).unwrap(),
+    );
+    assert!(rm.converged);
+    assert_close(rm.covariates[0].beta, ru.covariates[0].beta, 1e-8, "Age beta");
+    assert_close(rm.covariates[0].se, ru.covariates[0].se, 1e-8, "Age SE");
+    assert_rel_close(rm.covariates[1].beta * sc, ru.covariates[1].beta, 1e-8, "Molar beta");
+    assert_rel_close(rm.covariates[1].se * sc, ru.covariates[1].se, 1e-8, "Molar SE");
+
+    // AUD-05-45: Signed -0.0 time normalization in KM & Cox PH.
+    let km_z = kaplan_meier_curve("z", &obs(&[(-0.0, false), (0.0, true), (1.0, true)]), true, conf).unwrap();
+    assert_eq!((km_z.steps.len(), km_z.steps[0].n_events, km_z.steps[0].n_censored), (2, 1, 1));
+    let mk_z = |t0: f64| {
+        [(t0, false, 0.0), (0.0, true, 1.0), (1.0, true, 0.0), (2.0, false, 1.0)]
+            .into_iter()
+            .map(|(time, event, x)| CoxSubject { time, event, x: vec![x] })
+            .collect::<Vec<_>>()
+    };
+    let (cn, cp) = (
+        cox_ph_regression(&mk_z(-0.0), &["X".into()], CoxTieMethod::Breslow, conf).unwrap(),
+        cox_ph_regression(&mk_z(0.0), &["X".into()], CoxTieMethod::Breslow, conf).unwrap(),
+    );
+    assert_close(cn.log_lik_null, cp.log_lik_null, 1e-12, "Cox -0.0 ll_null");
+    assert_close(cn.log_lik_model, cp.log_lik_model, 1e-12, "Cox -0.0 ll_model");
+
+    // AUD-05-53: MV Cox design validation & single-level categorical rejection.
+    let sh_cox = mv_cells_sheet(
+        "mv-cox",
+        &[
+            ("Time", Some(VariableRole::Continuous), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0].map(Cell::number)),
+            ("Status", Some(VariableRole::Continuous), &[1.0, 0.0, 1.0, 1.0, 0.0, 1.0].map(Cell::number)),
+            ("Age", Some(VariableRole::Continuous), &[40.0, 50.0, 60.0, 45.0, 55.0, 65.0].map(Cell::number)),
+            ("Sex", Some(VariableRole::Categorical), &["F", "F", "F", "F", "F", "F"].map(Cell::text)),
+        ],
+    );
+    assert!(matches!(
+        run_kind(&sh_cox, cox_kind(0, 0, vec![2], vec![], CoxTieMethod::Efron)),
+        Err(StatsError::InvalidParameter { name: "status_column", .. })
+    ));
+    for bad_p in [vec![0, 2], vec![2, 2]] {
+        assert!(matches!(
+            run_kind(&sh_cox, cox_kind(0, 1, bad_p, vec![], CoxTieMethod::Efron)),
+            Err(StatsError::InvalidParameter { name: "predictor_columns", .. })
+        ));
+    }
+    assert!(matches!(run_kind(&sh_cox, cox_kind(0, 1, vec![2, 3], vec![], CoxTieMethod::Efron)), Err(StatsError::ZeroVariance { .. })));
+}
+
+#[test]
+fn audit_aud05_multivariate_clustering_rubin_kendall_and_pca_scale() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-12 (Murtagh & Legendre 2014): Regular tetrahedron UPGMA & Ward topological sort & monotonic merge heights.
+    let s3 = 3.0_f64.sqrt();
+    for (side, leg, doc, id) in
+        [(0.7, LinkageMethod::Average, ClusterLinkage::Upgma, "tet-upgma"), (1.7, LinkageMethod::WardD2, ClusterLinkage::Ward, "tet-ward")]
+    {
+        let pts = vec![
+            vec![0.0, 0.0, 0.0],
+            vec![side, 0.0, 0.0],
+            vec![0.5 * side, 0.5 * side * s3, 0.0],
+            vec![0.5 * side, side * s3 / 6.0, side * (2.0_f64 / 3.0).sqrt()],
+        ];
+        let merges = hierarchical_clustering(&pts, leg).unwrap();
+        assert_eq!(merges.len(), 3);
+        for (step, m) in merges.iter().enumerate() {
+            assert!(m.left < 0 || (m.left as usize) < step);
+            assert!(m.right < 0 || (m.right as usize) < step);
+        }
+        assert!(merges.windows(2).all(|w| w[0].distance <= w[1].distance));
+        let coph = cophenetic_distance_matrix(4, &merges).unwrap();
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_close(coph[i][j], side, 1e-12, id);
+            }
+        }
+        for k in 1..=4 {
+            assert_eq!(cut_dendrogram(4, &merges, k).unwrap().len(), 4);
+        }
+        let sh = mv_num_sheet(
+            id,
+            &[
+                ("X", &[pts[0][0], pts[1][0], pts[2][0], pts[3][0]]),
+                ("Y", &[pts[0][1], pts[1][1], pts[2][1], pts[3][1]]),
+                ("Z", &[pts[0][2], pts[1][2], pts[2][2], pts[3][2]]),
+            ],
+        );
+        let rs = run_kind(
+            &sh,
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+                k_means_k: Some(2),
+                distance: ClusterDistance::Euclidean,
+                linkage: doc,
+                k_sweep_max: None,
+            }),
+        )
+        .unwrap();
+        assert!(rs.tabs.iter().any(|t| t.id == "hierarchical-dendrogram"));
+    }
+
+    // AUD-05-38: kmeans_pp & kmeans_pp_with_distance enforce MAX_CLUSTERING_N; valid small sample silhouette > 0.99.
+    let n_over = MAX_CLUSTERING_N + 1;
+    let over: Vec<Vec<f64>> =
+        (0..n_over).map(|i| if i < n_over / 2 { vec![i as f64 * 1e-4, 0.0] } else { vec![100.0 + i as f64 * 1e-4, 100.0] }).collect();
+    assert!(matches!(kmeans_pp(&over, 2, 42), Err(StatsError::InvalidParameter { name: "clustering_n", value }) if value == n_over as f64));
+    assert!(matches!(
+        kmeans_pp_with_distance(&over, 2, ClusterDistance::Euclidean, 42),
+        Err(StatsError::InvalidParameter { name: "clustering_n", value }) if value == n_over as f64
+    ));
+    let small: Vec<Vec<f64>> = (0..10).map(|i| vec![i as f64 * 0.01, 0.0]).chain((0..10).map(|i| vec![100.0 + i as f64 * 0.01, 100.0])).collect();
+    assert!(kmeans_pp(&small, 2, 42).unwrap().mean_silhouette > 0.99);
+
+    // AUD-05-39 & AUD-05-60 Part 3 (Rubin 1987; Barnard & Rubin 1999): Zero/tiny within-variance pooling & lambda identity.
+    let rz = rubin_pool_estimates("p", &[1.0, 2.0, 3.0], &[0.0; 3], Some(20.0), conf).unwrap();
+    let (exp_se, exp_tc) = ((4.0_f64 / 3.0).sqrt(), student_t_two_sided_isf(0.05, 2.0).unwrap());
+    assert!(rz.riv.is_infinite() && rz.riv.is_sign_positive() && rz.p_value.is_finite() && rz.p_value > 0.0 && rz.p_value < 1.0);
+    assert_close(rz.lambda, 1.0, 1e-15, "rubin u=0 lambda");
+    assert_close(rz.fmi, 1.0, 1e-15, "rubin u=0 fmi");
+    assert_close(rz.df, 2.0, 1e-12, "rubin u=0 df");
+    assert_close(rz.pooled_se, exp_se, 1e-14, "rubin u=0 se");
+    assert_close(rz.ci.0, 2.0 - exp_tc * exp_se, 1e-12, "rubin u=0 ci lo");
+    assert_close(rz.ci.1, 2.0 + exp_tc * exp_se, 1e-12, "rubin u=0 ci hi");
+    let rcap = rubin_pool_estimates("p", &[1.0, 2.0, 3.0, 4.0, 5.0], &[0.0; 5], Some(2.5), conf).unwrap();
+    assert_close(rcap.df, 2.5, 1e-12, "rubin vc cap");
+    assert!(rcap.ci.0.is_finite() && rcap.ci.1.is_finite());
+    let rtiny = rubin_pool_estimates("t", &[1.0, 2.0, 3.0], &[1e-14; 3], Some(20.0), conf).unwrap();
+    assert!(
+        (1.999_999..=2.000_001).contains(&rtiny.df) && rtiny.ci.0.is_finite() && rtiny.ci.1.is_finite() && rtiny.riv.is_finite() && rtiny.riv > 1e12
+    );
+    assert!(rubin_pool_estimates("s", &[1.0, 2.0, 3.0], &[1e-8; 3], Some(20.0), conf).unwrap().p_value.is_finite());
+    let rn = rubin_pool_estimates("Slope", &[1.80, 2.05, 1.95, 2.20, 2.00], &[0.04, 0.05, 0.045, 0.06, 0.055], Some(30.0), conf).unwrap();
+    assert_close(rn.lambda, 1.2 * rn.between_variance / rn.total_variance, 1e-14, "lambda=(1+1/m)B/T");
+    assert_close(rn.lambda, rn.riv / (1.0 + rn.riv), 1e-14, "lambda=r/(1+r)");
+    assert!((rn.fmi - rn.lambda).abs() > 1e-3);
+
+    // AUD-05-47 (Kendall 1945): Sign-based tau-b immune to dx*dy underflow & wide-span overflow.
+    assert_close(kendall_tau_b(&[1e-200, 2e-200, 3e-200, 4e-200], &[1e-200, 2e-200, 3e-200, 4e-200]).unwrap().r, 1.0, 1e-15, "kendall tiny+");
+    assert_close(kendall_tau_b(&[1e-200, 2e-200, 3e-200, 4e-200], &[4e-200, 3e-200, 2e-200, 1e-200]).unwrap().r, -1.0, 1e-15, "kendall tiny-");
+    assert_close(kendall_tau_b(&[-1e308, 0.0, 1e308], &[-1e308, 0.0, 1e308]).unwrap().r, 1.0, 1e-15, "kendall wide");
+
+    // AUD-05-48 (Jolliffe 2002): Unstandardized PCA at 1e-16 preserves variance proportions; constant matrix -> ZeroVariance.
+    let base_flat = vec![
+        1.0, 2.0, 0.5, 2.0, 4.1, 0.9, 3.0, 5.8, 1.6, 4.0, 8.2, 2.1, 5.0, 9.9, 2.4, 6.0, 12.1, 3.2, 7.0, 13.8, 3.5, 8.0, 16.2, 4.1, 9.0, 17.9, 4.4,
+        10.0, 20.1, 5.0,
+    ];
+    let tiny_flat: Vec<f64> = base_flat.iter().map(|&v| v * 1e-16).collect();
+    let v_lbls = ["V1".into(), "V2".into(), "V3".into()];
+    let (pb, pt) = (
+        pca_analysis(&DenseMatrix::from_row_major(10, 3, base_flat).unwrap(), &v_lbls, false, None).unwrap(),
+        pca_analysis(&DenseMatrix::from_row_major(10, 3, tiny_flat).unwrap(), &v_lbls, false, None).unwrap(),
+    );
+    assert_close(pt.variance_proportion.iter().sum(), 1.0, 1e-12, "tiny PCA sum");
+    assert!(pt.kaiser_components == pb.kaiser_components && pt.kaiser_components >= 1);
+    for (vt, vb) in pt.variance_proportion.iter().zip(&pb.variance_proportion) {
+        assert_close(*vt, *vb, 1e-12, "tiny PCA prop");
+    }
+    assert!(matches!(
+        pca_analysis(&DenseMatrix::from_row_major(5, 2, vec![3.0; 10]).unwrap(), &["A".into(), "B".into()], false, None),
+        Err(StatsError::ZeroVariance { .. })
+    ));
 }

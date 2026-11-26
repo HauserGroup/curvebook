@@ -13,15 +13,22 @@
 //!   backend readiness invariants, and `WF-49` live coefficient refresh on upstream edits.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use curvebook_chart::equation_box::{ModelEquationParams, render_model_equation_annotation, render_tex_equation_box};
-use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, compile_graph, preflight_check_scene};
+use curvebook_chart::equation_box::{
+    ModelEquationParams, is_parametric_equation_analysis, render_model_equation_annotation, render_tex_equation_box, resolve_model_equation_tex,
+};
+use curvebook_chart::scales::resolve_template_hooks;
+use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, compile_graph, extract_fit_summary_entries, preflight_check_scene};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, DataSheet, EquationDisplayMode, GraphAnnotation, GraphSheet, LinearRegressionSpec, NonlinearFitSpec,
-    ProjectDocument, RectPt as DocRectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    AnalysisKind, AnalysisSpec, Cell, CurveSamplePoint, DataSheet, EquationDisplayMode, FittedCurveOverlay, GraphAnnotation, GraphSheet,
+    IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt as DocRectPt,
+    RegressionOverlaySpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SplineLowessSpec,
+    SubcolumnMode, TableArchetype, XyTable,
 };
 use curvebook_fit::{HookContext, execute_analysis, list_builtin_equations};
 use curvebook_palette::Rgba8;
 use curvebook_text::{RichText, measure_text_pt};
+
+use super::common::{assert_scenes_bit_identical, scene_texts};
 
 #[derive(Debug, Clone)]
 struct TextBox {
@@ -140,90 +147,6 @@ fn path_x_bounds(path: &Path2D) -> Option<(f64, f64)> {
         }
     }
     any.then_some((min_x, max_x))
-}
-
-fn assert_paths_bit_identical(p1: &Path2D, p2: &Path2D, idx: usize) {
-    assert_eq!(p1.commands.len(), p2.commands.len(), "cmd len mismatch at {idx}");
-    for (ca, cb) in p1.commands.iter().zip(&p2.commands) {
-        match (ca, cb) {
-            (PathCmd::MoveTo(u), PathCmd::MoveTo(v)) | (PathCmd::LineTo(u), PathCmd::LineTo(v)) => {
-                assert_eq!(u.x.to_bits(), v.x.to_bits());
-                assert_eq!(u.y.to_bits(), v.y.to_bits());
-            }
-            (PathCmd::QuadTo { control: c1a, to: t1 }, PathCmd::QuadTo { control: c1b, to: t2 }) => {
-                assert_eq!(c1a.x.to_bits(), c1b.x.to_bits());
-                assert_eq!(c1a.y.to_bits(), c1b.y.to_bits());
-                assert_eq!(t1.x.to_bits(), t2.x.to_bits());
-                assert_eq!(t1.y.to_bits(), t2.y.to_bits());
-            }
-            (PathCmd::CubicTo { c1: a1, c2: a2, to: t1 }, PathCmd::CubicTo { c1: b1, c2: b2, to: t2 }) => {
-                assert_eq!(a1.x.to_bits(), b1.x.to_bits());
-                assert_eq!(a1.y.to_bits(), b1.y.to_bits());
-                assert_eq!(a2.x.to_bits(), b2.x.to_bits());
-                assert_eq!(a2.y.to_bits(), b2.y.to_bits());
-                assert_eq!(t1.x.to_bits(), t2.x.to_bits());
-                assert_eq!(t1.y.to_bits(), t2.y.to_bits());
-            }
-            (PathCmd::Close, PathCmd::Close) => {}
-            _ => panic!("path cmd mismatch at {idx}"),
-        }
-    }
-}
-
-fn assert_primitive_bit_identical(idx: usize, pa: &ScenePrimitive, pb: &ScenePrimitive) {
-    match (pa, pb) {
-        (ScenePrimitive::Text(ta), ScenePrimitive::Text(tb)) => {
-            assert_eq!(ta.rich, tb.rich, "text mismatch at primitive {idx}");
-            assert_eq!(ta.anchor_pt.x.to_bits(), tb.anchor_pt.x.to_bits());
-            assert_eq!(ta.anchor_pt.y.to_bits(), tb.anchor_pt.y.to_bits());
-            assert_eq!(ta.font_size_pt.to_bits(), tb.font_size_pt.to_bits());
-            assert_eq!(ta.rotation_deg.to_bits(), tb.rotation_deg.to_bits());
-            assert_eq!(ta.anchor, tb.anchor);
-            assert_eq!(ta.color, tb.color);
-        }
-        (ScenePrimitive::Path { path: p1, fill: f1, stroke: s1, clip: c1 }, ScenePrimitive::Path { path: p2, fill: f2, stroke: s2, clip: c2 }) => {
-            assert_eq!(f1, f2, "fill mismatch at {idx}");
-            assert_eq!(c1.is_some(), c2.is_some());
-            assert_paths_bit_identical(p1, p2, idx);
-            match (s1, s2) {
-                (Some(sa), Some(sb)) => {
-                    assert_eq!(sa.color, sb.color);
-                    assert_eq!(sa.width_pt.to_bits(), sb.width_pt.to_bits());
-                    assert_eq!(sa.cap, sb.cap);
-                    assert_eq!(sa.join, sb.join);
-                }
-                (None, None) => {}
-                _ => panic!("stroke mismatch at {idx}"),
-            }
-        }
-        (ScenePrimitive::RasterImage(ia), ScenePrimitive::RasterImage(ib)) => {
-            assert_eq!(ia.asset_id, ib.asset_id);
-            assert_eq!(ia.pixel_size, ib.pixel_size);
-            assert_eq!(ia.rgba, ib.rgba);
-            assert_eq!(ia.bounds_pt.x.to_bits(), ib.bounds_pt.x.to_bits());
-            assert_eq!(ia.bounds_pt.y.to_bits(), ib.bounds_pt.y.to_bits());
-            assert_eq!(ia.bounds_pt.width.to_bits(), ib.bounds_pt.width.to_bits());
-            assert_eq!(ia.bounds_pt.height.to_bits(), ib.bounds_pt.height.to_bits());
-            assert_eq!(ia.rotation_deg.to_bits(), ib.rotation_deg.to_bits());
-        }
-        (ScenePrimitive::PushClip { rect: r1 }, ScenePrimitive::PushClip { rect: r2 }) => {
-            assert_eq!(r1.x.to_bits(), r2.x.to_bits());
-            assert_eq!(r1.y.to_bits(), r2.y.to_bits());
-            assert_eq!(r1.width.to_bits(), r2.width.to_bits());
-            assert_eq!(r1.height.to_bits(), r2.height.to_bits());
-        }
-        (ScenePrimitive::PopClip, ScenePrimitive::PopClip) => {}
-        _ => panic!("primitive variant mismatch at {idx}"),
-    }
-}
-
-fn assert_scenes_bit_identical(a: &ChartScene, b: &ChartScene) {
-    assert_eq!(a.width_pt.to_bits(), b.width_pt.to_bits());
-    assert_eq!(a.height_pt.to_bits(), b.height_pt.to_bits());
-    assert_eq!(a.primitives.len(), b.primitives.len(), "primitive count mismatch");
-    for (idx, (pa, pb)) in a.primitives.iter().zip(&b.primitives).enumerate() {
-        assert_primitive_bit_identical(idx, pa, pb);
-    }
 }
 
 fn assert_scene_backend_ready(scene: &ChartScene) {
@@ -612,4 +535,233 @@ fn wf49_live_coefficient_refresh_on_upstream_table_edits_across_models() {
     assert_scene_backend_ready(&scene_v2);
     let texts_v2: Vec<String> = text_boxes(&scene_v2).into_iter().map(|b| b.text).collect();
     assert_ne!(texts_v1, texts_v2, "ModelEquation annotations must refresh when upstream data changes");
+}
+
+#[test]
+fn unstable_parameters_never_leak_to_equation_box_hooks_or_fit_summary() {
+    let render_eq_joined = |doc: &ProjectDocument, res_id: &str| {
+        let mut s = ChartScene::new("eq-unstable", "Test", 480.0, 320.0, None);
+        render_model_equation_annotation(
+            &mut s,
+            doc,
+            &ModelEquationParams {
+                result_sheet_id: &SheetId::new(res_id),
+                data_set_index: 0,
+                mode: EquationDisplayMode::Substituted,
+                bounds_pt: DocRectPt::new(20.0, 20.0, 0.0, 0.0),
+                font_size_pt: 10.0,
+                bordered: true,
+            },
+        );
+        scene_texts(&s).join(" ")
+    };
+
+    // 1. Live collinear custom DSL fit under IdentifyUnstableParameters leaves unstable params symbolic & unexpanded.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).expect("xy");
+    xy.data_sets[0].title = String::from("Assay");
+    for r in 0..8 {
+        let x = (r + 1) as f64;
+        xy.set_x_cell(r, Cell::number(x)).expect("x");
+        xy.data_sets[0].cells[r][0] = Cell::number(3.0 * x + 5.0);
+    }
+    let ds = DataSheet::new("xy-collinear", "Collinear", TableArchetype::Xy(xy)).expect("ds");
+    let mut nl = NonlinearFitSpec::new("custom_collinear");
+    nl.custom_dsl = Some(String::from("Y = A * X + B + C * X"));
+    nl.identifiability_mode = Some(IdentifiabilityMode::IdentifyUnstableParameters);
+    nl.identify_unstable_parameters = true;
+    let res_live = execute_analysis(
+        &AnalysisSpec::new("res-unstable-live", "xy-collinear", AnalysisKind::NonlinearRegression(nl)).expect("spec"),
+        &ds,
+        &HookContext::default(),
+    )
+    .expect("execute");
+    assert_eq!(res_live.status, ResultStatus::UpToDate);
+    let param_tab = res_live.tabs.iter().find(|t| t.id == "nonlinear_parameters").expect("nonlinear_parameters tab");
+    let unstable_names: Vec<String> = param_tab
+        .row_labels
+        .iter()
+        .zip(&param_tab.rows)
+        .filter(|(_, row)| matches!(row.first(), Some(ResultCell::Text(s)) if s.eq_ignore_ascii_case("Unstable")))
+        .map(|(lbl, _)| lbl.strip_suffix("(Unstable)").unwrap_or(lbl).trim().to_owned())
+        .collect();
+    assert!(!unstable_names.is_empty(), "expected unstable parameter: {:?}", param_tab.row_labels);
+
+    let mut doc = ProjectDocument::new("UnstableGuard").expect("doc");
+    doc.add_data_sheet(ds.clone()).expect("add ds");
+    doc.add_result_sheet(res_live).expect("add res_live");
+    let live_tex = resolve_model_equation_tex(&doc, &SheetId::new("res-unstable-live"), 0, EquationDisplayMode::Substituted).expect("live TeX");
+    for uname in &unstable_names {
+        let hook = format!("{{{{result:res-unstable-live:0:{uname}}}}}");
+        assert_eq!(resolve_template_hooks(&hook, &doc, Some(&ds.id)), hook);
+        assert!(live_tex.contains(uname.as_str()), "omitted unstable `{uname}` should remain symbolic in `{live_tex}`");
+    }
+
+    // 2. Legacy pre-Wave-1 ResultSheet with raw non-identifiable float `1.234e7` in scalars still masked in eq box, hooks, and fit summary.
+    let mk_4pl_unstable = |id: &str| {
+        let nl_4pl = NonlinearFitSpec {
+            identifiability_mode: Some(IdentifiabilityMode::IdentifyUnstableParameters),
+            identify_unstable_parameters: true,
+            ..NonlinearFitSpec::new("log_agonist_vs_response_4pl")
+        };
+        let mut r = ResultSheet::new(AnalysisSpec::new(id, "xy-collinear", AnalysisKind::NonlinearRegression(nl_4pl)).expect("spec")).expect("res");
+        r.status = ResultStatus::UpToDate;
+        r
+    };
+    let mut legacy = mk_4pl_unstable("res-unstable-legacy");
+    legacy.tabs.push(ResultTab {
+        id: String::from("nonlinear_parameters"),
+        title: String::from("Best-fit values & confidence intervals"),
+        kind: ResultTabKind::ParametersAndConfidenceIntervals,
+        column_headers: vec![String::from("Best-fit value")],
+        row_labels: vec![String::from("Bottom"), String::from("Top (Unstable)"), String::from("LogEC50"), String::from("HillSlope")],
+        rows: vec![
+            vec![ResultCell::Number { value: 10.5, prefix: None, units: None }],
+            vec![ResultCell::Text(String::from("Unstable"))],
+            vec![ResultCell::Number { value: -6.25, prefix: None, units: None }],
+            vec![ResultCell::Number { value: 1.45, prefix: None, units: None }],
+        ],
+        footnotes: Vec::new(),
+    });
+    legacy.scalars = [("Bottom", 10.5), ("Top", 1.234e7), ("LogEC50", -6.25), ("HillSlope", 1.45)]
+        .into_iter()
+        .map(|(k, value)| ResultScalarEntry { key: String::from(k), data_set_index: Some(0), value, units: None })
+        .collect();
+    legacy.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("log_agonist_vs_response_4pl"),
+        converged: true,
+        ambiguous: true,
+        points: vec![
+            CurveSamplePoint { x: 1.0, y: 10.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+            CurveSamplePoint { x: 8.0, y: 90.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+        ],
+    });
+    doc.add_result_sheet(legacy).expect("add legacy");
+
+    let eq_joined = render_eq_joined(&doc, "res-unstable-legacy");
+    assert!(!eq_joined.contains("1.234") && eq_joined.contains("10.5") && eq_joined.contains("Top"), "eq_joined={eq_joined}");
+    assert_eq!(
+        resolve_template_hooks("Top={{result:res-unstable-legacy:0:Top}}, Bottom={{result:res-unstable-legacy:0:Bottom}}", &doc, Some(&ds.id)),
+        "Top={{result:res-unstable-legacy:0:Top}}, Bottom=10.5"
+    );
+    assert_eq!(resolve_template_hooks("{{result:res-unstable-legacy:Top}}", &doc, Some(&ds.id)), "{{result:res-unstable-legacy:Top}}");
+
+    let mut graph = GraphSheet::new_uninitialized_for_data("g-legacy-unstable", &ds).expect("graph");
+    graph.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("res-unstable-legacy"),
+        sample_segments: 256,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: true,
+    });
+    let summary = extract_fit_summary_entries(&graph, &doc, 6);
+    assert_eq!(summary.len(), 1);
+    assert!(summary[0].metrics.iter().all(|m| m.label != "Top" && !m.formatted_value.contains("1.234")));
+
+    // 3. All parameters omitted renders graceful unavailable placeholder.
+    doc.add_result_sheet(mk_4pl_unstable("res-all-unstable")).expect("add all_omitted");
+    let ph_text = render_eq_joined(&doc, "res-all-unstable");
+    assert!(ph_text.contains("Fit parameters unavailable"), "got: {ph_text}");
+}
+
+#[test]
+fn linear_fixed_point_custom_dsl_branch_b_and_spline_equation_suppression() {
+    let mut doc = ProjectDocument::new("EqEdgeCases").expect("doc");
+
+    // 1. fixed_point takes precedence over force_through_origin -> Y = 2*X + 5 preserves Intercept and `+ 5`.
+    let mut xy_lin = XyTable::new(SubcolumnMode::Single, 1, 5).expect("xy lin");
+    for (r, (x, y)) in [(0.0, 5.0), (5.0, 15.0), (10.0, 25.0), (15.0, 35.0), (20.0, 45.0)].into_iter().enumerate() {
+        xy_lin.set_x_cell(r, Cell::number(x)).expect("x");
+        xy_lin.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let lin_ds = DataSheet::new("xy-fp", "FixedPoint", TableArchetype::Xy(xy_lin)).expect("ds");
+    let fp_spec = AnalysisSpec::new(
+        "res-fp",
+        "xy-fp",
+        AnalysisKind::LinearRegression(LinearRegressionSpec {
+            force_through_origin: true,
+            fixed_point: Some((10.0, 25.0)),
+            ..LinearRegressionSpec::default()
+        }),
+    )
+    .expect("fp spec");
+    let fp_res = execute_analysis(&fp_spec, &lin_ds, &HookContext::default()).expect("fp fit");
+    doc.add_data_sheet(lin_ds).expect("add lin_ds");
+    doc.add_result_sheet(fp_res).expect("add fp_res");
+    let fp_sym = resolve_model_equation_tex(&doc, &SheetId::new("res-fp"), 0, EquationDisplayMode::Symbolic).expect("fp sym");
+    let fp_sub = resolve_model_equation_tex(&doc, &SheetId::new("res-fp"), 0, EquationDisplayMode::Substituted).expect("fp sub");
+    assert!(fp_sym.contains("Intercept"), "fp_sym={fp_sym}");
+    assert!(fp_sub.contains('2') && fp_sub.contains("+ 5"), "fp_sub={fp_sub}");
+
+    // 2. Two-branch custom DSL: DS1 renders `<B>` branch (`NS * X`), never `<A>` branch.
+    let mut xy_dsl = XyTable::new(SubcolumnMode::Single, 2, 8).expect("xy dsl");
+    xy_dsl.data_sets[0].title = String::from("Total");
+    xy_dsl.data_sets[1].title = String::from("Nonspecific");
+    for (r, x) in [0.5, 1.0, 2.0, 4.0, 8.0, 12.0, 16.0, 20.0].into_iter().enumerate() {
+        xy_dsl.set_x_cell(r, Cell::number(x)).expect("x");
+        xy_dsl.data_sets[0].cells[r][0] = Cell::number(100.0 * x / (2.0 + x) + 1.5 * x);
+        xy_dsl.data_sets[1].cells[r][0] = Cell::number(1.5 * x);
+    }
+    let dsl_ds = DataSheet::new("xy-dsl", "Binding", TableArchetype::Xy(xy_dsl)).expect("dsl ds");
+    let mut nl_dsl = NonlinearFitSpec::new("custom_two_branch");
+    nl_dsl.custom_dsl = Some(String::from("<A> Y = Bmax * X / (Kd + X) + NS * X\n<B> Y = NS * X"));
+    nl_dsl.parameter_rules = vec![ParameterRule {
+        name: String::from("NS"),
+        scope: ParameterScope::SharedGlobal,
+        initial_override: Some(1.0),
+        lower_bound: None,
+        upper_bound: None,
+    }];
+    let dsl_res = execute_analysis(
+        &AnalysisSpec::new("res-dsl-ab", "xy-dsl", AnalysisKind::NonlinearRegression(nl_dsl)).expect("spec"),
+        &dsl_ds,
+        &HookContext::default(),
+    )
+    .expect("dsl fit");
+    doc.add_data_sheet(dsl_ds).expect("add dsl_ds");
+    doc.add_result_sheet(dsl_res).expect("add dsl_res");
+    let sym_a = resolve_model_equation_tex(&doc, &SheetId::new("res-dsl-ab"), 0, EquationDisplayMode::Symbolic).expect("sym A");
+    let sym_b = resolve_model_equation_tex(&doc, &SheetId::new("res-dsl-ab"), 1, EquationDisplayMode::Symbolic).expect("sym B");
+    let sub_b = resolve_model_equation_tex(&doc, &SheetId::new("res-dsl-ab"), 1, EquationDisplayMode::Substituted).expect("sub B");
+    assert!(sym_a.contains("Bmax") && sym_a.contains("Kd") && sym_a.contains("NS"), "sym_a={sym_a}");
+    assert!(sym_b.contains("NS") && !sym_b.contains("Bmax") && !sym_b.contains("Kd"), "sym_b={sym_b}");
+    assert!(sub_b.contains("1.5") && !sub_b.contains("100") && !sub_b.contains("\\frac"), "sub_b={sub_b}");
+
+    // 3. Model-free FitSplineLowess returns None and renders zero primitives for Symbolic & Substituted.
+    let spline_kind = AnalysisKind::FitSplineLowess(SplineLowessSpec::default());
+    assert!(!is_parametric_equation_analysis(&spline_kind));
+    let mut spline_res = ResultSheet::new(AnalysisSpec::new("res-spline", "xy-fp", spline_kind).expect("spec")).expect("res");
+    spline_res.status = ResultStatus::UpToDate;
+    spline_res.scalars = [("n_points", 10.0), ("distinct_x", 10.0), ("segments", 200.0)]
+        .into_iter()
+        .map(|(k, value)| ResultScalarEntry { key: String::from(k), data_set_index: Some(0), value, units: None })
+        .collect();
+    spline_res.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("cubic_spline"),
+        converged: true,
+        ambiguous: false,
+        points: vec![
+            CurveSamplePoint { x: 0.0, y: 5.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+            CurveSamplePoint { x: 20.0, y: 45.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+        ],
+    });
+    doc.add_result_sheet(spline_res).expect("add spline_res");
+    for mode in [EquationDisplayMode::Symbolic, EquationDisplayMode::Substituted] {
+        assert_eq!(resolve_model_equation_tex(&doc, &SheetId::new("res-spline"), 0, mode), None);
+        let mut s = ChartScene::new("eq-spline", "Test", 480.0, 320.0, None);
+        render_model_equation_annotation(
+            &mut s,
+            &doc,
+            &ModelEquationParams {
+                result_sheet_id: &SheetId::new("res-spline"),
+                data_set_index: 0,
+                mode,
+                bounds_pt: DocRectPt::new(20.0, 20.0, 200.0, 40.0),
+                font_size_pt: 10.0,
+                bordered: true,
+            },
+        );
+        assert!(s.primitives.is_empty(), "FitSplineLowess must render zero primitives, got {:?}", scene_texts(&s));
+    }
 }

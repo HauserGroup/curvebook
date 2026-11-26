@@ -3,77 +3,19 @@
 
 #![forbid(unsafe_code)]
 
-use std::env;
 use std::fs;
-use std::io::Cursor;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use curvebook_mcp::{ERR_INVALID_PARAMS, McpServerState, call_tool, list_prompts, read_resource, serve};
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, CurveSamplePoint, FittedCurveOverlay, LinearRegressionSpec, ProjectDocument, ResultCell, ResultScalarEntry,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+};
+use curvebook_mcp::{ERR_INVALID_PARAMS, McpServerState, ResourceError, call_tool, dispatch_json_value, list_prompts, read_resource};
 use serde_json::{Value, json};
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+use crate::common::{TempDir as TempWorkdir, encode_base64, rpc_roundtrip};
 
-struct TempWorkdir {
-    path: PathBuf,
-}
-
-impl TempWorkdir {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = env::temp_dir().join(format!("cb-mcp-r17-4-{label}-{}-{seq}", std::process::id()));
-        fs::create_dir_all(&dir).map_err(|err| format!("create tempdir {}: {err}", dir.display()))?;
-        Ok(Self { path: dir })
-    }
-}
-
-impl Drop for TempWorkdir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn frame_cl(msg: &Value) -> Result<Vec<u8>, String> {
-    let body = serde_json::to_vec(msg).map_err(|err| format!("encode rpc: {err}"))?;
-    let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-    out.extend_from_slice(&body);
-    Ok(out)
-}
-
-fn decode_cl_frames(raw: &[u8]) -> Result<Vec<Value>, String> {
-    let mut rest = raw;
-    let mut frames = Vec::new();
-    while !rest.is_empty() {
-        let Some(pos) = rest.windows(4).position(|w| w == b"\r\n\r\n") else {
-            return Err(String::from("truncated Content-Length frame"));
-        };
-        let header = std::str::from_utf8(rest.get(..pos).ok_or("header slice")?).map_err(|err| format!("utf8 header: {err}"))?;
-        let mut content_len: Option<usize> = None;
-        for line in header.split("\r\n") {
-            if let Some((k, v)) = line.split_once(':')
-                && k.trim().eq_ignore_ascii_case("Content-Length")
-            {
-                content_len = v.trim().parse::<usize>().ok();
-            }
-        }
-        let len = content_len.ok_or("missing Content-Length header")?;
-        let body_start = pos + 4;
-        let body_end = body_start + len;
-        let body = rest.get(body_start..body_end).ok_or("incomplete frame body")?;
-        let val: Value = serde_json::from_slice(body).map_err(|err| format!("decode rpc json: {err}"))?;
-        frames.push(val);
-        rest = rest.get(body_end..).ok_or("tail slice")?;
-    }
-    Ok(frames)
-}
-
-fn rpc(state: &mut McpServerState, id: u64, method: &str, params: Value) -> Result<Value, String> {
-    let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
-    let bytes = frame_cl(&req)?;
-    let mut out = Vec::new();
-    serve(&mut Cursor::new(bytes), &mut out, state).map_err(|err| format!("serve {method}: {err}"))?;
-    let frames = decode_cl_frames(&out)?;
-    frames.into_iter().next().ok_or_else(|| format!("missing response frame for {method}"))
+fn rpc(state: &mut McpServerState, id: i64, method: &str, params: Value) -> Result<Value, String> {
+    rpc_roundtrip(state, id, method, params)
 }
 
 fn call_json_ok(state: &mut McpServerState, name: &str, args: Value) -> Result<Value, String> {
@@ -369,5 +311,122 @@ fn resources_read_supports_compact_query_controls() -> Result<(), String> {
 
     assert!(read_resource(doc, "result://fit-q?bogus=1").is_err());
     assert!(read_resource(doc, "result://fit-q?tab_id=nonexistent").is_err());
+
+    // Dense 500-point result projection omits points, slices tab rows + row_labels, and retains eliminated_outliers.
+    let mut dense = ProjectDocument::new("Fit Study").map_err(|e| e.to_string())?;
+    let mut rs =
+        ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    rs.status = ResultStatus::UpToDate;
+    rs.scalars.push(ResultScalarEntry { key: String::from("Slope"), data_set_index: Some(0), value: 2.5, units: None });
+    let num = |v: f64| ResultCell::Number { value: v, prefix: None, units: None };
+    rs.tabs.push(ResultTab {
+        id: String::from("summary"),
+        title: String::from("Summary"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![String::from("Val")],
+        row_labels: vec![String::from("R1"), String::from("R2"), String::from("R3")],
+        rows: vec![vec![num(1.0)], vec![num(2.0)], vec![num(3.0)]],
+        footnotes: vec![String::from("note")],
+    });
+    rs.tabs.push(ResultTab {
+        id: String::from("extra"),
+        title: String::from("Extra"),
+        kind: ResultTabKind::Residuals,
+        column_headers: vec![String::from("Val")],
+        row_labels: vec![String::from("E1")],
+        rows: vec![vec![num(9.0)]],
+        footnotes: Vec::new(),
+    });
+    rs.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("linear"),
+        converged: true,
+        ambiguous: false,
+        points: (0..500)
+            .map(|i| CurveSamplePoint { x: f64::from(i), y: f64::from(i) * 2.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None })
+            .collect(),
+    });
+    dense.add_result_sheet(rs).map_err(|e| e.to_string())?;
+    let parsed: Value = serde_json::from_str(
+        &read_resource(&dense, "result://r1?include_curves=false&tab_id=summary&max_rows=2").map_err(|e| format!("{e}"))?[0].text,
+    )
+    .map_err(|e| e.to_string())?;
+    assert_eq!(
+        (
+            parsed["tabs"].as_array().map(Vec::len),
+            &parsed["tabs"][0]["id"],
+            parsed["tabs"][0]["rows"].as_array().map(Vec::len),
+            parsed["tabs"][0]["row_labels"].as_array().map(Vec::len)
+        ),
+        (Some(1), &json!("summary"), Some(2), Some(2))
+    );
+    assert_eq!(
+        (
+            &parsed["fitted_curves"][0]["points_count"],
+            &parsed["fitted_curves"][0]["points_omitted"],
+            parsed["fitted_curves"][0].get("points").is_none(),
+            parsed.get("eliminated_outliers").is_some()
+        ),
+        (&json!(500), &json!(true), true, true)
+    );
+    assert!(matches!(read_resource(&dense, "result://r1?tab_id=does_not_exist"), Err(ResourceError::NotFound(_))));
+
+    // Live-attach resources/read query stripping + doc_inspect sections/detail/tab_id/max_rows/max_scalars.
+    let res_b64 = encode_base64(serde_json::to_string(&json!({
+        "id": "r1", "title": "Fit", "status": "UpToDate",
+        "tabs": [
+            { "id": "summary", "title": "Summary", "column_headers": ["V"], "row_labels": ["R1", "R2", "R3"], "rows": [[1], [2], [3]], "footnotes": [] },
+            { "id": "residuals", "title": "Residuals", "column_headers": ["Res"], "row_labels": ["R1"], "rows": [[0.1]], "footnotes": [] }
+        ],
+        "fitted_curves": [{ "data_set_index": 0, "equation_id": "linear", "converged": true, "ambiguous": false, "points": [{ "x": 0.0, "y": 1.0 }, { "x": 1.0, "y": 2.0 }] }]
+    })).map_err(|e| e.to_string())?.as_bytes());
+    let mut live = McpServerState::with_control_port(49808).map_err(|e| e.to_string())?.with_control_handler(move |method, params| match method {
+        "state.snapshot" => Ok(json!({ "active_sheet_id": "d1" })),
+        "doc.inspect" => match params.get("sheet_id").and_then(Value::as_str) {
+            None => Ok(json!({ "title": "Live", "counts": { "total": 2 }, "data_sheets": [{ "id": "d1" }], "result_sheets": [{ "id": "r1", "scalars": [{ "key": "a" }] }], "graph_sheets": [{ "id": "g1", "spec": { "heavy": true } }] })),
+            Some("d1") => Ok(json!({ "id": "d1", "section": "Data", "csv_preview": "X,Y\n1,10\n2,20\n3,30\n4,40" })),
+            Some("r1") => Ok(json!({ "id": "r1", "section": "Results", "tabs_data": [{ "id": "summary", "rows": [[1], [2], [3]], "row_labels": ["a", "b", "c"] }, { "id": "residuals", "rows": [[0.1]], "row_labels": ["a"] }], "scalars_data": [{ "key": "k1" }, { "key": "k2" }, { "key": "k3" }] })),
+            Some(other) => Err(format!("sheet `{other}` not found")),
+        },
+        "doc.export" => Ok(json!({ "data_base64": res_b64 })),
+        _ => Err(format!("unexpected {method}")),
+    });
+    let sheet_r = dispatch_json_value(
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": { "uri": "sheet://d1?max_rows=2" } }),
+        &mut live,
+    )
+    .ok_or("sheet reply")?;
+    let sv2: Value = serde_json::from_str(sheet_r["result"]["contents"][0]["text"].as_str().ok_or("text")?).map_err(|e| e.to_string())?;
+    assert_eq!((&sv2["csv_preview"], &sv2["csv_preview_truncated"]), (&json!("X,Y\n1,10\n2,20"), &json!(true)));
+    let res_r = dispatch_json_value(json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": "result://r1?include_curves=false&tab_id=summary&max_rows=1" } }), &mut live).ok_or("res reply")?;
+    let rv2: Value = serde_json::from_str(res_r["result"]["contents"][0]["text"].as_str().ok_or("text")?).map_err(|e| e.to_string())?;
+    assert_eq!(
+        (
+            rv2["tabs"].as_array().map(Vec::len),
+            rv2["tabs"][0]["rows"].as_array().map(Vec::len),
+            &rv2["fitted_curves"][0]["points_omitted"],
+            &rv2["fitted_curves"][0]["points_count"]
+        ),
+        (Some(1), Some(1), &json!(true), &json!(2))
+    );
+    let bad_tab = dispatch_json_value(
+        json!({ "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "result://r1?tab_id=missing" } }),
+        &mut live,
+    )
+    .ok_or("bad tab")?;
+    assert_eq!(bad_tab["error"]["code"], json!(-32002));
+    let ov = call_json_ok(&mut live, "doc_inspect", json!({ "sections": ["data"], "detail": "compact" }))?;
+    assert!(ov.get("data_sheets").is_some() && ov.get("graph_sheets").is_none() && ov.get("result_sheets").is_none());
+    let sf = call_json_ok(&mut live, "doc_inspect", json!({ "sheet_id": "r1", "tab_id": "summary", "max_rows": 2, "max_scalars": 1 }))?;
+    assert_eq!(
+        (
+            sf["tabs_data"].as_array().map(Vec::len),
+            sf["tabs_data"][0]["rows"].as_array().map(Vec::len),
+            sf["scalars_data"].as_array().map(Vec::len),
+            &sf["scalars_truncated"]
+        ),
+        (Some(1), Some(2), Some(1), &json!(true))
+    );
     Ok(())
 }

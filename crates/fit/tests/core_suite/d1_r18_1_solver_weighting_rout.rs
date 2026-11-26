@@ -14,17 +14,18 @@
 use super::common;
 
 use curvebook_doc::{
-    Cell, ConvergenceStrictness, DataSheet, FitMethod, ModelComparisonSpec, MultipleVariablesTable, OutlierHandling, ReplicateFitMode, ResultStatus,
-    SheetId, TableArchetype, VariableRole, WeightingScheme, WeightingSource,
+    Cell, CiBound, ConvergenceStrictness, DataSheet, FitMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec,
+    MultipleVariablesTable, OutlierHandling, ReplicateFitMode, ResultStatus, SheetId, TableArchetype, VariableRole, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{
-    DataPoint, FitError, FitStatus, HookContext, ModelComparisonOutcome, SolverConfig, SynchronizedComparisonRequest, compare_models_synchronized,
-    fit_nonlinear, get_builtin_model,
+    DataPoint, DatasetSeries, FitError, FitStatus, HookContext, ModelComparisonOutcome, SolverConfig, SynchronizedComparisonRequest, UnknownResponse,
+    compare_models, compare_models_question, compare_models_synchronized, compute_rsdr, fit_nonlinear, get_builtin_model,
 };
+use curvebook_testkit::assert_approx_eq;
 
 use common::{
-    assert_converged, cfg_fast, exec_nl, find_param, fit_with, mean_sd_n, nl_fast, param_val, rule_local_init, series_from_pts, series_replicates,
-    series_xy, xy_sheet_single,
+    assert_converged, cfg_fast, exec_nl, find_param, fit_with, mean_sd_n, nl_fast, param_val, rule_local_init, rule_shared, series_from_pts,
+    series_replicates, series_xy, xy_sheet_replicates, xy_sheet_single,
 };
 
 #[test]
@@ -346,4 +347,224 @@ fn d1_r18_1_multivar_multi_response_mv_y_columns_matches_r_oracle() {
         assert!((rs.lookup_scalar("YIntercept", Some(ds_idx)).unwrap() - r_int).abs() < 1e-8);
         assert!((rs.lookup_scalar("Slope", Some(ds_idx)).unwrap() - r_slope).abs() < 1e-8);
     }
+}
+
+#[test]
+fn aud_03_07_09_12_23_predicted_y_jacobian_observed_sd_and_zero_optimum() {
+    let m_lin = get_builtin_model("straight_line").unwrap();
+    let m_quad = get_builtin_model("quadratic").unwrap();
+
+    // AUD-03-07: independent ROUT PredictedY ImpossibleWeights aborts cleanly without fabricating rout audit.
+    let fit_imp = fit_with(
+        m_lin.as_ref(),
+        &[
+            series_xy(0, "Pos", &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[10.0, 12.0, 14.0, 16.0, 18.0, 20.0]),
+            series_xy(1, "ZeroHit", &[-2.0, -1.0, 0.0, 1.0, 2.0, 3.0], &[-4.0, -2.0, 0.0, 2.0, 4.0, 6.0]),
+        ],
+        &SolverConfig {
+            method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+            outlier_handling: OutlierHandling::Eliminate,
+            weighting: WeightingScheme::RelativeSquare,
+            weighting_source: WeightingSource::PredictedY,
+            ..cfg_fast()
+        },
+    );
+    assert_eq!((fit_imp.status, fit_imp.rout.is_none(), fit_imp.n_outliers_excluded), (FitStatus::ImpossibleWeights, true, 0));
+
+    // AUD-03-09: PredictedY AICc & LRT include exact -sum ln w_i = sum 2 ln|y_hat_i| Jacobian term.
+    let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+    let noise = [0.1, -0.2, 0.15, -0.1, 0.25, -0.3, 0.2, -0.4, 0.3, -0.2];
+    let ys: Vec<f64> = xs.iter().zip(noise).map(|(&x, e)| 5.0 + 2.0 * x + 0.15 * x * x + e * (1.0 + 0.1 * x)).collect();
+    let ds = [series_xy(0, "Curve", &xs, &ys)];
+    let cfg_py = SolverConfig { weighting: WeightingScheme::RelativeSquare, weighting_source: WeightingSource::PredictedY, ..cfg_fast() };
+    let (fit_lin, fit_quad) = (fit_with(m_lin.as_ref(), &ds, &cfg_py), fit_with(m_quad.as_ref(), &ds, &cfg_py));
+    let (nlw_lin, nlw_quad) = (fit_lin.predicted_y_neg_log_weight_sum.unwrap(), fit_quad.predicted_y_neg_log_weight_sum.unwrap());
+    let exp_nlw: f64 = fit_lin.datasets[0].y_hat.iter().map(|yh| 2.0 * yh.abs().ln()).sum();
+    assert_approx_eq(nlw_lin, exp_nlw, 1e-10, 1e-10, "neg_log_w_sum");
+    let (n, k_ic) = (fit_lin.n_obs as f64, (fit_lin.k_free + 1) as f64);
+    let exp_aicc = n * (fit_lin.weighted_ss / n).ln() + nlw_lin + 2.0 * k_ic + (2.0 * k_ic * (k_ic + 1.0)) / (n - k_ic - 1.0);
+    assert_approx_eq(fit_lin.aic_c.unwrap(), exp_aicc, 1e-9, 1e-9, "PredictedY AICc");
+
+    let (_, ModelComparisonOutcome::Aicc(aicc)) = compare_models(
+        &fit_lin,
+        m_quad.as_ref(),
+        &ds,
+        &HookContext::default(),
+        &cfg_py,
+        &ModelComparisonSpec::Aicc { alternative_equation_id: "quadratic".into() },
+    )
+    .unwrap() else {
+        panic!("expected Aicc");
+    };
+    assert_approx_eq(aicc.aicc_a, fit_lin.aic_c.unwrap(), 1e-9, 1e-9, "compare aicc_a");
+    assert_approx_eq(aicc.aicc_b, fit_quad.aic_c.unwrap(), 1e-9, 1e-9, "compare aicc_b");
+    let (_, ModelComparisonOutcome::LikelihoodRatioTest(lrt)) = compare_models(
+        &fit_lin,
+        m_quad.as_ref(),
+        &ds,
+        &HookContext::default(),
+        &cfg_py,
+        &ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: "quadratic".into() },
+    )
+    .unwrap() else {
+        panic!("expected LRT");
+    };
+    let exp_d = (n * (fit_lin.weighted_ss / n).ln() + nlw_lin) - (n * (fit_quad.weighted_ss / n).ln() + nlw_quad);
+    assert_approx_eq(lrt.lr_statistic, exp_d.max(0.0), 1e-8, 1e-8, "PredictedY LRT");
+
+    // AUD-03-12: ObservedSd keeps CI bands while omitting dimensionally invalid prediction bands.
+    let pts: Vec<DataPoint> = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        .iter()
+        .enumerate()
+        .map(|(row, &x)| DataPoint {
+            row,
+            sd: Some(50.0),
+            n: Some(3.0),
+            ..DataPoint::xy(x, 1000.0 + 200.0 * x + if row % 2 == 0 { 15.0 } else { -15.0 })
+        })
+        .collect();
+    let mut ds_sd = series_from_pts(0, "ObsSd", pts);
+    ds_sd.is_pre_summarized = true;
+    ds_sd.unknowns_y.push(UnknownResponse::Single((6, 1700.0)));
+    let fit_sd = fit_with(
+        m_lin.as_ref(),
+        &[ds_sd],
+        &SolverConfig {
+            weighting: WeightingScheme::ObservedSd,
+            compute_bands: true,
+            compute_prediction_bands: true,
+            interpolate_unknowns: true,
+            ..cfg_fast()
+        },
+    );
+    let ov = fit_sd.datasets[0].curve_overlay.as_ref().unwrap();
+    assert!(ov.points.iter().any(|p| p.ci_lower.is_some() && p.ci_upper.is_some()));
+    assert!(ov.points.iter().all(|p| p.pred_lower.is_none() && p.pred_upper.is_none()));
+    assert_eq!((fit_sd.interpolated_x[0].pred_lower, fit_sd.interpolated_x[0].pred_upper), (CiBound::Open, CiBound::Open));
+
+    // AUD-03-23: IRLS converges when optimal YIntercept == 0.0 under PredictedY RelativeSquare & RobustCauchy.
+    let xs_z = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let ds_z = [series_xy(0, "ZeroInt", &xs_z, &xs_z.map(|x| 2.0 * x))];
+    for (method, weighting, source) in [
+        (FitMethod::LeastSquares, WeightingScheme::RelativeSquare, WeightingSource::PredictedY),
+        (FitMethod::RobustCauchy, WeightingScheme::None, WeightingSource::ObservedY),
+    ] {
+        let fit = fit_with(m_lin.as_ref(), &ds_z, &SolverConfig { method, weighting, weighting_source: source, ..cfg_fast() });
+        assert_converged(&fit, "zero-optimum IRLS");
+        assert_approx_eq(param_val(&fit, "YIntercept"), 0.0, 1e-6, 1e-6, "YIntercept");
+        assert_approx_eq(param_val(&fit, "Slope"), 2.0, 1e-6, 1e-6, "Slope");
+    }
+}
+
+#[test]
+fn aud_03_21_24_35_rout_row_means_union_and_shared_robust_rsdr() {
+    let (m_lin, m_quad) = (get_builtin_model("straight_line").unwrap(), get_builtin_model("quadratic").unwrap());
+
+    // AUD-03-21: ROUT RowMeansOnly rejects pre-summarized and eliminates/excludes all 3 replicate subcols on outlier row.
+    let mut pre = series_xy(0, "Pre", &[1.0, 2.0, 3.0, 4.0, 5.0], &[2.0, 4.0, 6.0, 8.0, 10.0]);
+    pre.is_pre_summarized = true;
+    assert!(matches!(
+        fit_nonlinear(
+            m_lin.as_ref(),
+            &[pre],
+            &HookContext::default(),
+            &SolverConfig {
+                method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+                outlier_handling: OutlierHandling::Eliminate,
+                replicate_fit_mode: ReplicateFitMode::RowMeansOnly,
+                ..cfg_fast()
+            },
+        ),
+        Err(FitError::RequiresRawReplicates)
+    ));
+    let xs8 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let reps: [[f64; 3]; 8] = std::array::from_fn(|r| {
+        let base = if r == 4 { 500.0 } else { 2.0 * xs8[r] + 1.0 };
+        [base - 0.05, base, base + 0.05]
+    });
+    let mut nl_r = nl_fast("straight_line");
+    nl_r.method = FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 };
+    nl_r.outlier_handling = OutlierHandling::Eliminate;
+    nl_r.replicate_fit_mode = ReplicateFitMode::RowMeansOnly;
+    nl_r.emit_cleaned_data_tab = true;
+    let res_r = exec_nl(&xy_sheet_replicates("xy-rep-rout", "RepRout", &xs8, &[("Rep", &reps)]), nl_r);
+    assert_eq!(res_r.status, ResultStatus::UpToDate);
+    assert_eq!(res_r.eliminated_outliers.iter().filter(|c| c.row == 4 && c.col == 0).map(|c| c.subcol).collect::<Vec<_>>(), vec![0, 1, 2]);
+    let Some(DataSheet { archetype: TableArchetype::Xy(clean_xy), .. }) = &res_r.analyzable_data else { panic!("expected cleaned XY") };
+    assert!((0..3).all(|s| clean_xy.data_sets[0].cells[4][s].excluded));
+
+    // AUD-03-24: IdentifyAndCountOnly permits compare_models; Eliminate via compare_models_question synchronizes O_1 U O_2.
+    let xs11 = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+    let mut ys11: Vec<f64> = xs11.iter().map(|&x| 1.0 + 0.5 * x + 0.4 * x * x).collect();
+    ys11[5] += 80.0;
+    let ds11 = [series_xy(0, "Q", &xs11, &ys11)];
+    let cfg_id = SolverConfig {
+        method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+        outlier_handling: OutlierHandling::IdentifyAndCountOnly,
+        ..cfg_fast()
+    };
+    let primary_id = fit_with(m_lin.as_ref(), &ds11, &cfg_id);
+    assert_eq!(primary_id.n_outliers_excluded, 0);
+    let (_, out_id) = compare_models(
+        &primary_id,
+        m_quad.as_ref(),
+        &ds11,
+        &HookContext::default(),
+        &cfg_id,
+        &ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: "quadratic".into() },
+    )
+    .unwrap();
+    assert!(matches!(out_id, ModelComparisonOutcome::ExtraSumOfSquaresF(_)));
+    let cfg_el =
+        SolverConfig { method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }, outlier_handling: OutlierHandling::Eliminate, ..cfg_fast() };
+    let primary_el = fit_with(m_lin.as_ref(), &ds11, &cfg_el);
+    let q_res = compare_models_question(
+        m_lin.as_ref(),
+        &primary_el,
+        &ds11,
+        &HookContext::default(),
+        &cfg_el,
+        ModelComparisonMethod::ExtraSumOfSquaresF,
+        &ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "quadratic".into() },
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!((q_res.model_a_fit.n_obs, q_res.model_a_fit.n_outliers_excluded), (q_res.model_b_fit.n_obs, q_res.model_b_fit.n_outliers_excluded));
+
+    // AUD-03-35: shared global RobustCauchy apportions k_eff_d in ds_rsdr and retains Cauchy weight under PredictedY.
+    let xs5 = [1.0, 2.0, 3.0, 4.0, 5.0];
+    let ds4: Vec<DatasetSeries> = (0..4)
+        .map(|d| {
+            series_xy(
+                d,
+                &format!("D{d}"),
+                &xs5,
+                &xs5.iter().enumerate().map(|(i, &x)| 2.0 * x + 5.0 + if i == 2 { 0.5 } else { 0.1 * ((i + d) as f64 - 2.0) }).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let fit_sh = fit_with(
+        m_lin.as_ref(),
+        &ds4,
+        &SolverConfig { method: FitMethod::RobustCauchy, parameter_rules: vec![rule_shared("Slope"), rule_shared("YIntercept")], ..cfg_fast() },
+    );
+    for d in &fit_sh.datasets {
+        let p68 = compute_rsdr(&d.residuals.iter().map(|r| r.abs()).collect::<Vec<_>>(), 0);
+        assert_approx_eq(d.rsdr.unwrap(), p68 * (5.0 / 4.5), 1e-12, 1e-12, "apportioned ds_rsdr");
+    }
+    let mut ys_out = [3.0, 5.0, 7.0, 9.0, 11.0, 13.0, 15.0, 17.0];
+    ys_out[7] = 200.0;
+    let fit_py = fit_with(
+        m_lin.as_ref(),
+        &[series_xy(0, "Out", &xs8, &ys_out)],
+        &SolverConfig {
+            method: FitMethod::RobustCauchy,
+            weighting: WeightingScheme::Relative,
+            weighting_source: WeightingSource::PredictedY,
+            ..cfg_fast()
+        },
+    );
+    let base_w = fit_py.datasets[0].residuals[7].abs() / fit_py.datasets[0].y_hat[7].abs().sqrt();
+    assert!(fit_py.datasets[0].weighted_residuals[7].abs() < base_w * 0.5, "Cauchy weight must downweight outlier");
 }

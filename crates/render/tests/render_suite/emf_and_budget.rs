@@ -47,26 +47,28 @@ fn read_u16_le(bytes: &[u8], off: usize) -> u16 {
     u16::from_le_bytes(arr.unwrap_or([0; 2]))
 }
 
-fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
+pub(crate) fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
     let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
     assert!(arr.is_some(), "u32_le offset {off} out of bounds");
     u32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
-fn read_i32_le(bytes: &[u8], off: usize) -> i32 {
+pub(crate) fn read_i32_le(bytes: &[u8], off: usize) -> i32 {
     let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
     assert!(arr.is_some(), "i32_le offset {off} out of bounds");
     i32::from_le_bytes(arr.unwrap_or([0; 4]))
 }
 
-struct ParsedEmfSummary {
+pub(crate) struct ParsedEmfSummary {
     record_counts: HashMap<u32, usize>,
     max_handle_allocated: u32,
     n_handles_header: u16,
     frame_hmm: [i32; 4],
     map_modes: Vec<u32>,
-    decoded_texts: Vec<String>,
+    pub(crate) decoded_texts: Vec<String>,
     font_face_names: Vec<String>,
+    font_escapements: Vec<i32>,
+    font_face_tail_units: Vec<(u16, u16)>,
     ext_pen_styles: Vec<u32>,
     polybezier_point_counts: Vec<u32>,
     dib_records: Vec<ParsedDib>,
@@ -91,6 +93,8 @@ struct EmfParserState {
     map_modes: Vec<u32>,
     decoded_texts: Vec<String>,
     font_face_names: Vec<String>,
+    font_escapements: Vec<i32>,
+    font_face_tail_units: Vec<(u16, u16)>,
     ext_pen_styles: Vec<u32>,
     polybezier_point_counts: Vec<u32>,
     dib_records: Vec<ParsedDib>,
@@ -219,12 +223,13 @@ impl EmfParserState {
             EMR_EXTCREATEFONTINDIRECTW => {
                 assert!(n_size == 332 || n_size == 104, "unexpected font record size {n_size}");
                 self.register_handle(rec);
+                self.font_escapements.push(read_i32_le(rec, 20));
                 if n_size == 332 {
                     let units: Vec<u16> =
                         rec[40..104].as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).take_while(|&u| u != 0).collect();
-                    if let Ok(face) = String::from_utf16(&units) {
-                        self.font_face_names.push(face);
-                    }
+                    let face = String::from_utf16(&units).expect("lfFaceName must be valid UTF-16LE without lone surrogate");
+                    self.font_face_names.push(face);
+                    self.font_face_tail_units.push((read_u16_le(rec, 100), read_u16_le(rec, 102)));
                 }
             }
             EMR_SELECTOBJECT => {
@@ -260,7 +265,7 @@ impl EmfParserState {
     }
 }
 
-fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
+pub(crate) fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
     assert!(bytes.len() >= 88, "EMF too short for EMR_HEADER: {}", bytes.len());
     assert!(bytes.len().is_multiple_of(4), "EMF total length {} is not 4-byte aligned", bytes.len());
 
@@ -289,6 +294,8 @@ fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
         map_modes: Vec::new(),
         decoded_texts: Vec::new(),
         font_face_names: Vec::new(),
+        font_escapements: Vec::new(),
+        font_face_tail_units: Vec::new(),
         ext_pen_styles: Vec::new(),
         polybezier_point_counts: Vec::new(),
         dib_records: Vec::new(),
@@ -327,6 +334,8 @@ fn parse_and_validate_emf(bytes: &[u8]) -> ParsedEmfSummary {
         map_modes: state.map_modes,
         decoded_texts: state.decoded_texts,
         font_face_names: state.font_face_names,
+        font_escapements: state.font_escapements,
+        font_face_tail_units: state.font_face_tail_units,
         ext_pen_styles: state.ext_pen_styles,
         polybezier_point_counts: state.polybezier_point_counts,
         dib_records: state.dib_records,
@@ -543,6 +552,14 @@ fn encode_raster_emf_emits_bottom_up_bgra_stretchdibits() {
             0, 255, 0, 255, // top-right Green -> BGRX
         ]
     );
+
+    // Fully transparent [0,0,0,0] composites over white (not black); semi-transparent red blends cleanly.
+    let mut alpha_img = RasterImage::new(2, 1, 96, Rgba8::TRANSPARENT).expect("2x1 raster");
+    alpha_img.rgba = vec![0, 0, 0, 0, 200, 0, 0, 128];
+    let alpha_parsed = parse_and_validate_emf(&encode_raster_emf(&alpha_img).expect("transparent raster EMF"));
+    let px = &alpha_parsed.dib_records[0].pixels_bgra;
+    assert_eq!(&px[0..4], &[255, 255, 255, 255], "transparent pixel must composite to white, not black");
+    assert!(px[6] > 200 && px[5] > 100 && px[4] > 100 && px[7] == 255, "semi-transparent red over white BGRX: {:?}", &px[4..8]);
 }
 
 #[test]
@@ -586,4 +603,51 @@ fn emf_thick_non_round_solid_uses_extcreatepen_and_normalizes_css_font_stack() {
     let thin_parsed = parse_and_validate_emf(&thin_emf);
     assert_eq!(thin_parsed.record_counts.get(&EMR_CREATEPEN).copied().unwrap_or(0), 1);
     assert_eq!(thin_parsed.record_counts.get(&EMR_EXTCREATEPEN).copied().unwrap_or(0), 0);
+}
+
+#[test]
+fn emf_chunks_long_beziers_normalizes_tabs_angles_and_surrogate_face_names() {
+    // 1. Long 2,500-segment cubic path splits into bounded EMR_POLYBEZIERTO chunks (<= 3072 pts each).
+    let mut bez_scene = ChartScene::new("emf-chunk-bez", "Chunked Beziers", 200.0, 100.0, Some(Rgba8::WHITE));
+    let mut path = Path2D::new();
+    path.commands.push(PathCmd::MoveTo(PointPt::new(5.0, 50.0)));
+    for i in 0..2_500u32 {
+        let x = 5.0 + f64::from(i) * 0.05;
+        path.commands.push(PathCmd::CubicTo { c1: PointPt::new(x + 0.01, 40.0), c2: PointPt::new(x + 0.03, 60.0), to: PointPt::new(x + 0.05, 50.0) });
+    }
+    bez_scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+    let bez_parsed = parse_and_validate_emf(&encode_emf(&bez_scene).expect("encode chunked beziers"));
+    assert!(bez_parsed.polybezier_point_counts.len() >= 3, "expected >= 3 bounded chunks, got {:?}", bez_parsed.polybezier_point_counts);
+    assert!(bez_parsed.polybezier_point_counts.iter().all(|&c| c <= 3 * 1024 && c.is_multiple_of(3)));
+    assert_eq!(bez_parsed.polybezier_point_counts.iter().sum::<u32>(), 2_500 * 3);
+
+    // 2. Tabs expand to 4 spaces (no raw U+0009), escapement normalizes 90 deg -> 2700 and 1e12 deg -> [0, 3600),
+    //    and non-BMP face name crossing lfFaceName[32] truncates cleanly without a lone UTF-16 surrogate.
+    let mut txt_scene = ChartScene::new("emf-tabs-surr", "Tabs Angle Surrogate", 200.0, 100.0, Some(Rgba8::WHITE));
+    let mut surr_span = RichSpan::plain("Group A\t(n=12)");
+    surr_span.font_family = Some(format!("{}\u{1D11E}", "A".repeat(30)));
+    txt_scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: RichText::new(vec![surr_span]),
+        anchor_pt: PointPt::new(20.0, 40.0),
+        font_size_pt: 12.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::BLACK,
+        rotation_deg: 90.0,
+    }));
+    txt_scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: RichText::plain("HugeAngle"),
+        anchor_pt: PointPt::new(20.0, 70.0),
+        font_size_pt: 12.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::BLACK,
+        rotation_deg: 1e12,
+    }));
+    let txt_parsed = parse_and_validate_emf(&encode_emf(&txt_scene).expect("encode text emf"));
+    assert!(txt_parsed.decoded_texts.iter().all(|t| !t.contains('\t')), "raw tab U+0009 leaked: {:?}", txt_parsed.decoded_texts);
+    assert!(txt_parsed.decoded_texts.contains(&String::from("Group A    (n=12)")), "missing 4-space tab expansion: {:?}", txt_parsed.decoded_texts);
+    assert_eq!(txt_parsed.font_escapements.len(), 2);
+    assert_eq!(txt_parsed.font_escapements[0], 2700, "90 deg CW must normalize to 2700");
+    assert!((0..3600).contains(&txt_parsed.font_escapements[1]), "1e12 deg must normalize into [0, 3600): {}", txt_parsed.font_escapements[1]);
+    assert_eq!(txt_parsed.font_face_names[0], "A".repeat(30));
+    assert_eq!(txt_parsed.font_face_tail_units[0], (0, 0), "lfFaceName[30..32] must be NUL-terminated");
 }

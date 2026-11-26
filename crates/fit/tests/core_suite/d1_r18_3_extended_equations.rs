@@ -17,12 +17,15 @@
 
 use super::common;
 
-use curvebook_doc::{CiBound, ParameterRule};
+use curvebook_doc::{CiBound, ParameterRule, ParameterScope};
 use curvebook_fit::library::pharma::kb_ci_from_pkb_ci;
-use curvebook_fit::{DatasetSeries, FitStatus, NonlinearFitResult, SolverConfig, get_builtin_model};
+use curvebook_fit::{DatasetSeries, FitStatus, NonlinearFitResult, ParametricModel, SolverConfig, get_builtin_model};
 use curvebook_testkit::assert_approx_eq;
 
-use common::{cfg_fast, find_derived, find_param, fit_with, linspace, rule_const, rule_local_init, rule_per_ds, rule_shared_init, series_xy};
+use common::{
+    assert_converged, cfg_fast, cfg_fast_rules, dataset_param_val, find_derived, find_param, fit_with, linspace, param_ds_val, rule_const,
+    rule_local_init, rule_per_ds, rule_shared_init, series_eval, series_xy,
+};
 
 type ParamOracle<'a> = (&'a str, Option<usize>, f64, f64, f64, f64);
 type LqCase<'a> = (&'a str, &'a str, Vec<f64>, f64, &'a [ParamOracle<'a>]);
@@ -775,4 +778,189 @@ fn d1_r18_3_analytical_gradients_and_domain_guards() {
     let (open_lo, open_hi) = kb_ci_from_pkb_ci(CiBound::Open, CiBound::Finite(8.0));
     assert_eq!(open_hi, CiBound::Open);
     assert!(matches!(open_lo, CiBound::Finite(v) if (v - 1e-8).abs() < 1e-18));
+}
+
+fn check_grad_vs_fd_general(model: &dyn ParametricModel, x: f64, params: &[f64], ds: usize, one_sided_pos: &[usize], rel_tol: f64) {
+    let mut grad = vec![0.0; params.len()];
+    assert!(model.grad(&[x], params, ds, &mut grad), "{} grad() returned false", model.id());
+    for k in 0..params.len() {
+        let fd = if one_sided_pos.contains(&k) {
+            let h = 1e-12;
+            let mut p_hi = params.to_vec();
+            p_hi[k] += h;
+            (model.eval(&[x], &p_hi, ds).unwrap() - model.eval(&[x], params, ds).unwrap()) / h
+        } else {
+            let h = 1e-6 * params[k].abs().max(1e-8);
+            let (mut p_hi, mut p_lo) = (params.to_vec(), params.to_vec());
+            p_hi[k] += h;
+            p_lo[k] -= h;
+            (model.eval(&[x], &p_hi, ds).unwrap() - model.eval(&[x], &p_lo, ds).unwrap()) / (2.0 * h)
+        };
+        assert_approx_eq(grad[k], fd, 1e-6, rel_tol, &format!("{} grad[{k}]", model.id()));
+    }
+}
+
+#[test]
+fn aud_03_13_40_41_gaddum_schild_grad_domain_guards_and_allosteric_limits() {
+    // AUD-03-13: exact analytical gradient at AntagConc == 0.0 and simplex-disabled escape.
+    let (u_log, u_conc, s_conc) = (
+        get_builtin_model("ec50_shift_gaddum_schild_unity_log").unwrap(),
+        get_builtin_model("ec50_shift_gaddum_schild_unity_conc").unwrap(),
+        get_builtin_model("ec50_shift_gaddum_schild_conc").unwrap(),
+    );
+    let (exp_ul, exp_sc) = (-90.0 * 0.25 * 1.2 * 10.0_f64.powf(7.8), -90.0 * 0.25 * 1.2 * 10.0_f64.powf(7.5));
+    for (m, x0, p0, x1, p1, a_idx, exp_da) in [
+        (u_log.as_ref(), -7.0, &[5.0, 95.0, -7.0, 1.2, 7.8, 0.0][..], -6.5, &[5.0, 95.0, -7.0, 1.2, 7.8, 1e-7][..], 5, exp_ul),
+        (u_conc.as_ref(), 1e-7, &[5.0, 95.0, 1e-7, 1.2, 7.8, 0.0], 3e-7, &[5.0, 95.0, 1e-7, 1.2, 7.8, 1e-7], 5, exp_ul),
+        (s_conc.as_ref(), 1e-7, &[5.0, 95.0, 1e-7, 1.2, 7.5, 1.0, 0.0], 3e-7, &[5.0, 95.0, 1e-7, 1.2, 7.5, 1.15, 1e-7], 6, exp_sc),
+    ] {
+        let mut g = vec![0.0; p0.len()];
+        assert!(m.grad(&[x0], p0, 0, &mut g));
+        assert_approx_eq(g[a_idx], exp_da, 1e-3, 1e-12, m.id());
+        check_grad_vs_fd_general(m, x0, p0, 0, &[a_idx], 1e-4);
+        check_grad_vs_fd_general(m, x1, p1, 0, &[], 1e-6);
+    }
+    let mut g_sc = vec![0.0; 7];
+    assert!(!s_conc.grad(&[1e-7], &[5.0, 95.0, 1e-7, 1.2, 7.5, 0.5, 0.0], 0, &mut g_sc));
+    assert!(s_conc.grad(&[1e-7], &[5.0, 95.0, 1e-7, 1.2, 7.5, 1.5, 0.0], 0, &mut g_sc) && g_sc[6] == 0.0);
+
+    let log_xs = linspace(-9.0, -3.0, 15);
+    let cfg_esc = SolverConfig {
+        use_simplex_warm_start: false,
+        parameter_rules: vec![
+            rule_const("Bottom", 5.0),
+            rule_const("Top", 95.0),
+            rule_const("LogEC50", -7.0),
+            rule_const("HillSlope", 1.2),
+            rule_const("pKB", 7.8),
+        ],
+        ..cfg_fast()
+    };
+    let fit_esc = fit_with(u_log.as_ref(), &[series_eval(u_log.as_ref(), 0, "UnknownB", &log_xs, &[5.0, 95.0, -7.0, 1.2, 7.8, 5e-7])], &cfg_esc);
+    assert_converged(&fit_esc, "GaddumSchildUnity escape from AntagConc=0");
+    assert_approx_eq(param_ds_val(&fit_esc, 0, "AntagConc"), 5e-7, 1e-13, 1e-6, "recovered AntagConc");
+
+    // AUD-03-40: LinearDoseResponse, GaddumSchild, and EnzymeInhibition domain guards & default_bounds.
+    for (id, sat) in [("agonist_vs_response_4pl", 100.0), ("inhibitor_vs_response_4pl", 0.0)] {
+        let m = get_builtin_model(id).unwrap();
+        for (x, p) in [
+            (1.0, [0.0, 100.0, f64::NAN, 1.0]),
+            (1.0, [0.0, 100.0, 1.0, f64::NAN]),
+            (1.0, [f64::NAN, 100.0, 1.0, 1.0]),
+            (f64::NAN, [0.0, 100.0, 1.0, 1.0]),
+        ] {
+            assert!(m.eval(&[x], &p, 0).is_none());
+        }
+        assert_eq!(m.eval(&[1e200], &[0.0, 100.0, 1e-200, 10.0], 0), Some(sat));
+    }
+    let gs = get_builtin_model("ec50_shift_gaddum_schild").unwrap();
+    for p in [[0.0, 100.0, -7.0, 1.0, 7.0, 1.0, -5.0], [0.0, 100.0, -7.0, 1.0, f64::NAN, 1.0, 0.0], [0.0, 100.0, -7.0, 1.0, 7.0, 1.0, f64::NAN]] {
+        assert!(gs.eval(&[-7.0], &p, 0).is_none());
+    }
+    assert_eq!((gs.default_bounds()[5].0, gs.default_bounds()[6].0), (Some(1e-4), Some(0.0)));
+    for (id, valid, neg_i) in [
+        ("competitive_inhibition", &[100.0, 5.0, 1.0, 2.0][..], &[100.0, 5.0, 1.0, -2.0][..]),
+        ("noncompetitive_inhibition", &[100.0, 5.0, 1.0, 2.0], &[100.0, 5.0, 1.0, -2.0]),
+        ("uncompetitive_inhibition", &[100.0, 5.0, 1.0, 2.0], &[100.0, 5.0, 1.0, -2.0]),
+        ("mixed_model_inhibition", &[100.0, 5.0, 1.0, 2.0, 2.0], &[100.0, 5.0, 1.0, 2.0, -2.0]),
+    ] {
+        let m = get_builtin_model(id).unwrap();
+        assert!(m.eval(&[2.5], valid, 0).is_some() && m.eval(&[2.5], neg_i, 0).is_none() && m.eval(&[5.0], neg_i, 0).is_none());
+        let mut with_nan = valid.to_vec();
+        with_nan[0] = f64::NAN;
+        assert!(m.eval(&[2.5], &with_nan, 0).is_none());
+        let b = m.default_bounds();
+        assert!(b[0].0 == Some(0.0) && b[1].0.is_some_and(|v| v > 0.0) && b[2].0.is_some_and(|v| v > 0.0) && b.last().unwrap().0 == Some(0.0));
+    }
+
+    // AUD-03-41: AllostericModulatorCompetition extreme LogAlpha regimes.
+    let allo = get_builtin_model("allosteric_modulator_competition").unwrap();
+    let (y0, hot, kd) = (1000.0_f64, 2.0, 1.0);
+    for (lbl, x, log_kb, log_a, expected, atol) in [
+        ("NAM log_u=10", 4.0, -6.0, -320.0, y0 * (hot + kd) / (hot + kd * (1.0 + 1e10)), 1e-18),
+        ("NAM log_u=-2", -8.0, -6.0, -320.0, y0 * (hot + kd) / (hot + kd * 1.01), 1e-12),
+        ("PAM log_u=10", 4.0, -6.0, 320.0, y0 * (hot + kd) / hot, 1e-10),
+        ("PAM both>100", 120.0, 0.0, 350.0, y0 * (hot + kd) / hot, 1e-10),
+    ] {
+        assert_approx_eq(allo.eval(&[x], &[y0, log_kb, log_a, hot, kd], 0).unwrap(), expected, atol, 1e-12, lbl);
+    }
+}
+
+#[test]
+fn aud_03_27_default_parameter_rules_global_and_ecf() {
+    let m1 = get_builtin_model("one_site_total_and_ns_global").unwrap();
+    let (xs1, p1) = ([0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0], [1800.0, 3.5, 42.0, 85.0]);
+    let fit1 = fit_with(m1.as_ref(), &[series_eval(m1.as_ref(), 0, "Total", &xs1, &p1), series_eval(m1.as_ref(), 1, "NS", &xs1, &p1)], &cfg_fast());
+    assert_converged(&fit1, "one_site_total_and_ns_global default rules");
+    assert_eq!(fit1.k_free, 4);
+    for (ds, name, exp, atol) in [(0, "Bmax", p1[0], 1e-4), (0, "Kd", p1[1], 1e-5), (1, "NS", p1[2], 1e-5), (1, "Background", p1[3], 1e-4)] {
+        assert_approx_eq(dataset_param_val(&fit1, ds, name), exp, atol, 1e-5, name);
+    }
+
+    let m2 = get_builtin_model("two_site_total_and_ns_global").unwrap();
+    let (xs2, p2) = ([0.05, 0.15, 0.4, 1.0, 2.5, 6.0, 15.0, 35.0, 80.0, 160.0], [120.0, 0.45, 240.0, 22.0, 0.75, 14.0]);
+    let fit2 = fit_with(m2.as_ref(), &[series_eval(m2.as_ref(), 0, "Total", &xs2, &p2), series_eval(m2.as_ref(), 1, "NS", &xs2, &p2)], &cfg_fast());
+    assert_converged(&fit2, "two_site_total_and_ns_global default rules");
+    assert_eq!(fit2.k_free, 6);
+    assert_approx_eq(dataset_param_val(&fit2, 1, "NS"), p2[4], 1e-5, 1e-5, "global2 NS");
+    assert_approx_eq(dataset_param_val(&fit2, 1, "Background"), p2[5], 1e-4, 1e-5, "global2 Background");
+
+    let lx = linspace(-9.0, -3.5, 12);
+    let cx: Vec<f64> = lx.iter().map(|&v| 10.0_f64.powf(v)).collect();
+    for (id, xs, p_base, rule_name, concs, checks) in [
+        (
+            "ec50_shift_gaddum_schild",
+            lx.as_slice(),
+            [5.0, 95.0, -7.0, 1.1, 7.5, 1.15],
+            "AntagConc",
+            &[0.0, 1e-7, 1e-6][..],
+            &[("pA2", 7.5, 1e-4)][..],
+        ),
+        ("ec50_shift_gaddum_schild_conc", cx.as_slice(), [5.0, 95.0, 1e-7, 1.1, 7.5, 1.15], "AntagConc", &[0.0, 1e-7, 1e-6], &[("pA2", 7.5, 1e-4)]),
+        (
+            "allosteric_ec50_shift",
+            lx.as_slice(),
+            [4.0, 96.0, -7.0, 1.1, 2e-6, 0.1],
+            "ModConc",
+            &[0.0, 1e-6, 1e-5, 1e-4],
+            &[("Kb", 2e-6, 1e-10), ("alpha", 0.1, 1e-4)],
+        ),
+        (
+            "allosteric_ec50_shift_conc",
+            cx.as_slice(),
+            [4.0, 96.0, 1e-7, 1.1, 2e-6, 0.1],
+            "ModConc",
+            &[0.0, 1e-6, 1e-5, 1e-4],
+            &[("Kb", 2e-6, 1e-10), ("alpha", 0.1, 1e-4)],
+        ),
+    ] {
+        let m = get_builtin_model(id).unwrap();
+        let ds: Vec<_> = concs
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| series_eval(m.as_ref(), k, &format!("C={c}"), xs, &[p_base[0], p_base[1], p_base[2], p_base[3], p_base[4], p_base[5], c]))
+            .collect();
+        let per_ds: Vec<(usize, f64)> = concs.iter().copied().enumerate().collect();
+        let fit = fit_with(m.as_ref(), &ds, &cfg_fast_rules(vec![rule_per_ds(rule_name, &per_ds)]));
+        assert_converged(&fit, id);
+        assert_eq!(fit.k_free, 6, "{id} k_free");
+        for &(pname, exp, atol) in checks {
+            assert_approx_eq(param_ds_val(&fit, 0, pname), exp, atol, 1e-4, &format!("{id} {pname}"));
+        }
+    }
+
+    for (id, xs, true_mid, pname) in
+        [("log_agonist_vs_response_ecf", lx.as_slice(), -7.0, "LogECF"), ("agonist_vs_response_ecf", cx.as_slice(), 1e-7, "ECF")]
+    {
+        let m = get_builtin_model(id).unwrap();
+        assert!(
+            m.default_parameter_rules(&[])
+                .iter()
+                .any(|r| r.name == "F" && matches!(r.scope, ParameterScope::Constant(v) if (v - 50.0).abs() < 1e-12))
+        );
+        let fit = fit_with(m.as_ref(), &[series_eval(m.as_ref(), 0, id, xs, &[5.0, 95.0, true_mid, 1.3, 50.0])], &cfg_fast());
+        assert_converged(&fit, id);
+        assert_eq!(fit.k_free, 4);
+        assert_approx_eq(param_ds_val(&fit, 0, pname), true_mid, 1e-12, 1e-5, &format!("{id} {pname}"));
+    }
 }

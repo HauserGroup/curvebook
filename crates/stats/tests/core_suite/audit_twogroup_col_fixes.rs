@@ -5,26 +5,27 @@
 use curvebook_doc::{
     AnalysisKind, BlandAltmanSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec, MultipleRowTestsSpec,
     MultipleVariablesTable, MultiplicitySpec, OutlierSpec, ResultCell, ResultTabKind, SequenceProgression, SubcolumnAggregation, SubcolumnMode,
-    TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XColumnMode, XyTable,
+    SummarizedPoint, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XColumnMode, XyTable,
 };
 use curvebook_math::dist::norm_sf;
 use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::column::{
-    anderson_darling, one_sample_ks_normal, one_sample_ks_normal_at_alpha, one_sample_t_test, one_sample_wilcoxon, rout_outliers, shapiro_wilk,
-    summarize_column,
+    anderson_darling, one_sample_ks_normal, one_sample_ks_normal_at_alpha, one_sample_t_test, one_sample_wilcoxon, rout_outliers,
+    run_descriptive_analysis, shapiro_wilk, summarize_column, summarize_pre_summarized_points,
 };
+use curvebook_stats::common::{select_kth_pairwise_sum, select_kth_upper_triangle_half_sum};
 use curvebook_stats::error::StatsError;
 use curvebook_stats::multiplicity::MultiplicityProcedure;
 use curvebook_stats::two_group::{
     bland_altman, levene_variance_test, mann_whitney_u, multiple_row_t_tests, one_sample_t_test_from_summary, paired_sign_test, paired_t_test,
-    ratio_paired_t_test, unpaired_t_test, welch_t_test, wilcoxon_matched_pairs,
+    ratio_paired_t_test, unpaired_t_test, welch_t_test, welch_t_test_from_summary, wilcoxon_matched_pairs,
 };
 use curvebook_testkit::assert_approx_eq;
 
 use crate::common::{
     assert_all_sheet_numbers_finite, assert_close, cell_ci_finite, cell_num, cell_p_stars, col_sheet, col_sheet_hint, grouped_sheet_fill,
-    mv_cells_sheet, mv_num_sheet, presum_col_sheet, row_cell, run_kind, run_kind_sel, scalar, scalar_ds, scalar_opt, tab_by_id, tab_by_kind,
-    xy_multi_sheet, xy_sheet,
+    mv_cells_sheet, mv_num_sheet, presum_col_sheet, row_cell, run_kind, run_kind_sel, scalar, scalar_ds, scalar_opt, spec_for, tab_by_id,
+    tab_by_kind, xy_multi_sheet, xy_sheet,
 };
 
 #[test]
@@ -711,4 +712,98 @@ fn descriptive_tab_emits_geometric_harmonic_quadratic_mean_cis() {
     let exp_np = direct_np.quadratic_mean_ci.unwrap();
     assert_close(np_lo, exp_np.0, 1e-12, "NonPos RMS CI lo");
     assert_close(np_hi, exp_np.1, 1e-12, "NonPos RMS CI hi");
+}
+
+#[test]
+fn audit_aud05_descriptive_checklist_kth_selection_welch_scale_and_zero_cis() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-36: Descriptive analysis rejects non-finite hypothetical_value at stats-crate boundary.
+    let d_sh = col_sheet("d-mu0", &[("A", &[1.0, 2.0, 3.0, 4.0, 5.0])]);
+    let d_sp = spec_for("r-mu0", "d-mu0", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()));
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let bad_desc = DescriptiveSpec { hypothetical_value: Some(bad), ..Default::default() };
+        assert!(matches!(run_descriptive_analysis(&d_sh, &d_sp, &bad_desc), Err(StatsError::InvalidParameter { name: "hypothetical_value", .. })));
+    }
+
+    // AUD-05-37 (Brown & Forsythe 1974): Lognormal & Levene(median) variance checklist flags.
+    let tight: Vec<f64> = [-0.02, -0.01, 0.0, 0.01, 0.02, -0.015, 0.015, 0.005].into_iter().map(f64::exp).collect();
+    let wide: Vec<f64> = [-2.5, -1.8, -1.0, -0.3, 0.3, 1.0, 1.8, 2.5].into_iter().map(f64::exp).collect();
+    let var_status = |sh: &DataSheet, method: TwoGroupMethod| {
+        run_kind(sh, AnalysisKind::TwoGroupComparison(TwoGroupSpec { method, ..Default::default() }))
+            .unwrap()
+            .checklist
+            .into_iter()
+            .find(|c| c.assumption == "Homogeneity of variances" || c.assumption == "Variance homogeneity check")
+            .unwrap()
+            .status
+    };
+    assert_eq!(
+        var_status(&col_sheet("ln-het", &[("Tight", &tight), ("Wide", &wide)]), TwoGroupMethod::LognormalUnpairedT),
+        ChecklistStatus::Violated
+    );
+    let mut bimodal = vec![-1.0; 10];
+    bimodal.extend(std::iter::repeat_n(1.0, 10));
+    let mut heavy = vec![0.0; 18];
+    heavy.extend([-10.0_f64.sqrt(), 10.0_f64.sqrt()]);
+    let lev_sh = col_sheet("lev-f", &[("Bimodal", &bimodal), ("HeavyTail", &heavy)]);
+    assert_eq!(var_status(&lev_sh, TwoGroupMethod::UnpairedT), ChecklistStatus::Violated);
+    assert_eq!(var_status(&lev_sh, TwoGroupMethod::WelchT), ChecklistStatus::Info);
+
+    // AUD-05-44 (Johnson & Mizoguchi 1978): Monotone kth-selection validates ascending order & matches brute force.
+    let asc: Vec<f64> = (1..=25).map(f64::from).collect();
+    let desc: Vec<f64> = (1..=25).rev().map(f64::from).collect();
+    assert!(matches!(select_kth_pairwise_sum(&desc, &asc, 300), Err(StatsError::InvalidParameter { name: "sorted_xs", .. })));
+    assert!(matches!(select_kth_pairwise_sum(&asc, &desc, 300), Err(StatsError::InvalidParameter { name: "sorted_ys", .. })));
+    assert!(matches!(select_kth_upper_triangle_half_sum(&desc, 150), Err(StatsError::InvalidParameter { name: "sorted_x", .. })));
+    let mut b_sum: Vec<f64> = asc.iter().flat_map(|&x| asc.iter().map(move |&y| x + y)).collect();
+    b_sum.sort_by(f64::total_cmp);
+    assert_close(select_kth_pairwise_sum(&asc, &asc, 312).unwrap(), b_sum[312], 1e-14, "pairwise kth");
+    let asc_s = asc.as_slice();
+    let mut b_walsh: Vec<f64> = (0..asc_s.len()).flat_map(|i| (i..asc_s.len()).map(move |j| 0.5 * (asc_s[i] + asc_s[j]))).collect();
+    b_walsh.sort_by(f64::total_cmp);
+    assert_close(select_kth_upper_triangle_half_sum(&asc, 162).unwrap(), b_walsh[162], 1e-14, "upper-tri kth");
+
+    // AUD-05-46 (Welch 1947; Satterthwaite 1946): Extreme-scale Welch df & multiple_row_t_tests threshold check.
+    let base_w = welch_t_test(&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0], true, conf).unwrap();
+    for sc in [1e100_f64, 1e-100] {
+        let a: Vec<f64> = [1.0, 2.0, 3.0].iter().map(|&v| v * sc).collect();
+        let b: Vec<f64> = [4.0, 5.0, 6.0].iter().map(|&v| v * sc).collect();
+        let out = welch_t_test(&a, &b, true, conf).unwrap();
+        assert_close(out.df, base_w.df, 1e-12, "welch raw df");
+        assert_close(out.t_statistic, base_w.t_statistic, 1e-12, "welch raw t");
+        assert_close(out.p_value, base_w.p_value, 1e-12, "welch raw p");
+    }
+    let base_ws = welch_t_test_from_summary((1.0, 1.0, 10.0), (2.0, 2.0, 15.0), true, conf).unwrap();
+    for sc in [1e100_f64, 1e-100, 1e200, 1e-200] {
+        let out = welch_t_test_from_summary((sc, sc, 10.0), (2.0 * sc, 2.0 * sc, 15.0), true, conf).unwrap();
+        assert_close(out.df, base_ws.df, 1e-12, "welch sum df");
+        assert_close(out.t_statistic, base_ws.t_statistic, 1e-12, "welch sum t");
+        assert_close(out.p_value, base_ws.p_value, 1e-12, "welch sum p");
+    }
+    for bad_t in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.05, 1.0, 1.5] {
+        assert!(matches!(
+            multiple_row_t_tests(&["G1".into()], &[vec![1.0, 2.0, 3.0]], &[vec![4.0, 5.0, 6.0]], true, MultiplicityProcedure::TwoStageBkyFdr, bad_t),
+            Err(StatsError::InvalidParameter { name: "threshold", .. })
+        ));
+    }
+
+    // AUD-05-54: Zero-variance sd_ci/quadratic_mean_ci are None; outlier analysis distinguishes populated vs empty MeanSdN.
+    let c_sum = summarize_column("C", &[5.0; 4], 0, conf, None).unwrap();
+    assert_eq!((c_sum.sd, c_sum.sd_ci), (Some(0.0), None));
+    let z_sum = summarize_column("Z", &[0.0; 4], 0, conf, None).unwrap();
+    assert_eq!((z_sum.quadratic_mean, z_sum.quadratic_mean_ci, z_sum.sd_ci), (0.0, None, None));
+    let p_sum =
+        summarize_pre_summarized_points("P", &[SummarizedPoint { mean: 10.0, sd: 0.0, n: 5.0, ss_within: 0.0, df_within: 4.0 }], conf).unwrap();
+    assert_eq!((p_sum.sd, p_sum.sd_ci), (Some(0.0), None));
+    let out_k = AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: false });
+    let pop_pre = presum_col_sheet("po", SubcolumnMode::MeanSdN, &[("G", &[&[10.0, 1.5, 6.0], &[12.0, 2.0, 6.0]])]);
+    assert!(matches!(run_kind(&pop_pre, out_k.clone()), Err(StatsError::RequiresRawReplicates)));
+    let emp_pre = DataSheet::new(
+        "eo",
+        "EO",
+        TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 1, 2).unwrap()),
+    )
+    .unwrap();
+    assert!(matches!(run_kind(&emp_pre, out_k), Err(StatsError::EmptyInput)));
 }

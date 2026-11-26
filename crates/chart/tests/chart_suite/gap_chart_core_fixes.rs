@@ -13,27 +13,20 @@ use curvebook_chart::{
     resolve_data_sheet_or_upstream,
 };
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, Cell, ColumnDesignHint, ColumnTable, ConnectingLineStyle, CurveSamplePoint, DataSheet,
-    EmbeddedTableStyle, EquationDisplayMode, FittedCurveOverlay, GraphAnnotation, GraphSheet, GraphicalDataObject, LayoutItem, LayoutSheet,
-    LayoutSpec, LineConnectionKind, LogitDomain, NonlinearFitSpec, ProjectDocument, RectPt as DocRectPt, RegressionOverlaySpec, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SeriesOffsetSpec, SheetId, SubcolumnMode, TableArchetype,
-    TickLabelFormat, TransformAnalysisSpec, XyTable,
+    AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, Cell, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConnectingLineStyle,
+    ContingencyTable, CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, EmbeddedTableStyle, EquationDisplayMode, ErrorCode,
+    ErrorPropagationMode, FittedCurveOverlay, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, GroupedTable, LayoutItem, LayoutSheet,
+    LayoutSpec, LineConnectionKind, LogitDomain, MultipleVariablesTable, MultivariateGraphEncoding, MultivariatePlotMode, NonlinearFitSpec,
+    PartsOfWholeTable, ProjectDocument, RectPt as DocRectPt, RegressionOverlaySpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
+    ResultTab, ResultTabKind, SeriesOffsetSpec, SheetId, SizeChannelMapping, SubcolumnMode, SurvivalTable, TableArchetype, TickLabelFormat,
+    TransformAnalysisSpec, VariableRole, XyTable,
 };
 use curvebook_fit::tex_format::format_model_equation_tex;
 use curvebook_math::AxisScale;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_text::LocaleNumberPolicy;
 
-fn scene_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
-}
+use super::common::scene_texts;
 
 fn build_xy_doc_with_fit(points: &[(f64, f64)]) -> (ProjectDocument, GraphSheet) {
     let mut doc = ProjectDocument::new("GAP01XY").unwrap();
@@ -711,4 +704,169 @@ fn gap_01_08_engineering_si_extreme_values_fallback_to_scientific_notation() {
     assert_eq!(fmt(999.99), "999.99");
     assert_eq!(fmt(999.9996), "1 k");
     assert_eq!(fmt(999.999e24), "999.999 Y");
+}
+
+#[test]
+fn analyzable_data_chaining_across_mv_survival_contingency_pow_and_diagnostics() {
+    let mut doc = ProjectDocument::new("AnalyzableChaining").expect("doc");
+    let wrap_tx = |id: &str, src: &str, ds: DataSheet| {
+        let mut r = ResultSheet::new(
+            AnalysisSpec::new(
+                id,
+                src,
+                AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                    x_transform: None,
+                    y_transform: None,
+                    error_propagation: ErrorPropagationMode::default(),
+                }),
+            )
+            .expect("spec"),
+        )
+        .expect("res");
+        r.status = ResultStatus::UpToDate;
+        r.analyzable_data = Some(ds);
+        r
+    };
+    let build_mv = |id: &str, title: &str, rows: &[(f64, f64, &str)]| {
+        let mut mv = MultipleVariablesTable::new(3, rows.len()).expect("mv");
+        for (i, t) in ["Age", "Response", "Group"].into_iter().enumerate() {
+            mv.variables[i].title = String::from(t);
+        }
+        mv.variables[2].lock_role(VariableRole::Categorical);
+        for (r, &(age, resp, grp)) in rows.iter().enumerate() {
+            mv.variables[0].cells[r] = Cell::number(age);
+            mv.variables[1].cells[r] = Cell::number(resp);
+            mv.variables[2].cells[r] = Cell::text(grp);
+        }
+        DataSheet::new(id, title, TableArchetype::MultipleVariables(mv)).expect("mv ds")
+    };
+
+    // 1. MultipleVariables: 6 raw rows vs 3 filtered adult rows in analyzable_data.
+    let raw_mv = build_mv(
+        "mv-raw",
+        "Raw Patients",
+        &[(5.0, 1.0, "Ped"), (8.0, 2.0, "Ped"), (12.0, 3.0, "Ped"), (25.0, 40.0, "Adult"), (35.0, 55.0, "Adult"), (45.0, 70.0, "Adult")],
+    );
+    let filt_mv = build_mv("mv-filt-data", "Adult Only", &[(25.0, 40.0, "Adult"), (35.0, 55.0, "Adult"), (45.0, 70.0, "Adult")]);
+    doc.add_data_sheet(raw_mv).expect("add raw mv");
+    doc.add_result_sheet(wrap_tx("res-mv-filt", "mv-raw", filt_mv.clone())).expect("add res mv filt");
+
+    // 1a. BubbleScatter plots 3 filtered points.
+    let mut g_mv = GraphSheet::new_uninitialized_for_data("g-mv-filt", &filt_mv).expect("g mv");
+    g_mv.spec.primary_source_sheet_id = SheetId::new("res-mv-filt");
+    g_mv.spec.multivariate = Some(MultivariateGraphEncoding {
+        plot_mode: MultivariatePlotMode::BubbleScatter,
+        x_column: 0,
+        y_column: 1,
+        color: ColorChannelMapping::Constant(Rgba8::BLACK),
+        size: SizeChannelMapping::Constant { radius_pt: 4.5 },
+        label_column: None,
+        x_level_order_override: None,
+        show_convex_hulls: false,
+        show_confidence_ellipses: false,
+    });
+    assert_eq!(compile_graph(&g_mv, &doc).expect("compile mv").plotted_points.len(), 3);
+
+    // 1b. NormalQqPlot, ResidualPlot, Volcano, BlandAltman on transformed ResultSheet plot 3 filtered points.
+    for dkind in [DiagnosticPlotKind::NormalQqPlot, DiagnosticPlotKind::ResidualPlot, DiagnosticPlotKind::Volcano, DiagnosticPlotKind::BlandAltman] {
+        let mut g_diag = GraphSheet::new_uninitialized_for_data(format!("g-diag-{dkind:?}"), &filt_mv).expect("g diag");
+        g_diag.spec.kind = GraphKind::Diagnostic(dkind);
+        g_diag.spec.primary_source_sheet_id = SheetId::new("res-mv-filt");
+        g_diag.spec.multivariate = None;
+        let d_scene = compile_graph(&g_diag, &doc).expect("compile diag");
+        assert_eq!(d_scene.plotted_points.len(), 3, "{dkind:?} plotted wrong count, warnings={:?}", d_scene.warnings);
+    }
+
+    // 1c. 2-hop chain Heatmap (raw -> res-mv-filt [analyzable] -> res-mv-hop2 [analyzable_data=None]) plots 3 rows.
+    let mut hop2 =
+        ResultSheet::new(AnalysisSpec::new("res-mv-hop2", "res-mv-filt", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("spec"))
+            .expect("hop2");
+    hop2.status = ResultStatus::UpToDate;
+    doc.add_result_sheet(hop2).expect("add hop2");
+    let mut g_hm = GraphSheet::new_uninitialized_for_data("g-hm-hop2", &filt_mv).expect("g hm");
+    g_hm.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap);
+    g_hm.spec.primary_source_sheet_id = SheetId::new("res-mv-hop2");
+    g_hm.spec.heatmap_labels.annotate_cells = true;
+    let hm_scene = compile_graph(&g_hm, &doc).expect("compile hm");
+    assert!(hm_scene.warnings.is_empty(), "warnings={:?}", hm_scene.warnings);
+    let hm_texts = scene_texts(&hm_scene);
+    assert!(hm_texts.iter().any(|t| t.contains("40")) && hm_texts.iter().all(|t| t != "5"));
+
+    // 1d. ForestPlot on transformed Grouped(UpperLowerLimits).
+    let mk_forest = |id: &str, title: &str, labels: [&str; 2], rows: [[f64; 3]; 2]| {
+        let mut g = GroupedTable::new(SubcolumnMode::UpperLowerLimits, 1, 2).expect("for");
+        g.row_titles = labels.into_iter().map(String::from).collect();
+        for (r, vals) in rows.into_iter().enumerate() {
+            g.data_sets[0].cells[r] = vals.into_iter().map(Cell::number).collect();
+        }
+        DataSheet::new(id, title, TableArchetype::Grouped(g)).expect("for ds")
+    };
+    let raw_for = mk_forest("for-raw", "RawForest", ["RawStudyA", "RawStudyB"], [[1.0, 0.8, 1.2], [2.0, 1.5, 2.5]]);
+    let tx_for = mk_forest("for-tx-data", "CleanForest", ["CleanTrialX", "CleanTrialY"], [[0.6, 0.4, 0.9], [0.7, 0.5, 0.95]]);
+    doc.add_data_sheet(raw_for).expect("add raw for");
+    doc.add_result_sheet(wrap_tx("res-for-tx", "for-raw", tx_for.clone())).expect("add res for");
+    let mut g_for = GraphSheet::new_uninitialized_for_data("g-for-tx", &tx_for).expect("g for");
+    g_for.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot);
+    g_for.spec.primary_source_sheet_id = SheetId::new("res-for-tx");
+    let for_joined = scene_texts(&compile_graph(&g_for, &doc).expect("compile forest")).join(" | ");
+    assert!(for_joined.contains("CleanTrialX") && !for_joined.contains("RawStudyA"), "for_joined={for_joined}");
+
+    // 1e. ROC on transformed Column(Controls, Cases) uses transformed values (AUC=1.000, not raw 0.000).
+    let mk_roc = |id: &str, title: &str, pairs: [(f64, f64); 4]| {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4).expect("roc");
+        for (r, (c, k)) in pairs.into_iter().enumerate() {
+            col.data_sets[0].cells[r][0] = Cell::number(c);
+            col.data_sets[1].cells[r][0] = Cell::number(k);
+        }
+        DataSheet::new(id, title, TableArchetype::Column(col)).expect("roc ds")
+    };
+    let raw_roc = mk_roc("roc-raw", "RawROC", [(10.0, 1.0), (11.0, 2.0), (12.0, 3.0), (13.0, 4.0)]);
+    let tx_roc = mk_roc("roc-tx-data", "TransformedROC", [(1.0, 10.0), (2.0, 11.0), (3.0, 12.0), (4.0, 13.0)]);
+    doc.add_data_sheet(raw_roc).expect("add raw roc");
+    doc.add_result_sheet(wrap_tx("res-roc-tx", "roc-raw", tx_roc.clone())).expect("add res roc");
+    let mut g_roc = GraphSheet::new_uninitialized_for_data("g-roc-tx", &tx_roc).expect("g roc");
+    g_roc.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve);
+    g_roc.spec.primary_source_sheet_id = SheetId::new("res-roc-tx");
+    assert!(scene_texts(&compile_graph(&g_roc, &doc).expect("compile roc")).iter().any(|t| t.contains("AUC = 1.000")));
+
+    // 2. Survival, 3. Contingency, and 4. PartsOfWhole on transformed ResultSheets.
+    let mut surv = SurvivalTable::new(2, 5).expect("surv");
+    surv.cohorts[0].title = String::from("FiltVehicle");
+    surv.cohorts[1].title = String::from("FiltDrug");
+    for (r, (t, s0, s1)) in [(2.0, 1.0, 0.0), (4.0, 1.0, 1.0), (6.0, 0.0, 0.0), (8.0, 1.0, 1.0), (10.0, 1.0, 0.0)].into_iter().enumerate() {
+        surv.times[r] = Cell::number(t);
+        surv.cohorts[0].cells[r][0] = Cell::number(s0);
+        surv.cohorts[1].cells[r][0] = Cell::number(s1);
+    }
+    let mut cont = ContingencyTable::new(2, 2).expect("cont");
+    cont.row_titles = vec![String::from("FilteredPos"), String::from("FilteredNeg")];
+    cont.data_sets[0].title = String::from("Placebo");
+    cont.data_sets[1].title = String::from("Active");
+    cont.data_sets[0].cells = vec![vec![Cell::number(12.0)], vec![Cell::number(28.0)]];
+    cont.data_sets[1].cells = vec![vec![Cell::number(30.0)], vec![Cell::number(10.0)]];
+    let mut pow = PartsOfWholeTable::new(1, 3).expect("pow");
+    pow.slice_labels = vec![String::from("AlphaPart"), String::from("BetaPart"), String::from("GammaPart")];
+    pow.data_sets[0].cells = vec![vec![Cell::number(50.0)], vec![Cell::number(30.0)], vec![Cell::number(20.0)]];
+
+    for (res_id, ds, needle) in [
+        ("res-surv-tx", DataSheet::new("surv-tx-data", "Filtered OS", TableArchetype::Survival(surv)).expect("surv ds"), "FiltDrug"),
+        ("res-cont-tx", DataSheet::new("cont-tx-data", "Filtered Cont", TableArchetype::Contingency(cont)).expect("cont ds"), "FilteredPos"),
+        ("res-pow-tx", DataSheet::new("pow-tx-data", "Filtered PoW", TableArchetype::PartsOfWhole(pow)).expect("pow ds"), "AlphaPart (50.0%)"),
+    ] {
+        doc.add_result_sheet(wrap_tx(res_id, "mv-raw", ds.clone())).expect("add tx res");
+        let mut g = GraphSheet::new_uninitialized_for_data(format!("g-{res_id}"), &ds).expect("g");
+        g.spec.primary_source_sheet_id = SheetId::new(res_id);
+        let sc = compile_graph(&g, &doc).expect("compile tx graph");
+        assert!(sc.warnings.is_empty(), "{res_id} warnings={:?}", sc.warnings);
+        assert!(scene_texts(&sc).iter().any(|t| t.contains(needle)), "{res_id} missing `{needle}`");
+    }
+
+    // 5. Failed transform ResultSheet must NEVER leak raw upstream data.
+    let mut failed_res = wrap_tx("res-mv-failed", "mv-raw", filt_mv.clone());
+    failed_res.status = ResultStatus::Failed { code: ErrorCode::BadInput, message: String::from("filter failed") };
+    doc.add_result_sheet(failed_res).expect("add failed res");
+    let mut g_fail = GraphSheet::new_uninitialized_for_data("g-diag-fail", &filt_mv).expect("g fail");
+    g_fail.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot);
+    g_fail.spec.primary_source_sheet_id = SheetId::new("res-mv-failed");
+    assert!(compile_graph(&g_fail, &doc).expect("compile fail").plotted_points.is_empty());
 }

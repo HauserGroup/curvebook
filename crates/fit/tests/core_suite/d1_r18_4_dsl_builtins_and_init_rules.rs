@@ -11,10 +11,10 @@
 
 use super::common;
 
-use curvebook_fit::{DataPoint, FitStatus, ParametricModel};
+use curvebook_fit::{DataPoint, FitStatus, ParametricModel, SolverConfig};
 use curvebook_testkit::assert_approx_eq;
 
-use common::{assert_dsl_compile_err, dsl_compile, fit_default, series_from_pts};
+use common::{assert_dsl_compile_err, cfg_fast, dsl_compile, fit_default, fit_with, series_from_pts, series_xy};
 
 fn eval_dsl(expr: &str, x: &[f64]) -> Option<f64> {
     dsl_compile(expr).eval(x, &[], 0)
@@ -24,6 +24,13 @@ fn assert_eval_oracles(cases: &[(&str, f64, f64)]) {
     for &(expr, expected, tol) in cases {
         let actual = eval_dsl(expr, &[0.0]).unwrap_or_else(|| panic!("expected Some for `{expr}`"));
         assert_approx_eq(actual, expected, tol, tol, expr);
+    }
+}
+
+fn assert_rel_oracles(cases: &[(&str, f64, f64)]) {
+    for &(expr, expected, rel_tol) in cases {
+        let actual = eval_dsl(expr, &[0.0]).unwrap_or_else(|| panic!("expected Some for `{expr}`"));
+        assert_approx_eq(actual, expected, 0.0, rel_tol, expr);
     }
 }
 
@@ -200,6 +207,49 @@ fn d1_r18_4_initial_values_rule_grammar_anchors_and_titles() {
     let no_titles = model.initial_guess(&pts);
     assert_approx_eq(no_titles[9], 1.0, 1e-14, 1e-14, "fallback MeanColumnTitle");
     assert_approx_eq(no_titles[10], 1.0, 1e-14, 1e-14, "fallback LogMeanColumnTitle");
+
+    // AUD-03-32 & AUD-03-15: trait-object column-title dispatch, uses_sheet_dataset_index, attached fallback, and independent multi-dataset init.
+    let m_ct = dsl_compile("[Equation]\nY = Kd * X + LogKd\n[InitialValues]\nKd = MeanColumnTitle\nLogKd = LogMeanColumnTitle\n");
+    let dyn_m: &dyn ParametricModel = &m_ct;
+    assert!(dyn_m.uses_sheet_dataset_index());
+    let g_tr = dyn_m.initial_guess_with_column_titles(&[DataPoint::xy(1.0, 2.0), DataPoint::xy(2.0, 4.0)], &titles);
+    assert_approx_eq(g_tr[0], 100.0, 1e-13, 1e-13, "trait MeanColumnTitle");
+    assert_approx_eq(g_tr[1], 2.0, 1e-13, 1e-13, "trait LogMeanColumnTitle");
+    let attached = m_ct.with_column_title_values(vec![50.0, 150.0]);
+    let g_fb = (&attached as &dyn ParametricModel).initial_guess_with_column_titles(&[DataPoint::xy(1.0, 2.0), DataPoint::xy(2.0, 4.0)], &[]);
+    assert_approx_eq(g_fb[0], 100.0, 1e-13, 1e-13, "attached fallback MeanColumnTitle");
+    assert_approx_eq(g_fb[1], 2.0, 1e-13, 1e-13, "attached fallback LogMeanColumnTitle");
+
+    let m_ind = dsl_compile("[Equation]\nY = A + B * X\n[InitialValues]\nA = MeanColumnTitle\nB = 1.0\n");
+    let mut d0 = series_xy(0, "10", &[1.0, 2.0, 3.0, 4.0], &[21.0, 22.0, 23.0, 24.0]);
+    let mut d1 = series_xy(1, "30", &[1.0, 2.0, 3.0, 4.0], &[21.0, 22.0, 23.0, 24.0]);
+    d0.column_title_value = Some(10.0);
+    d1.column_title_value = Some(30.0);
+    let pfo = fit_with(&m_ind, &[d0.clone(), d1.clone()], &SolverConfig { plot_function_only: true, ..cfg_fast() });
+    assert_approx_eq(pfo.datasets[0].params[0], 20.0, 1e-12, 1e-12, "plot_function_only MeanColumnTitle = 20");
+    assert_eq!(fit_with(&m_ind, &[d0, d1], &cfg_fast()).status, FitStatus::Converged);
+
+    // AUD-03-43: [InitialValues] case-insensitive slot registration, subset filter scoping, shadowing, and specificity precedence.
+    let pts_a = [DataPoint { data_set_index: 0, ..DataPoint::xy(0.0, 10.0) }, DataPoint { data_set_index: 0, ..DataPoint::xy(5.0, 50.0) }];
+    let pts_b = [DataPoint { data_set_index: 1, ..DataPoint::xy(0.0, 10.0) }, DataPoint { data_set_index: 1, ..DataPoint::xy(5.0, 50.0) }];
+    let g_case =
+        dsl_compile("[Equation]\nY = Bottom + (Top - Bottom) * X\n[InitialValues]\nbottom = YMIN\nTop = Bottom + SPAN").initial_guess(&pts_a);
+    assert_approx_eq(g_case[0], 10.0, 1e-13, 1e-13, "case Bottom");
+    assert_approx_eq(g_case[1], 50.0, 1e-13, 1e-13, "case Top");
+    assert_approx_eq(
+        dsl_compile("[Equation]\nY = K * X\n[InitialValues]\n<A:C> base = YMAX\n<A> K = base * 2").initial_guess(&pts_a)[0],
+        100.0,
+        1e-13,
+        1e-13,
+        "subset <A> reads <A:C>",
+    );
+    assert_dsl_compile_err("[Equation]\nY = K * X\n[InitialValues]\n<A> base = YMAX\n<B> K = base * 2");
+    let m_sh = dsl_compile("[Equation]\nY = K * X\n[InitialValues]\nbase = 10\n<A> base = 50\nK = base * 2");
+    assert_approx_eq(m_sh.initial_guess(&pts_a)[0], 100.0, 1e-13, 1e-13, "shadowed <A>");
+    assert_approx_eq(m_sh.initial_guess(&pts_b)[0], 20.0, 1e-13, 1e-13, "unshadowed <B>");
+    let m_pr = dsl_compile("[Equation]\nY = A * X\n[InitialValues]\n<A> A = 10\nA = 1");
+    assert_approx_eq(m_pr.initial_guess(&pts_a)[0], 10.0, 1e-13, 1e-13, "<A> overrides Any");
+    assert_approx_eq(m_pr.initial_guess(&pts_b)[0], 1.0, 1e-13, 1e-13, "<B> falls back to Any");
 }
 
 #[test]
@@ -232,6 +282,100 @@ fn d1_r18_4_initial_values_empirical_slopes_oracles() {
         let init = model.initial_guess(&pts);
         for (i, exp) in expected.into_iter().enumerate() {
             assert_approx_eq(init[i], exp, tol, tol, &format!("{lbl}[{i}]"));
+        }
+    }
+
+    // AUD-03-31: Replicate tables collapse duplicate X to (x, mean_y) knots (both N < 30 and N >= 30).
+    let bare = dsl_compile("[Equation]\nY = SMin * X + SMid + SMax\n[InitialValues]\nSMin = SlopeAtXmin\nSMid = SlopeAtXmid\nSMax = SlopeAtXmax\n");
+    let pts24: Vec<DataPoint> =
+        [0.0, 1.0, 2.0, 3.0, 5.0, 7.0, 9.0, 10.0].into_iter().flat_map(|x| [-1.0, 0.0, 1.0].map(|d| DataPoint::xy(x, x * x + d))).collect();
+    let init24 = bare.initial_guess(&pts24);
+    for (i, exp) in [1.0, 8.0, 19.0].into_iter().enumerate() {
+        assert_approx_eq(init24[i], exp, 1e-12, 1e-12, &format!("rep24[{i}]"));
+    }
+    let pts40: Vec<DataPoint> =
+        (0..10).flat_map(|i| [-0.6, -0.2, 0.2, 0.6].map(move |d| DataPoint::xy(f64::from(i), 3.0 * f64::from(i) + 7.0 + d))).collect();
+    let init40 = bare.initial_guess(&pts40);
+    for (i, lbl) in ["SlopeAtXmin", "SlopeAtXmid", "SlopeAtXmax"].into_iter().enumerate() {
+        assert_approx_eq(init40[i], 3.0, 1e-12, 1e-12, &format!("rep40 {lbl}"));
+    }
+}
+
+#[test]
+fn aud_03_17_18_19_44_45_47_special_fn_oracles_is_defined_and_variadics() {
+    // D1 80-digit oracles (DLMF §§5.5.3, 10.25.2, 10.32.9, 13.2.2, 13.2.42, 15.2.1; A&S §§6.1.17, 9.8.5-8):
+    assert_rel_oracles(&[
+        // AUD-03-17: hyp1f1 / hyp2f1 growth peak before decay
+        ("Y = hyp1f1(1e-16, 600, 1000)", 1.042_822_244_121_725_4e24, 1e-11),
+        ("Y = hyp1f1(1e-15, 200, 350)", 1.536_490_432_597_118_0e1, 1e-11),
+        ("Y = hyp2f1(1e-16, 500, 180, 0.6)", 9.132_113_406_555_672_4e8, 1e-11),
+        ("Y = hyp2f1(1e-15, 300, 120, 0.7)", 4.362_635_361_613_934_7e9, 1e-11),
+        ("Y = hyp1f1(0.5, 1e8, 8.5e7)", 2.581_988_586_557_395_1, 1e-12),
+        ("Y = hyp2f1(1, 1, 10, 0.5)", 1.055_220_678_650_444_1, 1e-12),
+        // AUD-03-18: bessel_kn exponential scaling & large x
+        ("Y = besselk(1000, 750)", 6.349_801_573_783_100e-68, 1e-6),
+        ("Y = besselk(1150, 750)", 1.375_317_858_038_887e8, 1e-6),
+        ("Y = besselk(1500, 800)", 1.871_598_682_931_527e163, 1e-6),
+        ("Y = besselk(100, 730)", 3.974_942_982_630_591e-316, 1e-5),
+        // AUD-03-19: confluent_u Laplace left & right tail expansion
+        ("Y = confluent_u(50, 1.02, 0.01)", 8.686_752_514_972_594e-64, 1e-10),
+        ("Y = confluent_u(50, 1.02, 0.001)", 3.748_827_276_028_872e-63, 1e-10),
+        ("Y = confluent_u(50, 1.02, 0.0001)", 7.847_919_236_215_557e-63, 1e-10),
+        ("Y = confluent_u(100, 1.02, 0.0001)", 4.320_475_514_115_335e-156, 1e-10),
+        ("Y = confluent_u(50, 0.98, 0.0001)", 6.037_002_932_619_734e-63, 1e-10),
+        ("Y = confluent_u(0.5, 0.99, 1e-30)", 2.875_476_324_695_537_6e1, 1e-10),
+        ("Y = confluent_u(2.0, 0.99, 1e-40)", 5.896_541_621_458_294_1e1, 1e-10),
+        ("Y = confluent_u(1.0, 0.99, 1e-60)", 7.473_363_822_496_281_4e1, 1e-10),
+        // AUD-03-45(c): besseli0 / besseli1 at x = 705
+        ("Y = besseli0(705)", 2.262_050_552_655_472_5e304, 1e-11),
+        ("Y = besseli1(705)", 2.260_445_691_777_057_0e304, 1e-11),
+    ]);
+    assert_eq!(eval_dsl("Y = besseli0(705)", &[0.0]).unwrap().to_bits(), eval_dsl("Y = besseli(0, 705)", &[0.0]).unwrap().to_bits());
+
+    // AUD-03-17 underflow/roots, AUD-03-45(d) lngamma reflection, AUD-03-47 variadic min/max:
+    assert_eval_oracles(&[
+        ("Y = hyp1f1(1e-322, 10, 1)", 1.0, 1e-15),
+        ("Y = hyp2f1(1e-322, 1, 10, 0.5)", 1.0, 1e-15),
+        ("Y = lngamma(-0.5)", 1.265_512_123_484_645_4, 1e-12),
+        ("Y = lngamma(-3.5)", -1.309_006_684_993_042_0, 1e-12),
+        ("Y = min(3, 1, 2)", 1.0, 1e-15),
+        ("Y = max(3, 1, 5, 2)", 5.0, 1e-15),
+        ("Y = min(-2, -10, 4, -5)", -10.0, 1e-15),
+    ]);
+    assert_approx_eq(eval_dsl("Y = lngamma(-100.25)", &[0.0]).unwrap(), -3.634_009_232_278_215_4e2, 1e-12, 1e-11, "lngamma(-100.25)");
+    assert_eq!(eval_dsl("Y = hyp1f1(-1, 2, 2)", &[0.0]), Some(0.0));
+    assert_eq!(eval_dsl("Y = hyp2f1(-1, 2, 1, 0.5)", &[0.0]), Some(0.0));
+    assert_eval_none(&[
+        "Y = hyp1f1(1e-321, 1000, 3000)",
+        "Y = hyp2f1(1e-170, 1e-170, 1e-300, 0.5)",
+        "Y = hyp1f1(-2, 1, 2 - sqrt(2))",
+        "Y = hyp2f1(-20, 1, 1, 0.99)",
+        "Y = besselk(2000, 800)",
+        "Y = lngamma(0)",
+        "Y = lngamma(-1)",
+        "Y = lngamma(-5)",
+        "Y = is_defined(besseli(100000, 66000))",
+    ]);
+    assert_dsl_compile_err("Y = min(1)");
+    assert_dsl_compile_err("Y = max(1)");
+
+    // AUD-03-44: compound is_defined fault-catching while normal expressions remain strict.
+    for (src, x, exp) in [
+        ("Y = IF(is_defined(X2 + 1), 2 * X1 + X2, 2 * X1)", &[4.0, f64::NAN][..], Some(8.0)),
+        ("Y = IF(is_defined(X2 + 1), 2 * X1 + X2, 2 * X1)", &[4.0, 3.0][..], Some(11.0)),
+        ("Y = IF(is_defined(X2 + 1), 2 * X1 + X2, 2 * X1)", &[4.0][..], Some(8.0)),
+        ("Y = IF(is_defined(1 / X), 1 / X, 0)", &[0.0][..], Some(0.0)),
+        ("Y = IF(is_defined(1 / X), 1 / X, 0)", &[2.0][..], Some(0.5)),
+        ("Y = IF(is_defined(sqrt(X)), sqrt(X), 0)", &[-1.0][..], Some(0.0)),
+        ("Y = IF(is_defined(sqrt(X)), sqrt(X), 0)", &[9.0][..], Some(3.0)),
+        ("Y = is_defined(is_defined(1 / X) + 1)", &[0.0][..], Some(1.0)),
+        ("Y = 1 / X", &[0.0][..], None),
+        ("Y = sqrt(X)", &[-1.0][..], None),
+        ("Y = X2 + 1", &[4.0, f64::NAN][..], None),
+    ] {
+        match exp {
+            Some(v) => assert_approx_eq(eval_dsl(src, x).unwrap(), v, 1e-14, 1e-14, src),
+            None => assert_eq!(eval_dsl(src, x), None, "{src}"),
         }
     }
 }

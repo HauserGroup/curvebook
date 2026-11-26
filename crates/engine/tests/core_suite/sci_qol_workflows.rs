@@ -8,7 +8,7 @@ use curvebook_engine::Session;
 use curvebook_palette::{LineDashStyle, Rgba8};
 use serde_json::json;
 
-use super::common::{TempDir, col_sheet, decode_base64, err_cmd, gs, ls, ok_cmd, run_cmds, session_with, xy_4pl_sheet};
+use super::common::{TempDir, assert_bad_input, col_sheet, decode_base64, err_cmd, gs, ls, ok_cmd, run_cmds, session_with, xy_4pl_sheet};
 
 fn anova_col(id: &str) -> curvebook_doc::DataSheet {
     col_sheet(
@@ -283,4 +283,50 @@ fn qol8_layout_canvas_presets_preflight_and_all_presets() {
             assert!((out.payload["height_pt"].as_f64().unwrap() - expected_pt.height).abs() < 1e-3);
         }
     }
+
+    // AUD-02-09: proportional scale clamps tiny TextCallout font_size_pt >= 0.5 and keeps layout editable.
+    run_cmds(
+        &mut s,
+        &[
+            ("layout.create", json!({ "sheet_id": "lay-clamp", "width": 2000.0, "height": 2000.0, "unit": "pt" })),
+            (
+                "layout.addPanel",
+                json!({ "sheet_id": "lay-clamp", "kind": "text", "markdown": "Small note", "font_size_pt": 1.0, "bounds_pt": [10.0, 10.0, 100.0, 20.0] }),
+            ),
+            ("layout.applyCanvasPreset", json!({ "sheet_id": "lay-clamp", "preset": "SingleColumn88mm", "resize_mode": "proportional_scale" })),
+        ],
+    );
+    let LayoutItem::TextCallout { font_size_pt, .. } = &ls(&s, "lay-clamp").spec.items[0] else { panic!("expected TextCallout") };
+    assert!(*font_size_pt >= 0.5);
+    ok_cmd(
+        &mut s,
+        "layout.addPanel",
+        json!({ "sheet_id": "lay-clamp", "kind": "text", "markdown": "Follow-up", "bounds_pt": [5.0, 5.0, 40.0, 15.0] }),
+    );
+
+    // AUD-02-13: layout panel IDs stay unique after deletion (auto addPanel + edit.pasteResultTable) and explicit duplicates fail.
+    run_cmds(
+        &mut s,
+        &[
+            ("stats.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-1", "kind": "descriptive" })),
+            ("layout.create", json!({ "sheet_id": "lay-id" })),
+            ("layout.addPanel", json!({ "sheet_id": "lay-id", "kind": "text", "markdown": "One" })),
+            ("layout.addPanel", json!({ "sheet_id": "lay-id", "kind": "text", "markdown": "Two" })),
+        ],
+    );
+    let rem = ls(&s, "lay-id").spec.items[1].clone();
+    run_cmds(
+        &mut s,
+        &[
+            ("layout.setSpec", json!({ "sheet_id": "lay-id", "spec": { "items": [rem] } })),
+            ("layout.addPanel", json!({ "sheet_id": "lay-id", "kind": "text", "markdown": "Three" })),
+        ],
+    );
+    let items = &ls(&s, "lay-id").spec.items;
+    assert!(items.len() == 2 && items[0].id() != items[1].id());
+    assert_ne!(
+        ok_cmd(&mut s, "edit.pasteResultTable", json!({ "source_sheet_id": "res-desc", "target_sheet_id": "lay-id" })).payload["panel_id"],
+        "panel-2"
+    );
+    assert_bad_input(&mut s, "layout.addPanel", json!({ "sheet_id": "lay-id", "kind": "text", "markdown": "Dup", "panel_id": "panel-2" }));
 }

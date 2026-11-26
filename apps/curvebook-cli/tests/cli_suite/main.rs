@@ -21,5 +21,4 @@ mod r17_4_stdio_workflows;
 mod r17_5_cli_warnings;
 mod r45_robust_cli;
 mod r73_mcp_surface_and_headless;
-mod rem_hosts;
 mod slice0_vertical_gate;

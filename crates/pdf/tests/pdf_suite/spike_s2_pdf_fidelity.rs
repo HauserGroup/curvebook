@@ -3,8 +3,6 @@
 //! transparency `/ExtGState`, `TrimBox`/`BleedBox`, sRGB/CMYK/Grayscale colour spaces,
 //! outlined glyph fallback, xref/FlateDecode structural verification, and byte determinism.
 
-use std::collections::BTreeMap;
-use std::io::Read;
 use std::time::Instant;
 
 use curvebook_chart::{
@@ -13,111 +11,11 @@ use curvebook_chart::{
 use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_ORANGE, OKABE_ITO_VERMILION, Rgba8};
 use curvebook_pdf::{PdfColorSpace, PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
 use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
-use flate2::read::ZlibDecoder;
 
-struct ParsedPdf {
-    objects: BTreeMap<usize, Vec<u8>>,
-    xref_offsets: Vec<(usize, usize, char)>,
-    trailer: String,
-    streams: Vec<(usize, String, Vec<u8>)>,
-}
-
-fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|w| w == needle)
-}
+use super::ParsedPdf;
 
 fn parse_and_verify_pdf(bytes: &[u8]) -> Result<ParsedPdf, String> {
-    assert!(bytes.starts_with(b"%PDF-1.4\n") || bytes.starts_with(b"%PDF-1.7\n"), "missing %PDF-1.4/%PDF-1.7 header");
-    assert!(bytes.ends_with(b"%%EOF\n"), "missing %%EOF\\n footer");
-
-    let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
-    let after_startxref = std::str::from_utf8(bytes.get(startxref_pos + b"startxref\n".len()..).ok_or("startxref tail")?)
-        .map_err(|e| format!("ASCII startxref: {e}"))?;
-    let xref_offset_str = after_startxref.lines().next().ok_or("missing xref offset line")?.trim();
-    let xref_offset: usize = xref_offset_str.parse().map_err(|e| format!("invalid xref offset: {e}"))?;
-
-    assert!(xref_offset < startxref_pos, "xref offset out of bounds");
-    assert!(bytes.get(xref_offset..).is_some_and(|s| s.starts_with(b"xref\n")), "xref offset does not point to xref\\n");
-
-    let xref_to_start = bytes.get(xref_offset..startxref_pos).ok_or("xref slice")?;
-    let trailer_rel = find_subslice(xref_to_start, b"trailer\n").ok_or("missing trailer after xref")?;
-    let xref_section = std::str::from_utf8(xref_to_start.get(..trailer_rel).ok_or("xref utf8")?).map_err(|e| format!("ASCII xref table: {e}"))?;
-    let trailer_section = std::str::from_utf8(xref_to_start.get(trailer_rel..).ok_or("trailer utf8")?).map_err(|e| format!("ASCII trailer: {e}"))?;
-
-    let mut xref_lines = xref_section.lines();
-    assert_eq!(xref_lines.next(), Some("xref"));
-    let header_parts: Vec<&str> = xref_lines.next().ok_or("missing xref range line")?.split_whitespace().collect();
-    let [zero, count_str] = header_parts.as_slice() else {
-        return Err(format!("unexpected xref range line: {header_parts:?}"));
-    };
-    assert_eq!(*zero, "0");
-    let total_entries: usize = count_str.parse().map_err(|e| format!("invalid xref count: {e}"))?;
-
-    let mut xref_offsets = Vec::with_capacity(total_entries);
-    for (idx, line) in xref_lines.enumerate() {
-        assert_eq!(line.len(), 20 - 1, "each xref entry line before \\n must be 19 chars: `{line}`");
-        let off: usize = line.get(0..10).ok_or("xref off slice")?.parse().map_err(|e| format!("10-digit xref offset: {e}"))?;
-        let generation: usize = line.get(11..16).ok_or("xref gen slice")?.parse().map_err(|e| format!("5-digit xref generation: {e}"))?;
-        let kind = line.chars().nth(17).ok_or("xref f/n flag")?;
-        if idx == 0 {
-            assert_eq!((off, generation, kind), (0, 65535, 'f'));
-        } else {
-            assert_eq!(generation, 0);
-            assert_eq!(kind, 'n');
-            assert!(off < xref_offset, "object {idx} offset {off} >= xref {xref_offset}");
-        }
-        xref_offsets.push((off, generation, kind));
-    }
-    assert_eq!(xref_offsets.len(), total_entries);
-
-    let mut objects = BTreeMap::new();
-    let mut streams = Vec::new();
-    for (obj_id, &(off, _, kind)) in xref_offsets.iter().enumerate() {
-        if kind != 'n' {
-            continue;
-        }
-        let expected_prefix = format!("{obj_id} 0 obj\n");
-        let obj_tail = bytes.get(off..xref_offset).ok_or("object range")?;
-        assert!(obj_tail.starts_with(expected_prefix.as_bytes()), "object {obj_id} missing `{expected_prefix}` at offset {off}");
-        let after_prefix = obj_tail.get(expected_prefix.len()..).ok_or("obj body range")?;
-        let endobj_rel = find_subslice(after_prefix, b"endobj\n").ok_or("missing endobj\\n")?;
-        let body = after_prefix.get(..endobj_rel).ok_or("obj body slice")?;
-        objects.insert(obj_id, body.to_vec());
-
-        if let Some(stream_rel) = find_subslice(body, b"\nstream\n") {
-            let dict_bytes = body.get(..stream_rel).ok_or("dict slice")?;
-            let dict_str = String::from_utf8_lossy(dict_bytes);
-            let data_start = stream_rel + b"\nstream\n".len();
-            let stream_tail = body.get(data_start..).ok_or("stream tail")?;
-            let endstream_rel = find_subslice(stream_tail, b"\nendstream").ok_or("missing \\nendstream")?;
-            let raw_stream = stream_tail.get(..endstream_rel).ok_or("raw stream slice")?;
-
-            let declared_len = extract_pdf_int(&dict_str, "/Length ").ok_or("stream missing /Length")?;
-            assert_eq!(raw_stream.len(), declared_len, "object {obj_id} /Length mismatch");
-
-            let decoded = if dict_str.contains("/Filter /FlateDecode") {
-                let mut decoder = ZlibDecoder::new(raw_stream);
-                let mut out = Vec::new();
-                decoder.read_to_end(&mut out).map_err(|e| format!("zlib FlateDecode: {e}"))?;
-                out
-            } else {
-                raw_stream.to_vec()
-            };
-            streams.push((obj_id, dict_str.into_owned(), decoded));
-        }
-    }
-
-    Ok(ParsedPdf { objects, xref_offsets, trailer: trailer_section.to_owned(), streams })
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn extract_pdf_int(dict: &str, key: &str) -> Option<usize> {
-    let (_, rest) = dict.split_once(key)?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
+    super::parse_pdf_strict(bytes, &[b"%PDF-1.4\n", b"%PDF-1.7\n"], false)
 }
 
 fn build_spike_s2_scenes() -> Vec<ChartScene> {
@@ -459,4 +357,86 @@ fn spike_s2_error_guards_and_unbalanced_clip_safety() -> Result<(), String> {
     let big_q_count = stream.lines().filter(|l| *l == "Q").count();
     assert_eq!(q_count, big_q_count, "PDF q/Q graphics state stack must always balance");
     Ok(())
+}
+
+#[test]
+fn pdf_extreme_coords_and_invalid_stroke_or_clip_guards() {
+    let raw_opts = PdfExportOptions { compress_streams: false, ..PdfExportOptions::default() };
+    let base = ChartScene::new("pdf-box-inf", "Box Inf", 200.0, 100.0, Some(Rgba8::WHITE));
+    for box_opts in [
+        PdfExportOptions { trim_pt: Some(RectPt::new(1e308, 0.0, 1e308, 50.0)), ..raw_opts.clone() },
+        PdfExportOptions { bleed_pt: Some(RectPt::new(0.0, 1e308, 50.0, 1e308)), ..raw_opts.clone() },
+    ] {
+        assert!(matches!(render_pdf(&base, &box_opts), Err(PdfError::InvalidScene { .. })));
+    }
+
+    let assert_no_inf_or_invalid = |res: Result<Vec<u8>, PdfError>| match res {
+        Ok(pdf) => {
+            let s = String::from_utf8_lossy(&pdf);
+            assert!(!s.contains("inf") && !s.contains("NaN"), "PDF stream must never emit inf/NaN");
+        }
+        Err(PdfError::InvalidScene { .. }) => {}
+        Err(other) => panic!("unexpected error: {other}"),
+    };
+
+    // Extreme ±1e308 QuadTo degree elevation and extreme text coordinates must never emit inf/NaN.
+    let mut quad_scene = ChartScene::new("pdf-quad", "Quad", 200.0, 100.0, None);
+    let mut quad_path = Path2D::new();
+    quad_path.commands.push(PathCmd::MoveTo(PointPt::new(-1e308, 0.0)));
+    quad_path.commands.push(PathCmd::QuadTo { control: PointPt::new(1e308, 0.0), to: PointPt::new(0.0, 0.0) });
+    quad_scene.primitives.push(ScenePrimitive::Path { path: quad_path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+    assert_no_inf_or_invalid(render_pdf(&quad_scene, &raw_opts));
+
+    let mut text_scene = ChartScene::new("pdf-text-inf", "Text Inf", 200.0, 100.0, None);
+    text_scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: RichText::plain("Overflow"),
+        anchor_pt: PointPt::new(1e308, -1e308),
+        font_size_pt: 1e308,
+        anchor: TextAnchor::Middle,
+        color: Rgba8::BLACK,
+        rotation_deg: 0.0,
+    }));
+    assert!(matches!(render_pdf(&text_scene, &raw_opts), Err(PdfError::InvalidScene { .. })));
+    assert_no_inf_or_invalid(render_pdf(&text_scene, &PdfExportOptions { outline_text: true, ..raw_opts }));
+
+    // Invalid stroke widths (NaN/+Inf/negative), inactive zero-alpha NaN/negative-clip paths, and negative PushClip.
+    let opts = PdfExportOptions::default();
+    let bad_primitives = [
+        ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(90.0, 90.0)),
+            fill: None,
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, f64::NAN)),
+            clip: None,
+        },
+        ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(90.0, 90.0)),
+            fill: None,
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, f64::INFINITY)),
+            clip: None,
+        },
+        ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(90.0, 90.0)),
+            fill: None,
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, -2.0)),
+            clip: None,
+        },
+        ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(f64::NAN, 10.0), PointPt::new(50.0, 50.0)),
+            fill: Some(FillPaint::solid(Rgba8::TRANSPARENT)),
+            stroke: None,
+            clip: None,
+        },
+        ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(50.0, 50.0)),
+            fill: Some(FillPaint::solid(Rgba8::TRANSPARENT)),
+            stroke: None,
+            clip: Some(RectPt { x: 0.0, y: 0.0, width: -5.0, height: 10.0 }),
+        },
+        ScenePrimitive::PushClip { rect: RectPt { x: 0.0, y: 0.0, width: 10.0, height: -1.0 } },
+    ];
+    for (idx, prim) in bad_primitives.into_iter().enumerate() {
+        let mut s = ChartScene::new(format!("pdf-bad-{idx}"), "Bad", 100.0, 100.0, None);
+        s.primitives.push(prim);
+        assert!(matches!(render_pdf(&s, &opts), Err(PdfError::InvalidScene { .. })), "expected InvalidScene for bad primitive {idx}");
+    }
 }

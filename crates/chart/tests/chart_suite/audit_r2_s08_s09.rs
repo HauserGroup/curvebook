@@ -18,18 +18,9 @@ use curvebook_stats::multivariate::run_multivariate_analysis;
 use curvebook_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
 use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
 
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+use super::common::scene_texts;
 
-fn scene_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
-}
+type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 fn filled_marker_centers(scene: &ChartScene) -> Vec<PointPt> {
     scene

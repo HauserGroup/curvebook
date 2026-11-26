@@ -3,7 +3,7 @@
 
 use std::io::Cursor;
 
-use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
+use curvebook_chart::scene::{PathCmd, ScenePrimitive};
 use curvebook_chart::{compile_graph, compile_layout};
 use curvebook_doc::graph::MAX_GRAPH_ANNOTATIONS;
 use curvebook_doc::result::ErrorCode;
@@ -20,6 +20,8 @@ use curvebook_doc::{
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use image::{DynamicImage, GrayImage, ImageFormat, Luma};
 
+use super::common::{all_points_finite, scene_texts};
+
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn encode_solid_png_rgba_asset(width: u32, height: u32, luma: u8) -> TestResult<ProjectImageAsset> {
@@ -28,61 +30,6 @@ fn encode_solid_png_rgba_asset(width: u32, height: u32, luma: u8) -> TestResult<
     DynamicImage::ImageLuma8(gray).write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)?;
     let asset_id = content_addressed_asset_id(&bytes);
     Ok(ProjectImageAsset { asset_id, media_type: curvebook_doc::ImageMimeKind::Png, pixel_size: (width, height), bytes })
-}
-
-fn all_points_finite(scene: &ChartScene) -> bool {
-    for prim in &scene.primitives {
-        match prim {
-            ScenePrimitive::Path { path, .. } => {
-                for cmd in &path.commands {
-                    let ok = match *cmd {
-                        PathCmd::MoveTo(p) | PathCmd::LineTo(p) => p.x.is_finite() && p.y.is_finite(),
-                        PathCmd::QuadTo { control, to } => control.x.is_finite() && control.y.is_finite() && to.x.is_finite() && to.y.is_finite(),
-                        PathCmd::CubicTo { c1, c2, to } => {
-                            c1.x.is_finite() && c1.y.is_finite() && c2.x.is_finite() && c2.y.is_finite() && to.x.is_finite() && to.y.is_finite()
-                        }
-                        PathCmd::Close => true,
-                    };
-                    if !ok {
-                        return false;
-                    }
-                }
-            }
-            ScenePrimitive::Text(t) => {
-                if !t.anchor_pt.x.is_finite() || !t.anchor_pt.y.is_finite() || !t.font_size_pt.is_finite() || !t.rotation_deg.is_finite() {
-                    return false;
-                }
-            }
-            ScenePrimitive::RasterImage(img) => {
-                if !img.bounds_pt.x.is_finite()
-                    || !img.bounds_pt.y.is_finite()
-                    || !img.bounds_pt.width.is_finite()
-                    || !img.bounds_pt.height.is_finite()
-                    || !img.rotation_deg.is_finite()
-                {
-                    return false;
-                }
-            }
-            ScenePrimitive::PushClip { rect } => {
-                if !rect.x.is_finite() || !rect.y.is_finite() || !rect.width.is_finite() || !rect.height.is_finite() {
-                    return false;
-                }
-            }
-            ScenePrimitive::PopClip => {}
-        }
-    }
-    true
-}
-
-fn scene_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
 }
 
 fn simple_xy_doc() -> TestResult<(ProjectDocument, DataSheet, GraphSheet)> {

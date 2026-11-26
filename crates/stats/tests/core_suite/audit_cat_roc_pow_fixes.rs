@@ -7,7 +7,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use curvebook_doc::{AnalysisKind, ChecklistStatus, ContingencyMethod, ContingencySpec, KappaWeighting, ResultCell, RocCiMethod, RocSpec, TableKind};
+use curvebook_doc::{
+    AnalysisKind, ChecklistStatus, ContingencyMethod, ContingencySpec, KappaWeighting, PowerAnalysisSpec, ResultCell, RocCiMethod, RocSpec, TableKind,
+};
 use curvebook_math::dist::norm_sf;
 use curvebook_math::rng::DeterministicRng;
 use curvebook_math::{ConfidenceLevel, MathError};
@@ -829,4 +831,226 @@ fn audit_fa_sec05_08_power_one_sided_mde_and_bounds() {
         .with_sample_size_group2(50.0)
         .with_allocation_ratio(1.0);
     assert_close(compute_power_curve(&p25, 10, 30, 5).unwrap()[0].total_n, 35.0, 1e-12, "k=2.5 curve");
+}
+
+#[test]
+fn audit_aud05_categorical_kappa_mcnemar_ca_barnard_fisher_and_nnt() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+
+    // AUD-05-04 (Fleiss, Nee & Landis 1979): Exact null variance SE_0 for K=2 (0.85, 0.15) & K=3 (0.7, 0.2, 0.1).
+    let tbl2: Vec<Vec<u64>> = (0..100)
+        .map(|i| {
+            if i < 80 {
+                vec![10, 0]
+            } else if i < 90 {
+                vec![5, 5]
+            } else {
+                vec![0, 10]
+            }
+        })
+        .collect();
+    let r2 = fleiss_kappa(&tbl2, conf).unwrap();
+    assert_close(r2.kappa / r2.z_statistic, (2.0_f64 / (100.0 * 10.0 * 9.0)).sqrt(), 1e-12, "Fleiss 1979 K=2 SE_0");
+    let tbl3: Vec<Vec<u64>> = (0..100)
+        .map(|i| {
+            if i < 65 {
+                vec![10, 0, 0]
+            } else if i < 75 {
+                vec![5, 5, 0]
+            } else if i < 90 {
+                vec![0, 10, 0]
+            } else {
+                vec![0, 0, 10]
+            }
+        })
+        .collect();
+    let r3 = fleiss_kappa(&tbl3, conf).unwrap();
+    let (pe, pj3) = (0.7_f64.powi(2) + 0.2_f64.powi(2) + 0.1_f64.powi(2), 0.7_f64.powi(3) + 0.2_f64.powi(3) + 0.1_f64.powi(3));
+    assert_close(
+        r3.kappa / r3.z_statistic,
+        (2.0 * (pe + pe * pe - 2.0 * pj3) / (100.0 * 10.0 * 9.0 * (1.0 - pe).powi(2))).sqrt(),
+        1e-12,
+        "Fleiss 1979 K=3 SE_0",
+    );
+
+    // AUD-05-05 (McNemar 1947; Cochran-Armitage): Zero-margin 2x2 McNemar, asymmetric 3x3 guard, & interior empty dose gap.
+    let res_zm = run_kind(&contingency_sheet("mc-zm", &[&[0, 10], &[0, 5]]), ct_kind(ContingencyMethod::McNemarPaired)).unwrap();
+    assert_close(scalar(&res_zm, "McNemar exact P"), 2.0 * 0.5_f64.powi(10), 1e-12, "McNemar zero-margin P");
+    assert_close(scalar(&res_zm, "McNemar chi-square"), 8.1, 1e-12, "McNemar zero-margin Yates chi2");
+
+    let asym_3x3 = vec![vec![10_u64, 2, 0], vec![0, 0, 0], vec![3, 15, 0]];
+    assert!(matches!(
+        run_kind(&contingency_sheet("mc-3x3", &[&[10, 2, 0], &[0, 0, 0], &[3, 15, 0]]), ct_kind(ContingencyMethod::McNemarPaired)),
+        Err(StatsError::InvalidParameter { name: "mcnemar_dimensions", .. })
+    ));
+    let ac_3x3 = analyze_contingency(&asym_3x3, false, conf).unwrap();
+    assert_eq!((ac_3x3.mcnemar_chi2, ac_3x3.mcnemar_exact_p), (None, None));
+
+    let with_gap = vec![vec![20_u64, 0], vec![0, 0], vec![5, 15], vec![5, 15]];
+    let exp_gap = -5.175_491_695_067_655;
+    assert_close(cochran_armitage_trend(&with_gap).unwrap().0, exp_gap, 1e-12, "CA gap [1,3,4]");
+    assert_close(cochran_armitage_trend(&[vec![20, 0], vec![5, 15], vec![5, 15]]).unwrap().0, -4.743_416_490_252_569, 1e-12, "CA contig");
+    assert_close(analyze_contingency(&with_gap, false, conf).unwrap().cochran_armitage_z.unwrap(), exp_gap, 1e-12, "analyze_contingency CA gap");
+    for (id, rows) in
+        [("ca42", &[&[20_u64, 0][..], &[0, 0], &[5, 15], &[5, 15]][..]), ("ca43", &[&[20_u64, 0, 0][..], &[0, 0, 0], &[5, 15, 0], &[5, 15, 0]][..])]
+    {
+        let rs = run_kind(&contingency_sheet(id, rows), ct_kind(ContingencyMethod::CochranArmitageTrend)).unwrap();
+        let tab = tab_by_id(&rs, "contingency-main");
+        assert_eq!(tab.rows[0][1], ResultCell::Empty);
+        assert_close(cell_num(&tab.rows[0][0]), exp_gap, 1e-12, id);
+    }
+
+    // AUD-05-06 (Barnard 1947 CSM), AUD-05-16 (Fisher RxC cell cap), AUD-05-51/52/60 (symmetry, "∞" ratios, signed NNT).
+    let csm = barnard_exact_2x2_with_ordering(2, 0, 19, 481, BarnardOrdering::Csm).unwrap();
+    assert!(!csm.used_asymptotic_fallback);
+    assert_close(csm.p_value, 0.000_854_99, 1e-5, "Barnard CSM boundary oracle");
+
+    let mut diag100 = vec![vec![0_u64; 100]; 100];
+    for (i, row) in diag100.iter_mut().enumerate() {
+        row[i] = 1;
+    }
+    assert!(matches!(fisher_exact_rxc(&diag100), Err(StatsError::InvalidParameter { name: "fisher_exact_max_cells", .. })));
+
+    for (id, rows) in [
+        ("ct25", &[&[5_u64, 25, 25, 25, 25][..], &[4, 25, 25, 25, 25]][..]),
+        ("ct52", &[&[5_u64, 4][..], &[25, 25], &[25, 25], &[25, 25], &[25, 25]][..]),
+    ] {
+        let r = run_kind(&contingency_sheet(id, rows), AnalysisKind::Contingency(ContingencySpec::default())).unwrap();
+        assert_eq!(r.checklist.iter().find(|c| c.assumption == "Minimum expected cell count").unwrap().status, ChecklistStatus::Pass);
+    }
+    let r_inf = run_kind(
+        &contingency_sheet("ct-inf", &[&[10, 0], &[0, 5]]),
+        AnalysisKind::Contingency(ContingencySpec { compute_odds_and_risk_ratios: true, ..Default::default() }),
+    )
+    .unwrap();
+    let rt = tab_by_id(&r_inf, "contingency-ratios");
+    assert_eq!((&rt.rows[0][0], &rt.rows[1][0]), (&ResultCell::Text("∞".into()), &ResultCell::Text("∞".into())));
+    let r_harm = analyze_2x2_ratios(2, 8, 7, 3, conf).unwrap();
+    assert!(r_harm.nnt.unwrap() < 0.0);
+    assert_close(r_harm.nnt.unwrap().abs(), r_harm.nnt_value.unwrap(), 1e-12, "signed NNT magnitude");
+}
+
+#[test]
+fn audit_aud05_power_min_n_asinh_partial_sensitivity_and_chisquare_cap() {
+    // AUD-05-11: Contextual min integer n for Correlation (n=3) & homoscedastic UnpairedT (n1=1, n2=10).
+    let cp = solve_power(
+        &PowerAnalysisRequest::correlation(0.99, 0.05, 0.80)
+            .with_correlation_method(CorrelationPowerMethod::ConditionalSlopeT)
+            .with_target(PowerSolveTarget::Power)
+            .with_sample_size(3.0),
+    )
+    .unwrap();
+    assert_eq!((cp.n_per_group, cp.total_n, cp.actual_df, cp.power_curve[0].n), (3, 3, Some(1.0), 3.0));
+    assert_close(cp.achieved_power, cp.power_at_continuous_n, 1e-12, "Corr n=3 power");
+    assert!(cp.achieved_power < 0.70);
+    let cn =
+        solve_power(&PowerAnalysisRequest::correlation(0.999, 0.05, 0.80).with_correlation_method(CorrelationPowerMethod::ExactTTransform)).unwrap();
+    assert!((cn.n_per_group, cn.total_n, cn.actual_df) == (3, 3, Some(1.0)) && cn.achieved_power >= 0.80);
+    let cmde = solve_power(
+        &PowerAnalysisRequest::new(PowerTestFamily::Correlation)
+            .with_correlation_method(CorrelationPowerMethod::ConditionalSlopeT)
+            .with_target(PowerSolveTarget::DetectableEffect)
+            .with_sample_size(3.0)
+            .with_alpha(0.05)
+            .with_target_power(0.80),
+    )
+    .unwrap();
+    assert_eq!((cmde.n_per_group, cmde.actual_df), (3, Some(1.0)));
+    assert_close(cmde.achieved_power, 0.80, 1e-9, "Corr n=3 MDE");
+    assert!(
+        solve_power(
+            &PowerAnalysisRequest::correlation(0.99, 0.05, 0.80)
+                .with_correlation_method(CorrelationPowerMethod::FisherZ)
+                .with_target(PowerSolveTarget::Power)
+                .with_sample_size(3.0)
+        )
+        .is_err()
+    );
+
+    let tp = solve_power(
+        &PowerAnalysisRequest::unpaired_t(1.0, 0.05, 0.80).with_target(PowerSolveTarget::Power).with_sample_size(1.0).with_sample_size_group2(10.0),
+    )
+    .unwrap();
+    assert_eq!((tp.n_per_group, tp.n_group2, tp.total_n, tp.actual_df, tp.power_curve[0].n), (1, Some(10), 11, Some(9.0), 1.0));
+    assert_close(tp.achieved_power, tp.power_at_continuous_n, 1e-12, "UnpairedT (1,10)");
+    let tn = solve_power(&PowerAnalysisRequest::unpaired_t(6.0, 0.05, 0.80).with_sample_size_group2(10.0)).unwrap();
+    assert!((tn.n_per_group, tn.n_group2, tn.total_n, tn.actual_df) == (1, Some(10), 11, Some(9.0)) && tn.achieved_power >= 0.80);
+    assert!(
+        solve_power(
+            &PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
+                .with_target(PowerSolveTarget::Power)
+                .with_sample_size(1.0)
+                .with_sample_size_group2(10.0)
+                .with_effect(PowerEffectSpec::MeanDiffAndSd { mean_diff: 1.0, sd: 1.0, sd_group2: Some(2.0), within_pair_correlation: None })
+        )
+        .is_err()
+    );
+    assert_eq!((PowerTestFamily::Correlation.min_integer_n(), PowerTestFamily::TwoSampleUnpairedT.min_integer_n()), (4, 2));
+
+    // AUD-05-35: Correlation power asinh(t / sqrt(df)) avoids atanh(1.0) saturation at tiny alpha/df.
+    let r_sa = solve_power(
+        &PowerAnalysisRequest::correlation(0.999_999_999, 1e-9, 0.80)
+            .with_correlation_method(CorrelationPowerMethod::ExactTTransform)
+            .with_target(PowerSolveTarget::Power)
+            .with_sample_size(3.0),
+    )
+    .unwrap();
+    assert!(r_sa.achieved_power.is_finite() && r_sa.achieved_power > 0.0);
+    let r_df =
+        solve_power(&PowerAnalysisRequest::correlation(0.99, 0.001, 0.80).with_correlation_method(CorrelationPowerMethod::ExactTTransform)).unwrap();
+    assert!(r_df.n_per_group >= 3 && (0.80..=1.0).contains(&r_df.achieved_power));
+    let r_fz = solve_power(
+        &PowerAnalysisRequest::correlation(0.99999, 1e-12, 0.80)
+            .with_correlation_method(CorrelationPowerMethod::FisherZWithTCrit)
+            .with_target(PowerSolveTarget::Power)
+            .with_sample_size(3.005),
+    )
+    .unwrap();
+    assert!(
+        r_fz.power_at_continuous_n.is_finite() && r_fz.power_at_continuous_n > 0.0 && r_fz.achieved_power.is_finite() && r_fz.achieved_power > 0.0
+    );
+
+    // AUD-05-49: Sensitivity table keeps achievable cells & notes omitted ones; AUD-05-50: ChiSquare MAX_CONTINUOUS_N cap.
+    let req49 = PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80).with_sample_size_group2(50.0);
+    let res49 = solve_power(&req49).unwrap();
+    assert!(res49.n_per_group == 88 && res49.achieved_power >= 0.80);
+    assert!(
+        solve_power(
+            &PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80)
+                .with_target(PowerSolveTarget::Power)
+                .with_sample_size(87.0)
+                .with_sample_size_group2(50.0)
+        )
+        .unwrap()
+        .achieved_power
+            < 0.80
+    );
+    assert!(!res49.sensitivity_table.is_empty() && res49.sensitivity_table.len() < 16);
+    assert!(res49.sensitivity_table.iter().any(|c| (c.alpha - 0.05).abs() < 1e-12 && (c.target_power - 0.80).abs() < 1e-12));
+    assert!(res49.notes.iter().any(|n| n.contains("Sensitivity table omitted")));
+    let sh_pow = col_sheet("pow-src", &[("A", &[1.0, 2.0])]);
+    let rs_pow = run_kind(
+        &sh_pow,
+        AnalysisKind::PowerAnalysis(PowerAnalysisSpec {
+            family: curvebook_doc::PowerTestFamily::TwoSampleUnpairedT,
+            solve_target: curvebook_doc::PowerSolveTarget::SampleSize,
+            alpha: 0.05,
+            target_power: Some(0.80),
+            sample_size_group2: Some(50.0),
+            effect: curvebook_doc::PowerEffectSpec::Standardized(0.5),
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    assert!(rs_pow.tabs.iter().any(|t| t.id == "power-sensitivity"));
+    assert!(compute_sensitivity_table(&req49, &[1.5], &[0.80]).is_err());
+    assert!(compute_sensitivity_table(&req49, &[0.001], &[0.95]).is_err());
+
+    for tiny_w in [1e-8_f64, 1e-200_f64] {
+        assert!(matches!(
+            solve_power(&PowerAnalysisRequest::chi_square(tiny_w, 1.0, 0.05, 0.80)),
+            Err(StatsError::NotConverged { algorithm: "solve_continuous_n" })
+        ));
+    }
+    assert_eq!(solve_power(&PowerAnalysisRequest::chi_square(0.30, 1.0, 0.05, 0.80)).unwrap().total_n, 88);
 }

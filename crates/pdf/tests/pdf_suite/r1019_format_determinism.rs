@@ -3,9 +3,6 @@
 //! (Core-14 fallback, cleanroom embedded TrueType `/F6`, and outlined glyph modes)
 //! and live `%PDF-1.7` binary & content-stream refresh on upstream edits.
 
-use std::collections::BTreeMap;
-use std::io::Read;
-
 use curvebook_chart::equation_box::render_tex_equation_box;
 use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor, compile_graph, compile_layout};
 use curvebook_doc::{
@@ -17,7 +14,6 @@ use curvebook_palette::Rgba8;
 use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf, render_pdf_pages};
 use curvebook_testkit::sha256_bytes;
 use curvebook_text::{BUNDLED_FONTS, build_minimal_truetype_font, has_bundled_fonts_feature, parse_markup};
-use flate2::read::ZlibDecoder;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -68,101 +64,17 @@ fn extract_pdf_tj_text(stream: &str) -> String {
     out
 }
 
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|w| w == needle)
-}
-
-fn extract_pdf_int(dict: &str, key: &str) -> Option<usize> {
-    let idx = dict.find(key)?;
-    let rest = dict.get(idx + key.len()..)?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().ok()
-}
-
 fn parse_pdf17_strict(bytes: &[u8]) -> Result<ParsedPdf, Box<dyn std::error::Error>> {
-    if !bytes.starts_with(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n") {
-        return Err(String::from("missing %PDF-1.7 binary header").into());
-    }
-    if !bytes.ends_with(b"%%EOF\n") {
-        return Err(String::from("missing %%EOF trailer").into());
-    }
-
-    let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
-    let after = std::str::from_utf8(bytes.get(startxref_pos + b"startxref\n".len()..).ok_or("startxref tail")?)?;
-    let xref_offset: usize = after.lines().next().ok_or("missing xref offset line")?.trim().parse()?;
-    let trailer_rel = find_subslice(bytes.get(xref_offset..startxref_pos).ok_or("xref slice")?, b"trailer\n").ok_or("missing trailer")?;
-    let xref_str = std::str::from_utf8(bytes.get(xref_offset..xref_offset + trailer_rel).ok_or("xref utf8")?)?;
-
-    let mut lines = xref_str.lines();
-    if lines.next() != Some("xref") {
-        return Err(String::from("missing xref header").into());
-    }
-    let count_line = lines.next().ok_or("missing xref range")?;
-    let total_entries: usize = count_line.split_whitespace().nth(1).ok_or("missing xref total")?.parse()?;
-
-    let mut offsets = Vec::with_capacity(total_entries);
-    for (idx, line) in lines.enumerate() {
-        if line.len() != 19 {
-            return Err(format!("xref entry must be 19 chars: `{line}`").into());
-        }
-        let off: usize = line.get(0..10).ok_or("xref off")?.parse()?;
-        let kind = line.chars().nth(17).ok_or("xref kind")?;
-        if idx > 0 && (kind != 'n' || off >= xref_offset) {
-            return Err(format!("invalid xref entry {idx}").into());
-        }
-        offsets.push((off, kind));
-    }
-    if offsets.len() != total_entries {
-        return Err(format!("xref count mismatch: {} vs {total_entries}", offsets.len()).into());
-    }
-
-    let mut objects = BTreeMap::new();
-    let mut page_streams = Vec::new();
-    let mut fontfile2_streams = Vec::new();
-    for (obj_id, &(off, kind)) in offsets.iter().enumerate() {
-        if kind != 'n' {
-            continue;
-        }
-        let prefix = format!("{obj_id} 0 obj\n");
-        let tail = bytes.get(off..xref_offset).ok_or("object range")?;
-        if !tail.starts_with(prefix.as_bytes()) {
-            return Err(format!("missing object header {prefix}").into());
-        }
-        let body_start = off + prefix.len();
-        let endobj_rel = find_subslice(bytes.get(body_start..xref_offset).ok_or("obj body")?, b"endobj\n").ok_or("missing endobj")?;
-        let body = bytes.get(body_start..body_start + endobj_rel).ok_or("body slice")?;
-        objects.insert(obj_id, String::from_utf8_lossy(body).into_owned());
-
-        if let Some(stream_rel) = find_subslice(body, b"\nstream\n") {
-            let dict_str = String::from_utf8_lossy(body.get(..stream_rel).ok_or("dict slice")?).into_owned();
-            let data_start = stream_rel + b"\nstream\n".len();
-            let endstream_rel = find_subslice(body.get(data_start..).ok_or("stream tail")?, b"\nendstream").ok_or("missing endstream")?;
-            let raw_stream = body.get(data_start..data_start + endstream_rel).ok_or("raw stream")?;
-            let declared_len = extract_pdf_int(&dict_str, "/Length ").ok_or("missing /Length")?;
-            if raw_stream.len() != declared_len {
-                return Err(format!("stream length mismatch: {} vs {declared_len}", raw_stream.len()).into());
-            }
-            let decoded = if dict_str.contains("/Filter /FlateDecode") {
-                let mut dec = ZlibDecoder::new(raw_stream);
-                let mut out = Vec::new();
-                dec.read_to_end(&mut out)?;
-                out
-            } else {
-                raw_stream.to_vec()
-            };
-            if dict_str.contains("/Length1 ") {
-                fontfile2_streams.push(decoded);
-            } else {
-                page_streams.push(String::from_utf8(decoded)?);
-            }
+    let parsed = super::parse_pdf_strict(bytes, &[b"%PDF-1.7\n"], true)?;
+    let objects_text = parsed.objects.into_values().map(|b| String::from_utf8_lossy(&b).into_owned()).collect::<Vec<_>>().join("\n");
+    let (mut page_streams, mut fontfile2_streams) = (Vec::new(), Vec::new());
+    for (_, dict_str, decoded) in parsed.streams {
+        if dict_str.contains("/Length1 ") {
+            fontfile2_streams.push(decoded);
+        } else {
+            page_streams.push(String::from_utf8(decoded)?);
         }
     }
-
-    let objects_text = objects.into_values().collect::<Vec<_>>().join("\n");
     Ok(ParsedPdf { objects_text, page_streams, fontfile2_streams })
 }
 

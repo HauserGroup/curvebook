@@ -15,18 +15,9 @@ use curvebook_stats::multivariate::run_multivariate_analysis;
 use curvebook_stats::regression::run_glm_analysis;
 use curvebook_stats::survival::run_survival_analysis;
 
-type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+use super::common::scene_texts;
 
-fn scene_texts(scene: &ChartScene) -> Vec<String> {
-    scene
-        .primitives
-        .iter()
-        .filter_map(|p| match p {
-            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
-            _ => None,
-        })
-        .collect()
-}
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[test]
 fn cox_ph_baseline_and_covariate_survival_curves_compile() -> TestResult {

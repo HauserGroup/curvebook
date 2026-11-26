@@ -10,16 +10,23 @@ use curvebook_doc::{
 use curvebook_fit::diagnostics::{anderson_darling_test, compute_profile_likelihood_cis, rout_detect_outliers};
 use curvebook_fit::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use curvebook_fit::library::get_builtin_model;
-use curvebook_fit::result::execute_analysis;
+use curvebook_fit::result::{execute_analysis, execute_nonlinear_analysis};
 use curvebook_fit::solver::{InferenceAvailability, ModelComparisonOutcome, SolverConfig, compare_models, compare_models_checked, fit_nonlinear};
-use curvebook_fit::types::{HookContext, MultivarExtractionSpec, extract_datasets_from_sheet_with_options, parse_leading_number};
+use curvebook_fit::types::{
+    DataPoint, HookContext, MultivarExtractionSpec, UnknownResponse, extract_datasets_from_sheet_with_options, parse_leading_number,
+};
+use curvebook_fit::{
+    EquationCategory, ParametricModel, detect_log_x_scale_mismatch, detect_raw_non_log10_x_scale, is_log_x_equation_id,
+    non_log_counterpart_equation_id, suggested_default_dose_response_equation,
+};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::norm_ppf;
 use curvebook_testkit::metrics::assert_approx_eq;
 
 use crate::common::{
-    cfg_rules, dsl_compile, exec_nl, find_param, find_tab, fit_default, fit_with, param_val, rule_col_title, rule_const, rule_local_init,
-    rule_shared, rule_shared_bounds, series_replicates, series_xy, unit_cov_1d, xy_sheet, xy_sheet_replicates, xy_sheet_single,
+    cfg_fast, cfg_rules, dsl_compile, exec_nl, find_param, find_tab, fit_default, fit_with, nl_fast, param_val, rule_col_title, rule_const,
+    rule_local_bounds, rule_local_init, rule_shared, rule_shared_bounds, series_replicates, series_xy, unit_cov_1d, xy_sheet, xy_sheet_replicates,
+    xy_sheet_single,
 };
 
 #[test]
@@ -326,6 +333,19 @@ fn audit_115_poisson_infeasible_start_recovers_feasible_optimum() {
         ..SolverConfig::default()
     };
     assert!(matches!(fit_nonlinear(&model, &ds, &HookContext::default(), &cfg_imp), Err(FitError::ImpossibleWeights { .. })));
+
+    // AUD-03-25: PoissonDeviance respects max_iters and converges with finite profile CI on one_phase_decay.
+    let xs_p: [f64; 9] = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0];
+    let ys_p: Vec<f64> = xs_p.iter().map(|&x| (200.0 * (-0.35 * x).exp() + 5.0).round()).collect();
+    let fit_p = fit_with(
+        get_builtin_model("one_phase_decay").unwrap().as_ref(),
+        &[series_xy(0, "Counts", &xs_p, &ys_p)],
+        &SolverConfig { method: FitMethod::PoissonDeviance, max_iters: 100, compute_profile_ci: true, ..cfg_fast() },
+    );
+    assert_eq!(fit_p.status, FitStatus::Converged);
+    let pk = find_param(&fit_p, "K");
+    assert_approx_eq(pk.estimate, 0.35, 0.03, 0.1, "Poisson decay K");
+    assert!(matches!((pk.ci_lower, pk.ci_upper), (CiBound::Finite(_), CiBound::Finite(_))));
 }
 
 #[test]
@@ -441,4 +461,190 @@ fn audit_121_issue_11_nearly_flat_3pl_open_upper_logec50_and_top() {
         Some((if val.abs() < 1.5 { 11.0 } else { 15.0 }, vec![val]))
     });
     assert_eq!(disc, vec![(CiBound::Open, CiBound::Open)]);
+}
+
+#[test]
+fn aud_03_10_11_15_36_37_solver_fd_inverse_interp_nonfirst_and_bounds() {
+    // AUD-03-10: scale-aware FD on nanomolar box [1e-12, 1e-8] + BadGradLine NaN/Inf fallback to FD.
+    let m_nm = dsl_compile("Y = Vmax * X / (Kd + X)\n# Inits: Vmax=90.0, Kd=2e-9");
+    let xs_nm = [1e-10, 3e-10, 1e-9, 3e-9, 1e-8, 3e-8, 1e-7];
+    let fit_nm = fit_with(
+        &m_nm,
+        &[series_xy(0, "nM", &xs_nm, &xs_nm.map(|x| 100.0 * x / (1e-9 + x)))],
+        &SolverConfig { parameter_rules: vec![rule_local_bounds("Kd", Some(2e-9), Some(1e-12), Some(1e-8))], compute_profile_ci: true, ..cfg_fast() },
+    );
+    assert_eq!(fit_nm.status, FitStatus::Converged);
+    assert_approx_eq(param_val(&fit_nm, "Vmax"), 100.0, 1e-5, 1e-5, "nM Vmax");
+    assert_approx_eq(param_val(&fit_nm, "Kd"), 1e-9, 1e-14, 1e-5, "nM Kd");
+
+    struct BadGradLine;
+    impl ParametricModel for BadGradLine {
+        fn id(&self) -> &'static str {
+            "bad_grad_line"
+        }
+        fn name(&self) -> &'static str {
+            "Bad Grad Line"
+        }
+        fn category(&self) -> EquationCategory {
+            EquationCategory::StandardCurve
+        }
+        fn param_names(&self) -> &[String] {
+            static P: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+            P.get_or_init(|| vec!["m".into(), "b".into()])
+        }
+        fn eval(&self, x: &[f64], p: &[f64], _: usize) -> Option<f64> {
+            Some(p[0] * x[0] + p[1])
+        }
+        fn grad(&self, _: &[f64], _: &[f64], _: usize, out: &mut [f64]) -> bool {
+            out[0] = f64::NAN;
+            out[1] = f64::INFINITY;
+            true
+        }
+        fn initial_guess(&self, _: &[DataPoint]) -> Vec<f64> {
+            vec![0.1, 0.1]
+        }
+    }
+    let fit_bg = fit_with(&BadGradLine, &[series_xy(0, "L", &[1.0, 2.0, 3.0, 4.0, 5.0], &[5.0, 8.0, 11.0, 14.0, 17.0])], &cfg_fast());
+    assert_eq!(fit_bg.status, FitStatus::Converged);
+    assert_approx_eq(param_val(&fit_bg, "m"), 3.0, 1e-8, 1e-8, "FD fallback m");
+    assert_approx_eq(param_val(&fit_bg, "b"), 2.0, 1e-8, 1e-8, "FD fallback b");
+
+    // AUD-03-11: inverse interpolation rejects poles, handles multi-decade & Gaussian flank CI coverage, and tiny-Y roots.
+    let cfg_ix = SolverConfig { interpolate_unknowns: true, ..cfg_fast() };
+    let xs_mm = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
+    let mut ds_mm = series_xy(0, "MM", &xs_mm, &xs_mm.map(|x| 100.0 * x / (5.0 + x)));
+    ds_mm.unknowns_y.push(UnknownResponse::Single((6, 120.0)));
+    assert!(fit_with(get_builtin_model("michaelis_menten").unwrap().as_ref(), &[ds_mm], &cfg_ix).interpolated_x[0].output_estimate.is_nan());
+
+    let x_dec = [1e-4, 1e-3, 1e-2, 0.1, 0.3, 0.5, 1.0, 3.0, 10.0, 100.0, 1000.0];
+    let e_dec = [0.2, -0.1, 0.15, -0.2, 0.1, -0.15, 0.2, -0.1, 0.15, -0.2, 0.1];
+    let mut ds_dec = series_xy(0, "MultiDec", &x_dec, &x_dec.iter().zip(e_dec).map(|(&x, e)| 100.0 * x / (0.5 + x) + e).collect::<Vec<_>>());
+    ds_dec.unknowns_y.push(UnknownResponse::Single((11, 50.0)));
+    let ix = &fit_with(get_builtin_model("agonist_vs_response_4pl").unwrap().as_ref(), &[ds_dec], &cfg_ix).interpolated_x[0];
+    assert_approx_eq(ix.output_estimate, 0.5, 0.05, 0.1, "multi-decade EC50 root");
+    let (CiBound::Finite(lo), CiBound::Finite(hi)) = (ix.ci_lower, ix.ci_upper) else { panic!("expected finite inverse CI") };
+    assert!(lo <= ix.output_estimate && ix.output_estimate <= hi);
+
+    let xg = [1.0, 2.0, 3.0, 4.0, 4.5, 5.0, 5.5, 6.0, 7.0, 8.0, 9.0];
+    let eg = [0.1, -0.1, 0.2, -0.15, 0.1, -0.2, 0.15, -0.1, 0.2, -0.1, 0.1];
+    let mut ds_g =
+        series_xy(0, "Gauss", &xg, &xg.iter().zip(eg).map(|(&x, e)| 100.0 * (-0.5 * ((x - 5.0) / 1.5_f64).powi(2)).exp() + e).collect::<Vec<_>>());
+    ds_g.unknowns_y.push(UnknownResponse::Single((11, 80.0)));
+    let ig = &fit_with(get_builtin_model("gaussian").unwrap().as_ref(), &[ds_g], &cfg_ix).interpolated_x[0];
+    assert!(ig.output_estimate.is_finite());
+    assert!(matches!(ig.ci_lower, CiBound::Finite(v) if v <= ig.output_estimate) || !matches!(ig.ci_lower, CiBound::Finite(_)));
+    assert!(matches!(ig.ci_upper, CiBound::Finite(v) if v >= ig.output_estimate) || !matches!(ig.ci_upper, CiBound::Finite(_)));
+
+    let sl = get_builtin_model("straight_line").unwrap();
+    let xs_t = [1.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0];
+    let mut ds_t = series_xy(0, "TinyY", &xs_t, &xs_t.map(|x| 1e-14 * x));
+    ds_t.unknowns_y.push(UnknownResponse::Single((7, 5e-14)));
+    assert_approx_eq(fit_with(sl.as_ref(), &[ds_t], &cfg_ix).interpolated_x[0].output_estimate, 5.0, 1e-6, 1e-6, "tiny-Y inverse root");
+
+    // AUD-03-15: non-first sheet columns work for both custom DSL (<C>=2) and built-in paired global binding ([2,3]).
+    let dsl_c = dsl_compile("<A> Y = Top * X / (Kd + X)\n<C> Y = Slope * X + Base");
+    let fit_c = fit_with(
+        &dsl_c,
+        &[series_xy(2, "ColC", &[1.0, 2.0, 3.0, 4.0, 5.0], &[5.0, 8.0, 11.0, 14.0, 17.0])],
+        &SolverConfig { parameter_rules: vec![rule_const("Top", 1.0), rule_const("Kd", 1.0)], ..cfg_fast() },
+    );
+    assert_eq!(fit_c.status, FitStatus::Converged);
+    assert_approx_eq(param_val(&fit_c, "Slope"), 3.0, 1e-6, 1e-6, "<C> Slope");
+    assert_approx_eq(param_val(&fit_c, "Base"), 2.0, 1e-6, 1e-6, "<C> Base");
+    let xs_b = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0];
+    let fit_b = fit_with(
+        get_builtin_model("one_site_total_and_ns_global").unwrap().as_ref(),
+        &[
+            series_xy(2, "Total", &xs_b, &xs_b.map(|x| 100.0 * x / (2.5 + x) + 1.5 * x + 3.0)),
+            series_xy(3, "NS", &xs_b, &xs_b.map(|x| 1.5 * x + 3.0)),
+        ],
+        &SolverConfig { parameter_rules: vec![rule_shared("Bmax"), rule_shared("Kd"), rule_shared("NS"), rule_shared("Background")], ..cfg_fast() },
+    );
+    assert_eq!(fit_b.status, FitStatus::Converged);
+    for (p, exp) in [("Bmax", 100.0), ("Kd", 2.5), ("NS", 1.5), ("Background", 3.0)] {
+        assert_approx_eq(param_val(&fit_b, p), exp, 1e-4, 1e-4, p);
+    }
+
+    // AUD-03-36 & AUD-03-37: Nelder-Mead escapes upper-bound start and GeneralPowerY(NaN) errors on all-1.0 Y.
+    let fit_ub = fit_with(
+        sl.as_ref(),
+        &[series_xy(0, "UB", &[1.0, 2.0, 3.0, 4.0, 5.0], &[3.0, 5.0, 7.0, 9.0, 11.0])],
+        &SolverConfig {
+            use_simplex_warm_start: true,
+            parameter_rules: vec![rule_local_bounds("Slope", Some(20.0), Some(0.05), Some(20.0))],
+            ..cfg_fast()
+        },
+    );
+    assert_eq!(fit_ub.status, FitStatus::Converged);
+    assert_approx_eq(param_val(&fit_ub, "Slope"), 2.0, 1e-6, 1e-6, "escaped upper bound");
+    let err_nan = fit_nonlinear(
+        sl.as_ref(),
+        &[series_xy(0, "Ones", &[1.0, 2.0, 3.0, 4.0], &[1.0; 4])],
+        &HookContext::default(),
+        &SolverConfig { weighting: WeightingScheme::GeneralPowerY(f64::NAN), ..cfg_fast() },
+    )
+    .unwrap_err();
+    assert!(matches!(err_nan, FitError::ImpossibleWeights { .. } | FitError::InvalidParameter { .. }));
+}
+
+#[test]
+fn ext_01_raw_x_scale_detection_and_nonlinear_checklist_warning() {
+    for (id, counterpart) in [
+        ("log_agonist_vs_response_4pl", Some("agonist_vs_response_4pl")),
+        ("log_inhibitor_vs_response_4pl", Some("inhibitor_vs_response_4pl")),
+        ("4pl", Some("agonist_vs_response_4pl")),
+        ("absolute_ic50_4pl", Some("absolute_ic50_4pl_conc")),
+        ("operational_model_depletion_log", Some("operational_model_depletion_conc")),
+        ("one_site_fit_ki", None),
+        ("one_site_fit_logic50", None),
+        ("two_sites_fit_logic50", None),
+        ("two_sites_fit_ki", None),
+        ("homologous_one_site_competition", None),
+        ("one_site_competition_ligand_depletion", None),
+        ("allosteric_modulator_competition", None),
+    ] {
+        assert!(is_log_x_equation_id(id), "{id} must be recognized as log10(X)");
+        assert_eq!(non_log_counterpart_equation_id(id), counterpart, "{id}");
+    }
+    assert!(!is_log_x_equation_id("agonist_vs_response_4pl") && !is_log_x_equation_id("log_gaussian"));
+
+    let raw_molar = [1e-9, 1e-8, 1e-7, 1e-6];
+    for xs in [&raw_molar[..], &[0.01, 0.1, 1.0, 10.0][..], &[0.0, 10.0, 30.0, 100.0, 300.0][..]] {
+        assert!(detect_raw_non_log10_x_scale(xs).is_some());
+        assert_eq!(suggested_default_dose_response_equation(xs), "agonist_vs_response_4pl");
+        assert_eq!(
+            detect_log_x_scale_mismatch("log_agonist_vs_response_4pl", xs).unwrap().suggested_equation_id.as_deref(),
+            Some("agonist_vs_response_4pl")
+        );
+        assert_eq!(detect_log_x_scale_mismatch("one_site_fit_ki", xs).unwrap().suggested_equation_id, None);
+    }
+    for log_xs in [&[-9.0, -8.0, -7.0, -6.0, -5.0][..], &[-3.0, -2.0, -1.0, 0.0, 1.0, 2.0][..], &[0.0, 1.0, 2.0, 3.0, 4.0][..]] {
+        assert!(detect_raw_non_log10_x_scale(log_xs).is_none());
+        assert_eq!(suggested_default_dose_response_equation(log_xs), "log_agonist_vs_response_4pl");
+        assert!(detect_log_x_scale_mismatch("log_agonist_vs_response_4pl", log_xs).is_none());
+    }
+
+    let sheet_molar = xy_sheet_single("xy-molar", "Molar", "Drug", &raw_molar, &raw_molar.map(|c| 10.0 + 90.0 * c / (3e-8 + c)));
+    let nl = nl_fast("log_agonist_vs_response_4pl");
+    let spec = AnalysisSpec::new("res-molar", "xy-molar", AnalysisKind::NonlinearRegression(nl.clone())).unwrap();
+    let res = execute_nonlinear_analysis(&spec, &nl, &sheet_molar, &HookContext::default()).unwrap();
+    assert!(res.checklist.iter().any(|c| c.status == ChecklistStatus::Warn && c.explanation.contains("agonist_vs_response_4pl")));
+    let res_ki = exec_nl(&sheet_molar, nl_fast("one_site_fit_logic50"));
+    assert!(res_ki.checklist.iter().any(|c| c.status == ChecklistStatus::Warn && c.explanation.contains("Transform X to log10(X)")));
+
+    let log_out = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0, 100.0];
+    let mut nl_filt = nl_fast("log_agonist_vs_response_4pl");
+    nl_filt.x_range_filter = Some((Some(-10.0), Some(-3.0)));
+    let res_filt = exec_nl(
+        &xy_sheet_single("xy-log-filt", "LogFilt", "Drug", &log_out, &log_out.map(|x| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.2)))),
+        nl_filt,
+    );
+    assert!(res_filt.checklist.iter().all(|c| !c.assumption.contains("X-axis scale")));
+
+    let log_x = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0];
+    let res_log = exec_nl(
+        &xy_sheet_single("xy-log", "Log", "Drug", &log_x, &log_x.map(|x| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.2)))),
+        nl_fast("log_agonist_vs_response_4pl"),
+    );
+    assert!(res_log.checklist.iter().all(|c| !c.assumption.contains("X-axis scale")));
 }

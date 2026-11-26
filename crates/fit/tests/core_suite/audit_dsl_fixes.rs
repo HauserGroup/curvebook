@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use curvebook_fit::dsl::DslWarningKind;
 use curvebook_fit::{CompiledDslModel, DslEquationKind, FitError, HookContext, ParametricModel, fit_nonlinear, integrate_rk45};
+use curvebook_testkit::assert_approx_eq;
 
 use crate::common::{assert_dsl_compile_err, cfg_fast_rules, dsl_compile, fit_with, param_ds_val, rule_shared_bounds, rule_shared_init, series_xy};
 
@@ -218,6 +219,10 @@ fn audit_48_reserved_identifier_warnings_and_assignment_errors() {
         "Y = A * X\n[InitialValues]\nt = 1",
         "Y = A * X # initial: PI = 3",
         "Y = A * X # initial: t = 2",
+        "[Equation]\nY = k * X\n[Transforms]\nPI = 2 * k",
+        "[Equation]\nY = k * X\n[Transforms]\nE = k + 1",
+        "<C:A> Y = a * X",
+        "<5:2> Y = a * X",
     ] {
         assert_dsl_compile_err(bad);
     }
@@ -297,5 +302,105 @@ fn audit_50_vm_opcode_cap_and_ode_vm_op_budget_bounds_heavy_rhs() {
     assert!(elapsed < 1.5, "heavy ODE VM budget should cap work quickly, took {elapsed:.3}s");
     if let Err(err) = res {
         assert!(matches!(err, FitError::OdeIntegrationFailed { .. }), "expected OdeIntegrationFailed, got {err:?}");
+    }
+}
+
+#[test]
+fn aud_03_01_02_dsl_branch_and_special_fn_budgets() {
+    // AUD-03-01: Branch-expansion OOM, filter-class explosion, unscoped target charging, and linear select_outside_branch.
+    let big_rhs = std::iter::repeat_n("1", 2_048).collect::<Vec<_>>().join("+");
+    let mut poc1 = String::with_capacity(160_000);
+    for i in 0..24 {
+        poc1.push_str(&format!("v{i}={big_rhs}\n"));
+    }
+    for d in 0..4_096 {
+        poc1.push_str(&format!("<{d}>Y=v0\n"));
+    }
+    let mut poc2 = String::with_capacity(120_000);
+    for d in 0..4_096 {
+        poc2.push_str(&format!("<{d}>Y=X\n"));
+    }
+    for i in 0..200 {
+        poc2.push_str(&format!("<~{i},{}>Y=X\n", (i + 1) % 4_096));
+    }
+    let mut poc3 = String::with_capacity(64_000);
+    for d in 0..100 {
+        poc3.push_str(&format!("<{d}>k=1\n"));
+    }
+    poc3.push_str(&format!("Y={big_rhs}\n"));
+    for (tag, poc) in [("PoC 1", &poc1), ("PoC 2", &poc2), ("PoC 3", &poc3)] {
+        let t0 = Instant::now();
+        assert_dsl_compile_err(poc);
+        assert!(t0.elapsed().as_secs_f64() < 2.0, "{tag} should fail fast");
+    }
+
+    let mut poc4 = String::with_capacity(900_000);
+    poc4.push_str("<A> s = 1\n<A> Y = s\n");
+    for i in 0..200 {
+        poc4.push_str(&format!("<~A> v{i} = {big_rhs}\n"));
+    }
+    for _ in 0..4_000 {
+        poc4.push_str("Y = s\n");
+    }
+    let t2 = Instant::now();
+    let compiled_poc4 = dsl_compile(&poc4);
+    assert!(t2.elapsed().as_secs_f64() < 2.0, "PoC 4 select_outside_branch must stay linear");
+    assert_approx_eq(compiled_poc4.eval(&[1.0], &[], 0).unwrap(), 1.0, 1e-14, 1e-14, "PoC 4 <A>");
+
+    let shadowed = dsl_compile("<A> s = 10\n<A> Y = s\nY = s + 100\n<~A> s = 20\nY = s + 5\n");
+    assert_approx_eq(shadowed.eval(&[1.0], &[], 0).unwrap(), 10.0, 1e-14, 1e-14, "shadowed <A>");
+    assert_approx_eq(shadowed.eval(&[1.0], &[], 1).unwrap(), 25.0, 1e-14, 1e-14, "shadowed <~A>");
+
+    let valid = dsl_compile("<A> m = 2\n<B> m = 5\nbase = m * X\nY = base + b");
+    assert_approx_eq(valid.eval(&[3.0], &[1.0], 0).unwrap(), 7.0, 1e-14, 1e-14, "valid <A>");
+    assert_approx_eq(valid.eval(&[3.0], &[1.0], 1).unwrap(), 16.0, 1e-14, 1e-14, "valid <B>");
+
+    // AUD-03-02: Debye overflow/underflow O(1) bounds, special-fn VM step metering, and ODE RHS budget.
+    let m_ovf = dsl_compile("Y = besseli(0, 500000)");
+    let t0 = Instant::now();
+    assert_eq!(m_ovf.eval(&[0.0], &[], 0), None);
+    assert!(t0.elapsed().as_secs_f64() < 0.05, "besseli overflow should reject in O(1)");
+    assert_eq!(dsl_compile("Y = besselk(2000, 2000)").eval(&[0.0], &[], 0), Some(0.0));
+
+    for (call, count) in [("besseli(1000, 1000)", 200), ("besseljn(5000, 5000)", 40), ("besselk(1500, 1000)", 80)] {
+        let src = format!("s = 0\n{}Y = s", format!("s = s + {call}\n").repeat(count));
+        let m = dsl_compile(&src);
+        let t = Instant::now();
+        assert_eq!(m.eval(&[0.0], &[], 0), None, "chained {call} must trip MAX_VM_STEPS");
+        assert!(t.elapsed().as_secs_f64() < 0.5, "chained {call} too slow");
+    }
+
+    let ode_heavy = dsl_compile("Y0 = A\ndY/dt = -k * Y + 1e-6 * besseljn(5000, 5000 + t)");
+    let xs: Vec<f64> = (1..=20).map(f64::from).collect();
+    let cfg = cfg_fast_rules(vec![rule_shared_init("k", 500.0), rule_shared_init("A", 1.0)]);
+    let t4 = Instant::now();
+    let _ = fit_nonlinear(&ode_heavy, &[series_xy(0, "OdeHeavy", &xs, &[0.5; 20])], &HookContext::default(), &cfg);
+    assert!(t4.elapsed().as_secs_f64() < 2.0, "ODE with heavy special fn must remain bounded");
+}
+
+#[test]
+fn aud_03_30_47_zero_ode_and_utf8_lexer_diagnostics() {
+    // AUD-03-30: ODE y_ref fallback when y0 == 0 && f0 == 0.
+    let poly_ode = dsl_compile("Y(0) = 0\ndY/dt = t^5");
+    for t in [0.5_f64, 1.0, 2.0, 3.0] {
+        assert_approx_eq(poly_ode.eval(&[t], &[], 0).unwrap(), t.powi(6) / 6.0, 1e-9, 1e-6, &format!("t^5 ODE at {t}"));
+    }
+    let delayed_ode = dsl_compile("Y(0) = 0\ndY/dt = IF(t < 1, 0, sin(t - 1))");
+    for t in [0.5_f64, 1.0, 1.5, 2.0, 3.5] {
+        let exact = if t <= 1.0 { 0.0 } else { 1.0 - (t - 1.0).cos() };
+        assert_approx_eq(delayed_ode.eval(&[t], &[], 0).unwrap(), exact, 1e-6, 1e-5, &format!("delayed ODE at {t}"));
+    }
+
+    // AUD-03-47: UTF-8 scalar lexer error reporting preserves Unicode scalar without garbling lead byte.
+    for (name, src, want, forbid) in
+        [("utf8_minus", "Y = a * X \u{2212} b", '\u{2212}', Some('\u{00E2}')), ("utf8_alpha", "Y = \u{03B1} * X", '\u{03B1}', None)]
+    {
+        let FitError::DslCompileError { message, .. } = CompiledDslModel::compile(name, src).unwrap_err() else {
+            panic!("expected DslCompileError for {name}");
+        };
+        assert!(message.contains(want), "{name}: expected `{want}` in `{message}`");
+        if let Some(bad) = forbid {
+            assert!(!message.contains(bad), "{name}: garbled `{bad}` in `{message}`");
+        }
     }
 }

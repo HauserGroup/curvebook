@@ -3,11 +3,12 @@
 use super::common;
 
 use std::path::Path;
+use std::time::Instant;
 
-use common::build_zip_str_entries;
-use curvebook_doc::{Cell, CellValue, SubcolumnMode, TableArchetype, TableKind};
+use common::{build_zip_str_entries, xlsx_single_sheet_zip};
+use curvebook_doc::{Cell, CellValue, ColumnDesignHint, DocError, MAX_TITLE_BYTES, SubcolumnMode, TableArchetype, TableKind};
 use curvebook_format::{
-    CsvOptions, FormatKind, FormatRegistry, XlsxImportOptions, decode_delimited_text_bytes, import_csv_to_datasheet, import_xlsx_bytes,
+    CsvOptions, FormatError, FormatKind, FormatRegistry, XlsxImportOptions, decode_delimited_text_bytes, import_csv_to_datasheet, import_xlsx_bytes,
     import_xlsx_bytes_with_options, list_xlsx_sheets,
 };
 
@@ -146,5 +147,176 @@ fn delimited_hardening_covers_utf16_boms_thousands_locales_multiline_headers_and
         if thou.is_some() {
             assert_eq!(got.thousands_separator, thou, "{label}");
         }
+    }
+}
+
+fn xlsx_with_parts(shared_strings_xml: Option<&str>, worksheet_xml: &str) -> Vec<u8> {
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let wb = r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let sst_rel = if shared_strings_xml.is_some() {
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>"#
+    } else {
+        ""
+    };
+    let wb_rels = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>{sst_rel}</Relationships>"#
+    );
+    let mut entries =
+        vec![("_rels/.rels", rels), ("xl/workbook.xml", wb), ("xl/_rels/workbook.xml.rels", &wb_rels), ("xl/worksheets/sheet1.xml", worksheet_xml)];
+    if let Some(sst) = shared_strings_xml {
+        entries.push(("xl/sharedStrings.xml", sst));
+    }
+    build_zip_str_entries(&entries)
+}
+
+fn excel_col_name(mut n: usize) -> String {
+    let mut out = Vec::new();
+    while n > 0 {
+        out.push((b'A' + ((n - 1) % 26) as u8) as char);
+        n = (n - 1) / 26;
+    }
+    out.into_iter().rev().collect()
+}
+
+#[test]
+fn xlsx_bounds_amplification_merges_truncation_and_index_overflow() {
+    // Shared-string & merged-header amplification, multi-sheet workbook budget, and whitespace overlapping merges -> ZipBomb.
+    let sst_big = format!(r#"<?xml version="1.0"?><sst><si><t>{}</t></si></sst>"#, "A".repeat(1_048_576));
+    let rows_80: String = (1..=80).map(|r| format!(r#"<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>"#)).collect();
+    let ws_80 = format!(r#"<?xml version="1.0"?><worksheet><sheetData>{rows_80}</sheetData></worksheet>"#);
+    assert!(matches!(import_xlsx_bytes(&xlsx_with_parts(Some(&sst_big), &ws_80)), Err(FormatError::ZipBomb { .. })));
+
+    let big_hdr_ws = format!(
+        r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{}</t></is></c><c r="ACYJ1"><v>1</v></c></row></sheetData><mergeCells count="1"><mergeCell ref="A1:ACYJ1"/></mergeCells></worksheet>"#,
+        "H".repeat(100_000)
+    );
+    assert!(matches!(import_xlsx_bytes(&xlsx_with_parts(None, &big_hdr_ws)), Err(FormatError::ZipBomb { .. })));
+
+    let ok_hdr_ws = format!(
+        r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{}</t></is></c></row><row r="2"><c r="A2"><v>1</v></c><c r="B2"><v>2</v></c><c r="C2"><v>3</v></c></row></sheetData><mergeCells count="1"><mergeCell ref="A1:C1"/></mergeCells></worksheet>"#,
+        "B".repeat(MAX_TITLE_BYTES + 500)
+    );
+    let TableArchetype::Xy(ref xy) = import_xlsx_bytes(&xlsx_with_parts(None, &ok_hdr_ws)).unwrap().document.data_sheets[0].archetype else {
+        panic!("expected Xy")
+    };
+    assert!(xy.x_title.len() <= MAX_TITLE_BYTES && xy.data_sets[0].title.len() <= MAX_TITLE_BYTES);
+
+    // 10k duplicate mergeCells stay fast; distinct overlapping header merges fail with ZipBomb.
+    let dup_ws = format!(
+        r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c><c r="D1"><v>1</v></c></row><row r="2"><c r="A2"><v>10</v></c><c r="B2"><v>20</v></c><c r="C2"><v>30</v></c><c r="D2"><v>40</v></c></row></sheetData><mergeCells>{}</mergeCells></worksheet>"#,
+        r#"<mergeCell ref="A1:D1"/>"#.repeat(10_000)
+    );
+    let t0 = Instant::now();
+    assert_eq!(import_xlsx_bytes(&xlsx_with_parts(None, &dup_ws)).unwrap().document.data_sheets.len(), 1);
+    assert!(t0.elapsed().as_secs() < 2);
+
+    let overlap_ws = r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>H</t></is></c><c r="Z1"><v>1</v></c></row></sheetData><mergeCells><mergeCell ref="A1:Z1"/><mergeCell ref="A1:Y1"/></mergeCells></worksheet>"#;
+    assert!(matches!(import_xlsx_bytes(&xlsx_with_parts(None, overlap_ws)), Err(FormatError::ZipBomb { .. })));
+
+    // 100-sheet shared-string amplification exceeds workbook-wide budget.
+    let sheet_tags: String = (1..=100).map(|i| format!(r#"<sheet name="S{i}" sheetId="{i}" r:id="rId1"/>"#)).collect();
+    let multi_wb = format!(
+        r#"<?xml version="1.0"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>{sheet_tags}</sheets></workbook>"#
+    );
+    let rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#;
+    let wb_rels = r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"#;
+    let tiny_ws = r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#;
+    let multi_bytes = build_zip_str_entries(&[
+        ("_rels/.rels", rels),
+        ("xl/workbook.xml", &multi_wb),
+        ("xl/_rels/workbook.xml.rels", wb_rels),
+        ("xl/sharedStrings.xml", &sst_big),
+        ("xl/worksheets/sheet1.xml", tiny_ws),
+    ]);
+    assert!(matches!(import_xlsx_bytes(&multi_bytes), Err(FormatError::ZipBomb { .. })));
+
+    // 2 MiB whitespace anchor + 1,000 overlapping merges fail fast.
+    let merges_1k: String = (2..=1_001).map(|c| format!(r#"<mergeCell ref="A1:{}1"/>"#, excel_col_name(c))).collect();
+    let ws_spaces = format!(
+        r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>{}</t></is></c><c r="{}1"><v>1</v></c></row></sheetData><mergeCells>{merges_1k}</mergeCells></worksheet>"#,
+        " ".repeat(2_097_152),
+        excel_col_name(1_001)
+    );
+    let t1 = Instant::now();
+    assert!(matches!(import_xlsx_bytes(&xlsx_with_parts(None, &ws_spaces)), Err(FormatError::ZipBomb { .. })));
+    assert!(t1.elapsed().as_secs() < 2);
+
+    // Truncated/unclosed/empty XML rejected; self-closing <sst/>/<worksheet/> accepted.
+    for (sst, ws) in [
+        (None, r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row><row r="2"><c r="A2"><v>2"#),
+        (None, r#"<?xml version="1.0"?><worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#),
+        (Some(r#"<?xml version="1.0"?><sst><si><t>Hello</t></si><si><t>Trunc"#), tiny_ws),
+        (None, ""),
+    ] {
+        assert!(matches!(import_xlsx_bytes(&xlsx_with_parts(sst, ws)), Err(FormatError::XmlParse { .. })));
+    }
+    assert!(import_xlsx_bytes(&xlsx_with_parts(Some(r#"<?xml version="1.0"?><sst/>"#), r#"<?xml version="1.0"?><worksheet/>"#)).is_ok());
+
+    // Max row/col indices never wrap/panic.
+    for rows_xml in [
+        r#"<row r="18446744073709551615"/><row><c><v>1</v></c></row>"#,
+        r#"<row r="4294967295"/><row><c><v>1</v></c></row>"#,
+        r#"<row r="1"><c r="GKGWBYLWRXTLPO1"/><c><v>1</v></c></row>"#,
+        r#"<row r="1"><c r="MWLQKWU1"/><c><v>1</v></c></row>"#,
+    ] {
+        match import_xlsx_bytes(&xlsx_single_sheet_zip("Overflow", rows_xml)).unwrap_err() {
+            FormatError::Doc(DocError::TooManyRows { count, .. }) | FormatError::Doc(DocError::TooManyDataSets { count, .. }) => assert!(count > 0),
+            other => panic!("expected TooManyRows/TooManyDataSets for `{rows_xml}`, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn xlsx_subcolumn_normalization_and_presummarized_design_hint() {
+    let simple = xlsx_single_sheet_zip(
+        "Sheet1",
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Ctrl</t></is></c><c r="B1" t="inlineStr"><is><t>Drug</t></is></c></row><row r="2"><c r="A2"><v>10</v></c><c r="B2"><v>20</v></c></row>"#,
+    );
+    let TableArchetype::Grouped(ref grp) =
+        import_xlsx_bytes_with_options(&simple, &XlsxImportOptions { table_kind: Some(TableKind::Grouped), ..Default::default() })
+            .unwrap()
+            .document
+            .data_sheets[0]
+            .archetype
+    else {
+        panic!("expected Grouped")
+    };
+    assert_eq!((grp.subcolumn_mode, grp.data_sets.len()), (SubcolumnMode::RawReplicates(1), 2));
+
+    let TableArchetype::Nested(ref nested) =
+        import_xlsx_bytes_with_options(&simple, &XlsxImportOptions { table_kind: Some(TableKind::Nested), ..Default::default() })
+            .unwrap()
+            .document
+            .data_sheets[0]
+            .archetype
+    else {
+        panic!("expected Nested")
+    };
+    assert_eq!((nested.groups.len(), nested.groups[0].biological_unit_count()), (2, 1));
+    assert!(matches!(
+        import_xlsx_bytes_with_options(
+            &simple,
+            &XlsxImportOptions { table_kind: Some(TableKind::Nested), subcolumn_mode: SubcolumnMode::MeanSdN, ..Default::default() }
+        ),
+        Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Nested, .. }))
+    ));
+
+    let summary = xlsx_single_sheet_zip(
+        "SummaryCol",
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Ctrl:Mean</t></is></c><c r="B1" t="inlineStr"><is><t>Ctrl:SD</t></is></c><c r="C1" t="inlineStr"><is><t>Ctrl:N</t></is></c></row><row r="2"><c r="A2"><v>10.5</v></c><c r="B2"><v>1.2</v></c><c r="C2"><v>6</v></c></row>"#,
+    );
+    for (mode, expected) in [
+        (SubcolumnMode::MeanSdN, ColumnDesignHint::PrecomputedError),
+        (SubcolumnMode::MeanSemN, ColumnDesignHint::PrecomputedError),
+        (SubcolumnMode::MeanCvN, ColumnDesignHint::PrecomputedError),
+        (SubcolumnMode::Single, ColumnDesignHint::UnpairedReplicates),
+    ] {
+        let rep = import_xlsx_bytes_with_options(
+            &summary,
+            &XlsxImportOptions { table_kind: Some(TableKind::Column), subcolumn_mode: mode, ..Default::default() },
+        )
+        .unwrap();
+        let TableArchetype::Column(ref col) = rep.document.data_sheets[0].archetype else { panic!("expected Column") };
+        assert_eq!(col.design_hint, expected, "{mode:?}");
     }
 }

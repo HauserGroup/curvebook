@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 
-use crate::common::{TempDirGuard, build_zip_entries, pzfx_tables, sample_checkpoint_project};
+use crate::common::{TempDirGuard, build_zip_entries, pzfx_tables, sample_checkpoint_project, sample_column_project};
 use curvebook_doc::{Cell, CellCoord, TableArchetype};
 use curvebook_format::prism::MAX_PROJECT_CELLS;
 use curvebook_format::pzfx::MAX_IMPORT_CELLS;
@@ -9,6 +9,7 @@ use curvebook_format::{
     ArchiveKind, ArchiveManifest, FormatError, import_prism_bytes, import_pzfx_str, is_unpacked_project_dir, open_project_bytes,
     open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir, save_template_bytes,
 };
+use serde_json::json;
 
 #[test]
 fn zip_and_unpacked_dir_preserve_exclusion_notes_and_checkpoints() {
@@ -152,6 +153,43 @@ fn unpacked_dir_rejects_traversal_tampering_and_corrupt_entries() {
 
     fs::write(proj_dir.join("manifest.json"), [0xff_u8, 0xfe, 0x00]).unwrap();
     assert!(matches!(open_project_unpacked_dir(&proj_dir), Err(FormatError::InvalidZip { .. })));
+
+    // Malicious .curvebook.tx/COMMITTING listing arbitrary non-stage paths must fail without deleting user/.git files,
+    // and valid stage names must not be cleaned up before snapshot validation succeeds.
+    let tx_root = root.child("tx_sec.curvebook.d");
+    let tx_doc = sample_column_project("Unpacked Security");
+    save_project_unpacked_dir(&tx_doc, &tx_root).unwrap();
+    fs::create_dir_all(tx_root.join(".git")).unwrap();
+    fs::write(tx_root.join(".git/config"), b"[core]\n").unwrap();
+    fs::write(tx_root.join("README.md"), b"# Notes\n").unwrap();
+    fs::write(tx_root.join("analysis.py"), b"print(1)\n").unwrap();
+    let tx_dir = tx_root.join(".curvebook.tx");
+    fs::create_dir_all(&tx_dir).unwrap();
+    fs::write(
+        tx_dir.join("COMMITTING"),
+        serde_json::to_vec(&json!({
+            "format": "curvebook-unpacked-tx", "version": 1,
+            "stage_paths": [".git/config", "README.md", "analysis.py"], "prior_csv_paths": [], "new_csv_paths": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(save_project_unpacked_dir(&tx_doc, &tx_root), Err(FormatError::UnsafePath { .. })));
+    assert!(tx_root.join(".git/config").exists() && tx_root.join("README.md").exists() && tx_root.join("analysis.py").exists());
+
+    let dummy_stage = tx_root.join(".document.json.stage.1234.9");
+    fs::write(&dummy_stage, b"staged").unwrap();
+    fs::write(
+        tx_dir.join("COMMITTING"),
+        serde_json::to_vec(&json!({
+            "format": "curvebook-unpacked-tx", "version": 1,
+            "stage_paths": [".document.json.stage.1234.9"], "prior_csv_paths": [], "new_csv_paths": []
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(save_project_unpacked_dir(&tx_doc, &tx_root), Err(FormatError::MissingArchiveEntry { .. })));
+    assert!(dummy_stage.exists());
 }
 
 #[cfg(unix)]

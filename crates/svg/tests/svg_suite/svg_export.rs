@@ -5,10 +5,11 @@ use curvebook_chart::{
     TextAnchor, compile_graph, compile_layout,
 };
 use curvebook_doc::{
-    CropInsetsPt, DataSheet, GraphSheet, ImageMimeKind, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    CropInsetsPt, DataSheet, GraphSheet, ImageMimeKind, LayoutSheet, LayoutSpec, MAX_IMAGE_DIM_PX, ProjectDocument, SheetId, SubcolumnMode,
+    TableArchetype, XyTable,
 };
 use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
-use curvebook_svg::{SVG_XMLNS, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
+use curvebook_svg::{MAX_SVG_PATH_COMMANDS, MAX_SVG_PRIMITIVES, SVG_XMLNS, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
 use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
 
 fn sample_rich_scene() -> ChartScene {
@@ -636,4 +637,88 @@ fn svg_editable_tspan_overrides_parent_opacity_and_skips_orphan_clip_paths() {
         "opaque tspan inside 0-alpha text must reset fill-opacity:\n{svg}"
     );
     assert!(!svg.contains("<clipPath"), "skipped invisible path must not leave an orphan <clipPath>:\n{svg}");
+}
+
+fn raster_prim(asset_id: &str, pixel_size: (u32, u32), rgba: Vec<u8>, bounds_pt: RectPt) -> ScenePrimitive {
+    ScenePrimitive::RasterImage(SceneRasterImage {
+        asset_id: String::from(asset_id),
+        media_type: ImageMimeKind::Png,
+        pixel_size,
+        rgba,
+        bounds_pt,
+        crop: CropInsetsPt::default(),
+        rotation_deg: 0.0,
+        clip: None,
+    })
+}
+
+fn forge_trailing_4_bytes_for_crc32(buf: &mut [u8], target_crc: u32) {
+    let n = buf.len();
+    assert!(n >= 4);
+    let mut table = [0u32; 256];
+    for (i, slot) in table.iter_mut().enumerate() {
+        let mut c = u32::try_from(i).expect("u8");
+        for _ in 0..8 {
+            c = if (c & 1) != 0 { (c >> 1) ^ 0xEDB8_8320 } else { c >> 1 };
+        }
+        *slot = c;
+    }
+    let (mut s, mut idxs) = (target_crc ^ 0xFFFF_FFFF, [0u8; 4]);
+    for slot in idxs.iter_mut().rev() {
+        let idx = table.iter().position(|&v| (v >> 24) == (s >> 24)).expect("unique CRC32 top byte");
+        *slot = u8::try_from(idx).expect("u8");
+        s = (s ^ table[idx]) << 8;
+    }
+    let mut c = crc32fast::hash(&buf[..n - 4]) ^ 0xFFFF_FFFF;
+    for (i, idx) in idxs.into_iter().enumerate() {
+        buf[n - 4 + i] = ((c & 0xFF) as u8) ^ idx;
+        c = (c >> 8) ^ table[usize::from(idx)];
+    }
+}
+
+#[test]
+fn svg_resource_caps_stamp_dedup_and_crc32_collision_guard() {
+    let opts = SvgExportOptions::default();
+
+    // 1. Oversized primitive count, single-path command count, and raster dimension all fail cleanly.
+    let mut many_prims = ChartScene::new("svg-many", "Many", 100.0, 100.0, None);
+    many_prims.primitives.resize(MAX_SVG_PRIMITIVES + 1, ScenePrimitive::PopClip);
+    let mut huge_path = Path2D { commands: Vec::with_capacity(MAX_SVG_PATH_COMMANDS + 1) };
+    huge_path.commands.push(PathCmd::MoveTo(PointPt::new(0.0, 0.0)));
+    huge_path.commands.resize(MAX_SVG_PATH_COMMANDS + 1, PathCmd::LineTo(PointPt::new(1.0, 1.0)));
+    let mut cmd_scene = ChartScene::new("svg-cmds", "Cmds", 100.0, 100.0, None);
+    cmd_scene.primitives.push(ScenePrimitive::Path { path: huge_path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+    let mut dim_scene = ChartScene::new("svg-dim", "Dim", 100.0, 100.0, None);
+    dim_scene.primitives.push(raster_prim("huge", (MAX_IMAGE_DIM_PX + 1, 1), Vec::new(), RectPt::new(0.0, 0.0, 10.0, 10.0)));
+    for bad in [&many_prims, &cmd_scene, &dim_scene] {
+        assert!(matches!(render_svg(bad, &opts), Err(SvgError::InvalidScene { .. })), "expected InvalidScene for {}", bad.sheet_id);
+    }
+
+    // 2. 40 repeated 32x32 stamps emit one Base64 PNG <symbol>/<image> in <defs> and 40 <use> stamps.
+    let rgba: Vec<u8> = (0..32u8).flat_map(|y| (0..32u8).flat_map(move |x| [x.wrapping_mul(7), y.wrapping_mul(9), x ^ y, 255])).collect();
+    let mut stamp_scene = ChartScene::new("svg-stamps", "Stamps", 400.0, 400.0, Some(Rgba8::WHITE));
+    for i in 0..40u32 {
+        stamp_scene.primitives.push(raster_prim("tile", (32, 32), rgba.clone(), RectPt::new(f64::from(i) * 8.0, 10.0, 20.0, 20.0)));
+    }
+    let svg = render_svg(&stamp_scene, &opts).expect("render 40 stamps");
+    validate_svg_structure(&svg).expect("valid SVG with <defs>/<symbol>/<use>");
+    assert_eq!(svg.matches("<symbol id=\"img-").count(), 1, "repeated image must be defined once in <defs>");
+    assert_eq!(svg.matches("<image ").count(), 1, "only one <image> definition expected");
+    assert_eq!(svg.matches("<use ").count(), 40, "expected 40 compact <use> stamps");
+    assert_eq!(svg.matches("data:image/png;base64,").count(), 2, "Base64 URI appears once each for xlink:href and href");
+
+    // 3. Distinct images with forged identical CRC32 must NOT collide in the dedup cache.
+    let img_a = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let mut img_b = vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 0, 0, 0, 0];
+    forge_trailing_4_bytes_for_crc32(&mut img_b, crc32fast::hash(&img_a));
+    assert_ne!(img_a, img_b);
+    assert_eq!(crc32fast::hash(&img_a), crc32fast::hash(&img_b));
+    let mut crc_scene = ChartScene::new("svg-crc-collide", "CRC Collision", 200.0, 100.0, Some(Rgba8::WHITE));
+    for (x, buf) in [(10.0, img_a), (80.0, img_b)] {
+        crc_scene.primitives.push(raster_prim("", (2, 2), buf, RectPt::new(x, 10.0, 40.0, 40.0)));
+    }
+    let crc_svg = render_svg(&crc_scene, &opts).expect("render colliding SVG images");
+    validate_svg_structure(&crc_svg).expect("valid svg");
+    assert_eq!(crc_svg.matches("<symbol id=\"img-").count(), 2, "distinct images with identical CRC32 must NOT collide");
+    assert!(crc_svg.contains("xlink:href=\"#img-0\"") && crc_svg.contains("xlink:href=\"#img-1\""));
 }

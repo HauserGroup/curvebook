@@ -1,46 +1,15 @@
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use curvebook_format::ZipWriter;
-use serde_json::Value;
+use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SubcolumnMode, TableArchetype};
+use curvebook_format::{ZipWriter, save_project_file};
+use serde_json::{Value, json};
+
+use crate::common::{CliHarness, TempDir};
 
 type TestResult = Result<(), String>;
 
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
-
-struct TempDir {
-    path: PathBuf,
-}
-
-impl TempDir {
-    fn new(label: &str) -> Result<Self, String> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cb-cli-r17-5-{label}-{}-{seq}", std::process::id()));
-        fs::create_dir_all(&dir).map_err(|err| format!("create temp dir `{}`: {err}", dir.display()))?;
-        Ok(Self { path: dir })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.path);
-    }
-}
-
-fn run_cli(args: &[&str]) -> Result<Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_curvebook-cli"))
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| format!("spawn cli {args:?}: {err}"))
+fn run_cli(args: &[&str]) -> Result<std::process::Output, String> {
+    CliHarness::run(args)
 }
 
 #[test]
@@ -111,5 +80,43 @@ fn cli_convert_and_info_surface_pzfx_and_prism_import_warnings() -> TestResult {
     let conv_val: Value = serde_json::from_slice(&conv_json_out.stdout).map_err(|e| format!("parse convert json: {e}"))?;
     let conv_warnings = conv_val["warnings"].as_array().ok_or("expected warnings array in convert --json")?;
     assert!(conv_warnings.iter().any(|w| w.as_str().unwrap_or("").contains("[UnsupportedAnalysis]")), "warnings: {conv_warnings:?}");
+
+    // 3. `info --json` reports Column subcolumn_mode (`MeanSdN`).
+    let mut doc = ProjectDocument::new("Column Summary Study").map_err(|e| e.to_string())?;
+    let mut col = ColumnTable::new(ColumnDesignHint::PrecomputedError, 2, 2).map_err(|e| e.to_string())?;
+    col.subcolumn_mode = SubcolumnMode::MeanSdN;
+    doc.add_data_sheet(DataSheet::new("col-1", "Summary Column", TableArchetype::Column(col)).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let proj = dir.child("column_summary.curvebook");
+    save_project_file(&proj, &doc).map_err(|e| e.to_string())?;
+    let col_info = CliHarness::run_ok_json(&["info", &proj.display().to_string(), "--json"])?;
+    assert_eq!(col_info["tables"][0]["subcolumn_mode"], json!("MeanSdN"));
+
+    // 4. `run` rejects unknown command keys (`param` typo) with exit 2; `batch` propagates base `.pzfx` warnings to JSON & stderr.
+    let bad_script = dir.child("bad_script.json");
+    fs::write(&bad_script, serde_json::to_vec(&json!([{ "cmd": "sheet.createData", "param": { "kind": "Column" } }])).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    assert_eq!(run_cli(&["run", &bad_script.display().to_string(), "--json"])?.status.code(), Some(2));
+
+    let warn_pzfx = dir.child("warn_base.pzfx");
+    fs::write(
+        &warn_pzfx,
+        r#"<?xml version="1.0" encoding="UTF-8"?><PrismFile><TableSequence><Table ID="Table0" TableType="OneWay"><Title>Data 1</Title><YColumn Width="81" Decimals="1" Subcolumns="1"><Title>Ctrl</Title><Subcolumn><d>1.0</d><d>2.0</d></Subcolumn></YColumn></Table></TableSequence><Graph ID="Graph0"><Title>Unsupported Legacy Graph</Title></Graph></PrismFile>"#,
+    )
+    .map_err(|e| e.to_string())?;
+    let manifest = dir.child("manifest.json");
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&json!({
+            "schema": "curvebook.batch.v1",
+            "project": "warn_base.pzfx",
+            "exports": [{ "format": "curvebook", "out": "out.curvebook" }]
+        }))
+        .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    let (batch_json, batch_stderr) = CliHarness::run_checked_json(&["batch", &manifest.display().to_string(), "--json"])?;
+    assert!(!batch_json["warnings"].as_array().ok_or("missing batch warnings")?.is_empty());
+    assert!(batch_stderr.contains("warning:"), "missing stderr warning: {batch_stderr}");
     Ok(())
 }

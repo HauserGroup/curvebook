@@ -3,8 +3,11 @@
 
 use std::collections::HashMap;
 
-use curvebook_doc::{NonlinearFitSpec, ResultSheet, ResultStatus};
-use curvebook_fit::{FitStatus, format_model_equation_tex, format_model_equation_tex_for_dataset, format_polynomial_equation_tex, get_builtin_model};
+use curvebook_doc::{LinearRegressionSpec, NonlinearFitSpec, ResultSheet, ResultStatus};
+use curvebook_fit::{
+    FitStatus, format_linear_regression_equation_tex, format_model_equation_tex, format_model_equation_tex_for_dataset,
+    format_polynomial_equation_tex, get_builtin_model,
+};
 
 use crate::common::{
     assert_grad_matches_fd, cfg_rules, dsl_compile, exec_nl, fit_with, mv_sheet_num, nl_fast, rule_col_title, rule_const, rule_per_ds, series_eval,
@@ -365,4 +368,51 @@ fn r2_s03_09_per_dataset_constants_and_empty_linear_fallback() {
     let eq_s0 = format_model_equation_tex_for_dataset("one_site_competition_ligand_depletion", None, &suffixed, Some(0), true, 4);
     let eq_s1 = format_model_equation_tex_for_dataset("one_site_competition_ligand_depletion", None, &suffixed, Some(1), true, 4);
     assert!(!eq_s0.contains("HotNM") && eq_s0.contains("1.5") && !eq_s1.contains("HotNM") && eq_s1.contains("3"));
+}
+
+#[test]
+fn aud_03_33_34_and_13_18_tex_sections_piecewise_and_fixed_point_linear() {
+    let owned = |p: &[(&str, f64)]| -> Vec<(String, f64)> { p.iter().map(|&(k, v)| (k.to_owned(), v)).collect() };
+    for &(dsl, params, sub, expected) in &[
+        (
+            "[InitialValues]\nA = YMAX\n[Equation]\nY = A * exp(-k * X)\n[Derived Scalars]\nHalfLife = ln(2) / k\n",
+            &[][..],
+            false,
+            "Y = A \\cdot \\exp(-k \\cdot X)",
+        ),
+        ("[Equation]\nY = A * X\n[Initial Value]\nA = 2\n[Derived Scalars]\nDouble = 2 * A\n2 * A\n", &[][..], false, "Y = A \\cdot X"),
+        ("Y = IF(X > 0, gamma * X + gamma(X), 0)", &[("gamma", 2.5)][..], true, "Y = \\text{IF}(X > 0, 2.5 \\cdot X + \\text{gamma}(X), 0)"),
+        ("Y = IF(X > 0, X^b, 0)", &[("b", -2.5)][..], true, "Y = \\text{IF}(X > 0, X^{-2.5}, 0)"),
+        ("Y = IF(X > 0, X ** b, 0)", &[("b", 12.0)][..], true, "Y = \\text{IF}(X > 0, X^{12}, 0)"),
+        ("Y = IF(X <= -2, 1, 0)", &[][..], false, "Y = \\text{IF}(X \\leq -2, 1, 0)"),
+        ("Y = IF(X > -2, 1, 0)", &[][..], false, "Y = \\text{IF}(X > -2, 1, 0)"),
+        ("Y = IF(X >= -2 && X != -1, X % -3, 0)", &[][..], false, "Y = \\text{IF}(X \\geq -2 \\land X \\neq -1, X \\bmod (-3), 0)"),
+        ("Y = X && -2 || -3", &[][..], false, "Y = X \\land -2 \\lor -3"),
+        ("Y = !(-X)", &[][..], false, "Y = \\neg -X"),
+        ("Y = !a", &[("a", -2.0)][..], true, "Y = \\neg -2"),
+    ] {
+        assert_eq!(format_model_equation_tex("custom_dsl", Some(dsl), &owned(params), sub, 4), expected, "dsl={dsl}");
+    }
+    let mod_and = format_model_equation_tex("custom_dsl", Some("Y = IF(X > 0 && !(X < 1), X % 2, 0)"), &[], false, 4);
+    assert!(mod_and.contains("\\land") && mod_and.contains("\\neg") && mod_and.contains("\\bmod"), "{mod_and}");
+    let fallback_pow = format_model_equation_tex("custom_dsl", Some("Y = a ** X @ 1"), &owned(&[("a", -2.0)]), true, 4);
+    assert!(fallback_pow.contains("(-2)"), "{fallback_pow}");
+
+    // AUD-13-18: fixed_point linear preserves Y-intercept even when force_through_origin is set, and <B> + [DS2] substitution.
+    let fp_spec = LinearRegressionSpec { force_through_origin: true, fixed_point: Some((10.0, 25.0)), ..LinearRegressionSpec::default() };
+    assert_eq!(format_linear_regression_equation_tex(&fp_spec, &owned(&[("Slope", 2.0), ("YIntercept", 5.0)]), true, 4), "Y = 2 \\cdot X + 5");
+    assert_eq!(format_linear_regression_equation_tex(&fp_spec, &[], false, 4), "Y = \\text{Slope} \\cdot X + \\text{Intercept}");
+    assert_eq!(format_polynomial_equation_tex(1, true, &owned(&[("Slope", 2.0), ("YIntercept", 5.0)]), true, 4), "Y = 2 \\cdot X + 5");
+    assert_eq!(format_polynomial_equation_tex(1, true, &owned(&[("Slope", 2.0), ("YIntercept", 0.0)]), true, 4), "Y = 2 \\cdot X");
+    assert_eq!(
+        format_model_equation_tex_for_dataset(
+            "custom_dsl",
+            Some("<A> Y = Bmax * X / (Kd + X) + NS * X\n<B> Y = NS * X\n"),
+            &owned(&[("NS [DS1]", 1.0), ("NS [DS2]", 3.5)]),
+            Some(1),
+            true,
+            4,
+        ),
+        "Y = 3.5 \\cdot X"
+    );
 }

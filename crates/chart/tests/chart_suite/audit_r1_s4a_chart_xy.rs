@@ -3,30 +3,14 @@
 
 use curvebook_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_graph};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AxisSegment, Cell, CurveSamplePoint, DataSheet, ErrorBarMetric, ErrorBarSpec, FittedCurveOverlay, GraphSheet,
-    NonlinearFitSpec, ProjectDocument, RegressionOverlaySpec, ResultSheet, ResultStatus, SheetId, SubcolumnMode, SurvivalTable, TableArchetype,
-    XyTable,
+    AnalysisKind, AnalysisSpec, AxisSegment, Cell, CurveSamplePoint, DataSheet, DemingErrorSpec, EquationDisplayMode, ErrorBarMetric, ErrorBarSpec,
+    FittedCurveOverlay, GraphAnnotation, GraphSheet, LinearRegressionSpec, NonlinearFitSpec, ProjectDocument, RectPt, RegressionOverlaySpec,
+    ResultSheet, ResultStatus, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, XyTable,
 };
+use curvebook_fit::{HookContext, execute_analysis};
 use curvebook_math::{AxisScale, LogitDomain};
 
-fn all_points_finite(scene: &ChartScene) -> bool {
-    scene.primitives.iter().all(|p| match p {
-        ScenePrimitive::Path { path, .. } => path.commands.iter().all(|c| match c {
-            PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => pt.x.is_finite() && pt.y.is_finite(),
-            PathCmd::QuadTo { control, to } => control.x.is_finite() && control.y.is_finite() && to.x.is_finite() && to.y.is_finite(),
-            PathCmd::CubicTo { c1, c2, to } => {
-                c1.x.is_finite() && c1.y.is_finite() && c2.x.is_finite() && c2.y.is_finite() && to.x.is_finite() && to.y.is_finite()
-            }
-            PathCmd::Close => true,
-        }),
-        ScenePrimitive::Text(t) => t.anchor_pt.x.is_finite() && t.anchor_pt.y.is_finite(),
-        ScenePrimitive::RasterImage(img) => {
-            img.bounds_pt.x.is_finite() && img.bounds_pt.y.is_finite() && img.bounds_pt.width.is_finite() && img.bounds_pt.height.is_finite()
-        }
-        ScenePrimitive::PushClip { rect } => rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite(),
-        ScenePrimitive::PopClip => true,
-    })
-}
+use super::common::all_points_finite;
 
 fn filled_marker_centers(scene: &ChartScene) -> Vec<PointPt> {
     scene
@@ -462,4 +446,68 @@ fn r1_x2_06_fitted_overlay_never_borrows_wrong_dataset_or_failed_result() {
     let scene_fail = compile_graph(&g_fail, &doc).unwrap();
     assert!(scene_fail.warnings.iter().any(|w| w.code == "failed_regression_result"));
     assert_eq!(scene_fail.primitives, scene_none.primitives, "failed result must not render stale fitted curves");
+}
+
+#[test]
+fn default_model_ii_deming_overlay_renders_cleanly() {
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).expect("xy");
+    xy.data_sets[0].title = String::from("Method B");
+    for (r, (x, y)) in [(1.0, 2.2), (2.0, 4.1), (3.0, 5.9), (4.0, 8.3), (5.0, 10.0), (6.0, 12.1), (7.0, 13.8), (8.0, 16.2)].into_iter().enumerate() {
+        xy.set_x_cell(r, Cell::number(x)).expect("x");
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let ds = DataSheet::new("xy-deming", "Method Comparison", TableArchetype::Xy(xy)).expect("ds");
+
+    for (tag, err_spec) in [
+        ("equal", DemingErrorSpec::EqualError),
+        ("sds", DemingErrorSpec::StandardDeviations { sd_x: 0.4, sd_y: 0.8 }),
+        ("ratio", DemingErrorSpec::VarianceRatio { lambda: 2.0 }),
+    ] {
+        let lin_spec = LinearRegressionSpec { deming_model_ii: true, deming_error: err_spec, ..LinearRegressionSpec::default() };
+        let res_id = SheetId::new(format!("res-deming-{tag}"));
+        let res = execute_analysis(
+            &AnalysisSpec::new(res_id.clone(), "xy-deming", AnalysisKind::LinearRegression(lin_spec)).expect("spec"),
+            &ds,
+            &HookContext::default(),
+        )
+        .expect("deming execute");
+        assert_eq!(res.status, ResultStatus::UpToDate);
+        assert_eq!(res.fitted_curves.len(), 1, "expected default Deming overlay for {tag}");
+
+        let mut doc = ProjectDocument::new("DemingOverlay").expect("doc");
+        doc.add_data_sheet(ds.clone()).expect("add ds");
+        doc.add_result_sheet(res).expect("add res");
+
+        let mut graph = GraphSheet::new_uninitialized_for_data(format!("g-deming-{tag}"), &ds).expect("graph");
+        graph.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+            result_sheet_id: res_id.clone(),
+            sample_segments: 256,
+            show_confidence_band: false,
+            show_prediction_band: false,
+            shaded_ribbon: true,
+        });
+        graph.spec.annotations.push(GraphAnnotation::ModelEquation {
+            result_sheet_id: res_id,
+            data_set_index: 0,
+            mode: EquationDisplayMode::Substituted,
+            bounds_pt: RectPt::new(80.0, 30.0, 0.0, 0.0),
+            font_size_pt: 10.0,
+            bordered: true,
+        });
+
+        let scene = compile_graph(&graph, &doc).expect("compile deming chart");
+        assert!(scene.warnings.is_empty(), "warnings for {tag}: {:?}", scene.warnings);
+        let overlay_strokes = scene
+            .primitives
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p,
+                    ScenePrimitive::Path { path, fill: None, stroke: Some(st), clip: Some(_) }
+                        if (st.width_pt - 1.75).abs() < 1e-6 && path.commands.len() >= 16
+                )
+            })
+            .count();
+        assert!(overlay_strokes >= 1, "expected rendered Deming fitted curve path for {tag}");
+    }
 }

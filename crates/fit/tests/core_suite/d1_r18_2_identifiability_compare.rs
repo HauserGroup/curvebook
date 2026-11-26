@@ -14,19 +14,22 @@ use super::common;
 
 use curvebook_doc::{
     Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitFlagRules, FitMethod, IdentifiabilityMode, ModelComparisonMethod,
-    ModelComparisonQuestion, NonlinearFitSpec, ResultCell, ResultStatus, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    ModelComparisonQuestion, NonlinearFitSpec, OutlierHandling, ResultCell, ResultStatus, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
     format_significant_digits,
 };
+use curvebook_fit::diagnostics::compute_covariance_diagnostics;
 use curvebook_fit::{
-    DatasetSeries, FitIdentifiability, HookContext, ModelComparisonOutcome, NonlinearFitResult, ParameterNote, SolverConfig,
+    DatasetSeries, FitIdentifiability, FitStatus, HookContext, ModelComparisonOutcome, NonlinearFitResult, ParameterNote, SolverConfig,
     assemble_objective_hessian, compare_models_question, evaluate_fit_flags, get_builtin_model, greedy_hessian_reduction, hessian_condition_number,
-    hessian_kappa_threshold,
+    hessian_kappa_threshold, is_fit_well_defined,
 };
+use curvebook_math::ConfidenceLevel;
 use curvebook_math::linalg::DenseMatrix;
-use curvebook_testkit::assert_close;
+use curvebook_testkit::{assert_approx_eq, assert_close};
 
 use common::{
-    cell_num, cfg_fast, dsl_compile, exec_nl, find_param, find_tab, fit_default, fit_with, nl_fast, series_xy, tab_row, xy_sheet, xy_sheet_single,
+    cell_num, cfg_fast, dsl_compile, exec_nl, find_param, find_tab, fit_default, fit_with, nl_fast, rule_const, series_xy, tab_row, xy_sheet,
+    xy_sheet_single,
 };
 
 #[test]
@@ -40,11 +43,16 @@ fn r18_2_greedy_hessian_identifiability_and_three_modes_r_oracle() {
 
     // Raw unscaled condition number oracle on [X, 1, 1e-6 * X^2] remains exact, while AUD-03-05
     // correlation-equilibrated `greedy_hessian_reduction` is unit-scale invariant and keeps all 3.
+    let j_unit: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, x * x]).collect();
+    let h_unit = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_unit).unwrap(), false).unwrap();
+    let red_unit = greedy_hessian_reduction(&h_unit, hessian_kappa_threshold()).unwrap();
     let j_scaled: Vec<f64> = xs.iter().flat_map(|&x| [x, 1.0, 1e-6 * x * x]).collect();
     let h_scaled = assemble_objective_hessian(&DenseMatrix::from_row_major(xs.len(), 3, j_scaled).unwrap(), false).unwrap();
     assert_close(hessian_condition_number(&h_scaled).unwrap() / 3.856_137_345_783e11, 1.0, 1e-6, "kappa(H_full) relative");
     let red_scaled = greedy_hessian_reduction(&h_scaled, hessian_kappa_threshold()).unwrap();
+    assert_eq!(red_unit.unstable_indices, red_scaled.unstable_indices);
     assert!(red_scaled.unstable_indices.is_empty(), "pure unit rescaling must not trigger false instability (AUD-03-05)");
+    assert_approx_eq(red_unit.final_kappa, red_scaled.final_kappa, 1e-6, 1e-9, "scale-invariant kappa");
 
     // Truly collinear parameterization Y = A*X + B + C*(X + 1 + 1e-5 * X^2) spans the exact same
     // subspace span{X, 1, X^2}, so RSS_full and the R 4.5.2 reduced-subspace SE(A), SE(B) are
@@ -109,9 +117,74 @@ fn r18_2_greedy_hessian_identifiability_and_three_modes_r_oracle() {
     let c_amb = find_param(&fit_amb, "C");
     assert!(c_amb.notes.contains(&ParameterNote::Ambiguous) && !c_amb.notes.contains(&ParameterNote::Unstable));
 
-    let fit_all = fit_with(&dead_model, &[ds], &SolverConfig { identifiability_mode: Some(IdentifiabilityMode::ReportAll), ..cfg_fast() });
+    let fit_all = fit_with(
+        &dead_model,
+        &[ds],
+        &SolverConfig { identifiability_mode: Some(IdentifiabilityMode::ReportAll), compute_profile_ci: true, ..cfg_fast() },
+    );
     assert_eq!(fit_all.identifiability, FitIdentifiability::NotAssessed);
     assert!(fit_all.parameters.iter().all(|p| !p.notes.contains(&ParameterNote::Ambiguous) && !p.notes.contains(&ParameterNote::Unstable)));
+    // AUD-03-06: rank-deficient ReportAll emits NaN SE and Open CI (never 0.0).
+    let pc_all = find_param(&fit_all, "C");
+    assert!(pc_all.se.is_nan() && (pc_all.ci_lower, pc_all.ci_upper) == (CiBound::Open, CiBound::Open));
+}
+
+#[test]
+fn aud_03_04_05_06_greedy_cov_masking_large_k_and_rank_deficient_nan() {
+    // AUD-03-04: greedy reduction masks unstable row/col in cov/corr as NaN and fixes unstable C during profile CI.
+    let xs: Vec<f64> = (0..12).map(f64::from).collect();
+    let noise = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
+    let ys: Vec<f64> = xs.iter().zip(noise).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
+    let col_model = dsl_compile("Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0");
+    let fit_prof = fit_with(
+        &col_model,
+        &[series_xy(0, "Col", &xs, &ys)],
+        &SolverConfig {
+            identifiability_mode: Some(IdentifiabilityMode::IdentifyUnstableParameters),
+            compute_profile_ci: true,
+            compute_bands: true,
+            ..SolverConfig::default()
+        },
+    );
+    let (p_a, p_b, p_c) = (find_param(&fit_prof, "A"), find_param(&fit_prof, "B"), find_param(&fit_prof, "C"));
+    assert!(p_c.notes.contains(&ParameterNote::Unstable) && p_c.se.is_nan() && p_c.hougaard_g1.is_nan());
+    assert_eq!((p_c.ci_lower, p_c.ci_upper), (CiBound::Open, CiBound::Open));
+    let ic = p_c.slot_index;
+    for j in 0..3 {
+        assert!(
+            fit_prof.covariance.covariance_matrix[ic][j].is_nan()
+                && fit_prof.covariance.covariance_matrix[j][ic].is_nan()
+                && fit_prof.covariance.correlation_matrix[ic][j].is_nan()
+                && fit_prof.covariance.correlation_matrix[j][ic].is_nan()
+        );
+    }
+    for p in [p_a, p_b] {
+        assert!(p.se.is_finite() && p.se > 0.0 && matches!((p.ci_lower, p.ci_upper), (CiBound::Finite(_), CiBound::Finite(_))));
+    }
+
+    // AUD-03-05: zero diagonal column dropped immediately and large K > 32 executes via single-SVD pivot.
+    let mut h_big = DenseMatrix::zeros(40, 40).unwrap();
+    for i in 0..40 {
+        h_big.set(i, i, if i == 5 { 0.0 } else { 1.0 }).unwrap();
+    }
+    h_big.set(10, 11, 1.0).unwrap();
+    h_big.set(11, 10, 1.0).unwrap();
+    let red_big = greedy_hessian_reduction(&h_big, hessian_kappa_threshold()).unwrap();
+    assert!(red_big.unstable_indices.contains(&5) && (red_big.unstable_indices.contains(&10) || red_big.unstable_indices.contains(&11)));
+    assert_eq!(red_big.stable_indices.len(), 38);
+
+    // AUD-03-06: rank-1 2x2 Jacobian emits NaN SE/CI/corr (never 0.0).
+    let j_r1 = DenseMatrix::from_row_major(6, 2, vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0, 5.0, 0.0, 6.0, 0.0]).unwrap();
+    let cov_r1 = compute_covariance_diagnostics(&j_r1, 0.5, 4, &[2.0, 1.0], ConfidenceLevel::DEFAULT_95).unwrap();
+    assert!(cov_r1.numerical_rank == 1 && cov_r1.standard_errors[0].is_finite() && cov_r1.standard_errors[0] > 0.0);
+    assert!(
+        cov_r1.standard_errors[1].is_nan()
+            && cov_r1.symmetric_ci_lower[1].is_nan()
+            && cov_r1.symmetric_ci_upper[1].is_nan()
+            && cov_r1.correlation_matrix[1][1].is_nan()
+            && cov_r1.correlation_matrix[0][1].is_nan()
+            && cov_r1.correlation_matrix[1][0].is_nan()
+    );
 }
 
 #[test]
@@ -220,6 +293,41 @@ fn r18_2_four_model_comparison_questions_and_prefer_well_defined_r_oracle() {
     };
     assert!(preferred_is_primary, "clean 4PL fit must be preferred over Flagged 3PL fit");
     assert!(rejection_reasons.iter().any(|r| r.contains("Flagged")));
+
+    // AUD-03-03: is_fit_well_defined accepts Converged and rejects all 5 unconverged/ambiguous statuses.
+    let mut sl_fit = fit_with(
+        get_builtin_model("straight_line").unwrap().as_ref(),
+        &[series_xy(0, "A", &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1.0, 3.0, 5.0, 7.0, 9.0, 11.0])],
+        &cfg,
+    );
+    assert!(sl_fit.status == FitStatus::Converged && is_fit_well_defined(&sl_fit, None).0);
+    for bad in [FitStatus::HitMaxIters, FitStatus::Diverged, FitStatus::BadInitialValues, FitStatus::ImpossibleWeights, FitStatus::Ambiguous] {
+        sl_fit.status = bad;
+        let (ok, reasons) = is_fit_well_defined(&sl_fit, None);
+        assert!(!ok && !reasons.is_empty(), "is_fit_well_defined must reject {bad:?}");
+    }
+
+    // AUD-03-08: SingleGlobalCurveVsSeparate preserves model default constants (3PL HillSlope fixed -> k_free = 3 vs 6).
+    let x3 = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0];
+    let ds3 = [
+        series_xy(0, "A", &x3, &x3.map(|v| 10.0 + 90.0 / (1.0 + 10.0_f64.powf(-6.5 - v)))),
+        series_xy(1, "B", &x3, &x3.map(|v| 10.0 + 90.0 / (1.0 + 10.0_f64.powf(-5.5 - v)))),
+    ];
+    let m3 = get_builtin_model("log_agonist_vs_response_3pl").unwrap();
+    let p3 = fit_with(m3.as_ref(), &ds3, &cfg);
+    let q3 = compare_models_question(
+        m3.as_ref(),
+        &p3,
+        &ds3,
+        &HookContext::default(),
+        &cfg,
+        ModelComparisonMethod::ExtraSumOfSquaresF,
+        &ModelComparisonQuestion::SingleGlobalCurveVsSeparate,
+        false,
+        None,
+    )
+    .unwrap();
+    assert_eq!((q3.model_a_fit.k_free, q3.model_b_fit.k_free), (3, 6));
 }
 
 #[test]
@@ -259,6 +367,22 @@ fn r18_2_fit_flag_rules_all_six_criteria() {
         },
     );
     assert!(!outcome.flagged, "clean fit should not be flagged: {:?}", outcome.reasons);
+
+    // AUD-03-26: zero-TSS R^2 is NaN (global & dataset), triggers min_r_squared flag, and is omitted from result.scalars.
+    let const_xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+    let const_ys = [5.0; 5];
+    let fixed_rules = vec![rule_const("YIntercept", 0.0), rule_const("Slope", 0.0)];
+    let fit_z = fit_with(
+        get_builtin_model("straight_line").unwrap().as_ref(),
+        &[series_xy(0, "A", &const_xs, &const_ys)],
+        &SolverConfig { parameter_rules: fixed_rules.clone(), ..cfg_fast() },
+    );
+    assert!(fit_z.r_squared.is_nan() && fit_z.datasets[0].r_squared.is_nan());
+    assert!(evaluate_fit_flags(&fit_z, &FitFlagRules { min_r_squared: Some(0.95), ..FitFlagRules::default() }).flagged);
+    let mut nl_z = nl_fast("straight_line");
+    nl_z.parameter_rules = fixed_rules;
+    let res_z = exec_nl(&xy_sheet_single("xy-const", "Const", "A", &const_xs, &const_ys), nl_z);
+    assert!(res_z.scalars.iter().all(|s| s.value.is_finite()));
 }
 
 #[test]
@@ -294,6 +418,33 @@ fn r18_2_parameter_summary_and_significant_digits_r_oracle() {
     for (val, sig, exp) in [(0.179_486_6, 4, "0.1795"), (9.999, 3, "10.0"), (0.0, 3, "0.00"), (1.2345e-6, 3, "1.23e-6")] {
         assert_eq!(format_significant_digits(val, sig), exp);
     }
+
+    // AUD-03-39 / AUD-13-05 / AUD-13-15: unstable Parameter Summary masking & cleaned_data never clobbers _param_summary.
+    let xs12: Vec<f64> = (0..12).map(f64::from).collect();
+    let n12 = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
+    let y0: Vec<f64> = xs12.iter().zip(n12).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
+    let mut y1: Vec<f64> = xs12.iter().zip(n12).map(|(&x, e)| 2.0 + 3.0 * x - e).collect();
+    y1[6] = 400.0;
+    let sr_sheet = xy_sheet("xy-sum-rout", "SumRout", &xs12, &[("10", &y0), ("20", &y1)]);
+
+    let mut nl_u = nl_fast("ill_cond");
+    nl_u.custom_dsl = Some("Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
+    nl_u.identifiability_mode = Some(IdentifiabilityMode::IdentifyUnstableParameters);
+    nl_u.summary_parameter = Some("C".to_owned());
+    let res_u = exec_nl(&sr_sheet, nl_u);
+    assert!(res_u.scalars.iter().all(|s| !s.key.eq_ignore_ascii_case("C")));
+    assert_eq!(tab_row(&res_u, "nonlinear_parameter_summary", "10")[1], ResultCell::Text("Unstable".to_owned()));
+    let Some(DataSheet { archetype: TableArchetype::Xy(u_xy), .. }) = &res_u.analyzable_data else { panic!("expected summary XY") };
+    assert!(u_xy.data_sets[0].cells[0][0].active_number().is_none());
+
+    let mut nl_both = nl_fast("straight_line");
+    nl_both.method = FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 };
+    nl_both.outlier_handling = OutlierHandling::Eliminate;
+    nl_both.summary_parameter = Some("Slope".to_owned());
+    nl_both.emit_cleaned_data_tab = true;
+    let res_both = exec_nl(&sr_sheet, nl_both);
+    assert!(res_both.tabs.iter().any(|t| t.id == "cleaned_data") && res_both.tabs.iter().any(|t| t.id == "nonlinear_parameter_summary"));
+    assert!(res_both.analyzable_data.as_ref().unwrap().id.as_str().ends_with("_param_summary"));
 }
 
 #[test]
@@ -321,6 +472,7 @@ fn r18_2_dual_interpolated_tabs_analyzable_data_and_antilog_r_oracle() {
         panic!("expected XyTable for interpolated analyzable_data");
     };
     assert_eq!(ixy.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::UpperLowerLimits });
+    assert_eq!(ixy.x_title, "Interpolated X");
     assert_eq!(ixy.x_cells.len(), 3, "1 Mean X row + 2 Replicate rows");
 
     let oracles = [

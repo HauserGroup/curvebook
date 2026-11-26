@@ -3,37 +3,30 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CurveSamplePoint, DataSheet, FittedCurveOverlay, GraphSheet, NonlinearFitSpec, ProjectDocument,
-    RegressionOverlaySpec, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    AnalysisKind, AnalysisSpec, CurveSamplePoint, FittedCurveOverlay, GraphSheet, NonlinearFitSpec, ProjectDocument, RegressionOverlaySpec,
+    ResultSheet, ResultStatus, SheetId,
 };
 use curvebook_engine::{CommandOutcome, Session};
 use serde_json::{Value, json};
 
-/// How the regression overlay on the graph is set up.
+use super::common::{ok_cmd, xy_sheet};
+
 #[derive(Clone, Copy)]
 enum Overlay {
-    /// Overlay bound to an up-to-date fit.
     Current,
-    /// Overlay bound to the same fit, now pending recalculation but still holding its cached curve.
     Pending,
-    /// No overlay at all.
     None,
 }
 
 fn doc(overlay: Overlay) -> ProjectDocument {
     let mut doc = ProjectDocument::new("Pending fit").unwrap();
-    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
-    for (r, (x, y)) in [(1.0, 10.0), (2.0, 21.0), (3.0, 29.0), (4.0, 41.0)].into_iter().enumerate() {
-        xy.set_x_cell(r, Cell::number(x)).unwrap();
-        xy.data_sets[0].cells[r][0] = Cell::number(y);
-    }
-    let ds = DataSheet::new("d", "Dose response", TableArchetype::Xy(xy)).unwrap();
+    let ds = xy_sheet("d", "Dose response", "", &[1.0, 2.0, 3.0, 4.0], &[("", &[10.0, 21.0, 29.0, 41.0])]);
     doc.add_data_sheet(ds.clone()).unwrap();
 
-    let spec = AnalysisSpec::new("fit", "d", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("linear"))).unwrap();
-    let mut res = ResultSheet::new(spec).unwrap();
+    let mut res =
+        ResultSheet::new(AnalysisSpec::new("fit", "d", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("linear"))).unwrap()).unwrap();
     res.status = if matches!(overlay, Overlay::Pending) { ResultStatus::Dirty } else { ResultStatus::UpToDate };
-    let pt = |x: f64, y: f64| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None };
+    let pt = |x, y| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None };
     res.fitted_curves.push(FittedCurveOverlay {
         data_set_index: 0,
         equation_id: String::from("linear"),
@@ -44,23 +37,19 @@ fn doc(overlay: Overlay) -> ProjectDocument {
     doc.add_result_sheet(res).unwrap();
 
     let mut graph = GraphSheet::new_uninitialized_for_data("g", &ds).unwrap();
-    graph.spec.series[0].regression_overlay = match overlay {
-        Overlay::None => None,
-        Overlay::Current | Overlay::Pending => Some(RegressionOverlaySpec {
-            result_sheet_id: SheetId::new("fit"),
-            sample_segments: 50,
-            show_confidence_band: false,
-            show_prediction_band: false,
-            shaded_ribbon: false,
-        }),
-    };
+    graph.spec.series[0].regression_overlay = (!matches!(overlay, Overlay::None)).then(|| RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("fit"),
+        sample_segments: 50,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: false,
+    });
     doc.add_graph_sheet(graph).unwrap();
     doc
 }
 
 fn export(overlay: Overlay, command: &str, params: Value) -> CommandOutcome {
-    let mut session = Session::from_document(doc(overlay));
-    session.execute(command, params).unwrap_or_else(|e| panic!("{command} failed: {e}"))
+    ok_cmd(&mut Session::from_document(doc(overlay)), command, params)
 }
 
 fn warning_codes(outcome: &CommandOutcome) -> Vec<String> {
@@ -70,9 +59,7 @@ fn warning_codes(outcome: &CommandOutcome) -> Vec<String> {
 #[test]
 fn pending_fit_exports_the_figure_without_its_old_curve() {
     let svg = |overlay| export(overlay, "graph.exportSvg", json!({ "sheet_id": "g" })).payload["svg"].as_str().unwrap().to_owned();
-    let current = svg(Overlay::Current);
-    let pending = svg(Overlay::Pending);
-    let without = svg(Overlay::None);
+    let (current, pending, without) = (svg(Overlay::Current), svg(Overlay::Pending), svg(Overlay::None));
     assert_ne!(current, without, "fixture must draw a fitted curve when the fit is up to date");
     assert_eq!(pending, without, "a pending fit must not contribute its cached curve to the exported figure");
 }
@@ -91,11 +78,7 @@ fn every_figure_export_states_the_pending_fit_warning() {
         let codes = warning_codes(&out);
         assert!(codes.iter().any(|c| c == "pending_regression_result"), "{command}: payload warnings {codes:?}");
         assert_eq!(out.payload["warnings_count"], json!(codes.len()), "{command}: warnings_count");
-        assert!(
-            out.warnings.iter().any(|w| w.starts_with("pending_regression_result: ") && w.contains("'fit'")),
-            "{command}: outcome warnings {:?}",
-            out.warnings
-        );
+        assert!(out.warnings.iter().any(|w| w.starts_with("pending_regression_result: ") && w.contains("'fit'")), "{command}: {:?}", out.warnings);
         assert!(out.message.contains("warning(s)"), "{command}: message `{}`", out.message);
     }
 }
@@ -103,7 +86,6 @@ fn every_figure_export_states_the_pending_fit_warning() {
 #[test]
 fn current_fit_exports_without_warnings() {
     let out = export(Overlay::Current, "graph.exportSvg", json!({ "sheet_id": "g" }));
-    assert_eq!(warning_codes(&out), Vec::<String>::new());
-    assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    assert!(warning_codes(&out).is_empty() && out.warnings.is_empty());
     assert_eq!(out.message, "exported SVG figure");
 }

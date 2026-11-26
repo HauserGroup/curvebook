@@ -10,37 +10,7 @@ use curvebook_render::{
 };
 use curvebook_text::{RichSpan, RichText, SpanWeight};
 
-const EMR_EXTTEXTOUTW: u32 = 84;
-
-fn read_u32_le(bytes: &[u8], off: usize) -> u32 {
-    let arr: Option<[u8; 4]> = bytes.get(off..off + 4).and_then(|s| s.try_into().ok());
-    assert!(arr.is_some(), "u32_le offset {off} out of bounds");
-    u32::from_le_bytes(arr.unwrap_or([0; 4]))
-}
-
-fn decode_emf_texts(emf: &[u8]) -> Vec<String> {
-    let mut texts = Vec::new();
-    let mut off = 0usize;
-    while off + 8 <= emf.len() {
-        let rec_type = read_u32_le(emf, off);
-        let rec_size = read_u32_le(emf, off + 4) as usize;
-        if rec_size < 8 || off + rec_size > emf.len() {
-            break;
-        }
-        if rec_type == EMR_EXTTEXTOUTW && rec_size >= 76 {
-            let n_chars = read_u32_le(emf, off + 44) as usize;
-            let off_str = read_u32_le(emf, off + 48) as usize;
-            if off_str + n_chars * 2 <= rec_size
-                && let Some(utf16_bytes) = emf.get(off + off_str..off + off_str + n_chars * 2)
-            {
-                let units: Vec<u16> = utf16_bytes.as_chunks::<2>().0.iter().map(|&pair| u16::from_le_bytes(pair)).collect();
-                texts.push(String::from_utf16(&units).expect("UTF-16LE in EMR_EXTTEXTOUTW"));
-            }
-        }
-        off += rec_size;
-    }
-    texts
-}
+use super::emf_and_budget::parse_and_validate_emf;
 
 fn ellipse_path(cx: f64, cy: f64, rx: f64, ry: f64) -> Path2D {
     let k = 0.552_284_749_830_793_6;
@@ -143,7 +113,7 @@ fn sec10_06_emf_rejects_zero_dpi_enforces_primitive_budget_and_reorders_rtl_span
         color: Rgba8::BLACK,
     }));
     let emf = encode_emf(&rtl_scene).expect("encode rtl emf");
-    let texts = decode_emf_texts(&emf);
+    let texts = parse_and_validate_emf(&emf).decoded_texts;
     let joined = texts.join("|");
     let pos_digits = joined.find("2026").expect("missing digits in EMF output");
     // Reordering reverses Hebrew characters into visual LTR order ("םולש") after "2026 ".

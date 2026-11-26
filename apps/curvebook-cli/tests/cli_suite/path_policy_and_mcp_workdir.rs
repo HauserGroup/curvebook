@@ -122,6 +122,17 @@ fn r1_s12_01_batch_run_and_direct_workdir_reject_stored_external_link_escapes() 
     assert!(ok_out.status.success(), "inside batch failed: {}", String::from_utf8_lossy(&ok_out.stderr));
     let exported_csv = fs::read_to_string(dirs.workdir.join("out_ok.csv")).expect("read ok export");
     assert!(exported_csv.contains("77.5"), "expected refreshed inside link value in CSV: {exported_csv}");
+
+    // 5. CLI sandbox sanitizes extra path keys (`dir`, `directory`, `destination_path`, `unpacked_dir`, `output_path`).
+    for key in ["dir", "directory", "destination_path", "unpacked_dir", "output_path"] {
+        let script = dirs.workdir.join(format!("escape_{key}.json"));
+        let mut params = serde_json::Map::new();
+        params.insert(key.to_owned(), json!("../outside.target"));
+        fs::write(&script, serde_json::to_vec(&json!([{ "cmd": "project.save", "params": serde_json::Value::Object(params) }])).expect("json"))
+            .expect("write escape script");
+        let out = Command::new(bin).args(["run", &script.display().to_string(), "--workdir", &wd_str, "--json"]).output().expect("run escape");
+        assert_eq!(out.status.code(), Some(2), "extra path key `{key}` escape must fail with exit 2");
+    }
 }
 
 #[test]

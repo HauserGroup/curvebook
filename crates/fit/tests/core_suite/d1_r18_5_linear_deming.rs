@@ -19,8 +19,8 @@ use super::common;
 
 use curvebook_doc::{AnalysisKind, AnalysisSpec, DemingErrorSpec, LinearRegressionSpec};
 use curvebook_fit::{
-    DemingOptions, FitError, InverseIntervalSet, SimpleLinearOptions, deming_regression, duplicate_pair_repeatability_sd, execute_linear_analysis,
-    simple_linear_regression,
+    DataPoint, DemingOptions, FitError, InverseIntervalSet, SimpleLinearOptions, compare_linear_lines, deming_regression,
+    duplicate_pair_repeatability_sd, execute_linear_analysis, simple_linear_regression,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_testkit::assert_approx_eq;
@@ -188,6 +188,8 @@ fn d1_r18_5_deming_unequal_error_specs_match_r_4_5_2() {
         let lin_spec = LinearRegressionSpec { deming_model_ii: true, deming_error: err_spec, ..LinearRegressionSpec::default() };
         let spec = AnalysisSpec::new("res-dem", "xy-dem", AnalysisKind::LinearRegression(lin_spec)).unwrap();
         let rs = execute_linear_analysis(&spec, &lin_spec, &sheet).unwrap();
+        // AUD-13-17: default Deming emits FittedCurveOverlay for every DemingErrorSpec variant.
+        assert!(rs.fitted_curves.len() == 1 && rs.fitted_curves[0].points.len() >= 2, "default Deming must emit FittedCurveOverlay");
 
         assert_oracles(&[
             (lam, lambda, 1e-14, 1e-14, "resolved lambda"),
@@ -205,13 +207,79 @@ fn d1_r18_5_deming_unequal_error_specs_match_r_4_5_2() {
         ]);
     }
 
-    let bad_spec = LinearRegressionSpec {
-        deming_model_ii: true,
-        deming_error: DemingErrorSpec::StandardDeviations { sd_x: 0.0, sd_y: 1.0 },
-        ..LinearRegressionSpec::default()
-    };
-    let spec = AnalysisSpec::new("res-bad-dem", "xy-dem", AnalysisKind::LinearRegression(bad_spec)).unwrap();
-    assert!(matches!(execute_linear_analysis(&spec, &bad_spec, &sheet), Err(FitError::InvalidParameter { name: "deming_error", .. })));
+    // AUD-03-20: unsupported Deming option combinations fail cleanly with InvalidParameter.
+    let bad_specs = [
+        (
+            LinearRegressionSpec {
+                deming_model_ii: true,
+                deming_error: DemingErrorSpec::StandardDeviations { sd_x: 0.0, sd_y: 1.0 },
+                ..Default::default()
+            },
+            "deming_error",
+        ),
+        (LinearRegressionSpec { deming_model_ii: true, force_through_origin: true, ..Default::default() }, "fixed_point"),
+        (LinearRegressionSpec { deming_model_ii: true, fixed_point: Some((1.0, 2.0)), ..Default::default() }, "fixed_point"),
+        (LinearRegressionSpec { deming_model_ii: true, standard_addition: true, ..Default::default() }, "standard_addition"),
+        (LinearRegressionSpec { deming_model_ii: true, interpolate_unknowns: true, ..Default::default() }, "interpolate_unknowns"),
+    ];
+    for (lin_spec, expected_name) in bad_specs {
+        let spec = AnalysisSpec::new("res-bad-dem", "xy-dem", AnalysisKind::LinearRegression(lin_spec)).unwrap();
+        let err = execute_linear_analysis(&spec, &lin_spec, &sheet).unwrap_err();
+        assert!(matches!(err, FitError::InvalidParameter { name, .. } if name == expected_name), "expected {expected_name}, got {err:?}");
+    }
+}
+
+#[test]
+fn aud_03_22_and_38_linear_parallel_overflow_and_large_n_deming() {
+    // AUD-03-22: exact parallel lines (large-Y & non-dyadic) avoid cancellation false positives, while tiny-Y (1e-14) distinct slopes/intercepts are detected.
+    let xs = [1.0, 2.0, 3.0, 4.0, 5.0];
+    for (tag, y1, y2) in [
+        (
+            "large",
+            [1_000_003.0, 2_000_003.0, 3_000_003.0, 4_000_003.0, 5_000_003.0],
+            [1_000_007.0, 2_000_007.0, 3_000_007.0, 4_000_007.0, 5_000_007.0],
+        ),
+        ("non-dyadic", xs.map(|x| 0.3 * x + 1.1), xs.map(|x| 0.3 * x + 2.7)),
+    ] {
+        let cmp = compare_linear_lines(&[&xy_pts(&xs, &y1), &xy_pts(&xs, &y2)], false).unwrap();
+        assert!(!cmp.slopes_significantly_different && cmp.intercepts_significantly_different == Some(true), "{tag}");
+        assert_approx_eq(cmp.f_slopes, 0.0, 1e-12, 1e-12, &format!("{tag} f_slopes"));
+        assert_approx_eq(cmp.p_slopes, 1.0, 1e-12, 1e-12, &format!("{tag} p_slopes"));
+    }
+    let noise = [1e-17, -1e-17, 1e-17, -1e-17, 1e-17];
+    let s1 = xy_pts(&xs, &std::array::from_fn::<f64, 5, _>(|i| (i as f64 + 1.0) * 1e-14 + noise[i]));
+    let s2 = xy_pts(&xs, &std::array::from_fn::<f64, 5, _>(|i| (i as f64 + 1.0) * 5e-14 + noise[i]));
+    let cmp_s = compare_linear_lines(&[&s1, &s2], false).unwrap();
+    assert!(cmp_s.slopes_significantly_different && cmp_s.f_slopes > 1e5, "small-Y F={}", cmp_s.f_slopes);
+    let s3 = xy_pts(&xs, &std::array::from_fn::<f64, 5, _>(|i| (i as f64 + 6.0) * 1e-14 + noise[i]));
+    let cmp_i = compare_linear_lines(&[&s1, &s3], false).unwrap();
+    assert!(!cmp_i.slopes_significantly_different && cmp_i.intercepts_significantly_different == Some(true));
+
+    // AUD-03-38: non-origin fixed_point clears force_through_origin, 1e200 overflow errors, 1e100 r == 1, and large-n O(n) Deming jackknife.
+    let res_fp = simple_linear_regression(
+        &xy_pts(&xs, &[3.0, 5.0, 7.0, 9.0, 11.0]),
+        &SimpleLinearOptions { force_through_origin: true, fixed_point: Some((5.0, 10.0)), ..Default::default() },
+    )
+    .unwrap();
+    assert!(!res_fp.force_through_origin);
+    let no_bands = SimpleLinearOptions { compute_bands: false, ..Default::default() };
+    assert!(matches!(
+        simple_linear_regression(&xy_pts(&[1.0, 2.0, 3.0], &[1e200, 2.0001e200, 3e200]), &no_bands),
+        Err(FitError::InvalidParameter { .. })
+    ));
+    let res_big = simple_linear_regression(&xy_pts(&[1e100, 2e100, 3e100], &[1e100, 2e100, 3e100]), &no_bands).unwrap();
+    assert_approx_eq(res_big.r, 1.0, 1e-12, 1e-12, "large-scale r == 1");
+    assert_approx_eq(res_big.r_squared, 1.0, 1e-12, 1e-12, "large-scale R^2 == 1");
+
+    let dpts: Vec<DataPoint> = (0..120)
+        .map(|i| {
+            let x = (i as f64) * 0.5 + 1.0;
+            DataPoint::xy(x, 1.2 * x + 3.5 + if i % 2 == 0 { 0.3 } else { -0.3 })
+        })
+        .collect();
+    let dem = deming_regression(&dpts, &DemingOptions::default()).unwrap();
+    assert!(dem.slope.is_finite() && dem.se_slope.is_finite() && dem.se_slope > 0.0 && dem.se_intercept.is_finite() && dem.se_intercept > 0.0);
+    assert_approx_eq(dem.slope, 1.2, 1e-2, 1e-2, "large-n Deming slope");
 }
 
 #[test]

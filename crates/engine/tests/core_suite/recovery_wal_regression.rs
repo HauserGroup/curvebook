@@ -1,7 +1,7 @@
 use std::fs;
 
-use curvebook_doc::{CellCoord, SheetId, TableArchetype};
-use curvebook_engine::Session;
+use curvebook_doc::{CellCoord, ErrorCode, SheetId, TableArchetype};
+use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_format::{DirectoryJournalBackend, JOURNAL_FILE_NAME, MemoryJournalBackend};
 use serde_json::json;
 
@@ -152,5 +152,51 @@ fn engine_open_with_recovery_quarantines_interior_corrupt_wal_lines_and_reports_
     };
     assert_eq!(col.data_sets[0].cells[0][0].active_number(), Some(314.0));
     let _ = recovered.close_journal_cleanly(rec_journal)?;
+    Ok(())
+}
+
+#[test]
+fn aud_02_19_and_13_01_wal_checkpoint_and_replay_filesystem_policy() -> Result<(), Box<dyn std::error::Error>> {
+    // AUD-02-19: table.excludeCellsWithReason forces WAL checkpoint and preserves minted timestamp across crash recovery.
+    assert!(Session::command_requires_wal_checkpoint("table.excludeCellsWithReason"));
+    let tmp = TempDir::try_new("aud-wal")?;
+    let wal_dir = tmp.child("wal_dir");
+    let (mut s1, mut j1, _) = Session::open_dir_with_recovery(&wal_dir, "owner-1", 60_000, 1_000)?;
+    s1.execute_and_record(&mut j1, "sheet.createData", json!({ "sheet_id": "col-1", "kind": "column", "cols": 1, "rows": 3 }))?;
+    let out =
+        s1.execute_and_record(&mut j1, "table.excludeCellsWithReason", json!({ "sheet_id": "col-1", "reason_tag": "artifact", "row": 0, "col": 0 }))?;
+    let minted_ts = out.payload["timestamp_utc"].as_str().ok_or("missing timestamp_utc")?.to_owned();
+    assert!(!minted_ts.is_empty());
+    drop((j1, s1));
+    let (reopened, _j2, rep2) = Session::open_dir_with_recovery(&wal_dir, "owner-2", 60_000, 200_000)?;
+    assert!(rep2.recovered_commands.is_empty());
+    let note = reopened
+        .document()
+        .data_sheet(&SheetId::new("col-1"))
+        .ok_or("missing col-1")?
+        .exclusion_note(CellCoord::new(0, 0, 0))
+        .ok_or("missing note")?;
+    assert_eq!(note.timestamp_utc, minted_ts);
+
+    // AUD-13-01: crafted checksummed WAL filesystem command rejected under RejectExternal, skipped with warning under best-effort, and skipped by lease-only.
+    let fs_dir = tmp.child("wal_fs");
+    let secret_csv = tmp.child("host_secret.csv");
+    fs::write(&secret_csv, "X,Y\n1,99\n2,199\n")?;
+    let (mut seed_s, mut seed_j, _) = Session::open_dir_with_recovery(&fs_dir, "seed", 60_000, 1_000)?;
+    seed_s.execute_and_record(&mut seed_j, "sheet.createData", json!({ "sheet_id": "xy-1", "kind": "xy", "cols": 1, "rows": 2 }))?;
+    seed_s.checkpoint_journal(&mut seed_j)?;
+    seed_s.record_to_journal(&mut seed_j, "table.importCsv", &json!({ "sheet_id": "stolen", "path": secret_csv.to_string_lossy() }))?;
+    drop((seed_j, seed_s));
+
+    let err = Session::open_dir_with_recovery_and_policy(&fs_dir, "owner-strict", 60_000, 200_000, ExternalPathPolicy::RejectExternal, false)
+        .err()
+        .ok_or("expected PathEscape")?;
+    assert_eq!(err.code, ErrorCode::PathEscape);
+    let (be, j_be, rep_be) = Session::open_dir_with_best_effort_recovery(&fs_dir, "owner-be", 60_000, 400_000)?;
+    assert!(be.document().data_sheet(&SheetId::new("stolen")).is_none());
+    assert!(rep_be.warnings.iter().any(|w| w.kind == "skipped_unreplayable_command" && w.message.contains("table.importCsv")));
+    drop((j_be, be));
+    let (_j_lease, rep_lease) = Session::open_dir_journal_lease_only(&fs_dir, "owner-lease", 60_000, 600_000)?;
+    assert!(rep_lease.recovered_commands.is_empty());
     Ok(())
 }

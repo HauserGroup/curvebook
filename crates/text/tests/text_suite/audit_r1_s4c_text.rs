@@ -6,17 +6,10 @@ use std::time::Instant;
 use curvebook_text::TrueTypeFont;
 use curvebook_text::glyph_paths::outline_ttf_glyph;
 
-fn push_u16(buf: &mut Vec<u8>, v: u16) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn push_i16(buf: &mut Vec<u8>, v: i16) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
-
-fn push_u32(buf: &mut Vec<u8>, v: u32) {
-    buf.extend_from_slice(&v.to_be_bytes());
-}
+use super::sfnt_fixture::{
+    assemble_sfnt, build_cmap4_subtable, build_head, build_hhea, build_synthetic_cff_otf, cff_push_int, push_i16, push_u16, push_u32,
+    wrap_cmap_subtables,
+};
 
 fn make_simple_square_glyph() -> Vec<u8> {
     let mut g = Vec::new();
@@ -84,61 +77,16 @@ fn make_compound_glyph(components: &[(u16, i16, i16)]) -> Vec<u8> {
 fn build_ttf_from_glyphs(glyph_blobs: &[Vec<u8>]) -> Vec<u8> {
     let num_glyphs = u16::try_from(glyph_blobs.len()).expect("glyph count fits u16");
     assert!((2..=27).contains(&num_glyphs));
-    let mapped_count = num_glyphs - 1;
-    let end_code = 0x0041_u16 + (mapped_count - 1);
-    let id_delta: i16 = 1 - 0x0041_i16;
-
-    // `head` (indexToLocFormat = 1: long 32-bit `loca` offsets)
-    let mut head = vec![0u8; 54];
-    head[0..4].copy_from_slice(&0x0001_0000_u32.to_be_bytes());
-    head[12..16].copy_from_slice(&0x5F0F_3CF5_u32.to_be_bytes());
-    head[18..20].copy_from_slice(&1000_u16.to_be_bytes());
-    head[50..52].copy_from_slice(&1_i16.to_be_bytes());
-
-    // `hhea`
-    let mut hhea = vec![0u8; 36];
-    hhea[0..4].copy_from_slice(&0x0001_0000_u32.to_be_bytes());
-    hhea[4..6].copy_from_slice(&800_i16.to_be_bytes());
-    hhea[6..8].copy_from_slice(&(-200_i16).to_be_bytes());
-    hhea[34..36].copy_from_slice(&num_glyphs.to_be_bytes());
-
-    // `maxp`
+    let end_code = 0x0041_u16 + (num_glyphs - 2);
     let mut maxp = vec![0u8; 6];
     maxp[0..4].copy_from_slice(&0x0001_0000_u32.to_be_bytes());
     maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
-
-    // `hmtx`
     let mut hmtx = Vec::with_capacity(usize::from(num_glyphs) * 4);
     for _ in 0..num_glyphs {
         push_u16(&mut hmtx, 600);
         push_i16(&mut hmtx, 0);
     }
-
-    // `cmap` format 4 mapping 'A'..=end_code -> 1..=mapped_count
-    let mut cmap = Vec::new();
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 1);
-    push_u16(&mut cmap, 3);
-    push_u16(&mut cmap, 1);
-    push_u32(&mut cmap, 12);
-    push_u16(&mut cmap, 4);
-    push_u16(&mut cmap, 32);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 4); // segCountX2 = 4 (2 segments)
-    push_u16(&mut cmap, 4);
-    push_u16(&mut cmap, 1);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, end_code);
-    push_u16(&mut cmap, 0xFFFF);
-    push_u16(&mut cmap, 0); // reservedPad
-    push_u16(&mut cmap, 0x0041);
-    push_u16(&mut cmap, 0xFFFF);
-    push_i16(&mut cmap, id_delta);
-    push_i16(&mut cmap, 1);
-    push_u16(&mut cmap, 0);
-    push_u16(&mut cmap, 0);
-
-    // `glyf` + long `loca`
+    let cmap = wrap_cmap_subtables(&[(3, 1, build_cmap4_subtable(&[(0x0041, end_code, 1 - 0x0041_i16, 0), (0xFFFF, 0xFFFF, 1, 0)], &[]))]);
     let mut glyf = Vec::new();
     let mut loca = Vec::with_capacity((usize::from(num_glyphs) + 1) * 4);
     for blob in glyph_blobs {
@@ -146,33 +94,18 @@ fn build_ttf_from_glyphs(glyph_blobs: &[Vec<u8>]) -> Vec<u8> {
         glyf.extend_from_slice(blob);
     }
     push_u32(&mut loca, u32::try_from(glyf.len()).expect("glyf end fits u32"));
-
-    let tables: [([u8; 4], Vec<u8>); 7] =
-        [(*b"cmap", cmap), (*b"glyf", glyf), (*b"head", head), (*b"hhea", hhea), (*b"hmtx", hmtx), (*b"loca", loca), (*b"maxp", maxp)];
-    let num_tables = u16::try_from(tables.len()).expect("table count");
-    let dir_size = 12 + tables.len() * 16;
-    let mut font = Vec::new();
-    push_u32(&mut font, 0x0001_0000);
-    push_u16(&mut font, num_tables);
-    push_u16(&mut font, 64);
-    push_u16(&mut font, 2);
-    push_u16(&mut font, 48);
-
-    let mut cur_offset = dir_size;
-    for (tag, data) in &tables {
-        font.extend_from_slice(tag);
-        push_u32(&mut font, 0);
-        push_u32(&mut font, u32::try_from(cur_offset).expect("table offset"));
-        push_u32(&mut font, u32::try_from(data.len()).expect("table len"));
-        cur_offset += (data.len() + 3) & !3;
-    }
-    for (_, data) in &tables {
-        font.extend_from_slice(data);
-        while !font.len().is_multiple_of(4) {
-            font.push(0);
-        }
-    }
-    font
+    assemble_sfnt(
+        0x0001_0000,
+        vec![
+            (*b"cmap", cmap),
+            (*b"glyf", glyf),
+            (*b"head", build_head(1)),
+            (*b"hhea", build_hhea(800, -200, 0, num_glyphs)),
+            (*b"hmtx", hmtx),
+            (*b"loca", loca),
+            (*b"maxp", maxp),
+        ],
+    )
 }
 
 #[test]
@@ -268,4 +201,63 @@ fn r1_s09_10_valid_diamond_dag_and_depth_limit_behave_cleanly() {
     assert_eq!(depth7_cmds.len(), 6);
 
     assert!(outline_ttf_glyph(&ttf, 'K', 0.0, 20.0, 12.0, false).is_none(), "depth-8 chain must abort cleanly");
+}
+
+#[test]
+fn cff_outline_enforces_contour_subr_and_finiteness_budgets() {
+    let push_op = |buf: &mut Vec<u8>, dx: i32, dy: i32, op: u8| {
+        cff_push_int(buf, dx);
+        cff_push_int(buf, dy);
+        buf.push(op);
+    };
+
+    // 1. Valid 1-contour CFF triangle outlines cleanly; NaN origin & overflowing coords return None.
+    let mut tri_cs = Vec::new();
+    push_op(&mut tri_cs, 100, 100, 21); // rmoveto
+    push_op(&mut tri_cs, 200, 0, 5); // rlineto
+    push_op(&mut tri_cs, -100, 200, 5);
+    tri_cs.push(14); // endchar
+    let ok_otf = build_synthetic_cff_otf(&tri_cs, &[]);
+    let ok_ttf = TrueTypeFont::parse_checked(&ok_otf).expect("parse valid CFF OTF");
+    assert!(!outline_ttf_glyph(&ok_ttf, 'A', 0.0, 0.0, 12.0, false).expect("valid CFF triangle").is_empty());
+    assert!(outline_ttf_glyph(&ok_ttf, 'A', f64::NAN, 0.0, 12.0, false).is_none());
+    assert!(outline_ttf_glyph(&ok_ttf, 'A', 1.5e308, 0.0, 1e308, false).is_none());
+
+    // 2. CFF glyph with 257 contours (> MAX_TTF_CONTOURS=256) returns None.
+    let mut many_contours = Vec::new();
+    for _ in 0..257 {
+        push_op(&mut many_contours, 1, 1, 21);
+        push_op(&mut many_contours, 2, 0, 5);
+        push_op(&mut many_contours, 0, 2, 5);
+    }
+    many_contours.push(14);
+    let over_otf = build_synthetic_cff_otf(&many_contours, &[]);
+    let over_ttf = TrueTypeFont::parse_checked(&over_otf).expect("parse over-contour CFF OTF");
+    assert!(outline_ttf_glyph(&over_ttf, 'A', 0.0, 0.0, 12.0, false).is_none(), "CFF glyph with >256 contours must be rejected");
+
+    // 3. CFF Type 2 subroutine amplification bomb (8 nested levels, 4x fanout = 4^8 calls) aborts rapidly.
+    let mut leaf = Vec::new();
+    push_op(&mut leaf, 1, 1, 5);
+    leaf.push(11); // return
+    let mut subrs = vec![leaf];
+    for level in 1..=8i32 {
+        let mut s = Vec::new();
+        for _ in 0..4 {
+            cff_push_int(&mut s, (level - 1) - 107);
+            s.push(29); // callgsubr
+        }
+        s.push(11);
+        subrs.push(s);
+    }
+    let mut root_cs = Vec::new();
+    push_op(&mut root_cs, 10, 10, 21);
+    cff_push_int(&mut root_cs, 8 - 107);
+    root_cs.push(29);
+    root_cs.push(14);
+    let subr_refs: Vec<&[u8]> = subrs.iter().map(Vec::as_slice).collect();
+    let bomb_otf = build_synthetic_cff_otf(&root_cs, &subr_refs);
+    let bomb_ttf = TrueTypeFont::parse_checked(&bomb_otf).expect("parse CFF subr bomb");
+    let t0 = Instant::now();
+    assert!(outline_ttf_glyph(&bomb_ttf, 'A', 0.0, 0.0, 12.0, false).is_none(), "CFF subr bomb must be rejected");
+    assert!(t0.elapsed().as_secs_f64() < 1.0, "CFF subr bomb must reject rapidly, took {:?}", t0.elapsed());
 }

@@ -18,7 +18,6 @@ mod r1019_typeset_equations;
 mod r13_phase_a_charts;
 mod r18_6_simple_logistic_overlay;
 mod r20_5_fit_summary_autoranging;
-mod rem_aud13_chart_seam;
 mod scales_axes;
 mod sec09_s1_regressions;
 mod ticks_and_diag_parity;

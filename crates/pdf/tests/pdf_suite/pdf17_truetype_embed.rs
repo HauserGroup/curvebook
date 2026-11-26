@@ -2,137 +2,20 @@
 //! `/FontDescriptor`, `FlateDecode` `/FontFile2`) embedding, BiDi/RTL visual text ordering,
 //! and `--no-default-features` / empty-`BUNDLED_FONTS` Core-14 & outlined fallback.
 
-use std::collections::BTreeMap;
-use std::io::Read;
 use std::time::Instant;
 
 use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
 use curvebook_palette::{OKABE_ITO_BLUE, Rgba8};
 use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf, render_pdf_pages};
 use curvebook_text::{BUNDLED_FONTS, RichText, build_minimal_truetype_font, parse_markup, parse_truetype_font_info};
-use flate2::read::ZlibDecoder;
 use serde::Deserialize;
 use serde::de::value::{Error as DeValueError, MapDeserializer};
 use serde::de::{Deserializer, IntoDeserializer, Visitor};
 
-struct ParsedPdf {
-    objects: BTreeMap<usize, Vec<u8>>,
-    streams: Vec<(usize, String, Vec<u8>)>,
-    trailer: String,
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).rposition(|w| w == needle)
-}
-
-fn extract_pdf_int(dict: &str, key: &str) -> Option<usize> {
-    let (_, rest) = dict.split_once(key)?;
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    digits.parse().ok()
-}
+use super::{ParsedPdf, extract_pdf_int};
 
 fn parse_pdf_strict(bytes: &[u8], expected_header: &[u8]) -> Result<ParsedPdf, String> {
-    if !bytes.starts_with(expected_header) {
-        return Err(format!("expected header {:?}", String::from_utf8_lossy(expected_header)));
-    }
-    if !bytes.windows(6).any(|w| w == b"%\xE2\xE3\xCF\xD3\n") {
-        return Err("missing PDF binary comment %âãÏÓ".to_owned());
-    }
-    if !bytes.ends_with(b"%%EOF\n") {
-        return Err("missing %%EOF\\n".to_owned());
-    }
-
-    let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
-    let after = std::str::from_utf8(bytes.get(startxref_pos + b"startxref\n".len()..).ok_or("startxref tail")?)
-        .map_err(|e| format!("utf8 startxref: {e}"))?;
-    let xref_offset: usize = after.lines().next().ok_or("missing xref offset line")?.trim().parse().map_err(|e| format!("parse xref offset: {e}"))?;
-    if xref_offset >= startxref_pos || !bytes.get(xref_offset..).is_some_and(|s| s.starts_with(b"xref\n")) {
-        return Err("invalid xref offset".to_owned());
-    }
-
-    let xref_to_start = bytes.get(xref_offset..startxref_pos).ok_or("xref slice")?;
-    let trailer_rel = find_subslice(xref_to_start, b"trailer\n").ok_or("missing trailer")?;
-    let xref_str = std::str::from_utf8(xref_to_start.get(..trailer_rel).ok_or("xref utf8")?).map_err(|e| format!("utf8 xref: {e}"))?;
-    let trailer = std::str::from_utf8(xref_to_start.get(trailer_rel..).ok_or("trailer utf8")?).map_err(|e| format!("utf8 trailer: {e}"))?.to_owned();
-
-    let mut lines = xref_str.lines();
-    if lines.next() != Some("xref") {
-        return Err("missing xref header line".to_owned());
-    }
-    let count_parts: Vec<&str> = lines.next().ok_or("missing xref range")?.split_whitespace().collect();
-    let [zero, count_str] = count_parts.as_slice() else {
-        return Err(format!("unexpected xref range: {count_parts:?}"));
-    };
-    if *zero != "0" {
-        return Err(format!("unexpected xref range: {count_parts:?}"));
-    }
-    let total_entries: usize = count_str.parse().map_err(|e| format!("xref total: {e}"))?;
-
-    let mut offsets = Vec::with_capacity(total_entries);
-    for (idx, line) in lines.enumerate() {
-        if line.len() != 19 {
-            return Err(format!("xref entry must be 20 bytes including LF: `{line}`"));
-        }
-        let off: usize = line.get(0..10).ok_or("xref off slice")?.parse().map_err(|e| format!("xref offset: {e}"))?;
-        let generation: usize = line.get(11..16).ok_or("xref gen slice")?.parse().map_err(|e| format!("xref gen: {e}"))?;
-        let kind = line.chars().nth(17).ok_or("xref kind")?;
-        if idx == 0 {
-            if (off, generation, kind) != (0, 65535, 'f') {
-                return Err(format!("bad xref entry 0: ({off}, {generation}, {kind})"));
-            }
-        } else if (generation, kind) != (0, 'n') || off >= xref_offset {
-            return Err(format!("bad xref entry {idx}: ({off}, {generation}, {kind})"));
-        }
-        offsets.push((off, kind));
-    }
-    if offsets.len() != total_entries {
-        return Err(format!("xref count mismatch: {} vs {total_entries}", offsets.len()));
-    }
-
-    let mut objects = BTreeMap::new();
-    let mut streams = Vec::new();
-    for (obj_id, &(off, kind)) in offsets.iter().enumerate() {
-        if kind != 'n' {
-            continue;
-        }
-        let prefix = format!("{obj_id} 0 obj\n");
-        let obj_tail = bytes.get(off..xref_offset).ok_or("object range")?;
-        if !obj_tail.starts_with(prefix.as_bytes()) {
-            return Err(format!("missing object header {prefix}"));
-        }
-        let after_prefix = obj_tail.get(prefix.len()..).ok_or("object body range")?;
-        let endobj_rel = find_subslice(after_prefix, b"endobj\n").ok_or("missing endobj")?;
-        let body = after_prefix.get(..endobj_rel).ok_or("object body slice")?;
-        objects.insert(obj_id, body.to_vec());
-
-        if let Some(stream_rel) = find_subslice(body, b"\nstream\n") {
-            let dict_str = String::from_utf8_lossy(body.get(..stream_rel).ok_or("dict slice")?).into_owned();
-            let data_start = stream_rel + b"\nstream\n".len();
-            let stream_tail = body.get(data_start..).ok_or("stream tail")?;
-            let endstream_rel = find_subslice(stream_tail, b"\nendstream").ok_or("missing endstream")?;
-            let raw_stream = stream_tail.get(..endstream_rel).ok_or("raw stream slice")?;
-            let declared_len = extract_pdf_int(&dict_str, "/Length ").ok_or("missing /Length")?;
-            if raw_stream.len() != declared_len {
-                return Err(format!("stream length mismatch: {} vs {declared_len}", raw_stream.len()));
-            }
-
-            let decoded = if dict_str.contains("/Filter /FlateDecode") {
-                let mut dec = ZlibDecoder::new(raw_stream);
-                let mut out = Vec::new();
-                dec.read_to_end(&mut out).map_err(|e| format!("zlib decode: {e}"))?;
-                out
-            } else {
-                raw_stream.to_vec()
-            };
-            streams.push((obj_id, dict_str, decoded));
-        }
-    }
-
-    Ok(ParsedPdf { objects, streams, trailer })
+    super::parse_pdf_strict(bytes, &[expected_header], true)
 }
 
 fn sample_scientific_scene(title: &str) -> ChartScene {

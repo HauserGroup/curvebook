@@ -1,9 +1,17 @@
 //! MCP protocol and resource-template audit regression tests.
 
-use std::io::Cursor;
+use std::collections::VecDeque;
+use std::io::{BufReader, Cursor, Read};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use curvebook_doc::ErrorCode;
+use curvebook_engine::EngineError;
 use curvebook_mcp::{
-    ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, McpServerState, ResourceTemplateDescriptor, dispatch_json_value, list_resource_templates, serve,
+    ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, GuiSessionHost, McpServerState, ResourceTemplateDescriptor, dispatch_json_value,
+    list_resource_templates, serve, serve_concurrent,
 };
 use serde_json::{Value, json};
 
@@ -117,5 +125,82 @@ fn premature_notifications_initialized_does_not_break_initialize_handshake() -> 
     assert_eq!(strict_replies.get(1).and_then(|r| r.pointer("/result/protocolVersion")), Some(&json!("2024-11-05")));
     assert!(strict_replies.get(2).and_then(|r| r.pointer("/result/tools")).is_some_and(Value::is_array));
     assert_eq!(strict_replies.get(3).and_then(|r| r.pointer("/error/code")), Some(&json!(ERR_INVALID_REQUEST)));
+    Ok(())
+}
+
+#[test]
+fn serve_concurrent_delivers_cancel_while_request_in_flight() -> TestResult {
+    struct ChanRead(mpsc::Receiver<Vec<u8>>, VecDeque<u8>);
+    impl Read for ChanRead {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            while self.1.is_empty() {
+                match self.0.recv() {
+                    Ok(c) if !c.is_empty() => self.1.extend(c),
+                    Ok(_) => continue,
+                    Err(_) => return Ok(0),
+                }
+            }
+            let n = out.len().min(self.1.len());
+            for dst in &mut out[..n] {
+                *dst = self.1.pop_front().unwrap_or(0);
+            }
+            Ok(n)
+        }
+    }
+    struct SlotCancelHost {
+        reg_slot: Arc<curvebook_platform::sync::Mutex<Option<curvebook_mcp::CancellationRegistry>>>,
+        started: Option<mpsc::Sender<()>>,
+        observed: Arc<AtomicBool>,
+    }
+    impl GuiSessionHost for SlotCancelHost {
+        fn call_gui(&mut self, _: &str, _: Value) -> Result<Value, EngineError> {
+            if let Some(tx) = self.started.take() {
+                let _ = tx.send(());
+            }
+            let reg = self.reg_slot.lock().ok().and_then(|g| g.clone()).ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "no reg"))?;
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                if reg.is_cancelled(&json!(42)) {
+                    self.observed.store(true, Ordering::Release);
+                    return Err(EngineError::with_code(ErrorCode::Cancelled, "cancelled in flight"));
+                }
+                thread::sleep(Duration::from_millis(5));
+            }
+            Ok(json!({ "timed_out": true }))
+        }
+    }
+
+    let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>();
+    let reg_slot = Arc::new(curvebook_platform::sync::Mutex::named("test.reg_slot", None));
+    let (s_tx, s_rx) = mpsc::channel::<()>();
+    let observed = Arc::new(AtomicBool::new(false));
+    let mut state = McpServerState::with_gui_host(Box::new(SlotCancelHost {
+        reg_slot: Arc::clone(&reg_slot),
+        started: Some(s_tx),
+        observed: Arc::clone(&observed),
+    }));
+    if let Ok(mut g) = reg_slot.lock() {
+        *g = Some(state.cancellation_registry());
+    }
+    let sender = thread::spawn(move || {
+        let _ = in_tx.send(
+            format!("{}\n", json!({ "jsonrpc": "2.0", "id": 42, "method": "tools/call", "params": { "name": "ui_inspect", "arguments": {} } }))
+                .into_bytes(),
+        );
+        if s_rx.recv_timeout(Duration::from_secs(2)).is_ok() {
+            let _ = in_tx
+                .send(format!("{}\n", json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 42 } })).into_bytes());
+        }
+        thread::sleep(Duration::from_millis(50));
+    });
+    let mut output = Vec::new();
+    serve_concurrent(BufReader::new(ChanRead(in_rx, VecDeque::new())), &mut output, &mut state, 1024 * 1024).map_err(|e| e.to_string())?;
+    let _ = sender.join();
+    assert!(observed.load(Ordering::Acquire));
+    let reply: Value = serde_json::from_str(String::from_utf8(output).map_err(|e| e.to_string())?.trim()).map_err(|e| e.to_string())?;
+    assert_eq!(
+        (&reply["id"], &reply["result"]["isError"], &reply["result"]["structuredContent"]["code"]),
+        (&json!(42), &json!(true), &json!("cancelled"))
+    );
     Ok(())
 }

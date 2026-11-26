@@ -6,12 +6,14 @@
 use std::sync::atomic::AtomicBool;
 
 use curvebook_doc::{
-    CldOrdering, ClusterDistance, ClusterLinkage, CoxTieMethod, ErrorBarMetric, ErrorCode, ErrorPropagationMode, FramePreset, GlmFamily,
-    MathTransformPreset, ResultStatus, SheetId, TickDirection, WeightingScheme,
+    AnalysisKind, AnalysisSpec, CldOrdering, ClusterDistance, ClusterLinkage, ConstantValue, CoxTieMethod, CurveSamplePoint, DataSheet,
+    ErrorBarMetric, ErrorCode, ErrorPropagationMode, FittedCurveOverlay, FramePreset, GlmFamily, HookSource, InfoSheet, LinearRegressionSpec,
+    MathTransformPreset, NormalizeAnchor, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SourceCellId,
+    SubcolumnMode, TableArchetype, TickDirection, TransformAnalysisSpec, WeightingScheme, XyTable,
 };
 use curvebook_engine::services::{
-    EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportTarget, RasterSizingPolicy, export_document_artifact, inspect_project_summary,
-    inspect_sheet_detail,
+    DocumentExportFormat, EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
+    export_document_artifact, inspect_project_summary, inspect_sheet_detail,
 };
 use curvebook_engine::{BatchCommandStep, Caller, MAX_UNDO_ENTRIES, Session};
 use curvebook_format::CsvOptions;
@@ -22,7 +24,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::common::{assert_bad_input, ok_cmd, run_cmds};
+use super::common::{assert_bad_input, col_sheet, ok_cmd, run_cmds, session_with};
 
 fn build_demo_session() -> Session {
     let mut session = Session::new();
@@ -234,6 +236,88 @@ fn inspect_services_match_project_inspect_and_sheet_detail() {
     let detail = inspect_sheet_detail(session.document(), &focus_id, true).unwrap();
     assert_eq!((&detail["section"], &detail["id"]), (&json!("Data"), &json!("xy_1")));
     assert!(detail["csv_preview"].as_str().is_some_and(|s| s.contains("2.1")));
+
+    // AUD-02-12: ExportOptionsSpec CSV with tab_index targets ResultSheet even when DataSheet is active.
+    let mut s_tab = session_with("TabIdx", vec![col_sheet("col-1", "Groups", &[("A", &[1.0, 2.0, 3.0]), ("B", &[4.0, 5.0, 6.0])])]);
+    run_cmds(
+        &mut s_tab,
+        &[
+            ("stats.run", json!({ "sheet_id": "res-1", "source_sheet_id": "col-1", "kind": "descriptive" })),
+            ("sheet.select", json!({ "sheet_id": "col-1" })),
+        ],
+    );
+    assert_eq!(s_tab.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+    let mut opts = ExportOptionsSpec::new(DocumentExportFormat::Csv);
+    (opts.tidy, opts.tab_index) = (false, Some(0));
+    let art = export_document_artifact(s_tab.document(), &opts.into_artifact_request(s_tab.document(), true).unwrap(), None, "test.csv").unwrap();
+    assert!(art.target_id == "res-1" && !art.into_utf8_string().unwrap().trim().is_empty());
+
+    // AUD-02-17: project.inspect counts Normalize hooked anchors.
+    let mut doc_hk = session_with("Hk", vec![col_sheet("col-1", "G", &[("A", &[10.0, 50.0, 90.0])])]).document().clone();
+    let mut info = InfoSheet::new_preseeded(SheetId::new("info-1"), "Anchors").unwrap();
+    info.set_constant("Zero", ConstantValue::Number(0.0), None).unwrap();
+    info.set_constant("Hundred", ConstantValue::Number(100.0), None).unwrap();
+    doc_hk.add_info_sheet(info).unwrap();
+    let hk_spec = AnalysisSpec::new(
+        "res-norm",
+        "col-1",
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::Hooked(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info-1")),
+                constant_name: "Zero".into(),
+            }),
+            hundred_anchor: NormalizeAnchor::Hooked(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info-1")),
+                constant_name: "Hundred".into(),
+            }),
+            output_percent: true,
+            per_data_set: true,
+        }),
+    )
+    .unwrap();
+    doc_hk.add_result_sheet(ResultSheet::new(hk_spec).unwrap()).unwrap();
+    assert_eq!(ok_cmd(&mut Session::from_document(doc_hk), "project.inspect", json!({})).payload["result_sheets"][0]["hook_count"], 2);
+
+    // AUD-13-19: analysis.exportJson and table.exportCsv preserve eliminated_outliers, pred bands, analyzable_data, and footnotes.
+    let mut doc_exp = ProjectDocument::new("Export Fidelity").unwrap();
+    let raw_ds = DataSheet::new("xy-1", "Raw", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2).unwrap())).unwrap();
+    doc_exp.add_data_sheet(raw_ds.clone()).unwrap();
+    let mut res_exp =
+        ResultSheet::new(AnalysisSpec::new("res-exp", "xy-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).unwrap()).unwrap();
+    res_exp.status = ResultStatus::UpToDate;
+    res_exp.tabs.push(ResultTab {
+        id: "summary".into(),
+        title: "Summary".into(),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec!["Metric".into(), "Value".into()],
+        row_labels: vec!["r0".into()],
+        rows: vec![vec![ResultCell::Text("Slope".into()), ResultCell::Number { value: 2.0, prefix: None, units: None }]],
+        footnotes: vec!["Footnote: 95% bands included.".into()],
+    });
+    res_exp.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: "linear".into(),
+        converged: true,
+        ambiguous: false,
+        points: vec![CurveSamplePoint { x: 1.0, y: 2.0, ci_lower: Some(1.8), ci_upper: Some(2.2), pred_lower: Some(1.2), pred_upper: Some(2.8) }],
+    });
+    res_exp.eliminated_outliers.push(SourceCellId { sheet_id: SheetId::new("xy-1"), row: 1, col: 0, subcol: 0 });
+    res_exp.analyzable_data = Some(raw_ds);
+    doc_exp.add_result_sheet(res_exp).unwrap();
+    let mut s_exp = Session::from_document(doc_exp);
+    let parsed: Value =
+        serde_json::from_str(ok_cmd(&mut s_exp, "analysis.exportJson", json!({ "sheet_id": "res-exp" })).payload["json"].as_str().unwrap()).unwrap();
+    assert_eq!(parsed["eliminated_outliers"].as_array().unwrap().len(), 1);
+    assert!(parsed["analyzable_data"].is_object());
+    assert_eq!(
+        (&parsed["fitted_curves"][0]["points"][0]["pred_lower"], &parsed["fitted_curves"][0]["points"][0]["pred_upper"]),
+        (&json!(1.2), &json!(2.8))
+    );
+    assert_eq!(parsed["tabs"][0]["footnotes"][0], "Footnote: 95% bands included.");
+    let csv_str = ok_cmd(&mut s_exp, "table.exportCsv", json!({ "sheet_id": "res-exp" })).payload["csv"].as_str().unwrap().to_owned();
+    for needle in ["pred_lower", "pred_upper", "1.2", "2.8", "eliminated_outlier", "Footnote: 95% bands included."] {
+        assert!(csv_str.contains(needle), "missing `{needle}` in CSV");
+    }
 }
 
 fn check_alias<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(val: T, canonical: &str, alias: &str) {

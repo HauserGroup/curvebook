@@ -6,11 +6,16 @@ use std::net::SocketAddr;
 use std::process::Command;
 use std::time::Duration;
 
-use curvebook::desktop_host::{DesktopHostConfig, DesktopHostRuntime, DesktopWindowId};
+use curvebook::desktop_host::{
+    DesktopHostConfig, DesktopHostRuntime, DesktopWindowId, dir_has_unrecovered_crash, open_dir_with_policy_safe_recovery,
+    open_fresh_journal_for_seeded_session,
+};
 use curvebook::gui_window::CurveBookNativeApp;
 use curvebook_doc::{CellCoord, SheetId};
-use curvebook_engine::Session;
-use curvebook_format::{DirectoryJournalBackend, JOURNAL_FILE_NAME, JournalBackend, LOCKFILE_NAME, SNAPSHOT_FILE_NAME};
+use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_format::{
+    CrashRecoveryJournal, DirectoryJournalBackend, JOURNAL_FILE_NAME, JournalBackend, LOCKFILE_NAME, SNAPSHOT_FILE_NAME, save_project_file,
+};
 use curvebook_ui_egui::ControlAuth;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use eframe::egui;
@@ -384,5 +389,41 @@ fn audit_118_mixed_batch_save_then_gui_mutation_keeps_dirty_and_recovers() -> Re
     assert_eq!(rec_doc.data_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["t1"]);
     assert_eq!(rec_doc.graph_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["g1"]);
     rec_rt.close_all_force()?;
+    Ok(())
+}
+
+#[test]
+fn clean_open_save_clears_dirty_and_recovery_blocks_fs_wal_preserving_stale_lease() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Clean `project.open` and `project.save` clear `has_unsaved_changes`.
+    let td = TempDirGuard::new("dirty-and-wal-sec")?;
+    let archive = td.child("clean.curvebook");
+    save_project_file(&archive, &crate::common::build_col_doc("d1", "Table", &[("A", &[1.0])])?)?;
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: None, ..DesktopHostConfig::default() });
+    let wid = rt.open_window(None, ViewportMetrics::default())?;
+    rt.window_mut(wid)?.execute_and_journal("project.open", json!({ "path": archive.display().to_string() }))?;
+    assert!(!rt.window(wid)?.has_unsaved_changes());
+    rt.window_mut(wid)?.execute_and_journal("table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "value": 7.0 }))?;
+    assert!(rt.window(wid)?.has_unsaved_changes());
+    rt.window_mut(wid)?.execute_and_journal("project.save", json!({ "path": archive.display().to_string() }))?;
+    assert!(!rt.window(wid)?.has_unsaved_changes());
+
+    // 2. Crafted `project.save` WAL entry is rejected during crash recovery without writing to disk,
+    //    and seeding a fresh window isolates into a new dir while preserving `dir_has_unrecovered_crash`.
+    let crafted_dir = td.child("crafted");
+    fs::create_dir_all(&crafted_dir)?;
+    let evil_out = td.child("should_not_exist.curvebook");
+    let (mut journal, _) = CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&crafted_dir)?, "dead-owner", 1_000, 10_000)?;
+    let _ = journal.record_command(json!({ "command_id": "project.save", "params": { "path": evil_out.display().to_string() } }))?;
+    drop(journal.abandon());
+
+    assert!(open_dir_with_policy_safe_recovery(&crafted_dir, "new-owner", 60_000, 50_000, &ExternalPathPolicy::Unconstrained).is_err());
+    assert!(!evil_out.exists());
+
+    let mut seeded = Session::new();
+    let _ = seeded.execute("sheet.createData", json!({ "sheet_id": "d1", "kind": "Column" }))?;
+    let (final_dir, final_journal) =
+        open_fresh_journal_for_seeded_session(td.path(), &crafted_dir, DesktopWindowId(1), "live-win-1", 60_000, 50_000, &seeded)?;
+    assert!(final_dir != crafted_dir && !evil_out.exists() && dir_has_unrecovered_crash(&crafted_dir, 50_000));
+    let _ = seeded.close_journal_cleanly(final_journal)?;
     Ok(())
 }

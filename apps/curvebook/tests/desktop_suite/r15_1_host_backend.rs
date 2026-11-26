@@ -7,19 +7,26 @@
 //! - Host `Tokens::apply_to_ctx`, `Cmd/Ctrl +`/`-`/`0` `ui_scale`
 //! - `LiveControlBridge` + `GeometryStamp` post-resize / post-DPI barrier (`ui.screenshot` / `ui.inspect`)
 
+use std::fs;
 use std::io::{BufReader, Cursor};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use curvebook::desktop_host::{
     DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, NativeFileDialogAdapter, NativeFileDialogKind, NativeFileDialogRequest,
 };
-use curvebook::gui_window::CurveBookNativeApp;
+use curvebook::gui_window::{CurveBookNativeApp, LiveControlChannel, LiveControlRequest};
 use curvebook::live_control::{LiveControlBridge, serve_live_control_io};
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, LinearRegressionSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+};
+use curvebook_engine::{ExternalPathPolicy, Session};
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, ControlAuth, LOCALES, inspect_ui_tree, normalize_beta_gui_locale};
+use curvebook_ui_egui::theme::UiThemeMode;
+use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, ControlAuth, LOCALES, UiApp, inspect_ui_tree, normalize_beta_gui_locale};
 use eframe::egui;
 use serde_json::{Value, json};
 
@@ -395,5 +402,171 @@ fn live_control_ui_scale_1_5_does_not_double_scale_inspect_or_screenshot() -> Re
     let bounds = replies[2]["result"]["dialog"]["bounds"].as_array().ok_or("missing dialog.bounds")?;
     let [bx, by, bw, bh] = [0, 1, 2, 3].map(|i| bounds.get(i).and_then(Value::as_f64).unwrap_or(-1.0));
     assert!(bx >= 0.0 && by >= 0.0 && bx + bw <= 1202.0 && by + bh <= 752.0 && bw < 760.0, "double-scaled dialog bounds: {bounds:?}");
+    Ok(())
+}
+
+#[test]
+fn secondary_window_prefs_sync_per_request_token_64k_lift_and_live_screenshot_tab_idle() -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Secondary windows hydrate & sync preferences; closing Window 2 persists synced prefs.
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: None, ..DesktopHostConfig::default() });
+    let persisted = Arc::new(curvebook_platform::sync::Mutex::named("test.prefs", Vec::<(String, UiThemeMode)>::new()));
+    let p_hook = Arc::clone(&persisted);
+    rt.set_preferences_init_hook(|app: &mut UiApp| {
+        let _ = app.set_locale("de");
+        app.set_theme_mode(UiThemeMode::Dark);
+    });
+    rt.set_preferences_persist_hook(move |app: &UiApp| {
+        if let Ok(mut g) = p_hook.lock() {
+            g.push((app.locale.clone(), app.theme.mode));
+        }
+    });
+    let w1 = rt.open_window(None, ViewportMetrics::default())?;
+    assert_eq!((rt.window(w1)?.app().locale.as_str(), rt.window(w1)?.app().theme.mode), ("de", UiThemeMode::Dark));
+    let w2 = rt.dispatch(DesktopHostEvent::MenuAction { window_id: w1, command_id: String::from("window.new") })?.opened_window_id.ok_or("win2")?;
+    assert_eq!((rt.window(w2)?.app().locale.as_str(), rt.window(w2)?.app().theme.mode), ("de", UiThemeMode::Dark));
+    let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: w1, command_id: String::from("ui.locale.set:fr") })?;
+    let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: w1, command_id: String::from("ui.theme.set") })?;
+    let mode = rt.window(w1)?.app().theme.mode;
+    assert!(mode != UiThemeMode::Dark && rt.window(w2)?.app().locale == "fr" && rt.window(w2)?.app().theme.mode == mode);
+    let _ = rt.dispatch(DesktopHostEvent::WindowCloseRequested { window_id: w2, force: false })?;
+    assert_eq!(persisted.lock().map_err(|e| e.to_string())?.last(), Some(&(String::from("fr"), mode)));
+
+    // 2. Per-request `"token"` promotes auth to lift 64 KiB cap & `project.save` preserves canonical `file_path()`.
+    let td = TempDirGuard::new("token-64k-canon")?;
+    let wd = td.child("wd");
+    let sub = wd.join("sub");
+    fs::create_dir_all(&sub)?;
+    let mut rt_io = DesktopHostRuntime::new(DesktopHostConfig {
+        recovery_root: None,
+        path_policy: ExternalPathPolicy::workdir(&wd)?,
+        ..DesktopHostConfig::default()
+    });
+    let wio = rt_io.open_window(None, ViewportMetrics::default())?;
+    let auth = ControlAuth::from_token("rem-hosts-token-1321")?;
+    let (bridge, channel) = LiveControlBridge::new(auth);
+    let frames = format!(
+        "{}\n{}\n",
+        json!({ "id": "f1", "token": "rem-hosts-token-1321", "method": "engine.execute", "params": { "command_id": "project.save", "params": { "path": "sub/saved.curvebook" } } }),
+        json!({ "id": "f2", "token": "rem-hosts-token-1321", "method": "engine.execute", "params": { "command_id": "sheet.createData", "params": { "sheet_id": "d2", "title": "x".repeat(70 * 1024), "kind": "Column" } } }),
+    );
+    let io_h = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let (mut r, mut w) = (BufReader::new(Cursor::new(frames.into_bytes())), Vec::new());
+        serve_live_control_io(&mut r, &mut w, &bridge, |_| {})?;
+        Ok(w)
+    });
+    while let Ok(req) = channel.request_rx.recv() {
+        let out = rt_io.window_mut(wio)?.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |_, _| Ok(()));
+        let _ = req.reply_tx.send(out);
+    }
+    let replies = read_jsonl_values(&io_h.join().map_err(|_| "io panic")??)?;
+    assert_eq!((replies.len(), &replies[0]["ok"]), (2, &json!(true)));
+    assert!(!replies[1]["error"].as_str().unwrap_or("").contains("control line exceeds"));
+    assert_eq!(rt_io.window(wio)?.app().session().file_path(), Some(fs::canonicalize(sub.join("saved.curvebook"))?.as_path()));
+
+    // 3. Live GUI window: per-request token deferred screenshot, workspace/scale_factor, dialog Conflict/Open, symlink reject, int tab switch, 0 idle repaints.
+    let mut doc = ProjectDocument::new("GUI Window Study")?;
+    let mut rs = ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::LinearRegression(LinearRegressionSpec::default()))?)?;
+    rs.status = ResultStatus::UpToDate;
+    let num = |v: f64| ResultCell::Number { value: v, prefix: None, units: None };
+    for (id, title, kind, v) in [("tab_a", "Tab A", ResultTabKind::MainSummary, 1.0), ("tab_b", "Tab B", ResultTabKind::Residuals, 2.0)] {
+        rs.tabs.push(ResultTab {
+            id: id.into(),
+            title: title.into(),
+            kind,
+            column_headers: vec!["V".into()],
+            row_labels: vec!["1".into()],
+            rows: vec![vec![num(v)]],
+            footnotes: Vec::new(),
+        });
+    }
+    doc.add_result_sheet(rs)?;
+    let _ = doc.select_in_navigator(&curvebook_doc::SheetId::new("r1"));
+    let mut rt_g = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: None, in_window_menus: true, ..DesktopHostConfig::default() });
+    let wg = rt_g.open_window_with_session(Session::from_document(doc), ViewportMetrics::default(), false)?;
+    let (req_tx, req_rx) = std::sync::mpsc::channel::<LiveControlRequest>();
+    let ch = LiveControlChannel {
+        request_rx: req_rx,
+        egui_ctx_cell: Arc::new(std::sync::OnceLock::new()),
+        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        post_hook: None,
+    };
+    let mut h = NativeHarness::with_screen(CurveBookNativeApp::new(rt_g, wg, None).with_live_control(ch), egui::vec2(1024.0, 680.0));
+    let repaints = Arc::new(AtomicUsize::new(0));
+    let repaints_cb = Arc::clone(&repaints);
+    h.ctx.set_request_repaint_callback(move |_| {
+        repaints_cb.fetch_add(1, Ordering::Relaxed);
+    });
+    h.settle(3);
+
+    let send =
+        |payload: Value,
+         authed: bool|
+         -> Result<std::sync::mpsc::Receiver<Result<curvebook::desktop_host::LiveControlFrameOutput, String>>, Box<dyn std::error::Error>> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            req_tx.send(LiveControlRequest {
+                raw_bytes: format!("{payload}\n").into_bytes(),
+                auth: ControlAuth::from_token("rem-hosts-token-gui")?,
+                conn_authenticated: authed,
+                reply_tx: tx,
+            })?;
+            Ok(rx)
+        };
+    let rx_shot =
+        send(json!({ "id": "s1", "token": "rem-hosts-token-gui", "method": "ui.screenshot", "params": { "target": "full_window" } }), false)?;
+    let rx_tab = send(json!({ "id": "t1", "token": "rem-hosts-token-gui", "method": "ui.switch_tab", "params": { "tab": 1 } }), false)?;
+    h.settle(12);
+    let shot_out = rx_shot.recv_timeout(Duration::from_secs(2))??;
+    assert_eq!(shot_out.auth_succeeded, Some(true));
+    let sj: Value = serde_json::from_slice(&shot_out.response_bytes)?;
+    assert_eq!(
+        (&sj["ok"], &sj["result"]["region"], &sj["result"]["format"], &sj["result"]["mime_type"]),
+        (&json!(true), &json!("full_window"), &json!("png"), &json!("image/png"))
+    );
+    assert!(
+        sj["result"]["bytes_len"].as_u64().is_some_and(|n| n > 0)
+            && sj["result"]["path"].is_null()
+            && sj["result"]["data_base64"].as_str().is_some_and(|s| !s.is_empty())
+            && sj["result"].get("png_base64").is_none()
+    );
+    let tj: Value = serde_json::from_slice(&rx_tab.recv_timeout(Duration::from_secs(2))??.response_bytes)?;
+    assert_eq!(
+        (&tj["ok"], &tj["result"]["tab_id"], h.app.runtime().window(wg)?.app().canvas_dialogs.result_view.active_tab_index),
+        (&json!(true), &json!("tab_b"), 1)
+    );
+
+    let rx_ws = send(json!({ "id": "ws", "method": "ui.screenshot", "params": { "target": "workspace", "scale_factor": 2.0 } }), true)?;
+    let rx_nodlg = send(json!({ "id": "nd", "method": "ui.screenshot", "params": { "region": "dialog" } }), true)?;
+    h.settle(12);
+    let wsj: Value = serde_json::from_slice(&rx_ws.recv_timeout(Duration::from_secs(2))??.response_bytes)?;
+    assert_eq!((&wsj["ok"], &wsj["result"]["region"], &wsj["result"]["dpi"]), (&json!(true), &json!("workspace"), &json!(192)));
+    let ndj: Value = serde_json::from_slice(&rx_nodlg.recv_timeout(Duration::from_secs(2))??.response_bytes)?;
+    assert_eq!((&ndj["ok"], &ndj["error_detail"]["code"]), (&json!(false), &json!("conflict")));
+
+    h.app.runtime_mut().window_mut(wg)?.app_mut().canvas_dialogs.active_dialog = curvebook_ui_egui::dialogs_canvas::ActiveDialog::About;
+    h.settle(3);
+    let rx_dlg = send(json!({ "id": "dg", "method": "ui.screenshot", "params": { "target": "dialog" } }), true)?;
+    h.settle(8);
+    let dgj: Value = serde_json::from_slice(&rx_dlg.recv_timeout(Duration::from_secs(2))??.response_bytes)?;
+    assert!(dgj["ok"] == json!(true) && dgj["result"]["region"] == json!("dialog") && dgj["result"]["bytes_len"].as_u64().is_some_and(|n| n > 0));
+    h.app.runtime_mut().window_mut(wg)?.app_mut().canvas_dialogs.active_dialog = curvebook_ui_egui::dialogs_canvas::ActiveDialog::None;
+    h.settle(3);
+
+    #[cfg(unix)]
+    {
+        let (real_file, link_path) = (td.child("real.png"), td.child("link.png"));
+        fs::write(&real_file, b"untouched")?;
+        std::os::unix::fs::symlink(&real_file, &link_path)?;
+        let rx_sym = send(
+            json!({ "id": "sy", "method": "ui.screenshot", "params": { "target": "full_window", "path": link_path.display().to_string() } }),
+            true,
+        )?;
+        h.settle(8);
+        let syj: Value = serde_json::from_slice(&rx_sym.recv_timeout(Duration::from_secs(2))??.response_bytes)?;
+        assert!(syj["ok"] == json!(false) && fs::read(&real_file)? == b"untouched");
+    }
+
+    repaints.store(0, Ordering::Relaxed);
+    let _ = h.step_events(Vec::new());
+    assert_eq!(repaints.load(Ordering::Relaxed), 0, "idle desktop frame must request 0 repaints");
     Ok(())
 }

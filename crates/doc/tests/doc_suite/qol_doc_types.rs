@@ -3,9 +3,10 @@
 //! `NamedCheckpoint` snapshots on `ProjectDocument`.
 
 use curvebook_doc::{
-    CanvasResizeMode, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, FigureCanvasPreset, GroupedTable, JournalWidthPreset,
-    LayoutSpec, MultipleVariablesTable, NamedCheckpoint, NestedTable, PartsOfWholeTable, PhysicalUnit, ProjectDocument, SheetId, SubcolumnMode,
-    SurvivalTable, TableArchetype, XyTable,
+    CanvasResizeMode, Cell, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, FigureCanvasPreset,
+    GroupedTable, JournalWidthPreset, LayoutSpec, MAX_TITLE_BYTES, MultipleVariablesTable, NamedCheckpoint, NestedGroupColumn, NestedTable,
+    PartsOfWholeTable, PhysicalUnit, ProjectDocument, SequenceProgression, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, XColumnMode,
+    XyTable, infer_number_separators, parse_import_number, strip_thousands_grouping,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -156,5 +157,72 @@ fn named_checkpoint_snapshots_and_serde_round_trip() -> TestResult {
     assert!(restored.checkpoints.is_empty());
     assert_eq!(restored.data_sheets.len(), 1);
     assert_eq!(restored.title, "Checkpoint Study");
+    Ok(())
+}
+
+#[test]
+fn generated_sequence_x_exclusion_and_nested_clone_and_thousands_grouping() -> TestResult {
+    // 1. GeneratedSequence X exclusions honored across value, summary, and active pairs.
+    for (prog, x1, x2) in [(SequenceProgression::Arithmetic, 3.0, 5.0), (SequenceProgression::Geometric, 2.0, 4.0)] {
+        let mut xy =
+            XyTable::new_with_x_mode(XColumnMode::GeneratedSequence { start: 1.0, step: 2.0, progression: prog }, SubcolumnMode::Single, 1, 3)?;
+        xy.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(20.0)], vec![Cell::number(30.0)]];
+        let mut ds = DataSheet::new("xy-gen", "Generated X", TableArchetype::Xy(xy))?;
+        ds.set_x_or_time_excluded(0, 0, true)?;
+        let TableArchetype::Xy(ref xy) = ds.archetype else { panic!("expected Xy") };
+        assert_eq!(
+            (xy.raw_x_value_at(0), xy.materialized_x_cell_at(0), xy.x_value_at(0), xy.x_summary_at(0)),
+            (Some(1.0), Cell::excluded_number(1.0), None, Ok(None))
+        );
+        assert_eq!((xy.x_value_at(1), xy.active_xy_pairs(0)), (Some(x1), vec![(x1, 20.0), (x2, 30.0)]));
+        ds.set_x_or_time_excluded(0, 0, false)?;
+        let TableArchetype::Xy(ref xy) = ds.archetype else { panic!("expected Xy") };
+        assert_eq!((xy.x_value_at(0), xy.active_xy_pairs(0)), (Some(1.0), vec![(1.0, 10.0), (x1, 20.0), (x2, 30.0)]));
+    }
+
+    // 2. Nested clone_structure preserves Y cells when widening & bounds subcolumn titles at MAX_TITLE_BYTES.
+    let mut tbl = NestedTable::new(2, 2, 3)?;
+    tbl.groups[0].title = String::from("Vehicle");
+    tbl.groups[0].cells[0] = vec![Cell::number(11.0), Cell::number(12.0)];
+    tbl.groups[0].cells[1] = vec![Cell::number(13.0), Cell::excluded_number(14.0)];
+    tbl.groups[1].cells[0] = vec![Cell::number(21.0), Cell::number(22.0)];
+    let ds = DataSheet::new("nest-src", "Nested Source", TableArchetype::Nested(tbl))?;
+    let opts = |clear_y_values, override_replicates| CloneDataSheetOptions {
+        title: String::from("Clone"),
+        keep_x_values: true,
+        clear_y_values,
+        clear_column_titles: false,
+        clear_row_titles: false,
+        override_replicates: Some(override_replicates),
+    };
+    let widened = ds.clone_structure("nest-wide", &opts(false, 4))?;
+    let TableArchetype::Nested(ref wnt) = widened.archetype else { panic!("expected Nested") };
+    assert_eq!(wnt.groups[0].biological_unit_count(), 4);
+    assert_eq!(wnt.groups[0].cells[0], vec![Cell::number(11.0), Cell::number(12.0), Cell::empty(), Cell::empty()]);
+    assert_eq!(wnt.groups[0].cells[1], vec![Cell::number(13.0), Cell::excluded_number(14.0), Cell::empty(), Cell::empty()]);
+    assert_eq!(wnt.groups[1].cells[0], vec![Cell::number(21.0), Cell::number(22.0), Cell::empty(), Cell::empty()]);
+    assert_eq!(ds.clone_structure("nest-clear", &opts(true, 4))?.cell(CellCoord::new(0, 0, 0)), Some(&Cell::empty()));
+
+    for long_title in ["A".repeat(MAX_TITLE_BYTES), "α".repeat(MAX_TITLE_BYTES / 2)] {
+        let grp = NestedGroupColumn::new(long_title, 2, 2)?;
+        assert!(grp.title.len() == MAX_TITLE_BYTES && grp.subcolumn_titles.iter().all(|s| s.len() <= MAX_TITLE_BYTES));
+        let nested = NestedTable { row_titles: vec![String::new(); 2], row_titles_expanded: false, groups: vec![grp] };
+        nested.validate()?;
+        let cloned = DataSheet::new("nest-long", "Long", TableArchetype::Nested(nested))?.clone_structure("nest-long-c", &opts(false, 3))?;
+        cloned.validate()?;
+        let TableArchetype::Nested(ref cnt) = cloned.archetype else { panic!("expected Nested") };
+        assert!(cnt.groups[0].subcolumn_titles.len() == 3 && cnt.groups[0].subcolumn_titles.iter().all(|s| s.len() <= MAX_TITLE_BYTES));
+    }
+
+    // 3. Leading-zero thousands groups rejected in strip_thousands_grouping, parse_import_number, and infer_number_separators.
+    for (s, exp) in [("0,123", None), ("00,123", None), ("0,000", None), ("0", Some("0")), ("1,000", Some("1000")), ("12,345,678", Some("12345678"))]
+    {
+        assert_eq!(strip_thousands_grouping(s, &[',']).as_deref(), exp, "{s}");
+    }
+    for (s, exp) in [("0,123", None), ("0,000.5", None), ("0.123", Some(0.123)), ("1,234.56", Some(1234.56))] {
+        assert_eq!(parse_import_number(s, '.', Some(',')), exp, "{s}");
+    }
+    assert_eq!(infer_number_separators(["0,000.5", "0,123"].into_iter(), ';'), (',', None));
+    assert_eq!(infer_number_separators(["1,234.56", "2,000.00"].into_iter(), ';'), ('.', Some(',')));
     Ok(())
 }

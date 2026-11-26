@@ -35,8 +35,5 @@ mod r46_library_oracles;
 mod r46_linear_oracles;
 mod r46_shapiro_rk45_oracles;
 mod r46_solver_oracles;
-mod rem_dsl;
-mod rem_lib;
-mod rem_solver_result;
 mod rv_ledger_fit;
 mod s3a_fit_x2_regressions;

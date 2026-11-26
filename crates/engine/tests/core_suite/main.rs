@@ -46,7 +46,6 @@ mod r45_robust_e2e;
 mod r63_select_and_transform;
 mod recovery_wal_regression;
 mod registry_and_errors;
-mod rem_engine_audit;
 mod rv_ledger_persist_engine;
 mod rv_ledger_sheet_table;
 mod rv_ledger_third_pass_engine;

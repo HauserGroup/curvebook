@@ -4,10 +4,10 @@
 
 use std::io::Read;
 
-use curvebook_chart::{ChartScene, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint, TextAnchor};
+use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint, TextAnchor};
 use curvebook_doc::{CropInsetsPt, ImageMimeKind, MAX_IMAGE_DIM_PX};
 use curvebook_palette::Rgba8;
-use curvebook_pdf::{PdfColorSpace, PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
+use curvebook_pdf::{MAX_PDF_RAW_STREAM_BYTES, MAX_PDF_TOTAL_PATH_COMMANDS, PdfColorSpace, PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
 use curvebook_text::{RichSpan, RichText, SpanSlope, SpanWeight, build_minimal_truetype_font};
 use flate2::read::ZlibDecoder;
 
@@ -335,4 +335,44 @@ fn x1_03_pdf_image_enforces_pixel_bounds_and_pre_alloc_uncompressed_budget() {
     let compressed_pdf = render_pdf(&big_scene, &comp_opts).expect("uniform huge raster should compress cleanly under streaming budget");
     assert!(compressed_pdf.starts_with(b"%PDF-1.7\n"));
     assert!(compressed_pdf.len() < 256 * 1024);
+}
+
+#[test]
+fn pdf_path_and_ttf_resource_caps_and_raster_xobject_dedup() {
+    // 1. Single path exceeding MAX_PDF_TOTAL_PATH_COMMANDS fails fast with ResourceLimit.
+    let mut huge_path = Path2D { commands: Vec::with_capacity(MAX_PDF_TOTAL_PATH_COMMANDS + 1) };
+    huge_path.commands.push(PathCmd::MoveTo(PointPt::new(0.0, 0.0)));
+    huge_path.commands.resize(MAX_PDF_TOTAL_PATH_COMMANDS + 1, PathCmd::LineTo(PointPt::new(1.0, 1.0)));
+    let mut cmd_scene = ChartScene::new("pdf-cmds", "Huge Path", 100.0, 100.0, None);
+    cmd_scene.primitives.push(ScenePrimitive::Path { path: huge_path, fill: None, stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)), clip: None });
+    assert!(matches!(render_pdf(&cmd_scene, &PdfExportOptions::default()), Err(PdfError::ResourceLimit { .. })));
+
+    // 2. Oversized embedded_truetype_font fails fast with ResourceLimit before cloning/compressing.
+    let empty_scene = ChartScene::new("pdf-big-ttf", "Big TTF", 100.0, 100.0, Some(Rgba8::WHITE));
+    let mut oversized_ttf = vec![0u8; MAX_PDF_RAW_STREAM_BYTES + 1];
+    oversized_ttf[0..4].copy_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+    let big_opts = PdfExportOptions { embedded_truetype_font: Some(oversized_ttf), ..PdfExportOptions::default() };
+    assert!(matches!(render_pdf(&empty_scene, &big_opts), Err(PdfError::ResourceLimit { .. })));
+
+    // 3. Raster XObject dedup reuses /Im0 for identical pixels while preserving distinct /Im1.
+    let img_a = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 255];
+    let img_b = vec![10, 20, 30, 255, 40, 50, 60, 255, 70, 80, 90, 255, 100, 110, 120, 255];
+    let mut dedup_scene = ChartScene::new("pdf-dedup", "Dedup", 200.0, 100.0, Some(Rgba8::WHITE));
+    for (x, rgba) in [(10.0, img_a.clone()), (80.0, img_b), (140.0, img_a)] {
+        dedup_scene.primitives.push(ScenePrimitive::RasterImage(SceneRasterImage {
+            asset_id: String::new(),
+            media_type: ImageMimeKind::Png,
+            pixel_size: (2, 2),
+            rgba,
+            bounds_pt: RectPt::new(x, 10.0, 40.0, 40.0),
+            crop: CropInsetsPt::default(),
+            rotation_deg: 0.0,
+            clip: None,
+        }));
+    }
+    let pdf = render_pdf(&dedup_scene, &PdfExportOptions { compress_streams: false, ..PdfExportOptions::default() }).expect("render PDF images");
+    let text = String::from_utf8_lossy(&pdf);
+    assert_eq!(text.matches("/Im0 Do").count(), 2, "identical image copies must deduplicate to /Im0");
+    assert_eq!(text.matches("/Im1 Do").count(), 1, "distinct image must emit separate /Im1");
+    assert!(!text.contains("/Im2 Do"), "no third image XObject expected");
 }
