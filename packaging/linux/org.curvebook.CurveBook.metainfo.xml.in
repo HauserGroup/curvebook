@@ -21,9 +21,9 @@
   </description>
   <launchable type="desktop-id">org.curvebook.CurveBook.desktop</launchable>
   <icon type="stock">org.curvebook.CurveBook</icon>
-  <url type="homepage">https://github.com/HauserGroup/curvebook</url>
+  <url type="homepage">https://curvebook.org/</url>
   <url type="bugtracker">https://github.com/HauserGroup/curvebook/issues</url>
-  <url type="help">https://github.com/HauserGroup/curvebook</url>
+  <url type="help">https://curvebook.org/manual/</url>
   <categories>
     <category>Science</category>
     <category>Math</category>

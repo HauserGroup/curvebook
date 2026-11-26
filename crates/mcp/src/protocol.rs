@@ -29,7 +29,7 @@ pub const SERVER_INSTRUCTIONS: &str = concat!(
     "Inspect state with `doc_inspect` (supports `detail: 'compact'|'standard'|'full'`, `sections`, `sheet_id`, `tab_id`, `max_rows`, `max_scalars`) or resources (`sheet://<id>`, `result://<id>?include_curves=false`). ",
     "Discover commands with `command_list` (`filter`, `group`, `command_id`, `include_schemas`) and `list_toolsets` / `enable_toolset` (emits `notifications/tools/list_changed`). ",
     "Use `fit.run` `method: 'rout'` + `identify_unstable_parameters: true` for dose-response outlier detection and identifiability diagnostics, inspect tool `annotations` before mutating/filesystem calls, and pass string arguments to `prompts/list` + `prompts/get`. ",
-    "Reference docs: https://hausergroup.github.io/curvebook/manual/v",
+    "Reference docs: https://curvebook.org/manual/v",
     env!("CARGO_PKG_VERSION_MAJOR"),
     ".",
     env!("CARGO_PKG_VERSION_MINOR"),

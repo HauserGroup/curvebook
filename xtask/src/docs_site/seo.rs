@@ -406,10 +406,11 @@ mod tests {
     fn site_config_and_custom_domain_helpers_stay_consistent() {
         assert!(validate_site_config(SITE_BASE_URL, CUSTOM_DOMAIN).is_ok());
         assert!(validate_site_config("https://curvebook.org/", Some("curvebook.org")).is_ok());
-        assert!(validate_site_config(SITE_BASE_URL, Some("curvebook.org")).is_err());
+        assert!(validate_site_config("https://hausergroup.github.io/curvebook/", None).is_ok());
+        assert!(validate_site_config("https://hausergroup.github.io/curvebook/", Some("curvebook.org")).is_err());
         assert!(validate_site_config("https://curvebook.org/", Some("https://curvebook.org")).is_err());
         assert!(validate_site_config("http://curvebook.org/", None).is_err());
-        assert_eq!(manual_canonical_url("analyses.html"), "https://hausergroup.github.io/curvebook/manual/latest/analyses.html");
+        assert_eq!(manual_canonical_url("analyses.html"), "https://curvebook.org/manual/latest/analyses.html");
     }
 
     #[test]
@@ -435,13 +436,13 @@ mod tests {
         assert_eq!(
             extract_locs(&xml),
             [
-                "https://hausergroup.github.io/curvebook/",
-                "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
-                "https://hausergroup.github.io/curvebook/linux.html",
-                "https://hausergroup.github.io/curvebook/faq.html",
-                "https://hausergroup.github.io/curvebook/privacy.html",
-                "https://hausergroup.github.io/curvebook/manual/v0.2/index.html",
-                "https://hausergroup.github.io/curvebook/manual/v0.2/registry/formats.html",
+                "https://curvebook.org/",
+                "https://curvebook.org/open-pzfx-files.html",
+                "https://curvebook.org/linux.html",
+                "https://curvebook.org/faq.html",
+                "https://curvebook.org/privacy.html",
+                "https://curvebook.org/manual/v0.2/index.html",
+                "https://curvebook.org/manual/v0.2/registry/formats.html",
             ]
         );
         assert!(!xml.contains("lastmod"), "sitemap must stay deterministic");
@@ -452,13 +453,13 @@ mod tests {
         assert_eq!(
             extract_locs(&build_sitemap_with_manual(root.path(), None).unwrap()),
             [
-                "https://hausergroup.github.io/curvebook/",
-                "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
-                "https://hausergroup.github.io/curvebook/linux.html",
-                "https://hausergroup.github.io/curvebook/faq.html",
-                "https://hausergroup.github.io/curvebook/privacy.html",
-                "https://hausergroup.github.io/curvebook/manual/latest/index.html",
-                "https://hausergroup.github.io/curvebook/manual/latest/registry/formats.html",
+                "https://curvebook.org/",
+                "https://curvebook.org/open-pzfx-files.html",
+                "https://curvebook.org/linux.html",
+                "https://curvebook.org/faq.html",
+                "https://curvebook.org/privacy.html",
+                "https://curvebook.org/manual/latest/index.html",
+                "https://curvebook.org/manual/latest/registry/formats.html",
             ]
         );
 
@@ -492,7 +493,7 @@ mod tests {
         let base_privacy = valid_landing_html("privacy.html");
         let bad_og_url = base_privacy.replace("privacy.html\"", "index.html\"").replacen("index.html\"", "privacy.html\"", 1);
         for (html, needle) in [
-            (String::from("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/\">"), "docs/privacy.html"),
+            (String::from("<link rel=\"canonical\" href=\"https://curvebook.org/\">"), "docs/privacy.html"),
             (format!("{0}{0}", canonical_link_tag("privacy.html")), "exactly one"),
             (bad_og_url, "og:url"),
             (base_privacy.replace("workspace-split-fit.png", "does-not-exist.png"), "og:image"),

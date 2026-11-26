@@ -7,15 +7,15 @@
   <p>
     <a href="https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/HauserGroup/curvebook/ci.yml?branch=main&style=flat-square&label=CI" alt="CI" /></a>
     <img src="https://img.shields.io/badge/Status-Beta-D96240?style=flat-square" alt="Status: Beta" />
-    <a href="https://hausergroup.github.io/curvebook/privacy.html"><img src="https://img.shields.io/badge/Telemetry-Zero-059669?style=flat-square" alt="Zero Telemetry" /></a>
+    <a href="https://curvebook.org/privacy.html"><img src="https://img.shields.io/badge/Telemetry-Zero-059669?style=flat-square" alt="Zero Telemetry" /></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-2563EB?style=flat-square" alt="MIT OR Apache-2.0" /></a>
   </p>
 
   <p>
     <a href="#download">Download</a> &middot;
-    <a href="https://hausergroup.github.io/curvebook/manual/">User Manual</a> &middot;
-    <a href="https://hausergroup.github.io/curvebook/manual/latest/get-started.html">Get Started</a> &middot;
-    <a href="https://hausergroup.github.io/curvebook/faq.html">FAQ</a> &middot;
+    <a href="https://curvebook.org/manual/">User Manual</a> &middot;
+    <a href="https://curvebook.org/manual/latest/get-started.html">Get Started</a> &middot;
+    <a href="https://curvebook.org/faq.html">FAQ</a> &middot;
     <a href="CONTRIBUTING.md">Contributing</a>
   </p>
 </div>
@@ -58,11 +58,11 @@
 Get the latest Beta from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)**:
 
 - **macOS** — Universal `.dmg` (Apple Silicon & Intel, signed & notarized)
-- **Windows** — `.msi` installer (`x64` / `arm64`) — *unsigned in Beta; see the [SmartScreen note](https://hausergroup.github.io/curvebook/manual/latest/troubleshooting.html#known-issues)*
+- **Windows** — `.msi` installer (`x64` / `arm64`) — *unsigned in Beta; see the [SmartScreen note](https://curvebook.org/manual/latest/troubleshooting.html#known-issues)*
 - **Linux** — Portable `.AppImage` (`x86_64` / `aarch64`)
 - **FreeBSD** — CLI-only `.tar.gz` (`x86_64`)
 
-Need help installing, setting up the CLI, or verifying downloads? See the **[Get Started Guide](https://hausergroup.github.io/curvebook/manual/latest/get-started.html)**.
+Need help installing, setting up the CLI, or verifying downloads? See the **[Get Started Guide](https://curvebook.org/manual/latest/get-started.html)**.
 
 ---
 
@@ -78,8 +78,8 @@ Want to drive CurveBook with a local AI assistant? Read the **[Beginner's MCP Gu
 
 ## Privacy, Docs & Contributing
 
-- **Private & offline** — Zero telemetry, zero crash reporting, and zero network calls ([Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html)). Built from scratch in safe Rust.
-- **Help & docs** — [User Manual](https://hausergroup.github.io/curvebook/manual/) · [FAQ](https://hausergroup.github.io/curvebook/faq.html) · [Troubleshooting](https://hausergroup.github.io/curvebook/manual/latest/troubleshooting.html#known-issues) · [Report an Issue](https://github.com/HauserGroup/curvebook/issues)
+- **Private & offline** — Zero telemetry, zero crash reporting, and zero network calls ([Privacy Policy](https://curvebook.org/privacy.html)). Built from scratch in safe Rust.
+- **Help & docs** — [User Manual](https://curvebook.org/manual/) · [FAQ](https://curvebook.org/faq.html) · [Troubleshooting](https://curvebook.org/manual/latest/troubleshooting.html#known-issues) · [Report an Issue](https://github.com/HauserGroup/curvebook/issues)
 - **Contributors** — [Contributing Guide](CONTRIBUTING.md) · [Architecture](docs/architecture.md) · [Development Guide](docs/development.md)
 - **License** — Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) (see [NOTICE](NOTICE) and [ATTRIBUTION.md](ATTRIBUTION.md)).
 

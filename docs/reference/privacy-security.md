@@ -2,7 +2,7 @@
 
 CurveBook is engineered for confidential laboratory and clinical research data: the desktop application, headless CLI, MCP server, and statistical libraries run offline on your machine with zero telemetry and zero network egress.
 
-See the public [Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html), [Security Policy](../../SECURITY.md), and [Licence & Attribution Policy](../licences.md).
+See the public [Privacy Policy](https://curvebook.org/privacy.html), [Security Policy](../../SECURITY.md), and [Licence & Attribution Policy](../licences.md).
 
 ---
 

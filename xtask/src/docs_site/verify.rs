@@ -1282,16 +1282,15 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         let page = render_test_page("canon.html", "Canon", "<p>Body.</p>");
         let with_link = |tag: &str| page.replacen("</head>", &format!("{tag}</head>"), 1);
 
-        let ok = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/canon.html\">"))
-            .unwrap();
-        assert!(!ok.hrefs.iter().any(|h| h.ends_with("/curvebook/canon.html")), "canonical URL must not enter the local link checker");
+        let ok = audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://curvebook.org/canon.html\">")).unwrap();
+        assert!(!ok.hrefs.iter().any(|h| h.ends_with("/canon.html")), "canonical URL must not enter the local link checker");
         assert!(
             audit_single_html("canon.html", &with_link("<link rel=\"canonical\" href=\"https://evil.example/canon.html\">"))
                 .unwrap_err()
                 .contains("canonical link")
         );
         assert!(
-            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://hausergroup.github.io/curvebook/site.css\">"))
+            audit_single_html("canon.html", &with_link("<link rel=\"stylesheet\" href=\"https://curvebook.org/site.css\">"))
                 .unwrap_err()
                 .contains("external asset URL")
         );
@@ -1383,13 +1382,13 @@ $$\n\\chi^2 = \\frac{(O - E)^2}{E}\n$$\n";
         });
         assert!(audit_single_html("analyses.html", &page).is_ok());
         for expected in [
-            "<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">",
+            "<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/analyses.html\">",
             "<meta property=\"og:type\" content=\"article\">",
             "<meta property=\"og:site_name\" content=\"CurveBook\">",
             "<meta property=\"og:title\" content=\"Analyses — CurveBook Documentation\">",
             "<meta property=\"og:description\" content=\"Statistical analyses reference.\">",
-            "<meta property=\"og:url\" content=\"https://hausergroup.github.io/curvebook/manual/latest/analyses.html\">",
-            "<meta property=\"og:image\" content=\"https://hausergroup.github.io/curvebook/images/workspace-layout-dark.png\">",
+            "<meta property=\"og:url\" content=\"https://curvebook.org/manual/latest/analyses.html\">",
+            "<meta property=\"og:image\" content=\"https://curvebook.org/images/workspace-layout-dark.png\">",
             "<meta name=\"twitter:card\" content=\"summary_large_image\">",
         ] {
             assert!(page.contains(expected), "missing `{expected}`");

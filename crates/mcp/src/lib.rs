@@ -23,7 +23,7 @@ pub const SERVER_NAME: &str = "curvebook";
 
 /// Canonical base URL for the online CurveBook reference manual matching this crate minor version.
 pub const DOCS_BASE_URL: &str =
-    concat!("https://hausergroup.github.io/curvebook/manual/v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), "/",);
+    concat!("https://curvebook.org/manual/v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), "/",);
 
 pub use errors::StructuredErrorPayload;
 pub use gui_tools::{GUI_TOOL_NAMES, is_gui_tool_name, list_gui_tools};

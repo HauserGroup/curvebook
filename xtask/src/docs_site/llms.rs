@@ -457,12 +457,12 @@ mod tests {
             SITE_SUMMARY,
             "## Key Pages",
             "## Documentation Manual",
-            "https://hausergroup.github.io/curvebook/faq.html",
-            "https://hausergroup.github.io/curvebook/open-pzfx-files.html",
-            "https://hausergroup.github.io/curvebook/llms-full.txt",
-            "https://hausergroup.github.io/curvebook/manual/latest/index.html",
-            "https://hausergroup.github.io/curvebook/manual/latest/analyses.html",
-            "https://hausergroup.github.io/curvebook/manual/latest/automation/mcp.html",
+            "https://curvebook.org/faq.html",
+            "https://curvebook.org/open-pzfx-files.html",
+            "https://curvebook.org/llms-full.txt",
+            "https://curvebook.org/manual/latest/index.html",
+            "https://curvebook.org/manual/latest/analyses.html",
+            "https://curvebook.org/manual/latest/automation/mcp.html",
         ] {
             assert!(text.contains(expected), "missing `{expected}`");
         }
@@ -489,7 +489,7 @@ mod tests {
         assert!(!pass_a.contains('\r'), "CRLF must be normalized to LF");
         for expected in [
             "## Quick Facts",
-            "Canonical URL: https://hausergroup.github.io/curvebook/manual/latest/get-started.html",
+            "Canonical URL: https://curvebook.org/manual/latest/get-started.html",
             "Install instructions (see roadmap, status, and audit report).",
             "Configure stdio MCP.",
             "Run `curvebook-cli`.",

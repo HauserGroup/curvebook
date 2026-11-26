@@ -4,22 +4,12 @@
 //! documentation site's CLI reference page so flag syntax, defaults, and exit codes stay in sync.
 
 /// Canonical online documentation URL for `curvebook-cli`.
-pub const CLI_DOCS_URL: &str = concat!(
-    "https://hausergroup.github.io/curvebook/manual/v",
-    env!("CARGO_PKG_VERSION_MAJOR"),
-    ".",
-    env!("CARGO_PKG_VERSION_MINOR"),
-    "/automation/cli.html",
-);
+pub const CLI_DOCS_URL: &str =
+    concat!("https://curvebook.org/manual/v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), "/automation/cli.html",);
 
 /// Canonical online registry URL containing per-subcommand `#cli-<id>` fragment targets.
-pub const CLI_REGISTRY_DOCS_URL: &str = concat!(
-    "https://hausergroup.github.io/curvebook/manual/v",
-    env!("CARGO_PKG_VERSION_MAJOR"),
-    ".",
-    env!("CARGO_PKG_VERSION_MINOR"),
-    "/registry/cli.html",
-);
+pub const CLI_REGISTRY_DOCS_URL: &str =
+    concat!("https://curvebook.org/manual/v", env!("CARGO_PKG_VERSION_MAJOR"), ".", env!("CARGO_PKG_VERSION_MINOR"), "/registry/cli.html",);
 
 /// Descriptor for a CLI flag option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

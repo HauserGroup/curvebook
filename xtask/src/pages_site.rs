@@ -25,10 +25,10 @@ use curvebook_platform::write_atomic;
 use crate::scan_util::{is_real_dir, is_regular_file, read_dir_paths_sorted, rel_slash};
 
 /// Published base URL of the GitHub Pages site.
-pub const SITE_BASE_URL: &str = "https://hausergroup.github.io/curvebook/";
+pub const SITE_BASE_URL: &str = "https://curvebook.org/";
 
-/// Optional custom domain (`CNAME`) for single-switch cutover; keep `None` while serving on `github.io`.
-pub const CUSTOM_DOMAIN: Option<&str> = None;
+/// Custom domain (`CNAME`) for GitHub Pages; emits `CNAME` and `robots.txt` during staging.
+pub const CUSTOM_DOMAIN: Option<&str> = Some("curvebook.org");
 
 /// Hand-written top-level pages under `docs/` that search engines should index, in sitemap order.
 /// Each must carry a canonical link and Open Graph / Twitter Card metadata (`docs-site --check`).
@@ -992,16 +992,13 @@ mod tests {
             ("target/docs-manual/index.html", "<meta http-equiv=\"refresh\" content=\"0; url=latest/index.html\">"),
             ("target/docs-manual/scratch/notes.html", "not a release snapshot"),
             ("docs/site.css", "body{}"),
-            (
-                "docs/404.html",
-                "<link rel=\"stylesheet\" href=\"/curvebook/site.css\"><a href=\"/curvebook/\">h</a><a href=\"/curvebook/manual/latest/index.html\">m</a>",
-            ),
+            ("docs/404.html", "<link rel=\"stylesheet\" href=\"/site.css\"><a href=\"/\">h</a><a href=\"/manual/latest/index.html\">m</a>"),
             ("docs/images/a.png", "png"),
             ("target/docs-manual/_root/llms.txt", "# CurveBook\n"),
             ("target/docs-manual/_root/llms-full.txt", "# CurveBook Full\n"),
             (
                 "target/docs-manual/_root/sitemap.xml",
-                "<urlset><url><loc>https://hausergroup.github.io/curvebook/</loc></url><url><loc>https://hausergroup.github.io/curvebook/faq.html</loc></url><url><loc>https://hausergroup.github.io/curvebook/manual/latest/files.html</loc></url></urlset>",
+                "<urlset><url><loc>https://curvebook.org/</loc></url><url><loc>https://curvebook.org/faq.html</loc></url><url><loc>https://curvebook.org/manual/latest/files.html</loc></url></urlset>",
             ),
             ("docs/ROADMAP.md", "internal"),
             ("docs/audit/report.md", "internal"),
@@ -1063,7 +1060,9 @@ mod tests {
     fn r12_9_stage_copies_the_list_and_refuses_unsafe_targets() {
         let root = seed("stage");
         let out = root.join("_site");
-        assert_eq!(stage(root.path(), &out).unwrap(), 24);
+        assert_eq!(stage(root.path(), &out).unwrap(), 26);
+        assert_eq!(std::fs::read_to_string(out.join("CNAME")).unwrap(), "curvebook.org\n");
+        assert!(std::fs::read_to_string(out.join("robots.txt")).unwrap().contains("Sitemap: https://curvebook.org/sitemap.xml"));
         assert_eq!(std::fs::read_to_string(out.join("manual/latest/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert_eq!(std::fs::read_to_string(out.join("manual/v0.1/registry/formats.html")).unwrap(), "<a href=\"../index.html\">up</a>");
         assert!(out.join("faq.html").is_file() && out.join("llms.txt").is_file() && out.join("llms-full.txt").is_file());
@@ -1094,7 +1093,8 @@ mod tests {
         assert!(files.contains(&String::from("manual/latest/index.html")) && files.contains(&String::from("manual/v0.1/index.html")));
 
         let out = root.join("_staged");
-        assert_eq!(stage_with_manual(root.path(), Some(&moved), &out).unwrap(), 24);
+        assert_eq!(stage_with_manual(root.path(), Some(&moved), &out).unwrap(), 26);
+        assert!(out.join("CNAME").is_file() && out.join("robots.txt").is_file());
         assert!(
             out.join("manual/index.html").is_file() && out.join("manual/latest/files.html").is_file() && out.join("manual/v0.1/files.html").is_file()
         );
@@ -1127,7 +1127,7 @@ mod tests {
             (
                 "sitemap",
                 "target/docs-manual/_root/sitemap.xml",
-                "<urlset><url><loc>https://hausergroup.github.io/curvebook/ROADMAP.md</loc></url></urlset>",
+                "<urlset><url><loc>https://curvebook.org/ROADMAP.md</loc></url></urlset>",
                 "sitemap.xml lists",
             ),
         ] {
@@ -1163,9 +1163,9 @@ mod tests {
             ("index.html", "manual/", Some("manual/index.html")),
             ("index.html", "../x.html", None),
             ("index.html", "/ROADMAP.md", None),
-            ("404.html", "/curvebook/", Some("index.html")),
-            ("404.html", "/curvebook/site.css", Some("site.css")),
-            ("404.html", "/other/site.css", None),
+            ("404.html", "/", Some("index.html")),
+            ("404.html", "/site.css", Some("site.css")),
+            ("404.html", "/../site.css", None),
         ] {
             assert_eq!(resolve(from, target).as_deref(), expected, "resolve({from}, {target})");
         }

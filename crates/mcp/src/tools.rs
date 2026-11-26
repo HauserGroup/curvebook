@@ -755,7 +755,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("doc_inspect"),
             description: String::from(concat!(
-                "Inspect the active project's sheets, variables, analyses, graphs, and layouts (supports compact summaries, section filtering, and bounded cell/tab previews). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Inspect the active project's sheets, variables, analyses, graphs, and layouts (supports compact summaries, section filtering, and bounded cell/tab previews). Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -812,7 +812,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("save_file"),
             description: String::from(concat!(
-                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template (atomically overwrites any existing destination target). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template (atomically overwrites any existing destination target). Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -831,7 +831,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("command_list"),
             description: String::from(concat!(
-                "List headless engine commands and desktop UI commands (marked with \"ui\": true); returns compact summaries by default or full schemas when filtering a single `command_id` or passing `include_schemas: true`. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "List headless engine commands and desktop UI commands (marked with \"ui\": true); returns compact summaries by default or full schemas when filtering a single `command_id` or passing `include_schemas: true`. Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -855,7 +855,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("command_run"),
             description: String::from(concat!(
-                "Execute a single engine command (or live UI command when attached to --control) with JSON parameters. Use `command_list(command_id=..., include_schemas=true)` to inspect exact parameter fields. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Execute a single engine command (or live UI command when attached to --control) with JSON parameters. Use `command_list(command_id=..., include_schemas=true)` to inspect exact parameter fields. Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -882,7 +882,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("command_batch"),
             description: String::from(concat!(
-                "Execute a sequence of commands, optionally with atomic rollback if any step fails. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Execute a sequence of commands, optionally with atomic rollback if any step fails. Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -919,7 +919,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("render_preview"),
             description: String::from(concat!(
-                "Compile a GraphSheet or LayoutSheet and rasterize a PNG preview with metadata. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Compile a GraphSheet or LayoutSheet and rasterize a PNG preview with metadata. Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -940,7 +940,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("export"),
             description: String::from(concat!(
-                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -981,7 +981,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("list_toolsets"),
             description: String::from(concat!(
-                "List CommandGroup toolsets, their enabled status, and per-command MCP tools (pass `include_tools: false` for group inventory only). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "List CommandGroup toolsets, their enabled status, and per-command MCP tools (pass `include_tools: false` for group inventory only). Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -1001,7 +1001,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("enable_toolset"),
             description: String::from(concat!(
-                "Enable or disable progressive CommandGroup per-command tools or the 'gui' toolset (emits notifications/tools/list_changed when modified). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Enable or disable progressive CommandGroup per-command tools or the 'gui' toolset (emits notifications/tools/list_changed when modified). Docs: https://curvebook.org/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),

@@ -520,19 +520,17 @@ fn assert_release_snapshot_outputs(sim_root: &Path, manual_out: &Path, head_sha:
         "Product Home</a>",
         "Privacy Policy</a>",
         "aria-current=\"page\"",
-        "<link rel=\"canonical\" href=\"https://hausergroup.github.io/curvebook/manual/latest/index.html\">",
+        "<link rel=\"canonical\" href=\"https://curvebook.org/manual/latest/index.html\">",
     ] {
         assert!(snap_home.contains(needle));
     }
     assert_eq!(fs::read_to_string(manual_out.join("latest/index.html")).map_err(|e| e.to_string())?, snap_home);
 
     let sitemap_xml = fs::read_to_string(manual_out.join("_root/sitemap.xml")).map_err(|e| e.to_string())?;
-    assert!(sitemap_xml.contains("https://hausergroup.github.io/curvebook/manual/latest/index.html"));
+    assert!(sitemap_xml.contains("https://curvebook.org/manual/latest/index.html"));
     assert!(!sitemap_xml.contains("/manual/v0.1/"));
     assert!(
-        fs::read_to_string(manual_out.join("_root/llms.txt"))
-            .map_err(|e| e.to_string())?
-            .contains("https://hausergroup.github.io/curvebook/manual/latest/index.html")
+        fs::read_to_string(manual_out.join("_root/llms.txt")).map_err(|e| e.to_string())?.contains("https://curvebook.org/manual/latest/index.html")
     );
     assert!(fs::read_to_string(manual_out.join("_root/llms-full.txt")).map_err(|e| e.to_string())?.contains("## Quick Facts"));
     for absent in ["docs/sitemap.xml", "docs/llms.txt", "docs/llms-full.txt"] {
@@ -583,11 +581,21 @@ fn assert_release_negative_gates_and_ci_stage(sim_root: &Path, manual_out: &Path
         String::from_utf8_lossy(&stage_res.stdout),
         String::from_utf8_lossy(&stage_res.stderr)
     );
-    for present in
-        ["index.html", "manual/index.html", "manual/latest/index.html", "manual/v0.1/index.html", "sitemap.xml", "llms.txt", "llms-full.txt"]
-    {
+    for present in [
+        "CNAME",
+        "robots.txt",
+        "index.html",
+        "manual/index.html",
+        "manual/latest/index.html",
+        "manual/v0.1/index.html",
+        "sitemap.xml",
+        "llms.txt",
+        "llms-full.txt",
+    ] {
         assert!(staged_site.join(present).is_file(), "expected staged `{present}`");
     }
+    assert_eq!(fs::read_to_string(staged_site.join("CNAME")).map_err(|e| e.to_string())?, "curvebook.org\n");
+    assert!(fs::read_to_string(staged_site.join("robots.txt")).map_err(|e| e.to_string())?.contains("Sitemap: https://curvebook.org/sitemap.xml"));
     for absent in ["manual/latest/manifest.json", "manual/v0.1/manifest.json", "ROADMAP.md"] {
         assert!(!staged_site.join(absent).exists(), "unexpected staged `{absent}`");
     }

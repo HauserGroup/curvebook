@@ -51,14 +51,14 @@ Search volumes above are unmeasured. Check them in a keyword tool or Search Cons
 | `FAQPage` structured data (HTML Microdata) on `faq.html` + facts table | Done (`R12.10`) | Self-contained first-sentence answers and a structured facts table give AI tools quotable facts. Google restricts FAQ rich results to a small set of government/health sites, so expect no rich snippet |
 | `llms.txt` and `llms-full.txt` | Done (`R12.10`, CI-only `R21.4`) | Read by some AI assistants and crawlers; generated into `target/docs-manual/_root/` during CI builds and checked by `docs-site --check` with internal doc links stripped |
 | Align `README.md` opening paragraph with canonical site summary | Branch (`R12.10`) | AI training corpora and coding agents read GitHub READMEs directly; the first paragraph now states free/open-source, OSes, offline/zero-telemetry, `.pzfx`/`.prism`, and GUI/CLI/MCP |
-| Custom domain (for example `curvebook.org`) | Decision | Separates CurveBook from `hausergroup.github.io`, enables root-level `robots.txt` and `llms.txt`, and avoids migrating Search Console/backlinks later. `CUSTOM_DOMAIN` in `xtask/src/pages_site.rs` (`R12.10`) makes cutover a single-config switch that auto-emits `CNAME` and `robots.txt` |
+| Custom domain (`curvebook.org`) | Branch (`R12.8`) | Separates CurveBook from `hausergroup.github.io`, enables root-level `robots.txt` and `llms.txt`, and avoids migrating Search Console/backlinks later. Switched in `xtask/src/pages_site.rs` (`CUSTOM_DOMAIN = Some("curvebook.org")`, `SITE_BASE_URL = "https://curvebook.org/"`) so `pages-stage` emits `CNAME` and `robots.txt` |
 | A `404.html` page that links back to the home page and manual | Ready | Pages serves it for missing URLs under the project path once the site is deployed through Actions (`R12.9`). Keeps visitors from dead ends after URLs change |
 | Accurate `<lastmod>` in the sitemap | Decision | The sitemap leaves it out to stay deterministic. A value from the last git commit touching each source page would be deterministic and is used by search engines when it is accurate |
 | `BreadcrumbList` structured data on manual pages | Ready | Generated from the existing section structure. Can show the page path in results |
 | Per-page `<meta name="description">` written for search wording | Ready | Generate from each reference page's front matter in `cargo xtask docs-site`; `--check` fails if one is missing or duplicated |
 | Image weight and dimensions on landing pages | Ready | Keep explicit `width`/`height`, `loading="lazy"` below the fold, and compressed screenshots. Keep the browser app's `.wasm` off landing pages |
 | `hreflang` alternates | Blocked | Only relevant once translated pages are published |
-| A `robots.txt` for the site | Decision | Pages serves `robots.txt` only at the organisation root site, which is a different repository. `R12.9` removes the main reason to need one |
+| A `robots.txt` for the site | Branch (`R12.8`) | Emitted automatically at `/robots.txt` by `pages-stage` with `CUSTOM_DOMAIN = Some("curvebook.org")`, pointing crawlers to `https://curvebook.org/sitemap.xml` |
 
 ## 2. Measurement
 
