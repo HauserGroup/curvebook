@@ -3,10 +3,13 @@
 
 use curvebook_doc::{PlateGeometry, PlateWellRole, ResultStatus, TableArchetype, TableKind};
 use egui::{Color32, CornerRadius, FontId, Id, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::UiApp;
-use crate::grid_view::{ImportReshapeMode, PlateMatchWellsKind, PlateSourceReducerKind, PlateValuesSourceMode, parse_localized_number_input};
+use crate::grid_view::{
+    ImportReshapeMode, ImportReshapeState, PlateLayoutSourceMode, PlateMatchWellsKind, PlateSourceReducerKind, PlateValuesSourceMode,
+    parse_localized_number_input,
+};
 use crate::i18n::{LocalePreset, tr};
 
 use super::import_wizard::{ImportWizardEguiState, PlateAssignRoleKind, PlateDilutionAxis, PlateDilutionScale, PlateSubTab};
@@ -89,17 +92,17 @@ fn normalize_treatment_replicates(roles: &mut [PlateWellRole]) {
     }
 }
 
-fn patch_field(intents: &mut PendingUiIntents, key: &str, value: Value) {
-    let mut fields = Map::new();
-    fields.insert(key.to_owned(), value);
-    intents.push(UiIntent::PatchActiveDialog { fields });
+fn update_ir(ir: &ImportReshapeState, intents: &mut PendingUiIntents, mutate: impl FnOnce(&mut ImportReshapeState)) {
+    let mut next = ir.clone();
+    mutate(&mut next);
+    intents.push(UiIntent::UpdateImportReshapeState(Box::new(next)));
 }
 
-fn patch_roles(intents: &mut PendingUiIntents, roles: &[PlateWellRole]) {
-    let mut fields = Map::new();
-    fields.insert(String::from("plate_roles"), Value::Array(roles.iter().map(role_to_json).collect()));
-    fields.insert(String::from("plate_layout_source"), Value::String(String::from("interactive")));
-    intents.push(UiIntent::PatchActiveDialog { fields });
+fn patch_roles(ir: &ImportReshapeState, intents: &mut PendingUiIntents, roles: &[PlateWellRole]) {
+    update_ir(ir, intents, |n| {
+        n.plate_roles = roles.iter().map(role_to_json).collect();
+        n.plate_layout_source = PlateLayoutSourceMode::InteractiveGrid;
+    });
 }
 
 fn parse_label_csv(raw: &str) -> Vec<String> {
@@ -202,7 +205,7 @@ fn render_plate_values_subtab(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     avail_w: f32,
-    is_384: bool,
+    _is_384: bool,
     expected: usize,
 ) {
     let ir = &app.grid.import_reshape;
@@ -210,25 +213,25 @@ fn render_plate_values_subtab(
 
     ui.horizontal_wrapped(|row| {
         row.label(RichText::new(tr(locale, "plate.values_source.label")).strong());
-        for (mode, wire, wid, key) in [
-            (PlateValuesSourceMode::PasteGrid, "paste", "import_plate.values_src.paste", "plate.values_source.paste"),
-            (PlateValuesSourceMode::ExistingSheet, "sheet", "import_plate.values_src.sheet", "plate.values_source.sheet"),
+        for (mode, wid, key) in [
+            (PlateValuesSourceMode::PasteGrid, "import_plate.values_src.paste", "plate.values_source.paste"),
+            (PlateValuesSourceMode::ExistingSheet, "import_plate.values_src.sheet", "plate.values_source.sheet"),
         ] {
             let sel = ir.plate_values_source == mode;
             let lbl = tr(locale, key);
             let r = ui_kit::choice_pill(row, tokens, lbl, sel, true);
             meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(sel.to_string()), true));
             if r.clicked() {
-                let mut f = Map::new();
-                f.insert(String::from("plate_values_source"), Value::String(String::from(wire)));
-                if mode == PlateValuesSourceMode::ExistingSheet
-                    && ir.plate_source_sheet_id.is_none()
-                    && let Some((default_id, is_mv)) = first_eligible_plate_source(app)
-                {
-                    f.insert(String::from("plate_source_sheet_id"), Value::String(default_id));
-                    f.insert(String::from("plate_source_reducer"), Value::String(String::from(if is_mv { "value_column" } else { "max" })));
-                }
-                intents.push(UiIntent::PatchActiveDialog { fields: f });
+                let default_src = (mode == PlateValuesSourceMode::ExistingSheet && ir.plate_source_sheet_id.is_none())
+                    .then(|| first_eligible_plate_source(app))
+                    .flatten();
+                update_ir(ir, intents, |n| {
+                    n.plate_values_source = mode;
+                    if let Some((default_id, is_mv)) = default_src {
+                        n.plate_source_sheet_id = Some(default_id);
+                        n.plate_source_reducer = if is_mv { PlateSourceReducerKind::ValueColumn } else { PlateSourceReducerKind::Max };
+                    }
+                });
             }
         }
     });
@@ -248,12 +251,10 @@ fn render_plate_values_subtab(
             FrameInspectEntryInput::modal("import_paste.input.plate_values", "textbox", "Plate Values", Some(state.plate_values_draft.clone()), true),
         );
         if pr.changed() {
-            let mut f = Map::new();
-            f.insert(String::from("plate_values"), Value::String(state.plate_values_draft.clone()));
-            if ir.plate_roles.len() != expected {
-                f.insert(String::from("plate_roles"), Value::Array(super::import_wizard::default_plate_roles(is_384, ir.subtract_blank_mean)));
-            }
-            intents.push(UiIntent::PatchActiveDialog { fields: f });
+            intents.push(UiIntent::SetImportReshapePlateValuesText {
+                text: state.plate_values_draft.clone(),
+                ensure_default_roles: ir.plate_roles.len() != expected,
+            });
         }
         return;
     }
@@ -275,18 +276,23 @@ fn render_plate_values_subtab(
                 for cand in &candidates {
                     let is_sel = ir.plate_source_sheet_id.as_deref() == Some(cand.id.as_str());
                     if menu.selectable_label(is_sel, &cand.display).clicked() {
-                        let mut f = Map::new();
-                        f.insert(String::from("plate_source_sheet_id"), Value::String(cand.id.clone()));
-                        if cand.is_mv {
-                            f.insert(String::from("plate_source_reducer"), Value::String(String::from("value_column")));
-                            if let Some(first_val_col) = cand.mv_numeric_cols.first() {
-                                f.insert(String::from("plate_source_value_column"), Value::String(first_val_col.clone()));
-                                state.plate_source_val_col_draft = first_val_col.clone();
-                            }
-                        } else {
-                            f.insert(String::from("plate_source_reducer"), Value::String(String::from("max")));
+                        let first_val_col = cand.mv_numeric_cols.first().cloned();
+                        if cand.is_mv
+                            && let Some(ref vc) = first_val_col
+                        {
+                            state.plate_source_val_col_draft = vc.clone();
                         }
-                        intents.push(UiIntent::PatchActiveDialog { fields: f });
+                        update_ir(ir, intents, |n| {
+                            n.plate_source_sheet_id = Some(cand.id.clone());
+                            if cand.is_mv {
+                                n.plate_source_reducer = PlateSourceReducerKind::ValueColumn;
+                                if let Some(vc) = first_val_col {
+                                    n.plate_source_value_column = vc;
+                                }
+                            } else {
+                                n.plate_source_reducer = PlateSourceReducerKind::Max;
+                            }
+                        });
                     }
                 }
             })
@@ -314,19 +320,19 @@ fn render_plate_values_subtab(
     ui.add_space(4.0);
     ui.horizontal_wrapped(|row| {
         row.label(tr(locale, "plate.reducer.label"));
-        for (kind, wire, wid, key) in [
-            (PlateSourceReducerKind::ValueColumn, "value_column", "import_plate.reducer.value_column", "plate.reducer.value_column"),
-            (PlateSourceReducerKind::RowIndex, "row_index", "import_plate.reducer.row_index", "plate.reducer.row_index"),
-            (PlateSourceReducerKind::XWindowMean, "x_window_mean", "import_plate.reducer.x_window_mean", "plate.reducer.x_window_mean"),
-            (PlateSourceReducerKind::Min, "min", "import_plate.reducer.min", "plate.reducer.min"),
-            (PlateSourceReducerKind::Max, "max", "import_plate.reducer.max", "plate.reducer.max"),
+        for (kind, wid, key) in [
+            (PlateSourceReducerKind::ValueColumn, "import_plate.reducer.value_column", "plate.reducer.value_column"),
+            (PlateSourceReducerKind::RowIndex, "import_plate.reducer.row_index", "plate.reducer.row_index"),
+            (PlateSourceReducerKind::XWindowMean, "import_plate.reducer.x_window_mean", "plate.reducer.x_window_mean"),
+            (PlateSourceReducerKind::Min, "import_plate.reducer.min", "plate.reducer.min"),
+            (PlateSourceReducerKind::Max, "import_plate.reducer.max", "plate.reducer.max"),
         ] {
             let sel = ir.plate_source_reducer == kind;
             let lbl = tr(locale, key);
             let r = ui_kit::choice_pill(row, tokens, lbl, sel, true);
             meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(sel.to_string()), true));
             if r.clicked() {
-                patch_field(intents, "plate_source_reducer", Value::String(String::from(wire)));
+                update_ir(ir, intents, |n| n.plate_source_reducer = kind);
             }
         }
     });
@@ -349,7 +355,7 @@ fn render_plate_values_subtab(
                     ),
                 );
                 if ed.changed() {
-                    patch_field(intents, "plate_source_value_column", Value::String(state.plate_source_val_col_draft.clone()));
+                    update_ir(ir, intents, |n| n.plate_source_value_column = state.plate_source_val_col_draft.clone());
                 }
             });
         }
@@ -369,9 +375,9 @@ fn render_plate_values_subtab(
                     ),
                 );
                 if ed.changed()
-                    && let Ok(n) = state.plate_source_row_draft.trim().parse::<usize>()
+                    && let Ok(n_row) = state.plate_source_row_draft.trim().parse::<usize>()
                 {
-                    patch_field(intents, "plate_source_row_index", json!(n));
+                    update_ir(ir, intents, |n| n.plate_source_row_index = n_row);
                 }
             });
         }
@@ -393,7 +399,7 @@ fn render_plate_values_subtab(
                 if e0.changed()
                     && let Some(v) = parse_localized_number_input(&state.plate_source_xmin_draft, &app.locale_preset)
                 {
-                    patch_field(intents, "plate_source_x_min", json!(v));
+                    update_ir(ir, intents, |n| n.plate_source_x_min = Some(v));
                 }
                 row.label(tr(locale, "auc.x_max"));
                 let e1 = row.add(egui::TextEdit::singleline(&mut state.plate_source_xmax_draft).hint_text("60").desired_width(76.0));
@@ -411,7 +417,7 @@ fn render_plate_values_subtab(
                 if e1.changed()
                     && let Some(v) = parse_localized_number_input(&state.plate_source_xmax_draft, &app.locale_preset)
                 {
-                    patch_field(intents, "plate_source_x_max", json!(v));
+                    update_ir(ir, intents, |n| n.plate_source_x_max = Some(v));
                 }
             });
         }
@@ -421,16 +427,16 @@ fn render_plate_values_subtab(
     ui.add_space(4.0);
     ui.horizontal_wrapped(|row| {
         row.label(tr(locale, "plate.match_wells.label"));
-        for (mw, wire, wid, key) in [
-            (PlateMatchWellsKind::ByWellId, "by_well_id", "import_plate.match.by_well_id", "plate.match_wells.by_id"),
-            (PlateMatchWellsKind::Positional, "positional", "import_plate.match.positional", "plate.match_wells.positional"),
+        for (mw, wid, key) in [
+            (PlateMatchWellsKind::ByWellId, "import_plate.match.by_well_id", "plate.match_wells.by_id"),
+            (PlateMatchWellsKind::Positional, "import_plate.match.positional", "plate.match_wells.positional"),
         ] {
             let sel = ir.plate_match_wells == mw;
             let lbl = tr(locale, key);
             let r = ui_kit::choice_pill(row, tokens, lbl, sel, true);
             meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(sel.to_string()), true));
             if r.clicked() {
-                patch_field(intents, "plate_match_wells", Value::String(String::from(wire)));
+                update_ir(ir, intents, |n| n.plate_match_wells = mw);
             }
         }
     });
@@ -504,7 +510,7 @@ fn render_plate_layout_subtab(
                         }
                     }
                     normalize_treatment_replicates(&mut roles);
-                    patch_roles(intents, &roles);
+                    patch_roles(ir, intents, &roles);
                 }
             }
         }
@@ -563,7 +569,7 @@ fn render_plate_layout_subtab(
                     }
                 }
                 normalize_treatment_replicates(&mut roles);
-                patch_roles(intents, &roles);
+                patch_roles(ir, intents, &roles);
             }
         });
 
@@ -667,7 +673,7 @@ fn render_plate_layout_subtab(
                     }
                 }
                 normalize_treatment_replicates(&mut roles);
-                patch_roles(intents, &roles);
+                patch_roles(ir, intents, &roles);
             }
         });
     }
@@ -829,6 +835,7 @@ fn render_plate_grids_io_subtab(
 ) {
     let locale = tokens.locale;
     let doc = app.document();
+    let ir = &app.grid.import_reshape;
 
     // Section A: Save / Load .cbplate
     ui.label(RichText::new(tr(locale, "plate.cbplate.section")).strong().color(tokens.text_primary));
@@ -851,7 +858,7 @@ fn render_plate_grids_io_subtab(
             ),
         );
         if path_ed.changed() {
-            patch_field(intents, "plate_template_path", Value::String(state.plate_cbplate_path_draft.clone()));
+            update_ir(ir, intents, |n| n.plate_template_path = state.plate_cbplate_path_draft.clone());
         }
         let save_btn = widgets::secondary_button(row, tr(locale, "plate.btn.save_cbplate"));
         meta.record_modal_response(
@@ -893,7 +900,7 @@ fn render_plate_grids_io_subtab(
             ),
         );
         if b_ed.changed() {
-            patch_field(intents, "plate_blank_labels", json!(parse_label_csv(&state.plate_blank_labels_draft)));
+            update_ir(ir, intents, |n| n.plate_blank_labels = parse_label_csv(&state.plate_blank_labels_draft));
         }
         row.label(tr(locale, "plate.pos_ctrl_labels.label"));
         let p_ed = row.add(egui::TextEdit::singleline(&mut state.plate_pos_ctrl_labels_draft).hint_text("PosCtrl").desired_width(140.0));
@@ -909,7 +916,7 @@ fn render_plate_grids_io_subtab(
             ),
         );
         if p_ed.changed() {
-            patch_field(intents, "plate_positive_control_labels", json!(parse_label_csv(&state.plate_pos_ctrl_labels_draft)));
+            update_ir(ir, intents, |n| n.plate_positive_control_labels = parse_label_csv(&state.plate_pos_ctrl_labels_draft));
         }
     });
 
@@ -936,7 +943,7 @@ fn render_plate_grids_io_subtab(
                     let sel = state.plate_layout_sheet_draft.as_deref() == Some(ds.id.as_str());
                     if menu.selectable_label(sel, &ds.title).clicked() {
                         state.plate_layout_sheet_draft = Some(ds.id.as_str().to_owned());
-                        patch_field(intents, "plate_layout_sheet_id", Value::String(ds.id.as_str().to_owned()));
+                        update_ir(ir, intents, |n| n.plate_layout_sheet_id = Some(ds.id.as_str().to_owned()));
                     }
                 }
             })
@@ -959,13 +966,13 @@ fn render_plate_grids_io_subtab(
             .show_ui(row, |menu| {
                 if menu.selectable_label(state.plate_x_grid_sheet_draft.is_none(), tr(locale, "plate.x_sheet.none")).clicked() {
                     state.plate_x_grid_sheet_draft = None;
-                    patch_field(intents, "plate_x_grid_sheet_id", Value::Null);
+                    update_ir(ir, intents, |n| n.plate_x_grid_sheet_id = None);
                 }
                 for ds in &doc.data_sheets {
                     let sel = state.plate_x_grid_sheet_draft.as_deref() == Some(ds.id.as_str());
                     if menu.selectable_label(sel, &ds.title).clicked() {
                         state.plate_x_grid_sheet_draft = Some(ds.id.as_str().to_owned());
-                        patch_field(intents, "plate_x_grid_sheet_id", Value::String(ds.id.as_str().to_owned()));
+                        update_ir(ir, intents, |n| n.plate_x_grid_sheet_id = Some(ds.id.as_str().to_owned()));
                     }
                 }
             })

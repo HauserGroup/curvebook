@@ -485,9 +485,7 @@ pub fn render_stat_params_modal(
                 220.0,
             );
             if state.custom_title_draft != before_custom {
-                let mut fields = serde_json::Map::new();
-                fields.insert(String::from("custom_title"), serde_json::Value::String(state.custom_title_draft.clone()));
-                intents.push(UiIntent::PatchActiveDialog { fields });
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::SetCustomTitle { title: state.custom_title_draft.clone() }));
             }
         },
         |ui, state, _w, _h, meta, intents| {

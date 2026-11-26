@@ -2,7 +2,6 @@
 
 use curvebook_doc::EquationDisplayMode;
 use egui::Ui;
-use serde_json::{Map, Value, json};
 
 use super::super::UiIntent;
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
@@ -35,9 +34,9 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
                 )
                 .clicked()
                 {
-                    let mut patch = Map::new();
-                    patch.insert(String::from("result_sheet_id"), Value::String(rid.as_str().to_owned()));
-                    gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                    let mut next = eq.clone();
+                    next.result_sheet_id = Some(rid.clone());
+                    gctx.intents.push(UiIntent::UpdateInsertModelEquationState(Box::new(next)));
                 }
             }
         });
@@ -65,9 +64,9 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
             )
             .clicked()
             {
-                let mut patch = Map::new();
-                patch.insert(String::from("mode"), Value::String(slug.to_owned()));
-                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                let mut next = eq.clone();
+                next.mode = mode;
+                gctx.intents.push(UiIntent::UpdateInsertModelEquationState(Box::new(next)));
             }
         }
     });
@@ -81,17 +80,17 @@ pub(super) fn render_insert_equation_body(ui: &mut Ui, state: &mut GraphModalEgu
     };
     let out = render_scrub_unit_field(ui, eq.font_size_pt, &mut state.eq_font_spinner, font_cfg, gctx.tokens, gctx.meta);
     if let Some(val) = out.committed_value {
-        let mut patch = Map::new();
-        patch.insert(String::from("font_size_pt"), json!(val.clamp(6.0, 36.0)));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = eq.clone();
+        next.font_size_pt = val.clamp(6.0, 36.0);
+        gctx.intents.push(UiIntent::UpdateInsertModelEquationState(Box::new(next)));
     }
 
     let mut bordered = eq.bordered;
     let brd_chk = ui.checkbox(&mut bordered, "Draw Bordered Callout Box");
     record_checkbox(ui, &brd_chk, gctx.meta, "eq.bordered", "Draw Bordered Callout Box", bordered);
     if brd_chk.changed() {
-        let mut patch = Map::new();
-        patch.insert(String::from("bordered"), Value::Bool(bordered));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = eq.clone();
+        next.bordered = bordered;
+        gctx.intents.push(UiIntent::UpdateInsertModelEquationState(Box::new(next)));
     }
 }

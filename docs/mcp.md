@@ -110,12 +110,12 @@ Verified in `crates/mcp/src/{gui_tools.rs, tools.rs, protocol.rs}` and `apps/cur
 
 ### 1. Hosts & Live Attachment
 
-- **`GuiSessionHost` (`crates/mcp/src/tools.rs`):** Trait (`call_gui`, plus optional `hosted_session` / `hosted_session_mut` / `sync_after_session_mutation`) implemented outside `crates/mcp` so MCP can drive an embedded `UiApp` without depending on `curvebook-ui-egui`. `McpServerState` routes all `8` `gui` tools either to an attached `GuiSessionHost` (`with_gui_host` / `set_gui_host`) or over loopback TCP via `--control-port <port>` (`with_control_port`, `run_stdio_with_control_port`). Calling a `gui` tool with neither returns `ErrorCode::Conflict`.
-- **Live attachment:** Run `curvebook --control <N>` (or `curvebook --control <N> --window` for a visible shared desktop window) and connect with `curvebook-cli mcp --control-port <N>`, then call `enable_toolset` with `{ "group": "gui", "enabled": true }` to expose the `8` `gui` tools alongside the core tools.
+- **`GuiSessionHost` (`crates/mcp/src/tools.rs`):** Trait (`call_gui`, plus optional `hosted_session` / `hosted_session_mut` / `sync_after_session_mutation`) implemented outside `crates/mcp` so MCP can drive an embedded `UiApp` without depending on `curvebook-ui-egui`. `McpServerState` routes all `7` `gui` tools either to an attached `GuiSessionHost` (`with_gui_host` / `set_gui_host`) or over loopback TCP via `--control-port <port>` (`with_control_port`, `run_stdio_with_control_port`). Calling a `gui` tool with neither returns `ErrorCode::Conflict`.
+- **Live attachment:** Run `curvebook --control <N>` (or `curvebook --control <N> --window` for a visible shared desktop window) and connect with `curvebook-cli mcp --control-port <N>`, then call `enable_toolset` with `{ "group": "gui", "enabled": true }` to expose the `7` `gui` tools alongside the core tools.
 
-### 2. The 8-Tool `gui` Surface (`GUI_TOOL_NAMES`)
+### 2. The 7-Tool `gui` Surface (`GUI_TOOL_NAMES`)
 
-Calling `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the `8` `gui` tools alongside the core tools above (and any enabled `CommandGroup` tools):
+Calling `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the `7` `gui` tools alongside the core tools above (and any enabled `CommandGroup` tools):
 
 | MCP Tool | Key Inputs | Key Annotations / Behavior |
 |---|---|---|
@@ -126,7 +126,6 @@ Calling `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHo
 | `ui_press_key` | `key`, `modifiers` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case GUI dispatch effects); dispatches keystrokes/shortcuts (`Enter`, `Escape`, `Tab`, `Cmd/Ctrl+T`, etc.). |
 | `ui_invoke_menu` | `path` (string or string array), `command_id`, optional `params` (`WorkdirGuard`-sanitized) | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case GUI dispatch effects); fails with `Conflict` when item is disabled. |
 | `ui_switch_tab` | `tab`/`tab_id` (string or non-negative integer index), `sheet_id`, `widget_id` | `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true`, `openWorldHint: false`; honors modal tab graying predicates; `sheet_id` alone selects a sheet. |
-| `ui_answer_dialog` | `action` (`ok`, `cancel`, `back`, `next`, `create`, `apply`, `preview`), `fields`/`values`/`patches`, `force_create_new`, `choice` | `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, `openWorldHint: true` (worst-case modal dialog effects). |
 
 ## UI Command Sync
 

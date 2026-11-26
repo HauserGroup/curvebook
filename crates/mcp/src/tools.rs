@@ -1022,7 +1022,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
 }
 
 /// Return the exposed MCP tools for `state`: the 10 core tools plus per-command tools for every
-/// enabled `CommandGroup` (and the 8 `gui` tools when enabled via `enable_toolset` or backed by a
+/// enabled `CommandGroup` (and the 7 `gui` tools when enabled via `enable_toolset` or backed by a
 /// `GuiSessionHost`).
 #[must_use]
 pub fn list_tools_for_state(state: &McpServerState) -> Vec<ToolDefinition> {

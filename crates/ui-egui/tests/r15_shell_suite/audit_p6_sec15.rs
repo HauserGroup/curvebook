@@ -241,9 +241,9 @@ fn fa_sec15_07_command_palette_run_dispatches_ui_commands() -> TestRes {
     let mut app = UiApp::new();
     let initial = app.nav.gallery.open;
     app.canvas_dialogs.open_command_palette();
-    app.canvas_dialogs.command_palette.query = String::from("ui.gallery.toggle");
-    app.canvas_dialogs.command_palette.selected_index = 0;
-    gui(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
+    gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "palette.query" }))?;
+    gui(&mut app, "ui.type_text", json!({ "text": "> ui.gallery.toggle" }))?;
+    gui(&mut app, "ui.press_key", json!({ "key": "Enter" }))?;
     assert_eq!(app.nav.gallery.open, !initial);
     Ok(())
 }

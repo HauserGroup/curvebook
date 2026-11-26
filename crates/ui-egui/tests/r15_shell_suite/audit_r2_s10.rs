@@ -14,11 +14,11 @@ use curvebook_ui_egui::interaction::InlineEditorTarget;
 use curvebook_ui_egui::modal_predicates::evaluate_dialog_widget;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
 use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
-use curvebook_ui_egui::{KeyModifiers, LocalePreset, UiApp, ViewportMetrics, VirtualWorkspaceFolder, inspect_ui_tree, inspect_ui_tree_for_metrics};
-use serde_json::{Value, json};
+use curvebook_ui_egui::{KeyModifiers, UiApp, ViewportMetrics, VirtualWorkspaceFolder, inspect_ui_tree, inspect_ui_tree_for_metrics};
+use serde_json::json;
 
 use crate::common::{TestRes, call_control, cell_number, ensure, key_down};
-use crate::helpers::{exec, gui, patch_map, run_panel_driver};
+use crate::helpers::{exec, gui, run_panel_driver};
 
 fn ok_doc_and_app() -> Result<(UiApp, SheetId, SheetId, SheetId, SheetId), String> {
     let mut app = UiApp::new();
@@ -61,35 +61,15 @@ fn r2_s10_01_human_path_only_rejects_non_empty_invoke_menu_params() -> TestRes {
     )
 }
 
-fn assert_modal_contract(app: &mut UiApp, slug: &str, valid_patch: Option<(&str, Value)>) -> TestRes {
+fn assert_modal_contract(app: &mut UiApp, slug: &str, expected_wid: Option<&str>) -> TestRes {
     let dlg = inspect_ui_tree(app, Some("dialog"), false).dialog.ok_or_else(|| format!("expected `{slug}` open"))?;
     ensure(dlg.dialog_kind == slug, format!("expected `{slug}`, got `{}`", dlg.dialog_kind))?;
-
-    let mismatch = dispatch_gui_action(app, "ui.answer_dialog", json!({ "dialog_id": "non_matching_modal_slug", "action": "ok" }))
+    let retired = dispatch_gui_action(app, "ui.answer_dialog", json!({ "action": "ok" }))
         .err()
-        .ok_or_else(|| format!("expected mismatch Conflict on `{slug}`"))?;
-    ensure(mismatch.code == ErrorCode::Conflict, format!("expected Conflict, got {:?}", mismatch.code))?;
-    ensure(
-        dispatch_gui_action(app, "ui.answer_dialog", json!({ "dialog_id": slug, "fields": { "__r2_s10_unknown_field__": 42 } })).is_err(),
-        format!("`{slug}` accepted unknown field"),
-    )?;
-
-    if let Some((wid, val)) = valid_patch {
+        .ok_or_else(|| format!("expected retired ui.answer_dialog error on `{slug}`"))?;
+    ensure(retired.code == ErrorCode::BadInput, format!("expected BadInput for retired ui.answer_dialog, got {:?}", retired.code))?;
+    if let Some(wid) = expected_wid {
         ensure(dlg.controls.iter().any(|c| c.widget_id == wid), format!("missing `{wid}` on `{slug}`"))?;
-        gui(app, "ui.answer_dialog", json!({ "dialog_id": slug, "fields": { wid: val } }))?;
-        let actual = inspect_ui_tree(app, Some("dialog"), false)
-            .dialog
-            .and_then(|d| d.controls.into_iter().find(|c| c.widget_id == wid))
-            .and_then(|c| c.value)
-            .ok_or_else(|| format!("post-patch value missing for `{wid}` on `{slug}`"))?;
-        let inner = actual.as_object().and_then(|o| o.get("value")).unwrap_or(&actual);
-        let ok = actual == val
-            || *inner == val
-            || matches!((inner.as_f64(), val.as_f64()), (Some(a), Some(b)) if (a - b).abs() < 1e-9)
-            || matches!((inner.as_bool(), val.as_bool()), (Some(a), Some(b)) if a == b)
-            || matches!((inner.as_str(), val.as_bool()), (Some("true"), Some(true)) | (Some("false"), Some(false)))
-            || matches!((inner.as_str(), val.as_str()), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b));
-        ensure(ok, format!("readback mismatch `{slug}` `{wid}`: expected {val}, got {actual}"))?;
     }
     app.canvas_dialogs.close_dialog();
     Ok(())
@@ -115,38 +95,38 @@ fn r2_s10_02_19_exhaustive_modal_contract_and_fail_closed() -> TestRes {
     let (rs_id, pwr_id, ps_id) = (SheetId::new("rs-1"), SheetId::new("rs-pwr-1"), SheetId::new("rs-ps-1"));
     let doc = app.document().clone();
 
-    let cases: Vec<(&str, Option<(&str, Value)>)> = vec![
-        ("analyze_sheet", Some(("analyze.search", json!("anova")))),
-        ("duplicate_analysis_prompt", Some(("duplicate.choice", json!("modify_existing")))),
-        ("edit_anova", Some(("edit.pvalue.digits.val", json!("3")))),
-        ("edit_power", Some(("power.sidebar.alpha", json!(0.01)))),
-        ("edit_pstack", Some(("edit.pvalue_stack.threshold.val", json!("0.020")))),
-        ("power_and_sample_size", Some(("power.sidebar.alpha", json!(0.01)))),
-        ("format_selected_points", Some(("fmt_pts.hidden", json!(true)))),
-        ("format_graph", Some(("format_graph.show_legend", json!(false)))),
-        ("format_axes", Some(("axes.title", json!("Y Axis")))),
-        ("pairwise_comparisons", Some(("pairwise.hide_non_significant", json!(false)))),
-        ("bubble_plot_inspector", Some(("bubble.show_convex_hulls", json!(true)))),
-        ("apply_style_from", Some(("apply_style.clone_palette", json!(false)))),
-        ("page_layout_composer", Some(("layout.align_plot_origins", json!(false)))),
-        ("export_figure", Some(("export.dpi", json!(600)))),
-        ("convert_archetype", Some(("convert.allow_lossy", json!(true)))),
-        ("import_reshape", Some(("import_paste.input.title", json!("Reshaped")))),
-        ("exclude_with_reason", Some(("exclude.note", json!("Outlier")))),
-        ("randomize_groups", Some(("rand_groups.seed.val", json!("7")))),
-        ("random_sample_rows", Some(("rand_sample.n.val", json!("3")))),
-        ("simulate_distributions", Some(("simulate.use_multiple_variables", json!(true)))),
-        ("insert_model_equation", Some(("eq.bordered", json!(false)))),
-        ("print", Some(("print.copies", json!(2)))),
-        ("change_data_analyzed", Some(("change_data.col.0", json!(false)))),
-        ("change_graph_type", Some(("graph_type.summary_measure", json!("median")))),
-        ("constant_hook_picker", Some(("hook.search_input", json!("EC50")))),
-        ("command_palette", Some(("palette.query", json!("analyze")))),
+    let cases: Vec<(&str, Option<&str>)> = vec![
+        ("analyze_sheet", Some("analyze.search")),
+        ("duplicate_analysis_prompt", Some("duplicate.choice")),
+        ("edit_anova", Some("edit.pvalue.digits.val")),
+        ("edit_power", Some("power.sidebar.alpha")),
+        ("edit_pstack", Some("edit.pvalue_stack.threshold.val")),
+        ("power_and_sample_size", Some("power.sidebar.alpha")),
+        ("format_selected_points", Some("fmt_pts.hidden")),
+        ("format_graph", Some("format_graph.show_legend")),
+        ("format_axes", Some("axes.title")),
+        ("pairwise_comparisons", Some("pairwise.hide_non_significant")),
+        ("bubble_plot_inspector", Some("bubble.show_convex_hulls")),
+        ("apply_style_from", Some("apply_style.clone_palette")),
+        ("page_layout_composer", Some("layout.align_plot_origins")),
+        ("export_figure", Some("export.dpi")),
+        ("convert_archetype", Some("convert.allow_lossy")),
+        ("import_reshape", Some("import_paste.input.title")),
+        ("exclude_with_reason", Some("exclude.note")),
+        ("randomize_groups", Some("rand_groups.seed.val")),
+        ("random_sample_rows", Some("rand_sample.n.val")),
+        ("simulate_distributions", Some("simulate.use_multiple_variables")),
+        ("insert_model_equation", Some("eq.bordered")),
+        ("print", Some("print.copies")),
+        ("change_data_analyzed", Some("change_data.col.0")),
+        ("change_graph_type", Some("graph_type.summary_measure")),
+        ("constant_hook_picker", Some("hook.search_input")),
+        ("command_palette", Some("palette.query")),
         ("about", None),
         ("result_viewer", None),
     ];
 
-    for (tag, patch) in cases {
+    for (tag, expected_wid) in cases {
         let slug = match tag {
             "analyze_sheet" => {
                 app.canvas_dialogs.open_analyze_dialog(&doc, &ds2_id);
@@ -162,7 +142,10 @@ fn r2_s10_02_19_exhaustive_modal_contract_and_fail_closed() -> TestRes {
             }
             "edit_anova" => {
                 app.canvas_dialogs.open_edit_parameters(&doc, &rs_id);
-                gui(&mut app, "ui.answer_dialog", json!({ "fields": { "p_value_format": "custom" } }))?;
+                if let Some(d) = &mut app.canvas_dialogs.edit_params.draft {
+                    d.p_value_format = curvebook_doc::PValueFormat::new_custom(4, Some(1e-4));
+                }
+                app.canvas_dialogs.edit_params.set_p_value_decimals(3)?;
                 gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "edit.tab.options" }))?;
                 "edit_analysis_parameters"
             }
@@ -272,46 +255,9 @@ fn r2_s10_02_19_exhaustive_modal_contract_and_fail_closed() -> TestRes {
             }
             _ => return Err(format!("unknown modal tag `{tag}`")),
         };
-        assert_modal_contract(&mut app, slug, patch)?;
+        assert_modal_contract(&mut app, slug, expected_wid)?;
     }
     Ok(())
-}
-
-#[test]
-fn r2_s10_03_16_localized_parsing_proportions_and_power_group2_errors() -> TestRes {
-    let (mut app, ds_id, _, _, _) = ok_doc_and_app()?;
-    let reply = call_control(&mut app, &json!({ "id": 1, "method": "ui.locale.set", "params": { "locale": "de-DE" } }))?;
-    ensure(reply["ok"] == json!(true), format!("locale set failed: {reply}"))?;
-
-    let doc = app.document().clone();
-    app.canvas_dialogs.open_analyze_dialog(&doc, &ds_id);
-    gui(&mut app, "ui.answer_dialog", json!({ "fields": { "selected_entry_id": "stats.contingency", "expected_proportions": "0,2; 0,3; 0,5" } }))?;
-    let props = app.canvas_dialogs.analyze.contingency_expected_proportions.as_ref().ok_or("missing expected_proportions")?;
-    ensure(
-        props.len() == 3 && (props[0] - 0.2).abs() < 1e-9 && (props[1] - 0.3).abs() < 1e-9 && (props[2] - 0.5).abs() < 1e-9,
-        format!("bad props: {props:?}"),
-    )?;
-    app.canvas_dialogs.close_dialog();
-
-    app.canvas_dialogs.open_power_wizard();
-    gui(&mut app, "ui.answer_dialog", json!({ "fields": { "sd_group2": "2,5", "sample_size_group2": "12,0" } }))?;
-    ensure(
-        app.canvas_dialogs.power_wizard.sd_group2 == Some(2.5) && app.canvas_dialogs.power_wizard.sample_size_group2 == Some(12.0),
-        "power group2 mismatch",
-    )?;
-    for bad_key in ["sd_group2", "sample_size_group2"] {
-        let res = curvebook_ui_egui::dialogs_canvas::dialog_patch::patch_power_wizard(
-            &mut app.canvas_dialogs.power_wizard,
-            &patch_map(json!({ bad_key: "abc" })),
-            &LocalePreset::comma_semicolon("de-DE"),
-        );
-        ensure(res.is_err(), format!("`{bad_key}` must reject non-numeric string"))?;
-    }
-    app.canvas_dialogs.close_dialog();
-
-    app.canvas_dialogs.open_simulate_distributions();
-    gui(&mut app, "ui.answer_dialog", json!({ "fields": { "simulate.mean": "3,75" } }))?;
-    ensure(app.canvas_dialogs.simulate_distributions.columns.first().map(|c| c.mean) == Some(3.75), "simulate mean mismatch")
 }
 
 #[test]
@@ -354,9 +300,10 @@ fn r2_s10_05_06_07_08_inspect_predicates_and_format_graph() -> TestRes {
     )?;
     app.canvas_dialogs.close_dialog();
 
-    for (action, on) in [("apply", true), ("ok", false)] {
+    for (btn_wid, on) in [("dialog.button.apply", true), ("dialog.button.ok", false)] {
         app.canvas_dialogs.open_format_graph(&app.document().clone(), &gs_id);
-        gui(&mut app, "ui.answer_dialog", json!({ "action": action, "fields": { "half_violin_with_points": on } }))?;
+        app.canvas_dialogs.format_graph.half_violin_with_points = on;
+        gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": btn_wid }))?;
     }
     let still_half = app.document().graph_sheet(&gs_id).and_then(|g| g.spec.series.first()).and_then(|s| match s.gdo {
         GraphicalDataObject::Violin { half_violin_with_points, .. } => Some(half_violin_with_points),
@@ -458,7 +405,8 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
 
     // R2-S10-18: FormatSelectedPoints row labels placed at distinct coordinates.
     app.canvas_dialogs.open_format_selected_points(&doc_mv, &gs_id, vec![(0, 0), (0, 2)]);
-    gui(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "show_row_labels": true } }))?;
+    app.canvas_dialogs.format_points.show_row_labels = true;
+    gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))?;
     let pos: Vec<(f64, f64)> = app
         .document()
         .graph_sheet(&gs_id)
@@ -477,7 +425,7 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
 
     // R2-S10-15: Print reports spooled/submitted honestly.
     app.open_print_dialog_for(Some(&gs_id));
-    let pr = gui(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
+    let pr = gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))?;
     ensure(pr["spooled"] == json!(true) && pr["submitted_to_os"] == json!(false) && pr["printed"] == json!(false), format!("print: {pr}"))?;
 
     // R2-S10-17: PowerWizard switch_tab validates intermediate stage.

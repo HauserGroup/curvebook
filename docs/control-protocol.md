@@ -18,7 +18,7 @@ Each client request is a single UTF-8 JSON object terminated by `\n` (bounded by
 {"id": 7, "op": "render.pdf", "sheet_id": "graph-1", "color_space": "srgb"}
 ```
 
-Supported built-in methods today are `"auth"`, `"ping"`, `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus all synced `UI_COMMANDS` in the generated `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
+Supported built-in methods today are `"auth"`, `"ping"`, `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus all synced `UI_COMMANDS` in the generated `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, the 7 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
 
 `render.pdf` accepts:
 - `sheet_id` / `sheetId`: optional `SheetId` (defaults to the active or first graph/layout sheet).
@@ -54,7 +54,7 @@ Intentional socket termination occurs only on:
 
 Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` ([`gui-workflows.md`](gui-workflows.md)):
 
-These 8 JSON-lines actions form the **semantic agent harness** for live desktop inspection and widget automation: widget IDs come from `ui.inspect` nodes synthesized from state, and `ui.answer_dialog` patches fields directly. Passing them does not show that a person can operate the drawn GUI; human-operable chrome is gated by `EguiHumanPathDriver` ([`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion)).
+These 7 JSON-lines actions form the **semantic agent harness** for live desktop inspection and widget automation: widget IDs come from `ui.inspect` nodes synthesized from state. Passing them does not show that a person can operate the drawn GUI; human-operable chrome is gated by `EguiHumanPathDriver` ([`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion)).
 
 | Method | Purpose & Behavior (`crates/ui-egui/src/gui_actions.rs`) |
 |---|---|
@@ -65,7 +65,6 @@ These 8 JSON-lines actions form the **semantic agent harness** for live desktop 
 | `"ui.press_key"` | Dispatches key presses and shortcut combos (`Enter` dialog confirm/next, `Escape` cancel, `Cmd/Ctrl+T` on `ResultSheet` to open `EditAnalysisParameters`, `ShortcutRegistry` combos, or `UiInputEvent::KeyDown`). |
 | `"ui.invoke_menu"` | Invokes a visible menu bar item by `command_id` or `path` (string or string array), returning `ErrorCode::Conflict` if disabled. |
 | `"ui.switch_tab"` | Switches navigator sheets (`sheet_id` / `nav.sheet.*`), `EditAnalysisParameters` tabs (guarded by `evaluate_edit_params_tab`), `PowerWizardStage` tabs (`can_advance`), or `ResultSheet` sub-tabs. |
-| `"ui.answer_dialog"` | Patches active modal/wizard `fields` / `values` / `patches` and/or triggers footer buttons (`ok`, `cancel`, `apply`, `back`, `next`, `create`, `preview` via `evaluate_dialog_button`), extracting tabular `ResultSheet` tabs via `sheet.extractResultTab` when invoking `AnalyzeSheet` from a `ResultSheet`. |
 
 ## Security Invariants
 

@@ -1,4 +1,4 @@
-//! Integration tests for the 8-tool progressive `gui` MCP surface and
+//! Integration tests for the 7-tool progressive `gui` MCP surface and
 //! `GuiSessionHost` / `--control-port` routing.
 
 use std::cell::RefCell;
@@ -141,16 +141,6 @@ fn gui_tools_route_through_gui_session_host_including_png_screenshot_and_tsv() {
         .expect("ui_invoke_menu");
     call_tool(&mut state, "ui_switch_tab", json!({ "tab": "multiple_comparisons", "sheet_id": "result-1", "widget_id": "dialog_tabs" }))
         .expect("ui_switch_tab");
-    call_tool(
-        &mut state,
-        "ui_answer_dialog",
-        json!({
-            "action": "ok",
-            "fields": { "alpha": 0.01 },
-            "values": { "posthoc": "tukey" },
-        }),
-    )
-    .expect("ui_answer_dialog");
 
     // Backend EngineError propagates with canonical structured fields.
     shared.borrow_mut().next_error =
@@ -166,17 +156,7 @@ fn gui_tools_route_through_gui_session_host_including_png_screenshot_and_tsv() {
     let methods: Vec<&str> = calls.iter().map(|(m, _)| m.as_str()).collect();
     assert_eq!(
         methods,
-        vec![
-            "ui.inspect",
-            "ui.screenshot",
-            "ui.pointer_gesture",
-            "ui.type_text",
-            "ui.press_key",
-            "ui.invoke_menu",
-            "ui.switch_tab",
-            "ui.answer_dialog",
-            "ui.switch_tab",
-        ]
+        vec!["ui.inspect", "ui.screenshot", "ui.pointer_gesture", "ui.type_text", "ui.press_key", "ui.invoke_menu", "ui.switch_tab", "ui.switch_tab",]
     );
     assert_eq!(calls[2].1["action"], json!("drag"));
     assert_eq!(calls[2].1["modifiers"], json!({ "shift": true, "ctrl": false, "alt": false, "meta": true }));
@@ -314,7 +294,7 @@ fn normal_mode_preserves_defaults_and_supports_progressive_gui_toolset() {
     assert_eq!(enable_reply["result"]["structuredContent"]["enabled_groups"], json!(["gui"]));
 
     let names: Vec<String> = list_tools_for_state(&state).into_iter().map(|t| t.name).collect();
-    assert_eq!(names.len(), 18);
+    assert_eq!(names.len(), 17);
     for expected in GUI_TOOL_NAMES {
         assert!(names.contains(&expected.to_owned()), "missing gui tool {expected}");
     }
@@ -326,7 +306,7 @@ fn normal_mode_preserves_defaults_and_supports_progressive_gui_toolset() {
     // State constructed with GuiSessionHost exposes both core + gui tools.
     let (host, _) = SharedMockHost::new();
     let mut hosted = McpServerState::with_gui_host(Box::new(host));
-    assert_eq!(list_tools_for_state(&hosted).len(), 18);
+    assert_eq!(list_tools_for_state(&hosted).len(), 17);
     assert!(!call_tool(&mut hosted, "doc_inspect", json!({})).expect("doc_inspect").is_error);
     assert!(!call_tool(&mut hosted, "ui_inspect", json!({})).expect("ui_inspect").is_error);
 }
@@ -348,7 +328,6 @@ fn gui_tools_parameter_validation_rejects_malformed_inputs() {
         ("ui_switch_tab", json!({})),
         ("ui_switch_tab", json!({ "tab": -1 })),
         ("ui_switch_tab", json!({ "tab": "   " })),
-        ("ui_answer_dialog", json!({})),
     ];
 
     for (tool, args) in bad_cases {
@@ -397,18 +376,6 @@ fn gui_tools_forward_extended_parameters() {
     call_tool(&mut state, "ui_switch_tab", json!({ "sheet_id": "result-1" })).expect("sheet_id only");
     call_tool(&mut state, "ui_switch_tab", json!({ "tab": 2 })).expect("integer tab index");
 
-    call_tool(
-        &mut state,
-        "ui_answer_dialog",
-        json!({
-            "action": "ok",
-            "patches": { "alpha": 0.01 },
-            "force_create_new": true,
-            "choice": "create_new"
-        }),
-    )
-    .expect("answer dialog extended");
-
     let host_guard = shared.borrow();
     let calls = &host_guard.calls;
     assert_eq!(calls[3].1["target"], json!("full_window"));
@@ -420,10 +387,6 @@ fn gui_tools_forward_extended_parameters() {
     assert_eq!(calls[5].1["params"]["kind"], json!("Column"));
     assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
     assert_eq!(calls[7].1["tab"], json!("2"));
-    assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
-    assert_eq!(calls[8].1["patches"]["choice"], json!("create_new"));
-    assert_eq!(calls[8].1["force_create_new"], json!(true));
-    assert_eq!(calls[8].1["choice"], json!("create_new"));
     drop(host_guard);
 
     call_tool(
@@ -448,12 +411,12 @@ fn gui_tools_forward_extended_parameters() {
     .expect("ui_inspect alias metrics");
 
     let host_guard = shared.borrow();
-    assert_eq!(host_guard.calls[9].1["metrics"], json!({ "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }));
-    assert_eq!(host_guard.calls[10].1["metrics"], json!({ "logical_width": 1600.0, "logical_height": 1000.0, "scale_factor": 1.5 }));
+    assert_eq!(host_guard.calls[8].1["metrics"], json!({ "logical_width": 1440.0, "logical_height": 900.0, "scale_factor": 2.0 }));
+    assert_eq!(host_guard.calls[9].1["metrics"], json!({ "logical_width": 1600.0, "logical_height": 1000.0, "scale_factor": 1.5 }));
 }
 
 #[test]
-fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
+fn gui_tools_worst_case_annotations_cover_all_seven_tools() {
     let expected = [
         ("ui_inspect", true, false, true, false),
         ("ui_screenshot", false, true, true, true),
@@ -462,7 +425,6 @@ fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
         ("ui_press_key", false, true, false, true),
         ("ui_invoke_menu", false, true, false, true),
         ("ui_switch_tab", false, false, true, false),
-        ("ui_answer_dialog", false, true, false, true),
     ];
 
     let gui_defs = curvebook_mcp::list_gui_tools();

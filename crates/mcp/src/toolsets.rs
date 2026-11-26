@@ -425,7 +425,7 @@ mod tests {
         };
         let parsed: Value = serde_json::from_str(text).expect("list_toolsets JSON");
         let gui_tools = parsed["gui_toolset"]["tools"].as_array().expect("gui tools array");
-        assert_eq!(gui_tools.len(), 8);
+        assert_eq!(gui_tools.len(), 7);
 
         let by_name: std::collections::BTreeMap<&str, &Value> =
             gui_tools.iter().map(|entry| (entry["name"].as_str().expect("gui tool name"), &entry["annotations"])).collect();
@@ -454,10 +454,6 @@ mod tests {
         assert_eq!(
             by_name["ui_switch_tab"],
             &json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
-        );
-        assert_eq!(
-            by_name["ui_answer_dialog"],
-            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
         );
     }
 }

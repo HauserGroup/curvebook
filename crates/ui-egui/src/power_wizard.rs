@@ -1044,28 +1044,4 @@ mod tests {
         assert!(graph.initialized);
         assert!(graph.title.contains("Power Curve"));
     }
-
-    #[test]
-    fn anova_groups_accepts_integers_floats_and_numeric_strings() {
-        let mut wizard = PowerWizardState::default();
-        let preset = crate::i18n::LocalePreset::default();
-        let mut patch = serde_json::Map::new();
-        patch.insert(String::from("family"), json!("one_way_anova"));
-        patch.insert(String::from("power.anova_groups"), json!("4"));
-        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("numeric string anova_groups");
-        assert_eq!(wizard.anova_groups, 4);
-
-        patch.insert(String::from("power.anova_groups"), json!(5.0));
-        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("float anova_groups");
-        assert_eq!(wizard.anova_groups, 5);
-
-        patch.insert(String::from("power.anova_groups"), json!("6.0"));
-        crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).expect("float string anova_groups");
-        assert_eq!(wizard.anova_groups, 6);
-
-        for invalid in [json!(0), json!(-2), json!("abc"), json!(2.5)] {
-            patch.insert(String::from("power.anova_groups"), invalid);
-            assert!(crate::dialogs_canvas::dialog_patch::patch_power_wizard(&mut wizard, &patch, &preset).is_err());
-        }
-    }
 }

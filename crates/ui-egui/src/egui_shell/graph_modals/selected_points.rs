@@ -2,7 +2,6 @@
 
 use curvebook_palette::MarkerShape;
 use egui::Ui;
-use serde_json::{Map, Value, json};
 
 use super::super::UiIntent;
 use super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
@@ -36,10 +35,10 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
             )
             .clicked()
             {
-                let mut patch = Map::new();
-                patch.insert(String::from("color"), Value::String(hex.to_owned()));
-                patch.insert(String::from("fill_color"), Value::String(hex.to_owned()));
-                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                let mut next = fp.clone();
+                next.color = Some(hex.to_owned());
+                next.fill_color = Some(hex.to_owned());
+                gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
             }
         }
     });
@@ -71,9 +70,9 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
             )
             .clicked()
             {
-                let mut patch = Map::new();
-                patch.insert(String::from("symbol"), Value::String(slug));
-                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                let mut next = fp.clone();
+                next.symbol = Some(slug);
+                gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
             }
         }
     });
@@ -87,9 +86,9 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     };
     let size_out = render_scrub_unit_field(ui, fp.size_pt.unwrap_or(5.0), &mut state.pts_size_spinner, size_cfg, gctx.tokens, gctx.meta);
     if let Some(val) = size_out.committed_value {
-        let mut patch = Map::new();
-        patch.insert(String::from("size_pt"), json!(val.clamp(2.0, 24.0)));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = fp.clone();
+        next.size_pt = Some(val.clamp(2.0, 24.0));
+        gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
     }
 
     let bw_cfg = ScrubUnitFieldConfig {
@@ -100,9 +99,9 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     };
     let bw_out = render_scrub_unit_field(ui, fp.border_width_pt.unwrap_or(1.0), &mut state.pts_border_spinner, bw_cfg, gctx.tokens, gctx.meta);
     if let Some(val) = bw_out.committed_value {
-        let mut patch = Map::new();
-        patch.insert(String::from("border_width_pt"), json!(val.clamp(0.5, 6.0)));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = fp.clone();
+        next.border_width_pt = Some(val.clamp(0.5, 6.0));
+        gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
     }
 
     ui.add_space(4.0);
@@ -110,17 +109,17 @@ pub(super) fn render_format_selected_points_body(ui: &mut Ui, state: &mut GraphM
     let h_chk = ui.checkbox(&mut hidden, "Hide Selected Points");
     record_checkbox(ui, &h_chk, gctx.meta, "fmt_pts.hidden", "Hide Selected Points", hidden);
     if h_chk.changed() {
-        let mut patch = Map::new();
-        patch.insert(String::from("hidden"), Value::Bool(hidden));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = fp.clone();
+        next.hidden = Some(hidden);
+        gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
     }
 
     let mut clear = fp.clear_overrides;
     let c_chk = ui.checkbox(&mut clear, "Clear Point Overrides");
     record_checkbox(ui, &c_chk, gctx.meta, "fmt_pts.clear", "Clear Point Overrides", clear);
     if c_chk.changed() {
-        let mut patch = Map::new();
-        patch.insert(String::from("clear_overrides"), Value::Bool(clear));
-        gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+        let mut next = fp.clone();
+        next.clear_overrides = clear;
+        gctx.intents.push(UiIntent::UpdateFormatSelectedPointsState(Box::new(next)));
     }
 }

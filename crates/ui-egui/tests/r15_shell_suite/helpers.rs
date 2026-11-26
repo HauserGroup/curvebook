@@ -2,14 +2,18 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use curvebook_doc::{ProjectDocument, ResultCell, ResultTab, ResultTabKind, SheetId};
-use curvebook_engine::CommandOutcome;
+use curvebook_doc::{
+    Cell, ColumnDesignHint, ColumnTable, DataSheet, MultipleVariablesTable, ProjectDocument, ResultCell, ResultTab, ResultTabKind, SheetId,
+    SubcolumnMode, TableArchetype, VariableRole, XyTable,
+};
+use curvebook_engine::{CommandOutcome, Session};
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::control_io::{dispatch_gui_action, dispatch_ui_command};
 use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, Tokens};
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use serde_json::{Map, Value};
+use egui::{Pos2, Rect, Vec2};
+use serde_json::Value;
 
 use crate::common::{ShellTestState, TestRes, ensure, make_shell_driver_with_state, sync_app_to_driver};
 
@@ -31,8 +35,105 @@ pub fn call_egui_control(app: &mut UiApp, req: &Value) -> Result<Value, String> 
     serde_json::from_str(&raw).map_err(|e| format!("parse egui control response `{raw}`: {e}"))
 }
 
-pub fn patch_map(val: Value) -> Map<String, Value> {
-    val.as_object().cloned().unwrap_or_default()
+pub fn seed_xy_app(xs: &[f64], ys: &[f64]) -> (UiApp, SheetId) {
+    let mut tbl = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
+    tbl.x_title = String::from("Conc");
+    tbl.data_sets[0].title = String::from("Response");
+    for (r, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
+        tbl.x_cells[r][0] = Cell::number(x);
+        tbl.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let sid = SheetId::new("xy-1");
+    let mut doc = ProjectDocument::new("XY Test").unwrap();
+    doc.data_sheets.push(DataSheet::new(sid.clone(), "Dose Response", TableArchetype::Xy(tbl)).unwrap());
+    doc.active_sheet_id = Some(sid.clone());
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.sync_views();
+    (app, sid)
+}
+
+pub fn seed_column_app(cols: &[(&str, &[f64])], hint: ColumnDesignHint) -> (UiApp, SheetId) {
+    let rows = cols.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
+    let mut tbl = ColumnTable::new(hint, cols.len(), rows).unwrap();
+    for (ci, (title, vals)) in cols.iter().enumerate() {
+        tbl.data_sets[ci].title = (*title).to_owned();
+        for (r, &v) in vals.iter().enumerate() {
+            tbl.data_sets[ci].cells[r][0] = Cell::number(v);
+        }
+    }
+    let sid = SheetId::new("col-1");
+    let mut doc = ProjectDocument::new("Column Test").unwrap();
+    doc.data_sheets.push(DataSheet::new(sid.clone(), "Groups", TableArchetype::Column(tbl)).unwrap());
+    doc.active_sheet_id = Some(sid.clone());
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.sync_views();
+    (app, sid)
+}
+
+pub fn seed_mv_app(col_count: usize, rows: usize) -> (UiApp, SheetId) {
+    let mut mv = MultipleVariablesTable::new(col_count, rows).unwrap();
+    for (c, vc) in mv.variables.iter_mut().enumerate() {
+        vc.title = format!("V{}", c + 1);
+        if c == 0 {
+            vc.role = VariableRole::Categorical;
+            for r in 0..rows {
+                vc.cells[r] = Cell::text(if r % 2 == 0 { "Ctrl" } else { "Tx" });
+            }
+        } else {
+            vc.role = VariableRole::Continuous;
+            for r in 0..rows {
+                vc.cells[r] = Cell::number(((r + 1) * (c + 1)) as f64);
+            }
+        }
+    }
+    let sid = SheetId::new("mv-1");
+    let mut doc = ProjectDocument::new("MV Test").unwrap();
+    doc.data_sheets.push(DataSheet::new(sid.clone(), "MV Sheet", TableArchetype::MultipleVariables(mv)).unwrap());
+    doc.active_sheet_id = Some(sid.clone());
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.sync_views();
+    (app, sid)
+}
+
+pub fn make_commit_driver(app: UiApp) -> EguiHumanPathDriver<'static, ShellTestState> {
+    let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+    make_shell_driver_with_state(ShellTestState::new(app).with_commit_all().with_merge_passes(), ViewportMetrics::new(1280.0, 800.0, 1.0), tokens)
+}
+
+pub fn run_egui_pass_with_ctx<R>(
+    ctx: &egui::Context,
+    size: Vec2,
+    input: egui::RawInput,
+    central: bool,
+    mut draw: impl FnMut(&egui::Context, &mut egui::Ui) -> R,
+) -> Result<R, String> {
+    let mut raw = input;
+    raw.screen_rect = Some(Rect::from_min_size(Pos2::ZERO, size));
+    let mut out = None;
+    let mut full = ctx.run_ui(raw, |ui| {
+        if central {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let c = ui.ctx().clone();
+                out = Some(draw(&c, ui));
+            });
+        } else {
+            let c = ui.ctx().clone();
+            out = Some(draw(&c, ui));
+        }
+    });
+    full.textures_delta.clear();
+    out.ok_or_else(|| String::from("egui pass did not execute"))
+}
+
+pub fn click_input(pos: Pos2) -> egui::RawInput {
+    egui::RawInput {
+        events: vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+        ..egui::RawInput::default()
+    }
 }
 
 pub fn make_human_driver(doc: ProjectDocument) -> EguiHumanPathDriver<'static, ShellTestState> {

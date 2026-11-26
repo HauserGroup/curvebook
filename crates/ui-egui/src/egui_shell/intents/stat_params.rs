@@ -1,7 +1,8 @@
 //! Typed executors for `StatParamsIntent` and `AnalyzePickerIntent` (retiring pre-R15 `views/*` custom dispatch).
 
 use curvebook_doc::{
-    AnalysisKind, ContingencySpec, MultiplicityMethod, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance, SurvivalAnalysisSpec, TwoGroupMethod,
+    AnalysisKind, ContingencySpec, MultiplicityMethod, OneWayMethod, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance, SurvivalAnalysisSpec,
+    TwoGroupMethod,
 };
 use curvebook_engine::EngineError;
 
@@ -16,10 +17,6 @@ use crate::modal_predicates::{
 
 fn conflict(msg: impl Into<String>) -> EngineError {
     EngineError::with_code(curvebook_doc::ErrorCode::Conflict, msg.into())
-}
-
-fn patch_edit_params(app: &mut UiApp, map: &serde_json::Map<String, serde_json::Value>) -> Result<(), EngineError> {
-    crate::dialogs_canvas::dialog_patch::patch_edit_params(&mut app.canvas_dialogs.edit_params, map, &app.locale_preset).map_err(conflict)
 }
 
 fn source_sheet_col_count(app: &UiApp) -> usize {
@@ -48,7 +45,11 @@ pub(super) fn apply_analyze_picker_intent(app: &mut UiApp, intent: AnalyzePicker
                 collapsed.push(slug);
             }
         }
+        AnalyzePickerIntent::SelectCatalogEntry { entry_id } => {
+            app.canvas_dialogs.analyze.select_catalog_entry(&entry_id);
+        }
         AnalyzePickerIntent::TogglePcaPredictor { col } => app.canvas_dialogs.analyze.toggle_pca_predictor(col),
+        AnalyzePickerIntent::SetPcaPredictors { cols } => app.canvas_dialogs.analyze.set_pca_predictors(cols),
         AnalyzePickerIntent::SetPcrOutcome { col } => {
             app.canvas_dialogs.analyze.select_pcr_outcome(col).map_err(conflict)?;
         }
@@ -72,6 +73,15 @@ pub(super) fn apply_analyze_picker_intent(app: &mut UiApp, intent: AnalyzePicker
                 an.outlier_iterative = !an.outlier_iterative;
             }
         }
+        AnalyzePickerIntent::SetPValueStackMethod { method } => {
+            app.canvas_dialogs.analyze.pvalue_stack_method = method;
+        }
+        AnalyzePickerIntent::SetPValueStackThreshold { threshold } => {
+            app.canvas_dialogs.analyze.pvalue_stack_threshold = threshold.clamp(0.001, 0.50);
+        }
+        AnalyzePickerIntent::SetPValueStackColumn { column } => {
+            app.canvas_dialogs.analyze.pvalue_stack_column = column;
+        }
         AnalyzePickerIntent::SetDuplicateChoice { choice } => {
             app.canvas_dialogs.analyze.duplicate_choice = choice;
             if choice == DuplicateChoice::ModifyExisting
@@ -91,6 +101,9 @@ pub(super) fn apply_analyze_picker_intent(app: &mut UiApp, intent: AnalyzePicker
 
 pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
+        StatParamsIntent::SetCustomTitle { title } => {
+            app.canvas_dialogs.edit_params.set_custom_title(Some(title)).map_err(conflict)?;
+        }
         StatParamsIntent::SetOneWayMethod { method } => set_one_way_method(app, &method)?,
         StatParamsIntent::SelectAllDatasets => {
             if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft {
@@ -104,26 +117,30 @@ pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent
         StatParamsIntent::SetMultiplicityMethod { slug } => set_multiplicity_method(app, &slug)?,
         StatParamsIntent::StepMultiplicityThreshold { delta } => step_multiplicity_threshold(app, delta),
         StatParamsIntent::SetCompareAgainstControl { enabled } => {
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("compare_against_control"), serde_json::Value::Bool(enabled));
-            patch_edit_params(app, &map)?;
+            app.canvas_dialogs.edit_params.set_compare_against_control(enabled);
         }
         StatParamsIntent::CycleControlColumn => handle_cycle_control_col(app)?,
         StatParamsIntent::ToggleMultiplicityReportCi => handle_toggle_mult_ci(app),
         StatParamsIntent::ToggleEffectSizes => handle_toggle_effect_sizes(app),
         StatParamsIntent::SetPValueFormat { slug } => {
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("p_value_format"), serde_json::Value::String(slug));
-            patch_edit_params(app, &map)?;
+            let trimmed = slug.trim();
+            let norm: String = trimmed.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+            let next = match norm.as_str() {
+                "apa" => PValueFormat::Apa,
+                "nejm" => PValueFormat::Nejm,
+                "custom" => PValueFormat::new_custom(4, None),
+                "fourdecimal" | "fourdecimals" | "default" | "standard" => PValueFormat::FourDecimal,
+                _ if trimmed == "0.0001" => PValueFormat::FourDecimal,
+                _ => return Err(conflict(format!("unknown P-value format `{slug}`"))),
+            };
+            app.canvas_dialogs.edit_params.set_p_value_format(next);
         }
         StatParamsIntent::StepPValueDigits { delta } => step_pvalue_digits(app, delta)?,
         StatParamsIntent::StepTwoGroupHypothetical { delta } => step_hypothetical_value(app, delta),
         StatParamsIntent::CycleContingencyCi { which } => cycle_contingency_ci(app, which)?,
         StatParamsIntent::ToggleCorrAllPairs => {
             let next = !app.canvas_dialogs.edit_params.correlation_all_pairs;
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("correlation_all_pairs"), serde_json::Value::Bool(next));
-            patch_edit_params(app, &map)?;
+            app.canvas_dialogs.edit_params.set_correlation_all_pairs(next);
         }
         StatParamsIntent::ToggleCorrHeatmap => {
             let gate = r7_correlation_heatmap_toggle(app.canvas_dialogs.edit_params.correlation_all_pairs);
@@ -131,9 +148,7 @@ pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent
                 return Err(conflict(gate.disabled_reason.unwrap_or_default()));
             }
             let next = !app.canvas_dialogs.edit_params.correlation_heatmap;
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("correlation_heatmap"), serde_json::Value::Bool(next));
-            patch_edit_params(app, &map)?;
+            app.canvas_dialogs.edit_params.set_correlation_heatmap(next).map_err(conflict)?;
         }
         StatParamsIntent::ToggleDiag { flag } => toggle_diag_flag(app, flag)?,
     }
@@ -173,9 +188,8 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
                 *mode = if mode == "detail" { String::from("auto") } else { String::from("detail") };
                 return Ok(());
             }
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("paired_or_matched"), serde_json::Value::Bool(next));
-            patch_edit_params(app, &map)
+            app.canvas_dialogs.edit_params.set_paired_or_matched(next);
+            Ok(())
         }
         AnalysisKind::FactorialAnova(f) => {
             if f.repeated_measures != RepeatedMeasuresDesign::None {
@@ -188,9 +202,8 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
                 *mode = if mode == "detail" { String::from("auto") } else { String::from("detail") };
                 return Ok(());
             }
-            let mut map = serde_json::Map::new();
-            map.insert(String::from("paired_or_matched"), serde_json::Value::Bool(true));
-            patch_edit_params(app, &map)
+            app.canvas_dialogs.edit_params.set_paired_or_matched(true);
+            Ok(())
         }
         _ => {
             let mode = &mut app.canvas_dialogs.edit_params.schematic_mode;
@@ -217,9 +230,16 @@ fn set_one_way_method(app: &mut UiApp, method_name: &str) -> Result<(), EngineEr
             return Err(conflict(p.disabled_reason.unwrap_or_else(|| String::from("Repeated measures unavailable"))));
         }
     }
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("anova_method"), serde_json::Value::String(method_name.to_owned()));
-    patch_edit_params(app, &map)?;
+    let saved_gg = app.canvas_dialogs.edit_params.saved_rm_geisser_greenhouse;
+    let next_method = match method_name.trim().to_ascii_lowercase().as_str() {
+        "ordinary" | "ordinary_anova" | "anova" => OneWayMethod::OrdinaryAnova,
+        "welch" | "brown_forsythe" | "brown_forsythe_welch" | "brown_forsythe_and_welch" => OneWayMethod::BrownForsytheAndWelch,
+        "kruskal" | "kruskal_wallis" => OneWayMethod::KruskalWallis,
+        "friedman" => OneWayMethod::Friedman,
+        "rm" | "repeated_measures" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: saved_gg },
+        other => return Err(conflict(format!("unknown one-way ANOVA method `{other}`"))),
+    };
+    app.canvas_dialogs.edit_params.set_one_way_method(next_method);
     if wants_nonparam && let Some(spec) = &mut app.canvas_dialogs.edit_params.draft {
         let mut kind = spec.kind.clone();
         if let AnalysisKind::OneWayAnova(ref mut a) = kind
@@ -247,21 +267,24 @@ fn handle_toggle_gg(app: &mut UiApp) -> Result<(), EngineError> {
     if !gate.enabled {
         return Err(conflict(gate.disabled_reason.unwrap_or_default()));
     }
-    let cur = ep.draft.as_ref().is_none_or(|d| {
-        !matches!(d.kind, AnalysisKind::OneWayAnova(ref a) if matches!(a.method, curvebook_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: false }))
-    });
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("geisser_greenhouse"), serde_json::Value::Bool(!cur));
-    patch_edit_params(app, &map)
+    let cur = ep.draft.as_ref().is_none_or(
+        |d| !matches!(d.kind, AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })),
+    );
+    app.canvas_dialogs.edit_params.set_geisser_greenhouse(!cur).map_err(conflict)
 }
 
 fn set_factorial_residual_cov(app: &mut UiApp, raw: &str) -> Result<(), EngineError> {
     if !app.canvas_dialogs.edit_params.paired_or_matched {
         return Err(conflict(r1_sphericity_or_reml_control(false).disabled_reason.unwrap_or_default()));
     }
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("residual_covariance"), serde_json::Value::String(raw.to_owned()));
-    patch_edit_params(app, &map)
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let cov = match norm.as_str() {
+        "compoundsymmetry" | "cs" | "randomintercept" => ResidualCovariance::CompoundSymmetry,
+        "unstructured" | "un" | "general" => ResidualCovariance::Unstructured,
+        _ => return Err(conflict(format!("unknown residual covariance structure `{raw}`"))),
+    };
+    app.canvas_dialogs.edit_params.set_residual_covariance(cov);
+    Ok(())
 }
 
 fn set_multiplicity_method(app: &mut UiApp, raw: &str) -> Result<(), EngineError> {
@@ -285,9 +308,7 @@ fn set_multiplicity_method(app: &mut UiApp, raw: &str) -> Result<(), EngineError
     if !gate.enabled {
         return Err(conflict(gate.disabled_reason.unwrap_or_default()));
     }
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("multiplicity_method"), serde_json::Value::String(raw.to_owned()));
-    patch_edit_params(app, &map)
+    app.canvas_dialogs.edit_params.set_multiplicity_method(method).map_err(conflict)
 }
 
 fn step_multiplicity_threshold(app: &mut UiApp, delta: f64) {
@@ -336,9 +357,8 @@ fn handle_cycle_control_col(app: &mut UiApp) -> Result<(), EngineError> {
     }
     let cols = source_sheet_col_count(app).max(2);
     let next = (app.canvas_dialogs.edit_params.control_column + 1) % cols;
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("control_column"), serde_json::json!(next));
-    patch_edit_params(app, &map)
+    app.canvas_dialogs.edit_params.set_control_column(next);
+    Ok(())
 }
 
 fn handle_toggle_mult_ci(app: &mut UiApp) {
@@ -411,10 +431,8 @@ fn step_pvalue_digits(app: &mut UiApp, delta: i32) -> Result<(), EngineError> {
         PValueFormat::Custom { decimals, .. } => i32::from(decimals),
         _ => 4,
     };
-    let next = (cur + delta).clamp(1, 9);
-    let mut map = serde_json::Map::new();
-    map.insert(String::from("p_value_decimals"), serde_json::json!(next));
-    patch_edit_params(app, &map)
+    let next = u8::try_from((cur + delta).clamp(1, 9)).unwrap_or(4);
+    app.canvas_dialogs.edit_params.set_p_value_decimals(next).map_err(conflict)
 }
 
 fn step_hypothetical_value(app: &mut UiApp, delta: f64) {
@@ -449,39 +467,33 @@ fn cycle_contingency_ci(app: &mut UiApp, which: ContingencyCiTarget) -> Result<(
         Some(AnalysisKind::Contingency(c)) => c.clone(),
         _ => ContingencySpec::default(),
     };
-    let (wid_key, checked, label, next_val) = match which {
-        ContingencyCiTarget::OddsRatio => (
-            "edit.contingency.ci.baptista_pike",
-            ep.contingency_odds_ratio_checked || cont.compute_odds_and_risk_ratios,
-            "Baptista-Pike",
-            if ep.contingency_or_ci_method == "Baptista-Pike" { "Woolf" } else { "Baptista-Pike" },
-        ),
-        ContingencyCiTarget::RelativeRisk => (
-            "edit.contingency.ci.koopman",
-            ep.contingency_relative_risk_checked || cont.compute_odds_and_risk_ratios,
-            "Koopman",
-            if ep.contingency_rr_ci_method == "Koopman" { "Katz" } else { "Koopman" },
-        ),
-        ContingencyCiTarget::AttributableRisk => (
-            "edit.contingency.ci.newcombe_wilson",
-            ep.contingency_attributable_risk_checked,
-            "Newcombe-Wilson",
-            if ep.contingency_arr_ci_method == "Newcombe-Wilson" { "Wald" } else { "Newcombe-Wilson" },
-        ),
-        ContingencyCiTarget::Diagnostic => (
-            "edit.contingency.ci.wilson_brown",
-            cont.compute_sensitivity_specificity,
-            "Wilson-Brown",
-            if ep.contingency_diag_ci_method == "Wilson-Brown" { "Clopper-Pearson" } else { "Wilson-Brown" },
-        ),
+    let (checked, label) = match which {
+        ContingencyCiTarget::OddsRatio => (ep.contingency_odds_ratio_checked || cont.compute_odds_and_risk_ratios, "Baptista-Pike"),
+        ContingencyCiTarget::RelativeRisk => (ep.contingency_relative_risk_checked || cont.compute_odds_and_risk_ratios, "Koopman"),
+        ContingencyCiTarget::AttributableRisk => (ep.contingency_attributable_risk_checked, "Newcombe-Wilson"),
+        ContingencyCiTarget::Diagnostic => (cont.compute_sensitivity_specificity, "Wilson-Brown"),
     };
     let gate = r6_contingency_ci_selector(rows, cols, checked, label);
     if !gate.enabled {
         return Err(conflict(gate.disabled_reason.unwrap_or_default()));
     }
-    let mut map = serde_json::Map::new();
-    map.insert(wid_key.to_owned(), serde_json::Value::String(next_val.to_owned()));
-    patch_edit_params(app, &map)
+    let ep = &mut app.canvas_dialogs.edit_params;
+    match which {
+        ContingencyCiTarget::OddsRatio => {
+            ep.contingency_or_ci_method = String::from(if ep.contingency_or_ci_method == "Baptista-Pike" { "Woolf" } else { "Baptista-Pike" });
+        }
+        ContingencyCiTarget::RelativeRisk => {
+            ep.contingency_rr_ci_method = String::from(if ep.contingency_rr_ci_method == "Koopman" { "Katz" } else { "Koopman" });
+        }
+        ContingencyCiTarget::AttributableRisk => {
+            ep.contingency_arr_ci_method = String::from(if ep.contingency_arr_ci_method == "Newcombe-Wilson" { "Wald" } else { "Newcombe-Wilson" });
+        }
+        ContingencyCiTarget::Diagnostic => {
+            ep.contingency_diag_ci_method =
+                String::from(if ep.contingency_diag_ci_method == "Wilson-Brown" { "Clopper-Pearson" } else { "Wilson-Brown" });
+        }
+    }
+    Ok(())
 }
 
 fn toggle_diag_flag(app: &mut UiApp, flag: DiagToggleFlag) -> Result<(), EngineError> {
@@ -503,9 +515,7 @@ fn toggle_diag_flag(app: &mut UiApp, flag: DiagToggleFlag) -> Result<(), EngineE
         DiagToggleFlag::Influence => {
             if let Some(AnalysisKind::GeneralizedLinearModel(g)) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
                 let next_vif = !g.compute_vif;
-                let mut map = serde_json::Map::new();
-                map.insert(String::from("compute_vif"), serde_json::Value::Bool(next_vif));
-                patch_edit_params(app, &map)?;
+                app.canvas_dialogs.edit_params.set_glm_compute_vif(next_vif);
             }
             app.canvas_dialogs.edit_params.diag_influence_leverage = !app.canvas_dialogs.edit_params.diag_influence_leverage;
         }

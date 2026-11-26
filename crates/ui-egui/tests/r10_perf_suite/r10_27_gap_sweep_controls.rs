@@ -72,18 +72,6 @@ fn gwf_18_format_axes_major_tick_interval_and_minor_ticks() -> TestRes {
 
     let gs = driver.state().app.document().graph_sheet(&gid).ok_or("missing graph after commit")?;
     assert_eq!((gs.spec.y_axis.segments[0].major_tick_interval, gs.spec.y_axis.segments[0].minor_ticks_per_interval), (Some(5.0), 9));
-
-    // FormatAxes localized field patch path directly handles major_tick_interval & minor_ticks_per_interval.
-    let mut fa = driver.state().app.canvas_dialogs.format_axes.clone();
-    fa.sync_from_graph(gs, AxisTarget::X);
-    let preset = driver.state().app.locale_preset.clone();
-    let patch_set =
-        serde_json::Map::from_iter([("axes.major_tick_interval".into(), json!(10.0)), ("axes.minor_ticks_per_interval".into(), json!(4))]);
-    curvebook_ui_egui::dialogs_canvas::dialog_patch::patch_format_axes(&mut fa, &patch_set, None, &preset)?;
-    assert_eq!((fa.axis_draft.segments[0].major_tick_interval, fa.axis_draft.segments[0].minor_ticks_per_interval), (Some(10.0), 4));
-    let patch_clear = serde_json::Map::from_iter([("major_tick_interval".into(), json!(null))]);
-    curvebook_ui_egui::dialogs_canvas::dialog_patch::patch_format_axes(&mut fa, &patch_clear, None, &preset)?;
-    assert_eq!(fa.axis_draft.segments[0].major_tick_interval, None);
     Ok(())
 }
 

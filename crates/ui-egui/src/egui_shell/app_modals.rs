@@ -2118,9 +2118,7 @@ fn render_checkpoints_modal(
                 let name_resp = ui.add(egui::TextEdit::singleline(&mut name_draft).desired_width((body_w - 64.0).max(120.0)));
                 app_input(ui, &name_resp, meta, "checkpoints.name", "Checkpoint Name", &name_draft, true);
                 if name_resp.changed() {
-                    intents.push(UiIntent::PatchActiveDialog {
-                        fields: serde_json::Map::from_iter([(String::from("name"), Value::String(name_draft.clone()))]),
-                    });
+                    intents.push(UiIntent::SetCheckpointsDraft { name: Some(name_draft.clone()), note: None });
                 }
             });
             ui.add_space(4.0);
@@ -2129,9 +2127,7 @@ fn render_checkpoints_modal(
                 let note_resp = ui.add(egui::TextEdit::singleline(&mut note_draft).desired_width((body_w - 64.0).max(120.0)));
                 app_input(ui, &note_resp, meta, "checkpoints.note", "Checkpoint Note", &note_draft, true);
                 if note_resp.changed() {
-                    intents.push(UiIntent::PatchActiveDialog {
-                        fields: serde_json::Map::from_iter([(String::from("note"), Value::String(note_draft.clone()))]),
-                    });
+                    intents.push(UiIntent::SetCheckpointsDraft { name: None, note: Some(note_draft.clone()) });
                 }
             });
             ui.add_space(6.0);
@@ -2150,12 +2146,7 @@ fn render_checkpoints_modal(
                 tokens,
             );
             if create_resp.clicked() && can_create {
-                intents.push(UiIntent::PatchActiveDialog {
-                    fields: serde_json::Map::from_iter([
-                        (String::from("name"), Value::String(name_draft.clone())),
-                        (String::from("note"), Value::String(note_draft.clone())),
-                    ]),
-                });
+                intents.push(UiIntent::SetCheckpointsDraft { name: Some(name_draft.clone()), note: Some(note_draft.clone()) });
                 intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
             }
 

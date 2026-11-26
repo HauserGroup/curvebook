@@ -559,3 +559,261 @@ fn studio_assumptions_wrap_and_offscreen_scroll_buttons_culled_at_1440x600() -> 
     }
     Ok(())
 }
+
+#[test]
+fn aud_09_08_18_19_20_41_43_46_info_layout_grid_and_trailing_studio() -> BoxRes {
+    use crate::helpers::{click_input, run_egui_pass_with_ctx};
+    use curvebook_doc::{DescriptiveSpec, InfoConstant, LayoutItem, LayoutSpec, RectPt, SourceCellId, VariableRole, VariableSource};
+    use curvebook_ui_egui::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
+    use curvebook_ui_egui::egui_shell::trailing_studio::{
+        TrailingStudioContext, TrailingStudioEguiState, arrange_layout_grid_items, render_trailing_studio,
+    };
+    use curvebook_ui_egui::egui_shell::{LayoutMetrics, ShellLayoutInput, UiIntent};
+    use serde_json::Value;
+
+    // 1. AUD-09-08 & AUD-09-43: InfoView comma decimal, disabled Escape guard, and sheet-switch notes flush.
+    let mut idoc = ProjectDocument::new("Info View")?;
+    idoc.info_sheets.push(InfoSheet::new_preseeded("info-1", "Info 1")?);
+    idoc.info_sheets.push(InfoSheet::new_preseeded("info-2", "Info 2")?);
+    let mut iapp = UiApp::from_session(Session::from_document(idoc));
+    iapp.set_locale("de");
+    iapp.execute_command("info.setConstant", json!({ "sheet_id": "info-1", "name": "Dose", "value": 12.5 }))?;
+    let itok = Tokens::from_theme_spec(&iapp.theme, &iapp.locale);
+
+    let (mut m_ro, mut i_ro) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(900.0, 500.0), Default::default(), true, |_, ui| {
+        render_info_view_for_sheet(ui, &iapp, Some(&SheetId::new("info-1")), &mut InfoViewEguiState::default(), &itok, true, &mut m_ro, &mut i_ro);
+    })?;
+    assert!(
+        m_ro.entries.iter().find(|e| e.label == "Dose").and_then(|e| e.value.as_ref()?.get("value")?.as_str()).is_some_and(|s| s.contains("12,5"))
+    );
+
+    let mut ist = InfoViewEguiState {
+        notes_draft: Some((SheetId::new("info-1"), "Updated note".into())),
+        notes_dirty: true,
+        editing_sheet_id: Some(SheetId::new("info-1")),
+        editing_key: Some("Dose".into()),
+        ..Default::default()
+    };
+    let esc = egui::RawInput {
+        events: vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+        ..Default::default()
+    };
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(900.0, 500.0), esc, true, |_, ui| {
+        render_info_view_for_sheet(
+            ui,
+            &iapp,
+            Some(&SheetId::new("info-1")),
+            &mut ist,
+            &itok,
+            false,
+            &mut FrameInspectMeta::default(),
+            &mut PendingUiIntents::new(),
+        );
+    })?;
+    assert_eq!(ist.editing_key.as_deref(), Some("Dose"));
+
+    let mut i_sw = PendingUiIntents::new();
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(900.0, 500.0), Default::default(), true, |_, ui| {
+        render_info_view_for_sheet(ui, &iapp, Some(&SheetId::new("info-2")), &mut ist, &itok, true, &mut FrameInspectMeta::default(), &mut i_sw);
+    })?;
+    assert!(i_sw.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { command_id, params } if command_id == "info.setNote" && params["sheet_id"] == json!("info-1") && params["text"] == json!("Updated note"))));
+    assert!(ist.editing_key.is_none() && ist.editing_sheet_id.is_none());
+
+    // 2. AUD-09-19: arrange_layout_grid_items expands rows to keep excess panels within page bounds.
+    let lspec = LayoutSpec {
+        items: (0..5)
+            .map(|i| LayoutItem::LiveGraph {
+                id: format!("p-{i}"),
+                graph_sheet_id: SheetId::new(format!("g-{i}")),
+                bounds_pt: RectPt::new(0.0, 0.0, 100.0, 100.0),
+                scale_percent: 100.0,
+                badge_override: None,
+            })
+            .collect(),
+        ..Default::default()
+    };
+    let arranged = arrange_layout_grid_items(&lspec, 2, 2, 10);
+    let page = lspec.page_size_pt();
+    assert_eq!(arranged.len(), 5);
+    assert!(arranged.iter().all(|it| !matches!(it, LayoutItem::LiveGraph { bounds_pt: b, .. } if b.x < 0.0 || b.y < 0.0 || b.x + b.width > page.width + 1e-6 || b.y + b.height > page.height + 1e-6)));
+
+    let layout = LayoutMetrics::CANONICAL.solve_shell_layout(ShellLayoutInput {
+        viewport_w_pt: 1440.0,
+        viewport_h_pt: 900.0,
+        empty_workspace: false,
+        navigator_open: true,
+        inspector_open: true,
+        family_open: true,
+        leading_user_collapsed: false,
+        trailing_user_collapsed: false,
+        leading_width_override_pt: None,
+        trailing_width_override_pt: None,
+        host_draws_menu_bar: false,
+        is_rtl: false,
+    });
+    let pass_ts = |ctx: &egui::Context,
+                   app: &UiApp,
+                   ts: &mut TrailingStudioEguiState,
+                   tok: &Tokens,
+                   raw: egui::RawInput|
+     -> Result<(FrameInspectMeta, PendingUiIntents), String> {
+        let (mut m, mut i) = (FrameInspectMeta::default(), PendingUiIntents::new());
+        run_egui_pass_with_ctx(ctx, egui::vec2(1200.0, 800.0), raw, false, |c, ui| {
+            m.begin_pass(c);
+            let ctx_in = TrailingStudioContext {
+                tokens: tok,
+                layout,
+                enabled: true,
+                focused: true,
+                selected_panel_index: None,
+                selected_graph_annotation: None,
+            };
+            render_trailing_studio(ui, app, ts, ctx_in, &mut m, &mut i);
+        })?;
+        Ok((m, i))
+    };
+
+    // 3. AUD-09-18: MV Trailing Studio `+ New` and `add_new_formula` omit `col`.
+    let mut mv_app = UiApp::new();
+    mv_app.execute_command("sheet.createData", json!({ "sheet_id": "mv-18", "kind": "multiple_variables", "cols": 2, "rows": 2, "variables": [{ "title": "A", "role": "continuous" }, { "title": "B", "role": "continuous" }], "auto_graph": false }))?;
+    mv_app.execute_command("sheet.select", json!({ "sheet_id": "mv-18" }))?;
+    mv_app.sync_views();
+    let tok_mv = Tokens::from_theme_spec(&mv_app.theme, &mv_app.locale);
+    let (ctx_mv, mut ts_mv) = (egui::Context::default(), TrailingStudioEguiState::default());
+    let (m0, _) = pass_ts(&ctx_mv, &mv_app, &mut ts_mv, &tok_mv, Default::default())?;
+    let _ = pass_ts(
+        &ctx_mv,
+        &mv_app,
+        &mut ts_mv,
+        &tok_mv,
+        click_input(m0.find_by_widget_id("inspector.mv.new_calc_col").unwrap().clipped_rect.center()),
+    )?;
+    assert_eq!(ts_mv.mv_selected_col, 2);
+    ts_mv.mv_formula_draft = "[A] + [B]".into();
+    let (m2, _) = pass_ts(&ctx_mv, &mv_app, &mut ts_mv, &tok_mv, Default::default())?;
+    let (_, i3) = pass_ts(
+        &ctx_mv,
+        &mv_app,
+        &mut ts_mv,
+        &tok_mv,
+        click_input(m2.find_by_widget_id("inspector.mv.apply_formula").unwrap().clipped_rect.center()),
+    )?;
+    assert!(i3.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { command_id, params } if command_id == "table.setCalculatedVariable" && params["formula"] == json!("[A] + [B]") && params.get("col").is_none())));
+    (ts_mv.mv_selected_col, ts_mv.mv_synced_col, ts_mv.mv_formula_draft) = (0, Some(0), "[A] * 2".into());
+    let (m4, _) = pass_ts(&ctx_mv, &mv_app, &mut ts_mv, &tok_mv, Default::default())?;
+    let (_, i5) = pass_ts(
+        &ctx_mv,
+        &mv_app,
+        &mut ts_mv,
+        &tok_mv,
+        click_input(m4.find_by_widget_id("inspector.mv.add_new_formula").unwrap().clipped_rect.center()),
+    )?;
+    assert!(i5.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { command_id, params } if command_id == "table.setCalculatedVariable" && params["formula"] == json!("[A] * 2") && params.get("col").is_none())));
+
+    // 4. AUD-09-20: Info downstream refs bound by info_sheet_id; blank Date emits null w/o kind; Remove Constant hides on rename.
+    let mut info_doc = ProjectDocument::new("Info Hooks")?;
+    let mut info_a = InfoSheet::new_preseeded("info-a", "A")?;
+    info_a.constants.push(InfoConstant::new("RunDate", ConstantValue::Date("2026-05-01".into()), None)?);
+    info_a.constants.push(InfoConstant::new("Factor", ConstantValue::Number(2.0), None)?);
+    let mut info_b = InfoSheet::new_preseeded("info-b", "B")?;
+    info_b.constants.push(InfoConstant::new("Factor", ConstantValue::Number(5.0), None)?);
+    info_doc.info_sheets.extend([info_a.clone(), info_b.clone()]);
+    let mut mv_b = MultipleVariablesTable::new(2, 2)?;
+    mv_b.variables[0].title = "A".into();
+    mv_b.variables[1].title = "Scaled".into();
+    mv_b.variables[1].role = VariableRole::Calculated;
+    mv_b.variables[1].source = VariableSource::Calculated { formula: "[A] * Info(\"Factor\")".into() };
+    let mut ds_b = DataSheet::new("ds-bound", "Bound", TableArchetype::MultipleVariables(mv_b))?;
+    ds_b.info_sheet_id = Some(SheetId::new("info-a"));
+    info_doc.data_sheets.push(ds_b);
+    info_doc.active_sheet_id = Some(SheetId::new("info-a"));
+    assert_eq!((collect_info_downstream_references(&info_doc, &info_a).len(), collect_info_downstream_references(&info_doc, &info_b).len()), (1, 0));
+
+    let info_app = UiApp::from_session(Session::from_document(info_doc));
+    let tok_info = Tokens::from_theme_spec(&info_app.theme, &info_app.locale);
+    let mut ts_info = TrailingStudioEguiState {
+        info_selected_constant: Some("RunDate".into()),
+        info_synced_key: Some((SheetId::new("info-a"), "RunDate".into())),
+        info_name_draft: "RunDate".into(),
+        info_value_draft: String::new(),
+        info_kind_draft: 2,
+        ..Default::default()
+    };
+    let ctx_info = egui::Context::default();
+    let (mi0, _) = pass_ts(&ctx_info, &info_app, &mut ts_info, &tok_info, Default::default())?;
+    let (_, ii1) = pass_ts(
+        &ctx_info,
+        &info_app,
+        &mut ts_info,
+        &tok_info,
+        click_input(mi0.find_by_widget_id("inspector.info.save_const").unwrap().clipped_rect.center()),
+    )?;
+    let sp = ii1
+        .intents()
+        .iter()
+        .find_map(|i| match i {
+            UiIntent::EngineCommand { command_id, params } if command_id == "info.setConstant" => Some(params),
+            _ => None,
+        })
+        .unwrap();
+    assert!(sp.get("value") == Some(&Value::Null) && sp.get("kind").is_none());
+    ts_info.info_name_draft = "Different".into();
+    let (mi2, _) = pass_ts(&ctx_info, &info_app, &mut ts_info, &tok_info, Default::default())?;
+    assert!(mi0.find_by_widget_id("inspector.info.remove_const").is_some() && mi2.find_by_widget_id("inspector.info.remove_const").is_none());
+
+    // 5. AUD-09-41 & AUD-09-46: brushed deleted sheet fallback, no positional series[0] fallback, fresh Right Y2 title, sticky Methods copy reset.
+    let mut g_app = UiApp::new();
+    g_app.execute_command(
+        "sheet.createData",
+        json!({ "sheet_id": "ds-g41", "kind": "column", "cols": 2, "rows": 2, "auto_graph": true, "graph_sheet_id": "g-41" }),
+    )?;
+    let mut gdoc = g_app.document().clone();
+    if let Some(gs) = gdoc.graph_sheet_mut(&SheetId::new("g-41"))
+        && gs.spec.series.len() >= 2
+    {
+        gs.spec.series.remove(0);
+    }
+    gdoc.active_sheet_id = Some(SheetId::new("g-41"));
+    let mut g_app = UiApp::from_session(Session::from_document(gdoc));
+    g_app.brushed_cell = Some(SourceCellId { sheet_id: SheetId::new("deleted"), row: 0, col: 0, subcol: 0 });
+    assert_eq!(resolve_studio_surface(&g_app), StudioContextSurface::GraphInspector);
+    g_app.brushed_cell = Some(SourceCellId { sheet_id: SheetId::new("ds-g41"), row: 0, col: 0, subcol: 0 });
+    let tok_g = Tokens::from_theme_spec(&g_app.theme, &g_app.locale);
+    let (mg, _) = pass_ts(&egui::Context::default(), &g_app, &mut TrailingStudioEguiState::default(), &tok_g, Default::default())?;
+    assert!(!mg.find_by_widget_id("inspector.drill_back.format_point").unwrap().enabled);
+
+    g_app.brushed_cell = None;
+    let (ctx_y2, mut ts_y2) =
+        (egui::Context::default(), TrailingStudioEguiState { graph_tab: GraphStudioTab::Axes, graph_axis_target: 2, ..Default::default() });
+    let (my0, _) = pass_ts(&ctx_y2, &g_app, &mut ts_y2, &tok_g, Default::default())?;
+    let (_, iy1) = pass_ts(
+        &ctx_y2,
+        &g_app,
+        &mut ts_y2,
+        &tok_g,
+        click_input(my0.find_by_widget_id("inspector.graph.scale.Log10").unwrap().clipped_rect.center()),
+    )?;
+    assert!(iy1.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { command_id, params } if command_id == "graph.setAxes" && params["y2_axis"]["title"] == json!("Right Y"))));
+
+    let (mut r_app, r_ds) =
+        crate::helpers::seed_column_app(&[("A", &[1.0, 3.0, 5.0]), ("B", &[2.0, 4.0, 6.0])], ColumnDesignHint::UnpairedReplicates);
+    r_app.execute_command(
+        "analysis.run",
+        json!({ "source_sheet_id": r_ds.as_str(), "kind": AnalysisKind::DescriptiveStats(DescriptiveSpec::default()) }),
+    )?;
+    let r_id = r_app.document().result_sheets.first().unwrap().id.clone();
+    r_app.execute_command("sheet.select", json!({ "sheet_id": r_id.as_str() }))?;
+    r_app.sync_views();
+    let tok_r = Tokens::from_theme_spec(&r_app.theme, &r_app.locale);
+    let mut ts_r = TrailingStudioEguiState {
+        results_tab: ResultsStudioTab::Methods,
+        methods_format: "markdown".into(),
+        last_copied_methods: true,
+        last_copied_methods_text: "stale".into(),
+        ..Default::default()
+    };
+    let _ = pass_ts(&egui::Context::default(), &r_app, &mut ts_r, &tok_r, Default::default())?;
+    assert!(!ts_r.last_copied_methods);
+    Ok(())
+}

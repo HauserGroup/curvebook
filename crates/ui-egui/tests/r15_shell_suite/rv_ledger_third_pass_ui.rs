@@ -5,15 +5,14 @@ use curvebook_doc::{
     OneWayAnovaSpec, OneWayMethod, OutlierSpec, ResidualCovariance, ResultSheet, SheetId, TableArchetype, TwoGroupMethod, TwoGroupSpec,
 };
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::dialogs_canvas::dialog_patch::{patch_analyze, patch_edit_params};
 use curvebook_ui_egui::i18n::{CATALOG, LOCALES, catalog_len};
 use curvebook_ui_egui::menus::{ShortcutRegistry, ShortcutScope, UI_COMMANDS, normalize_shortcut_combo};
 use curvebook_ui_egui::modal_predicates::apply_r2_gaussian_toggle;
 use curvebook_ui_egui::{KeyModifiers, UiApp, ViewportMetrics, inspect_ui_tree};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::common::{TestRes, key_down};
-use crate::helpers::{exec, gui, patch_map, ui_cmd};
+use crate::helpers::{exec, gui, ui_cmd};
 
 fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String> {
     let mut app = UiApp::new();
@@ -26,11 +25,6 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
         .join("\n");
     exec(&mut app, "table.paste", json!({ "sheet_id": ds_id.as_str(), "start_row": 0, "start_col": 0, "text": text }))?;
     Ok((app, ds_id))
-}
-
-fn patch_ep(app: &mut UiApp, val: Value) -> TestRes {
-    let preset = app.locale_preset.clone();
-    patch_edit_params(&mut app.canvas_dialogs.edit_params, &patch_map(val), &preset)
 }
 
 #[test]
@@ -107,15 +101,14 @@ fn rv76_outlier_dialog_methods_parameters_and_parse_fit_method() -> TestRes {
         matches!(h.app().document().result_sheets.last().ok_or("grubbs rs")?.analysis.kind, AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: true }) if (alpha - 0.04).abs() < 1e-9)
     );
 
-    // 2) Order-independent ROUT JSON patch -> EditAnalysisParameters switch to Grubbs.
+    // 2) ROUT dialog state -> EditAnalysisParameters switch to Grubbs.
     let (mut app, ds2_id) = build_column_app(2, 8)?;
     exec(&mut app, "sheet.select", json!({ "sheet_id": ds2_id.as_str() }))?;
     ui_cmd(&mut app, "ui.analyze.open", json!({}))?;
-    gui(
-        &mut app,
-        "ui.answer_dialog",
-        json!({ "action": "ok", "fields": { "entry_id": "stats.outliers", "fdr_q_percent": 3.25, "outlier_method": "rout" } }),
-    )?;
+    app.canvas_dialogs.analyze.select_catalog_entry("stats.outliers");
+    app.canvas_dialogs.analyze.outlier_method = String::from("rout");
+    app.canvas_dialogs.analyze.outlier_fdr_q_percent = 3.25;
+    gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))?;
     let rout_rs = app.document().result_sheets.last().ok_or("rout rs")?;
     assert!(
         matches!(rout_rs.analysis.kind, AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent }) if (fdr_q_percent - 3.25).abs() < 1e-9)
@@ -124,7 +117,10 @@ fn rv76_outlier_dialog_methods_parameters_and_parse_fit_method() -> TestRes {
 
     exec(&mut app, "sheet.select", json!({ "sheet_id": rs_id.as_str() }))?;
     ui_cmd(&mut app, "ui.editParams.open", json!({ "sheet_id": rs_id.as_str() }))?;
-    gui(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "alpha": 0.01, "iterative": false, "outlier_method": "grubbs" } }))?;
+    if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft {
+        spec.update_kind(AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.01, iterative: false }));
+    }
+    gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))?;
     assert!(
         matches!(app.document().result_sheet(&rs_id).ok_or("updated")?.analysis.kind, AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: false }) if (alpha - 0.01).abs() < 1e-9)
     );
@@ -143,26 +139,15 @@ fn rv76_outlier_dialog_methods_parameters_and_parse_fit_method() -> TestRes {
     let fit_rs_id = SheetId::try_new(fit.payload["sheet_id"].as_str().ok_or("fit_rs_id")?).map_err(|e| e.to_string())?;
     exec(&mut xy_app, "sheet.select", json!({ "sheet_id": fit_rs_id.as_str() }))?;
     ui_cmd(&mut xy_app, "ui.editParams.open", json!({ "sheet_id": fit_rs_id.as_str() }))?;
-    gui(&mut xy_app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "fdr_q_percent": 4.5, "fit_method": "rout" } }))?;
+    if let Some(spec) = &mut xy_app.canvas_dialogs.edit_params.draft
+        && let AnalysisKind::NonlinearRegression(nl) = &mut spec.kind
+    {
+        nl.method = curvebook_doc::FitMethod::RoutOutlierElimination { fdr_q_percent: 4.5 };
+    }
+    gui(&mut xy_app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" }))?;
     assert!(
         matches!(xy_app.document().result_sheet(&fit_rs_id).ok_or("fit_rs")?.analysis.kind, AnalysisKind::NonlinearRegression(NonlinearFitSpec { method: curvebook_doc::FitMethod::RoutOutlierElimination { fdr_q_percent }, .. }) if (fdr_q_percent - 4.5).abs() < 1e-9)
     );
-    Ok(())
-}
-
-#[test]
-fn rv76_fit_method_shorthands_parse_cleanly() -> TestRes {
-    let (mut app, ds_id) = build_column_app(1, 5)?;
-    exec(&mut app, "sheet.select", json!({ "sheet_id": ds_id.as_str() }))?;
-    ui_cmd(&mut app, "ui.analyze.open", json!({}))?;
-    let preset = app.locale_preset.clone();
-    for (patch, expected_q) in [
-        (json!({ "entry_id": "fit.nonlinear", "fit_method": { "method": "rout", "fdr_q_percent": 3.2 } }), 3.2),
-        (json!({ "fit_method": "rout:2.75" }), 2.75),
-    ] {
-        patch_analyze(&mut app.canvas_dialogs.analyze, &patch_map(patch), &preset)?;
-        assert_eq!(app.canvas_dialogs.analyze.fit_method, curvebook_doc::FitMethod::RoutOutlierElimination { fdr_q_percent: expected_q });
-    }
     Ok(())
 }
 
@@ -218,19 +203,24 @@ fn rv78_assumption_and_matching_toggles_preserve_compatible_submethods_and_reml(
     let tg_id = SheetId::try_new(tg.payload["sheet_id"].as_str().ok_or("tg_id")?).map_err(|e| e.to_string())?;
     app.canvas_dialogs.edit_params.open_for_result(&app.document().result_sheet(&tg_id).ok_or("tg")?.clone());
 
-    patch_ep(&mut app, json!({ "assume_gaussian": false }))?;
+    app.canvas_dialogs.edit_params.set_assume_gaussian(false);
     assert!(
         matches!(app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::TwoGroupComparison(t)) if t.method == TwoGroupMethod::MannWhitneyU)
     );
-    patch_ep(&mut app, json!({ "assume_gaussian": true }))?;
+    app.canvas_dialogs.edit_params.set_assume_gaussian(true);
     assert!(
         matches!(app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::TwoGroupComparison(t)) if t.method == TwoGroupMethod::WelchT)
     );
     assert!(app.canvas_dialogs.edit_params.welch_correction);
 
-    for p in [json!({ "two_group_method": "ratio_paired" }), json!({ "paired_or_matched": false }), json!({ "paired_or_matched": true })] {
-        patch_ep(&mut app, p)?;
+    if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft
+        && let AnalysisKind::TwoGroupComparison(t) = &mut spec.kind
+    {
+        t.method = TwoGroupMethod::RatioPairedT;
     }
+    app.canvas_dialogs.edit_params.sync_rule_flags_from_kind();
+    app.canvas_dialogs.edit_params.set_paired_or_matched(false);
+    app.canvas_dialogs.edit_params.set_paired_or_matched(true);
     assert!(
         matches!(app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::TwoGroupComparison(t)) if t.method == TwoGroupMethod::RatioPairedT)
     );
@@ -247,8 +237,8 @@ fn rv78_assumption_and_matching_toggles_preserve_compatible_submethods_and_reml(
     let rm_sheet = ResultSheet::new(AnalysisSpec::new("res-rm", ds_id, AnalysisKind::OneWayAnova(rm_spec)).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     app.canvas_dialogs.edit_params.open_for_result(&rm_sheet);
-    patch_ep(&mut app, json!({ "paired_or_matched": false }))?;
-    patch_ep(&mut app, json!({ "paired_or_matched": true }))?;
+    app.canvas_dialogs.edit_params.set_paired_or_matched(false);
+    app.canvas_dialogs.edit_params.set_paired_or_matched(true);
     let Some(AnalysisKind::OneWayAnova(after)) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) else {
         return Err("expected OneWayAnova".into());
     };

@@ -1,7 +1,7 @@
 //! Human-equivalent `gui` MCP tool definitions and validated dispatch (`R8.6`).
 //!
-//! Exposes the 8 semantic GUI tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`,
-//! `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`)
+//! Exposes the 7 semantic GUI tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`,
+//! `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`)
 //! across both in-process [`GuiSessionHost`](crate::tools::GuiSessionHost) bindings and
 //! loopback `--control` desktop windows without reversing the `L6` layer boundary.
 
@@ -19,9 +19,9 @@ use crate::tools::{
 };
 use crate::toolsets::ToolAnnotations;
 
-/// Ordered list of the 8 `gui` MCP tool names exposed when the `gui` toolset is enabled.
-pub const GUI_TOOL_NAMES: [&str; 8] =
-    ["ui_inspect", "ui_screenshot", "ui_pointer_gesture", "ui_type_text", "ui_press_key", "ui_invoke_menu", "ui_switch_tab", "ui_answer_dialog"];
+/// Ordered list of the 7 `gui` MCP tool names exposed when the `gui` toolset is enabled.
+pub const GUI_TOOL_NAMES: [&str; 7] =
+    ["ui_inspect", "ui_screenshot", "ui_pointer_gesture", "ui_type_text", "ui_press_key", "ui_invoke_menu", "ui_switch_tab"];
 
 const VALID_INSPECT_SCOPES: [&str; 9] = ["all", "workspace", "dialog", "grid", "navigator", "canvas", "menus", "toolbar", "tabs"];
 const VALID_SCREENSHOT_TARGETS: [&str; 5] = ["full_window", "workspace", "viewport", "canvas", "dialog"];
@@ -41,30 +41,13 @@ const GUI_TYPE_TEXT_WORST_CASE_EFFECTS: Effects = Effects::MUTATES_DOCUMENT
     .with(Effects::READS_FILESYSTEM)
     .with(Effects::WRITES_FILESYSTEM);
 
-/// Worst-case effects for modal dialog updates/commits (including lossy conversion, export, or OS print).
-const GUI_DIALOG_WORST_CASE_EFFECTS: Effects = Effects::MUTATES_DOCUMENT
-    .with(Effects::CHANGES_UI_STATE)
-    .with(Effects::MAY_DISCARD_DATA)
-    .with(Effects::WRITES_FILESYSTEM)
-    .with(Effects::LAUNCHES_PROCESS);
-
-/// Return `true` when `name` identifies one of the 8 `gui` MCP tools.
+/// Return `true` when `name` identifies one of the 7 `gui` MCP tools.
 #[must_use]
 pub fn is_gui_tool_name(name: &str) -> bool {
-    matches!(
-        name,
-        "ui_inspect"
-            | "ui_screenshot"
-            | "ui_pointer_gesture"
-            | "ui_type_text"
-            | "ui_press_key"
-            | "ui_invoke_menu"
-            | "ui_switch_tab"
-            | "ui_answer_dialog"
-    )
+    matches!(name, "ui_inspect" | "ui_screenshot" | "ui_pointer_gesture" | "ui_type_text" | "ui_press_key" | "ui_invoke_menu" | "ui_switch_tab")
 }
 
-/// Return all 8 `gui` MCP [`ToolDefinition`] entries with schemas and `Effects`-aligned annotations.
+/// Return all 7 `gui` MCP [`ToolDefinition`] entries with schemas and `Effects`-aligned annotations.
 #[must_use]
 pub fn list_gui_tools() -> Vec<ToolDefinition> {
     vec![
@@ -75,7 +58,6 @@ pub fn list_gui_tools() -> Vec<ToolDefinition> {
         def_ui_press_key(),
         def_ui_invoke_menu(),
         def_ui_switch_tab(),
-        def_ui_answer_dialog(),
     ]
     .into_iter()
     .map(|mut def| {
@@ -261,18 +243,7 @@ fn def_ui_switch_tab() -> ToolDefinition {
     }
 }
 
-fn def_ui_answer_dialog() -> ToolDefinition {
-    ToolDefinition {
-        name: String::from("ui_answer_dialog"),
-        description: String::from(
-            "Update enabled modal/wizard controls by widget_id (`fields`/`values`/`patches`) and/or click a modal action button (e.g. 'ok', 'cancel', 'next', 'back', 'create', 'apply', 'preview').",
-        ),
-        input_schema: strict_schema::<UiAnswerDialogArgs>(),
-        annotations: ToolAnnotations::from_effects(GUI_DIALOG_WORST_CASE_EFFECTS),
-    }
-}
-
-/// Validate parameters and dispatch one of the 8 `gui` MCP tools against `state`.
+/// Validate parameters and dispatch one of the 7 `gui` MCP tools against `state`.
 pub(crate) fn dispatch_gui_tool(state: &mut McpServerState, name: &str, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     match name {
         "ui_inspect" => handle_ui_inspect(state, args),
@@ -282,7 +253,6 @@ pub(crate) fn dispatch_gui_tool(state: &mut McpServerState, name: &str, args: &M
         "ui_press_key" => handle_ui_press_key(state, args),
         "ui_invoke_menu" => handle_ui_invoke_menu(state, args),
         "ui_switch_tab" => handle_ui_switch_tab(state, args),
-        "ui_answer_dialog" => handle_ui_answer_dialog(state, args),
         _ => Err(ToolCallError::UnknownTool(name.to_owned())),
     }
 }
@@ -710,72 +680,6 @@ fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -
     insert_opt_str(&mut params, "sheet_id", sheet_id);
     insert_opt_str(&mut params, "widget_id", widget_id);
     dispatch_json_result(state, "ui.switch_tab", Value::Object(params))
-}
-
-#[derive(Default, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-struct UiAnswerDialogArgs {
-    /// Modal button action to activate (e.g. 'ok', 'cancel', 'back', 'next', 'create', 'apply', 'preview').
-    action: Option<String>,
-    /// Map of modal widget_id -> value to set before clicking action.
-    fields: Option<Map<String, Value>>,
-    /// Alias for fields mapping widget_id -> value.
-    values: Option<Map<String, Value>>,
-    /// Alias for fields mapping widget_id -> value.
-    patches: Option<Map<String, Value>>,
-    /// Optional flag creating a new ResultSheet directly when committing AnalyzeSheet.
-    force_create_new: Option<bool>,
-    /// Optional selection for prompt dialogs (e.g. 'create_new' or 'modify_existing').
-    choice: Option<String>,
-}
-
-fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let parsed: UiAnswerDialogArgs = deserialize_args("ui_answer_dialog", args)?;
-    let action = trim_opt_non_empty(parsed.action, "action")?;
-    let mut fields = parsed.fields;
-    let mut values = parsed.values;
-    let mut patches = parsed.patches;
-    let choice = trim_opt_non_empty(parsed.choice, "choice")?;
-    if action.is_none() && fields.is_none() && values.is_none() && patches.is_none() && choice.is_none() {
-        return Err(ToolCallError::InvalidParams(String::from(
-            "ui_answer_dialog requires \"action\", \"fields\", \"values\", \"patches\", or \"choice\"",
-        )));
-    }
-
-    // Mirror top-level `choice` into the active field-patch map (without clobbering an explicit
-    // `choice`/`duplicate.choice` field) so both live and headless `parse_answer_dialog_params`
-    // forward prompt selections like `modify_existing` / `create_new` (`AUD-13-11`).
-    if let Some(ref choice_str) = choice {
-        let target_map = if let Some(ref mut f) = fields {
-            f
-        } else if let Some(ref mut v) = values {
-            v
-        } else if let Some(ref mut p) = patches {
-            p
-        } else {
-            fields.get_or_insert_with(Map::new)
-        };
-        if !target_map.contains_key("choice") && !target_map.contains_key("duplicate.choice") {
-            target_map.insert(String::from("choice"), Value::String(choice_str.clone()));
-        }
-    }
-
-    let mut params = Map::new();
-    insert_opt_str(&mut params, "action", action);
-    insert_opt_str(&mut params, "choice", choice);
-    if let Some(force) = parsed.force_create_new {
-        params.insert(String::from("force_create_new"), Value::Bool(force));
-    }
-    if let Some(f) = fields {
-        params.insert(String::from("fields"), Value::Object(f));
-    }
-    if let Some(v) = values {
-        params.insert(String::from("values"), Value::Object(v));
-    }
-    if let Some(p) = patches {
-        params.insert(String::from("patches"), Value::Object(p));
-    }
-    dispatch_json_result(state, "ui.answer_dialog", Value::Object(params))
 }
 
 fn normalize_pointer_action(raw: &str) -> Result<&'static str, ToolCallError> {

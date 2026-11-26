@@ -20,7 +20,7 @@ Single-call request and response syntax:
 {"id":1,"ok":true,"result":{"command_id":"sheet.createData","mutated":true,"message":"created data table sheet","payload":{"sheet_id":"data-1","title":"Data 1","kind":"xy","info_sheet_id":"info-1","graph_sheet_id":"graph-1"}},"error":null}
 ```
 
-Built-in control methods are `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, and interactive UI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`). You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
+Built-in control methods are `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, and interactive UI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`). You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
 
 When calling `doc.export`, optional `transparent_bg: true` is supported only for `svg`, `png`, and `tiff`; passing `transparent_bg: true` for opaque formats such as `pdf` or `emf` fails with `bad_input`.
 

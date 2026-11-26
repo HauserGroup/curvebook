@@ -48,10 +48,10 @@ fn fa_sec14_11_power_wizard_create_collapses_into_single_undo_entry() -> TestRes
 
     gui(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.powerWizard.open" }))?;
     for _ in 0..3 {
-        gui(&mut app, "ui.answer_dialog", json!({ "action": "next" }))?;
+        gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.next" }))?;
     }
     app.canvas_dialogs.power_wizard.recalculate().map_err(|e| e.to_string())?;
-    gui(&mut app, "ui.answer_dialog", json!({ "action": "create" }))?;
+    gui(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.create" }))?;
     assert_eq!(app.session().undo_depth(), before_undo + 1);
     assert!(!app.document().data_sheets.is_empty() && !app.document().result_sheets.is_empty());
 
@@ -104,7 +104,7 @@ fn fa_sec13_11_live_egui_shell_enables_newcombe_wilson_when_odds_ratio_active() 
 
     for (disable_ar, expect_enabled) in [(false, true), (true, false)] {
         if disable_ar {
-            gui(&mut app, "ui.answer_dialog", json!({ "fields": { "edit.contingency.attributable_risk": false } }))?;
+            app.canvas_dialogs.edit_params.set_contingency_attributable_risk(false);
         }
         let tree = inspect_ui_tree(&app, Some("dialog"), false);
         let node = tree.find_widget("edit.contingency.ci.newcombe_wilson").ok_or("missing edit.contingency.ci.newcombe_wilson")?;

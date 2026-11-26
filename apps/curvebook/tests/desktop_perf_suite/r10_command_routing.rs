@@ -22,7 +22,7 @@ use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
 use curvebook_ui_egui::interaction::{InlineEditorTarget, ViewportMetrics};
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
-use curvebook_ui_egui::{CanvasPreviewFilter, StubPlatformClipboardAdapter, UiApp, dispatch_gui_action};
+use curvebook_ui_egui::{CanvasPreviewFilter, StubPlatformClipboardAdapter, UiApp};
 use eframe::egui;
 use serde_json::{Value, json};
 
@@ -57,8 +57,10 @@ fn build_populated_routing_app() -> Result<UiApp, Box<dyn std::error::Error>> {
 
     let _ = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.analyze.open", &json!({ "sheet_id": "data-mv" }))
         .map_err(|e| format!("open Analyze failed: {e}"))?;
-    let _ =
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "stats.clustering", "k_means_k": 2 } }))?;
+    app.canvas_dialogs.analyze.select_catalog_entry("stats.clustering");
+    app.canvas_dialogs.analyze.cluster_k_means_k = Some(2);
+    let cluster_intent = app.canvas_dialogs.analyze.build_create_new_intent().ok_or("clustering intent")?;
+    let _ = app.execute_command(&cluster_intent.command_id, cluster_intent.params)?;
     app.canvas_dialogs.close_dialog();
 
     let result_id = app.document().result_sheets.first().map(|r| r.id.as_str().to_owned()).ok_or("expected result sheet")?;

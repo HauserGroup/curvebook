@@ -1129,3 +1129,357 @@ fn r20_4_fit_zoom_contract_and_wcag_258_spacing_equivalent_verification() -> Box
     }
     Ok(())
 }
+
+#[test]
+fn aud_08_09_13_canvas_rulers_equation_tex_find_bar_and_split_results() -> BoxRes {
+    use crate::helpers::{click_input, run_egui_pass_with_ctx};
+    use curvebook_doc::{GlmFamily, GlmSpec, LinearRegressionSpec, SimpleLogisticSpec, SplineLowessSpec, SubcolumnMode, XColumnMode, XyTable};
+    use curvebook_tools::GridCellCoord;
+    use curvebook_tools::canvas::PhysicalUnit;
+    use curvebook_ui_egui::dialogs_canvas::copy_result_table_to_clipboard;
+    use curvebook_ui_egui::dialogs_r9::InsertModelEquationDialogState;
+    use curvebook_ui_egui::egui_shell::canvas_view::{CanvasPerSheetViewportState, compute_ruler_ticks, resolve_live_equation_tex};
+    use curvebook_ui_egui::egui_shell::results_view::{
+        format_result_cell_display_text, render_results_view_for_sheet, visible_row_index_for_raw_row,
+    };
+    use curvebook_ui_egui::egui_shell::sheet_find_bar::{
+        DataSheetFindMatch, ResultSheetFindMatch, SheetFindBarState, X_OR_TIME_COL_SENTINEL, find_matches_in_data_sheet_cached,
+        find_matches_in_data_sheet_with_locale, find_matches_in_result_sheet, find_matches_in_result_sheet_cached, render_sheet_find_bar,
+    };
+    use curvebook_ui_egui::egui_shell::{FrameInspectMeta, UiIntent};
+    use curvebook_ui_egui::i18n::LocalePreset;
+    use curvebook_ui_egui::{StubPlatformClipboardAdapter, handle_control_line};
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    // 1. AUD-08-05 & AUD-08-06: ui.zoom.fitSheet resets per-sheet pan_pt; compute_ruler_ticks 1-2-5 increments & wide pan.
+    let (mut gapp, gds) = crate::helpers::seed_xy_app(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]);
+    gapp.execute_command("graph.create", json!({ "sheet_id": "g-fit", "data_sheet_id": gds.as_str(), "kind": "xy", "initialized": true }))?;
+    gapp.execute_command("sheet.select", json!({ "sheet_id": "g-fit" }))?;
+    gapp.egui_views.canvas_view.pan_pt = [40.0, -25.0];
+    gapp.egui_views
+        .canvas_view
+        .sheet_viewports
+        .insert(SheetId::new("g-fit"), CanvasPerSheetViewportState { pan_pt: [40.0, -25.0], ..Default::default() });
+    assert!(handle_control_line(&mut gapp, r#"{"id":"f","method":"ui.zoom.fitSheet"}"#).contains("\"ok\":true"));
+    assert_eq!(
+        (gapp.egui_views.canvas_view.pan_pt, gapp.egui_views.canvas_view.sheet_viewports.get(&SheetId::new("g-fit")).map(|v| v.pan_pt)),
+        ([0.0, 0.0], Some([0.0, 0.0]))
+    );
+    let low = compute_ruler_ticks(0.0, 0.0, 400.0, 0.25, PhysicalUnit::Inches);
+    assert!(low.len() >= 2 && low[0].1 == 0 && low[1].1 == 2 && (low[1].0 - 36.0).abs() < 1e-3);
+    assert!(compute_ruler_ticks(-3000.0, 0.0, 600.0, 1.0, PhysicalUnit::Inches).first().is_some_and(|t| t.1 > 32));
+
+    // 2. AUD-13-16 & AUD-13-18: Live TeX parity for SimpleLogistic, Linear fixed_point, Custom DSL <B>, and Spline/GLM ROC suppression.
+    let mut eq_doc = ProjectDocument::new("Eq")?;
+    let ds = DataSheet::new("d-xy", "XY", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 2, 4)?))?;
+    let mut gs = GraphSheet::new_uninitialized_for_data("g-xy", &ds)?;
+    gs.initialized = true;
+    eq_doc.data_sheets.push(ds);
+    eq_doc.graph_sheets.push(gs.clone());
+    let roc = FittedCurveOverlay {
+        equation_id: "ROC".into(),
+        data_set_index: 0,
+        converged: true,
+        ambiguous: false,
+        points: vec![
+            CurveSamplePoint { x: 0.0, y: 0.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+            CurveSamplePoint { x: 1.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+        ],
+    };
+    let mut add_rs = |id: &str, kind: AnalysisKind, scalars: &[(&str, f64, usize)], curve: Option<FittedCurveOverlay>| -> BoxRes {
+        let mut r = ResultSheet::new(AnalysisSpec::new(id, "d-xy", kind)?)?;
+        r.status = ResultStatus::UpToDate;
+        for &(k, v, dsi) in scalars {
+            r.scalars.push(ResultScalarEntry { key: k.into(), value: v, units: None, data_set_index: Some(dsi) });
+        }
+        if let Some(c) = curve {
+            r.fitted_curves.push(c);
+        }
+        eq_doc.result_sheets.push(r);
+        Ok(())
+    };
+    add_rs(
+        "r-log",
+        AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default()),
+        &[("beta0", -2.5, 0), ("beta1", 0.0001234, 0), ("AIC", 42.0, 0)],
+        Some(roc.clone()),
+    )?;
+    add_rs(
+        "r-lin",
+        AnalysisKind::LinearRegression(LinearRegressionSpec { force_through_origin: true, fixed_point: Some((1.0, 5.0)), ..Default::default() }),
+        &[("Slope", 2.0, 0), ("YIntercept", 3.0, 0)],
+        None,
+    )?;
+    let mut nls = NonlinearFitSpec::new("custom_dsl");
+    nls.custom_dsl = Some("<A>Y = a*X\n<B>Y = b*X + c".into());
+    add_rs("r-nl", AnalysisKind::NonlinearRegression(nls), &[("b", 4.0, 1), ("c", 7.0, 1)], None)?;
+    add_rs(
+        "r-sp",
+        AnalysisKind::FitSplineLowess(SplineLowessSpec::default()),
+        &[],
+        Some(FittedCurveOverlay { equation_id: "lowess".into(), ..roc.clone() }),
+    )?;
+    add_rs(
+        "r-glm",
+        AnalysisKind::GeneralizedLinearModel(GlmSpec {
+            family: GlmFamily::Logistic,
+            response_column: 0,
+            predictor_columns: vec![1],
+            reference_levels: vec![],
+            compute_vif: false,
+        }),
+        &[("beta0", -1.0, 0), ("beta1", 0.5, 0)],
+        Some(roc),
+    )?;
+    let lt = resolve_live_equation_tex(&eq_doc, &SheetId::new("r-log"), 0, EquationDisplayMode::Substituted).ok_or("log tex")?;
+    assert!(lt.contains("P(Y=1)") && lt.contains("0.0001234") && !lt.contains("AIC"));
+    assert!(resolve_live_equation_tex(&eq_doc, &SheetId::new("r-lin"), 0, EquationDisplayMode::Substituted).unwrap().contains("+ 3"));
+    let nlt = resolve_live_equation_tex(&eq_doc, &SheetId::new("r-nl"), 1, EquationDisplayMode::Substituted).unwrap();
+    assert!(nlt.contains('4') && nlt.contains('7'));
+    assert!(resolve_live_equation_tex(&eq_doc, &SheetId::new("r-sp"), 0, EquationDisplayMode::Substituted).is_none());
+    assert!(resolve_live_equation_tex(&eq_doc, &SheetId::new("r-glm"), 0, EquationDisplayMode::Substituted).is_none());
+    let mut eq_dlg = InsertModelEquationDialogState::default();
+    eq_dlg.open_for_graph(&gs, &eq_doc);
+    assert!(
+        eq_dlg.available_result_ids.contains(&SheetId::new("r-log"))
+            && !eq_dlg.available_result_ids.contains(&SheetId::new("r-sp"))
+            && !eq_dlg.available_result_ids.contains(&SheetId::new("r-glm"))
+    );
+
+    // 3. AUD-09-22/23/24/25/39/40: Locale find (XY/Survival/Frame1), ResultSheet find/formatter/collapsed rows, split tab sync & copy, find bar open bool.
+    let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, 1, 2)?;
+    (xy.x_title, xy.x_cells[0][0], xy.data_sets[0].cells[1][0]) = ("Conc_uM".into(), Cell::number(12.5), Cell::number(42.5));
+    let ds_xy = DataSheet::new("ds-xy-f", "XY", TableArchetype::Xy(xy))?;
+    let de = LocalePreset::for_locale("de");
+    assert_eq!(
+        find_matches_in_data_sheet_with_locale(&ds_xy, "conc_um", false, true, &de),
+        vec![DataSheetFindMatch::ColumnTitle { col: X_OR_TIME_COL_SENTINEL }]
+    );
+    assert_eq!(
+        find_matches_in_data_sheet_with_locale(&ds_xy, "12,5", false, true, &de),
+        vec![DataSheetFindMatch::Cell(GridCellCoord::new(0, X_OR_TIME_COL_SENTINEL, 0))]
+    );
+    assert_eq!(find_matches_in_data_sheet_cached(7, &ds_xy, "42,5", false, true, &de), vec![DataSheetFindMatch::Cell(GridCellCoord::new(1, 0, 0))]);
+    let mut surv = SurvivalTable::new(1, 2)?;
+    (surv.time_title, surv.times[1]) = ("FollowUpDays".into(), Cell::number(90.0));
+    let ds_s = DataSheet::new("ds-s-f", "Surv", TableArchetype::Survival(surv))?;
+    assert_eq!(
+        find_matches_in_data_sheet_with_locale(&ds_s, "followupdays", false, true, &LocalePreset::default()),
+        vec![DataSheetFindMatch::ColumnTitle { col: X_OR_TIME_COL_SENTINEL }]
+    );
+    assert_eq!(
+        find_matches_in_data_sheet_with_locale(&ds_s, "90", false, true, &LocalePreset::default()),
+        vec![DataSheetFindMatch::Cell(GridCellCoord::new(1, X_OR_TIME_COL_SENTINEL, 0))]
+    );
+
+    let mut nl3 = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    nl3.output_significant_digits = Some(3);
+    let mut rs = ResultSheet::new(AnalysisSpec::new("rs-f", "ds-xy-f", AnalysisKind::NonlinearRegression(nl3))?)?;
+    rs.status = ResultStatus::UpToDate;
+    rs.tabs = vec![
+        ResultTab {
+            id: "e".into(),
+            title: "E".into(),
+            kind: ResultTabKind::Diagnostics,
+            column_headers: vec!["Est".into()],
+            row_labels: vec![],
+            rows: vec![],
+            footnotes: vec![],
+        },
+        ResultTab {
+            id: "m".into(),
+            title: "M".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["Mean".into(), "95% CI".into()],
+            row_labels: vec!["Mean".into(), "Unreached".into()],
+            rows: vec![
+                vec![ResultCell::Text("Mean".into()), ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open }],
+                vec![
+                    ResultCell::Number { value: f64::NAN, prefix: None, units: None },
+                    ResultCell::Number { value: 12.3456, prefix: None, units: None },
+                ],
+            ],
+            footnotes: vec![],
+        },
+    ];
+    assert!(
+        find_matches_in_result_sheet(&rs, 0, false, "Est", false, false).is_empty()
+            && find_matches_in_result_sheet(&rs, 1, false, "NaN", false, false).is_empty()
+    );
+    assert_eq!(
+        find_matches_in_result_sheet(&rs, 1, false, "??? (ambiguous)", false, true),
+        vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 1 }]
+    );
+    assert_eq!(find_matches_in_result_sheet(&rs, 1, false, "Mean", true, true), vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 }]);
+    assert_eq!(
+        find_matches_in_result_sheet_cached(1, &rs, 1, false, "12.3", false, true),
+        vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 1, col_idx: 1 }]
+    );
+    assert_eq!(format_result_cell_display_text(&rs.tabs[1].rows[0][1], &rs, &rs.tabs[1]), "??? (ambiguous)");
+
+    let sec = ResultTab {
+        id: "sec".into(),
+        title: "S".into(),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec!["V".into()],
+        row_labels: vec!["SA".into(), "A1".into(), "A2".into(), "SB".into(), "B1".into()],
+        rows: vec![
+            vec![ResultCell::Empty],
+            vec![ResultCell::Number { value: 1.0, prefix: None, units: None }],
+            vec![ResultCell::Number { value: 2.0, prefix: None, units: None }],
+            vec![ResultCell::Empty],
+            vec![ResultCell::Number { value: 3.0, prefix: None, units: None }],
+        ],
+        footnotes: vec![],
+    };
+    assert_eq!(visible_row_index_for_raw_row(&SheetId::new("rs-f"), &sec, 4, &BTreeSet::from(["rs-f:sec:0".into()])), 2);
+
+    // Split ResultSheet scroll_to_match + live tab switch copy
+    let mut sw_doc = ProjectDocument::new("TabSw")?;
+    sw_doc.add_data_sheet(DataSheet::new("ds-sw", "DS", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2)?))?)?;
+    let mut sw_rs = ResultSheet::new(AnalysisSpec::new("res-sw", "ds-sw", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?)?;
+    sw_rs.status = ResultStatus::UpToDate;
+    sw_rs.tabs = vec![
+        ResultTab {
+            id: "t0".into(),
+            title: "T0".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["V".into()],
+            row_labels: vec!["R0".into()],
+            rows: vec![vec![ResultCell::Text("STALE_0".into())]],
+            footnotes: vec![],
+        },
+        ResultTab {
+            id: "t1".into(),
+            title: "T1".into(),
+            kind: ResultTabKind::Diagnostics,
+            column_headers: vec!["V".into()],
+            row_labels: vec!["R0".into()],
+            rows: vec![vec![ResultCell::Text("FRESH_1".into())]],
+            footnotes: vec![],
+        },
+    ];
+    sw_doc.add_result_sheet(sw_rs)?;
+    sw_doc.active_sheet_id = Some(SheetId::new("ds-sw"));
+    let mut sw_app = UiApp::from_session(Session::from_document(sw_doc));
+    sw_app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
+    let tok = Tokens::from_theme_spec(&sw_app.theme, &sw_app.locale);
+    let mut rv = ResultsViewEguiState::default();
+    rv.scroll_to_match(SheetId::new("res-sw"), 0, 0, 0);
+    let mut i_sc = PendingUiIntents::new();
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(800.0, 500.0), Default::default(), true, |_, ui| {
+        let _ = render_results_view_for_sheet(
+            ui,
+            &sw_app,
+            Some(&SheetId::new("res-sw")),
+            &mut rv,
+            &tok,
+            true,
+            &mut FrameInspectMeta::default(),
+            &mut i_sc,
+        );
+    })?;
+    assert!(
+        i_sc.intents().iter().any(|i| matches!(i, UiIntent::SyncResultSelection { sheet_id, tab_index: 0, .. } if sheet_id.as_str() == "res-sw"))
+    );
+
+    sw_app.sync_views();
+    sw_app.canvas_dialogs.result_view.bound_sheet_id = Some("res-sw".into());
+    sw_app.canvas_dialogs.result_view.bound_tab_idx = Some(0);
+    sw_app.canvas_dialogs.result_view.selected_anchor = Some((0, 0));
+    sw_app.canvas_dialogs.result_view.selected_focus = Some((0, 0));
+    let mut rv2 = ResultsViewEguiState {
+        selected_cell: Some((SheetId::new("res-sw"), 0, 0, 0)),
+        selection_anchor: Some((SheetId::new("res-sw"), 0, 0, 0)),
+        ..ResultsViewEguiState::default()
+    };
+    let (ctx_sw, mut m_sw) = (egui::Context::default(), FrameInspectMeta::default());
+    run_egui_pass_with_ctx(&ctx_sw, egui::vec2(800.0, 500.0), Default::default(), true, |c, ui| {
+        m_sw.begin_pass(c);
+        render_results_view_for_sheet(ui, &sw_app, Some(&SheetId::new("res-sw")), &mut rv2, &tok, true, &mut m_sw, &mut PendingUiIntents::new());
+    })?;
+    let t1_r = m_sw.find_by_widget_id("result.tab.t1").ok_or("t1")?.clipped_rect;
+    let mut i_t1 = PendingUiIntents::new();
+    run_egui_pass_with_ctx(&ctx_sw, egui::vec2(800.0, 500.0), click_input(t1_r.center()), true, |c, ui| {
+        let mut m2 = FrameInspectMeta::default();
+        m2.begin_pass(c);
+        render_results_view_for_sheet(ui, &sw_app, Some(&SheetId::new("res-sw")), &mut rv2, &tok, true, &mut m2, &mut i_t1);
+    })?;
+    assert!(rv2.selected_cell.is_none() && rv2.selection_anchor.is_none());
+    let _ = i_t1.commit_all_if_settled(&mut sw_app, false);
+    sw_app.egui_views.results_view = rv2;
+    let ctxt = copy_result_table_to_clipboard(&mut sw_app, "res-sw", false).command_result.unwrap()["copied_text"].as_str().unwrap().to_owned();
+    assert!(ctxt.contains("FRESH_1") && !ctxt.contains("STALE_0"));
+
+    // AUD-09-39 & Wave3 Frame-1 German find
+    let mut fs_bar = SheetFindBarState::default();
+    fs_bar.open_for_sheet(Some(SheetId::new("ds-sw")));
+    let open_ret = run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(900.0, 500.0), Default::default(), true, |c, _| {
+        render_sheet_find_bar(
+            c,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0)),
+            true,
+            false,
+            2,
+            &mut fs_bar,
+            &tok,
+            &mut FrameInspectMeta::default(),
+            &mut PendingUiIntents::new(),
+        )
+    })?;
+    fs_bar.close();
+    let closed_ret = run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(900.0, 500.0), Default::default(), true, |c, _| {
+        render_sheet_find_bar(
+            c,
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0)),
+            true,
+            false,
+            2,
+            &mut fs_bar,
+            &tok,
+            &mut FrameInspectMeta::default(),
+            &mut PendingUiIntents::new(),
+        )
+    })?;
+    assert!(open_ret && !closed_ret);
+
+    let (mut de_app, de_sid) = crate::helpers::seed_column_app(&[("Dose", &[12.5, 99.0])], ColumnDesignHint::UnpairedReplicates);
+    de_app.set_locale("de");
+    let mut views = EguiShellViewState::default();
+    views.sheet_find.open_for_sheet(Some(de_sid));
+    views.sheet_find.query = "12,5".into();
+    let lay = LayoutMetrics::CANONICAL.solve_shell_layout(ShellLayoutInput {
+        viewport_w_pt: 1100.0,
+        viewport_h_pt: 720.0,
+        empty_workspace: false,
+        navigator_open: false,
+        inspector_open: false,
+        family_open: false,
+        leading_user_collapsed: false,
+        trailing_user_collapsed: false,
+        leading_width_override_pt: None,
+        trailing_width_override_pt: None,
+        host_draws_menu_bar: false,
+        is_rtl: false,
+    });
+    let dec = HybridCoexistenceArbiter::evaluate_with_views(&de_app, &views, false);
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        let _ = render_center_stage(
+            ui,
+            &de_app,
+            &mut views,
+            CenterStageContext {
+                tokens: &Tokens::default(),
+                decision: &dec,
+                layout: lay,
+                focused_pane: ActiveWorkspacePane::MainCanvasOrGrid,
+                enabled: true,
+            },
+            &mut FrameInspectMeta::default(),
+            &mut PendingUiIntents::new(),
+        );
+    })?;
+    assert!(views.sheet_find.last_match_count == 1 && views.column_grid.active_find_matches.is_some());
+    Ok(())
+}

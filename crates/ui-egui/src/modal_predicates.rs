@@ -1,7 +1,7 @@
 //! Declarative modal conditional enablement & graying predicates (`R1`–`R10`, `docs/gui-workflows.md` §3.2).
 //!
 //! Single source of truth consumed by live egui dialog widgets (`.add_enabled` + disabled tooltips),
-//! `ui.inspect` (`ControlNode { enabled, disabled_reason }`), `ui.switch_tab`, and `ui.answer_dialog`.
+//! `ui.inspect` (`ControlNode { enabled, disabled_reason }`), and `ui.switch_tab`.
 
 use curvebook_doc::{
     AnalysisKind, Cell, CellValue, ColumnDesignHint, ContingencySpec, MultiplicityMethod, OneWayMethod, PValueFormat, ProjectDocument,
@@ -659,7 +659,7 @@ pub fn evaluate_dialog_button_for_app(app: &crate::UiApp, action: &str) -> Optio
 }
 
 /// Evaluate dialog footer buttons (`ok`, `apply`, `cancel`, `back`, `next`, `create`, `preview`)
-/// for `ui.inspect` and `ui.answer_dialog` validation.
+/// for `ui.inspect` and dialog action validation.
 #[must_use]
 pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument, action: &str) -> Option<ControlEnablement> {
     let norm = action.trim().to_ascii_lowercase();

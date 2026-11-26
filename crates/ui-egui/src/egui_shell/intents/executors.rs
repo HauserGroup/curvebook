@@ -410,10 +410,6 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
 
 fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
-        UiIntent::PatchActiveDialog { fields } => {
-            crate::dialogs_canvas::dialog_patch::patch_active_dialog(app, &fields)?;
-            Ok(UiIntentOutcome::ShellUpdated)
-        }
         UiIntent::CommitDialogAction { action } => {
             let result = super::super::dialog_actions::execute_dialog_button_action(app, &action)?;
             Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
@@ -425,6 +421,86 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
             app.grid.import_wizard.open = false;
             app.egui_views.transform_modals.open_kind = None;
             app.egui_views.app_modals.close_all();
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetRetargetSelectedDatasets { cols } => {
+            app.canvas_dialogs.change_data.selected_data_sets = cols;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::UpdateImportReshapeState(state) => {
+            app.grid.import_reshape = *state;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetImportReshapePlateValuesText { text, ensure_default_roles } => {
+            let parsed = app
+                .grid
+                .import_reshape
+                .parse_plate_values_text(&text, &app.locale_preset)
+                .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
+            app.grid.import_reshape.plate_values = parsed;
+            if ensure_default_roles {
+                let is_384 = app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::Plate384;
+                let expected = if is_384 { 384 } else { 96 };
+                if app.grid.import_reshape.plate_roles.len() != expected {
+                    app.grid.import_reshape.plate_roles = import_wizard::default_plate_roles(is_384, app.grid.import_reshape.subtract_blank_mean);
+                }
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetConvertArchetypeTarget { target_kind } => {
+            let mut working = app.canvas_dialogs.convert_archetype.clone();
+            let prev_target = working.target_kind;
+            working.set_target_kind(target_kind);
+            if (working.target_kind != prev_target || !working.preview_ready)
+                && let Some(intent) = working.preview_intent()
+            {
+                let out = app.execute_session_ui_cmd(&intent.command_id, intent.params)?;
+                working.apply_preview_payload(&out.payload);
+            }
+            app.canvas_dialogs.convert_archetype = working;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetExcludeWithReason { reason_tag, note } => {
+            if let Some(tag) = reason_tag {
+                app.canvas_dialogs.exclude_with_reason.reason_tag = tag;
+            }
+            if let Some(n) = note {
+                app.canvas_dialogs.exclude_with_reason.note = n;
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::UpdateFormatSelectedPointsState(state) => {
+            app.canvas_dialogs.format_points = *state;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::UpdateInsertModelEquationState(state) => {
+            app.canvas_dialogs.insert_model_equation = *state;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SwitchFormatAxesTarget { target } => {
+            let doc = app.document().clone();
+            app.canvas_dialogs.format_axes.switch_target_axis_preserving_thresholds(target, Some(&doc));
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetCommandPaletteQuery { query } => {
+            app.canvas_dialogs.command_palette.query.clone_from(&query);
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                app.egui_views.command_palette.query = query;
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetHookPickerSearch { query } => {
+            app.canvas_dialogs.hook_picker.search_query = query;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetCheckpointsDraft { name, note } => {
+            if let Some(n) = name {
+                app.canvas_dialogs.checkpoints.name_draft = n;
+            }
+            if let Some(nt) = note {
+                app.canvas_dialogs.checkpoints.note_draft = nt;
+            }
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::OpenManageVariables { .. }
@@ -686,26 +762,21 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                 return Ok(UiIntentOutcome::ShellUpdated);
             }
             if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ImportReshape) || app.grid.import_reshape.open {
-                let mut fields = serde_json::Map::new();
                 if app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::TidyLongPivot {
-                    fields.insert(String::from("tidy_csv"), serde_json::Value::String(clip.clone()));
-                    crate::dialogs_canvas::dialog_patch::patch_import_reshape(&mut app.grid.import_reshape, &fields, &app.locale_preset)
-                        .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
+                    app.grid.import_reshape.tidy_csv = clip;
                     app.egui_views.import_wizard.reshape_tidy_csv_draft = app.grid.import_reshape.tidy_csv.clone();
                 } else {
-                    fields.insert(String::from("data"), serde_json::Value::String(clip));
+                    let parsed = app
+                        .grid
+                        .import_reshape
+                        .parse_plate_values_text(&clip, &app.locale_preset)
+                        .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
+                    app.grid.import_reshape.plate_values = parsed;
                     let expected = if app.grid.import_reshape.mode == crate::grid_view::ImportReshapeMode::Plate384 { 384 } else { 96 };
                     if app.grid.import_reshape.plate_roles.len() != expected {
-                        fields.insert(
-                            String::from("plate_roles"),
-                            serde_json::Value::Array(import_wizard::default_plate_roles(
-                                expected == 384,
-                                app.grid.import_reshape.subtract_blank_mean,
-                            )),
-                        );
+                        app.grid.import_reshape.plate_roles =
+                            import_wizard::default_plate_roles(expected == 384, app.grid.import_reshape.subtract_blank_mean);
                     }
-                    crate::dialogs_canvas::dialog_patch::patch_import_reshape(&mut app.grid.import_reshape, &fields, &app.locale_preset)
-                        .map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
                     app.egui_views.import_wizard.plate_values_draft = app
                         .grid
                         .import_reshape

@@ -1,8 +1,8 @@
 //! `Edit Analysis Parameters...` (`Cmd+T`) dialog state machine and live preview diffing.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, DiagnosticPlotKind, GraphKind, MultiplicityMethod, MultivariateSpec, OneWayMethod, OutlierSpec, PValueFormat,
-    ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, SheetId, TwoGroupMethod,
+    AnalysisKind, AnalysisSpec, DiagnosticPlotKind, GraphKind, MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayMethod, OutlierSpec,
+    PValueFormat, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, SheetId, SurvivalAnalysisSpec, TwoGroupMethod,
 };
 
 use curvebook_tools::ToolCommandIntent;
@@ -453,6 +453,293 @@ impl EditAnalysisParametersState {
         if let Some(spec) = &mut self.draft {
             spec.p_value_format = format;
         }
+    }
+
+    /// Update custom decimal precision when `PValueFormat::Custom` is active.
+    pub fn set_p_value_decimals(&mut self, decimals: u8) -> Result<(), String> {
+        if let Some(spec) = &mut self.draft {
+            let PValueFormat::Custom { scientific_below, .. } = spec.p_value_format else {
+                return Err(String::from("Custom decimal precision spinner is disabled unless Custom P-value format is selected."));
+            };
+            spec.p_value_format = PValueFormat::new_custom(decimals, scientific_below);
+        }
+        Ok(())
+    }
+
+    /// Toggle Gaussian / parametric assumption with sub-method quadrant memory.
+    pub fn set_assume_gaussian(&mut self, assume_gaussian: bool) {
+        self.assume_gaussian = assume_gaussian;
+        let matched = self.paired_or_matched;
+        let ctrl = self.control_column;
+        let Some(mut spec) = self.draft.take() else {
+            return;
+        };
+        self.remember_submethods_from_kind(&spec.kind);
+        let mut kind = spec.kind.clone();
+        crate::modal_predicates::apply_r2_gaussian_toggle(&mut kind, assume_gaussian, matched, ctrl);
+        match &mut kind {
+            AnalysisKind::OneWayAnova(a) if assume_gaussian => {
+                a.method = if matched {
+                    OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                } else {
+                    self.saved_one_way_param_unpaired
+                };
+            }
+            AnalysisKind::TwoGroupComparison(t) => {
+                t.method = self.two_group_memory.resolve(assume_gaussian, matched, Some(t.method));
+            }
+            _ => {}
+        }
+        spec.update_kind(kind);
+        self.draft = Some(spec);
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Toggle paired / repeated-measures design with sub-method quadrant memory.
+    pub fn set_paired_or_matched(&mut self, matched: bool) {
+        self.paired_or_matched = matched;
+        let Some(mut spec) = self.draft.take() else {
+            return;
+        };
+        self.remember_submethods_from_kind(&spec.kind);
+        let mut updated = spec.kind.clone();
+        match &mut updated {
+            AnalysisKind::OneWayAnova(a) => {
+                a.method = match (self.assume_gaussian, matched) {
+                    (true, true) => OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse },
+                    (true, false) => self.saved_one_way_param_unpaired,
+                    (false, true) => OneWayMethod::Friedman,
+                    (false, false) => OneWayMethod::KruskalWallis,
+                };
+            }
+            AnalysisKind::TwoGroupComparison(t) => {
+                t.method = self.two_group_memory.resolve(self.assume_gaussian, matched, Some(t.method));
+            }
+            AnalysisKind::FactorialAnova(f) => {
+                f.repeated_measures = if matched { RepeatedMeasuresDesign::RowFactorMatched } else { RepeatedMeasuresDesign::None };
+            }
+            _ => {}
+        }
+        spec.update_kind(updated);
+        self.draft = Some(spec);
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Enable or disable compare-against-control mode (switches post-hoc to Dunnett when enabled).
+    pub fn set_compare_against_control(&mut self, enabled: bool) {
+        self.compare_against_control = enabled;
+        if enabled {
+            self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: self.control_column });
+        }
+    }
+
+    /// Set the control column index for Dunnett comparisons.
+    pub fn set_control_column(&mut self, col: usize) {
+        self.control_column = col;
+        if self.compare_against_control {
+            self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: col });
+        }
+    }
+
+    /// Toggle correlation all-pairs mode (turning it off clears heatmap generation).
+    pub fn set_correlation_all_pairs(&mut self, all_pairs: bool) {
+        self.correlation_all_pairs = all_pairs;
+        if !all_pairs {
+            self.correlation_heatmap = false;
+        }
+    }
+
+    /// Toggle correlation heatmap generation (requires all-pairs mode).
+    pub fn set_correlation_heatmap(&mut self, enabled: bool) -> Result<(), String> {
+        if enabled && !self.correlation_all_pairs {
+            return Err(String::from("Create correlation heatmap is disabled in X vs every Y mode."));
+        }
+        self.correlation_heatmap = enabled;
+        Ok(())
+    }
+
+    /// Set multiplicity method on ANOVA / Nested / Kaplan-Meier drafts with R1b/R2 gating.
+    pub fn set_multiplicity_method(&mut self, method: MultiplicityMethod) -> Result<(), String> {
+        let draft_reml = self.draft.as_ref().is_some_and(draft_forces_reml_mode);
+        let gate = crate::modal_predicates::r1b_post_hoc_option_enabled(self.assume_gaussian, draft_reml, method);
+        if !gate.enabled {
+            return Err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method is disabled.")));
+        }
+        self.set_anova_multiplicity(method);
+        Ok(())
+    }
+
+    fn set_anova_multiplicity(&mut self, method: MultiplicityMethod) {
+        self.update_draft_kind(|updated| {
+            match updated {
+                AnalysisKind::OneWayAnova(a) => a.multiplicity.method = method,
+                AnalysisKind::FactorialAnova(f) => f.multiplicity.method = method,
+                AnalysisKind::NestedComparison(n) => n.multiplicity.method = method,
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = method,
+                _ => return false,
+            }
+            true
+        });
+        if self.draft.is_some() {
+            self.sync_rule_flags_from_kind();
+        }
+    }
+
+    /// Update one-way ANOVA method while preserving sub-method memory and syncing rule flags.
+    pub fn set_one_way_method(&mut self, method: OneWayMethod) {
+        if let Some(mut spec) = self.draft.take() {
+            self.remember_submethods_from_kind(&spec.kind);
+            if let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone() {
+                a.method = method;
+                spec.update_kind(AnalysisKind::OneWayAnova(a));
+            }
+            self.draft = Some(spec);
+            self.sync_rule_flags_from_kind();
+        }
+    }
+
+    /// Set Geisser-Greenhouse sphericity correction on repeated-measures one-way ANOVA.
+    pub fn set_geisser_greenhouse(&mut self, gg: bool) -> Result<(), String> {
+        if !self.paired_or_matched {
+            return Err(String::from("Geisser-Greenhouse sphericity control is disabled when No matching is selected."));
+        }
+        self.try_update_draft_kind(|k| match k {
+            AnalysisKind::OneWayAnova(a) => {
+                if a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured {
+                    return Err(String::from("Sphericity corrections are disabled when Mixed-Effects REML is active."));
+                }
+                a.method = OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg };
+                Ok(true)
+            }
+            _ => Ok(false),
+        })?;
+        self.sync_rule_flags_from_kind();
+        Ok(())
+    }
+
+    /// Enable or disable mixed-effects REML on One-Way or Factorial ANOVA drafts.
+    pub fn set_mixed_effects_reml(&mut self, enabled: bool) {
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::OneWayAnova(a) => {
+                a.mixed_effects_reml = enabled;
+                if enabled && !crate::modal_predicates::r1b_is_reml_allowed_post_hoc(a.multiplicity.method) {
+                    a.multiplicity.method = MultiplicityMethod::Bonferroni;
+                }
+                true
+            }
+            AnalysisKind::FactorialAnova(f) => {
+                f.mixed_effects_reml = enabled;
+                if enabled && !crate::modal_predicates::r1b_is_reml_allowed_post_hoc(f.multiplicity.method) {
+                    f.multiplicity.method = MultiplicityMethod::Bonferroni;
+                }
+                true
+            }
+            _ => false,
+        });
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Set denominator degrees-of-freedom approximation for REML / nested models.
+    pub fn set_df_method(&mut self, method: MixedModelDfMethod) {
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::OneWayAnova(a) => {
+                a.df_method = method;
+                true
+            }
+            AnalysisKind::FactorialAnova(f) => {
+                f.df_method = method;
+                true
+            }
+            AnalysisKind::NestedComparison(n) => {
+                n.df_method = method;
+                true
+            }
+            _ => false,
+        });
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Set residual covariance structure on One-Way or Factorial ANOVA drafts.
+    pub fn set_residual_covariance(&mut self, cov: ResidualCovariance) {
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::OneWayAnova(a) => {
+                a.residual_covariance = cov;
+                true
+            }
+            AnalysisKind::FactorialAnova(f) => {
+                f.residual_covariance = cov;
+                true
+            }
+            _ => false,
+        });
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Toggle Welch's unequal-variance correction on two-group parametric drafts.
+    pub fn set_welch_correction(&mut self, enabled: bool) -> Result<(), String> {
+        let two_method = self.draft.as_ref().and_then(|s| match &s.kind {
+            AnalysisKind::TwoGroupComparison(two) => Some(two.method),
+            _ => None,
+        });
+        if let Some(method) = two_method {
+            if !crate::modal_predicates::r4_two_group_welch_correction(method).enabled {
+                if enabled {
+                    return Err(String::from("Welch's correction is disabled for paired or nonparametric tests."));
+                }
+                self.welch_correction = false;
+                return Ok(());
+            }
+            self.welch_correction = enabled;
+            self.update_draft_kind(|k| match k {
+                AnalysisKind::TwoGroupComparison(two) => {
+                    if enabled {
+                        two.method = TwoGroupMethod::WelchT;
+                    } else if matches!(two.method, TwoGroupMethod::WelchT | TwoGroupMethod::UnpairedT) {
+                        two.method = TwoGroupMethod::UnpairedT;
+                    }
+                    true
+                }
+                _ => false,
+            });
+            self.sync_rule_flags_from_kind();
+        }
+        Ok(())
+    }
+
+    /// Toggle attributable risk option on Contingency drafts.
+    pub fn set_contingency_attributable_risk(&mut self, enabled: bool) {
+        self.contingency_attributable_risk_checked = enabled;
+        let keep_ratios = enabled || self.contingency_odds_ratio_checked || self.contingency_relative_risk_checked;
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::Contingency(c) => {
+                c.compute_odds_and_risk_ratios = keep_ratios;
+                true
+            }
+            _ => false,
+        });
+    }
+
+    /// Toggle automatic k-means cluster selection (`None` <-> `Some(3)`).
+    pub fn toggle_k_means_auto(&mut self) {
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, .. }) => {
+                *k_means_k = if k_means_k.is_none() { Some(3) } else { None };
+                true
+            }
+            _ => false,
+        });
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Update GLM VIF computation flag on the active draft.
+    pub fn set_glm_compute_vif(&mut self, enabled: bool) {
+        self.update_draft_kind(|k| match k {
+            AnalysisKind::GeneralizedLinearModel(glm) => {
+                glm.compute_vif = enabled;
+                true
+            }
+            _ => false,
+        });
     }
 
     /// Pin or clear custom title on the draft [`AnalysisSpec`].

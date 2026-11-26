@@ -1521,10 +1521,116 @@ fn parse_f64_list_text(raw: &str, preset: &crate::i18n::LocalePreset) -> Option<
     Some(out)
 }
 
-fn sync_active_dialog_value(app: &mut UiApp, key: &str, val: Value) {
-    let mut map = serde_json::Map::new();
-    map.insert(key.to_owned(), val);
-    let _ = crate::dialogs_canvas::dialog_patch::patch_active_dialog(app, &map);
+fn parse_math_preset_str(raw: &str) -> Result<Option<curvebook_doc::MathTransformPreset>, String> {
+    use curvebook_doc::MathTransformPreset;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
+    if matches!(compact.as_str(), "none" | "identity" | "null" | "x" | "y") {
+        return Ok(None);
+    }
+    let norm: String = trimmed.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let preset = match (compact.as_str(), norm.as_str()) {
+        (_, "log10" | "log10x" | "log10y" | "ylog10y" | "ylog10x" | "xlog10x") => MathTransformPreset::Log10,
+        (_, "ln" | "lnx" | "lny" | "loge" | "ylny" | "ylnx" | "xlnx") => MathTransformPreset::Ln,
+        (_, "log2" | "log2x" | "log2y" | "ylog2y" | "ylog2x" | "xlog2x") => MathTransformPreset::Log2,
+        ("10^x" | "10^y" | "10**x" | "10**y", _) | (_, "exp10" | "exp10x" | "exp10y" | "10powx" | "10powy") => MathTransformPreset::Exp10,
+        ("e^x" | "e^y", _) | (_, "exp" | "expx" | "expy" | "epowx" | "epowy") => MathTransformPreset::Exp,
+        ("1/x" | "1/y", _) | (_, "reciprocal" | "reciprocalx" | "reciprocaly") => MathTransformPreset::Reciprocal,
+        (_, "sqrt" | "sqrtx" | "sqrty") => MathTransformPreset::Sqrt,
+        ("x^2" | "y^2" | "x*x" | "y*y" | "x**2" | "y**2", _) | (_, "square" | "squarex" | "squarey") => MathTransformPreset::Square,
+        (_, "logit" | "logitx" | "logity") => MathTransformPreset::Logit,
+        (_, "probit" | "probitx" | "probity") => MathTransformPreset::Probit,
+        (_, "arcsinsqrt" | "arcsinsqrtx" | "arcsinsqrty") => MathTransformPreset::ArcsinSqrt,
+        _ => return Err(format!("unknown math transform preset `{raw}`")),
+    };
+    Ok(Some(preset))
+}
+
+fn apply_transform_formula_str(
+    raw: &str,
+    x_slot: &mut Option<curvebook_doc::MathTransformPreset>,
+    y_slot: &mut Option<curvebook_doc::MathTransformPreset>,
+) -> Result<(), String> {
+    for part in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((lhs, rhs)) = part.split_once('=') {
+            let axis = lhs.trim().to_ascii_lowercase();
+            let parsed = parse_math_preset_str(rhs)?;
+            match axis.as_str() {
+                "x" | "x_transform" => *x_slot = parsed,
+                "y" | "y_transform" => *y_slot = parsed,
+                _ => return Err(format!("unsupported transform formula target `{lhs}`")),
+            }
+        } else {
+            *y_slot = parse_math_preset_str(part)?;
+        }
+    }
+    Ok(())
+}
+
+fn parse_axis_thresholds_text(raw: &str, preset: &crate::i18n::LocalePreset) -> Option<Vec<curvebook_doc::AxisThreshold>> {
+    use curvebook_doc::AxisThreshold;
+    use curvebook_palette::{LineDashStyle, Rgba8};
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        let val = serde_json::from_str::<Value>(trimmed).ok()?;
+        let items = match val {
+            Value::Array(arr) => arr,
+            other => vec![other],
+        };
+        let mut out = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(num) = item.as_f64().filter(|v| v.is_finite()) {
+                out.push(AxisThreshold {
+                    value: num,
+                    shade_to: None,
+                    color: Rgba8::rgb(120, 120, 120),
+                    dash_style: LineDashStyle::Dashed,
+                    stroke_width_pt: 1.0,
+                    label: None,
+                });
+            } else if let Ok(mut parsed) = serde_json::from_value::<AxisThreshold>(item) {
+                if !parsed.value.is_finite() || parsed.shade_to.is_some_and(|v| !v.is_finite()) {
+                    return None;
+                }
+                parsed.stroke_width_pt = parsed.stroke_width_pt.clamp(0.2, 8.0);
+                out.push(parsed);
+            } else {
+                return None;
+            }
+        }
+        return Some(out);
+    }
+    let vals = parse_f64_list_text(trimmed, preset)?;
+    Some(
+        vals.into_iter()
+            .map(|value| AxisThreshold {
+                value,
+                shade_to: None,
+                color: Rgba8::rgb(120, 120, 120),
+                dash_style: LineDashStyle::Dashed,
+                stroke_width_pt: 1.0,
+                label: None,
+            })
+            .collect(),
+    )
+}
+
+fn is_valid_point_color_str(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "black" | "white" | "transparent" | "red" | "blue" | "green" | "orange" | "purple" | "teal" | "gray" | "grey"
+    ) {
+        return true;
+    }
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    hex.is_ascii() && (hex.len() == 6 || hex.len() == 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 fn sync_info_notes_text_field(app: &mut UiApp, fid: &str, text: &str) {
@@ -1538,60 +1644,163 @@ fn sync_info_notes_text_field(app: &mut UiApp, fid: &str, text: &str) {
 }
 
 fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
-    let mut map = serde_json::Map::new();
+    use curvebook_doc::{AnalysisKind, MultivariateSpec, SurvivalAnalysisSpec, TransformAnalysisSpec};
+    let ep = &mut app.canvas_dialogs.edit_params;
     match fid {
         "edit.custom_title" => {
-            let val = if text.is_empty() { Value::Null } else { Value::String(text.to_owned()) };
-            map.insert(String::from("edit.custom_title"), val);
+            let _ = ep.set_custom_title((!text.is_empty()).then(|| text.to_owned()));
         }
-        "edit.transform.formula" | "edit.transform.filter_formula" | "edit.fit.model_id" | "edit.fit.custom_dsl" => {
-            map.insert(fid.to_owned(), Value::String(text.to_owned()));
-        }
-        "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" | "edit.glm.predictor_columns" | "edit.cox.predictor_columns" => {
+        "edit.transform.selected_data_sets" => {
             let Some(cols) = parse_usize_list_text(text) else {
                 return;
             };
-            map.insert(fid.to_owned(), serde_json::json!(cols));
+            let is_pca = ep.draft.as_ref().is_some_and(|s| matches!(s.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })));
+            if is_pca {
+                ep.pca_predictors.clone_from(&cols);
+                if ep.pcr_outcome_column.is_some_and(|y| ep.pca_predictors.contains(&y)) {
+                    ep.pcr_outcome_column = None;
+                }
+            }
+            if let Some(spec) = &mut ep.draft {
+                spec.selected_data_sets = cols;
+                if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &mut spec.kind {
+                    *pcr_outcome_column = ep.pcr_outcome_column;
+                }
+            }
+        }
+        "edit.transform.formula" | "edit.transform.filter_formula" => {
+            let trimmed = text.trim();
+            let opt_str = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            let mut changed = false;
+            if let Some(spec) = &mut ep.draft {
+                let mut kind = spec.kind.clone();
+                match &mut kind {
+                    AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, .. })
+                        if fid == "edit.transform.formula" && !trimmed.is_empty() =>
+                    {
+                        if apply_transform_formula_str(trimmed, x_transform, y_transform).is_ok() {
+                            changed = true;
+                        }
+                    }
+                    AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) => {
+                        *filter_formula = opt_str;
+                        changed = true;
+                    }
+                    _ => {}
+                }
+                if changed {
+                    spec.update_kind(kind);
+                }
+            }
+            if changed {
+                ep.sync_rule_flags_from_kind();
+            }
+        }
+        "edit.transform.baseline_columns" => {
+            let Some(cols) = parse_usize_list_text(text) else {
+                return;
+            };
+            if let Some(spec) = &mut ep.draft
+                && let AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. }) = spec.kind.clone()
+            {
+                spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cols, operation }));
+                ep.sync_rule_flags_from_kind();
+            }
         }
         "edit.contingency.expected_proportions" => {
-            if text.trim().is_empty() {
-                map.insert(fid.to_owned(), Value::Null);
+            let props = if text.trim().is_empty() {
+                None
             } else {
                 let Some(vals) = parse_f64_list_text(text, &app.locale_preset) else {
                     return;
                 };
-                map.insert(fid.to_owned(), serde_json::json!(vals));
+                Some(vals)
+            };
+            if let Some(spec) = &mut ep.draft
+                && let AnalysisKind::Contingency(mut c) = spec.kind.clone()
+            {
+                c.expected_proportions = props;
+                spec.update_kind(AnalysisKind::Contingency(c));
+                ep.sync_rule_flags_from_kind();
             }
         }
-        _ => return,
+        "edit.glm.predictor_columns" => {
+            let Some(cols) = parse_usize_list_text(text) else {
+                return;
+            };
+            if let Some(spec) = &mut ep.draft
+                && let AnalysisKind::GeneralizedLinearModel(mut glm) = spec.kind.clone()
+            {
+                glm.predictor_columns = cols;
+                spec.update_kind(AnalysisKind::GeneralizedLinearModel(glm));
+                ep.sync_rule_flags_from_kind();
+            }
+        }
+        "edit.cox.predictor_columns" => {
+            let Some(cols) = parse_usize_list_text(text) else {
+                return;
+            };
+            if let Some(spec) = &mut ep.draft
+                && let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+                    time_column,
+                    status_column,
+                    reference_levels,
+                    tie_method,
+                    ..
+                }) = spec.kind.clone()
+            {
+                spec.update_kind(AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+                    time_column,
+                    status_column,
+                    predictor_columns: cols,
+                    reference_levels,
+                    tie_method,
+                }));
+                ep.sync_rule_flags_from_kind();
+            }
+        }
+        "edit.fit.model_id" => {
+            let trimmed = text.trim();
+            if !trimmed.is_empty()
+                && let Some(spec) = &mut ep.draft
+                && let AnalysisKind::NonlinearRegression(mut fit) = spec.kind.clone()
+            {
+                fit.equation_id = trimmed.to_owned();
+                spec.update_kind(AnalysisKind::NonlinearRegression(fit));
+                ep.sync_rule_flags_from_kind();
+            }
+        }
+        "edit.fit.custom_dsl" => {
+            let trimmed = text.trim();
+            if let Some(spec) = &mut ep.draft
+                && let AnalysisKind::NonlinearRegression(mut fit) = spec.kind.clone()
+            {
+                fit.custom_dsl = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                spec.update_kind(AnalysisKind::NonlinearRegression(fit));
+                ep.sync_rule_flags_from_kind();
+            }
+        }
+        _ => {}
     }
-    let _ = crate::dialogs_canvas::dialog_patch::patch_edit_params(&mut app.canvas_dialogs.edit_params, &map, &app.locale_preset);
 }
 
 fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
-    let doc = app.document().clone();
-    let mut map = serde_json::Map::new();
     match fid {
         "axes.title" => {
-            map.insert(String::from("axes.title"), Value::String(text.to_owned()));
+            app.canvas_dialogs.format_axes.axis_draft.title = text.to_owned();
         }
         "axes.thresholds" | "axes.y_thresholds" | "axes.x_thresholds" => {
-            let trimmed = text.trim();
-            let val = if trimmed.is_empty() {
-                Value::Array(Vec::new())
-            } else if trimmed.starts_with('[') || trimmed.starts_with('{') {
-                let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
-                    return;
-                };
-                parsed
-            } else {
-                Value::String(trimmed.to_owned())
+            let Some(items) = parse_axis_thresholds_text(text, &app.locale_preset) else {
+                return;
             };
-            map.insert(fid.to_owned(), val);
+            match fid {
+                "axes.x_thresholds" => app.canvas_dialogs.format_axes.set_x_thresholds(items),
+                "axes.y_thresholds" => app.canvas_dialogs.format_axes.set_y_thresholds(items),
+                _ => app.canvas_dialogs.format_axes.set_active_thresholds(items),
+            }
         }
-        _ => return,
+        _ => {}
     }
-    let _ = crate::dialogs_canvas::dialog_patch::patch_format_axes(&mut app.canvas_dialogs.format_axes, &map, Some(&doc), &app.locale_preset);
 }
 
 /// Flush any buffered `FormatAxes` textbox edits (`axes.title`, `axes.thresholds`, `axes.y_thresholds`, `axes.x_thresholds`) into `format_axes`.
@@ -1627,20 +1836,33 @@ fn sync_power_or_format_points_text_field(app: &mut UiApp, fid: &str, text: &str
     match fid {
         "power.standardized_effect" | "power.within_pair_correlation" | "power.alpha" | "power.target_power" => {
             if let Some(val) = parse_localized_number_input(text.trim(), &app.locale_preset).filter(|v| v.is_finite()) {
-                sync_active_dialog_value(app, fid, serde_json::json!(val));
+                let pw = &mut app.canvas_dialogs.power_wizard;
+                match fid {
+                    "power.standardized_effect" => pw.standardized_effect = val,
+                    "power.within_pair_correlation" => pw.within_pair_correlation = val,
+                    "power.alpha" => pw.alpha = val,
+                    "power.target_power" => pw.target_power = val,
+                    _ => {}
+                }
+                let _ = pw.recalculate();
             }
             true
         }
         "format_points.color" => {
-            let v = if text.trim().is_empty() { Value::Null } else { Value::String(text.to_owned()) };
-            sync_active_dialog_value(app, fid, v);
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                app.canvas_dialogs.format_points.color = None;
+            } else if is_valid_point_color_str(trimmed) {
+                app.canvas_dialogs.format_points.color = Some(trimmed.to_owned());
+            }
             true
         }
         "format_points.size_pt" => {
-            if text.trim().is_empty() {
-                sync_active_dialog_value(app, fid, Value::Null);
-            } else if let Some(val) = parse_localized_number_input(text.trim(), &app.locale_preset).filter(|v| v.is_finite()) {
-                sync_active_dialog_value(app, fid, serde_json::json!(val));
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                app.canvas_dialogs.format_points.size_pt = None;
+            } else if let Some(val) = parse_localized_number_input(trimmed, &app.locale_preset).filter(|v| v.is_finite() && *v > 0.0) {
+                app.canvas_dialogs.format_points.size_pt = Some(val.clamp(1.0, 36.0));
             }
             true
         }
@@ -1653,18 +1875,44 @@ fn sync_modal_text_field(app: &mut UiApp, fid: &str, text: &str) -> bool {
         return true;
     }
     match fid {
-        "analyze.transform.formula" | "analyze.transform.filter_formula" | "analyze.fit.custom_dsl" => {
-            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        "analyze.transform.formula" | "analyze.transform.filter_formula" => {
+            let trimmed = text.trim();
+            let az = &mut app.canvas_dialogs.analyze;
+            if trimmed.is_empty() {
+                az.transform_formula = None;
+            } else {
+                az.transform_formula = Some(trimmed.to_owned());
+                if az.selected_entry_id.as_deref() != Some("transform.select") {
+                    let _ = apply_transform_formula_str(trimmed, &mut az.transform_x, &mut az.transform_y);
+                }
+            }
         }
-        "analyze.fit.equation_id" => sync_active_dialog_value(app, "equation_id", Value::String(text.to_owned())),
-        "analyze.transform.selected_data_sets" | "analyze.transform.baseline_columns" => {
+        "analyze.fit.custom_dsl" => {
+            let trimmed = text.trim();
+            app.canvas_dialogs.analyze.custom_dsl = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        }
+        "analyze.fit.equation_id" => app.canvas_dialogs.analyze.equation_id = text.to_owned(),
+        "analyze.transform.selected_data_sets" => {
             if let Some(cols) = parse_usize_list_text(text) {
-                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+                let az = &mut app.canvas_dialogs.analyze;
+                az.selected_data_sets = cols.clone();
+                if matches!(az.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr")) {
+                    az.set_pca_predictors(cols);
+                } else {
+                    for cand in &mut az.variable_candidates {
+                        cand.selected = az.selected_data_sets.contains(&cand.col_index);
+                    }
+                }
+            }
+        }
+        "analyze.transform.baseline_columns" => {
+            if let Some(cols) = parse_usize_list_text(text) {
+                app.canvas_dialogs.analyze.baseline_columns = cols;
             }
         }
         "analyze.expected_proportions" => {
             if let Some(vals) = parse_f64_list_text(text, &app.locale_preset).filter(|v| !v.is_empty()) {
-                sync_active_dialog_value(app, fid, serde_json::json!(vals));
+                app.canvas_dialogs.analyze.contingency_expected_proportions = Some(vals);
             }
         }
         "edit.custom_title"
@@ -1677,29 +1925,54 @@ fn sync_modal_text_field(app: &mut UiApp, fid: &str, text: &str) -> bool {
         | "edit.cox.predictor_columns"
         | "edit.fit.model_id"
         | "edit.fit.custom_dsl" => sync_edit_params_text_field(app, fid, text),
-        "import.title" | "import.x_title" | "import.tidy_csv" | "import.group_col" | "import.value_col" => {
-            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        "import.title" => app.grid.import_reshape.title = text.to_owned(),
+        "import.x_title" => app.grid.import_reshape.x_title = text.to_owned(),
+        "import.tidy_csv" => app.grid.import_reshape.tidy_csv = text.to_owned(),
+        "import.group_col" => app.grid.import_reshape.group_col = text.to_owned(),
+        "import.value_col" => app.grid.import_reshape.value_col = text.to_owned(),
+        "import.x_col" => {
+            let t = text.trim();
+            app.grid.import_reshape.x_col = (!t.is_empty()).then(|| t.to_owned());
         }
-        "import.x_col" | "import.replicate_col" => {
-            let v = if text.trim().is_empty() { Value::Null } else { Value::String(text.to_owned()) };
-            sync_active_dialog_value(app, fid, v);
+        "import.replicate_col" => {
+            let t = text.trim();
+            app.grid.import_reshape.replicate_col = (!t.is_empty()).then(|| t.to_owned());
         }
         "axes.title" | "axes.thresholds" | "axes.y_thresholds" | "axes.x_thresholds" => sync_format_axes_text_field(app, fid, text),
-        "create_graph.y_axis_title" | "create_graph.title" | "simulate.title" | "simulate.column_name" | "sample.title" => {
-            sync_active_dialog_value(app, fid, Value::String(text.to_owned()));
+        "create_graph.y_axis_title" => app.canvas_dialogs.create_graph.y_axis_title = text.to_owned(),
+        "create_graph.title" => app.canvas_dialogs.create_graph.graph_title = text.to_owned(),
+        "simulate.title" => {
+            let t = text.trim();
+            if !t.is_empty() {
+                app.canvas_dialogs.simulate_distributions.title = t.to_owned();
+            }
+        }
+        "simulate.column_name" => {
+            let t = text.trim();
+            if !t.is_empty()
+                && let Some(col0) = app.canvas_dialogs.simulate_distributions.columns.first_mut()
+            {
+                col0.name = t.to_owned();
+            }
+        }
+        "sample.title" => {
+            let t = text.trim();
+            if !t.is_empty() {
+                app.canvas_dialogs.random_sample_rows.title = t.to_owned();
+            }
         }
         "randomize.groups" => {
             let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(text);
         }
         "randomize.block_sizes" => {
-            if let Some(cols) = parse_usize_list_text(text).filter(|c| !c.is_empty()) {
-                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+            if let Some(cols) = parse_usize_list_text(text).filter(|c| !c.is_empty() && !c.contains(&0)) {
+                app.canvas_dialogs.randomize_groups.block_sizes = cols;
             }
         }
         "randomize.title" => app.canvas_dialogs.randomize_groups.title = text.to_owned(),
         "change_data.selected_data_sets" => {
             if let Some(cols) = parse_usize_list_text(text) {
-                sync_active_dialog_value(app, fid, serde_json::json!(cols));
+                app.canvas_dialogs.change_data.selected_data_sets = cols;
             }
         }
         _ => return false,

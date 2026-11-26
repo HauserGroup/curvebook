@@ -18,12 +18,6 @@ use crate::dialogs_canvas::data_column_title;
 // Shared String / Enum / JSON Parsers (reused across R9.12, R9.14, R9.16, WF-44..48)
 // ============================================================================
 
-/// Normalize an identifier to lowercase ASCII alphanumeric for flexible enum parsing.
-#[must_use]
-pub(crate) fn norm_key(raw: &str) -> String {
-    raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
-}
-
 pub(crate) fn equation_display_mode_str(mode: EquationDisplayMode) -> &'static str {
     match mode {
         EquationDisplayMode::Substituted => "substituted",
@@ -325,18 +319,6 @@ impl SimDistKind {
             Self::Exponential => "exponential",
         }
     }
-
-    pub(crate) fn from_str(raw: &str) -> Result<Self, String> {
-        match norm_key(raw).as_str() {
-            "uniform" => Ok(Self::Uniform),
-            "gaussian" | "normal" => Ok(Self::Gaussian),
-            "lognormal" => Ok(Self::LogNormal),
-            "binomial" => Ok(Self::Binomial),
-            "poisson" => Ok(Self::Poisson),
-            "exponential" | "exp" => Ok(Self::Exponential),
-            _ => Err(format!("unknown simulated distribution `{raw}`")),
-        }
-    }
 }
 
 /// One column specification in [`SimulateDistributionsDialogState`].
@@ -580,7 +562,6 @@ impl InsertModelEquationDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::i18n::LocalePreset;
     use curvebook_doc::{
         AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, ColumnTable, DataSheet, GraphKind, GraphSheet, LinearRegressionSpec,
         ProjectDocument, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, TableArchetype,
@@ -588,19 +569,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn r9_14_dialogs_validate_patches_and_emit_expected_intents() {
-        let preset = LocalePreset::default();
+    fn r9_14_dialogs_validate_and_emit_expected_intents() {
         let mut rand_dlg = RandomizeGroupsDialogState::default();
-        let patch = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
-            "groups": "Vehicle:1, DrugA:2",
-            "subject_count": 9,
-            "scheme": "permuted_block",
-            "block_sizes": [3, 6],
-            "seed": 77,
-            "title": "Preclinical Arms"
-        }))
-        .unwrap();
-        crate::dialogs_canvas::dialog_patch::patch_randomize_groups(&mut rand_dlg, &patch).unwrap();
+        rand_dlg.set_groups_from_str("Vehicle:1, DrugA:2").unwrap();
+        rand_dlg.subject_count = 9;
+        rand_dlg.scheme = RandomizationSchemeKind::PermutedBlock;
+        rand_dlg.block_sizes = vec![3, 6];
+        rand_dlg.seed = 77;
+        rand_dlg.title = String::from("Preclinical Arms");
         let intent = rand_dlg.commit_intent().expect("randomize intent");
         assert_eq!(intent.command_id, "table.randomizeGroups");
         assert_eq!(intent.params["scheme"], "permuted_block");
@@ -615,32 +591,33 @@ mod tests {
         let mut doc = ProjectDocument::new("Sample Test").unwrap();
         doc.add_data_sheet(ds).unwrap();
         assert!(sample_dlg.open_for_sheet(&doc, &SheetId::new("data-src")));
-        let s_patch = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
-            "sample_size": 6,
-            "seed": 19,
-            "stratify_column": 1,
-            "proportional_allocation": false
-        }))
-        .unwrap();
-        crate::dialogs_canvas::dialog_patch::patch_random_sample_rows(&mut sample_dlg, &s_patch).unwrap();
+        sample_dlg.sample_size = 6;
+        sample_dlg.seed = 19;
+        sample_dlg.stratify_column = Some(1);
+        sample_dlg.proportional_allocation = false;
         let s_intent = sample_dlg.commit_intent().expect("sample intent");
         assert_eq!(s_intent.command_id, "table.randomSampleRows");
         assert_eq!(s_intent.params["stratify_column"], 1);
         assert_eq!(s_intent.params["proportional_allocation"], false);
 
-        let mut sim_dlg = SimulateDistributionsDialogState::default();
-        let sim_patch = serde_json::from_value::<serde_json::Map<String, Value>>(json!({
-            "n_rows": 24,
-            "seed": 11,
-            "use_multiple_variables": true,
-            "columns": [
-                { "name": "Control", "distribution": "gaussian", "mean": 10.0, "sd": 2.0 },
-                { "name": "Counts", "distribution": "poisson", "lambda": 4.5 },
-                { "name": "Latency", "distribution": "exponential", "rate": 0.25 }
-            ]
-        }))
-        .unwrap();
-        crate::dialogs_canvas::dialog_patch::patch_simulate_distributions(&mut sim_dlg, &sim_patch, &preset).unwrap();
+        let mut sim_dlg = SimulateDistributionsDialogState {
+            n_rows: 24,
+            seed: 11,
+            use_multiple_variables: true,
+            columns: vec![
+                SimulatedDistColumnDraft {
+                    name: String::from("Control"),
+                    distribution: SimDistKind::Gaussian,
+                    mean: 10.0,
+                    sd: 2.0,
+                    ..Default::default()
+                },
+                SimulatedDistColumnDraft { name: String::from("Counts"), distribution: SimDistKind::Poisson, lambda: 4.5, ..Default::default() },
+                SimulatedDistColumnDraft { name: String::from("Latency"), distribution: SimDistKind::Exponential, rate: 0.25, ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        sim_dlg.title = String::from("Simulated");
         let sim_intent = sim_dlg.commit_intent().expect("sim intent");
         assert_eq!(sim_intent.command_id, "table.simulateDistributions");
         assert_eq!(sim_intent.params["n_rows"], 24);

@@ -313,3 +313,83 @@ fn da_05_06_top_chrome_popups_dismiss_on_escape() -> TestRes {
     assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_none());
     Ok(())
 }
+
+#[test]
+fn aud_07_23_08_14_18_and_09_26_44_history_top_bar_fit_search_recents_and_palette() -> TestRes {
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, InfoSheet, ProjectDocument, SheetId, TableArchetype};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::egui_shell::EguiShellViewState;
+    use curvebook_ui_egui::egui_shell::command_palette::filter_palette_commands;
+    use curvebook_ui_egui::egui_shell::top_bar_fit::{RightWidths, SearchVisibility, fit_right_group};
+    use curvebook_ui_egui::is_desktop_host_routed_command;
+    use curvebook_ui_egui::search_engine::{SearchRecents, UnifiedSearchAction, UnifiedSearchItem, UnifiedSearchKind, query_unified};
+
+    // AUD-08-14: sync_history_with_document adjusts cursor on predecessor deletion & preserves forward history.
+    let mut doc_h = ProjectDocument::new("Hist").map_err(|e| e.to_string())?;
+    for id in ["s1", "s2", "s3", "s4"] {
+        doc_h
+            .data_sheets
+            .push(DataSheet::new(id, id, TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap())).unwrap());
+    }
+    let mut views = EguiShellViewState::default();
+    for id in ["s1", "s2", "s3", "s4"] {
+        views.record_active_sheet_visit(&SheetId::new(id));
+    }
+    views.history_cursor = 2;
+    doc_h.data_sheets.retain(|ds| ds.id.as_str() != "s1");
+    doc_h.active_sheet_id = Some(SheetId::new("s3"));
+    views.sync_history_with_document(&doc_h);
+    assert_eq!(
+        (&views.active_sheet_history, views.history_cursor, views.can_go_forward()),
+        (&vec![SheetId::new("s2"), SheetId::new("s3"), SheetId::new("s4")], 1, true)
+    );
+
+    // AUD-08-18: fit_right_group with switcher == 0 reserves zero phantom width.
+    let tight = fit_right_group(&RightWidths {
+        room: 180.0,
+        has_pinned_badge: false,
+        switcher: 0.0,
+        field: 176.0,
+        icon: 48.0,
+        gap: 6.0,
+        trailing_extra: 56.0,
+    });
+    assert!(!tight.switcher && tight.switcher_w == 0.0 && tight.search == SearchVisibility::Field);
+
+    // AUD-07-23: search_engine evaluates live enabled state for Recent RunCommand entries.
+    let mut recents = SearchRecents::default();
+    recents.record(&UnifiedSearchItem {
+        kind: UnifiedSearchKind::Command,
+        title: "Undo".into(),
+        subtitle: "Edit".into(),
+        category_badge: "Command".into(),
+        shortcut: "Cmd+Z".into(),
+        match_spans: Vec::new(),
+        enabled: true,
+        score: 100,
+        action: UnifiedSearchAction::RunCommand { command_id: "edit.undo".into(), is_ui_command: false },
+        completion_text: "Undo".into(),
+    });
+    assert!(
+        query_unified(&UiApp::new(), "", 20, &recents)
+            .iter()
+            .any(|it| matches!(&it.action, UnifiedSearchAction::RunCommand { command_id, .. } if command_id == "edit.undo") && !it.enabled)
+    );
+
+    // AUD-09-26 & AUD-09-44: desktop host routing & ui.sheet.find hidden on InfoSheet.
+    for cmd in ["table.importPrism", "table.importPzfx", "table.importXlsx"] {
+        assert!(is_desktop_host_routed_command(cmd));
+    }
+    let mut doc_cp = ProjectDocument::new("Palette").map_err(|e| e.to_string())?;
+    doc_cp.info_sheets.push(InfoSheet::new_preseeded("info-1", "Info").map_err(|e| e.to_string())?);
+    let mut app = UiApp::from_session(Session::from_document(doc_cp));
+    app.execute_command("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "xy", "cols": 1, "rows": 2, "auto_graph": false }))
+        .map_err(|e| e.to_string())?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "info-1" })).map_err(|e| e.to_string())?;
+    app.sync_views();
+    assert!(filter_palette_commands(&app, "ui.sheet.find", 24).iter().all(|r| r.command_id != "ui.sheet.find"));
+    app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
+    app.sync_views();
+    assert!(filter_palette_commands(&app, "ui.sheet.find", 24).iter().any(|r| r.command_id == "ui.sheet.find"));
+    Ok(())
+}

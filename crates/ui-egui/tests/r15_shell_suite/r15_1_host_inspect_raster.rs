@@ -281,3 +281,283 @@ fn ui_scale_1_5_does_not_double_scale_offscreen_inspect_or_screenshot() -> Resul
     assert!(!p1.is_empty() && !p15.is_empty() && (i64::from(d15w) - i64::from(d1w)).abs() <= 2 && (i64::from(d15h) - i64::from(d1h)).abs() <= 2);
     Ok(())
 }
+
+#[test]
+fn aud_07_08_13_control_routing_batch_budget_raster_and_headless_guards() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_doc::{
+        AnalysisKind, AnalysisSpec, Cell, CellValue, ClusterDistance, ClusterLinkage, DataSheet, GraphSheet, MultipleVariablesTable,
+        MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    };
+    use curvebook_engine::{ExternalPathPolicy, Session};
+    use curvebook_ui_egui::control_io::host_routing::{
+        MAX_READ_ONLY_NESTING_DEPTH, command_replaces_project, contextual_command_params, has_non_null_path_param, is_command_read_only,
+        is_read_only_ui_command,
+    };
+    use curvebook_ui_egui::i18n::LOCALES;
+    use curvebook_ui_egui::menus::curated_menu_bar;
+    use curvebook_ui_egui::{ControlResponse, handle_control_line};
+    use serde_json::Value;
+
+    let ctrl = |app: &mut UiApp, req: &Value| -> Result<ControlResponse, Box<dyn std::error::Error>> {
+        Ok(serde_json::from_str(&handle_control_line(app, &serde_json::to_string(req)?))?)
+    };
+
+    // 1. AUD-07-05: Cluster append handles duplicate row labels in a single atomic undo step.
+    let mut cdoc = ProjectDocument::new("ClusterDup")?;
+    let mut mv = MultipleVariablesTable::new(1, 3)?;
+    mv.row_titles = vec!["Ctrl".into(), "Ctrl".into(), "Treated".into()];
+    mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0), Cell::number(10.0)];
+    cdoc.data_sheets.push(DataSheet::new(SheetId::new("mv-1"), "MV", TableArchetype::MultipleVariables(mv))?);
+    let mut rs = ResultSheet::new(AnalysisSpec::new(
+        "res-cl",
+        "mv-1",
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+            k_means_k: Some(2),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: None,
+        }),
+    )?)?;
+    rs.tabs.push(ResultTab {
+        id: "kmeans-assignments".into(),
+        title: "K-Means".into(),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec!["Cluster".into()],
+        row_labels: vec!["Ctrl".into(), "Ctrl".into(), "Treated".into()],
+        rows: [1.0, 2.0, 2.0].into_iter().map(|v| vec![ResultCell::Number { value: v, prefix: None, units: None }]).collect(),
+        footnotes: Vec::new(),
+    });
+    cdoc.result_sheets.push(rs);
+    cdoc.active_sheet_id = Some(SheetId::new("res-cl"));
+    let mut capp = UiApp::from_session(Session::from_document(cdoc));
+    let u0 = capp.session().undo_depth();
+    let cl_resp = ctrl(
+        &mut capp,
+        &json!({ "id": "cl", "method": "ui.result.appendClusterColumn", "params": { "sheet_id": "res-cl", "column_title": "Cluster" } }),
+    )?;
+    assert!(cl_resp.ok && cl_resp.result["assigned_rows"] == json!(3) && capp.session().undo_depth() == u0 + 1);
+    if let TableArchetype::MultipleVariables(ref m) = capp.document().data_sheet(&SheetId::new("mv-1")).ok_or("mv")?.archetype {
+        let cells: Vec<&CellValue> = m.variables.last().ok_or("col")?.cells.iter().map(|c| &c.value).collect();
+        assert_eq!(cells, vec![&CellValue::Text("Cluster 1".into()), &CellValue::Text("Cluster 2".into()), &CellValue::Text("Cluster 2".into())]);
+    }
+
+    // 2. AUD-07-14/15/17/19/26 & AUD-13-10/11/12/13/23: Control/routing/locale/budget/batch invariants.
+    let mut doc = ProjectDocument::new("GraphProj")?;
+    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 4)?;
+    for r in 0..4 {
+        xy.x_cells[r][0] = Cell::number((r + 1) as f64);
+        xy.data_sets[0].cells[r][0] = Cell::number(((r + 1) * 2) as f64);
+    }
+    let ds = DataSheet::new("data-xy", "XY", TableArchetype::Xy(xy))?;
+    let mut gs = GraphSheet::new_uninitialized_for_data("graph-1", &ds)?;
+    gs.initialized = true;
+    doc.data_sheets.push(ds);
+    doc.graph_sheets.push(gs);
+    doc.active_sheet_id = Some(SheetId::new("graph-1"));
+    let mut app = UiApp::from_session(Session::from_document(doc));
+
+    app.set_ui_scale(1.5);
+    assert!(ctrl(&mut app, &json!({ "id": "t", "method": "ui.theme.set", "params": { "mode": "dark" } }))?.ok);
+    assert!((app.ui_scale() - 1.5).abs() < 1e-4);
+
+    assert!(command_replaces_project("table.importXlsx", &json!({})) && !command_replaces_project("table.importXlsx", &json!({ "merge": true })));
+    let mut deep = json!({ "command": "ping" });
+    for _ in 0..=MAX_READ_ONLY_NESTING_DEPTH + 2 {
+        deep = json!({ "command": "command.run", "params": deep });
+    }
+    assert!(command_replaces_project("command.run", &deep));
+    assert!(is_read_only_ui_command("ui.editParams.open") && !is_read_only_ui_command("ui.export.allTablesCsv"));
+    assert!(
+        is_command_read_only("ui.print.open", Some(&json!({ "submit_to_os": false })))
+            && !is_command_read_only("ui.print.open", Some(&json!({ "submit_to_os": true })))
+    );
+
+    let dir = crate::common::temp_dir("cb-aud07-17")?;
+    app.session_mut().set_path_policy(ExternalPathPolicy::workdir(dir.path())?);
+    let pdf = ctrl(&mut app, &json!({ "id": "p", "method": "render.pdf", "params": { "sheet_id": "graph-1", "path": "out.pdf" } }))?;
+    assert!(pdf.ok && pdf.result.get("data_base64").is_none() && dir.path().join("out.pdf").exists());
+
+    for (m, sid) in [("ui.export.figure.open", "nope"), ("ui.export.resultsCsv.open", "data-xy"), ("ui.brush.point", "graph-1")] {
+        assert!(!ctrl(&mut app, &json!({ "id": m, "method": m, "params": { "sheet_id": sid } }))?.ok);
+    }
+
+    let mut visited = Vec::new();
+    app.set_locale("en");
+    for _ in 0..LOCALES.len() {
+        let next = contextual_command_params(&app, "ui.locale.set")["locale"].as_str().ok_or("locale")?.to_owned();
+        visited.push(next.clone());
+        app.set_locale(&next);
+    }
+    assert!(visited.len() == 16 && visited.iter().any(|l| l == "ar") && visited.iter().any(|l| l == "he"));
+    for (loc, lbl) in [("ar", "التفضيلات..."), ("he", "העדפות...")] {
+        app.set_locale(loc);
+        assert!(format!("{:?}", curated_menu_bar(&app)).contains(lbl));
+    }
+    for key in ["dir", "directory", "destination_path", "unpacked_dir", "output_path", "file_path", "path"] {
+        assert!(has_non_null_path_param(&json!({ key: "x" })) && has_non_null_path_param(&json!({ "nested": { key: "x" } })));
+    }
+    Ok(())
+}
+
+#[test]
+fn aud_13_10_11_12_13_invoke_menu_tabs_screenshot_budget_and_batch_cap() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_doc::ErrorCode;
+    use curvebook_engine::ExternalPathPolicy;
+    use curvebook_ui_egui::egui_shell::inspect_bridge::{ParsedSwitchTabTarget, finalize_screenshot_payload_with_limit, parse_switch_tab_params};
+    use curvebook_ui_egui::{ControlResponse, dispatch_gui_action, handle_control_line};
+    use serde_json::Value;
+
+    let ctrl = |app: &mut UiApp, req: &Value| -> Result<ControlResponse, Box<dyn std::error::Error>> {
+        Ok(serde_json::from_str(&handle_control_line(app, &serde_json::to_string(req)?))?)
+    };
+    let (mut app, _) = crate::helpers::seed_xy_app(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]);
+    let _ = app.execute_command("graph.create", json!({ "sheet_id": "graph-1", "data_sheet_id": "xy-1", "kind": "xy", "initialized": true }))?;
+    let _ = app.execute_command("sheet.select", json!({ "sheet_id": "graph-1" }))?;
+    let dir = crate::common::temp_dir("cb-aud13-12")?;
+    app.session_mut().set_path_policy(ExternalPathPolicy::workdir(dir.path())?);
+
+    // AUD-13-10/11/12: human_path_only empty params, int tab, screenshot payload & budget caps.
+    app.set_human_path_only(true);
+    assert_eq!(dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.rulers.toggle", "params": {} }))?["invoked"], json!(true));
+    assert!(dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.rulers.toggle", "params": { "visible": true } })).is_err());
+    app.set_human_path_only(false);
+    assert!(matches!(parse_switch_tab_params(&json!({ "tab": 2 }))?.target, ParsedSwitchTabTarget::Tab(t) if t == "2"));
+
+    let shot = dispatch_gui_action(&mut app, "ui.screenshot", json!({ "width_px": 160, "height_px": 120 }))?;
+    assert!(shot.get("data_base64").is_some() && shot.get("png_base64").is_none() && shot.get("data_base64_omitted").is_none());
+    let fake_png = vec![0x89u8; 4096];
+    let target = RenderTargetSpec { width_px: 1280, height_px: 800, dpi: 144 };
+    let shot_out = dir.path().join("large.png");
+    let shot_str = shot_out.to_str().ok_or("utf8")?;
+    let omitted = finalize_screenshot_payload_with_limit("full_window", target, &fake_png, Some(shot_str), 1024, |p, b| {
+        std::fs::write(p, b).map_err(|e| curvebook_engine::EngineError::with_code(ErrorCode::InternalError, e.to_string()))
+    })?;
+    assert!(omitted.get("data_base64").is_none() && omitted["data_base64_omitted"] == json!(true) && std::fs::read(&shot_out)? == fake_png);
+    assert_eq!(
+        finalize_screenshot_payload_with_limit("full_window", target, &fake_png, None, 1024, |_, _| Ok(())).unwrap_err().code,
+        ErrorCode::ResourceLimit
+    );
+    let mut wrote = false;
+    assert_eq!(
+        finalize_screenshot_payload_with_limit("full_window", target, &fake_png, Some(shot_str), 64, |_, _| {
+            wrote = true;
+            Ok(())
+        })
+        .unwrap_err()
+        .code,
+        ErrorCode::ResourceLimit
+    );
+    assert!(!wrote);
+
+    // AUD-13-13: command.batch structured failure details & 1000-step cap.
+    let bfail = ctrl(
+        &mut app,
+        &json!({ "id": "bf", "method": "command.batch", "params": { "atomic": true, "commands": [
+        { "command": "render.pdf", "params": { "sheet_id": "graph-1", "path": "step0.pdf" } },
+        { "command": "sheet.select", "params": { "sheet_id": "missing" } }
+    ] } }),
+    )?;
+    let det = bfail.error_detail.ok_or("missing detail")?;
+    for obj in [&det, det.get("details").ok_or("details")?] {
+        assert_eq!(
+            (
+                &obj["failed_index"],
+                &obj["failed_command_id"],
+                &obj["completed_steps"],
+                &obj["rolled_back"],
+                &obj["filesystem_side_effects_persisted"]
+            ),
+            (&json!(1), &json!("sheet.select"), &json!(1), &json!(true), &json!(true))
+        );
+    }
+    let too_many: Vec<Value> = (0..1005).map(|_| json!({ "command": "ping" })).collect();
+    for (atomic, rolled) in [(true, true), (false, false)] {
+        let lf = ctrl(&mut app, &json!({ "id": "lim", "method": "command.batch", "params": { "atomic": atomic, "commands": too_many } }))?;
+        let d = lf.error_detail.ok_or("lim detail")?;
+        assert_eq!(
+            (&d["code"], &d["details"]["completed_steps"], &d["details"]["rolled_back"]),
+            (&json!("RESOURCE_LIMIT"), &json!(0), &json!(rolled))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn aud_08_progress_modal_pointer_hover_crop_raster_and_rebound_copy_paste_guards() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_doc::SheetId;
+    use curvebook_render::RasterImage;
+    use curvebook_ui_egui::ZLayer;
+    use curvebook_ui_egui::egui_shell::FrameInspectNodeMeta;
+    use curvebook_ui_egui::egui_shell::center_stage::ProgressModalState;
+    use curvebook_ui_egui::egui_shell::inspect_bridge::{
+        HybridCoexistenceArbiter, HybridModalSurface, parse_pointer_gesture_params, resolve_power_curve_hover_target,
+    };
+    use curvebook_ui_egui::egui_shell::rasterizer::crop_raster_rgba;
+
+    let (mut app, _) = crate::helpers::seed_xy_app(&[1.0, 2.0, 3.0], &[2.0, 4.0, 6.0]);
+    let _ = app.execute_command("graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "xy-1", "kind": "xy", "initialized": true }))?;
+    let _ = app.execute_command("sheet.select", json!({ "sheet_id": "g1" }))?;
+    let _ = SheetId::new("g1");
+
+    // AUD-08-07/08/11/15/16: progress modal backdrop, pointer/hover validation, crop_raster_rgba, launcher & Event::Copy/Paste guard.
+    let pviews = EguiShellViewState {
+        progress_modal: Some(ProgressModalState {
+            operation_label: "Fit".into(),
+            detail: "1".into(),
+            progress_0_to_1: Some(0.5),
+            cancellable: true,
+            cancel_requested: false,
+        }),
+        ..Default::default()
+    };
+    let dec = HybridCoexistenceArbiter::evaluate_with_views(&app, &pviews, false);
+    assert!(dec.modal_surface == HybridModalSurface::EguiProgressModal && dec.modal_backdrop_active);
+    assert!(parse_pointer_gesture_params(&json!({ "kind": "click", "x": 1e300, "y": 10.0 }), 0.0).is_err());
+    let mut dmeta = FrameInspectMeta::default();
+    dmeta.record(FrameInspectNodeMeta {
+        egui_id: egui::Id::unique("power.curve_hover"),
+        accesskit_id: egui::Id::unique("power.curve_hover").accesskit_id(),
+        widget_id: "power.curve_hover".into(),
+        role: "canvas".into(),
+        label: "Power".into(),
+        command_id: None,
+        value: None,
+        enabled: true,
+        disabled_reason: None,
+        unclipped_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 50.0)),
+        clipped_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 50.0)),
+        z_layer: ZLayer::ModalDialog,
+        ellipsized: false,
+        full_label: None,
+        action_rank: None,
+    });
+    assert!(resolve_power_curve_hover_target(&mut app, &dmeta, &json!({ "hover_n": "bad" })).is_err());
+    assert!(crop_raster_rgba(&RasterImage { width_px: 1000, height_px: 1000, dpi: 72, rgba: vec![0u8; 16] }, 0, 0, 1000, 1000).is_err());
+
+    let (mut ctx_app, _) = crate::helpers::seed_column_app(&[("A", &[1.0, 2.0])], curvebook_doc::ColumnDesignHint::UnpairedReplicates);
+    let ctx = egui::Context::default();
+    let mut lv = EguiShellViewState { launcher_open: true, ..Default::default() };
+    let (mut m1, mut i1) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    crate::helpers::run_egui_pass_with_ctx(&ctx, egui::vec2(1024.0, 640.0), Default::default(), false, |_, ui| {
+        let _ = render_egui_shell_frame(ui, &ctx_app, &mut lv, &mut m1, &mut i1);
+    })?;
+    assert_eq!(m1.find_by_widget_id("status.summary").ok_or("summary")?.label, "Welcome Hub");
+
+    lv.launcher_open = false;
+    ctx_app.shortcuts.set_shortcut("ui.gallery.toggle", "Cmd+C")?;
+    ctx_app.shortcuts.set_shortcut("table.paste", "F8")?;
+    let (mut m2, mut i2) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    let copy_in = egui::RawInput { events: vec![egui::Event::Copy, egui::Event::Paste("99".into())], ..Default::default() };
+    crate::helpers::run_egui_pass_with_ctx(&ctx, egui::vec2(1024.0, 640.0), copy_in, false, |_, ui| {
+        let _ = render_egui_shell_frame(ui, &ctx_app, &mut lv, &mut m2, &mut i2);
+    })?;
+    assert!(!i2.intents().iter().any(|i| matches!(i, UiIntent::GridCopySelection | UiIntent::GridPasteFromClipboard { .. })));
+
+    ctx_app.canvas_dialogs.active_dialog = ActiveDialog::About;
+    let (mut m3, mut i3) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    crate::helpers::run_egui_pass_with_ctx(&ctx, egui::vec2(1024.0, 640.0), Default::default(), false, |_, ui| {
+        let _ = render_egui_shell_frame(ui, &ctx_app, &mut lv, &mut m3, &mut i3);
+    })?;
+    assert!(!m3.find_by_widget_id("status.summary").ok_or("summary modal")?.enabled);
+    Ok(())
+}

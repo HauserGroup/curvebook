@@ -4,7 +4,7 @@
 //! - `R2-S12-03`: `ui_invoke_menu` always supplies `params: {}` (never `null`/omitted).
 //! - `R2-S12-04`: `open_file` and `save_file` enforce `WorkdirGuard` before probing raw host paths
 //!   or inferring format from unguarded host directories.
-//! - `R2-S12-06`: Remove ignored `ui_inspect.sheet_id` and `ui_answer_dialog.dialog_id` schema drift.
+//! - `R2-S12-06`: Remove ignored `ui_inspect.sheet_id` schema drift.
 //! - `R2-S12-07`: `McpServerState::with_gui_host` shares the hosted `Session`, propagates changes via
 //!   `sync_after_session_mutation`, and wraps `resources/*` inside `run_guarded`.
 use std::cell::RefCell;
@@ -172,22 +172,16 @@ fn r2_s12_04_open_and_save_check_workdir_guard_before_host_fs_probe() -> TestRes
 }
 
 #[test]
-fn r2_s12_06_ui_inspect_and_ui_answer_dialog_drop_ignored_schema_drift() -> TestResult {
+fn r2_s12_06_ui_inspect_drops_ignored_schema_drift() -> TestResult {
     let tools = list_gui_tools();
     let inspect_def = tools.iter().find(|t| t.name == "ui_inspect").ok_or_else(|| String::from("missing ui_inspect"))?;
     assert!(inspect_def.input_schema["properties"].get("sheet_id").is_none(), "ui_inspect must not advertise ignored `sheet_id`");
-
-    let answer_def = tools.iter().find(|t| t.name == "ui_answer_dialog").ok_or_else(|| String::from("missing ui_answer_dialog"))?;
-    assert!(answer_def.input_schema["properties"].get("dialog_id").is_none(), "ui_answer_dialog must not advertise ignored `dialog_id`");
 
     let (host, _) = RecordingHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
     let err_inspect = call_tool(&mut state, "ui_inspect", json!({ "scope": "all", "sheet_id": "data-1" }));
     assert!(matches!(err_inspect, Err(ToolCallError::InvalidParams(_))), "expected InvalidParams for ui_inspect sheet_id: {err_inspect:?}");
-
-    let err_answer = call_tool(&mut state, "ui_answer_dialog", json!({ "action": "ok", "dialog_id": "dlg-1" }));
-    assert!(matches!(err_answer, Err(ToolCallError::InvalidParams(_))), "expected InvalidParams for ui_answer_dialog dialog_id: {err_answer:?}");
     Ok(())
 }
 
@@ -197,7 +191,7 @@ fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
     let (host, sync_count) = OwnedSessionHost::new();
     let mut state = McpServerState::with_gui_host(Box::new(host));
     state.set_workdir(Some(&dir.path)).map_err(|e| format!("set_workdir: {e}"))?;
-    assert!(list_tools_for_state(&state).len() >= 18);
+    assert!(list_tools_for_state(&state).len() >= 17);
 
     // Mutate via core `command_run` and verify `hosted_session` + GUI host inspect + resources/* see it.
     let created =

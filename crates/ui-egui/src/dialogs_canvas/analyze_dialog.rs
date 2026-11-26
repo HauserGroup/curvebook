@@ -519,6 +519,33 @@ impl AnalyzeDialogState {
         }
     }
 
+    /// Replace the selected PCA/PCR predictor columns while preserving disjoint PCR outcome selection.
+    pub fn set_pca_predictors(&mut self, cols: Vec<usize>) {
+        self.selected_data_sets.clone_from(&cols);
+        self.pca_predictors = cols;
+        self.clear_overlapping_pcr_outcome();
+        for cand in &mut self.variable_candidates {
+            cand.selected = self.selected_data_sets.contains(&cand.col_index);
+        }
+    }
+
+    /// Toggle correlation all-pairs mode (turning it off clears heatmap generation).
+    pub fn set_correlation_all_pairs(&mut self, all_pairs: bool) {
+        self.correlation_all_pairs = all_pairs;
+        if !all_pairs {
+            self.correlation_heatmap = false;
+        }
+    }
+
+    /// Toggle correlation heatmap generation (requires all-pairs mode).
+    pub fn set_correlation_heatmap(&mut self, enabled: bool) -> Result<(), String> {
+        if enabled && !self.correlation_all_pairs {
+            return Err(String::from("Create correlation heatmap is disabled in X vs every Y mode."));
+        }
+        self.correlation_heatmap = enabled;
+        Ok(())
+    }
+
     /// Select (or toggle off) the disjoint PCR outcome column with R10 predictor leakage guard.
     pub fn select_pcr_outcome(&mut self, col: usize) -> Result<(), String> {
         check_pcr_target_leakage(col, self.is_pca_predictor(col))?;
@@ -533,13 +560,6 @@ impl AnalyzeDialogState {
             }
         }
         Ok(())
-    }
-
-    pub(super) fn toggle_two_group_design(&mut self, gaussian: bool, paired: bool) {
-        if let Some(cur) = self.two_group_method {
-            self.two_group_memory.remember(cur);
-        }
-        self.two_group_method = Some(self.two_group_memory.resolve(gaussian, paired, self.two_group_method));
     }
 
     /// Filter [`ANALYSIS_CATALOG`] by source table compatibility, category chip, and search query.

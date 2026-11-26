@@ -127,11 +127,6 @@ enum PendingLiveUiActionKind {
     SwitchTab {
         response_payload: serde_json::Value,
     },
-    AnswerDialog {
-        action: String,
-        was_power_wizard: bool,
-        button_widget_id: String,
-    },
 }
 
 struct PendingLiveUiAction {
@@ -664,25 +659,6 @@ impl CurveBookNativeApp {
             }
             PendingLiveUiActionKind::PressKey { key_raw } => inspect_bridge::format_press_key_result(&key_raw, &outcomes),
             PendingLiveUiActionKind::SwitchTab { response_payload } => response_payload,
-            PendingLiveUiActionKind::AnswerDialog { action, was_power_wizard, button_widget_id } => {
-                let Ok(win) = self.runtime.window(win_id) else {
-                    Self::send_live_control_reply(
-                        pending.req,
-                        pending.request_id,
-                        Err(curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "missing active window")),
-                    );
-                    return true;
-                };
-                inspect_bridge::format_answer_dialog_click_result(
-                    win.app(),
-                    &win.app().egui_views,
-                    self.close_dialog_open,
-                    &action,
-                    &button_widget_id,
-                    was_power_wizard,
-                    &outcomes,
-                )
-            }
         };
 
         Self::send_live_control_reply(pending.req, pending.request_id, Ok(result_val));
@@ -766,7 +742,6 @@ impl CurveBookNativeApp {
                 "ui.type_text" => self.try_enqueue_live_type_text(ctx, deferred, parsed),
                 "ui.press_key" => self.try_enqueue_live_press_key(ctx, deferred.req, parsed),
                 "ui.switch_tab" => self.try_dispatch_live_switch_tab(deferred, parsed, &mut post_hook),
-                "ui.answer_dialog" => self.try_dispatch_live_answer_dialog(deferred.req, parsed, &mut post_hook),
                 _ => {
                     let res = self.dispatch_single_live_request(
                         &deferred.req.raw_bytes,
@@ -1400,88 +1375,6 @@ impl CurveBookNativeApp {
                 Self::send_live_engine_err_val(deferred.req, parsed.id, err)
             }
         }
-    }
-
-    fn try_dispatch_live_answer_dialog(
-        &mut self,
-        req: LiveControlRequest,
-        parsed: ControlRequest,
-        post_hook: &mut Option<LiveControlPostHook>,
-    ) -> LiveActionDispatch {
-        let normalized_params = normalize_live_answer_dialog_params(&parsed.params);
-        let dlg_params = match inspect_bridge::parse_answer_dialog_params(&normalized_params) {
-            Ok(p) => p,
-            Err(err) => return Self::send_live_engine_err_val(req, parsed.id, err),
-        };
-        let baseline = self.capture_mutation_baseline();
-        let win_id = self.active_window_id();
-        let close_open = self.close_dialog_open;
-
-        let patch_res = {
-            let Ok(win) = self.runtime.window_mut(win_id) else {
-                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
-            };
-            let views_snapshot = win.app().egui_views.clone();
-            inspect_bridge::prepare_answer_dialog_patch(win.app_mut(), &views_snapshot, close_open, &dlg_params)
-        };
-        match patch_res {
-            Ok(Some(patch_only_res)) => {
-                self.record_direct_live_mutation("ui.answer_dialog", baseline);
-                Self::send_live_control_reply(req, parsed.id, Ok(patch_only_res));
-                self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, true);
-                return LiveActionDispatch::YieldFrame;
-            }
-            Ok(None) => {}
-            Err(err) => {
-                self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, false);
-                return Self::send_live_engine_err_val(req, parsed.id, err);
-            }
-        }
-
-        let action = dlg_params.action.unwrap_or_else(|| String::from("ok"));
-        let active_dialog_is_some = self.runtime.window(win_id).is_ok_and(|w| w.app().canvas_dialogs.active_dialog != ActiveDialog::None);
-        if active_dialog_is_some {
-            let Ok(win) = self.runtime.window_mut(win_id) else {
-                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::InternalError, "missing active window");
-            };
-            return match inspect_bridge::execute_active_dialog_answer(win.app_mut(), &action) {
-                Ok(res) => {
-                    self.record_direct_live_mutation("ui.answer_dialog", baseline);
-                    Self::send_live_control_reply(req, parsed.id, Ok(res));
-                    self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, true);
-                    LiveActionDispatch::YieldFrame
-                }
-                Err(err) => {
-                    self.invoke_live_post_hook(post_hook, "ui.answer_dialog", baseline, false);
-                    Self::send_live_engine_err_val(req, parsed.id, err)
-                }
-            };
-        }
-
-        let candidate_wids = inspect_bridge::answer_dialog_candidate_wids(&action);
-        if let Some(entry) = candidate_wids.iter().find_map(|w| self.inspect_meta.find_by_widget_id(w)) {
-            if !entry.enabled {
-                let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("dialog button `{action}` is disabled"));
-                return Self::send_live_engine_error(req, parsed.id, curvebook_doc::ErrorCode::Conflict, msg);
-            }
-            let pos = entry.clipped_rect.center();
-            let button_widget_id = entry.widget_id.clone();
-            let batches = inspect_bridge::click_pos_batches(pos, egui::PointerButton::Primary, egui::Modifiers::NONE);
-            return self.begin_pending_live_action(
-                req,
-                parsed.id,
-                &parsed.method,
-                PendingLiveUiActionKind::AnswerDialog { action, was_power_wizard: false, button_widget_id },
-                batches,
-            );
-        }
-
-        Self::send_live_engine_error(
-            req,
-            parsed.id,
-            curvebook_doc::ErrorCode::NotFound,
-            format!("dialog button `{action}` not found on active modal"),
-        )
     }
 
     fn prepare_settled_live_request_bytes(&self, raw_bytes: &[u8], stamp: GeometryStamp) -> Vec<u8> {
@@ -2625,10 +2518,7 @@ fn should_defer_to_settled_frame(req: &LiveControlRequest) -> bool {
     let Some(parsed) = parse_control_request_from_bytes(&req.raw_bytes) else {
         return false;
     };
-    matches!(
-        parsed.method.as_str(),
-        "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture" | "ui.type_text" | "ui.press_key" | "ui.switch_tab" | "ui.answer_dialog"
-    )
+    matches!(parsed.method.as_str(), "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture" | "ui.type_text" | "ui.press_key" | "ui.switch_tab")
 }
 
 fn serialized_control_reply_len(id: &serde_json::Value, payload: &serde_json::Value) -> Result<usize, curvebook_engine::EngineError> {
@@ -2743,33 +2633,6 @@ fn find_indexed_tab_widget_in_meta(meta: &FrameInspectMeta, idx: usize) -> Optio
         }
     }
     None
-}
-
-fn normalize_live_answer_dialog_params(params: &serde_json::Value) -> serde_json::Value {
-    let mut cloned = params.clone();
-    let Some(obj) = cloned.as_object_mut() else {
-        return cloned;
-    };
-    let Some(choice_str) = obj.get("choice").and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned) else {
-        return cloned;
-    };
-    let patch_key = if obj.get("fields").is_some_and(serde_json::Value::is_object) {
-        "fields"
-    } else if obj.get("values").is_some_and(serde_json::Value::is_object) {
-        "values"
-    } else if obj.get("patches").is_some_and(serde_json::Value::is_object) {
-        "patches"
-    } else {
-        obj.insert(String::from("fields"), serde_json::Value::Object(serde_json::Map::new()));
-        "fields"
-    };
-    if let Some(map) = obj.get_mut(patch_key).and_then(serde_json::Value::as_object_mut)
-        && !map.contains_key("choice")
-        && !map.contains_key("duplicate.choice")
-    {
-        map.insert(String::from("choice"), serde_json::Value::String(choice_str));
-    }
-    cloned
 }
 
 fn ensure_params_object(params: &mut serde_json::Value) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
@@ -3215,10 +3078,16 @@ mod tests {
                 json!({ "id": "az", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "toolbar.analyze" } }),
                 "az",
             )?;
+            let _ = self.step(Vec::new());
+            self.send_ok(json!({ "id": "q", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "analyze.search" } }), "q")?;
+            self.send_ok(json!({ "id": "qt", "method": "ui.type_text", "params": { "text": entry_id } }), "qt")?;
+            let _ = self.step(Vec::new());
             self.send_ok(
-                json!({ "id": "ans", "method": "ui.answer_dialog", "params": { "action": "ok", "fields": { "entry_id": entry_id } } }),
+                json!({ "id": "sel", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": format!("analyze.entry.{entry_id}") } }),
                 entry_id,
             )?;
+            let _ = self.step(Vec::new());
+            self.send_ok(json!({ "id": "ok", "method": "ui.pointer_gesture", "params": { "action": "click", "widget_id": "modal.ok" } }), "ok")?;
             let _ = self.step(Vec::new());
             let rs_id = if let ActiveDialog::EditAnalysisParameters { result_sheet_id } =
                 &self.app.runtime().window(self.win_id)?.app().canvas_dialogs.active_dialog
@@ -3559,7 +3428,8 @@ mod tests {
             json!({"id":"sel","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"analyze.entry.stats.one_way_anova"}}),
             "sel",
         )?;
-        h.send_ok(json!({"id":"run","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}), "run")?;
+        let _ = h.step(Vec::new());
+        h.send_ok(json!({"id":"run","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"modal.ok"}}), "run")?;
         let _ = h.step(Vec::new());
         let active_rs = h.app.runtime().window(h.win_id)?.app().document().active_sheet_id.clone().ok_or("expected ResultSheet")?;
         assert!(h.app.runtime().window(h.win_id)?.app().document().result_sheet(&active_rs).is_some());
@@ -3780,7 +3650,7 @@ mod tests {
         let _ = h.step(Vec::new());
         h.send_ok(json!({"id":"hb","method":"ui.pointer_gesture","params":{"action":"hover","widget_id":"dialog.button.back"}}), "disabled hover")?;
         for _ in 0..3 {
-            h.send_ok(json!({"id":"nxt","method":"ui.answer_dialog","params":{"action":"next"}}), "next")?;
+            h.send_ok(json!({"id":"nxt","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"dialog.button.next"}}), "next")?;
             let _ = h.step(Vec::new());
         }
         h.send_ok(json!({"id":"pt","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"power.tab.curve"}}), "power tab")?;

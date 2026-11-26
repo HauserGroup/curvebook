@@ -406,7 +406,7 @@ fn fa_sec21_05_reject_unknown_args_on_all_18_builtin_tools() {
         assert!(all_tools.iter().any(|t| t.name == name), "missing tool `{name}`");
     }
 
-    let cases: [(&str, Value); 18] = [
+    let cases: [(&str, Value); 17] = [
         ("doc_inspect", json!({ "unexpected": true })),
         ("open_file", json!({ "path": sample_csv.display().to_string(), "unexpected": 1 })),
         ("save_file", json!({ "path": "out.curvebook", "unexpected": 1 })),
@@ -424,7 +424,6 @@ fn fa_sec21_05_reject_unknown_args_on_all_18_builtin_tools() {
         ("ui_press_key", json!({ "key": "Enter", "unexpected": true })),
         ("ui_invoke_menu", json!({ "command_id": "file.new", "unexpected": true })),
         ("ui_switch_tab", json!({ "tab": "graphs", "unexpected": true })),
-        ("ui_answer_dialog", json!({ "action": "confirm", "unexpected": true })),
     ];
 
     for (idx, (name, args)) in cases.iter().enumerate() {

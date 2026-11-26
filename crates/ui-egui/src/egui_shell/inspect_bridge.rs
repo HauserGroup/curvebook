@@ -10,7 +10,7 @@ use curvebook_doc::{ErrorCode, TableArchetype};
 use curvebook_engine::{EngineError, cmd};
 use curvebook_render::{RenderTargetSpec, encode_png};
 use egui::{Key, Modifiers, Pos2, Rect, Vec2};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::control_io::host_routing::contextual_command_params;
@@ -18,14 +18,12 @@ use crate::control_io::{
     dispatch_ui_command_as_ui, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
     require_params_object_or_null,
 };
-use crate::dialogs_canvas::dialog_patch::patch_active_dialog;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
 #[cfg(any(test, feature = "test-support"))]
 use crate::egui_shell::FrameInspectEntryInput;
 use crate::egui_shell::app_modals::render_app_modal;
 use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
 use crate::egui_shell::command_palette::render_command_palette;
-use crate::egui_shell::dialog_actions::submit_active_dialog_ok;
 use crate::egui_shell::fit_modal::{is_nonlinear_fit_dialog_active, render_fit_modal, render_hook_constant_modal};
 use crate::egui_shell::graph_modals::{is_graph_modal_active, render_graph_modal};
 use crate::egui_shell::import_wizard::render_import_or_convert_modal;
@@ -52,7 +50,7 @@ use crate::inspect::{
 };
 use crate::interaction::{KeyModifiers, UiEventOutcome, ViewportMetrics};
 use crate::menus::{CuratedMenuNode, UI_COMMANDS, command_tooltip, curated_menu_bar, is_desktop_host_routed_command, menu_bar_tooltips};
-use crate::modal_predicates::{evaluate_dialog_button_for_app, sync_format_points_fallback_targets};
+use crate::modal_predicates::evaluate_dialog_button_for_app;
 use crate::tr;
 use crate::workspace_nav::ActiveWorkspacePane;
 
@@ -1947,9 +1945,9 @@ fn ensure_egui_focus_if_needed(
     Ok((meta, ak))
 }
 
-/// Dispatch any of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`, `ui.invoke_menu`,
-/// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.switch_tab`, `ui.answer_dialog`)
-/// through settled `egui::Context::run` passes (`F8`).
+/// Dispatch any of the 7 interactive GUI actions (`ui.inspect`, `ui.screenshot`, `ui.invoke_menu`,
+/// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.switch_tab`) through settled
+/// `egui::Context::run` passes (`F8`).
 ///
 /// # Errors
 /// Returns [`EngineError`] on bad parameters, missing/disabled widgets, invalid actions, or
@@ -1964,7 +1962,7 @@ pub(crate) fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) 
         "ui.type_text" => dispatch_gui_type_text(app, &params),
         "ui.press_key" => dispatch_gui_press_key(app, &params),
         "ui.switch_tab" => dispatch_gui_switch_tab(app, &params),
-        "ui.answer_dialog" => dispatch_gui_answer_dialog(app, &params),
+        "ui.answer_dialog" if app.is_human_path_only() => Err(human_path_only_err("direct `ui.answer_dialog` is blocked in human-path-only mode")),
         _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported GUI action `{method}`"))),
     }
 }
@@ -3214,280 +3212,6 @@ fn dispatch_gui_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, Eng
     Ok(out)
 }
 
-/// Parsed and validated `ui.answer_dialog` parameters.
-pub struct ParsedAnswerDialogParams<'a> {
-    pub dialog_id: Option<&'a str>,
-    pub action: Option<String>,
-    pub choice: Option<&'a str>,
-    pub fields: Option<&'a Map<String, Value>>,
-    pub force_create_new: bool,
-    pub metrics: ViewportMetrics,
-}
-
-/// Parse and validate `ui.answer_dialog` request parameters.
-///
-/// # Errors
-/// Returns [`EngineError`] on invalid `fields`, `dialog_id`, `action`, `choice`, or `metrics`.
-pub fn parse_answer_dialog_params(params: &Value) -> Result<ParsedAnswerDialogParams<'_>, EngineError> {
-    require_params_object_or_null(params, "ui.answer_dialog").map_err(bad_input_err)?;
-    let dialog_id = opt_non_empty_str_param(params, &["dialog_id"]).map_err(bad_input_err)?;
-    let action = opt_non_empty_str_param(params, &["action"]).map_err(bad_input_err)?.map(|s| s.to_ascii_lowercase());
-    let choice = opt_non_empty_str_param(params, &["choice"]).map_err(bad_input_err)?;
-    let metrics = parse_viewport_metrics_from_params(params)?;
-    let force_create_new = params.get("force_create_new").and_then(Value::as_bool) == Some(true);
-    let fields = match params.get("fields").or_else(|| params.get("values")).or_else(|| params.get("patches")) {
-        Some(v) if !v.is_null() => Some(v.as_object().ok_or_else(|| bad_input_err("`fields` must be a JSON object"))?),
-        _ => None,
-    };
-    Ok(ParsedAnswerDialogParams { dialog_id, action, choice, fields, force_create_new, metrics })
-}
-
-/// Validate dialog open state and `dialog_id`, then apply any `fields` patch to `app`.
-///
-/// Returns `Ok(Some(json))` when `parsed.action` is `None` (patch-only call); otherwise returns
-/// `Ok(None)` so the caller executes the requested dialog button action.
-///
-/// # Errors
-/// Returns [`EngineError`] on `human_path_only` policy conflict, missing/mismatched dialog, or invalid fields.
-pub fn prepare_answer_dialog_patch(
-    app: &mut UiApp,
-    views: &EguiShellViewState,
-    host_close_dialog_open: bool,
-    parsed: &ParsedAnswerDialogParams<'_>,
-) -> Result<Option<Value>, EngineError> {
-    if app.is_human_path_only() {
-        return Err(human_path_only_err("direct `ui.answer_dialog` is blocked in human-path-only mode"));
-    }
-    let decision = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open);
-    if !decision.modal_backdrop_active && app.canvas_dialogs.active_dialog == ActiveDialog::None {
-        return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
-    }
-    if let Some(expected_id) = parsed.dialog_id {
-        let active_slug = resolve_dialog_slug(app, &decision, None);
-        let norm_expected: String = expected_id.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        let norm_active: String = active_slug.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-        let is_import_wizard_alias = norm_active == "importpastespecial" && norm_expected == "importwizard";
-        if norm_expected != norm_active && !is_import_wizard_alias {
-            return Err(EngineError::with_code(
-                ErrorCode::Conflict,
-                format!("expected modal dialog `{expected_id}`, but `{active_slug}` is currently open"),
-            ));
-        }
-    }
-
-    let mut want_force_create_new = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }) && parsed.force_create_new;
-    let merged_fields: Option<Map<String, Value>> = match (parsed.fields, parsed.choice) {
-        (Some(f), Some(ch)) => {
-            let mut m = f.clone();
-            m.entry(String::from("choice")).or_insert_with(|| Value::String(ch.to_owned()));
-            Some(m)
-        }
-        (Some(f), None) => Some(f.clone()),
-        (None, Some(ch)) => {
-            let mut m = Map::new();
-            m.insert(String::from("choice"), Value::String(ch.to_owned()));
-            Some(m)
-        }
-        (None, None) => None,
-    };
-    if let Some(fields_map) = merged_fields.as_ref() {
-        if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. })
-            && (fields_map.get("create_new").and_then(Value::as_bool) == Some(true)
-                || fields_map.get("force_create_new").and_then(Value::as_bool) == Some(true))
-        {
-            want_force_create_new = true;
-        }
-        patch_active_dialog(app, fields_map)?;
-        if want_force_create_new {
-            app.canvas_dialogs.analyze.force_create_new_once = true;
-        }
-        if parsed.action.is_none() {
-            return Ok(Some(json!({ "updated": true, "dialog": format!("{:?}", app.canvas_dialogs.active_dialog) })));
-        }
-    } else if want_force_create_new {
-        app.canvas_dialogs.analyze.force_create_new_once = true;
-    }
-
-    sync_format_points_fallback_targets(app);
-    Ok(None)
-}
-
-/// Candidate widget IDs matching a canonical `ui.answer_dialog` `action` name.
-#[must_use]
-pub fn answer_dialog_candidate_wids(action: &str) -> Vec<String> {
-    match action {
-        "ok" => vec![
-            String::from("dialog.button.ok"),
-            String::from("modal.ok"),
-            String::from("graph_type.apply"),
-            String::from("dialog.button.save"),
-            String::from("nav.delete_confirm.confirm"),
-            String::from("import.commit"),
-            String::from("transform.commit"),
-        ],
-        "create" => vec![String::from("dialog.button.create"), String::from("modal.create"), String::from("modal.ok"), String::from("power.commit")],
-        "cancel" => vec![String::from("dialog.button.cancel"), String::from("modal.cancel"), String::from("nav.delete_confirm.cancel")],
-        "apply" => vec![String::from("dialog.button.apply"), String::from("modal.apply"), String::from("graph_type.apply")],
-        "dont_save" | "discard" => vec![String::from("dialog.button.dont_save"), String::from("modal.discard")],
-        other => vec![format!("dialog.button.{other}"), format!("modal.{other}")],
-    }
-}
-
-/// Execute an `ActiveDialog` button action directly on `app` and return the formatted `ui.answer_dialog` JSON.
-///
-/// # Errors
-/// Returns [`EngineError`] if the button is disabled, unknown, or fails to commit.
-pub fn execute_active_dialog_answer(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
-    if let Some(eval) = evaluate_dialog_button_for_app(app, action)
-        && !eval.enabled
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::Conflict,
-            eval.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
-        ));
-    }
-    let was_power_wizard = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize);
-    let prev_suppress = app.canvas_dialogs.suppress_auto_open_fit_params;
-    app.canvas_dialogs.suppress_auto_open_fit_params = true;
-    let res =
-        if action == "ok" { submit_active_dialog_ok(app) } else { crate::egui_shell::dialog_actions::execute_dialog_button_action(app, action) };
-    app.canvas_dialogs.suppress_auto_open_fit_params = prev_suppress;
-    let res = res?;
-    if !is_power_studio_dialog_active(app) {
-        super::power_studio::reset_results_transient_state(&mut app.egui_views.power_studio);
-    }
-    let active_after = HybridCoexistenceArbiter::evaluate(app, false).modal_surface != HybridModalSurface::None;
-    let mut out = json!({
-        "answered": true,
-        "action": action,
-        "modal_open_after": active_after,
-        "outcome": res,
-    });
-    if let Some(out_obj) = out.as_object_mut()
-        && let Some(res_map) = res.as_object()
-    {
-        for (k, v) in res_map {
-            out_obj.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-        if let Some(payload) = res_map.get("payload").and_then(Value::as_object) {
-            for (k, v) in payload {
-                out_obj.entry(k.clone()).or_insert_with(|| v.clone());
-            }
-        }
-    }
-    if was_power_wizard
-        && matches!(action, "next" | "back")
-        && let Some(out_obj) = out.as_object_mut()
-    {
-        out_obj.entry(String::from("stage")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.label()));
-        out_obj.entry(String::from("stage_index")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.index()));
-    }
-    Ok(out)
-}
-
-/// Format the JSON response payload for a clicked `ui.answer_dialog` button from settled intent outcomes.
-#[must_use]
-pub fn format_answer_dialog_click_result(
-    app: &UiApp,
-    views: &EguiShellViewState,
-    host_close_dialog_open: bool,
-    action: &str,
-    button_widget_id: &str,
-    was_power_wizard: bool,
-    outcomes: &[UiIntentOutcome],
-) -> Value {
-    let outcome = outcomes
-        .iter()
-        .find_map(|o| match o {
-            UiIntentOutcome::Engine { command_id, outcome } => Some(json!({
-                "command_id": command_id,
-                "command_result": outcome.payload,
-            })),
-            UiIntentOutcome::Ui { command_id, result } => Some(json!({
-                "command_id": command_id,
-                "command_result": result,
-            })),
-            UiIntentOutcome::ShellUpdated => None,
-        })
-        .unwrap_or_else(|| json!({}));
-    let active_after = HybridCoexistenceArbiter::evaluate_with_views(app, views, host_close_dialog_open).modal_surface != HybridModalSurface::None;
-    let mut out = json!({
-        "answered": true,
-        "action": action,
-        "button_widget_id": button_widget_id,
-        "modal_open_after": active_after,
-        "outcome": outcome,
-    });
-    if let Some(cmd_res_val) = outcome.get("command_result").filter(|v| !v.is_null())
-        && let Some(out_obj) = out.as_object_mut()
-        && let Some(cmd_res) = cmd_res_val.as_object()
-    {
-        for (k, v) in cmd_res {
-            out_obj.entry(k.clone()).or_insert_with(|| v.clone());
-        }
-        if !cmd_res.contains_key("payload") {
-            out_obj.entry(String::from("payload")).or_insert_with(|| cmd_res_val.clone());
-        }
-    }
-    if was_power_wizard
-        && matches!(action, "next" | "back")
-        && let Some(out_obj) = out.as_object_mut()
-    {
-        out_obj.entry(String::from("stage")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.label()));
-        out_obj.entry(String::from("stage_index")).or_insert_with(|| json!(app.canvas_dialogs.power_wizard.stage.index()));
-    }
-    out
-}
-
-fn dispatch_gui_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let parsed = parse_answer_dialog_params(params)?;
-    let views_snapshot = app.egui_views.clone();
-    if let Some(patch_only_res) = prepare_answer_dialog_patch(app, &views_snapshot, false, &parsed)? {
-        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
-        return Ok(patch_only_res);
-    }
-
-    let action = parsed.action.unwrap_or_else(|| String::from("ok"));
-    let (meta, _, _) = step_headless_batches(app, parsed.metrics, Vec::new())?;
-    if app.canvas_dialogs.active_dialog != ActiveDialog::None
-        && let Some(eval) = evaluate_dialog_button_for_app(app, &action)
-        && !eval.enabled
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::Conflict,
-            eval.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
-        ));
-    }
-
-    let candidate_wids = answer_dialog_candidate_wids(&action);
-    if let Some(entry) = candidate_wids.iter().find_map(|w| meta.find_by_widget_id(w)) {
-        if !entry.enabled {
-            return Err(EngineError::with_code(
-                ErrorCode::Conflict,
-                entry.disabled_reason.clone().unwrap_or_else(|| format!("dialog button `{action}` is disabled")),
-            ));
-        }
-        let pos = entry.clipped_rect.center();
-        let button_wid = entry.widget_id.clone();
-        let was_power_wizard = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize);
-        let prev_suppress = app.canvas_dialogs.suppress_auto_open_fit_params;
-        app.canvas_dialogs.suppress_auto_open_fit_params = true;
-        let step_res = step_headless_batches(app, parsed.metrics, click_pos_batches(pos, egui::PointerButton::Primary, Modifiers::NONE));
-        app.canvas_dialogs.suppress_auto_open_fit_params = prev_suppress;
-        let (_, _, outcomes) = step_res?;
-        let views_after = app.egui_views.clone();
-        return Ok(format_answer_dialog_click_result(app, &views_after, false, &action, &button_wid, was_power_wizard, &outcomes));
-    }
-
-    if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-        let out = execute_active_dialog_answer(app, &action)?;
-        let _ = step_headless_batches(app, parsed.metrics, Vec::new())?;
-        return Ok(out);
-    }
-
-    Err(EngineError::with_code(ErrorCode::NotFound, format!("dialog button `{action}` not found on active modal")))
-}
-
 /// Render a minimal `egui_shell` workspace + `About` modal view (`R15.1` b4/b5) using canonical
 /// [`Tokens`], non-overlapping solid scrollbars, `100%` `ZLayer::ModalBackdrop` outside input
 /// capture, [`FrameInspectMeta`], and [`PendingUiIntents`].
@@ -4288,40 +4012,7 @@ mod tests {
     }
 
     #[test]
-    fn m2_answer_dialog_strict_action_validation_and_shell_dialog_id() -> Result<(), String> {
-        let mut app = build_xy_app_with_graphs()?;
-        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
-        let doc = app.document().clone();
-        assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from("ds-1")));
-        app.canvas_dialogs.analyze.selected_entry_id = Some(String::from("fit.linear"));
-
-        let err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "nonexistent_btn_xyz" }))
-            .err()
-            .ok_or_else(|| String::from("expected NotFound for nonexistent button"))?;
-        assert_eq!(err.code, ErrorCode::NotFound, "expected NotFound, got {err:?}");
-        assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }), "dialog must remain open");
-        assert!(app.document().result_sheets.is_empty(), "nonexistent action must not commit analysis");
-
-        let apply_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "apply" }))
-            .err()
-            .ok_or_else(|| String::from("expected NotFound for unsupported apply on AnalyzeSheet"))?;
-        assert_eq!(apply_err.code, ErrorCode::NotFound, "expected NotFound for apply on AnalyzeSheet, got {apply_err:?}");
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "cancel" })).map_err(|e| e.to_string())?;
-
-        // Shell-managed Preferences modal validates `dialog_id: "preferences"`.
-        app.egui_views.app_modals.preferences_open = true;
-        let mismatch = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "analyze_sheet", "action": "ok" }))
-            .err()
-            .ok_or_else(|| String::from("expected Conflict for mismatched dialog_id"))?;
-        assert_eq!(mismatch.code, ErrorCode::Conflict);
-
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "preferences", "action": "ok" })).map_err(|e| e.to_string())?;
-        assert!(!app.egui_views.app_modals.preferences_open, "preferences must close when answered with dialog_id=preferences");
-        Ok(())
-    }
-
-    #[test]
-    fn m2_power_stage_1_based_switch_tab_and_disabled_hover_and_dialog_patch_bad_input() -> Result<(), String> {
+    fn m2_power_stage_1_based_switch_tab_and_disabled_hover_and_retired_answer_dialog() -> Result<(), String> {
         let mut app = build_xy_app_with_graphs()?;
         app.canvas_dialogs.open_power_wizard();
 
@@ -4343,39 +4034,11 @@ mod tests {
         let s1 = dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab_id": "power.stage.1" })).map_err(|e| e.to_string())?;
         assert_eq!(s1.get("stage_index").and_then(Value::as_u64), Some(0));
 
-        // Unknown field keys in PowerAndSampleSize / AnalyzeSheet / EditAnalysisParameters return BadInput.
-        let pw_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
+        // Retired ui.answer_dialog returns BadInput in normal mode.
+        let retired_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))
             .err()
-            .ok_or_else(|| String::from("expected BadInput for unknown power field"))?;
-        assert_eq!(pw_err.code, ErrorCode::BadInput, "got {pw_err:?}");
-        app.canvas_dialogs.close_dialog();
-
-        let doc = app.document().clone();
-        assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from("ds-1")));
-        let az_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
-            .err()
-            .ok_or_else(|| String::from("expected BadInput for unknown analyze field"))?;
-        assert_eq!(az_err.code, ErrorCode::BadInput, "got {az_err:?}");
-        // Genuine disabled precondition still returns Conflict.
-        let az_dis = dispatch_gui_action(
-            &mut app,
-            "ui.answer_dialog",
-            json!({ "fields": { "entry_id": "stats.correlation", "correlation_all_pairs": false, "correlation_heatmap": true } }),
-        )
-        .err()
-        .ok_or_else(|| String::from("expected Conflict for disabled heatmap"))?;
-        assert_eq!(az_dis.code, ErrorCode::Conflict, "got {az_dis:?}");
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": "fit.linear" } }))
-            .map_err(|e| e.to_string())?;
-
-        // EditAnalysisParameters unknown key returns BadInput.
-        let rs_id = app.document().result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("missing result sheet"))?;
-        let doc_after = app.document().clone();
-        assert!(app.canvas_dialogs.open_edit_parameters(&doc_after, &rs_id));
-        let ep_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "unknown_xyz": 1 } }))
-            .err()
-            .ok_or_else(|| String::from("expected BadInput for unknown edit_params field"))?;
-        assert_eq!(ep_err.code, ErrorCode::BadInput, "got {ep_err:?}");
+            .ok_or_else(|| String::from("expected BadInput for retired ui.answer_dialog"))?;
+        assert_eq!(retired_err.code, ErrorCode::BadInput, "got {retired_err:?}");
         app.canvas_dialogs.close_dialog();
         Ok(())
     }
@@ -4494,26 +4157,6 @@ mod tests {
             let after_x = read_x(&app)?;
             assert!(after_x > before_x, "short {dist_pt}pt drag produced zero delta_x ({before_x} -> {after_x})");
         }
-
-        // 4. ui.answer_dialog accepts `dialog_id: "import_wizard"` alias for HybridModalSurface::EguiImportWizard.
-        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
-        app.grid.import_wizard.open = true;
-        let mismatch = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "preferences", "action": "cancel" }))
-            .err()
-            .ok_or_else(|| String::from("expected Conflict for mismatched dialog_id"))?;
-        assert_eq!(mismatch.code, ErrorCode::Conflict);
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "dialog_id": "import_wizard", "action": "cancel" })).map_err(|e| e.to_string())?;
-        assert!(!app.grid.import_wizard.open, "import_wizard must close when answered with dialog_id=import_wizard");
-
-        // 5. FormatSelectedPoints rejects `action: "apply"` with NotFound even with 0 selected points.
-        app.execute_command("sheet.select", json!({ "sheet_id": "gs-a" })).map_err(|e| e.to_string())?;
-        let doc_fp = app.document().clone();
-        assert!(app.canvas_dialogs.open_format_selected_points(&doc_fp, &curvebook_doc::SheetId::from("gs-a"), Vec::new()));
-        let fp_err = dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "apply" }))
-            .err()
-            .ok_or_else(|| String::from("expected NotFound for FormatSelectedPoints apply"))?;
-        assert_eq!(fp_err.code, ErrorCode::NotFound, "got {fp_err:?}");
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "cancel" })).map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -4530,7 +4173,11 @@ mod tests {
         let open_edit_for_entry = |a: &mut UiApp, sheet_id: &str, entry_id: &str| -> Result<curvebook_doc::SheetId, String> {
             let doc = a.document().clone();
             assert!(a.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from(sheet_id)));
-            dispatch_gui_action(a, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": entry_id } })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "analyze.search" })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.type_text", json!({ "text": entry_id })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": format!("analyze.entry.{entry_id}") }))
+                .map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "modal.ok" })).map_err(|e| e.to_string())?;
             if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &a.canvas_dialogs.active_dialog {
                 return Ok(result_sheet_id.clone());
             }
@@ -4587,7 +4234,13 @@ mod tests {
         )
         .map_err(|e| e.to_string())?;
         let _tg_rs_id = open_edit_for_entry(&mut app, "ds-col", "stats.two_group")?;
-        dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "fields": { "two_group_method": "one_sample_t" } })).map_err(|e| e.to_string())?;
+        if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft
+            && let curvebook_doc::AnalysisKind::TwoGroupComparison(mut tg) = spec.kind.clone()
+        {
+            tg.method = curvebook_doc::TwoGroupMethod::OneSampleT { hypothetical: 0.0 };
+            spec.update_kind(curvebook_doc::AnalysisKind::TwoGroupComparison(tg));
+            app.canvas_dialogs.edit_params.sync_rule_flags_from_kind();
+        }
 
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "edit.two_group.hypothetical" }))
             .map_err(|e| e.to_string())?;
@@ -4636,7 +4289,11 @@ mod tests {
         let open_edit = |a: &mut UiApp, sheet_id: &str, entry_id: &str| -> Result<curvebook_doc::SheetId, String> {
             let doc = a.document().clone();
             assert!(a.canvas_dialogs.open_analyze_dialog(&doc, &curvebook_doc::SheetId::from(sheet_id)));
-            dispatch_gui_action(a, "ui.answer_dialog", json!({ "action": "ok", "fields": { "entry_id": entry_id } })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "analyze.search" })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.type_text", json!({ "text": entry_id })).map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": format!("analyze.entry.{entry_id}") }))
+                .map_err(|e| e.to_string())?;
+            dispatch_gui_action(a, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "modal.ok" })).map_err(|e| e.to_string())?;
             if let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &a.canvas_dialogs.active_dialog {
                 return Ok(result_sheet_id.clone());
             }

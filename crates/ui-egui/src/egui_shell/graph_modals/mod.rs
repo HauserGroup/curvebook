@@ -25,7 +25,7 @@ use curvebook_palette::{ColorRamp, ColormapId};
 use curvebook_tools::ToolCommandIntent;
 use egui::scroll_area::ScrollBarVisibility;
 use egui::{Context, Ui};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AxisTarget};
@@ -499,21 +499,19 @@ fn render_dialog_top_strip(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
                     let lbl = tr(gctx.locale, tab.label_key());
                     let is_active = state.format_axes_pending_tab.unwrap_or(state.format_axes_tab) == tab;
                     if record_tab(ui, gctx.meta, tab.widget_id(), lbl, is_active, gctx.tokens).clicked() {
-                        let target_pair = match tab {
-                            FormatAxesTab::XAxis => Some((AxisTarget::X, "x")),
-                            FormatAxesTab::LeftYAxis => Some((AxisTarget::Y, "y")),
-                            FormatAxesTab::RightYAxis => Some((AxisTarget::Y2, "y2")),
+                        let target_axis = match tab {
+                            FormatAxesTab::XAxis => Some(AxisTarget::X),
+                            FormatAxesTab::LeftYAxis => Some(AxisTarget::Y),
+                            FormatAxesTab::RightYAxis => Some(AxisTarget::Y2),
                             FormatAxesTab::FrameAndOrigin | FormatAxesTab::TitlesAndTypography => None,
                         };
-                        if let Some((target_axis, slug)) = target_pair {
-                            if gctx.app.canvas_dialogs.format_axes.target_axis == target_axis {
+                        if let Some(target) = target_axis {
+                            if gctx.app.canvas_dialogs.format_axes.target_axis == target {
                                 state.format_axes_tab = tab;
                                 state.format_axes_pending_tab = None;
                             } else {
                                 state.format_axes_pending_tab = Some(tab);
-                                let mut patch = Map::new();
-                                patch.insert(String::from("axes.target_axis"), Value::String(slug.to_owned()));
-                                gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                                gctx.intents.push(UiIntent::SwitchFormatAxesTarget { target });
                             }
                         } else {
                             state.format_axes_tab = tab;

@@ -5,7 +5,6 @@
 mod analysis_catalog;
 mod analyze_dialog;
 mod command_palette;
-pub mod dialog_patch;
 mod edit_params;
 mod format_axes;
 mod format_graph;

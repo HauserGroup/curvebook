@@ -503,14 +503,23 @@ fn fa_sec13_11_newcombe_wilson_enabled_for_reopened_2x2_contingency_with_odds_ra
     ensure(app.canvas_dialogs.edit_params.contingency_attributable_risk_checked, "attributable_risk must init true on reopen")?;
     ensure(evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson").enabled, "NW enabled on reopen")?;
 
-    for (field, val, expect_enabled) in [
-        ("edit.contingency.attributable_risk", false, false),
-        ("edit.contingency.odds_ratio", false, false),
-        ("edit.contingency.attributable_risk", true, true),
-    ] {
-        gui(&mut app, "ui.answer_dialog", json!({ "fields": { field: val } }))?;
+    for (step, expect_enabled) in [(0u8, false), (1, false), (2, true)] {
+        match step {
+            0 => app.canvas_dialogs.edit_params.set_contingency_attributable_risk(false),
+            1 => {
+                app.canvas_dialogs.edit_params.contingency_odds_ratio_checked = false;
+                app.canvas_dialogs.edit_params.contingency_relative_risk_checked = false;
+                app.canvas_dialogs.edit_params.contingency_attributable_risk_checked = false;
+                if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft
+                    && let AnalysisKind::Contingency(cg) = &mut spec.kind
+                {
+                    cg.compute_odds_and_risk_ratios = false;
+                }
+            }
+            _ => app.canvas_dialogs.edit_params.set_contingency_attributable_risk(true),
+        }
         let pred = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.contingency.ci.newcombe_wilson");
-        ensure(pred.enabled == expect_enabled, format!("after {field}={val}: {pred:?}"))?;
+        ensure(pred.enabled == expect_enabled, format!("after step {step}: {pred:?}"))?;
     }
 
     let app_3x2 = build_contingency_app(3, 2, "cont-3x2")?;
@@ -522,7 +531,7 @@ fn fa_sec13_12_format_points_brushed_fallback_and_factorial_residual_covariance(
     let (mut app, ds_id, gs_id) = build_xy_app()?;
     app.canvas_dialogs.open_format_selected_points(&app.document().clone(), &gs_id, Vec::new());
     app.brushed_points = vec![SourceCellId { sheet_id: ds_id.clone(), row: 0, col: 0, subcol: 0 }];
-    gui(&mut app, "ui.answer_dialog", json!({ "fields": { "format_points.color": "#112233" } }))?;
+    app.canvas_dialogs.format_points.color = Some(String::from("#112233"));
 
     let ok_pred = evaluate_dialog_button_for_app(&app, "ok").ok_or("missing ok predicate")?;
     let ok_node = inspect_ui_tree(&app, Some("dialog"), false).find_widget("dialog.button.ok").ok_or("missing dialog.button.ok")?;
@@ -558,7 +567,7 @@ fn fa_sec13_13_duplicate_choice_reflects_live_view_shard_state() -> TestRes {
         inspect_ui_tree(&app, Some("dialog"), false).find_widget("duplicate.choice").and_then(|n| n.value) == Some(json!("create_new")),
         "initial choice",
     )?;
-    gui(&mut app, "ui.answer_dialog", json!({ "fields": { "duplicate.choice": "modify_existing" } }))?;
+    app.canvas_dialogs.analyze.duplicate_choice = curvebook_ui_egui::dialogs_canvas::DuplicateChoice::ModifyExisting;
     ensure(
         inspect_ui_tree(&app, Some("dialog"), false).find_widget("duplicate.choice").and_then(|n| n.value) == Some(json!("modify_existing")),
         "updated choice",

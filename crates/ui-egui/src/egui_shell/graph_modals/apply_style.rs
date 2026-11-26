@@ -3,7 +3,6 @@
 use crate::egui_shell::UiIntent;
 use curvebook_doc::SheetId;
 use egui::Ui;
-use serde_json::{Map, Value};
 
 use crate::i18n::tr;
 
@@ -34,9 +33,9 @@ pub(super) fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>)
                 )
                 .clicked()
                 {
-                    let mut patch = Map::new();
-                    patch.insert(String::from("donor_graph_id"), Value::String(id.as_str().to_owned()));
-                    gctx.intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                    let mut next = asf.clone();
+                    next.donor_graph_id = Some(id.clone());
+                    gctx.intents.push(UiIntent::UpdateApplyStyleState(Box::new(next)));
                 }
             }
         });

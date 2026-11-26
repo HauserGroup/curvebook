@@ -534,3 +534,359 @@ fn one_million_cell_xy_and_mv_virtualization_regression_guard() -> TestRes {
     }
     Ok(())
 }
+
+#[test]
+fn aud_07_08_10_import_paste_wizard_hardening_and_transform_modals() -> TestRes {
+    use crate::helpers::seed_column_app;
+    use curvebook_doc::{AnalysisSpec, CiBound, DescriptiveSpec, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::UiApp;
+    use curvebook_ui_egui::egui_shell::PendingUiIntents;
+    use curvebook_ui_egui::import_paste::commit_import_paste_dialog;
+
+    // 1. AUD-07-02/03/04/06/07/08: internal extraction (>200 rows, Survival, Nested, ResultTab CI precision), asterisk subcol atomic undo, bounds, blanks, predicates.
+    let mut doc = ProjectDocument::new("Ext").unwrap();
+    let mut big = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 240).unwrap();
+    for r in 0..240 {
+        big.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+    }
+    doc.data_sheets.push(DataSheet::new("big-col", "Big", TableArchetype::Column(big)).unwrap());
+    let mut surv = SurvivalTable::new(2, 3).unwrap();
+    for r in 0..3 {
+        surv.times[r] = Cell::number(((r + 1) * 10) as f64);
+        surv.cohorts[0].cells[r][0] = Cell::number(1.0);
+    }
+    doc.data_sheets.push(DataSheet::new("surv-1", "Surv", TableArchetype::Survival(surv)).unwrap());
+    let mut nst = NestedTable::new(2, 2, 2).unwrap();
+    nst.groups[0].cells[0][0] = Cell::number(11.0);
+    doc.data_sheets.push(DataSheet::new("nest-1", "Nest", TableArchetype::Nested(nst)).unwrap());
+    let mut rs =
+        ResultSheet::new(AnalysisSpec::new("res-1", "big-col", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap()).unwrap();
+    rs.status = ResultStatus::UpToDate;
+    rs.tabs = vec![
+        ResultTab {
+            id: "t0".into(),
+            title: "T0".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["A".into()],
+            row_labels: vec!["R".into()],
+            rows: vec![vec![ResultCell::Number { value: 1.0, prefix: None, units: None }]],
+            footnotes: vec![],
+        },
+        ResultTab {
+            id: "t1".into(),
+            title: "T1".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["CI".into()],
+            row_labels: vec!["P".into()],
+            rows: vec![vec![ResultCell::ConfidenceInterval { lower: CiBound::Finite(0.00012345), upper: CiBound::Finite(0.00098765) }]],
+            footnotes: vec![],
+        },
+    ];
+    doc.result_sheets.push(rs);
+    doc.active_sheet_id = Some(SheetId::new("big-col"));
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.grid.import_paste.source_origin = "internal_sheet".into();
+    app.grid.import_paste.target_mode = "new_sheet".into();
+    for (src, kind, check_tab) in [
+        ("big-col", TableKind::Column, false),
+        ("surv-1", TableKind::Survival, false),
+        ("nest-1", TableKind::Column, false),
+        ("res-1", TableKind::Column, true),
+    ] {
+        if check_tab {
+            (app.canvas_dialogs.result_view.result_sheet_id, app.canvas_dialogs.result_view.active_tab_index) = (Some(SheetId::new("res-1")), 1);
+        }
+        app.grid.import_paste.internal_source_sheet_id = Some(src.into());
+        app.grid.import_reshape.target_kind = kind;
+        let out = commit_import_paste_dialog(&mut app).unwrap();
+        let ds = app.document().data_sheet(&SheetId::new(out["sheet_id"].as_str().unwrap())).unwrap();
+        match src {
+            "big-col" => assert_eq!(ds.archetype.row_count(), 240),
+            "surv-1" => {
+                assert!(matches!(&ds.archetype, TableArchetype::Survival(s) if s.times[0].active_number() == Some(10.0) && s.cohorts.len() == 2))
+            }
+            "nest-1" => assert_eq!(ds.archetype.column_count(), 4),
+            _ => assert!(
+                matches!(ds.cell(CellCoord::new(0, 0, 0)).map(|c| &c.value), Some(curvebook_doc::CellValue::Text(t)) if t.contains("0.00012345") && t.contains("0.00098765"))
+            ),
+        }
+    }
+
+    // Asterisk subcol restore + atomic undo + PartsOfWhole/Nested wire names + OOM bounds + blanks + exclude_predicate
+    let mut gdoc = ProjectDocument::new("Grp").unwrap();
+    gdoc.data_sheets
+        .push(DataSheet::new("grp-1", "G", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).unwrap())).unwrap());
+    gdoc.active_sheet_id = Some(SheetId::new("grp-1"));
+    let mut gapp = UiApp::from_session(Session::from_document(gdoc));
+    let u0 = gapp.session().undo_depth();
+    gapp.grid.import_paste.source_origin = "clipboard".into();
+    gapp.grid.import_paste.raw_source_text = "A1\tA2\tB1\tB2\n1\t*litA2\t3\t*litB2".into();
+    gapp.grid.import_paste.has_header_row = true;
+    gapp.grid.import_paste.parse_asterisk_exclusions = false;
+    gapp.grid.import_paste.target_mode = "existing_sheet".into();
+    gapp.grid.import_paste.target_sheet_id = Some("grp-1".into());
+    gapp.grid.import_reshape.tidy_delimiter = '\t';
+    commit_import_paste_dialog(&mut gapp).unwrap();
+    let gds = gapp.document().data_sheet(&SheetId::new("grp-1")).unwrap();
+    assert_eq!(gapp.session().undo_depth(), u0 + 1);
+    for col in [0, 1] {
+        let c = gds.cell(CellCoord::new(0, col, 1)).unwrap();
+        assert!(!c.excluded && matches!(&c.value, curvebook_doc::CellValue::Text(s) if s.starts_with("*lit")));
+    }
+    for kind in [TableKind::PartsOfWhole, TableKind::Nested] {
+        gapp.grid.import_paste.target_mode = "new_sheet".into();
+        gapp.grid.import_paste.parse_asterisk_exclusions = true;
+        gapp.grid.import_paste.raw_source_text = "G1\tG2\n10\t20\n30\t40".into();
+        gapp.grid.import_reshape.target_kind = kind;
+        let sid = commit_import_paste_dialog(&mut gapp).unwrap()["sheet_id"].as_str().unwrap().to_owned();
+        assert_eq!(gapp.document().data_sheet(&SheetId::new(sid)).unwrap().kind(), kind);
+    }
+
+    let (mut bapp, bsid) = seed_column_app(&[("A", &[1.0, 2.0]), ("B", &[3.0, 4.0])], ColumnDesignHint::UnpairedReplicates);
+    bapp.grid.import_paste.source_origin = "clipboard".into();
+    bapp.grid.import_paste.target_mode = "new_sheet".into();
+    bapp.grid.import_reshape.tidy_delimiter = '\t';
+    bapp.grid.import_paste.raw_source_text = "A\tB\n1\t2".into();
+    bapp.grid.import_paste.row_wrap_width = curvebook_doc::MAX_DATA_SETS + 1;
+    assert!(commit_import_paste_dialog(&mut bapp).is_err());
+    bapp.grid.import_paste.row_wrap_width = 0;
+    let mut huge = String::from("Group\tVal\n");
+    for i in 0..=(curvebook_doc::MAX_DATA_SETS + 2) {
+        huge.push_str(&format!("G{i}\t{i}\n"));
+    }
+    (bapp.grid.import_paste.raw_source_text, bapp.grid.import_paste.unstack_enabled, bapp.grid.import_paste.unstack_group_col) = (huge, true, 0);
+    assert!(commit_import_paste_dialog(&mut bapp).is_err());
+    bapp.grid.import_paste.unstack_enabled = false;
+    (
+        bapp.grid.import_paste.raw_source_text,
+        bapp.grid.import_paste.skip_contiguous_blanks,
+        bapp.grid.import_paste.target_mode,
+        bapp.grid.import_paste.target_sheet_id,
+    ) = ("Val\n10\n\n\n20\n\n30".into(), true, "existing_sheet".into(), Some(bsid.as_str().into()));
+    commit_import_paste_dialog(&mut bapp).unwrap();
+    let dsb = bapp.document().data_sheet(&bsid).unwrap();
+    assert_eq!(
+        (
+            dsb.cell(CellCoord::new(0, 0, 0)).and_then(Cell::active_number),
+            dsb.cell(CellCoord::new(1, 0, 0)).is_some_and(Cell::is_empty),
+            dsb.cell(CellCoord::new(2, 0, 0)).and_then(Cell::active_number),
+            dsb.cell(CellCoord::new(4, 0, 0)).and_then(Cell::active_number)
+        ),
+        (Some(10.0), true, Some(20.0), Some(30.0))
+    );
+    (
+        bapp.grid.import_paste.skip_contiguous_blanks,
+        bapp.grid.import_paste.target_mode,
+        bapp.grid.import_paste.raw_source_text,
+        bapp.grid.import_paste.exclude_predicate,
+    ) = (false, "new_sheet".into(), "Dose\tResp\n1\t100\n10\t200".into(), "Dose < 5".into());
+    let psid = commit_import_paste_dialog(&mut bapp).unwrap()["sheet_id"].as_str().unwrap().to_owned();
+    let dsp = bapp.document().data_sheet(&SheetId::new(psid)).unwrap();
+    assert!(dsp.cell(CellCoord::new(0, 0, 0)).is_some_and(|c| c.excluded) && dsp.cell(CellCoord::new(1, 0, 0)).is_some_and(|c| !c.excluded));
+    for bad in ["NonExistent > 0", "not a predicate"] {
+        bapp.grid.import_paste.exclude_predicate = bad.into();
+        assert!(commit_import_paste_dialog(&mut bapp).is_err());
+    }
+
+    // AUD-08-12: Failed CommitImportWizard rolls back created sheet.
+    let n_before = bapp.document().data_sheets.len();
+    (bapp.grid.import_wizard.origin_kind, bapp.grid.import_wizard.target_sheet_id, bapp.grid.import_wizard.raw_clipboard_text) =
+        (ImportOriginKind::Clipboard, None, String::new());
+    let mut pw = PendingUiIntents::new();
+    pw.push(UiIntent::CommitImportWizard { close_after: true });
+    let _ = pw.commit_if_settled(&mut bapp, false);
+    assert_eq!(bapp.document().data_sheets.len(), n_before);
+    Ok(())
+}
+
+#[test]
+fn aud_10_import_wizard_policy_atomicity_unstack_and_transform_modals() -> TestRes {
+    use crate::common::temp_dir;
+    use crate::helpers::{make_commit_driver, seed_column_app, seed_xy_app};
+    use curvebook_doc::{ErrorPropagationMode, MathTransformPreset, SimulationNoise, TransformAnalysisSpec};
+    use curvebook_engine::{ExternalPathPolicy, Session};
+    use curvebook_ui_egui::UiApp;
+    use serde_json::Value;
+
+    // 2. AUD-10-03/05/20/21 & AUD-13-02: ImportWizard UI policy, atomic empty/frozen InfoSheet, unstack cap & 1-row header, XY replicate subcols.
+    let mut app_rej = UiApp::from_session(Session::new().with_path_policy(ExternalPathPolicy::RejectExternal));
+    (app_rej.grid.import_wizard.open, app_rej.grid.import_wizard.origin_kind, app_rej.grid.import_wizard.external_file_path) =
+        (true, ImportOriginKind::XlsxWorkbook, "/etc/passwd".into());
+    let dr_rej = make_commit_driver(app_rej);
+    for wid in ["import_paste.input.path", "import_wizard.xlsx.load_path", "import_wizard.xlsx.select_all", "import_wizard.xlsx.select_none"] {
+        assert!(!dr_rej.frame_meta().find_by_widget_id(wid).unwrap().enabled);
+    }
+    let wdir = temp_dir("cb-aud10-20")?;
+    let mut app_wd = UiApp::from_session(Session::new().with_path_policy(ExternalPathPolicy::workdir(wdir.path()).unwrap()));
+    (app_wd.grid.import_wizard.open, app_wd.grid.import_wizard.origin_kind, app_wd.grid.import_wizard.external_file_path) =
+        (true, ImportOriginKind::XlsxWorkbook, "../out.xlsx".into());
+    let mut dr_wd = make_commit_driver(app_wd);
+    dr_wd.click_widget_id("import_wizard.xlsx.load_path")?;
+    assert!(dr_wd.state().app.grid.import_wizard.xlsx_error.as_deref().is_some_and(|e| e.contains("workdir policy")));
+
+    let mut app_emp = UiApp::new();
+    (
+        app_emp.grid.import_wizard.open,
+        app_emp.grid.import_wizard.origin_kind,
+        app_emp.grid.import_wizard.delimiter,
+        app_emp.grid.import_wizard.raw_clipboard_text,
+    ) = (true, ImportOriginKind::Clipboard, ',', "Instrument: PlateReader\nA,B\n1,2\n3,4".into());
+    let mut dr_emp = make_commit_driver(app_emp);
+    for wid in ["import_paste.tab.notes", "import_paste.opt.extract_info_metadata", "import_paste.opt.add_floating_note", "modal.ok"] {
+        dr_emp.click_widget_id(wid)?;
+    }
+    assert!(!dr_emp.state().app.grid.import_wizard.open && dr_emp.state().app.session().undo_depth() == 1);
+    let info = dr_emp.state().app.document().info_sheets.first().unwrap();
+    assert!(info.constants.iter().any(|c| c.name == "Instrument") && info.notes_markdown.contains("[Import Summary]"));
+
+    let mut fdoc = ProjectDocument::new("Frozen").unwrap();
+    let mut finfo = InfoSheet::new_preseeded("info-f", "I").unwrap();
+    finfo.constants.clear();
+    finfo.notes_markdown.clear();
+    fdoc.info_sheets.push(finfo);
+    let mut fds =
+        DataSheet::new("col-f", "F", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap())).unwrap();
+    fds.info_sheet_id = Some(SheetId::new("info-f"));
+    fdoc.data_sheets.push(fds);
+    fdoc.active_sheet_id = Some(SheetId::new("col-f"));
+    let mut app_f = UiApp::from_session(Session::from_document(fdoc));
+    app_f.execute_command("sheet.freeze", json!({ "sheet_id": "col-f" })).unwrap();
+    (app_f.grid.import_wizard.open, app_f.grid.import_wizard.target_sheet_id, app_f.grid.import_wizard.raw_clipboard_text) =
+        (true, Some(SheetId::new("col-f")), "Batch: B99\n10\t20".into());
+    let mut dr_f = make_commit_driver(app_f);
+    for wid in ["import_paste.tab.notes", "import_paste.opt.extract_info_metadata", "import_paste.opt.add_floating_note", "modal.ok"] {
+        dr_f.click_widget_id(wid)?;
+    }
+    assert!(
+        dr_f.state().app.grid.import_wizard.open && dr_f.state().app.document().info_sheet(&SheetId::new("info-f")).unwrap().constants.is_empty()
+    );
+
+    let mut big_u = String::from("Grp,Val\n");
+    for i in 0..250 {
+        big_u.push_str(&format!("G{i},{i}\n"));
+    }
+    for j in 0..250 {
+        big_u.push_str(&format!("G0,{j}\n"));
+    }
+    let mut app_u = UiApp::new();
+    (
+        app_u.grid.import_wizard.open,
+        app_u.grid.import_wizard.delimiter,
+        app_u.grid.import_wizard.header_rows,
+        app_u.grid.import_wizard.filter.unstack_group_column,
+        app_u.grid.import_wizard.raw_clipboard_text,
+    ) = (true, ',', 1, Some(0), big_u);
+    let mut dr_u = make_commit_driver(app_u);
+    dr_u.click_widget_id("import_paste.tab.filter")?;
+    assert!(dr_u.state().views.import_wizard.unstack_error.is_some() && !dr_u.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+
+    let mut app_u1 = UiApp::new();
+    (
+        app_u1.grid.import_wizard.open,
+        app_u1.grid.import_wizard.delimiter,
+        app_u1.grid.import_wizard.header_rows,
+        app_u1.grid.import_wizard.filter.unstack_group_column,
+        app_u1.grid.import_wizard.raw_clipboard_text,
+    ) = (true, ',', 1, Some(0), "Grp,Val".into());
+    let mut dr_u1 = make_commit_driver(app_u1);
+    for wid in ["import_paste.tab.filter", "modal.ok"] {
+        dr_u1.click_widget_id(wid)?;
+    }
+    let dsu1 = dr_u1.state().app.document().data_sheets.first().unwrap();
+    assert!(dsu1.archetype.data_cell(CellCoord::new(0, 0, 0)).is_none_or(Cell::is_empty));
+
+    let mut xy2 = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
+    (xy2.x_cells[0][0], xy2.data_sets[0].cells[0][0], xy2.data_sets[0].cells[0][1]) = (Cell::number(1.0), Cell::number(10.0), Cell::number(11.0));
+    let mut doc_xy = ProjectDocument::new("XYR").unwrap();
+    doc_xy.data_sheets.push(DataSheet::new("xy-s", "S", TableArchetype::Xy(xy2)).unwrap());
+    doc_xy
+        .data_sheets
+        .push(DataSheet::new("col-d", "D", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 2).unwrap())).unwrap());
+    let mut app_xy = UiApp::from_session(Session::from_document(doc_xy));
+    (
+        app_xy.grid.import_wizard.open,
+        app_xy.grid.import_wizard.origin_kind,
+        app_xy.grid.import_wizard.source_sheet_id,
+        app_xy.grid.import_wizard.target_sheet_id,
+    ) = (true, ImportOriginKind::InternalDataSheet, Some(SheetId::new("xy-s")), Some(SheetId::new("col-d")));
+    let mut dr_xy = make_commit_driver(app_xy);
+    dr_xy.click_widget_id("modal.ok")?;
+    let dxy = dr_xy.state().app.document().data_sheet(&SheetId::new("col-d")).unwrap();
+    assert_eq!(
+        (0..3).map(|c| dxy.archetype.data_cell(CellCoord::new(0, c, 0)).and_then(Cell::active_number)).collect::<Vec<_>>(),
+        vec![Some(1.0), Some(10.0), Some(11.0)]
+    );
+
+    // 3. AUD-10-14/16/45: LinearScale slope preservation, German Simulate semicolon format, RemoveBaseline cycle, ExcludeWithReason preset.
+    let (mut app_lin, sid_lin) = seed_xy_app(&[1.0, 2.0, 3.0], &[10.0, 20.0, 30.0]);
+    let lin_k = AnalysisKind::Transform(TransformAnalysisSpec::Math {
+        x_transform: None,
+        y_transform: Some(MathTransformPreset::LinearScale { slope: 2.5, intercept: 10.0 }),
+        error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+    });
+    let rsid = SheetId::new(
+        app_lin
+            .execute_command("analysis.run", json!({ "source_sheet_id": sid_lin.as_str(), "kind": serde_json::to_value(&lin_k).unwrap() }))
+            .unwrap()
+            .payload["sheet_id"]
+            .as_str()
+            .unwrap(),
+    );
+    app_lin.canvas_dialogs.open_edit_parameters(&app_lin.document().clone(), &rsid);
+    let mut dr_lin = make_commit_driver(app_lin);
+    dr_lin.click_widget_id("modal.ok")?;
+    assert!(
+        matches!(&dr_lin.state().app.document().result_sheet(&rsid).unwrap().analysis.kind, AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform: Some(MathTransformPreset::LinearScale { slope, intercept }), .. }) if (*slope - 2.5).abs() < 1e-12 && (*intercept - 10.0).abs() < 1e-12)
+    );
+
+    let (mut app_de, sid_de) = seed_xy_app(&[1.0, 2.0, 3.0], &[1.0, 2.0, 3.0]);
+    app_de.set_locale("de");
+    let sim_k = AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
+        seed: 42,
+        row_count: 10,
+        replicates: 2,
+        x_min: -9.0,
+        x_max: -3.0,
+        equation_id: "log_agonist_vs_response_4pl".into(),
+        parameters: vec![("Top".into(), 100.5), ("HillSlope".into(), 1.5)],
+        noise: SimulationNoise::None,
+    });
+    let sim_id = SheetId::new(
+        app_de
+            .execute_command("analysis.run", json!({ "source_sheet_id": sid_de.as_str(), "kind": serde_json::to_value(&sim_k).unwrap() }))
+            .unwrap()
+            .payload["sheet_id"]
+            .as_str()
+            .unwrap(),
+    );
+    app_de.canvas_dialogs.open_edit_parameters(&app_de.document().clone(), &sim_id);
+    let dr_de = make_commit_driver(app_de);
+    assert!(
+        dr_de.state().views.transform_modals.sim_params_draft.contains(';')
+            && dr_de.state().views.transform_modals.validation_error.is_none()
+            && dr_de.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled
+    );
+
+    let (mut app_rb, sid_rb) = seed_column_app(&[("Ctrl", &[1.0, 2.0]), ("Tx", &[3.0, 4.0])], ColumnDesignHint::UnpairedReplicates);
+    (app_rb.egui_views.transform_modals.open_kind, app_rb.egui_views.transform_modals.target_sheet_id) =
+        (Some(TransformModalKind::RemoveBaseline), Some(sid_rb.clone()));
+    let mut dr_rb = make_commit_driver(app_rb);
+    let op0 = dr_rb.state().views.transform_modals.baseline_op;
+    dr_rb.click_widget_id("edit.transform.baseline_operation")?;
+    assert_eq!(dr_rb.state().views.transform_modals.baseline_op, (op0 + 1) % 4);
+
+    let (mut app_ex, sid_ex) = seed_column_app(&[("Ctrl", &[1.0, 2.0])], ColumnDesignHint::UnpairedReplicates);
+    (app_ex.canvas_dialogs.exclude_with_reason.sheet_id, app_ex.canvas_dialogs.exclude_with_reason.coords) =
+        (Some(sid_ex.clone()), vec![CellCoord::new(0, 0, 0).into()]);
+    app_ex.canvas_dialogs.exclude_with_reason.reason_tag.clear();
+    app_ex.canvas_dialogs.active_dialog = ActiveDialog::ExcludeWithReason { sheet_id: sid_ex };
+    let mut dr_ex = make_commit_driver(app_ex);
+    assert!(!dr_ex.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+    dr_ex.click_widget_id("exclude.preset.0")?;
+    assert!(
+        !dr_ex.state().views.transform_modals.exclude_reason_draft.is_empty() && dr_ex.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled
+    );
+    let _ = Value::Null;
+    Ok(())
+}

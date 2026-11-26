@@ -542,3 +542,519 @@ fn all_14_beta_locales_backdrop_capture_and_scrollbar_non_overlap_at_640x420_and
     check_accesskit_scrollbar_non_overlap(out.platform_output.accesskit_update.as_ref().ok_or("expected AccessKit TreeUpdate")?)?;
     Ok(())
 }
+
+#[test]
+fn aud_07_08_09_10_ext01_stats_fit_power_modals_regressions() -> BoxRes {
+    use crate::helpers::{click_input, run_egui_pass_with_ctx, seed_column_app};
+    use curvebook_doc::{FactorialAnovaSpec, GroupedTable};
+    use curvebook_stats::power::{PowerSolveTarget, PowerTestFamily};
+    use curvebook_ui_egui::dialogs_r9::RandomSampleRowsDialogState;
+    use curvebook_ui_egui::egui_shell::power_studio::{
+        PowerStudioEguiState, build_narrative_paragraph, render_power_studio_modal, sync_anova_group_means,
+    };
+    use curvebook_ui_egui::egui_shell::{FrameInspectMeta, StatParamsIntent, UiIntent};
+    use curvebook_ui_egui::power_wizard::{PowerEffectInputMode, PowerWizardStage, PowerWizardState};
+
+    // 1. AUD-07-24/25 & AUD-08-12/17: PowerWizard RegressionSlope reset, RandomSample stratify reset, ResolveDuplicate err keeps modal, ToggleSchematic MeanSdN guard.
+    let mut pw = PowerWizardState::default();
+    pw.set_family(PowerTestFamily::SimpleLinearRegression);
+    pw.effect_mode = PowerEffectInputMode::RegressionSlope;
+    pw.set_family(PowerTestFamily::TwoSamplePairedT);
+    assert_eq!(pw.effect_mode, PowerEffectInputMode::Standardized);
+
+    let mut doc_r9 = ProjectDocument::new("R9")?;
+    doc_r9.data_sheets.push(DataSheet::new("s-w", "W", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 4, 5)?))?);
+    doc_r9.data_sheets.push(DataSheet::new("s-n", "N", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 5)?))?);
+    let mut rsdlg = RandomSampleRowsDialogState::default();
+    assert!(rsdlg.open_for_sheet(&doc_r9, &SheetId::new("s-w")));
+    rsdlg.stratify_column = Some(3);
+    assert!(rsdlg.open_for_sheet(&doc_r9, &SheetId::new("s-n")) && rsdlg.stratify_column.is_none());
+
+    let (mut dup_app, dup_sid) = seed_column_app(&[("A", &[1.0, 2.0])], ColumnDesignHint::UnpairedReplicates);
+    (dup_app.canvas_dialogs.analyze.source_sheet_id, dup_app.canvas_dialogs.analyze.selected_entry_id) =
+        (Some(dup_sid.clone()), Some("stats.descriptive".into()));
+    dup_app.canvas_dialogs.active_dialog = ActiveDialog::DuplicateAnalysisPrompt {
+        source_sheet_id: dup_sid,
+        existing_result_ids: vec![SheetId::new("nope")],
+        pending_entry_id: "stats.descriptive".into(),
+    };
+    let mut pdup = PendingUiIntents::new();
+    pdup.push(UiIntent::ResolveDuplicateAnalysis { modify_existing_id: Some(SheetId::new("nope")) });
+    assert!(
+        pdup.commit_if_settled(&mut dup_app, false).is_err()
+            && matches!(dup_app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. })
+    );
+
+    let mut doc_f = ProjectDocument::new("Fact")?;
+    doc_f.data_sheets.push(DataSheet::new("g-sum", "S", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::MeanSdN, 2, 2)?))?);
+    let mut app_f = UiApp::from_session(Session::from_document(doc_f));
+    app_f.canvas_dialogs.edit_params.draft = Some(AnalysisSpec::new("r-f", "g-sum", AnalysisKind::FactorialAnova(FactorialAnovaSpec::default()))?);
+    let mut pf = PendingUiIntents::new();
+    pf.push(UiIntent::StatParams(StatParamsIntent::ToggleSchematic));
+    let _ = pf.commit_if_settled(&mut app_f, false)?;
+    assert!(!app_f.canvas_dialogs.edit_params.paired_or_matched);
+
+    // 2. AUD-09-03/09/28: PowerStudio clipboard adapter, narrative_copied reset, unavailable clipboard, sync_anova_group_means, solve_target narrative.
+    for avail in [true, false] {
+        let mut papp = UiApp::new();
+        let clip = Arc::new(if avail { StubPlatformClipboardAdapter::new() } else { StubPlatformClipboardAdapter::unavailable() });
+        papp.set_clipboard_adapter(clip.clone());
+        papp.canvas_dialogs.active_dialog = ActiveDialog::PowerAndSampleSize;
+        papp.canvas_dialogs.power_wizard.stage = PowerWizardStage::Results;
+        let _ = papp.canvas_dialogs.power_wizard.recalculate();
+        let tok = Tokens::from_theme_spec(&papp.theme, &papp.locale);
+        let (ctx, mut pst, mut m) = (
+            egui::Context::default(),
+            PowerStudioEguiState { results_tab: PowerResultsSubTab::NarrativeReport, ..Default::default() },
+            FrameInspectMeta::default(),
+        );
+        for _ in 0..2 {
+            m = FrameInspectMeta::default();
+            run_egui_pass_with_ctx(&ctx, egui::vec2(1100.0, 760.0), Default::default(), true, |c, _| {
+                render_power_studio_modal(c, &papp, &mut pst, &tok, &mut m, &mut PendingUiIntents::new())
+            })?;
+        }
+        let rect = m.find_by_widget_id("power.copy_narrative").ok_or("copy btn")?.clipped_rect;
+        run_egui_pass_with_ctx(&ctx, egui::vec2(1100.0, 760.0), click_input(rect.center()), true, |c, _| {
+            render_power_studio_modal(c, &papp, &mut pst, &tok, &mut FrameInspectMeta::default(), &mut PendingUiIntents::new())
+        })?;
+        assert_eq!(pst.narrative_copied, avail);
+        assert!(!clip.captured_texts().is_empty());
+        if avail {
+            papp.canvas_dialogs.power_wizard.alpha = 0.01;
+            let _ = papp.canvas_dialogs.power_wizard.recalculate();
+            run_egui_pass_with_ctx(&ctx, egui::vec2(1100.0, 760.0), Default::default(), true, |c, _| {
+                render_power_studio_modal(c, &papp, &mut pst, &tok, &mut FrameInspectMeta::default(), &mut PendingUiIntents::new())
+            })?;
+            assert!(!pst.narrative_copied);
+        }
+    }
+    pw.set_family(PowerTestFamily::OneWayAnova);
+    pw.effect_mode = PowerEffectInputMode::MeansAndSd;
+    for k in [10, 3] {
+        pw.anova_groups = k;
+        sync_anova_group_means(&mut pw);
+        assert_eq!(pw.group_means.len(), k);
+    }
+    pw.set_family(PowerTestFamily::TwoSampleUnpairedT);
+    for (target, phrase) in [
+        (PowerSolveTarget::SampleSize, "required sample size"),
+        (PowerSolveTarget::Power, "achieved statistical power is"),
+        (PowerSolveTarget::DetectableEffect, "minimum detectable standardized effect"),
+    ] {
+        pw.solve_target = target;
+        let _ = pw.recalculate();
+        assert!(build_narrative_paragraph(&pw, pw.result.as_ref().ok_or("pw res")?).contains(phrase));
+    }
+    Ok(())
+}
+
+#[test]
+fn aud_10_ext01_dose_response_and_log_x_warning_banner() -> BoxRes {
+    use crate::helpers::{make_commit_driver, seed_xy_app};
+
+    // 3. EXT-01: Raw vs log10 dose-response default & fit.warning.log_x_scale one-click switch.
+    let (raw_xs, log_xs, ys) = ([0.01, 0.1, 1.0, 10.0, 100.0, 1000.0], [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0], [5.0, 12.0, 48.0, 88.0, 97.0, 99.0]);
+    for (xs, expected_eq) in [(raw_xs.as_slice(), "agonist_vs_response_4pl"), (log_xs.as_slice(), "log_agonist_vs_response_4pl")] {
+        let (mut a, s) = seed_xy_app(xs, &ys);
+        assert!(a.canvas_dialogs.open_analyze_dialog(&a.document().clone(), &s));
+        a.canvas_dialogs.analyze.select_catalog_entry("fit.nonlinear");
+        let mut d = make_commit_driver(a);
+        d.click_widget_id("modal.ok")?;
+        assert!(
+            matches!(&d.state().app.document().result_sheets.last().ok_or("rs")?.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == expected_eq)
+        );
+    }
+    let (mut aw, sw) = seed_xy_app(&raw_xs, &ys);
+    let rsw = SheetId::new(
+        aw.execute_command(
+            "analysis.run",
+            json!({ "source_sheet_id": sw.as_str(), "kind": "nonlinear_regression", "equation_id": "log_agonist_vs_response_4pl" }),
+        )?
+        .payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    assert!(aw.canvas_dialogs.open_edit_parameters(&aw.document().clone(), &rsw));
+    let mut dw = make_commit_driver(aw);
+    assert!(dw.frame_meta().find_by_widget_id("fit.warning.log_x_scale").is_some());
+    dw.click_widget_id("fit.warning.switch_non_log")?;
+    assert!(dw.frame_meta().find_by_widget_id("fit.warning.log_x_scale").is_none());
+    assert!(
+        matches!(&dw.state().app.canvas_dialogs.edit_params.draft.as_ref().ok_or("draft")?.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "agonist_vs_response_4pl")
+    );
+    Ok(())
+}
+
+#[test]
+fn aud_10_02_04_42_and_13_15_25_factor_and_fit_modal_regressions() -> BoxRes {
+    use crate::helpers::{make_commit_driver, seed_mv_app, seed_xy_app};
+    use curvebook_doc::{FactorialAnovaSpec, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, ParameterRule, ParameterScope};
+
+    let (log_xs, ys) = ([-9.0, -8.0, -7.0, -6.0, -5.0, -4.0], [5.0, 12.0, 48.0, 88.0, 97.0, 99.0]);
+
+    // 4. AUD-10-02/04/42 & AUD-13-15: 25-factor formula cap, Fit Compare/Custom DSL/summary_param.
+    let (mut a25, s25) = seed_mv_app(26, 6);
+    let sp25 = AnalysisSpec::new(
+        "res-25",
+        s25,
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+            response_column: Some(25),
+            multifactor_columns: (0..25).collect(),
+            max_interaction_order: 25,
+            ..Default::default()
+        }),
+    )?;
+    (a25.canvas_dialogs.edit_params.result_sheet_id, a25.canvas_dialogs.edit_params.draft, a25.canvas_dialogs.active_dialog) =
+        (Some(sp25.id.clone()), Some(sp25.clone()), ActiveDialog::EditAnalysisParameters { result_sheet_id: sp25.id });
+    let d25 = make_commit_driver(a25);
+    let fb = d25.frame_meta().find_by_widget_id("edit.formula_bar").ok_or("formula_bar")?;
+    assert!(fb.value.as_ref().and_then(|v| v.as_str()).unwrap_or(&fb.label).contains("25"));
+
+    let (mut af, sf) = seed_xy_app(&log_xs, &ys);
+    let rsf = SheetId::new(
+        af.execute_command(
+            "analysis.run",
+            json!({ "source_sheet_id": sf.as_str(), "kind": "nonlinear_regression", "equation_id": "log_agonist_vs_response_4pl" }),
+        )?
+        .payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    assert!(af.canvas_dialogs.open_edit_parameters(&af.document().clone(), &rsf));
+    if let Some(d) = af.canvas_dialogs.edit_params.draft.as_mut()
+        && let AnalysisKind::NonlinearRegression(nl) = &mut d.kind
+    {
+        nl.comparison = Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: "straight_line".into() });
+        nl.comparison_question = Some(ModelComparisonQuestion::AlternativeEquation { alternative_equation_id: "straight_line".into() });
+        nl.comparison_method = Some(ModelComparisonMethod::ExtraSumOfSquaresF);
+        nl.parameter_rules.push(ParameterRule {
+            name: "Bottom".into(),
+            scope: ParameterScope::Constant(0.0),
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        });
+    }
+    let mut df = make_commit_driver(af);
+    df.click_widget_id("fit.tab.compare")?;
+    df.click_widget_id("fit.cmp.aicc")?;
+    assert!(
+        matches!(&df.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::NonlinearRegression(nl) if nl.comparison_method == Some(ModelComparisonMethod::Aicc))
+    );
+    df.click_widget_id("fit.cmp.none")?;
+    assert!(
+        matches!(&df.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::NonlinearRegression(nl) if nl.comparison.is_none() && nl.comparison_question.is_none() && nl.comparison_method.is_none())
+    );
+    for wid in ["fit.tab.model", "fit.eq.custom_toggle"] {
+        df.click_widget_id(wid)?;
+    }
+    assert!(
+        matches!(&df.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::NonlinearRegression(nl) if nl.parameter_rules.is_empty())
+    );
+    for wid in ["fit.eq.mode.builtin", "fit.tab.output"] {
+        df.click_widget_id(wid)?;
+    }
+    let sc = df.state().dialog_rect_pt.ok_or("rect")?.center();
+    for target_wid in ["fit.out.create_summary_graph", "fit.out.summary_param.LogEC50"] {
+        for _ in 0..4 {
+            if df.frame_meta().find_by_widget_id(target_wid).is_some() {
+                break;
+            }
+            df.wheel_at(sc, egui::vec2(0.0, -180.0))?;
+        }
+        df.click_widget_id(target_wid)?;
+    }
+    assert!(
+        matches!(&df.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::NonlinearRegression(nl) if nl.summary_parameter.as_deref() == Some("LogEC50"))
+    );
+    Ok(())
+}
+
+#[test]
+fn aud_10_analyze_picker_dataset_category_pstack_and_pcr_regressions() -> BoxRes {
+    use crate::common::set_textbox;
+    use crate::helpers::{make_commit_driver, seed_column_app, seed_mv_app};
+    use curvebook_ui_egui::dialogs_canvas::AnalysisCategory;
+
+    // 5. AUD-10-06/07/23/24: Analyze picker dataset uncheck (live & fallback), category preserves search, P-Value Stack dropdown & column cycle, PCR leakage disable.
+    let (mut ac, sc_id) = seed_column_app(&[("A", &[0.01, 0.04]), ("B", &[0.02, 0.05]), ("C", &[0.03, 0.06])], ColumnDesignHint::UnpairedReplicates);
+    assert!(ac.canvas_dialogs.open_analyze_dialog(&ac.document().clone(), &sc_id));
+    let mut dc = make_commit_driver(ac);
+    dc.click_widget_id("analyze.mv.var.0")?;
+    assert_eq!(dc.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1, 2]);
+    set_textbox(&mut dc, "analyze.search", "t-test")?;
+    dc.click_widget_id("analyze.cat.column")?;
+    assert_eq!(
+        (dc.state().app.canvas_dialogs.analyze.category_filter, dc.state().app.canvas_dialogs.analyze.search_query.as_str()),
+        (Some(AnalysisCategory::Column), "t-test")
+    );
+    for wid in ["analyze.cat.all", "analyze.search.clear"] {
+        dc.click_widget_id(wid)?;
+    }
+    set_textbox(&mut dc, "analyze.search", "stack")?;
+    dc.click_widget_id("analyze.entry.stats.pvalue_stack")?;
+    let m0 = dc.state().app.canvas_dialogs.analyze.pvalue_stack_method;
+    dc.click_widget_id("analyze.pvalue_stack.method")?;
+    dc.click_widget_id("analyze.pvalue_stack.method")?;
+    assert_eq!(dc.state().app.canvas_dialogs.analyze.pvalue_stack_method, m0);
+    for exp in [Some(0), Some(1), Some(2), None] {
+        dc.click_widget_id("analyze.pvalue_stack.column")?;
+        assert_eq!(dc.state().app.canvas_dialogs.analyze.pvalue_stack_column, exp);
+    }
+    let (mut afb, sfb) = seed_column_app(&[("A", &[0.01]), ("B", &[0.02]), ("C", &[0.03])], ColumnDesignHint::UnpairedReplicates);
+    assert!(afb.canvas_dialogs.open_analyze_dialog(&afb.document().clone(), &sfb));
+    afb.canvas_dialogs.analyze.variable_candidates.clear();
+    let mut dfb = make_commit_driver(afb);
+    dfb.click_widget_id("analyze.dataset.0")?;
+    assert_eq!(dfb.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1, 2]);
+
+    let (mut amv, smv) = seed_mv_app(4, 6);
+    assert!(amv.canvas_dialogs.open_analyze_dialog(&amv.document().clone(), &smv));
+    let mut dmv = make_commit_driver(amv);
+    set_textbox(&mut dmv, "analyze.search", "PCR")?;
+    dmv.click_widget_id("analyze.entry.stats.pcr")?;
+    dmv.click_widget_id("analyze.pca.pred.1")?;
+    assert_eq!(
+        (&dmv.state().app.canvas_dialogs.analyze.pca_predictors, &dmv.state().app.canvas_dialogs.analyze.selected_data_sets),
+        (&vec![1], &vec![1])
+    );
+    assert!(
+        !dmv.frame_meta().find_by_widget_id("analyze.pcr.outcome.1").unwrap().enabled
+            && dmv.frame_meta().find_by_widget_id("analyze.pcr.outcome.2").unwrap().enabled
+    );
+    Ok(())
+}
+
+#[test]
+fn aud_10_stat_params_locale_cancel_cox_multirow_and_mi_regressions() -> BoxRes {
+    use crate::common::{set_textbox, sync_app_to_driver};
+    use crate::helpers::{make_commit_driver, seed_column_app, seed_mv_app, seed_xy_app};
+    use curvebook_doc::{CoxTieMethod, MultipleRowTestsSpec, MultivariateSpec};
+
+    // 6. AUD-10-09/10/26/27/30/51: German decimal + cancel-reopen, Cox PH swap, MultiRow, MI clamp.
+    let (mut al, sl) = seed_xy_app(&[1.0, 2.0, 3.0, 4.0, 5.0], &[2.0, 4.0, 6.0, 8.0, 10.0]);
+    al.set_locale("de");
+    let rsl = SheetId::new(
+        al.execute_command("analysis.run", json!({ "source_sheet_id": sl.as_str(), "kind": "linear_regression" }))?.payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    assert!(al.canvas_dialogs.open_edit_parameters(&al.document().clone(), &rsl));
+    let mut dl = make_commit_driver(al);
+    dl.click_widget_id("edit.lin.fixed_point")?;
+    set_textbox(&mut dl, "edit.lin.fixed_point_x0", "1,5")?;
+    assert!(dl.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+    set_textbox(&mut dl, "edit.lin.fixed_point_x0", "bad")?;
+    assert!(!dl.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+    set_textbox(&mut dl, "edit.lin.fixed_point_x0", "2,5")?;
+    for wid in ["edit.tab.options", "edit.conf.99", "edit.tab.diagnostics"] {
+        dl.click_widget_id(wid)?;
+    }
+    assert!(dl.frame_meta().find_by_widget_id("edit.lin.conf_bands").unwrap().label.contains("99%"));
+    for wid in ["edit.tab.experimental_design", "edit.lin.deming", "edit.lin.deming.sds"] {
+        dl.click_widget_id(wid)?;
+    }
+    set_textbox(&mut dl, "edit.lin.deming.sd_x", "-5")?;
+    assert!(!dl.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+    dl.click_widget_id("modal.cancel")?;
+    let doc_r = dl.state().app.document().clone();
+    assert!(dl.state_mut().app.canvas_dialogs.open_edit_parameters(&doc_r, &rsl));
+    sync_app_to_driver(&mut dl);
+    for wid in ["edit.lin.deming", "edit.lin.deming.sds"] {
+        dl.click_widget_id(wid)?;
+    }
+    assert!(dl.state().views.stats_modals.numeric_field_errors.is_empty() && dl.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+
+    let (mut acox, scox) = seed_mv_app(4, 6);
+    let sp_cox = AnalysisSpec::new(
+        "rcox",
+        scox,
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+            time_column: 1,
+            status_column: 2,
+            predictor_columns: vec![3],
+            reference_levels: vec![],
+            tie_method: CoxTieMethod::Efron,
+        }),
+    )?;
+    (acox.canvas_dialogs.edit_params.result_sheet_id, acox.canvas_dialogs.edit_params.draft, acox.canvas_dialogs.active_dialog) =
+        (Some(sp_cox.id.clone()), Some(sp_cox.clone()), ActiveDialog::EditAnalysisParameters { result_sheet_id: sp_cox.id });
+    let mut dcox = make_commit_driver(acox);
+    for wid in ["edit.tab.data", "edit.cox.time.3", "edit.cox.time.2"] {
+        dcox.click_widget_id(wid)?;
+    }
+    assert!(
+        matches!(&dcox.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { time_column: 2, status_column, predictor_columns, .. }) if *status_column != 2 && !predictor_columns.contains(&3))
+    );
+
+    let (mut art, srt) = seed_column_app(&[("A", &[1.0, 2.0]), ("B", &[3.0, 4.0])], ColumnDesignHint::UnpairedReplicates);
+    let sp_rt = AnalysisSpec::new("rrt", srt, AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default()))?;
+    (art.canvas_dialogs.edit_params.result_sheet_id, art.canvas_dialogs.edit_params.draft, art.canvas_dialogs.active_dialog) =
+        (Some(sp_rt.id.clone()), Some(sp_rt.clone()), ActiveDialog::EditAnalysisParameters { result_sheet_id: sp_rt.id });
+    let mut drt = make_commit_driver(art);
+    drt.click_widget_id("edit.tab.multiple_comparisons")?;
+    assert!(
+        !drt.frame_meta().find_by_widget_id("edit.post_hoc.tukey").unwrap().enabled
+            && !drt.frame_meta().find_by_widget_id("edit.post_hoc.dunnett").unwrap().enabled
+    );
+
+    let (mut ami, smi) = seed_mv_app(3, 6);
+    let sp_mi = AnalysisSpec::new(
+        "rmi",
+        smi,
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+            imputations_m: 5,
+            max_iters: 100,
+            seed: 42,
+            response_column: None,
+            predictor_columns: vec![],
+        }),
+    )?;
+    (ami.canvas_dialogs.edit_params.result_sheet_id, ami.canvas_dialogs.edit_params.draft, ami.canvas_dialogs.active_dialog) =
+        (Some(sp_mi.id.clone()), Some(sp_mi.clone()), ActiveDialog::EditAnalysisParameters { result_sheet_id: sp_mi.id });
+    let mut dmi = make_commit_driver(ami);
+    for wid in ["edit.tab.experimental_design", "edit.mi.iters.inc"] {
+        dmi.click_widget_id(wid)?;
+    }
+    assert!(matches!(
+        &dmi.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind,
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { max_iters: 100, .. })
+    ));
+    Ok(())
+}
+
+#[test]
+fn aud_10_r9_defaults_spline_viewer_and_contingency_ci_regressions() -> BoxRes {
+    use crate::common::sync_app_to_driver;
+    use crate::helpers::{make_commit_driver, seed_mv_app, seed_xy_app};
+    use curvebook_doc::{ContingencyMethod, ContingencySpec, KappaWeighting, ResultStatus, SplineLowessMethod, SplineLowessSpec};
+    use curvebook_ui_egui::egui_shell::UiIntent;
+
+    let mut arg = UiApp::new();
+    arg.canvas_dialogs.active_dialog = ActiveDialog::RandomizeGroups;
+    let mut drg = make_commit_driver(arg);
+    for wid in ["rand_groups.sch.block", "rand_groups.p3", "rand_groups.block.inc", "rand_groups.block.dec", "rand_groups.block.dec"] {
+        drg.click_widget_id(wid)?;
+    }
+    assert_eq!(drg.state().app.canvas_dialogs.randomize_groups.block_sizes, vec![3]);
+
+    let mut doc_rs = ProjectDocument::new("RS")?;
+    doc_rs.data_sheets.push(DataSheet::new("s1", "Big", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 4, 20)?))?);
+    doc_rs.data_sheets.push(DataSheet::new("s2", "Sm", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?))?);
+    let mut ars = UiApp::from_session(Session::from_document(doc_rs));
+    (
+        ars.canvas_dialogs.random_sample_rows.source_sheet_id,
+        ars.canvas_dialogs.random_sample_rows.stratify_column,
+        ars.canvas_dialogs.random_sample_rows.proportional_allocation,
+        ars.canvas_dialogs.random_sample_rows.sample_size,
+    ) = (Some(SheetId::new("s1")), Some(3), true, 15);
+    ars.canvas_dialogs.active_dialog = ActiveDialog::RandomSampleRows { source_sheet_id: Some(SheetId::new("s1")) };
+    let mut drs = make_commit_driver(ars);
+    drs.click_widget_id("rand_sample.src.1")?;
+    let rst = &drs.state().app.canvas_dialogs.random_sample_rows;
+    assert!(rst.source_sheet_id == Some(SheetId::new("s2")) && rst.stratify_column.is_none() && !rst.proportional_allocation && rst.sample_size <= 3);
+
+    let (mut adef, sdef) = seed_mv_app(3, 6);
+    adef.execute_command("analysis.run", json!({ "sheet_id": "rpca", "source_sheet_id": sdef.as_str(), "kind": "pca" }))?;
+    adef.execute_command("analysis.run", json!({ "sheet_id": "rcor", "source_sheet_id": sdef.as_str(), "kind": "correlation_matrix" }))?;
+    assert!(adef.canvas_dialogs.open_edit_parameters(&adef.document().clone(), &SheetId::new("rpca")));
+    let mut ddef = make_commit_driver(adef);
+    for wid in ["dialog.button.save_default", "modal.cancel"] {
+        ddef.click_widget_id(wid)?;
+    }
+    let dsnap = ddef.state().app.document().clone();
+    assert!(ddef.state_mut().app.canvas_dialogs.open_edit_parameters(&dsnap, &SheetId::new("rcor")));
+    sync_app_to_driver(&mut ddef);
+    ddef.click_widget_id("dialog.button.save_default")?;
+    assert_eq!(ddef.state().app.egui_views.stats_modals.saved_defaults.len(), 2);
+
+    let (mut asp, ssp) = seed_xy_app(&[0.0, 1.0, 2.0, 3.0, 4.0], &[0.0, 1.0, 4.0, 9.0, 16.0]);
+    let spsp = AnalysisSpec::new(
+        "rsp",
+        ssp,
+        AnalysisKind::FitSplineLowess(SplineLowessSpec {
+            method: SplineLowessMethod::SmoothingSpline,
+            smoothing_df: Some(6.0),
+            smoothing_knots: None,
+            ..Default::default()
+        }),
+    )?;
+    (asp.canvas_dialogs.edit_params.result_sheet_id, asp.canvas_dialogs.edit_params.draft, asp.canvas_dialogs.active_dialog) =
+        (Some(spsp.id.clone()), Some(spsp.clone()), ActiveDialog::EditAnalysisParameters { result_sheet_id: spsp.id });
+    let mut dsp = make_commit_driver(asp);
+    assert!(dsp.frame_meta().find_by_widget_id("edit.dataset.0").is_some());
+    dsp.click_widget_id("edit.spline.knots.inc")?;
+    assert!(
+        matches!(&dsp.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::FitSplineLowess(s) if s.smoothing_df == Some(7.0))
+    );
+
+    let mut doc_rv = ProjectDocument::new("RV")?;
+    let mut rrv = ResultSheet::new(AnalysisSpec::new("rv-1", "src", AnalysisKind::LinearRegression(Default::default()))?)?;
+    rrv.status = ResultStatus::UpToDate;
+    rrv.tabs = vec![
+        ResultTab {
+            id: "t1".into(),
+            title: "T1".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["V".into()],
+            row_labels: vec!["R0".into()],
+            rows: vec![vec![ResultCell::Number { value: 1.0, units: None, prefix: None }]],
+            footnotes: vec![],
+        },
+        ResultTab {
+            id: "t2".into(),
+            title: "T2".into(),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec!["V".into()],
+            row_labels: vec!["R0".into()],
+            rows: vec![vec![ResultCell::Number { value: 99.0, units: None, prefix: None }]],
+            footnotes: vec![],
+        },
+    ];
+    doc_rv.result_sheets.push(rrv);
+    let mut arv = UiApp::from_session(Session::from_document(doc_rv));
+    arv.canvas_dialogs.result_view.active_tab_index = 99;
+    arv.canvas_dialogs.active_dialog = ActiveDialog::ResultViewer { result_sheet_id: SheetId::new("rv-1") };
+    assert_eq!(make_commit_driver(arv).frame_meta().find_by_widget_id("result.tab.1").ok_or("t1")?.value, Some(json!(true)));
+
+    // Contingency variants + Woolf unsupported CI alert + cycle back
+    let mut doc_cg = ProjectDocument::new("CG")?;
+    let mut ct = ContingencyTable::new(2, 2)?;
+    for (r, (a, b)) in [(12.0, 4.0), (5.0, 14.0)].into_iter().enumerate() {
+        (ct.data_sets[0].cells[r][0], ct.data_sets[1].cells[r][0]) = (Cell::number(a), Cell::number(b));
+    }
+    doc_cg.add_data_sheet(DataSheet::new("cont-1", "2x2", TableArchetype::Contingency(ct))?)?;
+    doc_cg.add_result_sheet(ResultSheet::new(AnalysisSpec::new(
+        "res-cont",
+        "cont-1",
+        AnalysisKind::Contingency(ContingencySpec { compute_odds_and_risk_ratios: true, ..Default::default() }),
+    )?)?)?;
+    let mut acg = UiApp::from_session(Session::from_document(doc_cg));
+    assert!(acg.canvas_dialogs.open_edit_parameters(&acg.document().clone(), &SheetId::new("res-cont")));
+    let mut dcg = make_commit_driver(acg);
+    for wid in ["edit.cont.g2", "edit.cont.barnard", "edit.cont.fleiss_kappa", "edit.cont.exact_binomial"] {
+        assert!(dcg.frame_meta().find_by_widget_id(wid).is_some());
+    }
+    for wid in ["edit.cont.kappa", "edit.cont.kappa.linear"] {
+        dcg.click_widget_id(wid)?;
+    }
+    assert!(
+        matches!(&dcg.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind, AnalysisKind::Contingency(c) if c.method == ContingencyMethod::CohenKappa { weighting: KappaWeighting::Linear })
+    );
+    dcg.click_widget_id("edit.contingency.ci.baptista_pike")?;
+    let okn = dcg.frame_meta().find_by_widget_id("modal.ok").ok_or("ok")?;
+    assert!(
+        !okn.enabled
+            && okn.disabled_reason.as_deref().is_some_and(|r| r.contains("Woolf"))
+            && dcg.frame_meta().find_by_widget_id("edit.contingency.ci.error").is_some()
+    );
+    let mut ok_try = PendingUiIntents::new();
+    ok_try.push(UiIntent::DialogButtonAction { action: "ok".into() });
+    assert!(ok_try.commit_if_settled(&mut dcg.state_mut().app, false).unwrap_err().to_string().contains("Woolf"));
+    dcg.click_widget_id("edit.contingency.ci.baptista_pike")?;
+    assert!(
+        dcg.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled && dcg.frame_meta().find_by_widget_id("edit.contingency.ci.error").is_none()
+    );
+    Ok(())
+}

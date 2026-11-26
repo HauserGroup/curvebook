@@ -167,7 +167,7 @@ impl FormatAxesState {
         }
     }
 
-    pub(super) fn set_x_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+    pub(crate) fn set_x_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
         if self.target_axis == AxisTarget::X {
             self.axis_draft.thresholds = thresholds.clone();
         }
@@ -177,7 +177,7 @@ impl FormatAxesState {
         self.pending_x_thresholds = Some(thresholds);
     }
 
-    pub(super) fn set_y_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+    pub(crate) fn set_y_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
         if self.target_axis == AxisTarget::Y {
             self.axis_draft.thresholds = thresholds.clone();
         }
@@ -187,50 +187,12 @@ impl FormatAxesState {
         self.pending_y_thresholds = Some(thresholds);
     }
 
-    fn set_y2_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
-        if self.target_axis == AxisTarget::Y2 {
-            self.axis_draft.thresholds = thresholds.clone();
-        }
-        if let Some(ref mut staged) = self.staged_y2_axis {
-            staged.thresholds = thresholds.clone();
-        }
-        self.pending_y2_thresholds = Some(thresholds);
-    }
-
-    pub(super) fn set_active_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+    pub(crate) fn set_active_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
         self.axis_draft.thresholds = thresholds.clone();
         match self.target_axis {
             AxisTarget::X => self.pending_x_thresholds = Some(thresholds),
             AxisTarget::Y => self.pending_y_thresholds = Some(thresholds),
             AxisTarget::Y2 => self.pending_y2_thresholds = Some(thresholds),
-        }
-    }
-
-    pub(super) fn append_thresholds_for_target(&mut self, target: AxisTarget, mut items: Vec<AxisThreshold>) {
-        match target {
-            AxisTarget::X => {
-                let mut next = self.effective_x_thresholds().to_vec();
-                next.append(&mut items);
-                self.set_x_thresholds(next);
-            }
-            AxisTarget::Y => {
-                let mut next = self.effective_y_thresholds().to_vec();
-                next.append(&mut items);
-                self.set_y_thresholds(next);
-            }
-            AxisTarget::Y2 => {
-                let mut next = if self.target_axis == AxisTarget::Y2 {
-                    self.axis_draft.thresholds.clone()
-                } else if let Some(ref y2s) = self.pending_y2_thresholds {
-                    y2s.clone()
-                } else if let Some(ref staged) = self.staged_y2_axis {
-                    staged.thresholds.clone()
-                } else {
-                    self.base_y2_thresholds.clone()
-                };
-                next.append(&mut items);
-                self.set_y2_thresholds(next);
-            }
         }
     }
 
@@ -307,7 +269,7 @@ impl FormatAxesState {
         resolved
     }
 
-    pub(super) fn switch_target_axis_preserving_thresholds(&mut self, next: AxisTarget, doc: Option<&ProjectDocument>) {
+    pub fn switch_target_axis_preserving_thresholds(&mut self, next: AxisTarget, doc: Option<&ProjectDocument>) {
         if next == self.target_axis {
             return;
         }

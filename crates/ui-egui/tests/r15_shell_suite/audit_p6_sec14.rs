@@ -14,7 +14,6 @@ use curvebook_palette::PaletteId;
 use curvebook_stats::multivariate::pca_analysis;
 use curvebook_stats::run_analysis;
 use curvebook_tools::GridCellCoord;
-use curvebook_ui_egui::dialogs_canvas::dialog_patch::{patch_analyze, patch_edit_params, patch_format_axes, patch_import_reshape};
 use curvebook_ui_egui::dialogs_canvas::{
     AnalyzeDialogState, AxisTarget, BubblePlotInspectorState, CommandPaletteState, EditAnalysisParametersState, FormatAxesState,
     PairwiseComparisonsState,
@@ -28,7 +27,6 @@ use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 use crate::common::{result_scalar, seed_column_doc};
-use crate::helpers::patch_map;
 
 fn pw_rec(a: usize, b: usize, diff: f64, p: f64, sig: bool) -> PairwiseComparisonRecord {
     PairwiseComparisonRecord {
@@ -223,8 +221,7 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
     let direct_pca = pca_analysis(&DenseMatrix::from_row_major(8, 3, flat_x).unwrap(), &["X1".into(), "X2".into(), "X3".into()], true, None).unwrap();
     assert!((result_scalar(&pcr_res, "PC1 eigenvalue").unwrap() - direct_pca.eigenvalues[0]).abs() < 1e-10);
 
-    // 2. AnalyzeDialogState `toggle_variable`, patch hoisting, leakage guard, and non-PCR pass-through.
-    let preset = LocalePreset::default();
+    // 2. AnalyzeDialogState `toggle_variable`, leakage guard, and non-PCR pass-through.
     let mut az = AnalyzeDialogState::default();
     az.open_for_data_sheet(&ds);
     az.select_catalog_entry("stats.pcr");
@@ -236,20 +233,16 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
     assert_eq!((&az.pca_predictors, az.pcr_outcome_column), (&vec![0, 1, 3], None));
     az.toggle_variable(3);
 
-    for bad in [json!({ "pcr_outcome_column": 1, "selected_data_sets": [0, 1, 2] }), json!({ "pcr_outcome_column": "invalid" })] {
-        assert!(patch_analyze(&mut az, &patch_map(bad), &preset).is_err());
-    }
+    az.set_pca_predictors(vec![0, 1, 2]);
+    assert!(az.select_pcr_outcome(1).is_err(), "PCR outcome must reject predictor column leakage");
     let mut reg_az = AnalyzeDialogState::default();
     reg_az.open_for_data_sheet(&ds);
-    patch_analyze(
-        &mut reg_az,
-        &patch_map(json!({ "entry_id": "stats.multiple_regression", "selected_data_sets": [0, 1, 2], "response_column": 2 })),
-        &preset,
-    )
-    .unwrap();
+    reg_az.select_catalog_entry("stats.multiple_regression");
+    reg_az.selected_data_sets = vec![0, 1, 2];
+    reg_az.explicit_response_column = Some(2);
     assert_eq!(reg_az.pcr_outcome_column, None);
 
-    patch_analyze(&mut az, &patch_map(json!({ "selected_data_sets": [0, 1, 2], "pcr_outcome_column": 3 })), &preset).unwrap();
+    az.select_pcr_outcome(3).unwrap();
     let built_kind = az.build_analysis_kind().unwrap();
     assert!(matches!(built_kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(3), .. })));
 
@@ -268,7 +261,7 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
     let mut ep = EditAnalysisParametersState::default();
     ep.open_for_result(&rs_saved);
     assert_eq!(ep.pcr_outcome_column, Some(3));
-    patch_edit_params(&mut ep, &patch_map(json!({ "pcr_outcome_column": Value::Null })), &preset).unwrap();
+    ep.select_pcr_outcome(3).unwrap();
     assert_eq!(ep.pcr_outcome_column, None);
     let upd = ep.commit_intent().unwrap();
     assert_eq!(upd.params["pcr_outcome_column"], Value::Null);
@@ -280,7 +273,6 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
 
 #[test]
 fn fa_sec14_04_edit_params_contingency_reopen_sync_and_paired_graph_differences() {
-    let preset = LocalePreset::default();
     let mut ct = ContingencyTable::new(2, 2).unwrap();
     for (r, c, v) in [(0, 0, 20.0), (0, 1, 5.0), (1, 0, 10.0), (1, 1, 25.0)] {
         ct.data_sets[c].cells[r][0] = Cell::number(v);
@@ -295,11 +287,10 @@ fn fa_sec14_04_edit_params_contingency_reopen_sync_and_paired_graph_differences(
     let mut ep = EditAnalysisParametersState::default();
     ep.open_for_result(&rs_ct);
     assert!(ep.contingency_odds_ratio_checked && ep.contingency_relative_risk_checked && ep.contingency_attributable_risk_checked);
-    assert!(patch_edit_params(&mut ep, &patch_map(json!({ "edit.contingency.ci.baptista_pike": "BogusCI" })), &preset).is_err());
 
-    patch_edit_params(&mut ep, &patch_map(json!({ "edit.contingency.odds_ratio": false })), &preset).unwrap();
+    ep.set_contingency_attributable_risk(false);
     assert!(!ep.contingency_attributable_risk_checked);
-    patch_edit_params(&mut ep, &patch_map(json!({ "edit.contingency.attributable_risk": true })), &preset).unwrap();
+    ep.set_contingency_attributable_risk(true);
     assert!(matches!(ep.draft.as_ref().unwrap().kind, AnalysisKind::Contingency(ContingencySpec { compute_odds_and_risk_ratios: true, .. })));
 
     let (mut doc, _) = seed_column_doc(
@@ -321,7 +312,7 @@ fn fa_sec14_04_edit_params_contingency_reopen_sync_and_paired_graph_differences(
     let rs_paired = make_tg("res-p", TwoGroupMethod::PairedT);
     doc.add_result_sheet(rs_paired.clone()).unwrap();
     ep.open_for_result(&rs_paired);
-    patch_edit_params(&mut ep, &patch_map(json!({ "edit.two_group.graph_differences": true })), &preset).unwrap();
+    ep.graph_differences = true;
     let intents = ep.commit_intents(Some(&doc));
     assert!(intents.iter().any(|i| i.command_id == "graph.create"));
     let mut sess = Session::from_document(doc);
@@ -336,13 +327,12 @@ fn fa_sec14_04_edit_params_contingency_reopen_sync_and_paired_graph_differences(
             .any(|s| matches!(s.gdo, curvebook_doc::GraphicalDataObject::BeforeAfterLines { .. })))
     );
 
-    patch_edit_params(&mut ep, &patch_map(json!({ "two_group_method": "unpaired_t" })), &preset).unwrap();
+    ep.set_paired_or_matched(false);
     assert!(!ep.graph_differences);
 }
 
 #[test]
 fn fa_sec14_05_format_axes_preserves_multi_axis_edits_and_y2_across_tab_switches() {
-    let preset = LocalePreset::default();
     let ds = DataSheet::new("d-ax", "Assay", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 4).unwrap())).unwrap();
     let gs = GraphSheet::new_uninitialized_for_data("g-ax", &ds).unwrap();
     let mut doc = ProjectDocument::new("SEC14-05 Axes").unwrap();
@@ -351,15 +341,20 @@ fn fa_sec14_05_format_axes_preserves_multi_axis_edits_and_y2_across_tab_switches
 
     let mut fa = FormatAxesState::default();
     fa.sync_from_graph(&gs, AxisTarget::X);
-    for p in [
-        json!({ "axes.title": "Dose (nM)", "axes.scale": "log10", "axes.min": 1.0, "axes.max": 1000.0 }),
-        json!({ "axes.target_axis": "Y", "axes.title": "Response (%)", "axes.major_tick_interval": 25.0, "axes.enable_y2": true }),
-        json!({ "axes.target_axis": "Y2", "axes.title": "Normalized Y2" }),
-    ] {
-        patch_format_axes(&mut fa, &patch_map(p), Some(&doc), &preset).unwrap();
-    }
+    fa.axis_draft.title = String::from("Dose (nM)");
+    fa.set_segment_scale(0, GraphAxisScale::Log10);
+    fa.set_segment_bounds(0, Some(1.0), Some(1000.0)).unwrap();
+
+    fa.switch_target_axis_preserving_thresholds(AxisTarget::Y, Some(&doc));
+    fa.axis_draft.title = String::from("Response (%)");
+    fa.axis_draft.segments[0].major_tick_interval = Some(25.0);
+    fa.enable_y2 = true;
+
+    fa.switch_target_axis_preserving_thresholds(AxisTarget::Y2, Some(&doc));
+    fa.axis_draft.title = String::from("Normalized Y2");
     assert!(fa.add_threshold(42.0, None, Some("EC50".into()), curvebook_palette::Rgba8::rgba(200, 0, 0, 255)));
-    patch_format_axes(&mut fa, &patch_map(json!({ "axes.target_axis": "X" })), Some(&doc), &preset).unwrap();
+
+    fa.switch_target_axis_preserving_thresholds(AxisTarget::X, Some(&doc));
     assert_eq!((fa.axis_draft.title.as_str(), fa.axis_draft.segments[0].scale, fa.enable_y2), ("Dose (nM)", GraphAxisScale::Log10, true));
 
     let intent = fa.commit_intent().unwrap();
@@ -373,7 +368,7 @@ fn fa_sec14_05_format_axes_preserves_multi_axis_edits_and_y2_across_tab_switches
     assert_eq!((y2.title.as_str(), y2.thresholds.len()), ("Normalized Y2", 1));
 
     fa.sync_from_graph(saved, AxisTarget::X);
-    patch_format_axes(&mut fa, &patch_map(json!({ "axes.enable_y2": false })), Some(sess.document()), &preset).unwrap();
+    fa.enable_y2 = false;
     let clear = fa.commit_intent().unwrap();
     sess.execute(&clear.command_id, clear.params).unwrap();
     assert!(sess.document().graph_sheet(&"g-ax".into()).unwrap().spec.y2_axis.is_none());
@@ -439,13 +434,12 @@ fn fa_sec14_08_command_palette_ui_metadata_enablement_schema_and_activation() {
 }
 
 #[test]
-fn fa_sec14_09_import_reshape_decimal_sep_hoisted_before_data() {
+fn fa_sec14_09_import_reshape_decimal_sep_parses_comma_values() {
     let preset = LocalePreset::default();
     let mut reshape = ImportReshapeState::default();
-    // `"data"` precedes `"decimal_sep"` alphabetically in serde_json::Map (BTreeMap).
-    patch_import_reshape(&mut reshape, &patch_map(json!({ "data": "1,5\t2,25\n3,75\t4,5", "decimal_sep": "," })), &preset).unwrap();
+    reshape.decimal_separator = ',';
+    reshape.plate_values = reshape.parse_plate_values_text("1,5\t2,25\n3,75\t4,5", &preset).unwrap();
     assert_eq!((reshape.decimal_separator, &reshape.plate_values), (',', &vec![Some(1.5), Some(2.25), Some(3.75), Some(4.5)]));
-    assert!(patch_import_reshape(&mut reshape, &patch_map(json!({ "decimal_sep": ";" })), &preset).is_err());
 }
 
 #[test]
@@ -491,7 +485,7 @@ fn fa_sec14_11_power_wizard_create_is_atomic_on_error_and_exceeding_sheet_limit(
     let mut app = UiApp::from_session(Session::from_document(doc));
     dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.powerWizard.open" })).unwrap();
     app.canvas_dialogs.power_wizard.recalculate().unwrap();
-    assert!(dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "create" })).is_err());
+    assert!(dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.create" })).is_err());
     assert_eq!(app.document().total_sheet_count(), MAX_SHEETS_PER_PROJECT - 3);
     assert!(app.canvas_dialogs.power_wizard.created_sheets.is_none());
 }

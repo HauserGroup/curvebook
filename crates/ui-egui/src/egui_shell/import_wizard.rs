@@ -10,11 +10,11 @@ use curvebook_doc::{
 };
 use curvebook_format::{CsvOptions, collapse_merged_header_rows, extract_preamble_info, parse_delimited_records, write_delimited_records};
 use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
-use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display};
+use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportReshapeState, ImportWizardStage, format_cell_display};
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
@@ -1667,10 +1667,10 @@ fn render_paste_clipboard_button(ui: &mut Ui, meta: &mut FrameInspectMeta, inten
     }
 }
 
-fn patch_import_reshape_field(intents: &mut PendingUiIntents, key: &str, value: Value) {
-    let mut fields = Map::new();
-    fields.insert(key.to_owned(), value);
-    intents.push(UiIntent::PatchActiveDialog { fields });
+fn update_import_reshape(ir: &ImportReshapeState, intents: &mut PendingUiIntents, mutate: impl FnOnce(&mut ImportReshapeState)) {
+    let mut next = ir.clone();
+    mutate(&mut next);
+    intents.push(UiIntent::UpdateImportReshapeState(Box::new(next)));
 }
 
 fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32, body_h: f32) {
@@ -1693,15 +1693,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     let r = choice_pill(row, tokens, lbl, ir.mode == mode, true);
                     meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some((ir.mode == mode).to_string()), true));
                     if r.clicked() {
-                        patch_import_reshape_field(
-                            intents,
-                            "mode",
-                            Value::String(String::from(match mode {
-                                ImportReshapeMode::Plate96 => "plate96",
-                                ImportReshapeMode::Plate384 => "plate384",
-                                ImportReshapeMode::TidyLongPivot => "tidylongpivot",
-                            })),
-                        );
+                        update_import_reshape(ir, intents, |n| n.mode = mode);
                     }
                 }
             });
@@ -1709,17 +1701,17 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
             body.add_space(4.0);
             body.horizontal_wrapped(|row| {
                 row.label("Target Kind:");
-                for (kind, slug, wid, lbl) in [
-                    (TableKind::Xy, "xy", "import_paste.target.xy", "XY"),
-                    (TableKind::Column, "column", "import_paste.target.column", "Column"),
-                    (TableKind::Grouped, "grouped", "import_paste.target.grouped", "Grouped"),
-                    (TableKind::MultipleVariables, "multiple_variables", "import_paste.target.multiple_variables", "Multiple Variables"),
+                for (kind, wid, lbl) in [
+                    (TableKind::Xy, "import_paste.target.xy", "XY"),
+                    (TableKind::Column, "import_paste.target.column", "Column"),
+                    (TableKind::Grouped, "import_paste.target.grouped", "Grouped"),
+                    (TableKind::MultipleVariables, "import_paste.target.multiple_variables", "Multiple Variables"),
                 ] {
                     let selected = ir.target_kind == kind;
                     let kr = choice_pill(row, tokens, lbl, selected, true);
                     meta.record_modal_response(row, &kr, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(selected.to_string()), true));
                     if kr.clicked() {
-                        patch_import_reshape_field(intents, "target_kind", Value::String(String::from(slug)));
+                        update_import_reshape(ir, intents, |n| n.target_kind = kind);
                     }
                 }
             });
@@ -1745,7 +1737,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     ),
                 );
                 if tr.changed() {
-                    patch_import_reshape_field(intents, "title", Value::String(state.reshape_title_draft.clone()));
+                    update_import_reshape(ir, intents, |n| n.title = state.reshape_title_draft.clone());
                 }
                 row.label("X Title:");
                 let x_title_id = egui::Id::unique("import_paste.input.x_title");
@@ -1767,7 +1759,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     ),
                 );
                 if xr.changed() {
-                    patch_import_reshape_field(intents, "x_title", Value::String(state.reshape_x_title_draft.clone()));
+                    update_import_reshape(ir, intents, |n| n.x_title = state.reshape_x_title_draft.clone());
                 }
                 render_paste_clipboard_button(row, meta, intents);
             });
@@ -1781,46 +1773,58 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                 FrameInspectEntryInput::modal("import.subtract_blank_mean", "checkbox", "Subtract Blank Mean", Some(sub_blank.to_string()), true),
             );
             if sb_resp.changed() {
-                intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("import.subtract_blank_mean") });
                 let is_384 = ir.mode == ImportReshapeMode::Plate384;
                 let expected = if is_384 { 384 } else { 96 };
-                if sub_blank && (ir.plate_roles.len() != expected || !ir.plate_roles.iter().any(|r| r.as_str() == Some("Blank"))) {
-                    patch_import_reshape_field(intents, "plate_roles", Value::Array(default_plate_roles(is_384, true)));
-                }
+                let ensure_blank_roles =
+                    sub_blank && (ir.plate_roles.len() != expected || !ir.plate_roles.iter().any(|r| r.as_str() == Some("Blank")));
+                update_import_reshape(ir, intents, |n| {
+                    n.subtract_blank_mean = sub_blank;
+                    if ensure_blank_roles {
+                        n.plate_roles = default_plate_roles(is_384, true);
+                    }
+                });
             }
 
             if ir.mode == ImportReshapeMode::TidyLongPivot {
                 body.add_space(4.0);
                 body.horizontal_wrapped(|row| {
                     row.label("Delimiter:");
-                    for (delim, wire, wid, lbl) in [
-                        (',', "comma", "import_paste.delim.comma", "Comma"),
-                        ('\t', "tab", "import_paste.delim.tab", "Tab"),
-                        (';', "semicolon", "import_paste.delim.semi", "Semicolon"),
+                    for (delim, wid, lbl) in [
+                        (',', "import_paste.delim.comma", "Comma"),
+                        ('\t', "import_paste.delim.tab", "Tab"),
+                        (';', "import_paste.delim.semi", "Semicolon"),
                     ] {
                         let sel = ir.tidy_delimiter == delim;
                         let dr = choice_pill(row, tokens, lbl, sel, true);
                         meta.record_modal_response(row, &dr, FrameInspectEntryInput::modal(wid, "radio", lbl, Some(sel.to_string()), true));
                         if dr.clicked() {
-                            patch_import_reshape_field(intents, "delimiter", Value::String(String::from(wire)));
+                            update_import_reshape(ir, intents, |n| n.tidy_delimiter = delim);
                         }
                     }
                 });
 
                 body.add_space(4.0);
                 body.horizontal_wrapped(|row| {
-                    for (field_key, wid, lbl, hint, draft) in [
-                        ("x_col", "import_paste.input.x_col", "X Col", "Optional", &mut state.reshape_x_col_draft),
-                        ("group_col", "import_paste.input.group_col", "Group Col", "Group", &mut state.reshape_group_col_draft),
-                        ("replicate_col", "import_paste.input.replicate_col", "Replicate Col", "Optional", &mut state.reshape_replicate_col_draft),
-                        ("value_col", "import_paste.input.value_col", "Value Col", "Value", &mut state.reshape_value_col_draft),
-                        ("excluded_col", "import_paste.input.excluded_col", "Excluded Col", "Optional", &mut state.reshape_excluded_col_draft),
+                    for (field_idx, wid, lbl, hint, draft) in [
+                        (0usize, "import_paste.input.x_col", "X Col", "Optional", &mut state.reshape_x_col_draft),
+                        (1, "import_paste.input.group_col", "Group Col", "Group", &mut state.reshape_group_col_draft),
+                        (2, "import_paste.input.replicate_col", "Replicate Col", "Optional", &mut state.reshape_replicate_col_draft),
+                        (3, "import_paste.input.value_col", "Value Col", "Value", &mut state.reshape_value_col_draft),
+                        (4, "import_paste.input.excluded_col", "Excluded Col", "Optional", &mut state.reshape_excluded_col_draft),
                     ] {
                         row.label(format!("{lbl}:"));
                         let ed = row.add(egui::TextEdit::singleline(draft).id(egui::Id::unique(wid)).hint_text(hint).desired_width(82.0));
                         meta.record_modal_response(row, &ed, FrameInspectEntryInput::modal(wid, "textbox", lbl, Some(draft.clone()), true));
                         if ed.changed() {
-                            patch_import_reshape_field(intents, field_key, Value::String(draft.clone()));
+                            let val = draft.clone();
+                            let opt = (!val.trim().is_empty()).then(|| val.trim().to_owned());
+                            update_import_reshape(ir, intents, |n| match field_idx {
+                                0 => n.x_col = opt,
+                                1 => n.group_col = val,
+                                2 => n.replicate_col = opt,
+                                3 => n.value_col = val,
+                                _ => n.excluded_col = opt,
+                            });
                         }
                     }
                 });
@@ -1846,7 +1850,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                     ),
                 );
                 if csv_ed.changed() {
-                    patch_import_reshape_field(intents, "tidy_csv", Value::String(state.reshape_tidy_csv_draft.clone()));
+                    update_import_reshape(ir, intents, |n| n.tidy_csv = state.reshape_tidy_csv_draft.clone());
                 }
             } else {
                 super::plate_editor::render_plate_map_reshape_section(body, app, state, tokens, meta, intents, avail_w);
@@ -1884,9 +1888,7 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
                     FrameInspectEntryInput::modal(&format!("convert.target.{slug}"), "radio", lbl, Some(active.to_string()), true),
                 );
                 if r.clicked() {
-                    let mut f = Map::new();
-                    f.insert(String::from("target_kind"), Value::String(slug.to_owned()));
-                    intents.push(UiIntent::PatchActiveDialog { fields: f });
+                    intents.push(UiIntent::SetConvertArchetypeTarget { target_kind: kind });
                 }
             }
         });

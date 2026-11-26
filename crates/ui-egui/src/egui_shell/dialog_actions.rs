@@ -1,7 +1,7 @@
 //! Desktop `egui_shell` modal button execution and dialog widget click/toggle handlers (`F6`).
 
 use curvebook_doc::{
-    AnalysisKind, CldOrdering, DiagnosticPlotKind, ErrorCode, GraphKind, MultiplicityMethod, MultivariateSpec, OneWayMethod, ProjectDocument,
+    AnalysisKind, DiagnosticPlotKind, ErrorCode, GraphKind, MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayMethod, ProjectDocument,
     ResidualCovariance, SheetId, TransformAnalysisSpec,
 };
 use curvebook_engine::EngineError;
@@ -9,14 +9,13 @@ use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
-use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory, AnalyzeDialogState, AnalyzeDuplicateChoice, EditAnalysisParametersState};
+use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory, AnalyzeDialogState, AnalyzeDuplicateChoice};
 use crate::grid_view::ImportOriginKind;
 use crate::interaction::{clear_modal_text_buffers, close_active_modal, sync_edit_params_text_buffers, sync_format_axes_text_buffers};
 use crate::modal_predicates::{
     evaluate_dialog_button_for_app, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
     r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, sync_format_points_fallback_targets,
 };
-use crate::power_wizard::PowerWizardStage;
 
 fn bad_input(msg: impl Into<String>) -> EngineError {
     EngineError::with_code(ErrorCode::BadInput, msg)
@@ -293,22 +292,6 @@ fn validate_import_wizard_internal_source(app: &UiApp, target_id: &SheetId) -> R
         }
     }
     Ok(())
-}
-
-/// Commit the active dialog's primary action (`create`/`next` for Power Wizard, `ok` otherwise).
-#[allow(dead_code)]
-pub(crate) fn submit_active_dialog_ok(app: &mut UiApp) -> Result<Value, EngineError> {
-    let action = match app.canvas_dialogs.active_dialog {
-        ActiveDialog::PowerAndSampleSize => {
-            if app.canvas_dialogs.power_wizard.stage == PowerWizardStage::Results {
-                "create"
-            } else {
-                "next"
-            }
-        }
-        _ => "ok",
-    };
-    execute_dialog_button_action(app, action)
 }
 
 fn button_not_found(action: &str) -> EngineError {
@@ -832,7 +815,6 @@ fn commit_many_intents_opt_close(app: &mut UiApp, intents: Vec<curvebook_tools::
 enum DialogToggleGroup {
     ImportReshape,
     ConvertArchetype,
-    BubblePlot,
     ApplyStyle,
     EditParams,
 }
@@ -842,7 +824,6 @@ impl DialogToggleGroup {
         match dialog {
             ActiveDialog::ImportReshape => Some(Self::ImportReshape),
             ActiveDialog::ConvertArchetype { .. } => Some(Self::ConvertArchetype),
-            ActiveDialog::BubblePlotInspector { .. } => Some(Self::BubblePlot),
             ActiveDialog::ApplyStyleFrom { .. } => Some(Self::ApplyStyle),
             ActiveDialog::EditAnalysisParameters { .. } => Some(Self::EditParams),
             _ => None,
@@ -871,16 +852,6 @@ const DIALOG_BOOL_TOGGLES: &[DialogBoolToggle] = &[
         group: DialogToggleGroup::ConvertArchetype,
         widget_id: "convert.preview_only",
         field: |a| &mut a.canvas_dialogs.convert_archetype.preview_only,
-    },
-    DialogBoolToggle {
-        group: DialogToggleGroup::BubblePlot,
-        widget_id: "bubble.show_convex_hulls",
-        field: |a| &mut a.canvas_dialogs.bubble_plot.show_convex_hulls,
-    },
-    DialogBoolToggle {
-        group: DialogToggleGroup::BubblePlot,
-        widget_id: "bubble.show_confidence_ellipses",
-        field: |a| &mut a.canvas_dialogs.bubble_plot.show_confidence_ellipses,
     },
     DialogBoolToggle {
         group: DialogToggleGroup::ApplyStyle,
@@ -914,79 +885,6 @@ const DIALOG_BOOL_TOGGLES: &[DialogBoolToggle] = &[
     },
 ];
 
-struct AnalyzePatchClick {
-    widget_id: &'static str,
-    patch_key: &'static str,
-    next_value: fn(&AnalyzeDialogState) -> Value,
-}
-
-const ANALYZE_PATCH_CLICKS: &[AnalyzePatchClick] = &[
-    AnalyzePatchClick {
-        widget_id: "analyze.correlation_all_pairs",
-        patch_key: "correlation_all_pairs",
-        next_value: |an| json!(!an.correlation_all_pairs),
-    },
-    AnalyzePatchClick { widget_id: "analyze.correlation.heatmap", patch_key: "correlation_heatmap", next_value: |an| json!(!an.correlation_heatmap) },
-    AnalyzePatchClick {
-        widget_id: "analyze.factorial.residual_covariance",
-        patch_key: "residual_covariance",
-        next_value: |an| {
-            json!(if an.factorial_residual_covariance == ResidualCovariance::Unstructured { "compound_symmetry" } else { "unstructured" })
-        },
-    },
-];
-
-struct EditParamPatchClick {
-    widget_id: &'static str,
-    patch_key: &'static str,
-    next_value: fn(&EditAnalysisParametersState) -> Value,
-}
-
-const EDIT_PARAM_PATCH_CLICKS: &[EditParamPatchClick] = &[
-    EditParamPatchClick {
-        widget_id: "edit.rm.mixed_effects_reml",
-        patch_key: "mixed_effects_reml",
-        next_value: |ep| {
-            let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::OneWayAnova(a)) if a.mixed_effects_reml)
-                || matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::FactorialAnova(f)) if f.mixed_effects_reml);
-            json!(!cur)
-        },
-    },
-    EditParamPatchClick { widget_id: "edit.rm.df_kenward_roger", patch_key: "df_method", next_value: |_| json!("kenward_roger") },
-    EditParamPatchClick { widget_id: "edit.rm.df_satterthwaite", patch_key: "df_method", next_value: |_| json!("satterthwaite") },
-    EditParamPatchClick { widget_id: "edit.two_group.welch", patch_key: "welch_correction", next_value: |ep| json!(!ep.welch_correction) },
-    EditParamPatchClick {
-        widget_id: "edit.contingency.attributable_risk",
-        patch_key: "attributable_risk",
-        next_value: |ep| json!(!ep.contingency_attributable_risk_checked),
-    },
-    EditParamPatchClick {
-        widget_id: "edit.cluster.k_means_auto",
-        patch_key: "k_means_auto",
-        next_value: |ep| {
-            let cur_auto =
-                matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: None, .. })));
-            json!(!cur_auto)
-        },
-    },
-];
-
-struct PostHocClickSpec {
-    widget_id: &'static str,
-    raw_method: &'static str,
-    method: fn(&EditAnalysisParametersState) -> MultiplicityMethod,
-}
-
-const POST_HOC_CLICKS: &[PostHocClickSpec] = &[
-    PostHocClickSpec { widget_id: "edit.post_hoc.tukey", raw_method: "tukey", method: |_| MultiplicityMethod::TukeyHsd },
-    PostHocClickSpec {
-        widget_id: "edit.post_hoc.dunnett",
-        raw_method: "dunnett",
-        method: |ep| MultiplicityMethod::Dunnett { control_column: ep.control_column },
-    },
-    PostHocClickSpec { widget_id: "edit.post_hoc.dunn", raw_method: "dunn", method: |_| MultiplicityMethod::DunnRankSum },
-];
-
 fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     if let Some(group) = DialogToggleGroup::from_dialog(&app.canvas_dialogs.active_dialog)
         && let Some(toggle) = DIALOG_BOOL_TOGGLES.iter().find(|t| t.group == group && t.widget_id == wid)
@@ -996,26 +894,20 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
         return Ok(Some(json!({ "clicked": wid, "updated": true })));
     }
     match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::PairwiseComparisons { .. } if wid == "pairwise.auto_add" => {
-            let doc = app.document().clone();
-            let added = app.canvas_dialogs.pairwise.auto_add_from_analysis(&doc);
-            Ok(Some(json!({ "clicked": wid, "added": added, "updated": true })))
-        }
-        ActiveDialog::PairwiseComparisons { .. } if wid == "pairwise.cld_ordering" => {
-            let pw = &mut app.canvas_dialogs.pairwise;
-            pw.cld_ordering = match pw.cld_ordering {
-                CldOrdering::DescendingMean => CldOrdering::AscendingMean,
-                CldOrdering::AscendingMean => CldOrdering::DescendingMean,
-            };
-            Ok(Some(json!({ "clicked": wid, "updated": true })))
-        }
         ActiveDialog::AnalyzeSheet { .. } => {
-            let Some(spec) = ANALYZE_PATCH_CLICKS.iter().find(|s| s.widget_id == wid) else {
-                return Ok(None);
-            };
-            let mut patch = Map::new();
-            patch.insert(spec.patch_key.to_owned(), (spec.next_value)(&app.canvas_dialogs.analyze));
-            crate::dialogs_canvas::dialog_patch::patch_analyze(&mut app.canvas_dialogs.analyze, &patch, &app.locale_preset).map_err(disabled_err)?;
+            let az = &mut app.canvas_dialogs.analyze;
+            match wid {
+                "analyze.correlation_all_pairs" => az.set_correlation_all_pairs(!az.correlation_all_pairs),
+                "analyze.correlation.heatmap" => az.set_correlation_heatmap(!az.correlation_heatmap).map_err(disabled_err)?,
+                "analyze.factorial.residual_covariance" => {
+                    az.factorial_residual_covariance = if az.factorial_residual_covariance == ResidualCovariance::Unstructured {
+                        ResidualCovariance::CompoundSymmetry
+                    } else {
+                        ResidualCovariance::Unstructured
+                    };
+                }
+                _ => return Ok(None),
+            }
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
         ActiveDialog::EditAnalysisParameters { .. } => try_toggle_edit_params_click(app, wid),
@@ -1025,66 +917,91 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
 
 fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     let ep = &app.canvas_dialogs.edit_params;
-    let mut patch = Map::new();
-    if let Some(spec) = EDIT_PARAM_PATCH_CLICKS.iter().find(|s| s.widget_id == wid) {
-        let is_nested = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::NestedComparison(_)));
-        if wid == "edit.rm.mixed_effects_reml" || (matches!(wid, "edit.rm.df_kenward_roger" | "edit.rm.df_satterthwaite") && !is_nested) {
-            let gate = r1_sphericity_or_reml_control(ep.paired_or_matched);
-            if !gate.enabled {
-                return Err(disabled_err(
-                    gate.disabled_reason.unwrap_or_else(|| String::from("Mixed-effects REML controls require matched/repeated measures.")),
-                ));
-            }
-        }
-        patch.insert(spec.patch_key.to_owned(), (spec.next_value)(ep));
-    } else if let Some(spec) = POST_HOC_CLICKS.iter().find(|s| s.widget_id == wid) {
-        let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, is_reml_mixed_effects_active(ep, app.document()), (spec.method)(ep));
-        if !gate.enabled {
-            return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method is disabled."))));
-        }
-        patch.insert(String::from("multiplicity_method"), json!(spec.raw_method));
-    } else {
-        match wid {
-            "edit.assume_gaussian" => {
-                if ep.assume_gaussian {
-                    let gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
-                    if !gate.enabled {
-                        return Err(disabled_err(
-                            gate.disabled_reason
-                                .unwrap_or_else(|| String::from("Nonparametric rank tests are disabled for pre-summarized Column tables.")),
-                        ));
-                    }
-                }
-                patch.insert(String::from("assume_gaussian"), json!(!ep.assume_gaussian));
-            }
-            "edit.paired_or_matched" => {
-                if !ep.paired_or_matched {
-                    let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
-                    if !gate.enabled {
-                        return Err(disabled_err(
-                            gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),
-                        ));
-                    }
-                }
-                patch.insert(String::from("paired_or_matched"), json!(!ep.paired_or_matched));
-            }
-            "edit.sphericity.geisser_greenhouse" => {
-                let gate = r1b_sphericity_correction(ep.paired_or_matched, is_reml_mixed_effects_active(ep, app.document()));
+    match wid {
+        "edit.rm.mixed_effects_reml" | "edit.rm.df_kenward_roger" | "edit.rm.df_satterthwaite" => {
+            let is_nested = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::NestedComparison(_)));
+            if wid == "edit.rm.mixed_effects_reml" || !is_nested {
+                let gate = r1_sphericity_or_reml_control(ep.paired_or_matched);
                 if !gate.enabled {
-                    return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Sphericity control is disabled."))));
+                    return Err(disabled_err(
+                        gate.disabled_reason.unwrap_or_else(|| String::from("Mixed-effects REML controls require matched/repeated measures.")),
+                    ));
                 }
-                let gg_checked = ep.draft.as_ref().is_none_or(|d| {
-                    !matches!(
-                        d.kind,
-                        AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })
-                    )
-                });
-                patch.insert(String::from("edit.sphericity.geisser_greenhouse"), json!(!gg_checked));
             }
-            _ => return Ok(None),
+            match wid {
+                "edit.rm.mixed_effects_reml" => {
+                    let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::OneWayAnova(a)) if a.mixed_effects_reml)
+                        || matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::FactorialAnova(f)) if f.mixed_effects_reml);
+                    app.canvas_dialogs.edit_params.set_mixed_effects_reml(!cur);
+                }
+                "edit.rm.df_kenward_roger" => app.canvas_dialogs.edit_params.set_df_method(MixedModelDfMethod::KenwardRoger),
+                "edit.rm.df_satterthwaite" => app.canvas_dialogs.edit_params.set_df_method(MixedModelDfMethod::Satterthwaite),
+                _ => {}
+            }
         }
+        "edit.two_group.welch" => {
+            let next = !ep.welch_correction;
+            app.canvas_dialogs.edit_params.set_welch_correction(next).map_err(disabled_err)?;
+        }
+        "edit.contingency.attributable_risk" => {
+            let next = !ep.contingency_attributable_risk_checked;
+            app.canvas_dialogs.edit_params.set_contingency_attributable_risk(next);
+        }
+        "edit.cluster.k_means_auto" => {
+            app.canvas_dialogs.edit_params.toggle_k_means_auto();
+        }
+        "edit.post_hoc.tukey" | "edit.post_hoc.dunnett" | "edit.post_hoc.dunn" => {
+            let method = match wid {
+                "edit.post_hoc.tukey" => MultiplicityMethod::TukeyHsd,
+                "edit.post_hoc.dunnett" => MultiplicityMethod::Dunnett { control_column: ep.control_column },
+                _ => MultiplicityMethod::DunnRankSum,
+            };
+            let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, is_reml_mixed_effects_active(ep, app.document()), method);
+            if !gate.enabled {
+                return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method is disabled."))));
+            }
+            app.canvas_dialogs.edit_params.set_multiplicity_method(method).map_err(disabled_err)?;
+        }
+        "edit.assume_gaussian" => {
+            if ep.assume_gaussian {
+                let gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                if !gate.enabled {
+                    return Err(disabled_err(
+                        gate.disabled_reason
+                            .unwrap_or_else(|| String::from("Nonparametric rank tests are disabled for pre-summarized Column tables.")),
+                    ));
+                }
+            }
+            let next = !ep.assume_gaussian;
+            app.canvas_dialogs.edit_params.set_assume_gaussian(next);
+        }
+        "edit.paired_or_matched" => {
+            if !ep.paired_or_matched {
+                let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                if !gate.enabled {
+                    return Err(disabled_err(
+                        gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),
+                    ));
+                }
+            }
+            let next = !ep.paired_or_matched;
+            app.canvas_dialogs.edit_params.set_paired_or_matched(next);
+        }
+        "edit.sphericity.geisser_greenhouse" => {
+            let gate = r1b_sphericity_correction(ep.paired_or_matched, is_reml_mixed_effects_active(ep, app.document()));
+            if !gate.enabled {
+                return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Sphericity control is disabled."))));
+            }
+            let gg_checked = ep.draft.as_ref().is_none_or(|d| {
+                !matches!(
+                    d.kind,
+                    AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })
+                )
+            });
+            app.canvas_dialogs.edit_params.set_geisser_greenhouse(!gg_checked).map_err(disabled_err)?;
+        }
+        _ => return Ok(None),
     }
-    crate::dialogs_canvas::dialog_patch::patch_edit_params(&mut app.canvas_dialogs.edit_params, &patch, &app.locale_preset).map_err(disabled_err)?;
     Ok(Some(json!({ "clicked": wid, "updated": true })))
 }
 
@@ -1247,20 +1164,11 @@ mod tests {
         assert!(apply_dialog_widget_click(&mut app, "convert.allow_lossy").map_err(|e| e.to_string())?.is_some());
         assert!(apply_dialog_widget_click(&mut app, "convert.preview_only").map_err(|e| e.to_string())?.is_some());
 
-        assert!(app.canvas_dialogs.open_bubble_plot(&doc, &gs_id));
-        assert!(apply_dialog_widget_click(&mut app, "bubble.show_convex_hulls").map_err(|e| e.to_string())?.is_some());
-        assert!(apply_dialog_widget_click(&mut app, "bubble.show_confidence_ellipses").map_err(|e| e.to_string())?.is_some());
-        assert!(app.canvas_dialogs.bubble_plot.show_convex_hulls && app.canvas_dialogs.bubble_plot.show_confidence_ellipses);
-
         assert!(app.canvas_dialogs.open_apply_style_from(&doc, &gs_id));
         let before_pal = app.canvas_dialogs.apply_style.clone_palette;
         assert!(apply_dialog_widget_click(&mut app, "apply_style.clone_palette").map_err(|e| e.to_string())?.is_some());
         assert_eq!(app.canvas_dialogs.apply_style.clone_palette, !before_pal);
 
-        assert!(app.canvas_dialogs.open_pairwise_comparisons(&doc, &gs_id));
-        let before_ord = app.canvas_dialogs.pairwise.cld_ordering;
-        assert!(apply_dialog_widget_click(&mut app, "pairwise.cld_ordering").map_err(|e| e.to_string())?.is_some());
-        assert_ne!(app.canvas_dialogs.pairwise.cld_ordering, before_ord);
         assert!(apply_dialog_widget_click(&mut app, "dead.legacy.widget_id").map_err(|e| e.to_string())?.is_none());
         app.canvas_dialogs.close_dialog();
         Ok(())

@@ -359,3 +359,138 @@ fn welcome_hub_grouped_direct_create_uses_valid_replicates_mode() -> BoxRes {
     assert_clean_parity(&driver, "grouped direct create")?;
     Ok(())
 }
+
+#[test]
+fn aud_08_13_and_09_01_07_27_45_welcome_policy_samples_clone_and_nested_nav() -> BoxRes {
+    use crate::helpers::{click_input, run_egui_pass_with_ctx};
+    use curvebook_doc::{AnalysisKind, AnalysisSpec, ColumnTable, DataSheet, DescriptiveSpec, ProjectDocument, ResultSheet, VariableSource};
+    use curvebook_engine::{ExternalPathPolicy, Session};
+    use curvebook_ui_egui::egui_shell::leading_dock::{LeadingDockEguiState, collect_visible_sheet_ids};
+    use curvebook_ui_egui::egui_shell::welcome_hub::{
+        WelcomeArchetypeChoice, WelcomeHubEguiState, WelcomeLeftMode, build_sample_creation_intent, render_welcome_hub,
+    };
+    use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
+    use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, instantiate_sample_fixture};
+
+    // 1. AUD-09-01: RejectExternal disables open_file; Workdir blocks traversal; failed project.open keeps launcher open.
+    let mut app_rej = UiApp::new();
+    app_rej.session_mut().set_path_policy(ExternalPathPolicy::reject_external());
+    let tokens = Tokens::from_theme_spec(&app_rej.theme, &app_rej.locale);
+    let mut st = WelcomeHubEguiState { left_mode: WelcomeLeftMode::OpenFile, open_file_path_draft: "a.curvebook".into(), ..Default::default() };
+    let (ctx0, mut m0, mut i0) = (egui::Context::default(), FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx0, egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_rej, &mut st, &tokens, true, &mut m0, &mut i0);
+    })?;
+    assert!(
+        !m0.find_by_widget_id("welcome.btn.open_file").ok_or("btn")?.enabled
+            && !m0.find_by_widget_id("welcome.input.open_path").ok_or("inp")?.enabled
+            && i0.is_empty()
+    );
+
+    let mut app_wd = UiApp::new();
+    app_wd.session_mut().set_path_policy(ExternalPathPolicy::workdir(&std::env::current_dir()?)?);
+    let mut st_wd =
+        WelcomeHubEguiState { left_mode: WelcomeLeftMode::OpenFile, open_file_path_draft: "../../../../etc/passwd".into(), ..Default::default() };
+    let (ctx_wd, mut m_wd, mut i_wd) = (egui::Context::default(), FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_wd, egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_wd, &mut st_wd, &tokens, true, &mut m_wd, &mut i_wd);
+    })?;
+    let r = m_wd.find_by_widget_id("welcome.btn.open_file").ok_or("btn")?.clipped_rect;
+    let (mut m_c, mut i_c) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_wd, egui::vec2(1100.0, 720.0), click_input(r.center()), true, |_, ui| {
+        render_welcome_hub(ui, &app_wd, &mut st_wd, &tokens, true, &mut m_c, &mut i_c);
+    })?;
+    assert!(i_c.is_empty() && st_wd.open_file_error.is_some());
+
+    let mut app_unc = UiApp::new();
+    let mut st_unc =
+        WelcomeHubEguiState { left_mode: WelcomeLeftMode::OpenFile, open_file_path_draft: "missing-rem-test.curvebook".into(), ..Default::default() };
+    let (ctx_u, mut mu0, mut iu0) = (egui::Context::default(), FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_u, egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_unc, &mut st_unc, &tokens, true, &mut mu0, &mut iu0);
+    })?;
+    let ru = mu0.find_by_widget_id("welcome.btn.open_file").ok_or("btn")?.clipped_rect;
+    let (mut mu1, mut iu1) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_u, egui::vec2(1100.0, 720.0), click_input(ru.center()), true, |_, ui| {
+        render_welcome_hub(ui, &app_unc, &mut st_unc, &tokens, true, &mut mu1, &mut iu1);
+    })?;
+    assert!(iu1.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { command_id, .. } if command_id == "project.open")));
+    assert!(!iu1.intents().iter().any(|i| matches!(i, UiIntent::SetLauncherOpen { open: false })));
+    let _ = iu1.commit_all_if_settled(&mut app_unc, false);
+    assert!(app_unc.canvas_dialogs.status_banner.is_some());
+    let (mut mu2, mut iu2) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_u, egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_unc, &mut st_unc, &tokens, true, &mut mu2, &mut iu2);
+    })?;
+    assert!(st_unc.open_file_error.is_some() && !iu2.intents().iter().any(|i| matches!(i, UiIntent::SetLauncherOpen { open: false })));
+
+    // 2. AUD-09-27: Every sample fixture preserves slice_labels, Nested subcolumn_titles, and MV Calculated formulas.
+    for fx in SAMPLE_FIXTURES {
+        let mut app = UiApp::new();
+        let mut intents = PendingUiIntents::new();
+        intents.push(build_sample_creation_intent(&app, fx.id, None, false, false)?);
+        intents.commit_if_settled(&mut app, false)?;
+        let ds = app.document().data_sheets.last().ok_or("sample ds")?;
+        match &ds.archetype {
+            TableArchetype::PartsOfWhole(t) => assert!(t.slice_labels.iter().any(|s| !s.is_empty())),
+            TableArchetype::Nested(t) => assert!(t.groups.iter().any(|g| g.subcolumn_titles.iter().any(|s| !s.is_empty()))),
+            TableArchetype::MultipleVariables(t) => {
+                if let TableArchetype::MultipleVariables(raw_mv) = &instantiate_sample_fixture(fx.id, SheetId::new("raw"))?.archetype {
+                    for (idx, rv) in raw_mv.variables.iter().enumerate() {
+                        if let VariableSource::Calculated { formula } = &rv.source {
+                            assert_eq!(t.variables.get(idx).map(|v| &v.source), Some(&VariableSource::Calculated { formula: formula.clone() }));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // 3. AUD-09-07 & AUD-09-45: ClonePipeline keep_x omits clear_data; PrecomputedError normalizes y_subcolumn_kind -> 2.
+    let (app_xy, _) = crate::helpers::seed_xy_app(&[1.0, 2.0], &[10.0, 20.0]);
+    let mut st_cl = WelcomeHubEguiState { left_mode: WelcomeLeftMode::ClonePipeline, ..Default::default() };
+    st_cl.schema.clone_source_sheet_id = Some(SheetId::new("xy-1"));
+    st_cl.schema.clone_clear_values = true;
+    st_cl.schema.clone_keep_x = true;
+    let (ctx_cl, mut mcl0, mut icl0) = (egui::Context::default(), FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_cl, egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_xy, &mut st_cl, &tokens, true, &mut mcl0, &mut icl0);
+    })?;
+    let rc = mcl0.find_by_widget_id("welcome.btn.create").ok_or("create")?.clipped_rect;
+    let (mut mcl1, mut icl1) = (FrameInspectMeta::default(), PendingUiIntents::new());
+    run_egui_pass_with_ctx(&ctx_cl, egui::vec2(1100.0, 720.0), click_input(rc.center()), true, |_, ui| {
+        render_welcome_hub(ui, &app_xy, &mut st_cl, &tokens, true, &mut mcl1, &mut icl1);
+    })?;
+    let cp = icl1
+        .intents()
+        .iter()
+        .find_map(|i| match i {
+            UiIntent::EngineCommand { command_id, params } if command_id == "sheet.clonePipeline" => Some(params),
+            _ => None,
+        })
+        .ok_or("clonePipeline")?;
+    assert!(cp.get("clear_data").is_none() && cp["keep_x_values"] == json!(true) && cp["clear_y_values"] == json!(true));
+
+    let mut st_col = WelcomeHubEguiState { left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Column), ..Default::default() };
+    (st_col.schema.col_design_kind, st_col.schema.y_subcolumn_kind) = (2, 5);
+    run_egui_pass_with_ctx(&egui::Context::default(), egui::vec2(1100.0, 720.0), Default::default(), true, |_, ui| {
+        render_welcome_hub(ui, &app_xy, &mut st_col, &tokens, true, &mut FrameInspectMeta::default(), &mut PendingUiIntents::new());
+    })?;
+    assert_eq!(st_col.schema.y_subcolumn_kind, 2);
+
+    // 4. AUD-08-13: collect_visible_sheet_ids follows NestedResultsUnderData & hides collapsed children.
+    let mut doc_n = ProjectDocument::new("Nav")?;
+    for id in ["d1", "d2"] {
+        doc_n.data_sheets.push(DataSheet::new(id, id, TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2)?))?);
+    }
+    doc_n.result_sheets.push(ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?)?);
+    let mut nav_app = UiApp::from_session(Session::from_document(doc_n));
+    nav_app.nav.nesting_mode = NavigatorNestingMode::NestedResultsUnderData;
+    nav_app.sync_views();
+    let mut ns = LeadingDockEguiState::default();
+    assert_eq!(collect_visible_sheet_ids(&nav_app, &ns), vec![SheetId::new("d1"), SheetId::new("r1"), SheetId::new("d2")]);
+    ns.nested_collapsed_parents.insert(SheetId::new("d1"));
+    assert_eq!(collect_visible_sheet_ids(&nav_app, &ns), vec![SheetId::new("d1"), SheetId::new("d2")]);
+    Ok(())
+}

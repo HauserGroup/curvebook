@@ -2329,9 +2329,7 @@ pub fn render_hook_constant_modal(
                     None,
                 );
                 if s_resp.changed() {
-                    let mut fields = serde_json::Map::new();
-                    fields.insert(String::from("hook.search_query"), serde_json::json!(state.hook_search_draft));
-                    intents.push(UiIntent::PatchActiveDialog { fields });
+                    intents.push(UiIntent::SetHookPickerSearch { query: state.hook_search_draft.clone() });
                 }
                 if render_modal_seg_btn(ui, tokens, meta, "hook.search_clear", "Clear", false, &ControlEnablement::enabled()) {
                     state.hook_search_draft.clear();

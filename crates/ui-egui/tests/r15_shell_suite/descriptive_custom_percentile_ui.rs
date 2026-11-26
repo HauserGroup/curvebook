@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 //! UI tests for `DescriptiveSpec::custom_upper_percentile` in the `egui_shell` Descriptive
-//! Statistics modal and `AnalyzeDialogState` / `dialog_patch` wiring.
+//! Statistics modal and `AnalyzeDialogState` wiring.
 
 use super::common;
 
@@ -10,11 +10,10 @@ use common::{ShellTestState, make_shell_driver_with_state, seed_column_doc, set_
 use curvebook_doc::{AnalysisKind, ColumnDesignHint, DescriptiveSpec, SheetId};
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::dialogs_canvas::{AnalyzeDialogState, dialog_patch};
+use curvebook_ui_egui::dialogs_canvas::AnalyzeDialogState;
 use curvebook_ui_egui::egui_shell::Tokens;
-use curvebook_ui_egui::i18n::LocalePreset;
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use serde_json::{Map, json};
+use serde_json::json;
 
 #[test]
 fn descriptive_modal_custom_upper_percentile_round_trip() {
@@ -93,15 +92,7 @@ fn analyze_dialog_wires_custom_upper_percentile_into_analysis_run() {
     let mut dlg = AnalyzeDialogState::default();
     dlg.open_for_data_sheet(doc.data_sheet(&sid).unwrap());
     dlg.select_catalog_entry("stats.descriptive");
-    let preset = LocalePreset::default();
-
-    let mut bad = Map::new();
-    bad.insert(String::from("custom_upper_percentile"), json!(50.0));
-    assert!(dialog_patch::patch_analyze(&mut dlg, &bad, &preset).is_err());
-
-    let mut patch = Map::new();
-    patch.insert(String::from("custom_upper_percentile"), json!(97.5));
-    dialog_patch::patch_analyze(&mut dlg, &patch, &preset).unwrap();
+    dlg.descriptive_custom_upper_percentile = Some(97.5);
 
     let intent = dlg.build_create_new_intent().expect("analysis.run intent");
     assert_eq!(intent.command_id, "analysis.run");

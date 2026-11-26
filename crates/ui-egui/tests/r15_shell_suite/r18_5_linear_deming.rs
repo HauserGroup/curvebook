@@ -5,14 +5,14 @@
 //! `R18.5` (linear standard addition, fixed point, Deming Model II), and `R18.6` (XY simple logistic).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ConvergenceStrictness, DataSheet, DemingErrorSpec, LinearRegressionSpec, NonlinearFitSpec, OutlierHandling,
-    ProjectDocument, ReplicateFitMode, SheetId, SimpleLogisticSpec, SubcolumnMode, TableArchetype, WeightingSource, XyTable,
+    AnalysisKind, Cell, DataSheet, DemingErrorSpec, LinearRegressionSpec, ProjectDocument, SheetId, SimpleLogisticSpec, SubcolumnMode,
+    TableArchetype, XyTable,
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, EditAnalysisParametersState, dialog_patch};
+use curvebook_ui_egui::dialogs_canvas::ANALYSIS_CATALOG;
 use curvebook_ui_egui::egui_shell::driver::EguiHumanPathDriver;
-use curvebook_ui_egui::i18n::{LOCALES, LocalePreset, tr};
+use curvebook_ui_egui::i18n::{LOCALES, tr};
 use serde_json::json;
 
 use crate::common::{ShellTestState, make_default_driver, seed_xy_doc, set_textbox};
@@ -37,33 +37,6 @@ fn seed_analysis_edit_modal(doc: ProjectDocument, source_id: &str, res_id: &str,
     let snap = app.document().clone();
     assert!(app.canvas_dialogs.open_edit_parameters(&snap, &rsid));
     (app, rsid)
-}
-
-#[test]
-fn r18_1_edit_params_patches_all_new_nonlinear_fields() {
-    let spec = AnalysisSpec::new("res-1", SheetId::new("ds-1"), AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line"))).unwrap();
-    let mut state = EditAnalysisParametersState { draft: Some(spec), ..EditAnalysisParametersState::default() };
-
-    let patch = json!({
-        "weighting_source": "PredictedY",
-        "outlier_handling": "IdentifyAndCountOnly",
-        "emit_cleaned_data_tab": true,
-        "replicate_fit_mode": "RowMeansOnly",
-        "convergence_strictness": "Strict",
-        "mv_y_columns": [2, 3]
-    });
-    dialog_patch::patch_edit_params(&mut state, patch.as_object().unwrap(), &LocalePreset::for_locale("en")).unwrap();
-
-    assert!(matches!(
-        &state.draft.as_ref().unwrap().kind,
-        AnalysisKind::NonlinearRegression(nl)
-            if nl.weighting_source == WeightingSource::PredictedY
-                && nl.outlier_handling == OutlierHandling::IdentifyAndCountOnly
-                && nl.emit_cleaned_data_tab
-                && nl.replicate_fit_mode == ReplicateFitMode::RowMeansOnly
-                && nl.convergence_strictness == ConvergenceStrictness::Strict
-                && nl.mv_y_columns == vec![2, 3]
-    ));
 }
 
 #[test]

@@ -546,18 +546,6 @@ impl McpChild {
         self.call_tool_err("ui_switch_tab", args)
     }
 
-    pub fn ui_answer_dialog(&mut self, args: Value) -> Result<Value, String> {
-        self.call_tool_payload("ui_answer_dialog", args)
-    }
-
-    pub fn ui_answer_ok(&mut self, fields: Value) -> Result<Value, String> {
-        self.call_tool_payload("ui_answer_dialog", json!({ "fields": fields, "action": "ok" }))
-    }
-
-    pub fn ui_answer_err(&mut self, args: Value) -> Result<Value, String> {
-        self.call_tool_err("ui_answer_dialog", args)
-    }
-
     pub fn ui_type(&mut self, widget_id: Option<&str>, text: &str, clear_existing: bool, commit_enter: bool) -> Result<Value, String> {
         let mut args = serde_json::Map::new();
         args.insert(String::from("text"), Value::String(text.to_owned()));
@@ -595,7 +583,7 @@ impl McpChild {
     }
 
     // -----------------------------------------------------------------------
-    // Higher-level UI workflow helpers (strictly via the 8 ui_* MCP tools)
+    // Higher-level UI workflow helpers (strictly via the 7 ui_* MCP tools)
     // -----------------------------------------------------------------------
 
     pub fn create_table(&mut self, params: Value) -> Result<String, String> {
@@ -628,22 +616,6 @@ impl McpChild {
         Ok(())
     }
 
-    pub fn exclude_cell_cmd_shift_e(
-        &mut self,
-        sheet_id: &str,
-        row: usize,
-        col: usize,
-        subcol: usize,
-        reason_tag: &str,
-        note: &str,
-    ) -> Result<(), String> {
-        self.ui_switch_sheet(sheet_id)?;
-        self.ui_pointer(json!({ "action": "click", "widget_id": format!("grid.cell.{row}.{col}.{subcol}") }))?;
-        self.ui_press("e", json!({ "meta": true, "shift": true }))?;
-        self.ui_answer_ok(json!({ "reason_tag": reason_tag, "note": note }))?;
-        Ok(())
-    }
-
     pub fn navigator_result_ids(&mut self) -> Result<Vec<String>, String> {
         let nav = self.ui_inspect("navigator", false)?;
         let arr = nav.get("navigator_sheets").and_then(Value::as_array).ok_or_else(|| format!("missing navigator_sheets in ui_inspect: {nav}"))?;
@@ -652,28 +624,6 @@ impl McpChild {
             .filter(|s| s.get("section").and_then(Value::as_str) == Some("results"))
             .filter_map(|s| s.get("sheet_id").and_then(Value::as_str).map(ToOwned::to_owned))
             .collect())
-    }
-
-    pub fn run_analyze(&mut self, sheet_id: &str, fields: Value) -> Result<String, String> {
-        let before = self.navigator_result_ids()?;
-        self.ui_switch_sheet(sheet_id)?;
-        self.ui_invoke("ui.analyze.open", json!({ "sheet_id": sheet_id }))?;
-        let out = self.ui_answer_dialog(json!({
-            "fields": fields,
-            "force_create_new": true,
-            "action": "ok",
-        }))?;
-        if let Some(sid) = out.get("payload").and_then(|p| p.get("sheet_id")).and_then(Value::as_str) {
-            return Ok(sid.to_owned());
-        }
-        let after = self.navigator_result_ids()?;
-        after.into_iter().rev().find(|id| !before.contains(id)).ok_or_else(|| format!("analyze did not produce a new ResultSheet: {out}"))
-    }
-
-    pub fn edit_analysis_cmd_t(&mut self, result_sheet_id: &str, fields: Value) -> Result<Value, String> {
-        self.ui_switch_sheet(result_sheet_id)?;
-        self.ui_press("t", json!({ "meta": true }))?;
-        self.ui_answer_ok(fields)
     }
 
     pub fn graph_for_source(&mut self, source_id: &str) -> Result<String, String> {
@@ -847,14 +797,5 @@ pub fn export_graph_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, St
     let out = gui.ui_invoke("graph.exportSvg", json!({ "sheet_id": sheet_id }))?;
     let svg = out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing SVG payload for `{sheet_id}`: {out}"))?.to_owned();
     curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("invalid SVG for `{sheet_id}`: {e}"))?;
-    Ok(svg)
-}
-
-pub fn export_figure_svg(gui: &mut McpChild, sheet_id: &str) -> Result<String, String> {
-    gui.ui_invoke("ui.export.figure.open", json!({ "sheet_id": sheet_id }))?;
-    let out = gui.ui_answer_ok(json!({ "format": "svg" }))?;
-    let svg =
-        out.pointer("/payload/svg").and_then(Value::as_str).ok_or_else(|| format!("missing figure SVG payload for `{sheet_id}`: {out}"))?.to_owned();
-    curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("invalid figure SVG for `{sheet_id}`: {e}"))?;
     Ok(svg)
 }

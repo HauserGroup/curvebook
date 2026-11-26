@@ -3,7 +3,7 @@
 mod executors;
 mod stat_params;
 
-use curvebook_doc::{ConfidenceLevel, LevelOrderSpec, SheetId, SheetSection};
+use curvebook_doc::{ConfidenceLevel, LevelOrderSpec, PValueStackMethod, SheetId, SheetSection, TableKind};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
 use curvebook_palette::CanvasPreviewFilter;
 
@@ -11,12 +11,12 @@ use super::layout::WorkspacePreset;
 use super::{app_modals, transform_modals};
 use crate::UiApp;
 use crate::dialogs_canvas::{
-    ActiveInspector, ApplyStyleFromState, BubblePlotInspectorState, ChangeGraphTypeState, CreateGraphDialogState, DuplicateChoice,
+    ActiveInspector, ApplyStyleFromState, AxisTarget, BubblePlotInspectorState, ChangeGraphTypeState, CreateGraphDialogState, DuplicateChoice,
     EqualizeScalingDialogState, ExportFigureState, FormatAxesState, FormatEmbeddedTableDialogState, FormatGraphState, FormatImageDialogState,
-    PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState, VariableRoleFilter,
+    FormatSelectedPointsState, PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState, VariableRoleFilter,
 };
-use crate::dialogs_r9::{RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
-use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, MoveDirection};
+use crate::dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
+use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeState, MoveDirection};
 use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeMode;
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
@@ -45,13 +45,18 @@ pub enum DiagToggleFlag {
 pub enum AnalyzePickerIntent {
     ClearSearch,
     ToggleCategory { slug: String },
+    SelectCatalogEntry { entry_id: String },
     TogglePcaPredictor { col: usize },
+    SetPcaPredictors { cols: Vec<usize> },
     SetPcrOutcome { col: usize },
     SetMvRoleFilter { filter: VariableRoleFilter },
     ToggleMvVar { col: usize },
     SetOutlierMethod { method: String },
     StepOutlierParam { delta: f64 },
     ToggleOutlierIterative,
+    SetPValueStackMethod { method: PValueStackMethod },
+    SetPValueStackThreshold { threshold: f64 },
+    SetPValueStackColumn { column: Option<usize> },
     SetDuplicateChoice { choice: DuplicateChoice },
     SetDuplicateTarget { target_id: String },
 }
@@ -59,6 +64,7 @@ pub enum AnalyzePickerIntent {
 /// Typed `EditAnalysisParameters` statistical modal actions (with `R1`–`R9` predicate gating).
 #[derive(Debug, Clone, PartialEq)]
 pub enum StatParamsIntent {
+    SetCustomTitle { title: String },
     SetOneWayMethod { method: String },
     SelectAllDatasets,
     ToggleDataset { idx: usize },
@@ -211,11 +217,38 @@ pub enum UiIntent {
         coord: curvebook_tools::GridCellCoord,
     },
     ClearBrush,
-    PatchActiveDialog {
-        fields: serde_json::Map<String, serde_json::Value>,
-    },
     CommitDialogAction {
         action: String,
+    },
+    SetRetargetSelectedDatasets {
+        cols: Vec<usize>,
+    },
+    UpdateImportReshapeState(Box<ImportReshapeState>),
+    SetImportReshapePlateValuesText {
+        text: String,
+        ensure_default_roles: bool,
+    },
+    SetConvertArchetypeTarget {
+        target_kind: TableKind,
+    },
+    SetExcludeWithReason {
+        reason_tag: Option<String>,
+        note: Option<String>,
+    },
+    UpdateFormatSelectedPointsState(Box<FormatSelectedPointsState>),
+    UpdateInsertModelEquationState(Box<InsertModelEquationDialogState>),
+    SwitchFormatAxesTarget {
+        target: AxisTarget,
+    },
+    SetCommandPaletteQuery {
+        query: String,
+    },
+    SetHookPickerSearch {
+        query: String,
+    },
+    SetCheckpointsDraft {
+        name: Option<String>,
+        note: Option<String>,
     },
     CloseAllModals,
     OpenManageVariables {

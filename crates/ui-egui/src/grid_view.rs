@@ -784,6 +784,36 @@ pub struct ImportReshapeState {
     pub plate_status_message: Option<String>,
 }
 
+fn parse_plate_cell_token(tok: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
+    let t = tok.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("na") || t.eq_ignore_ascii_case("null") || t == "-" {
+        return Ok(None);
+    }
+    parse_localized_number_input(t, preset).filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("invalid plate numeric token `{t}`"))
+}
+
+fn parse_plate_values_text_with_locale(raw: &str, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains('\t') || trimmed.contains(';') || (preset.decimal_separator != ',' && trimmed.contains(',')) {
+            let split_iter: Box<dyn Iterator<Item = &str>> =
+                if preset.decimal_separator == ',' { Box::new(trimmed.split(['\t', ';'])) } else { Box::new(trimmed.split([',', '\t', ';'])) };
+            for cell in split_iter {
+                out.push(parse_plate_cell_token(cell, preset)?);
+            }
+        } else {
+            for cell in trimmed.split_whitespace() {
+                out.push(parse_plate_cell_token(cell, preset)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
 impl Default for ImportReshapeState {
     fn default() -> Self {
         Self {
@@ -823,6 +853,15 @@ impl Default for ImportReshapeState {
 }
 
 impl ImportReshapeState {
+    /// Parse pasted delimited or whitespace-separated well values using locale decimal rules.
+    pub fn parse_plate_values_text(&self, raw: &str, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
+        let mut effective = preset.clone();
+        if self.decimal_separator == ',' || self.decimal_separator == '.' {
+            effective.decimal_separator = self.decimal_separator;
+        }
+        parse_plate_values_text_with_locale(raw, &effective)
+    }
+
     /// Build the engine [`ToolCommandIntent`] (`table.importPlateMap` or `table.importTidyLong`).
     ///
     /// # Errors

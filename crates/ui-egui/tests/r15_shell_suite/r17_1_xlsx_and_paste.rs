@@ -118,3 +118,58 @@ fn human_path_import_wizard_loads_and_selects_multiple_xlsx_worksheets() -> Resu
     assert_eq!(titles, vec!["Alpha", "Gamma"]);
     Ok(())
 }
+
+#[test]
+fn aud_07_01_and_13_02_xlsx_wizard_enforces_external_path_policy() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_engine::{ExternalPathPolicy, Session};
+    use curvebook_ui_egui::UiApp;
+    use curvebook_ui_egui::grid_view::ImportPasteWizardState;
+
+    let root = temp_dir("cb-aud07-01-xlsx")?;
+    let (workdir, outside) = (root.path().join("workdir"), root.path().join("outside"));
+    fs::create_dir_all(&workdir)?;
+    fs::create_dir_all(&outside)?;
+    let xlsx_bytes = build_xlsx_zip(&[
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="SheetA" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Val</t></is></c></row><row r="2"><c r="A2"><v>1.0</v></c></row></sheetData></worksheet>"#,
+        ),
+    ]);
+    let (outside_xlsx, inside_xlsx) = (outside.join("secret.xlsx"), workdir.join("allowed.xlsx"));
+    fs::write(&outside_xlsx, &xlsx_bytes)?;
+    fs::write(&inside_xlsx, &xlsx_bytes)?;
+
+    let mut sess = Session::new();
+    sess.set_path_policy(ExternalPathPolicy::RejectExternal);
+    let mut app_rej = UiApp::from_session(sess);
+    app_rej.grid.import_wizard.external_file_path = inside_xlsx.to_string_lossy().into_owned();
+    assert!(app_rej.grid.import_wizard.load_xlsx_from_path_str().is_err());
+
+    let mut sess2 = Session::new();
+    sess2.set_path_policy(ExternalPathPolicy::workdir(&workdir)?);
+    let mut app_wd = UiApp::from_session(sess2);
+    app_wd.grid.import_wizard.external_file_path = outside_xlsx.to_string_lossy().into_owned();
+    assert!(app_wd.grid.import_wizard.load_xlsx_from_path_str().is_err());
+
+    app_wd.grid.import_wizard.external_file_path = inside_xlsx.to_string_lossy().into_owned();
+    assert_eq!(app_wd.grid.import_wizard.load_xlsx_from_path_str()?, 1);
+    let params = app_wd.grid.import_wizard.build_xlsx_import_params().ok_or("missing params")?;
+    assert!(params.get("path").is_some() && params.get("bytes_base64").is_none());
+
+    let mut wiz = ImportPasteWizardState::default();
+    let _ = wiz.load_xlsx_bytes(&xlsx_bytes)?;
+    assert!(wiz.build_xlsx_import_params().ok_or("bytes params")?.get("bytes_base64").is_some());
+    Ok(())
+}

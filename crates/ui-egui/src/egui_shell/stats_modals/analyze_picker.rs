@@ -2,7 +2,7 @@
 
 use curvebook_doc::{PValueStackMethod, SheetId};
 use egui::{Context, Id, Key, Modifiers, TextEdit, Ui, Vec2};
-use serde_json::{Map, Value, json};
+use serde_json::json;
 
 use crate::UiApp;
 use crate::dialogs_canvas::DuplicateChoice;
@@ -231,9 +231,7 @@ fn render_analyze_entries_pane(
         let selected = app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some(item.id);
         let en = crate::modal_predicates::evaluate_dialog_widget(&app.canvas_dialogs, app.document(), &format!("analyze.entry.{}", item.id));
         if render_modal_radio(ui, tokens, meta, &format!("analyze.entry.{}", item.id), item.label, selected, &en) {
-            let mut fields = Map::new();
-            fields.insert(String::from("entry_id"), Value::String(item.id.to_owned()));
-            intents.push(UiIntent::PatchActiveDialog { fields });
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SelectCatalogEntry { entry_id: item.id.to_owned() }));
         }
     }
 
@@ -299,9 +297,7 @@ fn render_analyze_datasets_pane(
                         next.push(var.col_index);
                         next.sort_unstable();
                     }
-                    let mut fields = Map::new();
-                    fields.insert(String::from("pca_predictors"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
-                    intents.push(UiIntent::PatchActiveDialog { fields });
+                    intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPcaPredictors { cols: next }));
                 }
                 if is_pcr {
                     let pcr_en = r10_pcr_outcome_column(var.col_index, &synced_pca_preds);
@@ -371,9 +367,7 @@ fn render_analyze_datasets_pane(
                             next.push(var.col_index);
                             next.sort_unstable();
                         }
-                        let mut fields = Map::new();
-                        fields.insert(String::from("pca_predictors"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
-                        intents.push(UiIntent::PatchActiveDialog { fields });
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPcaPredictors { cols: next }));
                     } else {
                         intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleMvVar { col: var.col_index }));
                     }
@@ -510,9 +504,7 @@ fn render_analyze_entry_specific_options(
             .show_ui(ui, |ui| {
                 for m in PValueStackMethod::ALL {
                     if ui.selectable_label(m == az.pvalue_stack_method, m.label()).clicked() {
-                        let mut patch = Map::new();
-                        patch.insert(String::from("pvalue_stack_method"), json!(m.label()));
-                        intents.push(UiIntent::PatchActiveDialog { fields: patch });
+                        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPValueStackMethod { method: m }));
                     }
                 }
             })
@@ -546,9 +538,7 @@ fn render_analyze_entry_specific_options(
         );
         if thresh_step != 0 {
             let next_t = (az.pvalue_stack_threshold + if thresh_step > 0 { 0.01 } else { -0.01 }).clamp(0.001, 0.50);
-            let mut patch = Map::new();
-            patch.insert(String::from("pvalue_stack_threshold"), json!(next_t));
-            intents.push(UiIntent::PatchActiveDialog { fields: patch });
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPValueStackThreshold { threshold: next_t }));
         }
 
         let titles = column_titles_for_draft(app.document(), az.source_sheet_id.as_ref());
@@ -575,9 +565,7 @@ fn render_analyze_entry_specific_options(
                     Some(_) => None,
                 }
             };
-            let mut patch = Map::new();
-            patch.insert(String::from("pvalue_stack_column"), json!(next_col));
-            intents.push(UiIntent::PatchActiveDialog { fields: patch });
+            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetPValueStackColumn { column: next_col }));
         }
     }
     if matches!(az.selected_entry_id.as_deref(), Some("stats.factorial_anova" | "two_way_anova")) {
@@ -780,9 +768,7 @@ pub fn render_change_data_analyzed_modal(
                         cd.selected_data_sets.is_empty(),
                         &ControlEnablement::enabled(),
                     ) {
-                        let mut fields = Map::new();
-                        fields.insert(String::from("selected_data_sets"), Value::Array(Vec::new()));
-                        intents.push(UiIntent::PatchActiveDialog { fields });
+                        intents.push(UiIntent::SetRetargetSelectedDatasets { cols: Vec::new() });
                     }
                     for (ci, col_name) in titles.iter().enumerate() {
                         let on = cd.selected_data_sets.is_empty() || cd.selected_data_sets.contains(&ci);
@@ -800,9 +786,7 @@ pub fn render_change_data_analyzed_modal(
                             if !titles.is_empty() && next.len() == titles.len() {
                                 next.clear();
                             }
-                            let mut fields = Map::new();
-                            fields.insert(String::from("selected_data_sets"), Value::Array(next.into_iter().map(|i| json!(i)).collect()));
-                            intents.push(UiIntent::PatchActiveDialog { fields });
+                            intents.push(UiIntent::SetRetargetSelectedDatasets { cols: next });
                         }
                     }
                 }

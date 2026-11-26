@@ -449,3 +449,209 @@ fn all_14_beta_locales_pass_640x420_and_1440x600_non_overlap_and_backdrop_captur
     check_accesskit_scrollbar_non_overlap(out.platform_output.accesskit_update.as_ref().ok_or("expected AccessKit TreeUpdate")?)?;
     Ok(())
 }
+
+#[test]
+fn aud_07_09_and_10_13_15_17_18_22_31_43_44_and_13_16_17_graph_and_app_modals() -> BoxRes {
+    use crate::common::{set_textbox, sync_app_to_driver};
+    use crate::helpers::{make_commit_driver, seed_column_app, seed_mv_app};
+    use curvebook_doc::{AnalysisKind, OneWayMethod, SubcolumnMode, XyTable};
+    use curvebook_tools::GridCellCoord;
+    use curvebook_ui_egui::control_io::host_routing::commit_active_modal_dialog;
+    use curvebook_ui_egui::egui_shell::UiIntent;
+    use curvebook_ui_egui::{StubPlatformClipboardAdapter, handle_control_line, normalize_shortcut_combo};
+    use std::sync::Arc;
+
+    // 1. AUD-07-09: FormatSelectedPoints cross-sheet brush isolation & brushed commit fallback.
+    let mut bdoc = ProjectDocument::new("Brush")?;
+    let mut xy1 = XyTable::new(SubcolumnMode::Single, 1, 3)?;
+    let mut xy2 = XyTable::new(SubcolumnMode::Single, 1, 3)?;
+    for r in 0..3 {
+        (xy1.x_cells[r][0], xy1.data_sets[0].cells[r][0], xy2.x_cells[r][0], xy2.data_sets[0].cells[r][0]) =
+            (Cell::number(r as f64), Cell::number((r + 1) as f64), Cell::number(r as f64), Cell::number((r + 10) as f64));
+    }
+    let ds1 = DataSheet::new("ds-a", "A", TableArchetype::Xy(xy1))?;
+    let mut g1 = GraphSheet::new_uninitialized_for_data("g-a", &ds1)?;
+    g1.initialized = true;
+    bdoc.data_sheets.extend([ds1, DataSheet::new("ds-b", "B", TableArchetype::Xy(xy2))?]);
+    bdoc.graph_sheets.push(g1);
+    bdoc.active_sheet_id = Some(SheetId::new("g-a"));
+    let mut bapp = UiApp::from_session(Session::from_document(bdoc));
+    bapp.brush_from_grid_cell(&SheetId::new("ds-b"), GridCellCoord::new(2, 0, 0));
+    let r_open: serde_json::Value =
+        serde_json::from_str(&handle_control_line(&mut bapp, r#"{"id":1,"method":"ui.formatPoints.open","params":{"sheet_id":"g-a"}}"#))?;
+    assert_eq!(r_open["result"]["selected_count"], json!(0));
+    bapp.brush_from_grid_cell(&SheetId::new("ds-a"), GridCellCoord::new(1, 0, 0));
+    bapp.canvas_dialogs.open_format_selected_points_with_subcols(&bapp.document().clone(), &SheetId::new("g-a"), Vec::new());
+    bapp.canvas_dialogs.format_points.hidden = Some(true);
+    assert!(commit_active_modal_dialog(&mut bapp, |_, _| Ok(Default::default()))?.handled);
+    assert!(!bapp.document().graph_sheet(&SheetId::new("g-a")).ok_or("g-a")?.spec.point_overrides.is_empty());
+
+    // 2. AUD-10-15/44/17/18/22/43: Preferences shortcut capture, About/Feedback clipboard, REML compare_against_control, Manage Variables 64-undo + staging + frozen, ImportProjectMode & ExportFigure EMF failure/success.
+    let mut ap = UiApp::new();
+    ap.egui_views.app_modals.open_preferences(&ap.shortcuts, Some(PreferencesCategory::KeyboardShortcuts));
+    ap.egui_views.app_modals.preferences.selected_shortcut_command = Some(ap.shortcuts.bindings().next().unwrap().command_id.clone());
+    ap.egui_views.app_modals.preferences.shortcut_capture_armed = true;
+    let mut dp = make_commit_driver(ap);
+    dp.press_egui_key(egui::Key::K, egui::Modifiers::COMMAND);
+    let cap = dp.state().views.app_modals.preferences.shortcut_combo_draft.clone();
+    assert!(!cap.contains("CmdOrCtrl") && normalize_shortcut_combo(&cap).is_ok());
+
+    let stub = Arc::new(StubPlatformClipboardAdapter::default());
+    let mut aclip = UiApp::new();
+    aclip.human_path_only = true;
+    aclip.set_clipboard_adapter(stub.clone());
+    aclip.canvas_dialogs.active_dialog = ActiveDialog::About;
+    let mut dclip = make_commit_driver(aclip);
+    dclip.click_widget_id("dialog.about.copy_version")?;
+    assert!(stub.last_text().is_some_and(|t| t.contains("CurveBook")));
+    stub.clear();
+    dclip.state_mut().app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
+    sync_app_to_driver(&mut dclip);
+    dclip.click_widget_id("dialog.feedback.copy_markdown")?;
+    assert!(stub.last_text().is_some_and(|t| t.contains("CurveBook")));
+
+    let (mut aav, sav) = seed_column_app(&[("A", &[1.0, 2.0]), ("B", &[4.0, 5.0]), ("C", &[7.0, 8.0])], ColumnDesignHint::PairedRepeatedMeasures);
+    let avid = SheetId::new(
+        aav.execute_command("analysis.run", json!({ "source_sheet_id": sav.as_str(), "kind": "one_way_anova" }))?.payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    assert!(aav.canvas_dialogs.open_edit_parameters(&aav.document().clone(), &avid));
+    if let Some(d) = aav.canvas_dialogs.edit_params.draft.as_mut()
+        && let AnalysisKind::OneWayAnova(a) = &mut d.kind
+    {
+        (a.method, a.mixed_effects_reml) = (OneWayMethod::RepeatedMeasures { geisser_greenhouse: true }, true);
+    }
+    aav.canvas_dialogs.edit_params.paired_or_matched = true;
+    let mut dav = make_commit_driver(aav);
+    dav.click_widget_id("edit.tab.multiple_comparisons")?;
+    assert!(!dav.frame_meta().find_by_widget_id("edit.compare_against_control").unwrap().enabled);
+
+    let (mut amv, smv) = seed_mv_app(3, 4);
+    for i in 0..70usize {
+        amv.execute_command("table.setTitles", json!({ "sheet_id": smv.as_str(), "col": 2, "title": format!("S{i}") }))?;
+    }
+    assert_eq!(amv.session().undo_depth(), 64);
+    (amv.grid.variables_dialog.open, amv.grid.variables_dialog.selected_column) = (true, Some(1));
+    let mut dmv = make_commit_driver(amv);
+    for wid in ["mv_formula.vars.role.categorical", "modal.cancel"] {
+        dmv.click_widget_id(wid)?;
+    }
+    assert!(
+        matches!(&dmv.state().app.document().data_sheet(&smv).unwrap().archetype, TableArchetype::MultipleVariables(m) if m.variables[1].role == VariableRole::Continuous)
+    );
+    (dmv.state_mut().app.grid.variables_dialog.open, dmv.state_mut().app.grid.variables_dialog.selected_column) = (true, Some(0));
+    sync_app_to_driver(&mut dmv);
+    set_textbox(&mut dmv, "mv_formula.vars.title_input", "ArmR")?;
+    dmv.click_widget_id("mv_formula.vars.col.1")?;
+    set_textbox(&mut dmv, "mv_formula.vars.title_input", "DoseR")?;
+    dmv.click_widget_id("modal.ok")?;
+    assert!(
+        matches!(&dmv.state().app.document().data_sheet(&smv).unwrap().archetype, TableArchetype::MultipleVariables(m) if m.variables[0].title == "ArmR" && m.variables[1].title == "DoseR")
+    );
+    dmv.state_mut().app.execute_command("sheet.freeze", json!({ "sheet_id": smv.as_str() }))?;
+    dmv.state_mut().app.grid.variables_dialog.open = true;
+    sync_app_to_driver(&mut dmv);
+    assert!(
+        !dmv.frame_meta().find_by_widget_id("mv_formula.vars.title_input").unwrap().enabled
+            && !dmv.frame_meta().find_by_widget_id("mv_formula.vars.order.reversed").unwrap().enabled
+    );
+
+    let mut aipm = UiApp::new();
+    aipm.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode {
+        command_id: "table.importPrism".into(),
+        path: "/nonexistent/rem_missing.prism".into(),
+        has_unsaved_changes: false,
+    };
+    let mut dipm = make_commit_driver(aipm);
+    dipm.click_widget_id("import_project_mode.merge")?;
+    assert!(matches!(dipm.state().app.canvas_dialogs.active_dialog, ActiveDialog::ImportProjectMode { .. }));
+
+    let mut aexp = UiApp::new();
+    let ls_id =
+        SheetId::new(aexp.execute_command("layout.create", json!({ "sheet_id": "ls-rem", "title": "L" }))?.payload["sheet_id"].as_str().ok_or("id")?);
+    aexp.canvas_dialogs.open_export_figure(&SheetId::new("gs-missing"));
+    aexp.egui_views.app_modals.export_emf_selected = true;
+    let mut fi = PendingUiIntents::new();
+    fi.push(UiIntent::DialogButtonAction { action: "ok".into() });
+    assert!(
+        fi.commit_if_settled(&mut aexp, false).is_err()
+            && matches!(aexp.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. })
+            && aexp.egui_views.app_modals.export_emf_selected
+    );
+    let mut fi2 = PendingUiIntents::new();
+    fi2.push_engine("graph.exportEmf", json!({ "sheet_id": "gs-missing" }));
+    fi2.push(UiIntent::CloseAllModals);
+    assert!(
+        fi2.commit_all_if_settled(&mut aexp, false).first_error().is_some()
+            && matches!(aexp.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. })
+            && aexp.egui_views.app_modals.export_emf_selected
+    );
+    aexp.canvas_dialogs.open_export_figure(&ls_id);
+    let mut oki = PendingUiIntents::new();
+    oki.push(UiIntent::DialogButtonAction { action: "ok".into() });
+    assert!(
+        oki.commit_if_settled(&mut aexp, false).is_ok()
+            && aexp.canvas_dialogs.active_dialog == ActiveDialog::None
+            && !aexp.egui_views.app_modals.export_emf_selected
+    );
+    Ok(())
+}
+
+#[test]
+fn aud_10_13_31_and_13_16_17_format_axes_overlays_and_heatmap_graph_modals() -> BoxRes {
+    use crate::common::sync_app_to_driver;
+    use crate::helpers::{make_commit_driver, seed_mv_app, seed_xy_app};
+    use curvebook_doc::{AnalysisKind, DemingErrorSpec, FramePreset, LinearRegressionSpec, SimpleLogisticSpec};
+    use curvebook_ui_egui::dialogs_canvas::AxisTarget;
+
+    // 3. AUD-10-13/31 & AUD-13-16/17: FormatAxes Y2+PlainBoxed atomicity, FormatGraph SimpleLogistic+Deming overlays, Heatmap OK.
+    let (mut axy, sxy) = seed_xy_app(&[1.0, 2.0, 3.0, 4.0, 5.0], &[0.0, 0.0, 1.0, 1.0, 1.0]);
+    let gid = SheetId::new(
+        axy.execute_command("graph.create", json!({ "data_sheet_id": sxy.as_str(), "kind": "xy" }))?.payload["sheet_id"].as_str().ok_or("id")?,
+    );
+    axy.execute_command("analysis.run", json!({ "sheet_id": "r-sl", "title": "Simple Logistic Fit", "source_sheet_id": sxy.as_str(), "kind": serde_json::to_value(AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default()))? }))?;
+    axy.execute_command("analysis.run", json!({ "sheet_id": "r-dem", "title": "Deming Fit", "source_sheet_id": sxy.as_str(), "kind": serde_json::to_value(AnalysisKind::LinearRegression(LinearRegressionSpec { deming_model_ii: true, deming_error: DemingErrorSpec::EqualError, ..Default::default() }))? }))?;
+    let gs_init = axy.document().graph_sheet(&gid).unwrap().clone();
+    axy.canvas_dialogs.format_axes.sync_from_graph(&gs_init, AxisTarget::Y2);
+    axy.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: gid.clone() };
+    axy.canvas_dialogs.format_axes.enable_y2 = true;
+    let mut dxy = make_commit_driver(axy);
+    for wid in ["edit.tab.axes.frame_origin", "axes.frame.plain_boxed"] {
+        dxy.click_widget_id(wid)?;
+    }
+    let u0 = dxy.state().app.session().undo_depth();
+    dxy.click_widget_id("modal.ok")?;
+    assert_eq!(
+        (dxy.state().app.session().undo_depth(), dxy.state().app.document().graph_sheet(&gid).unwrap().spec.frame_preset),
+        (u0 + 1, FramePreset::PlainBoxed)
+    );
+
+    let doc2 = dxy.state().app.document().clone();
+    assert!(dxy.state_mut().app.canvas_dialogs.open_format_graph(&doc2, &gid));
+    sync_app_to_driver(&mut dxy);
+    let lbls: Vec<String> =
+        dxy.frame_meta().entries.iter().filter(|n| n.widget_id.starts_with("format_graph.overlay.attach.")).map(|n| n.label.clone()).collect();
+    assert!(lbls.iter().any(|l| l.contains("Simple Logistic")) && lbls.iter().any(|l| l.contains("Deming")));
+
+    let (mut ahm, shm) = seed_mv_app(4, 6);
+    let cid = SheetId::new(
+        ahm.execute_command("analysis.run", json!({ "source_sheet_id": shm.as_str(), "kind": "correlation_matrix" }))?.payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    let hgid = SheetId::new(
+        ahm.execute_command(
+            "graph.create",
+            json!({ "data_sheet_id": cid.as_str(), "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap), "initialized": true }),
+        )?
+        .payload["sheet_id"]
+            .as_str()
+            .ok_or("id")?,
+    );
+    assert!(ahm.canvas_dialogs.open_format_graph(&ahm.document().clone(), &hgid));
+    let mut dhm = make_commit_driver(ahm);
+    dhm.click_widget_id("modal.ok")?;
+    assert!(dhm.state().last_intent_error.is_none() && dhm.state().app.canvas_dialogs.active_dialog == ActiveDialog::None);
+    Ok(())
+}

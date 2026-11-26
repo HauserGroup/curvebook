@@ -861,9 +861,7 @@ fn ghost_target_item(items: &[UnifiedSearchItem], selected_index: usize) -> Opti
 }
 
 fn push_palette_query_patch(query: &str, intents: &mut PendingUiIntents) {
-    let mut fields = serde_json::Map::new();
-    fields.insert(String::from("query"), Value::String(query.to_owned()));
-    intents.push(UiIntent::PatchActiveDialog { fields });
+    intents.push(UiIntent::SetCommandPaletteQuery { query: query.to_owned() });
 }
 
 fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {

@@ -8,7 +8,7 @@ use curvebook_doc::{
 };
 use curvebook_transform::formula::parser::parse_formula;
 use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExcludeWithReasonDialogState};
@@ -2566,9 +2566,7 @@ pub fn render_exclude_with_reason_modal(
                 if r.clicked() {
                     preset_clicked = true;
                     state.exclude_reason_draft = (*tag).to_owned();
-                    let mut f = Map::new();
-                    f.insert(String::from("reason_tag"), Value::String((*tag).to_owned()));
-                    intents.push(UiIntent::PatchActiveDialog { fields: f });
+                    intents.push(UiIntent::SetExcludeWithReason { reason_tag: Some((*tag).to_owned()), note: None });
                 }
             }
         });
@@ -2591,9 +2589,7 @@ pub fn render_exclude_with_reason_modal(
                 FrameInspectEntryInput::modal("exclude.reason_tag", "textbox", "Reason Tag", Some(state.exclude_reason_draft.clone()), true),
             );
             if tr_box.changed() {
-                let mut f = Map::new();
-                f.insert(String::from("reason_tag"), Value::String(state.exclude_reason_draft.clone()));
-                intents.push(UiIntent::PatchActiveDialog { fields: f });
+                intents.push(UiIntent::SetExcludeWithReason { reason_tag: Some(state.exclude_reason_draft.clone()), note: None });
             }
         });
         ui.label("Audit Note:");
@@ -2614,9 +2610,7 @@ pub fn render_exclude_with_reason_modal(
             FrameInspectEntryInput::modal("exclude.note", "textbox", "Audit Note", Some(state.exclude_note_draft.clone()), true),
         );
         if nr.changed() {
-            let mut f = Map::new();
-            f.insert(String::from("note"), Value::String(state.exclude_note_draft.clone()));
-            intents.push(UiIntent::PatchActiveDialog { fields: f });
+            intents.push(UiIntent::SetExcludeWithReason { reason_tag: None, note: Some(state.exclude_note_draft.clone()) });
         }
 
         ui.add_space(8.0);

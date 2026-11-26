@@ -711,19 +711,17 @@ fn r10_10_pvalue_stack_catalog_analyze_and_edit_params_roundtrip() {
     .unwrap();
     app.execute_command("sheet.select", json!({ "sheet_id": "col-pvals" })).unwrap();
     dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.analyze.open" })).unwrap();
-    dispatch_gui_action(
-        &mut app,
-        "ui.answer_dialog",
-        json!({ "fields": { "entry_id": "stats.pvalue_stack", "method": "Šídák (1967)", "threshold": 0.05, "column": 0 } }),
-    )
-    .unwrap();
+    app.canvas_dialogs.analyze.select_catalog_entry("stats.pvalue_stack");
+    app.canvas_dialogs.analyze.pvalue_stack_method = PValueStackMethod::Sidak;
+    app.canvas_dialogs.analyze.pvalue_stack_threshold = 0.05;
+    app.canvas_dialogs.analyze.pvalue_stack_column = Some(0);
 
     let analyze_txt = serde_json::to_string(&dispatch_gui_action(&mut app, "ui.inspect", json!({ "include_widgets": true })).unwrap()).unwrap();
     for wid in ["analyze.pvalue_stack.method", "analyze.pvalue_stack.threshold", "analyze.pvalue_stack.column"] {
         assert!(analyze_txt.contains(wid));
     }
 
-    dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok" })).unwrap();
+    dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" })).unwrap();
     let res_id = app.document().result_sheets.last().unwrap().id.clone();
     let created = app.document().result_sheet(&res_id).unwrap();
     assert_eq!(
@@ -739,12 +737,14 @@ fn r10_10_pvalue_stack_catalog_analyze_and_edit_params_roundtrip() {
         assert!(edit_txt.contains(wid));
     }
 
-    dispatch_gui_action(
-        &mut app,
-        "ui.answer_dialog",
-        json!({ "action": "ok", "fields": { "multiplicity_method": "Benjamini-Krieger-Yekutieli", "threshold": 0.10, "column": 1 } }),
-    )
-    .unwrap();
+    if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft
+        && let AnalysisKind::PValueStack(ps) = &mut spec.kind
+    {
+        ps.method = PValueStackMethod::TwoStageBky;
+        ps.threshold = 0.10;
+        ps.column = Some(1);
+    }
+    dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" })).unwrap();
     let updated = app.document().result_sheet(&res_id).unwrap();
     assert_eq!(
         updated.analysis.kind,

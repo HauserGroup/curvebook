@@ -232,13 +232,21 @@ fn shared_live_window_shares_human_and_agent_state() -> Result<(), Box<dyn std::
                 .map_err(|e| e.to_string())?;
         assert_eq!(opened["ok"], json!(true), "ui.invoke_menu failed: {opened}");
         for step in 0..3 {
-            let next = send_json_line(&mut w, &mut r, &json!({"id": format!("n{step}"), "method": "ui.answer_dialog", "params": {"action": "next"}}))
-                .map_err(|e| e.to_string())?;
+            let next = send_json_line(
+                &mut w,
+                &mut r,
+                &json!({"id": format!("n{step}"), "method": "ui.pointer_gesture", "params": {"action": "click", "widget_id": "dialog.button.next"}}),
+            )
+            .map_err(|e| e.to_string())?;
             assert_eq!(next["ok"], json!(true));
         }
         assert_eq!(
-            send_json_line(&mut w, &mut r, &json!({"id": "g4", "method": "ui.answer_dialog", "params": {"action": "create"}}))
-                .map_err(|e| e.to_string())?["ok"],
+            send_json_line(
+                &mut w,
+                &mut r,
+                &json!({"id": "g4", "method": "ui.pointer_gesture", "params": {"action": "click", "widget_id": "dialog.button.create"}}),
+            )
+            .map_err(|e| e.to_string())?["ok"],
             json!(true)
         );
         let shot = send_json_line(&mut w, &mut r, &json!({"id": "g5", "method": "ui.screenshot", "params": {"target": "full_window"}}))
