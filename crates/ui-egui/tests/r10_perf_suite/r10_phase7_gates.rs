@@ -858,17 +858,17 @@ fn r10_22_b2_and_r10_1_web_bundle_budget_and_shared_layout_parity() -> TestRes {
     for (rel, must_have, must_not, msg) in [
         (
             "apps/curvebook-web/src/lib.rs",
-            &["UiApp", "WebChromeBridge", "WebTextBridge"][..],
-            &[][..],
-            "must drive shared UiApp + placeholder bridges",
+            &["PLACEHOLDER_INDEX_HTML", "default-src 'self'", "connect-src 'self'"][..],
+            &["LayoutTree", "build_workspace_layout_tree", "host_adapters", "chrome_bridge", "text_bridge"][..],
+            "must stay a minimal strict-CSP placeholder without legacy bridges or LayoutTree",
         ),
         (
-            "apps/curvebook-web/src/chrome_bridge.rs",
-            &[][..],
-            &["LayoutTree", "build_workspace_layout_tree"][..],
-            "must not reference retired LayoutTree",
+            "apps/curvebook-web/index.html",
+            &["Content-Security-Policy", "default-src 'self'", "connect-src 'self'", "data-wasm-opt"][..],
+            &["<script", "<style", "'unsafe-inline'"][..],
+            "must enforce strict zero-script CSP placeholder",
         ),
-        ("apps/curvebook-web/Cargo.toml", &["curvebook-ui-egui", "workspace = true"][..], &[][..], "must consume workspace curvebook-ui-egui"),
+        ("apps/curvebook-web/Cargo.toml", &["wasm-bindgen", "workspace = true"][..], &[][..], "must keep workspace wasm-bindgen manifest"),
         ("Cargo.toml", &["[profile.web-release]", "opt-level = \"s\""][..], &[][..], "must define slim [profile.web-release]"),
         ("packaging/web/package.sh", &["trunk build --release"][..], &[][..], "must invoke trunk build --release"),
     ] {

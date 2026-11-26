@@ -1,6 +1,6 @@
 [package]
 name = "curvebook-web"
-description = "CurveBook WebAssembly browser host (strict-CSP wasm32 bridge)"
+description = "CurveBook WebAssembly browser host placeholder (strict-CSP wasm32, pending R11.11)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,19 +15,7 @@ workspace = true
 name = "curvebook-web"
 path = "src/main.rs"
 
-[dependencies]
-curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
-curvebook-format = { workspace = true }
-curvebook-platform = { workspace = true }
-curvebook-text = { workspace = true }
-curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { workspace = true }
 wasm-bindgen = { workspace = true }
 web-sys = { workspace = true }
-
-[dev-dependencies]
-curvebook-ui-egui = { workspace = true, features = ["test-support"] }
