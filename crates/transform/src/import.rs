@@ -1194,315 +1194,155 @@ mod dialect_tests {
 
     #[test]
     fn transform_dialect_parses_quoted_numbers_skips_blank_lines_and_keeps_quoted_empty_row() {
-        let input = "\u{FEFF}\"42.5\",10*\r\n\r\n\"\"\n\"a\"\"b\nc\",\n";
-        let rows = parse_delimited_text(input, ',', '.', true).unwrap();
-        assert_eq!(rows.len(), 3);
-        // Transform sends quoted fields through Cell::parse_import_token (numeric parsed as Number).
-        assert_eq!(rows[0][0], Cell::number(42.5));
-        assert_eq!(rows[0][1], Cell { value: CellValue::Number(10.0), excluded: true });
-        // Standalone unquoted blank line skipped, while quoted empty line `""` is retained.
-        assert_eq!(rows[1], vec![Cell::empty()]);
-        // Quoted newline + doubled quote + trailing empty field preserved.
-        assert_eq!(rows[2], vec![Cell::text("a\"b\nc"), Cell::empty()]);
+        let rows = parse_delimited_text("\u{FEFF}\"42.5\",10*\r\n\r\n\"\"\n\"a\"\"b\nc\",\n", ',', '.', true).unwrap();
+        let exp = vec![
+            vec![Cell::number(42.5), Cell { value: CellValue::Number(10.0), excluded: true }],
+            vec![Cell::empty()],
+            vec![Cell::text("a\"b\nc"), Cell::empty()],
+        ];
+        assert_eq!(rows, exp);
     }
 
     #[test]
     fn transform_dialect_handles_quote_as_delimiter_and_maps_syntax_errors() {
         let rows = parse_delimited_text("1\"2\"3\n4\"5", '"', '.', true).unwrap();
         assert_eq!(rows, vec![vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)], vec![Cell::number(4.0), Cell::number(5.0)]]);
-
-        assert!(matches!(parse_delimited_text("a\"b,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
-        assert!(matches!(parse_delimited_text("\"a\"x,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
-        assert!(matches!(parse_delimited_text("\"unclosed", ',', '.', true), Err(TransformError::InvalidInput { .. })));
+        for bad in ["a\"b,1", "\"a\"x,1", "\"unclosed"] {
+            assert!(matches!(parse_delimited_text(bad, ',', '.', true), Err(TransformError::InvalidInput { .. })));
+        }
     }
 }
 
 #[cfg(test)]
 mod audit_w1_import_tests {
     use curvebook_doc::{
-        Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec,
-        ImportPlacementSpec, LinkSource, LinkedDataRegion, MAX_TITLE_BYTES, NestedTable, PlacementMode, SequenceProgression, SheetCellRange,
-        SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+        Cell, CellCoord as Cc, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, GroupedTable, ImportFilterSpec as Ifs, ImportLinkSpec,
+        ImportPlacementSpec as Ips, LinkSource, LinkedDataRegion, MAX_TITLE_BYTES, NestedTable, PlacementMode, SequenceProgression, SheetCellRange,
+        SubcolumnMode, TableArchetype,
     };
 
-    use super::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline, parse_delimited_text};
+    use super::{ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, apply_import_link_pipeline, parse_delimited_text};
     use crate::error::TransformError;
+    use crate::test_helpers as th;
+
+    fn col_dst(id: &str, cols: usize, rows: usize) -> DataSheet {
+        DataSheet::new(id, "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols, rows).unwrap())).unwrap()
+    }
+
+    fn clip(filter: Ifs, placement: Ips) -> ImportLinkSpec {
+        ImportLinkSpec { source: LinkSource::Clipboard, filter, placement }
+    }
+
+    fn rng(a: (usize, usize, usize), b: (usize, usize, usize)) -> SheetCellRange {
+        SheetCellRange::new(Cc::new(a.0, a.1, a.2), Cc::new(b.0, b.1, b.2))
+    }
+
+    fn csv(target: &mut DataSheet, spec: &ImportLinkSpec, text: &str) -> Result<ImportPipelineReport, TransformError> {
+        let p = ImportSourcePayload::DelimitedText { text, delimiter: ',', decimal_separator: '.' };
+        apply_import_link_pipeline(target, spec, p, &ImportPipelineOptions::default(), None)
+    }
 
     #[test]
     fn aud_04_12_unstack_skips_excluded_group_keys() {
-        let mut target =
-            DataSheet::new("dst-unstack", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).unwrap()))
-                .unwrap();
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec { unstack_group_column: Some(0), parse_asterisk_exclusions: true, ..Default::default() },
-            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
-        };
-        let payload = ImportSourcePayload::DelimitedText { text: "Ctrl,10\nCtrl*,999\nDrug,20\n", delimiter: ',', decimal_separator: '.' };
-        apply_import_link_pipeline(&mut target, &spec, payload, &ImportPipelineOptions::default(), None).unwrap();
-        let TableArchetype::Column(col) = &target.archetype else { panic!("expected Column") };
-        assert_eq!(col.data_sets[0].title, "Ctrl");
-        assert_eq!(col.data_sets[1].title, "Drug");
-        assert_eq!(col.data_sets[0].cells[0][0].active_number(), Some(10.0));
-        assert!(col.data_sets[0].cells[1][0].is_empty(), "excluded group key row must not enter active Ctrl column");
-        assert_eq!(col.data_sets[1].cells[0][0].active_number(), Some(20.0));
+        let mut target = col_dst("dst-unstack", 2, 2);
+        let spec = clip(
+            Ifs { unstack_group_column: Some(0), parse_asterisk_exclusions: true, ..Default::default() },
+            Ips { propagate_title_header: true, ..Default::default() },
+        );
+        csv(&mut target, &spec, "Ctrl,10\nCtrl*,999\nDrug,20\n").unwrap();
+        let col = th::as_col(&target);
+        assert_eq!((col.data_sets[0].title.as_str(), col.data_sets[1].title.as_str()), ("Ctrl", "Drug"));
+        assert_eq!(
+            (col.data_sets[0].cells[0][0].active_number(), col.data_sets[0].cells[1][0].is_empty(), col.data_sets[1].cells[0][0].active_number()),
+            (Some(10.0), true, Some(20.0))
+        );
     }
 
     #[test]
     fn aud_04_13_place_grid_handles_nested_biological_units() {
         let mut target = DataSheet::new("dst-nested", "Nested", TableArchetype::Nested(NestedTable::new(2, 3, 2).unwrap())).unwrap();
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 0), ..Default::default() },
-        };
-        let payload = ImportSourcePayload::DelimitedText { text: "1,2,3,4,5,6\n7,8,9,10,11,12\n", delimiter: ',', decimal_separator: '.' };
-        let report = apply_import_link_pipeline(&mut target, &spec, payload, &ImportPipelineOptions::default(), None).unwrap();
-        assert_eq!(report.target_range, SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 1, 2)));
+        let anchor = |sub| clip(Ifs::default(), Ips { anchor: Cc::new(0, 0, sub), ..Default::default() });
+        assert_eq!(csv(&mut target, &anchor(0), "1,2,3,4,5,6\n7,8,9,10,11,12\n").unwrap().target_range, rng((0, 0, 0), (1, 1, 2)));
         let TableArchetype::Nested(nt) = &target.archetype else { panic!("expected Nested") };
-        assert_eq!(nt.groups.len(), 2, "must not fabricate spurious treatment groups");
-        assert_eq!(nt.groups[0].cells[0][2].active_number(), Some(3.0));
-        assert_eq!(nt.groups[1].cells[0][0].active_number(), Some(4.0));
-        assert_eq!(nt.groups[1].cells[1][2].active_number(), Some(12.0));
-
-        // Anchoring at a valid biological unit subcol >= 1 succeeds; out-of-range subcol fails.
-        let sub1_spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 1), ..Default::default() },
-        };
-        let rep2 = apply_import_link_pipeline(
-            &mut target,
-            &sub1_spec,
-            ImportSourcePayload::DelimitedText { text: "99,100\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(rep2.target_range, SheetCellRange::new(CellCoord::new(0, 0, 1), CellCoord::new(0, 0, 2)));
-        let bad_sub = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 3), ..Default::default() },
-        };
-        assert!(matches!(
-            apply_import_link_pipeline(
-                &mut target,
-                &bad_sub,
-                ImportSourcePayload::DelimitedText { text: "1\n", delimiter: ',', decimal_separator: '.' },
-                &ImportPipelineOptions::default(),
-                None,
-            ),
-            Err(TransformError::InvalidSpec { .. })
-        ));
+        assert_eq!(nt.groups.len(), 2);
+        assert_eq!((th::num(&nt.groups[0].cells[0][2]), th::num(&nt.groups[1].cells[0][0]), th::num(&nt.groups[1].cells[1][2])), (3.0, 4.0, 12.0));
+        assert_eq!(csv(&mut target, &anchor(1), "99,100\n").unwrap().target_range, rng((0, 0, 1), (0, 0, 2)));
+        assert!(matches!(csv(&mut target, &anchor(3), "1\n"), Err(TransformError::InvalidSpec { .. })));
     }
 
     #[test]
     fn aud_04_15_place_grid_target_range_tracks_lexicographic_end() {
-        let mut target =
-            DataSheet::new("dst-grp", "Grouped", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(4), 2, 2).unwrap())).unwrap();
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { anchor: CellCoord::new(0, 0, 0), ..Default::default() },
-        };
-        let rep = apply_import_link_pipeline(
-            &mut target,
-            &spec,
-            ImportSourcePayload::DelimitedText { text: "1,2,3,4,5\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(rep.target_range, SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 1, 0)));
+        let grp = GroupedTable::new(SubcolumnMode::RawReplicates(4), 2, 2).unwrap();
+        let mut target = DataSheet::new("dst-grp", "Grouped", TableArchetype::Grouped(grp)).unwrap();
+        let spec = clip(Ifs::default(), Ips { anchor: Cc::new(0, 0, 0), ..Default::default() });
+        assert_eq!(csv(&mut target, &spec, "1,2,3,4,5\n").unwrap().target_range, rng((0, 0, 0), (0, 1, 0)));
     }
 
     #[test]
     fn aud_04_16_ensure_sheet_rows_keeps_generated_sequence_x_cells_rectangular() {
-        let xy = XyTable::new_with_x_mode(
-            XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: SequenceProgression::Arithmetic },
-            SubcolumnMode::Single,
-            1,
-            2,
-        )
-        .unwrap();
+        let xy = th::xy_gen_seq(0.0, 1.0, SequenceProgression::Arithmetic, SubcolumnMode::Single, 1, 2);
         let mut sheet = DataSheet::new("xy-gen", "GenSeq", TableArchetype::Xy(xy)).unwrap();
         sheet.set_x_or_time_excluded(0, 0, true).unwrap();
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { mode: PlacementMode::AppendRows, ..Default::default() },
-        };
-        apply_import_link_pipeline(
-            &mut sheet,
-            &spec,
-            ImportSourcePayload::DelimitedText { text: "10\n20\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        sheet.validate().expect("XY sheet with excluded GeneratedSequence carrier must remain rectangular and valid");
-        let TableArchetype::Xy(xy_after) = &sheet.archetype else { panic!("expected Xy") };
-        assert_eq!(xy_after.x_cells.len(), 4);
-        assert!(xy_after.x_cells.iter().all(|row| row.len() == 1));
-        assert!(xy_after.x_cells[0][0].excluded);
-        assert!(!xy_after.x_cells[3][0].excluded);
+        let spec = clip(Ifs::default(), Ips { mode: PlacementMode::AppendRows, ..Default::default() });
+        csv(&mut sheet, &spec, "10\n20\n").unwrap();
+        sheet.validate().unwrap();
+        let xc = &th::as_xy(&sheet).x_cells;
+        assert!(xc.len() == 4 && xc.iter().all(|row| row.len() == 1) && xc[0][0].excluded && !xc[3][0].excluded);
     }
 
     #[test]
     fn aud_04_17_insert_rows_shifts_linked_regions_and_saturates_exclusion_notes() {
-        let mut target =
-            DataSheet::new("dst-ins", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4).unwrap()))
-                .unwrap();
-        target.set_cell(CellCoord::new(2, 1, 0), Cell { value: CellValue::Number(77.0), excluded: true }).unwrap();
-        target.exclusion_notes.push(curvebook_doc::CellExclusionNote {
-            coord: CellCoord::new(2, 1, 0),
-            reason_tag: String::from("outlier"),
-            note: String::from("Shifted with row 2"),
-            timestamp_utc: String::new(),
-        });
-        // Direct-API stale note at usize::MAX must saturate (no overflow panic) and be pruned cleanly.
-        target.exclusion_notes.push(curvebook_doc::CellExclusionNote {
-            coord: CellCoord::new(usize::MAX, 0, 0),
-            reason_tag: String::from("stale"),
-            note: String::from("Saturates without wrap"),
-            timestamp_utc: String::new(),
-        });
-        let existing_link = LinkedDataRegion {
+        let mut target = col_dst("dst-ins", 2, 4);
+        target.set_cell(Cc::new(2, 1, 0), Cell { value: CellValue::Number(77.0), excluded: true }).unwrap();
+        target.exclusion_notes.extend([th::excl_note(2, 1, 0, "outlier", "Shifted"), th::excl_note(usize::MAX, 0, 0, "stale", "Saturates")]);
+        target.linked_regions.push(LinkedDataRegion {
             id: String::from("link-1"),
-            spec: ImportLinkSpec {
-                source: LinkSource::Clipboard,
-                filter: ImportFilterSpec::default(),
-                placement: ImportPlacementSpec { anchor: CellCoord::new(2, 1, 0), ..Default::default() },
-            },
-            target_range: SheetCellRange::new(CellCoord::new(2, 1, 0), CellCoord::new(3, 1, 0)),
+            spec: clip(Ifs::default(), Ips { anchor: Cc::new(2, 1, 0), ..Default::default() }),
+            target_range: rng((2, 1, 0), (3, 1, 0)),
             provenance_summary: String::from("existing"),
-        };
-        target.linked_regions.push(existing_link);
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { mode: PlacementMode::InsertRows, anchor: CellCoord::new(0, 0, 0), ..Default::default() },
-        };
-        apply_import_link_pipeline(
-            &mut target,
-            &spec,
-            ImportSourcePayload::DelimitedText { text: "1\n2\n3\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(target.linked_regions[0].target_range, SheetCellRange::new(CellCoord::new(5, 1, 0), CellCoord::new(6, 1, 0)));
-        assert_eq!(target.linked_regions[0].spec.placement.anchor.row, 5);
-        assert_eq!(target.exclusion_notes.len(), 1);
-        assert_eq!(target.exclusion_notes[0].coord, CellCoord::new(5, 1, 0));
-        assert_eq!(target.exclusion_notes[0].reason_tag, "outlier");
-        assert!(target.cell(CellCoord::new(5, 1, 0)).unwrap().excluded);
+        });
+        let spec = clip(Ifs::default(), Ips { mode: PlacementMode::InsertRows, anchor: Cc::new(0, 0, 0), ..Default::default() });
+        csv(&mut target, &spec, "1\n2\n3\n").unwrap();
+        assert_eq!((target.linked_regions[0].target_range, target.linked_regions[0].spec.placement.anchor.row), (rng((5, 1, 0), (6, 1, 0)), 5));
+        assert_eq!(
+            (target.exclusion_notes.len(), target.exclusion_notes[0].coord, target.exclusion_notes[0].reason_tag.as_str()),
+            (1, Cc::new(5, 1, 0), "outlier")
+        );
+        assert!(target.cell(Cc::new(5, 1, 0)).unwrap().excluded);
     }
 
     #[test]
     fn aud_04_18_and_43_header_validation_propagation_decimal_sep_and_unique_link_ids() {
-        // AUD-04-18: oversized unstacked header rejected BEFORE mutating target.
-        let mut target =
-            DataSheet::new("dst-hdr", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
-                .unwrap();
-        let long_group = "G".repeat(MAX_TITLE_BYTES + 10);
-        let csv = format!("{long_group},42\n");
-        let spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec { unstack_group_column: Some(0), ..Default::default() },
-            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
-        };
-        let err = apply_import_link_pipeline(
-            &mut target,
-            &spec,
-            ImportSourcePayload::DelimitedText { text: &csv, delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap_err();
-        assert!(matches!(err, TransformError::Doc(DocError::TitleTooLong { .. })));
-        assert!(target.cell(CellCoord::new(0, 0, 0)).unwrap().is_empty(), "target must remain unmutated on invalid header");
+        let mut target = col_dst("dst-hdr", 1, 1);
+        let long_csv = format!("{},42\n", "G".repeat(MAX_TITLE_BYTES + 10));
+        let mut spec = clip(Ifs { unstack_group_column: Some(0), ..Default::default() }, Ips { propagate_title_header: true, ..Default::default() });
+        assert!(matches!(csv(&mut target, &spec, &long_csv), Err(TransformError::Doc(DocError::TitleTooLong { .. }))));
+        assert!(target.cell(Cc::new(0, 0, 0)).unwrap().is_empty());
 
-        // AUD-04-18: transpose=true must NOT apply pre-transpose headers onto post-transpose columns.
-        let tx_spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec { unstack_group_column: Some(0), ..Default::default() },
-            placement: ImportPlacementSpec { propagate_title_header: true, transpose: true, ..Default::default() },
-        };
-        apply_import_link_pipeline(
-            &mut target,
-            &tx_spec,
-            ImportSourcePayload::DelimitedText { text: "G1,10\nG2,20\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        let TableArchetype::Column(col_tx) = &target.archetype else { panic!("expected Column") };
-        assert_ne!(col_tx.data_sets[0].title, "G1");
+        spec.placement.transpose = true;
+        csv(&mut target, &spec, "G1,10\nG2,20\n").unwrap();
+        assert_ne!(th::as_col(&target).data_sets[0].title, "G1");
 
-        // AUD-04-43 part 1: plain delimited import with propagate_title_header=true promotes row 0 to column titles.
-        let mut plain_dst =
-            DataSheet::new("dst-plain", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 1).unwrap()))
-                .unwrap();
-        let plain_spec = ImportLinkSpec {
-            source: LinkSource::Clipboard,
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec { propagate_title_header: true, ..Default::default() },
-        };
-        let rep = apply_import_link_pipeline(
-            &mut plain_dst,
-            &plain_spec,
-            ImportSourcePayload::DelimitedText { text: "Ctrl,Drug\n10,20\n30,40\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(rep.rows_placed, 2);
-        let TableArchetype::Column(c_plain) = &plain_dst.archetype else { panic!("expected Column") };
-        assert_eq!((c_plain.data_sets[0].title.as_str(), c_plain.data_sets[1].title.as_str()), ("Ctrl", "Drug"));
-        assert_eq!(c_plain.data_sets[0].cells[0][0], Cell { value: CellValue::Number(10.0), excluded: false });
+        let mut plain = col_dst("dst-plain", 2, 1);
+        let plain_spec = clip(Ifs::default(), Ips { propagate_title_header: true, ..Default::default() });
+        assert_eq!(csv(&mut plain, &plain_spec, "Ctrl,Drug\n10,20\n30,40\n").unwrap().rows_placed, 2);
+        let cp = th::as_col(&plain);
+        assert_eq!((cp.data_sets[0].title.as_str(), cp.data_sets[1].title.as_str()), ("Ctrl", "Drug"));
+        assert_eq!(cp.data_sets[0].cells[0][0], Cell { value: CellValue::Number(10.0), excluded: false });
 
-        // AUD-04-43 part 2: invalid decimal separator rejected.
         assert!(matches!(parse_delimited_text("105,2", ',', '0', false), Err(TransformError::InvalidSpec { .. })));
 
-        // AUD-04-43 part 3: default link_id avoids collisions after deleting an earlier link.
-        let mut lnk_dst =
-            DataSheet::new("dst-lnk", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
-                .unwrap();
+        let mut lnk = col_dst("dst-lnk", 1, 1);
         let file_spec = ImportLinkSpec {
             source: LinkSource::ExternalDelimitedFile { path: String::from("a.csv"), delimiter: ',', decimal_separator: '.' },
-            filter: ImportFilterSpec::default(),
-            placement: ImportPlacementSpec::default(),
+            filter: Ifs::default(),
+            placement: Ips::default(),
         };
-        apply_import_link_pipeline(
-            &mut lnk_dst,
-            &file_spec,
-            ImportSourcePayload::DelimitedText { text: "1\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        apply_import_link_pipeline(
-            &mut lnk_dst,
-            &file_spec,
-            ImportSourcePayload::DelimitedText { text: "2\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(lnk_dst.linked_regions[0].id, "link-1");
-        assert_eq!(lnk_dst.linked_regions[1].id, "link-2");
-        lnk_dst.linked_regions.remove(0);
-        apply_import_link_pipeline(
-            &mut lnk_dst,
-            &file_spec,
-            ImportSourcePayload::DelimitedText { text: "3\n", delimiter: ',', decimal_separator: '.' },
-            &ImportPipelineOptions::default(),
-            None,
-        )
-        .unwrap();
-        assert_eq!(lnk_dst.linked_regions.len(), 2);
-        assert_ne!(lnk_dst.linked_regions[0].id, lnk_dst.linked_regions[1].id);
+        csv(&mut lnk, &file_spec, "1\n").unwrap();
+        csv(&mut lnk, &file_spec, "2\n").unwrap();
+        assert_eq!((lnk.linked_regions[0].id.as_str(), lnk.linked_regions[1].id.as_str()), ("link-1", "link-2"));
+        lnk.linked_regions.remove(0);
+        csv(&mut lnk, &file_spec, "3\n").unwrap();
+        assert!(lnk.linked_regions.len() == 2 && lnk.linked_regions[0].id != lnk.linked_regions[1].id);
     }
 }

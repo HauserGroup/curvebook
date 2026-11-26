@@ -1955,31 +1955,34 @@ fn flatten_primary_columns(arch: &TableArchetype, selected: &[usize], include_ax
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{
-        Cell, CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, DataSheet, DerivedColumnFormula, DocError, GroupedTable, MAX_SHEET_CELLS,
-        MAX_TITLE_BYTES, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, ThreeWayColumnGrouping, VariableRole,
-        VariableSource, XColumnMode, XyTable,
+        Cell, ColumnDesignHint, ColumnTable, DataSheet, DerivedColumnFormula, DocError, GroupedTable, MAX_SHEET_CELLS, MAX_TITLE_BYTES,
+        MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, ThreeWayColumnGrouping, VariableRole, VariableSource,
+        XyTable,
     };
 
     use super::{PruneMethod, SelectRule, execute_prune, execute_select, execute_select_with_derived, execute_transpose, try_retain_rows};
     use crate::error::TransformError;
     use crate::formula::evaluate_calculated_variables;
-    use crate::ops::TransformContext;
+    use crate::ops::{TransformContext, TransformOutput};
+    use crate::test_helpers as th;
+
+    fn prune(s: &DataSheet, m: PruneMethod) -> TransformOutput {
+        execute_prune(s, m, &TransformContext::default()).unwrap()
+    }
+
+    fn sel(s: &DataSheet, rules: &[SelectRule], kind: TableKind) -> DataSheet {
+        execute_select(s, rules, kind, &TransformContext::default()).unwrap().data_sheet
+    }
+
+    fn sel_d(s: &DataSheet, rules: &[SelectRule], derived: &[DerivedColumnFormula], kind: TableKind) -> Result<DataSheet, TransformError> {
+        execute_select_with_derived(s, rules, derived, kind, &TransformContext::default()).map(|o| o.data_sheet)
+    }
 
     #[test]
     fn aud04_03_transpose_bounds_checks_and_checked_mul_exclusion_notes() {
-        let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
-        for r in 0..2 {
-            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
-            xy.data_sets[0].cells[r] = vec![Cell::excluded_number(10.0), Cell::number(20.0)];
-        }
-        let mut sheet = DataSheet::new("tr-oob", "OOB Note", TableArchetype::Xy(xy)).unwrap();
-        // Inject an overflowing out-of-bounds exclusion note directly via Rust API.
-        sheet.exclusion_notes.push(CellExclusionNote {
-            coord: CellCoord::new(0, (usize::MAX / 2) + 1, 0),
-            reason_tag: String::from("spoof"),
-            note: String::from("overflowing col"),
-            timestamp_utc: String::new(),
-        });
+        let row = vec![Cell::excluded_number(10.0), Cell::number(20.0)];
+        let mut sheet = th::xy_sheet("tr-oob", SubcolumnMode::RawReplicates(2), &[1.0, 2.0], &[vec![row; 2]]);
+        sheet.exclusion_notes.push(th::excl_note(0, (usize::MAX / 2) + 1, 0, "spoof", "overflowing col"));
         let out = execute_transpose(&sheet, true, &TransformContext::default()).unwrap();
         assert!(out.data_sheet.exclusion_notes.is_empty(), "spoofed OOB note must be dropped, got {:?}", out.data_sheet.exclusion_notes);
     }
@@ -1987,147 +1990,78 @@ mod tests {
     #[test]
     fn aud04_14_prune_and_average_bins_snapshot_calculated_mv_variables() {
         let mut mv = MultipleVariablesTable::new(2, 4).unwrap();
-        mv.variables[0].title = String::from("X");
-        mv.variables[1].title = String::from("Doubled");
-        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0), Cell::number(4.0)];
+        (mv.variables[0].title, mv.variables[1].title) = (String::from("X"), String::from("Doubled"));
+        mv.variables[0].cells = th::nums(&[1.0, 2.0, 3.0, 4.0]);
         mv.variables[1].set_calculated_formula("=X * 2");
         evaluate_calculated_variables(&mut mv, None).unwrap();
         let sheet = DataSheet::new("mv-prune", "MV Prune", TableArchetype::MultipleVariables(mv)).unwrap();
-        let ctx = TransformContext::default();
-
         for method in [PruneMethod::AverageBins(2), PruneMethod::EveryNth(2), PruneMethod::MinMaxBins(2)] {
-            let out = execute_prune(&sheet, method, &ctx).unwrap();
-            let TableArchetype::MultipleVariables(out_mv) = &out.data_sheet.archetype else {
-                panic!("expected MV");
-            };
-            assert_eq!(out_mv.variables[1].source, VariableSource::Entered, "{method:?}");
-            assert_eq!(out_mv.variables[1].role, VariableRole::Continuous, "{method:?}");
+            let v1 = &th::into_mv(prune(&sheet, method).data_sheet).variables[1];
+            assert_eq!((v1.source.clone(), v1.role), (VariableSource::Entered, VariableRole::Continuous), "{method:?}");
         }
     }
 
     #[test]
     fn aud04_23_select_derived_column_enforces_cumulative_cell_budget_before_alloc() {
-        // 20,000 rows x 1 dataset x 500 subcols = 10,020,000 cells (valid <= MAX_SHEET_CELLS = 30M).
-        // Adding 3 derived columns would request 40,020,000 cells (> 30M) and must fail with TooManyCells before allocating.
         let xy = XyTable::new(SubcolumnMode::RawReplicates(500), 1, 20_000).unwrap();
         let sheet = DataSheet::new("big-xy", "Big XY", TableArchetype::Xy(xy)).unwrap();
-        let derived = vec![DerivedColumnFormula::new("D1", "1"), DerivedColumnFormula::new("D2", "2"), DerivedColumnFormula::new("D3", "3")];
-        let err = execute_select_with_derived(&sheet, &[], &derived, TableKind::Xy, &TransformContext::default()).unwrap_err();
+        let derived = [DerivedColumnFormula::new("D1", "1"), DerivedColumnFormula::new("D2", "2"), DerivedColumnFormula::new("D3", "3")];
+        let err = sel_d(&sheet, &[], &derived, TableKind::Xy).unwrap_err();
         assert!(matches!(err, TransformError::Doc(DocError::TooManyCells { max: MAX_SHEET_CELLS, .. })), "unexpected err: {err:?}");
     }
 
     #[test]
     fn aud04_30_average_bins_overflow_safe_means_and_parametric_pooling_no_orphan_n() {
-        // 1. Grouped row_numeric_spacing and cells with [1e308, 1e308] average cleanly to 1e308 without Inf.
         let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 1, 2).unwrap();
-        grp.row_numeric_spacing = Some(vec![Some(1e308), Some(1e308)]);
-        grp.data_sets[0].cells = vec![vec![Cell::number(1e308)], vec![Cell::number(1e308)]];
-        let grp_sheet = DataSheet::new("grp-big", "Grp Big", TableArchetype::Grouped(grp)).unwrap();
-        let binned = execute_prune(&grp_sheet, PruneMethod::AverageBins(2), &TransformContext::default()).unwrap();
-        let TableArchetype::Grouped(b_grp) = &binned.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert_eq!(b_grp.row_numeric_spacing, Some(vec![Some(1e308)]));
-        assert_eq!(b_grp.data_sets[0].cells[0][0].active_number(), Some(1e308));
+        (grp.row_numeric_spacing, grp.data_sets[0].cells) = (Some(vec![Some(1e308), Some(1e308)]), vec![vec![Cell::number(1e308)]; 2]);
+        let binned = prune(&DataSheet::new("grp-big", "Grp Big", TableArchetype::Grouped(grp)).unwrap(), PruneMethod::AverageBins(2));
+        let b_grp = th::as_grp(&binned.data_sheet);
+        assert_eq!((&b_grp.row_numeric_spacing, b_grp.data_sets[0].cells[0][0].active_number()), (&Some(vec![Some(1e308)]), Some(1e308)));
         assert!(binned.data_sheet.validate_finite_metadata().is_ok());
 
-        // 2. Parametric pooling on (1e308, 1, 2) x 2 stays finite; (-1e160, 1, 2) & (+1e160, 1, 2) yields finite pooled SD ~ 1.1547e160.
-        let mut xy = XyTable::new(SubcolumnMode::MeanSdN, 2, 2).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.set_x_cell(1, Cell::number(2.0)).unwrap();
-        xy.data_sets[0].cells =
-            vec![vec![Cell::number(1e308), Cell::number(1.0), Cell::number(2.0)], vec![Cell::number(1e308), Cell::number(1.0), Cell::number(2.0)]];
-        xy.data_sets[1].cells =
-            vec![vec![Cell::number(-1e160), Cell::number(1.0), Cell::number(2.0)], vec![Cell::number(1e160), Cell::number(1.0), Cell::number(2.0)]];
-        let xy_sheet = DataSheet::new("pool-big", "Pool Big", TableArchetype::Xy(xy)).unwrap();
-        let pooled = execute_prune(&xy_sheet, PruneMethod::AverageBins(2), &TransformContext::default()).unwrap();
-        let TableArchetype::Xy(p_xy) = &pooled.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert_eq!(p_xy.data_sets[0].cells[0][0].active_number(), Some(1e308));
-        assert!((p_xy.data_sets[0].cells[0][1].active_number().unwrap() - (2.0_f64 / 3.0).sqrt()).abs() < 1e-12);
-        assert_eq!(p_xy.data_sets[0].cells[0][2].active_number(), Some(4.0));
-        let expected_sd = 1e160 * (4.0_f64 / 3.0).sqrt();
-        assert!(((p_xy.data_sets[1].cells[0][1].active_number().unwrap() - expected_sd) / expected_sd).abs() < 1e-12);
+        let c0 = vec![th::nums(&[1e308, 1.0, 2.0]), th::nums(&[1e308, 1.0, 2.0])];
+        let c1 = vec![th::nums(&[-1e160, 1.0, 2.0]), th::nums(&[1e160, 1.0, 2.0])];
+        let p_xy =
+            th::into_xy(prune(&th::xy_sheet("pool-big", SubcolumnMode::MeanSdN, &[1.0, 2.0], &[c0, c1]), PruneMethod::AverageBins(2)).data_sheet);
+        assert_eq!((p_xy.data_sets[0].cells[0][0].active_number(), p_xy.data_sets[0].cells[0][2].active_number()), (Some(1e308), Some(4.0)));
+        th::assert_close(th::num(&p_xy.data_sets[0].cells[0][1]), (2.0_f64 / 3.0).sqrt(), 1e-12);
+        let exp_sd = 1e160 * (4.0_f64 / 3.0).sqrt();
+        th::assert_close((th::num(&p_xy.data_sets[1].cells[0][1]) - exp_sd) / exp_sd, 0.0, 1e-12);
 
-        // 3. Genuine pooled SD overflow ((-1.7e308, 1, 2) & (+1.7e308, 1, 2)) clears ENTIRE row (no orphaned N) and warns.
-        let mut ovf = XyTable::new(SubcolumnMode::MeanSdN, 1, 2).unwrap();
-        ovf.set_x_cell(0, Cell::number(1.0)).unwrap();
-        ovf.set_x_cell(1, Cell::number(2.0)).unwrap();
-        ovf.data_sets[0].cells = vec![
-            vec![Cell::number(-1.7e308), Cell::number(1.0), Cell::number(2.0)],
-            vec![Cell::number(1.7e308), Cell::number(1.0), Cell::number(2.0)],
-        ];
-        let ovf_sheet = DataSheet::new("pool-ovf", "Pool Ovf", TableArchetype::Xy(ovf)).unwrap();
-        let ovf_out = execute_prune(&ovf_sheet, PruneMethod::AverageBins(2), &TransformContext::default()).unwrap();
-        let TableArchetype::Xy(ovf_xy) = &ovf_out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!(ovf_xy.data_sets[0].cells[0].iter().all(Cell::is_empty), "must not emit orphaned N: {:?}", ovf_xy.data_sets[0].cells[0]);
-        assert!(!ovf_out.warnings.is_empty());
+        let ovf_c = vec![th::nums(&[-1.7e308, 1.0, 2.0]), th::nums(&[1.7e308, 1.0, 2.0])];
+        let ovf_out = prune(&th::xy_sheet("pool-ovf", SubcolumnMode::MeanSdN, &[1.0, 2.0], &[ovf_c]), PruneMethod::AverageBins(2));
+        let row0 = &th::as_xy(&ovf_out.data_sheet).data_sets[0].cells[0];
+        assert!(row0.iter().all(Cell::is_empty) && !ovf_out.warnings.is_empty(), "must not emit orphaned N: {row0:?}");
     }
 
     #[test]
     fn aud04_32_presummarized_subcolumns_in_topn_exclude_missing_and_minmax_bins() {
         let mut grp = GroupedTable::new(SubcolumnMode::MeanSdN, 1, 3).unwrap();
-        grp.data_sets[0].cells = vec![
-            vec![Cell::number(10.0), Cell::number(1.0), Cell::number(100.0)],
-            vec![Cell::number(50.0), Cell::number(2.0), Cell::number(3.0)],
-            vec![Cell::empty(), Cell::empty(), Cell::number(500.0)],
-        ];
+        grp.data_sets[0].cells =
+            vec![th::nums(&[10.0, 1.0, 100.0]), th::nums(&[50.0, 2.0, 3.0]), vec![Cell::empty(), Cell::empty(), Cell::number(500.0)]];
         let sheet = DataSheet::new("grp-sum", "Grp Sum", TableArchetype::Grouped(grp)).unwrap();
-        let ctx = TransformContext::default();
 
-        // TopN picks row 1 (Mean = 50), not row 0 (avg(10,1,100) = 37) or row 2 (empty Mean, N = 500).
-        let top1 = execute_select(&sheet, &[SelectRule::TopN { column: 0, n: 1 }], TableKind::Grouped, &ctx).unwrap();
-        let TableArchetype::Grouped(top_g) = &top1.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert_eq!(top_g.row_count(), 1);
-        assert_eq!(top_g.data_sets[0].cells[0][0].active_number(), Some(50.0));
+        let top_g = th::into_grp(sel(&sheet, &[SelectRule::TopN { column: 0, n: 1 }], TableKind::Grouped));
+        assert_eq!((top_g.row_count(), top_g.data_sets[0].cells[0][0].active_number()), (1, Some(50.0)));
+        assert_eq!(sel(&sheet, &[SelectRule::ExcludeMissing], TableKind::Grouped).archetype.row_count(), 2);
 
-        // ExcludeMissing drops row 2 whose Mean is empty even though N = 500 is populated.
-        let non_miss = execute_select(&sheet, &[SelectRule::ExcludeMissing], TableKind::Grouped, &ctx).unwrap();
-        assert_eq!(non_miss.data_sheet.archetype.row_count(), 2);
+        let mm_g = th::into_grp(prune(&sheet, PruneMethod::MinMaxBins(3)).data_sheet);
+        let c0 = &mm_g.data_sets[0].cells;
+        assert_eq!((mm_g.row_count(), c0[0][0].active_number(), c0[1][0].active_number()), (2, Some(10.0), Some(50.0)));
 
-        // MinMaxBins ignores N = 500 when Mean is empty, keeping rows 0 (min=10) and 1 (max=50).
-        let mm = execute_prune(&sheet, PruneMethod::MinMaxBins(3), &ctx).unwrap();
-        let TableArchetype::Grouped(mm_g) = &mm.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert_eq!(mm_g.row_count(), 2);
-        assert_eq!(mm_g.data_sets[0].cells[0][0].active_number(), Some(10.0));
-        assert_eq!(mm_g.data_sets[0].cells[1][0].active_number(), Some(50.0));
-
-        // RawReplicates XY aggregates all active replicates in TopN.
-        let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.set_x_cell(1, Cell::number(2.0)).unwrap();
-        xy.data_sets[0].cells = vec![vec![Cell::number(10.0), Cell::number(10.0)], vec![Cell::number(5.0), Cell::number(95.0)]];
-        let xy_sheet = DataSheet::new("xy-rep", "XY Rep", TableArchetype::Xy(xy)).unwrap();
-        let xy_top = execute_select(&xy_sheet, &[SelectRule::TopN { column: 0, n: 1 }], TableKind::Xy, &ctx).unwrap();
-        let TableArchetype::Xy(out_xy) = &xy_top.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert_eq!(out_xy.x_value_at(0), Some(2.0)); // mean(5, 95) = 50 > mean(10, 10) = 10
+        let xy_s = th::xy_sheet("xy-rep", SubcolumnMode::RawReplicates(2), &[1.0, 2.0], &[vec![th::nums(&[10.0, 10.0]), th::nums(&[5.0, 95.0])]]);
+        assert_eq!(th::into_xy(sel(&xy_s, &[SelectRule::TopN { column: 0, n: 1 }], TableKind::Xy)).x_value_at(0), Some(2.0));
     }
 
     #[test]
     fn aud04_39_log_spaced_prune_binary_search_exact_and_fast() {
         let n = 10_000_usize;
-        let mut xy = XyTable::new(SubcolumnMode::Single, 1, n).unwrap();
-        for r in 0..n {
-            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
-            xy.data_sets[0].cells[r][0] = Cell::number(r as f64);
-        }
-        let sheet = DataSheet::new("log-fast", "LogFast", TableArchetype::Xy(xy)).unwrap();
-        let out = execute_prune(&sheet, PruneMethod::LogarithmicSpacing { target_points: 5 }, &TransformContext::default()).unwrap();
-        let TableArchetype::Xy(out_xy) = &out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        let xs: Vec<f64> = (0..out_xy.row_count()).map(|r| out_xy.x_value_at(r).unwrap()).collect();
-        // Exact geometric targets over [1, 10000]: 1, 10, 100, 1000, 10000.
-        assert_eq!(xs, vec![1.0, 10.0, 100.0, 1000.0, 10000.0]);
+        let xs: Vec<f64> = (1..=n).map(|r| r as f64).collect();
+        let ys: Vec<Vec<Cell>> = (0..n).map(|r| vec![Cell::number(r as f64)]).collect();
+        let sheet = th::xy_sheet("log-fast", SubcolumnMode::Single, &xs, &[ys]);
+        let out_xy = th::into_xy(prune(&sheet, PruneMethod::LogarithmicSpacing { target_points: 5 }).data_sheet);
+        let got: Vec<f64> = (0..out_xy.row_count()).map(|r| out_xy.x_value_at(r).unwrap()).collect();
+        assert_eq!(got, vec![1.0, 10.0, 100.0, 1000.0, 10000.0]);
     }
 
     #[test]
@@ -2135,62 +2069,28 @@ mod tests {
         let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
         col.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)]];
         let sheet = DataSheet::new("pr-long", "P".repeat(MAX_TITLE_BYTES), TableArchetype::Column(col)).unwrap();
-        let pruned = execute_prune(&sheet, PruneMethod::EveryNth(1), &TransformContext::default()).unwrap();
-        assert!(pruned.data_sheet.validate().is_ok());
-        assert!(pruned.data_sheet.title.len() <= MAX_TITLE_BYTES);
+        let pruned = prune(&sheet, PruneMethod::EveryNth(1));
+        assert!(pruned.data_sheet.validate().is_ok() && pruned.data_sheet.title.len() <= MAX_TITLE_BYTES);
 
-        // GeneratedSequence XY at exact MAX_SHEET_CELLS (1_000_000 x 1 x 30 = 30M) would hit 31M on materialization.
-        // Test the same overflow boundary with smaller column/subcol product: 100_000 x 1 x 300 = 30M (+100_000 X = 30.1M > 30M).
-        let mut arch = TableArchetype::Xy(
-            XyTable::new_with_x_mode(
-                XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: SequenceProgression::Arithmetic },
-                SubcolumnMode::RawReplicates(300),
-                1,
-                100_000,
-            )
-            .unwrap(),
-        );
-        let all_rows: Vec<usize> = (0..100_000).collect();
-        let err = try_retain_rows(&mut arch, &all_rows).unwrap_err();
+        let mut arch = TableArchetype::Xy(th::xy_gen_seq(0.0, 1.0, SequenceProgression::Arithmetic, SubcolumnMode::RawReplicates(300), 1, 100_000));
+        let err = try_retain_rows(&mut arch, &(0..100_000).collect::<Vec<_>>()).unwrap_err();
         assert!(matches!(err, TransformError::Doc(DocError::TooManyCells { max: MAX_SHEET_CELLS, .. })), "unexpected err: {err:?}");
     }
 
     #[test]
     fn aud04_46_select_predicate_col_index_letter_alias_exclude_missing_and_three_way_clear() {
-        let mut mv = MultipleVariablesTable::new(2, 3).unwrap();
-        mv.variables[0].title = String::from("A");
-        mv.variables[1].title = String::from("B");
-        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(5.0), Cell::number(10.0)];
-        mv.variables[1].cells = vec![Cell::number(2.0), Cell::number(6.0), Cell::number(20.0)];
-        let sheet = DataSheet::new("sel-alias", "Alias", TableArchetype::MultipleVariables(mv)).unwrap();
-        let derived = vec![DerivedColumnFormula::new("Score", "[A] + [B]")];
-        let ctx = TransformContext::default();
-
-        // Both col(2) and spreadsheet letter alias "C" trigger predicate_needs_derived.
+        let sheet = th::mv_sheet("sel-alias", &[("A", None, th::nums(&[1.0, 5.0, 10.0])), ("B", None, th::nums(&[2.0, 6.0, 20.0]))]);
+        let derived = [DerivedColumnFormula::new("Score", "[A] + [B]")];
         for pred in ["col(2) > 10", "C > 10"] {
-            let out = execute_select_with_derived(&sheet, &[SelectRule::Predicate(String::from(pred))], &derived, TableKind::MultipleVariables, &ctx)
-                .unwrap();
-            let TableArchetype::MultipleVariables(out_mv) = &out.data_sheet.archetype else {
-                panic!("expected MV");
-            };
-            assert_eq!(out_mv.row_count(), 2, "predicate `{pred}`");
-            assert_eq!(out_mv.variables[2].cells[0].active_number(), Some(11.0));
-            assert_eq!(out_mv.variables[2].cells[1].active_number(), Some(30.0));
+            let out = th::into_mv(sel_d(&sheet, &[SelectRule::Predicate(pred.to_owned())], &derived, TableKind::MultipleVariables).unwrap());
+            let c2 = &out.variables[2].cells;
+            assert_eq!((out.row_count(), c2[0].active_number(), c2[1].active_number()), (2, Some(11.0), Some(30.0)), "pred `{pred}`");
         }
 
-        // ExcludeMissing stays scoped to base columns even when derived column has missing values.
-        let derived_with_na = vec![DerivedColumnFormula::new("Ratio", "if([A] > 1, [B] / [A], nan)")];
-        let out_excl = execute_select_with_derived(
-            &sheet,
-            &[SelectRule::ExcludeMissing, SelectRule::Predicate(String::from("isvalid(Ratio) OR [A] == 1"))],
-            &derived_with_na,
-            TableKind::MultipleVariables,
-            &ctx,
-        )
-        .unwrap();
-        assert_eq!(out_excl.data_sheet.archetype.row_count(), 3, "ExcludeMissing must not drop row 0 for missing derived Ratio");
+        let rules = [SelectRule::ExcludeMissing, SelectRule::Predicate(String::from("isvalid(Ratio) OR [A] == 1"))];
+        let derived_na = [DerivedColumnFormula::new("Ratio", "if([A] > 1, [B] / [A], nan)")];
+        assert_eq!(sel_d(&sheet, &rules, &derived_na, TableKind::MultipleVariables).unwrap().archetype.row_count(), 3);
 
-        // GroupedTable three_way_grouping cleared when columns are subsetted or derived column is appended.
         let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 4, 2).unwrap();
         grp.three_way_grouping = Some(ThreeWayColumnGrouping {
             factor_1_name: String::from("Drug"),
@@ -2199,43 +2099,21 @@ mod tests {
             factor_2_levels: [String::from("F"), String::from("M")],
         });
         let grp_sheet = DataSheet::new("grp-3w", "3-Way", TableArchetype::Grouped(grp)).unwrap();
-
         let sub_ctx = TransformContext { selected_data_sets: vec![0, 1], ..TransformContext::default() };
-        let sub_out = execute_select(&grp_sheet, &[], TableKind::Grouped, &sub_ctx).unwrap();
-        let TableArchetype::Grouped(sub_grp) = &sub_out.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert!(sub_grp.three_way_grouping.is_none());
-
-        let app_out = execute_select_with_derived(
-            &grp_sheet,
-            &[],
-            &[DerivedColumnFormula::new("Extra", "1")],
-            TableKind::Grouped,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        let TableArchetype::Grouped(app_grp) = &app_out.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert!(app_grp.three_way_grouping.is_none());
+        assert!(th::into_grp(execute_select(&grp_sheet, &[], TableKind::Grouped, &sub_ctx).unwrap().data_sheet).three_way_grouping.is_none());
+        let extra = [DerivedColumnFormula::new("Extra", "1")];
+        assert!(th::into_grp(sel_d(&grp_sheet, &[], &extra, TableKind::Grouped).unwrap()).three_way_grouping.is_none());
     }
 
     #[test]
     fn aud04_51_transpose_all_archetypes_direct_construction_preserves_data() {
         let mut grp = GroupedTable::new(SubcolumnMode::MeanSdN, 2, 3).unwrap();
         grp.row_titles = vec![String::from("R0"), String::from("R1"), String::from("R2")];
-        grp.data_sets[0].title = String::from("C0");
-        grp.data_sets[1].title = String::from("C1");
-        grp.data_sets[1].cells[2] = vec![Cell::number(42.0), Cell::number(3.5), Cell::number(6.0)];
+        (grp.data_sets[0].title, grp.data_sets[1].title) = (String::from("C0"), String::from("C1"));
+        grp.data_sets[1].cells[2] = th::nums(&[42.0, 3.5, 6.0]);
         let sheet = DataSheet::new("tr-grp", "Grp", TableArchetype::Grouped(grp)).unwrap();
-        let out = execute_transpose(&sheet, true, &TransformContext::default()).unwrap();
-        let TableArchetype::Grouped(tr) = &out.data_sheet.archetype else {
-            panic!("expected Grouped");
-        };
-        assert_eq!((tr.data_sets.len(), tr.row_count()), (3, 2));
-        assert_eq!(tr.data_sets[2].cells[1][0].active_number(), Some(42.0));
-        assert_eq!(tr.data_sets[2].cells[1][1].active_number(), Some(3.5));
-        assert_eq!(tr.data_sets[2].cells[1][2].active_number(), Some(6.0));
+        let tr = th::into_grp(execute_transpose(&sheet, true, &TransformContext::default()).unwrap().data_sheet);
+        let vals: Vec<_> = tr.data_sets[2].cells[1].iter().map(Cell::active_number).collect();
+        assert_eq!((tr.data_sets.len(), tr.row_count(), vals), (3, 2, vec![Some(42.0), Some(3.5), Some(6.0)]));
     }
 }

@@ -1093,9 +1093,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use curvebook_doc::{
-        AnalysisKind, AnalysisSpec, Cell, CellCoord, CellExclusionNote, ColumnTable, ContingencyTable, DataSheet, GroupedTable,
-        MultipleVariablesTable, NestedTable, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TransformAnalysisSpec, VariableRole,
-        XyTable,
+        AnalysisKind, AnalysisSpec, Cell, CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError,
+        GroupedTable, MAX_ROWS, MAX_TITLE_BYTES, MultipleVariablesTable, NestedTable, PartsOfWholeTable, SequenceProgression, SubcolumnMode,
+        SurvivalTable, TableArchetype, TransformAnalysisSpec, VariableRole, VariableSource, XyTable,
     };
     use curvebook_math::sum::SummaryMoments;
     use serde::Deserialize;
@@ -1106,198 +1106,153 @@ mod tests {
     };
     use crate::error::TransformError;
     use crate::ops::{TransformContext, execute_analysis_transform};
+    use crate::test_helpers as th;
 
-    fn group_counts_from_schedule(sheet: &DataSheet) -> BTreeMap<String, usize> {
-        let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
-            panic!("expected MultipleVariables schedule");
-        };
+    fn mv_counts(sheet: &DataSheet, col: usize) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
-        for cell in &mv.variables[4].cells {
-            let label = cell.active_text().unwrap().to_owned();
-            *counts.entry(label).or_insert(0) += 1;
+        for cell in &th::as_mv(sheet).variables[col].cells {
+            *counts.entry(cell.active_text().unwrap().to_owned()).or_insert(0) += 1;
         }
         counts
     }
 
+    fn assert_counts(counts: &BTreeMap<String, usize>, expected: &[(&str, usize)]) {
+        for &(k, v) in expected {
+            assert_eq!(counts.get(k).copied(), Some(v), "key={k}");
+        }
+    }
+
+    fn assert_arrive(pairs: &[(String, String)], expected: &[(&str, &str)]) {
+        let map: BTreeMap<&str, &str> = pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        for &(k, v) in expected {
+            assert_eq!(map.get(k).copied(), Some(v), "arrive key={k}");
+        }
+    }
+
+    fn weights(gs: &[(&str, usize)]) -> Vec<GroupAllocationWeight> {
+        gs.iter().map(|&(l, w)| if w == 1 { GroupAllocationWeight::new(l) } else { GroupAllocationWeight::with_weight(l, w) }).collect()
+    }
+
+    fn rand_cfg(n: usize, gs: &[(&str, usize)], scheme: AllocationScheme, seed: u64) -> SubjectRandomizationConfig {
+        SubjectRandomizationConfig::from_subject_count("r", "R", n, weights(gs), scheme, seed)
+    }
+
+    fn sample_cfg(seed: u64, n: usize, strat: Option<usize>, prop: bool) -> RowSampleConfig {
+        RowSampleConfig { seed, sample_size: n, stratify_column: strat, proportional_allocation: prop, output_id: None, output_title: None }
+    }
+
+    fn strata_cells(runs: &[(&str, usize)]) -> Vec<Cell> {
+        runs.iter().flat_map(|&(s, n)| vec![Cell::text(s); n]).collect()
+    }
+
+    fn sim_cfg(n_rows: usize, seed: u64, cols: &[(&str, SimulatedDistribution)], mv: bool) -> DistributionSimulationConfig {
+        let columns = cols.iter().map(|&(n, d)| SimulatedColumnSpec { name: n.to_owned(), distribution: d }).collect();
+        DistributionSimulationConfig { sheet_id: String::from("sim"), title: String::from("Sim"), n_rows, seed, columns, use_multiple_variables: mv }
+    }
+
     #[test]
     fn complete_balanced_weighted_randomization_is_reproducible_and_exact() {
-        let cfg = SubjectRandomizationConfig::from_subject_count(
-            "rand-1",
-            "Study Arm Schedule",
-            20,
-            vec![
-                GroupAllocationWeight::with_weight("HighDose", 2),
-                GroupAllocationWeight::with_weight("LowDose", 1),
-                GroupAllocationWeight::new("Vehicle"),
-            ],
-            AllocationScheme::CompleteBalanced,
-            202_601,
-        );
-
+        let cfg = rand_cfg(20, &[("HighDose", 2), ("LowDose", 1), ("Vehicle", 1)], AllocationScheme::CompleteBalanced, 202_601);
         let out_a = randomize_subjects_to_groups(&cfg).unwrap();
-        let out_b = randomize_subjects_to_groups(&cfg).unwrap();
-        assert_eq!(out_a, out_b);
-
+        assert_eq!(out_a, randomize_subjects_to_groups(&cfg).unwrap());
         let mut cfg_other = cfg.clone();
         cfg_other.seed = 9999;
-        let out_c = randomize_subjects_to_groups(&cfg_other).unwrap();
-        assert_ne!(out_a.data_sheet, out_c.data_sheet);
+        assert_ne!(out_a.data_sheet, randomize_subjects_to_groups(&cfg_other).unwrap().data_sheet);
 
-        let counts = group_counts_from_schedule(&out_a.data_sheet);
-        assert_eq!(counts.get("HighDose").copied(), Some(10));
-        assert_eq!(counts.get("LowDose").copied(), Some(5));
-        assert_eq!(counts.get("Vehicle").copied(), Some(5));
-
-        let TableArchetype::MultipleVariables(mv) = &out_a.data_sheet.archetype else {
-            panic!("expected MultipleVariables");
-        };
+        assert_counts(&mv_counts(&out_a.data_sheet, 4), &[("HighDose", 10), ("LowDose", 5), ("Vehicle", 5)]);
+        let mv = th::as_mv(&out_a.data_sheet);
         let titles: Vec<&str> = mv.variables.iter().map(|v| v.title.as_str()).collect();
         assert_eq!(titles, ["Subject_ID", "Allocation_Order", "Block_Index", "Block_Size", "Assigned_Group"]);
-        assert_eq!(mv.variables[0].role, VariableRole::Categorical);
-        assert_eq!(mv.variables[1].role, VariableRole::Continuous);
-        assert_eq!(mv.variables[4].role, VariableRole::Categorical);
-        assert_eq!(mv.variables[1].cells[0].active_number(), Some(1.0));
-        assert_eq!(mv.variables[1].cells[19].active_number(), Some(20.0));
-        assert_eq!(mv.variables[2].cells[0].active_number(), Some(1.0));
-        assert_eq!(mv.variables[3].cells[0].active_number(), Some(20.0));
-
-        let arrive: BTreeMap<String, String> = out_a.arrive_constants.into_iter().collect();
-        assert_eq!(arrive.get("randomization.seed").map(String::as_str), Some("202601"));
-        assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("complete_balanced"));
-        assert_eq!(arrive.get("randomization.allocation_ratio").map(String::as_str), Some("2:1:1"));
-        assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("20"));
-        assert_eq!(arrive.get("randomization.total_subjects").map(String::as_str), Some("20"));
+        let (v0, v1, v2, v3, v4) = (&mv.variables[0], &mv.variables[1], &mv.variables[2], &mv.variables[3], &mv.variables[4]);
+        assert_eq!((v0.role, v1.role, v4.role), (VariableRole::Categorical, VariableRole::Continuous, VariableRole::Categorical));
+        assert_eq!((th::num(&v1.cells[0]), th::num(&v1.cells[19]), th::num(&v2.cells[0]), th::num(&v3.cells[0])), (1.0, 20.0, 1.0, 20.0));
+        assert_arrive(
+            &out_a.arrive_constants,
+            &[
+                ("randomization.seed", "202601"),
+                ("randomization.method", "complete_balanced"),
+                ("randomization.allocation_ratio", "2:1:1"),
+                ("randomization.block_sizes", "20"),
+                ("randomization.total_subjects", "20"),
+            ],
+        );
     }
 
     #[test]
     fn permuted_block_fixed_and_variable_sizes_balance_per_block_and_trim_cleanly() {
-        let subjects: Vec<String> = (1..=14).map(|i| format!("M-{i:02}")).collect();
-        let fixed_cfg = SubjectRandomizationConfig {
-            sheet_id: String::from("rand-fixed"),
-            title: String::from("Fixed Block"),
-            subject_ids: subjects.clone(),
-            groups: vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
-            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![4] },
-            seed: 77,
-        };
-        let fixed_out = randomize_subjects_to_groups(&fixed_cfg).unwrap();
-        let TableArchetype::MultipleVariables(fmv) = &fixed_out.data_sheet.archetype else {
-            panic!("expected MultipleVariables");
-        };
+        let mut fixed_cfg = rand_cfg(14, &[("A", 1), ("B", 1)], AllocationScheme::PermutedBlock { block_sizes: vec![4] }, 77);
+        fixed_cfg.subject_ids = (1..=14).map(|i| format!("M-{i:02}")).collect();
+        let fmv = th::into_mv(randomize_subjects_to_groups(&fixed_cfg).unwrap().data_sheet);
         assert_eq!(fmv.row_count(), 14);
         for blk in 0..3 {
-            let start = blk * 4;
-            let mut a_count = 0;
-            let mut b_count = 0;
-            for r in start..start + 4 {
-                assert_eq!(fmv.variables[2].cells[r].active_number(), Some((blk + 1) as f64));
-                assert_eq!(fmv.variables[3].cells[r].active_number(), Some(4.0));
+            let mut counts = (0_usize, 0_usize);
+            for r in (blk * 4)..(blk * 4 + 4) {
+                assert_eq!((th::num(&fmv.variables[2].cells[r]), th::num(&fmv.variables[3].cells[r])), ((blk + 1) as f64, 4.0));
                 match fmv.variables[4].cells[r].active_text() {
-                    Some("A") => a_count += 1,
-                    Some("B") => b_count += 1,
+                    Some("A") => counts.0 += 1,
+                    Some("B") => counts.1 += 1,
                     other => panic!("unexpected group {other:?}"),
                 }
             }
-            assert_eq!(a_count, 2);
-            assert_eq!(b_count, 2);
+            assert_eq!(counts, (2, 2));
         }
-        assert_eq!(fmv.variables[2].cells[12].active_number(), Some(4.0));
-        assert_eq!(fmv.variables[2].cells[13].active_number(), Some(4.0));
+        assert_eq!((th::num(&fmv.variables[2].cells[12]), th::num(&fmv.variables[2].cells[13])), (4.0, 4.0));
 
-        let multi_cfg = SubjectRandomizationConfig {
-            sheet_id: String::from("rand-var"),
-            title: String::from("Variable Block"),
-            subject_ids: (1..=32).map(|i| format!("S{i}")).collect(),
-            groups: vec![GroupAllocationWeight::with_weight("Drug", 2), GroupAllocationWeight::with_weight("Placebo", 2)],
-            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![4, 8] },
-            seed: 4242,
-        };
+        let mut multi_cfg = rand_cfg(32, &[("Drug", 2), ("Placebo", 2)], AllocationScheme::PermutedBlock { block_sizes: vec![4, 8] }, 4242);
+        multi_cfg.subject_ids = (1..=32).map(|i| format!("S{i}")).collect();
         let multi_out = randomize_subjects_to_groups(&multi_cfg).unwrap();
-        let TableArchetype::MultipleVariables(mmv) = &multi_out.data_sheet.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        let mut seen_sizes = BTreeSet::new();
-        let mut row = 0;
+        let mmv = th::as_mv(&multi_out.data_sheet);
+        let (mut seen_sizes, mut row) = (BTreeSet::new(), 0);
         while row < mmv.row_count() {
-            let b_idx = mmv.variables[2].cells[row].active_number().unwrap() as usize;
-            let b_sz = mmv.variables[3].cells[row].active_number().unwrap() as usize;
+            let (b_idx, b_sz) = (th::num(&mmv.variables[2].cells[row]) as usize, th::num(&mmv.variables[3].cells[row]) as usize);
             assert!(b_sz == 4 || b_sz == 8);
             seen_sizes.insert(b_sz);
             let end = (row + b_sz).min(mmv.row_count());
-            let mut drug = 0;
-            let mut placebo = 0;
+            let mut counts = (0_usize, 0_usize);
             for r in row..end {
-                assert_eq!(mmv.variables[2].cells[r].active_number().unwrap() as usize, b_idx);
-                assert_eq!(mmv.variables[3].cells[r].active_number().unwrap() as usize, b_sz);
+                assert_eq!((th::num(&mmv.variables[2].cells[r]) as usize, th::num(&mmv.variables[3].cells[r]) as usize), (b_idx, b_sz));
                 match mmv.variables[4].cells[r].active_text() {
-                    Some("Drug") => drug += 1,
-                    Some("Placebo") => placebo += 1,
+                    Some("Drug") => counts.0 += 1,
+                    Some("Placebo") => counts.1 += 1,
                     other => panic!("unexpected group {other:?}"),
                 }
             }
             if end - row == b_sz {
-                assert_eq!(drug, b_sz / 2);
-                assert_eq!(placebo, b_sz / 2);
+                assert_eq!(counts, (b_sz / 2, b_sz / 2));
             }
             row = end;
         }
         assert_eq!(seen_sizes.len(), 2);
-
-        let arrive: BTreeMap<String, String> = multi_out.arrive_constants.into_iter().collect();
-        assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("permuted_block"));
-        assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("4, 8"));
-        assert_eq!(arrive.get("randomization.allocation_ratio").map(String::as_str), Some("2:2"));
+        assert_arrive(
+            &multi_out.arrive_constants,
+            &[("randomization.method", "permuted_block"), ("randomization.block_sizes", "4, 8"), ("randomization.allocation_ratio", "2:2")],
+        );
     }
 
     #[test]
     fn group_weight_serde_defaults_omitted_weight_to_one_and_validates_errors() {
         let de = serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new([("label", "Control")].into_iter());
         let parsed = GroupAllocationWeight::deserialize(de).unwrap();
-        assert_eq!(parsed.label, "Control");
-        assert_eq!(parsed.weight, 1);
+        assert_eq!((parsed.label.as_str(), parsed.weight), ("Control", 1));
 
-        let empty_subj = SubjectRandomizationConfig {
-            sheet_id: String::from("r"),
-            title: String::from("R"),
-            subject_ids: Vec::new(),
-            groups: vec![GroupAllocationWeight::new("A")],
-            scheme: AllocationScheme::CompleteBalanced,
-            seed: 1,
-        };
-        assert!(matches!(randomize_subjects_to_groups(&empty_subj), Err(TransformError::InvalidSpec { .. })));
-
-        let bad_block = SubjectRandomizationConfig::from_subject_count(
-            "r",
-            "R",
-            10,
-            vec![GroupAllocationWeight::with_weight("A", 2), GroupAllocationWeight::with_weight("B", 1)],
-            AllocationScheme::PermutedBlock { block_sizes: vec![4] },
-            1,
-        );
-        assert!(matches!(randomize_subjects_to_groups(&bad_block), Err(TransformError::InvalidSpec { .. })));
-
-        let zero_weight = SubjectRandomizationConfig::from_subject_count(
-            "r",
-            "R",
-            10,
-            vec![GroupAllocationWeight::with_weight("A", 0), GroupAllocationWeight::new("B")],
-            AllocationScheme::CompleteBalanced,
-            1,
-        );
-        assert!(matches!(randomize_subjects_to_groups(&zero_weight), Err(TransformError::InvalidSpec { .. })));
+        let bad_cfgs = [
+            rand_cfg(0, &[("A", 1)], AllocationScheme::CompleteBalanced, 1),
+            rand_cfg(10, &[("A", 2), ("B", 1)], AllocationScheme::PermutedBlock { block_sizes: vec![4] }, 1),
+            rand_cfg(10, &[("A", 0), ("B", 1)], AllocationScheme::CompleteBalanced, 1),
+        ];
+        for cfg in &bad_cfgs {
+            assert!(matches!(randomize_subjects_to_groups(cfg), Err(TransformError::InvalidSpec { .. })));
+        }
     }
 
     #[test]
     fn uniform_and_stratified_row_sampling_preserves_metadata_and_strata() {
-        // XY table with 20 rows and exclusion note
         let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 20).unwrap();
-        xy.x_title = String::from("Dose");
-        xy.data_sets[0].title = String::from("Response");
+        (xy.x_title, xy.data_sets[0].title) = (String::from("Dose"), String::from("Response"));
         for r in 0..20 {
             xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
             xy.row_titles[r] = format!("R{r}");
-            xy.data_sets[0].cells[r][0] = Cell::number((r * 10) as f64);
-            xy.data_sets[0].cells[r][1] = Cell::number((r * 10 + 1) as f64);
+            xy.data_sets[0].cells[r] = th::nums(&[(r * 10) as f64, (r * 10 + 1) as f64]);
         }
         let mut xy_sheet = DataSheet::new("xy-pop", "XY Pop", TableArchetype::Xy(xy)).unwrap();
         xy_sheet.exclusion_notes.push(CellExclusionNote {
@@ -1307,555 +1262,241 @@ mod tests {
             timestamp_utc: String::from("2026-11-14T00:00:00Z"),
         });
 
-        let cfg =
-            RowSampleConfig { seed: 555, sample_size: 8, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        let cfg = sample_cfg(555, 8, None, false);
         let idx1 = sample_row_indices(&xy_sheet, &cfg).unwrap();
-        let idx2 = sample_row_indices(&xy_sheet, &cfg).unwrap();
-        assert_eq!(idx1, idx2);
-        assert_eq!(idx1.len(), 8);
-        assert_eq!(idx1.iter().copied().collect::<BTreeSet<_>>().len(), 8);
+        assert_eq!(idx1, sample_row_indices(&xy_sheet, &cfg).unwrap());
+        assert_eq!((idx1.len(), idx1.iter().copied().collect::<BTreeSet<_>>().len()), (8, 8));
 
         let sampled_xy = random_sample_rows(&xy_sheet, &cfg).unwrap();
-        let TableArchetype::Xy(sxy) = &sampled_xy.archetype else {
-            panic!("expected Xy");
-        };
-        assert_eq!(sxy.row_count(), 8);
-        assert_eq!(sxy.y_subcolumn_mode, SubcolumnMode::RawReplicates(2));
+        let sxy = th::as_xy(&sampled_xy);
+        assert_eq!((sxy.row_count(), sxy.y_subcolumn_mode), (8, SubcolumnMode::RawReplicates(2)));
         for (new_r, &orig_r) in idx1.iter().enumerate() {
             assert_eq!(sxy.x_value_at(new_r), Some((orig_r + 1) as f64));
             assert_eq!(sxy.row_titles[new_r], format!("R{orig_r}"));
             assert_eq!(sxy.data_sets[0].cells[new_r][1].active_number(), Some((orig_r * 10 + 1) as f64));
         }
-        let expected_note_row = idx1.iter().position(|&r| r == 5);
-        assert_eq!(sampled_xy.exclusion_notes.first().map(|n| n.coord.row), expected_note_row);
+        assert_eq!(sampled_xy.exclusion_notes.first().map(|n| n.coord.row), idx1.iter().position(|&r| r == 5));
 
-        // MultipleVariables stratified sampling (strata sizes 50, 30, 20)
-        let mut mv = MultipleVariablesTable::new(2, 100).unwrap();
-        mv.variables[0].title = String::from("Cohort");
-        mv.variables[0].lock_role(VariableRole::Categorical);
-        mv.variables[1].title = String::from("Biomarker");
-        mv.variables[1].lock_role(VariableRole::Continuous);
-        for r in 0..100 {
-            let stratum = if r < 50 {
-                "North"
-            } else if r < 80 {
-                "South"
-            } else {
-                "West"
-            };
-            mv.variables[0].cells[r] = Cell::text(stratum);
-            mv.variables[1].cells[r] = Cell::number(r as f64);
-        }
-        let mv_sheet = DataSheet::new("mv-pop", "MV Pop", TableArchetype::MultipleVariables(mv)).unwrap();
-
-        // Proportional: 20 rows -> 10 North, 6 South, 4 West
-        let prop_spec = AnalysisSpec::new(
-            "an-sample-prop",
-            "mv-pop",
-            AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
-                seed: 1234,
-                sample_size: 20,
-                stratify_column: Some(0),
-                proportional_allocation: true,
-            }),
-        )
-        .unwrap();
+        let strata = strata_cells(&[("North", 50), ("South", 30), ("West", 20)]);
+        let bio: Vec<Cell> = (0..100).map(|r| Cell::number(r as f64)).collect();
+        let mv_sheet =
+            th::mv_sheet("mv-pop", &[("Cohort", Some(VariableRole::Categorical), strata), ("Biomarker", Some(VariableRole::Continuous), bio)]);
+        let rs = TransformAnalysisSpec::RandomSample { seed: 1234, sample_size: 20, stratify_column: Some(0), proportional_allocation: true };
+        let prop_spec = AnalysisSpec::new("an-sample-prop", "mv-pop", AnalysisKind::Transform(rs)).unwrap();
         let prop_res = execute_analysis_transform(&mv_sheet, &prop_spec, &TransformContext::default()).unwrap();
-        assert_eq!(prop_res.lookup_scalar("sample_size", None), Some(20.0));
-        assert_eq!(prop_res.lookup_scalar("population_size", None), Some(100.0));
-        assert_eq!(prop_res.lookup_scalar("seed", None), Some(1234.0));
-        let prop_data = prop_res.analyzable_data.as_ref().unwrap();
-        let TableArchetype::MultipleVariables(pmv) = &prop_data.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        let mut prop_counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for c in &pmv.variables[0].cells {
-            *prop_counts.entry(c.active_text().unwrap()).or_insert(0) += 1;
-        }
-        assert_eq!(prop_counts.get("North").copied(), Some(10));
-        assert_eq!(prop_counts.get("South").copied(), Some(6));
-        assert_eq!(prop_counts.get("West").copied(), Some(4));
-
-        // Equal allocation across strata: 18 rows -> 6 North, 6 South, 6 West
-        let equal_cfg = RowSampleConfig {
-            seed: 1234,
-            sample_size: 18,
-            stratify_column: Some(0),
-            proportional_allocation: false,
-            output_id: None,
-            output_title: None,
-        };
-        let eq_sheet = random_sample_rows(&mv_sheet, &equal_cfg).unwrap();
-        let TableArchetype::MultipleVariables(emv) = &eq_sheet.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        let mut eq_counts: BTreeMap<&str, usize> = BTreeMap::new();
-        for c in &emv.variables[0].cells {
-            *eq_counts.entry(c.active_text().unwrap()).or_insert(0) += 1;
-        }
-        assert_eq!(eq_counts.get("North").copied(), Some(6));
-        assert_eq!(eq_counts.get("South").copied(), Some(6));
-        assert_eq!(eq_counts.get("West").copied(), Some(6));
+        assert_eq!(
+            (prop_res.lookup_scalar("sample_size", None), prop_res.lookup_scalar("population_size", None), prop_res.lookup_scalar("seed", None)),
+            (Some(20.0), Some(100.0), Some(1234.0))
+        );
+        assert_counts(&mv_counts(prop_res.analyzable_data.as_ref().unwrap(), 0), &[("North", 10), ("South", 6), ("West", 4)]);
+        let eq_sheet = random_sample_rows(&mv_sheet, &sample_cfg(1234, 18, Some(0), false)).unwrap();
+        assert_counts(&mv_counts(&eq_sheet, 0), &[("North", 6), ("South", 6), ("West", 6)]);
     }
 
     #[test]
     fn row_sampling_supports_remaining_archetypes_and_validates_inputs() {
-        let sample_four = |sheet: &DataSheet, seed: u64| -> usize {
-            random_sample_rows(
-                sheet,
-                &RowSampleConfig { seed, sample_size: 4, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None },
-            )
-            .unwrap()
-            .archetype
-            .row_count()
-        };
-
-        let col_sheet = DataSheet::new(
-            "col-pop",
-            "Col",
-            TableArchetype::Column(ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 10).unwrap()),
-        )
-        .unwrap();
-        assert_eq!(sample_four(&col_sheet, 1), 4);
-
-        let grp_sheet =
-            DataSheet::new("grp-pop", "Grp", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 12).unwrap())).unwrap();
-        assert_eq!(sample_four(&grp_sheet, 2), 4);
-
         let mut ctg = ContingencyTable::new(2, 8).unwrap();
         for r in 0..8 {
             ctg.row_titles[r] = format!("Cat{r}");
-            ctg.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
-            ctg.data_sets[1].cells[r][0] = Cell::number((r + 2) as f64);
+            (ctg.data_sets[0].cells[r][0], ctg.data_sets[1].cells[r][0]) = (Cell::number((r + 1) as f64), Cell::number((r + 2) as f64));
         }
-        let ctg_sheet = DataSheet::new("ctg-pop", "Ctg", TableArchetype::Contingency(ctg)).unwrap();
-        assert_eq!(sample_four(&ctg_sheet, 3), 4);
-
-        let pow_sheet = DataSheet::new("pow-pop", "PoW", TableArchetype::PartsOfWhole(PartsOfWholeTable::new(1, 9).unwrap())).unwrap();
-        assert_eq!(sample_four(&pow_sheet, 4), 4);
-
-        let srv_sheet = DataSheet::new("srv-pop", "Srv", TableArchetype::Survival(SurvivalTable::new(2, 10).unwrap())).unwrap();
-        assert_eq!(sample_four(&srv_sheet, 5), 4);
-
-        let nst_sheet = DataSheet::new("nst-pop", "Nst", TableArchetype::Nested(NestedTable::new(2, 3, 11).unwrap())).unwrap();
-        assert_eq!(sample_four(&nst_sheet, 6), 4);
-
-        let too_big =
-            RowSampleConfig { seed: 1, sample_size: 11, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
-        assert!(matches!(random_sample_rows(&col_sheet, &too_big), Err(TransformError::InvalidSpec { .. })));
-
-        let zero_sz =
-            RowSampleConfig { seed: 1, sample_size: 0, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
-        assert!(matches!(random_sample_rows(&col_sheet, &zero_sz), Err(TransformError::InvalidSpec { .. })));
-
-        let bad_col =
-            RowSampleConfig { seed: 1, sample_size: 4, stratify_column: Some(9), proportional_allocation: true, output_id: None, output_title: None };
-        assert!(matches!(random_sample_rows(&col_sheet, &bad_col), Err(TransformError::InvalidSpec { .. })));
+        let col_sheet =
+            DataSheet::new("col-pop", "Col", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 10).unwrap())).unwrap();
+        let sheets = [
+            col_sheet.clone(),
+            DataSheet::new("grp-pop", "Grp", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 12).unwrap())).unwrap(),
+            DataSheet::new("ctg-pop", "Ctg", TableArchetype::Contingency(ctg)).unwrap(),
+            DataSheet::new("pow-pop", "PoW", TableArchetype::PartsOfWhole(PartsOfWholeTable::new(1, 9).unwrap())).unwrap(),
+            DataSheet::new("srv-pop", "Srv", TableArchetype::Survival(SurvivalTable::new(2, 10).unwrap())).unwrap(),
+            DataSheet::new("nst-pop", "Nst", TableArchetype::Nested(NestedTable::new(2, 3, 11).unwrap())).unwrap(),
+        ];
+        for (idx, sheet) in sheets.iter().enumerate() {
+            assert_eq!(random_sample_rows(sheet, &sample_cfg((idx + 1) as u64, 4, None, false)).unwrap().archetype.row_count(), 4);
+        }
+        for bad in [sample_cfg(1, 11, None, false), sample_cfg(1, 0, None, false), sample_cfg(1, 4, Some(9), true)] {
+            assert!(matches!(random_sample_rows(&col_sheet, &bad), Err(TransformError::InvalidSpec { .. })));
+        }
     }
 
     #[test]
     fn proportional_apportionment_clamps_small_stratum_to_one_and_equal_handles_saturation() {
-        let mut mv = MultipleVariablesTable::new(1, 100).unwrap();
-        mv.variables[0].title = String::from("Group");
-        for r in 0..100 {
-            let label = if r < 90 {
-                "Major"
-            } else if r < 99 {
-                "Minor"
-            } else {
-                "Tiny"
-            };
-            mv.variables[0].cells[r] = Cell::text(label);
+        let sheet = th::mv_sheet("stratum-edge", &[("Group", None, strata_cells(&[("Major", 90), ("Minor", 9), ("Tiny", 1)]))]);
+        for (cfg, expected) in [
+            (sample_cfg(11, 5, Some(0), true), [("Major", 3), ("Minor", 1), ("Tiny", 1)]),
+            (sample_cfg(12, 15, Some(0), false), [("Tiny", 1), ("Minor", 7), ("Major", 7)]),
+        ] {
+            assert_counts(&mv_counts(&random_sample_rows(&sheet, &cfg).unwrap(), 0), &expected);
         }
-        let sheet = DataSheet::new("stratum-edge", "Stratum Edge", TableArchetype::MultipleVariables(mv)).unwrap();
-
-        let prop_5 = random_sample_rows(
-            &sheet,
-            &RowSampleConfig {
-                seed: 11,
-                sample_size: 5,
-                stratify_column: Some(0),
-                proportional_allocation: true,
-                output_id: None,
-                output_title: None,
-            },
-        )
-        .unwrap();
-        let TableArchetype::MultipleVariables(pmv) = &prop_5.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        let mut counts = BTreeMap::new();
-        for c in &pmv.variables[0].cells {
-            *counts.entry(c.active_text().unwrap()).or_insert(0_usize) += 1;
-        }
-        assert_eq!(counts.get("Major").copied(), Some(3));
-        assert_eq!(counts.get("Minor").copied(), Some(1));
-        assert_eq!(counts.get("Tiny").copied(), Some(1));
-
-        // Equal allocation of 15 across [90, 9, 1] -> Tiny caps at 1, leaving 14 split 7 & 7
-        let eq_15 = random_sample_rows(
-            &sheet,
-            &RowSampleConfig {
-                seed: 12,
-                sample_size: 15,
-                stratify_column: Some(0),
-                proportional_allocation: false,
-                output_id: None,
-                output_title: None,
-            },
-        )
-        .unwrap();
-        let TableArchetype::MultipleVariables(emv) = &eq_15.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        let mut eq_counts = BTreeMap::new();
-        for c in &emv.variables[0].cells {
-            *eq_counts.entry(c.active_text().unwrap()).or_insert(0_usize) += 1;
-        }
-        assert_eq!(eq_counts.get("Tiny").copied(), Some(1));
-        assert_eq!(eq_counts.get("Minor").copied(), Some(7));
-        assert_eq!(eq_counts.get("Major").copied(), Some(7));
     }
 
     #[test]
     fn continuous_simulated_distributions_match_moments_and_mv_mode() {
-        let n = 5_000_usize;
-        let cfg = DistributionSimulationConfig {
-            sheet_id: String::from("sim-cont"),
-            title: String::from("Continuous"),
-            n_rows: n,
-            seed: 2026,
-            columns: vec![
-                SimulatedColumnSpec { name: String::from("Unif"), distribution: SimulatedDistribution::Uniform { min: -2.0, max: 6.0 } },
-                SimulatedColumnSpec { name: String::from("Gauss"), distribution: SimulatedDistribution::Gaussian { mean: 10.0, sd: 2.5 } },
-                SimulatedColumnSpec { name: String::from("LogN"), distribution: SimulatedDistribution::LogNormal { mean_log: 0.5, sd_log: 0.4 } },
-                SimulatedColumnSpec { name: String::from("Exp"), distribution: SimulatedDistribution::Exponential { rate: 0.5 } },
-            ],
-            use_multiple_variables: false,
-        };
-
+        use SimulatedDistribution as D;
+        let cols = [
+            ("Unif", D::Uniform { min: -2.0, max: 6.0 }),
+            ("Gauss", D::Gaussian { mean: 10.0, sd: 2.5 }),
+            ("LogN", D::LogNormal { mean_log: 0.5, sd_log: 0.4 }),
+            ("Exp", D::Exponential { rate: 0.5 }),
+        ];
+        let cfg = sim_cfg(5_000, 2026, &cols, false);
         let sheet_a = simulate_distribution_columns(&cfg).unwrap();
-        let sheet_b = simulate_distribution_columns(&cfg).unwrap();
-        assert_eq!(sheet_a, sheet_b);
+        assert_eq!(sheet_a, simulate_distribution_columns(&cfg).unwrap());
+        let col_tbl = th::as_col(&sheet_a);
+        assert_eq!((col_tbl.data_sets.len(), col_tbl.row_count()), (4, 5_000));
 
-        let TableArchetype::Column(col_tbl) = &sheet_a.archetype else {
-            panic!("expected Column table");
-        };
-        assert_eq!(col_tbl.data_sets.len(), 4);
-        assert_eq!(col_tbl.row_count(), n);
+        let (ln_m, ln_v) = ((0.58_f64).exp(), (0.16_f64.exp() - 1.0) * (1.16_f64).exp());
+        for (col, [mean, mtol, var, vtol], ok) in [
+            (0, [2.0, 0.16, 64.0 / 12.0, 0.35], (|x: f64| (-2.0..6.0).contains(&x)) as fn(f64) -> bool),
+            (1, [10.0, 0.18, 6.25, 0.63], |_| true),
+            (2, [ln_m, 0.06, ln_v, 0.10], |x| x > 0.0),
+            (3, [2.0, 0.15, 4.0, 0.80], |x| x > 0.0),
+        ] {
+            let vals = col_tbl.active_column_values(col);
+            assert!(vals.iter().all(|&x| ok(x)), "bounds col {col}");
+            let m = SummaryMoments::from_slice(&vals).unwrap();
+            th::assert_close(m.mean, mean, mtol);
+            th::assert_close(m.sample_variance().unwrap(), var, vtol);
+        }
 
-        // Uniform(-2, 6): mean = 2.0, var = 64/12
-        let u = col_tbl.active_column_values(0);
-        assert!(u.iter().all(|&x| (-2.0..6.0).contains(&x)));
-        let mu = SummaryMoments::from_slice(&u).unwrap();
-        assert!((mu.mean - 2.0).abs() < 0.16, "uniform mean={}", mu.mean);
-        assert!((mu.sample_variance().unwrap() - (64.0 / 12.0)).abs() < 0.35);
-
-        // Gaussian(10, 2.5): mean = 10.0, var = 6.25
-        let g = col_tbl.active_column_values(1);
-        let mg = SummaryMoments::from_slice(&g).unwrap();
-        assert!((mg.mean - 10.0).abs() < 0.18, "gauss mean={}", mg.mean);
-        assert!((mg.sample_variance().unwrap() - 6.25).abs() < 0.63);
-
-        // LogNormal(0.5, 0.4): mean = exp(0.58), var = (exp(0.16)-1)*exp(1.16)
-        let ln_vals = col_tbl.active_column_values(2);
-        assert!(ln_vals.iter().all(|&x| x > 0.0));
-        let mln = SummaryMoments::from_slice(&ln_vals).unwrap();
-        let exp_mean = (0.58_f64).exp();
-        let exp_var = (0.16_f64.exp() - 1.0) * (1.16_f64).exp();
-        assert!((mln.mean - exp_mean).abs() < 0.06, "logn mean={} vs {exp_mean}", mln.mean);
-        assert!((mln.sample_variance().unwrap() - exp_var).abs() < 0.10);
-
-        // Exponential(0.5): mean = 2.0, var = 4.0
-        let ex = col_tbl.active_column_values(3);
-        assert!(ex.iter().all(|&x| x > 0.0));
-        let mex = SummaryMoments::from_slice(&ex).unwrap();
-        assert!((mex.mean - 2.0).abs() < 0.15, "exp mean={}", mex.mean);
-        assert!((mex.sample_variance().unwrap() - 4.0).abs() < 0.80);
-
-        // MultipleVariables output mode
-        let mut mv_cfg = cfg;
-        mv_cfg.use_multiple_variables = true;
-        mv_cfg.n_rows = 12;
-        let mv_sheet = simulate_distribution_columns(&mv_cfg).unwrap();
-        let TableArchetype::MultipleVariables(mv) = &mv_sheet.archetype else {
-            panic!("expected MultipleVariables");
-        };
-        assert_eq!(mv.variables.len(), 4);
-        assert_eq!(mv.row_count(), 12);
-        assert_eq!(mv.variables[0].role, VariableRole::Continuous);
+        let mv =
+            th::into_mv(simulate_distribution_columns(&DistributionSimulationConfig { use_multiple_variables: true, n_rows: 12, ..cfg }).unwrap());
+        assert_eq!((mv.variables.len(), mv.row_count(), mv.variables[0].role), (4, 12, VariableRole::Continuous));
     }
 
     #[test]
     fn discrete_simulated_distributions_match_moments_and_bounds() {
-        let n = 5_000_usize;
-        let cfg = DistributionSimulationConfig {
-            sheet_id: String::from("sim-disc"),
-            title: String::from("Discrete"),
-            n_rows: n,
-            seed: 271_828,
-            columns: vec![
-                SimulatedColumnSpec { name: String::from("BinomSmall"), distribution: SimulatedDistribution::Binomial { trials: 20, p: 0.3 } },
-                SimulatedColumnSpec { name: String::from("BinomLarge"), distribution: SimulatedDistribution::Binomial { trials: 500, p: 0.72 } },
-                SimulatedColumnSpec { name: String::from("BinomGeo"), distribution: SimulatedDistribution::Binomial { trials: 10_000, p: 0.0005 } },
-                SimulatedColumnSpec { name: String::from("PoisSmall"), distribution: SimulatedDistribution::Poisson { lambda: 4.5 } },
-                SimulatedColumnSpec { name: String::from("PoisLarge"), distribution: SimulatedDistribution::Poisson { lambda: 1_000.0 } },
-                SimulatedColumnSpec { name: String::from("PoisZero"), distribution: SimulatedDistribution::Poisson { lambda: 0.0 } },
-                SimulatedColumnSpec { name: String::from("BinomZero"), distribution: SimulatedDistribution::Binomial { trials: 50, p: 0.0 } },
-                SimulatedColumnSpec { name: String::from("BinomOne"), distribution: SimulatedDistribution::Binomial { trials: 50, p: 1.0 } },
-            ],
-            use_multiple_variables: false,
-        };
-
-        let sheet = simulate_distribution_columns(&cfg).unwrap();
-        let TableArchetype::Column(col_tbl) = &sheet.archetype else {
-            panic!("expected Column table");
-        };
-
-        let bs = col_tbl.active_column_values(0);
-        assert!(bs.iter().all(|&x| (0.0..=20.0).contains(&x) && x.fract() == 0.0));
-        let mbs = SummaryMoments::from_slice(&bs).unwrap();
-        assert!((mbs.mean - 6.0).abs() < 0.15, "binom small mean={}", mbs.mean);
-        assert!((mbs.sample_variance().unwrap() - 4.2).abs() < 0.42);
-
-        let bl = col_tbl.active_column_values(1);
-        assert!(bl.iter().all(|&x| (0.0..=500.0).contains(&x) && x.fract() == 0.0));
-        let mbl = SummaryMoments::from_slice(&bl).unwrap();
-        assert!((mbl.mean - 360.0).abs() < 0.71, "binom large mean={}", mbl.mean);
-        assert!((mbl.sample_variance().unwrap() - 100.8).abs() < 10.1);
-
-        let bg = col_tbl.active_column_values(2);
-        assert!(bg.iter().all(|&x| (0.0..=10_000.0).contains(&x) && x.fract() == 0.0));
-        let mbg = SummaryMoments::from_slice(&bg).unwrap();
-        assert!((mbg.mean - 5.0).abs() < 0.16, "binom geo mean={}", mbg.mean);
-        assert!((mbg.sample_variance().unwrap() - 4.9975).abs() < 0.55);
-
-        let ps = col_tbl.active_column_values(3);
-        assert!(ps.iter().all(|&x| x >= 0.0 && x.fract() == 0.0));
-        let mps = SummaryMoments::from_slice(&ps).unwrap();
-        assert!((mps.mean - 4.5).abs() < 0.15, "pois small mean={}", mps.mean);
-        assert!((mps.sample_variance().unwrap() - 4.5).abs() < 0.48);
-
-        let pl = col_tbl.active_column_values(4);
-        assert!(pl.iter().all(|&x| x >= 0.0 && x.fract() == 0.0));
-        let mpl = SummaryMoments::from_slice(&pl).unwrap();
-        assert!((mpl.mean - 1000.0).abs() < 2.24, "pois large mean={}", mpl.mean);
-        assert!((mpl.sample_variance().unwrap() - 1000.0).abs() < 100.0);
-
-        assert!(col_tbl.active_column_values(5).iter().all(|&x| x == 0.0));
-        assert!(col_tbl.active_column_values(6).iter().all(|&x| x == 0.0));
-        assert!(col_tbl.active_column_values(7).iter().all(|&x| x == 50.0));
+        use SimulatedDistribution as D;
+        let cols = [
+            ("BinomSmall", D::Binomial { trials: 20, p: 0.3 }),
+            ("BinomLarge", D::Binomial { trials: 500, p: 0.72 }),
+            ("BinomGeo", D::Binomial { trials: 10_000, p: 0.0005 }),
+            ("PoisSmall", D::Poisson { lambda: 4.5 }),
+            ("PoisLarge", D::Poisson { lambda: 1_000.0 }),
+            ("PoisZero", D::Poisson { lambda: 0.0 }),
+            ("BinomZero", D::Binomial { trials: 50, p: 0.0 }),
+            ("BinomOne", D::Binomial { trials: 50, p: 1.0 }),
+        ];
+        let col_tbl = th::into_col(simulate_distribution_columns(&sim_cfg(5_000, 271_828, &cols, false)).unwrap());
+        for (col, max_b, mean, mtol, var, vtol) in [
+            (0, Some(20.0), 6.0, 0.15, 4.2, 0.42),
+            (1, Some(500.0), 360.0, 0.71, 100.8, 10.1),
+            (2, Some(10_000.0), 5.0, 0.16, 4.9975, 0.55),
+            (3, None, 4.5, 0.15, 4.5, 0.48),
+            (4, None, 1000.0, 2.24, 1000.0, 100.0),
+        ] {
+            let vals = col_tbl.active_column_values(col);
+            assert!(vals.iter().all(|&x| x >= 0.0 && max_b.is_none_or(|hi| x <= hi) && x.fract() == 0.0));
+            let m = SummaryMoments::from_slice(&vals).unwrap();
+            th::assert_close(m.mean, mean, mtol);
+            th::assert_close(m.sample_variance().unwrap(), var, vtol);
+        }
+        for (col, exact) in [(5, 0.0), (6, 0.0), (7, 50.0)] {
+            assert!(col_tbl.active_column_values(col).iter().all(|&x| x == exact));
+        }
     }
 
     #[test]
     fn simulated_distribution_parameter_validation_errors() {
-        let base = |dist: SimulatedDistribution| DistributionSimulationConfig {
-            sheet_id: String::from("bad"),
-            title: String::from("Bad"),
-            n_rows: 10,
-            seed: 1,
-            columns: vec![SimulatedColumnSpec { name: String::from("X"), distribution: dist }],
-            use_multiple_variables: false,
-        };
-
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Uniform { min: 5.0, max: 5.0 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Uniform { min: 6.0, max: 2.0 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Gaussian { mean: 0.0, sd: -1.0 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::LogNormal { mean_log: 0.0, sd_log: -0.1 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Binomial { trials: 10, p: 1.2 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Binomial { trials: 10, p: -0.01 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Poisson { lambda: -0.5 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Exponential { rate: 0.0 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            simulate_distribution_columns(&base(SimulatedDistribution::Exponential { rate: -2.0 })),
-            Err(TransformError::InvalidSpec { .. })
-        ));
+        use SimulatedDistribution as D;
+        for dist in [
+            D::Uniform { min: 5.0, max: 5.0 },
+            D::Uniform { min: 6.0, max: 2.0 },
+            D::Gaussian { mean: 0.0, sd: -1.0 },
+            D::LogNormal { mean_log: 0.0, sd_log: -0.1 },
+            D::Binomial { trials: 10, p: 1.2 },
+            D::Binomial { trials: 10, p: -0.01 },
+            D::Poisson { lambda: -0.5 },
+            D::Exponential { rate: 0.0 },
+            D::Exponential { rate: -2.0 },
+        ] {
+            assert!(matches!(simulate_distribution_columns(&sim_cfg(10, 1, &[("X", dist)], false)), Err(TransformError::InvalidSpec { .. })));
+        }
     }
 
     #[test]
     fn aud04_14_random_sample_snapshots_calculated_mv_variables() {
         let mut mv = MultipleVariablesTable::new(2, 6).unwrap();
-        mv.variables[0].title = String::from("X");
-        mv.variables[1].title = String::from("Z");
-        for r in 0..6 {
-            mv.variables[0].cells[r] = Cell::number((r + 1) as f64);
-        }
+        (mv.variables[0].title, mv.variables[1].title) = (String::from("X"), String::from("Z"));
+        mv.variables[0].cells = (1..=6).map(|r| Cell::number(r as f64)).collect();
         mv.variables[1].set_calculated_formula("=([X] - mean([X])) / sd([X])");
         crate::formula::evaluate_calculated_variables(&mut mv, None).unwrap();
-        let orig_z: Vec<f64> = mv.variables[1].cells.iter().map(|c| c.active_number().unwrap()).collect();
+        let orig_z: Vec<f64> = mv.variables[1].cells.iter().map(th::num).collect();
         let sheet = DataSheet::new("mv-samp", "MV Samp", TableArchetype::MultipleVariables(mv)).unwrap();
 
-        let cfg =
-            RowSampleConfig { seed: 42, sample_size: 3, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        let cfg = sample_cfg(42, 3, None, false);
         let idxs = sample_row_indices(&sheet, &cfg).unwrap();
-        let sampled = random_sample_rows(&sheet, &cfg).unwrap();
-        let TableArchetype::MultipleVariables(mut out_mv) = sampled.archetype else {
-            panic!("expected MV");
-        };
-        assert_eq!(out_mv.variables[1].source, curvebook_doc::VariableSource::Entered);
-        assert_eq!(out_mv.variables[1].role, VariableRole::Continuous);
-        // Recalculating calculated variables must be a no-op and preserve original population Z-scores.
+        let mut out_mv = th::into_mv(random_sample_rows(&sheet, &cfg).unwrap());
+        assert_eq!((out_mv.variables[1].source.clone(), out_mv.variables[1].role), (VariableSource::Entered, VariableRole::Continuous));
         assert!(crate::formula::evaluate_calculated_variables(&mut out_mv, None).unwrap().is_empty());
         for (new_r, &orig_r) in idxs.iter().enumerate() {
-            assert!((out_mv.variables[1].cells[new_r].active_number().unwrap() - orig_z[orig_r]).abs() < 1e-12);
+            th::assert_close(th::num(&out_mv.variables[1].cells[new_r]), orig_z[orig_r], 1e-12);
         }
     }
 
     #[test]
     fn aud04_24_try_from_subject_count_rejects_excess_rows_before_alloc() {
-        let err = SubjectRandomizationConfig::try_from_subject_count(
-            "too-many",
-            "Too Many",
-            curvebook_doc::MAX_ROWS + 1,
-            vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
-            AllocationScheme::CompleteBalanced,
-            1,
-        )
-        .unwrap_err();
-        assert!(matches!(err, TransformError::Doc(curvebook_doc::DocError::TooManyRows { .. })), "unexpected err: {err:?}");
-
-        let ok = SubjectRandomizationConfig::try_from_subject_count(
-            "ok-rand",
-            "OK",
-            4,
-            vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
-            AllocationScheme::CompleteBalanced,
-            7,
-        )
-        .unwrap();
+        let gs = weights(&[("A", 1), ("B", 1)]);
+        let err = SubjectRandomizationConfig::try_from_subject_count("too", "Too", MAX_ROWS + 1, gs.clone(), AllocationScheme::CompleteBalanced, 1)
+            .unwrap_err();
+        assert!(matches!(err, TransformError::Doc(DocError::TooManyRows { .. })), "unexpected err: {err:?}");
+        let ok = SubjectRandomizationConfig::try_from_subject_count("ok", "OK", 4, gs, AllocationScheme::CompleteBalanced, 7).unwrap();
         assert_eq!(ok.subject_ids, vec!["1", "2", "3", "4"]);
     }
 
     #[test]
     fn aud04_45_random_sample_validates_source_and_output_and_guards_generated_sequence() {
-        // Ragged source rejected by sample_row_indices and random_sample_rows.
-        let mut ragged = MultipleVariablesTable::new(2, 4).unwrap();
-        ragged.variables[1].cells.truncate(2);
-        let ragged_sheet = DataSheet {
-            id: curvebook_doc::SheetId::new("rag"),
-            title: String::from("Ragged"),
-            archetype: TableArchetype::MultipleVariables(ragged),
-            frozen: false,
-            info_sheet_id: None,
-            linked_regions: Vec::new(),
-            floating_notes: Vec::new(),
-            color_tag: None,
-            exclusion_notes: Vec::new(),
-            plate_well_origins: Vec::new(),
-        };
-        let cfg =
-            RowSampleConfig { seed: 1, sample_size: 2, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        let mut ragged_sheet =
+            DataSheet::new("rag", "Ragged", TableArchetype::MultipleVariables(MultipleVariablesTable::new(2, 4).unwrap())).unwrap();
+        if let TableArchetype::MultipleVariables(mv) = &mut ragged_sheet.archetype {
+            mv.variables[1].cells.truncate(2);
+        }
+        let cfg = sample_cfg(1, 2, None, false);
         assert!(matches!(sample_row_indices(&ragged_sheet, &cfg), Err(TransformError::Doc(_))));
         assert!(matches!(random_sample_rows(&ragged_sheet, &cfg), Err(TransformError::Doc(_))));
 
-        // Long source title auto-suffix stays within MAX_TITLE_BYTES; invalid explicit output_id rejected.
         let mut mv = MultipleVariablesTable::new(1, 3).unwrap();
-        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)];
-        let long_sheet = DataSheet::new("samp-long", "S".repeat(curvebook_doc::MAX_TITLE_BYTES), TableArchetype::MultipleVariables(mv)).unwrap();
+        mv.variables[0].cells = th::nums(&[1.0, 2.0, 3.0]);
+        let long_sheet = DataSheet::new("samp-long", "S".repeat(MAX_TITLE_BYTES), TableArchetype::MultipleVariables(mv)).unwrap();
         let sampled = random_sample_rows(&long_sheet, &cfg).unwrap();
-        assert!(sampled.validate().is_ok());
-        assert!(sampled.title.len() <= curvebook_doc::MAX_TITLE_BYTES);
+        assert!(sampled.validate().is_ok() && sampled.title.len() <= MAX_TITLE_BYTES);
+        let bad_cfg = RowSampleConfig { output_id: Some(String::from("bad\0id")), ..cfg };
+        assert!(matches!(random_sample_rows(&long_sheet, &bad_cfg), Err(TransformError::Doc(DocError::InvalidIdentifier { .. }))));
 
-        let bad_id_cfg = RowSampleConfig { output_id: Some(String::from("bad\0id")), ..cfg };
-        assert!(matches!(random_sample_rows(&long_sheet, &bad_id_cfg), Err(TransformError::Doc(curvebook_doc::DocError::InvalidIdentifier { .. }))));
-
-        // GeneratedSequence XY near MAX_SHEET_CELLS rejects materialization overflow cleanly.
-        let seq_xy = XyTable::new_with_x_mode(
-            curvebook_doc::XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: curvebook_doc::SequenceProgression::Arithmetic },
-            SubcolumnMode::RawReplicates(300),
-            1,
-            100_000,
-        )
-        .unwrap();
+        let seq_xy = th::xy_gen_seq(0.0, 1.0, SequenceProgression::Arithmetic, SubcolumnMode::RawReplicates(300), 1, 100_000);
         let seq_sheet = DataSheet::new("seq-cap", "Seq Cap", TableArchetype::Xy(seq_xy)).unwrap();
-        let full_cfg = RowSampleConfig {
-            seed: 1,
-            sample_size: 100_000,
-            stratify_column: None,
-            proportional_allocation: false,
-            output_id: None,
-            output_title: None,
-        };
-        assert!(matches!(random_sample_rows(&seq_sheet, &full_cfg), Err(TransformError::Doc(curvebook_doc::DocError::TooManyCells { .. }))));
+        assert!(matches!(
+            random_sample_rows(&seq_sheet, &sample_cfg(1, 100_000, None, false)),
+            Err(TransformError::Doc(DocError::TooManyCells { .. }))
+        ));
     }
 
     #[test]
     fn aud04_49_complete_balanced_unbiased_d1_marginal_counts_and_arrive_metadata() {
-        // Reference: Durstenfeld (1964) uniform permutation over tied Hamilton remainders.
-        // For N = 5, weights = [1, 1], each seed assigns either (3, 2) or (2, 3) with exact probability 0.5.
-        // Across K = 10_000 seeds, count(arm0 == 3) ~ Binomial(10_000, 0.5): mean = 5_000, sd = 50;
-        // z = 6.0 two-sided tolerance [4_700, 5_300] (tail probability < 2e-9).
-        let groups = vec![GroupAllocationWeight::new("Control"), GroupAllocationWeight::new("Drug")];
-        let mut arm0_got_surplus = 0_usize;
-        let mut total_arm0 = 0_usize;
-        let mut total_arm1 = 0_usize;
-
+        // Durstenfeld (1964) over tied Hamilton remainders: N=5, [1,1] => Binomial(10_000, 0.5), z=6.0 bounds [4_700, 5_300].
+        let gs = weights(&[("Control", 1), ("Drug", 1)]);
+        let (mut arm0_surplus, mut total_arm0, mut total_arm1) = (0_usize, 0_usize, 0_usize);
         for seed in 1..=10_000_u64 {
-            let cfg = SubjectRandomizationConfig::try_from_subject_count(
-                "unb-5",
-                "Unbiased 5",
-                5,
-                groups.clone(),
-                AllocationScheme::CompleteBalancedUnbiased,
-                seed,
-            )
-            .unwrap();
+            let cfg = SubjectRandomizationConfig::try_from_subject_count("u5", "U5", 5, gs.clone(), AllocationScheme::CompleteBalancedUnbiased, seed)
+                .unwrap();
             let out = randomize_subjects_to_groups(&cfg).unwrap();
             if seed == 1 {
-                // Reproducibility & ARRIVE metadata check.
                 assert_eq!(out, randomize_subjects_to_groups(&cfg).unwrap());
-                let arrive: BTreeMap<String, String> = out.arrive_constants.iter().cloned().collect();
-                assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("complete_balanced_unbiased"));
-                assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("5"));
+                assert_arrive(&out.arrive_constants, &[("randomization.method", "complete_balanced_unbiased"), ("randomization.block_sizes", "5")]);
             }
-            let counts = group_counts_from_schedule(&out.data_sheet);
-            let c0 = counts.get("Control").copied().unwrap_or(0);
-            let c1 = counts.get("Drug").copied().unwrap_or(0);
+            let counts = mv_counts(&out.data_sheet, 4);
+            let (c0, c1) = (counts.get("Control").copied().unwrap_or(0), counts.get("Drug").copied().unwrap_or(0));
             assert!((c0 == 3 && c1 == 2) || (c0 == 2 && c1 == 3), "unexpected split ({c0}, {c1})");
-            if c0 == 3 {
-                arm0_got_surplus += 1;
-            }
-            total_arm0 += c0;
-            total_arm1 += c1;
+            arm0_surplus += usize::from(c0 == 3);
+            (total_arm0, total_arm1) = (total_arm0 + c0, total_arm1 + c1);
         }
-        assert!(
-            (4_700..=5_300).contains(&arm0_got_surplus),
-            "CompleteBalancedUnbiased arm0 surplus count {arm0_got_surplus} outside z=6.0 bounds [4700, 5300]"
-        );
+        assert!((4_700..=5_300).contains(&arm0_surplus), "arm0 surplus {arm0_surplus} outside [4700, 5300]");
         assert_eq!(total_arm0 + total_arm1, 50_000);
-        assert!((24_700..=25_300).contains(&total_arm0), "total arm0 allocations {total_arm0} outside [24700, 25300]");
+        assert!((24_700..=25_300).contains(&total_arm0), "total arm0 {total_arm0} outside [24700, 25300]");
 
-        // Confirm CompleteBalanced retains deterministic ascending-index Hamilton tie-breaking (arm 0 always 3).
         for seed in 1..=10_u64 {
             let cfg =
-                SubjectRandomizationConfig::try_from_subject_count("det-5", "Det 5", 5, groups.clone(), AllocationScheme::CompleteBalanced, seed)
-                    .unwrap();
-            let counts = group_counts_from_schedule(&randomize_subjects_to_groups(&cfg).unwrap().data_sheet);
-            assert_eq!((counts.get("Control").copied(), counts.get("Drug").copied()), (Some(3), Some(2)));
+                SubjectRandomizationConfig::try_from_subject_count("d5", "D5", 5, gs.clone(), AllocationScheme::CompleteBalanced, seed).unwrap();
+            assert_counts(&mv_counts(&randomize_subjects_to_groups(&cfg).unwrap().data_sheet, 4), &[("Control", 3), ("Drug", 2)]);
         }
     }
 }

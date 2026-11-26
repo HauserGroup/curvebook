@@ -1725,78 +1725,52 @@ fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Result<Vec<(usize, f6
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use curvebook_doc::SplineLowessSpec;
 
     use super::{AucOptions, DerivativeOrder, SmoothMethod, compute_auc, differentiate_xy, smooth_xy};
     use crate::error::TransformError;
+    use crate::test_helpers as th;
 
     #[test]
     fn aud_04_04_and_19_curve_lowess_no_collapse_and_caps_robustness_iters() {
-        // 1. Cap robustness_iters cleanly even on tiny or empty input.
-        assert!(matches!(
-            smooth_xy(&[], SmoothMethod::Lowess { span: 0.5, robustness_iters: SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS + 1 }),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(
-            smooth_xy(&[(0.0, 1.0), (1.0, 2.0)], SmoothMethod::Lowess { span: 0.5, robustness_iters: usize::MAX }),
-            Err(TransformError::InvalidSpec { .. })
-        ));
-        assert!(matches!(smooth_xy(&[], SmoothMethod::MovingAverage { window: 0 }), Err(TransformError::InvalidSpec { .. })));
-
-        // 2. Bisquare peak neighborhood never collapses to 0.0.
+        for (pts, method) in [
+            (&[][..], SmoothMethod::Lowess { span: 0.5, robustness_iters: SplineLowessSpec::MAX_LOWESS_ROBUSTNESS_ITERS + 1 }),
+            (&[(0.0, 1.0), (1.0, 2.0)][..], SmoothMethod::Lowess { span: 0.5, robustness_iters: usize::MAX }),
+            (&[][..], SmoothMethod::MovingAverage { window: 0 }),
+        ] {
+            assert!(matches!(smooth_xy(pts, method), Err(TransformError::InvalidSpec { .. })));
+        }
         let mut peak_pts: Vec<(f64, f64)> = (0..21).map(|i| (i as f64, 50.0)).collect();
-        peak_pts[10].1 = 200.0;
-        peak_pts[11].1 = 200.0;
-        let smoothed = smooth_xy(&peak_pts, SmoothMethod::Lowess { span: 0.15, robustness_iters: 3 }).expect("LOWESS peak");
-        for &(x, y) in &smoothed {
-            assert!(y.is_finite() && y >= 49.0, "curve::lowess collapsed at x={x}: got {y}");
+        (peak_pts[10].1, peak_pts[11].1) = (200.0, 200.0);
+        for &(x, y) in &smooth_xy(&peak_pts, SmoothMethod::Lowess { span: 0.15, robustness_iters: 3 }).unwrap() {
+            assert!(y.is_finite() && y >= 49.0, "collapsed at x={x}: {y}");
         }
     }
 
     #[test]
     fn aud_04_41_shifted_lagrange_derivative_scaled_auc_crossing_and_zero_area_filter() {
-        // 1. Offset cancellation on non-power-of-two h = 0.001 at x ~ 1e9 (y = (x - x0)^2),
-        //    and large Y baseline (y = 1e12 + (x - x0)^2 at h = 0.3).
-        let x0 = 1e9_f64;
-        let x1 = x0 + 0.001;
-        let x2 = x0 + 0.002;
-        let x_offset_pts = [(x0, 0.0), (x1, (x1 - x0).powi(2)), (x2, (x2 - x0).powi(2))];
-        let d1 = differentiate_xy(&x_offset_pts, DerivativeOrder::First).expect("shifted d1");
-        let d2 = differentiate_xy(&x_offset_pts, DerivativeOrder::Second).expect("shifted d2");
-        assert!((d1[1].1 - 2.0 * (x1 - x0)).abs() < 1e-12, "d1 x-offset cancellation: got {}", d1[1].1);
-        assert!((d2[1].1 - 2.0).abs() < 1e-10, "d2 x-offset cancellation: got {}", d2[1].1);
+        let (x0, x1, x2) = (1e9_f64, 1e9 + 0.001, 1e9 + 0.002);
+        let x_offset = [(x0, 0.0), (x1, (x1 - x0).powi(2)), (x2, (x2 - x0).powi(2))];
+        th::assert_close(differentiate_xy(&x_offset, DerivativeOrder::First).unwrap()[1].1, 2.0 * (x1 - x0), 1e-12);
+        th::assert_close(differentiate_xy(&x_offset, DerivativeOrder::Second).unwrap()[1].1, 2.0, 1e-10);
 
-        let xb1 = x0 + 0.3;
-        let xb2 = x0 + 0.6;
-        let y_base_pts = [(x0, 1e12), (xb1, 1e12 + (xb1 - x0).powi(2)), (xb2, 1e12 + (xb2 - x0).powi(2))];
-        let d2_base = differentiate_xy(&y_base_pts, DerivativeOrder::Second).expect("shifted d2 baseline");
-        assert!((d2_base[1].1 - 2.0).abs() < 1e-3, "d2 y-baseline cancellation: got {}", d2_base[1].1);
+        let (xb1, xb2) = (x0 + 0.3, x0 + 0.6);
+        let y_base = [(x0, 1e12), (xb1, 1e12 + (xb1 - x0).powi(2)), (xb2, 1e12 + (xb2 - x0).powi(2))];
+        th::assert_close(differentiate_xy(&y_base, DerivativeOrder::Second).unwrap()[1].1, 2.0, 1e-3);
 
-        // 2. Tiny dx = 1e-162 must not falsely error as duplicate X (old d0 underflowed to 0.0).
         let dx = 1e-162_f64;
-        let tiny = [(0.0, 0.0), (dx, dx), (2.0 * dx, 2.0 * dx)];
-        let d1_tiny = differentiate_xy(&tiny, DerivativeOrder::First).expect("tiny dx d1");
-        for &(_, v) in &d1_tiny {
-            assert!((v - 1.0).abs() < 1e-12, "tiny dx first derivative got {v}");
+        for &(_, v) in &differentiate_xy(&[(0.0, 0.0), (dx, dx), (2.0 * dx, 2.0 * dx)], DerivativeOrder::First).unwrap() {
+            th::assert_close(v, 1.0, 1e-12);
         }
 
-        // 3. Extreme Y sign crossing: d0 = 1e308, d1 = -1e308 must cross at midpoint x = 1.0 (not 0.0).
-        let extreme_pts = [(0.0, 1e308), (2.0, -1e308)];
-        let auc_ext = compute_auc(&extreme_pts, &AucOptions::default()).expect("extreme AUC");
+        let auc_ext = compute_auc(&[(0.0, 1e308), (2.0, -1e308)], &AucOptions::default()).unwrap();
         assert_eq!(auc_ext.peaks.len(), 1);
-        assert!((auc_ext.peaks[0].end_x - 1.0).abs() < 1e-12, "expected crossing at x=1.0, got {}", auc_ext.peaks[0].end_x);
+        th::assert_close(auc_ext.peaks[0].end_x, 1.0, 1e-12);
 
-        // 4. Zero-area underflow peak must be rejected when min_area_fraction > 0.0.
         let tiny_peak = [(0.0, 0.0), (1e-200, 1e-200), (2e-200, 0.0)];
-        let auc_filtered = compute_auc(&tiny_peak, &AucOptions { min_area_fraction: 0.1, ..AucOptions::default() }).expect("filtered AUC");
-        assert!(auc_filtered.peaks.is_empty(), "zero-area peak must be rejected when min_area_fraction > 0");
-        let auc_unfiltered = compute_auc(&tiny_peak, &AucOptions::default()).expect("unfiltered AUC");
-        assert_eq!(auc_unfiltered.peaks.len(), 1);
-
-        // 5. Moving average overflow-safe mean on [1e308, 1e308].
-        let ma = smooth_xy(&[(0.0, 1e308), (1.0, 1e308)], SmoothMethod::MovingAverage { window: 2 }).expect("MA large");
-        assert!((ma[0].1 - 1e308).abs() <= 1e295);
+        assert!(compute_auc(&tiny_peak, &AucOptions { min_area_fraction: 0.1, ..AucOptions::default() }).unwrap().peaks.is_empty());
+        assert_eq!(compute_auc(&tiny_peak, &AucOptions::default()).unwrap().peaks.len(), 1);
+        assert!((smooth_xy(&[(0.0, 1e308), (1.0, 1e308)], SmoothMethod::MovingAverage { window: 2 }).unwrap()[0].1 - 1e308).abs() <= 1e295);
     }
 }

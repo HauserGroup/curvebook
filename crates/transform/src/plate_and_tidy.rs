@@ -2254,60 +2254,52 @@ fn make_sheet_id(prefix: &str, title: &str) -> String {
 
 #[cfg(test)]
 mod audit_w1_plate_tidy_tests {
-    use curvebook_doc::{DocError, MAX_SUBCOLUMNS, TableArchetype};
+    use curvebook_doc::{DataSheet, DocError, MAX_SUBCOLUMNS};
 
     use super::{TidyColumnMapping, pivot_tidy_long_to_datasheet};
-    use crate::archetype_convert::TargetArchetypeKind;
+    use crate::archetype_convert::TargetArchetypeKind as K;
     use crate::error::TransformError;
+    use crate::test_helpers as th;
+
+    fn strs(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|&s| s.to_owned()).collect()
+    }
+
+    fn pivot(hdrs: &[&str], rows: &[Vec<String>], rep: Option<usize>, kind: K) -> Result<DataSheet, TransformError> {
+        let map =
+            TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: rep, value_col: if rep.is_some() { 3 } else { 2 }, excluded_col: None };
+        pivot_tidy_long_to_datasheet("Tidy", &strs(hdrs), rows, &map, kind, '.')
+    }
 
     #[test]
     fn aud_04_01_mixed_numeric_and_text_replicate_labels_never_panic() {
-        let headers: Vec<String> = ["X", "Group", "Rep", "Val"].into_iter().map(String::from).collect();
         let mut rows = Vec::new();
         for i in 1..=20 {
-            rows.push(vec![String::from("1"), String::from("A"), format!("{i}"), format!("{i}")]);
-            rows.push(vec![String::from("1"), String::from("A"), format!("{i}a"), format!("{}", i + 100)]);
-            rows.push(vec![String::from("1"), String::from("A"), format!("-{i}"), format!("{}", i + 200)]);
+            rows.push(strs(&["1", "A", &format!("{i}"), &format!("{i}")]));
+            rows.push(strs(&["1", "A", &format!("{i}a"), &format!("{}", i + 100)]));
+            rows.push(strs(&["1", "A", &format!("-{i}"), &format!("{}", i + 200)]));
         }
-        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: Some(2), value_col: 3, excluded_col: None };
-        let xy = pivot_tidy_long_to_datasheet("Mixed Reps XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap();
-        let TableArchetype::Xy(t) = &xy.archetype else { panic!("expected Xy") };
-        assert_eq!(t.y_subcolumn_mode.subcolumn_count(), 60);
-
-        let grp = pivot_tidy_long_to_datasheet("Mixed Reps Grouped", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap();
-        let TableArchetype::Grouped(g) = &grp.archetype else { panic!("expected Grouped") };
-        assert_eq!(g.subcolumn_mode.subcolumn_count(), 60);
+        let h = ["X", "Group", "Rep", "Val"];
+        assert_eq!(th::into_xy(pivot(&h, &rows, Some(2), K::Xy).unwrap()).y_subcolumn_mode.subcolumn_count(), 60);
+        assert_eq!(th::into_grp(pivot(&h, &rows, Some(2), K::Grouped).unwrap()).subcolumn_mode.subcolumn_count(), 60);
     }
 
     #[test]
     fn aud_04_21_duplicate_replicate_collisions_fail_fast_at_max_subcolumns() {
-        let headers: Vec<String> = ["X", "Group", "Rep", "Val"].into_iter().map(String::from).collect();
-        let rows: Vec<Vec<String>> =
-            (0..(MAX_SUBCOLUMNS + 2000)).map(|_| vec![String::from("1"), String::from("A"), String::from("R1"), String::from("5")]).collect();
-        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: Some(2), value_col: 3, excluded_col: None };
-        let err_xy = pivot_tidy_long_to_datasheet("Dup XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap_err();
-        assert!(matches!(err_xy, TransformError::Doc(DocError::TooManySubcolumns { .. })));
-        let err_grp = pivot_tidy_long_to_datasheet("Dup Grp", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap_err();
-        assert!(matches!(err_grp, TransformError::Doc(DocError::TooManySubcolumns { .. })));
+        let rows = vec![strs(&["1", "A", "R1", "5"]); MAX_SUBCOLUMNS + 2000];
+        for k in [K::Xy, K::Grouped] {
+            assert!(matches!(pivot(&["X", "Group", "Rep", "Val"], &rows, Some(2), k), Err(TransformError::Doc(DocError::TooManySubcolumns { .. }))));
+        }
     }
 
     #[test]
     fn aud_04_44_starred_missing_x_tokens_treated_as_missing_not_literal_text() {
-        let headers: Vec<String> = ["X", "Group", "Val"].into_iter().map(String::from).collect();
-        let rows: Vec<Vec<String>> = [("1", "A", "10"), ("10", "A", "20"), ("2", "A", "30"), ("NA*", "A", "40"), ("*", "A", "50")]
+        let rows: Vec<_> = [("1", "A", "10"), ("10", "A", "20"), ("2", "A", "30"), ("NA*", "A", "40"), ("*", "A", "50")]
             .into_iter()
-            .map(|(x, g, v)| vec![x.to_owned(), g.to_owned(), v.to_owned()])
+            .map(|(x, g, v)| strs(&[x, g, v]))
             .collect();
-        let mapping = TidyColumnMapping { x_col: Some(0), group_col: 1, replicate_col: None, value_col: 2, excluded_col: None };
-
-        // Grouped keeps numeric row sorting [1, 2, 10] and buckets starred missing X into "(Missing)".
-        let grp_sheet = pivot_tidy_long_to_datasheet("Starred Missing Grp", &headers, &rows, &mapping, TargetArchetypeKind::Grouped, '.').unwrap();
-        let TableArchetype::Grouped(g) = &grp_sheet.archetype else { panic!("expected Grouped") };
-        assert_eq!(g.row_titles, vec!["1", "2", "10", "(Missing)"]);
-
-        // XY skips missing X rows ("NA*" and "*") without failing as non-numeric.
-        let xy_sheet = pivot_tidy_long_to_datasheet("Starred Missing XY", &headers, &rows, &mapping, TargetArchetypeKind::Xy, '.').unwrap();
-        let TableArchetype::Xy(xy) = &xy_sheet.archetype else { panic!("expected Xy") };
-        assert_eq!(xy.row_count(), 3);
+        let h = ["X", "Group", "Val"];
+        assert_eq!(th::into_grp(pivot(&h, &rows, None, K::Grouped).unwrap()).row_titles, vec!["1", "2", "10", "(Missing)"]);
+        assert_eq!(th::into_xy(pivot(&h, &rows, None, K::Xy).unwrap()).row_count(), 3);
     }
 }

@@ -85,6 +85,95 @@ pub enum TransformKind {
 }
 
 #[cfg(test)]
+pub(crate) mod test_helpers {
+    use curvebook_doc::{
+        Cell, CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, MultipleVariablesTable, SequenceProgression,
+        SubcolumnMode, TableArchetype, VariableRole, XColumnMode, XyTable,
+    };
+
+    pub(crate) fn as_xy(s: &DataSheet) -> &XyTable {
+        let TableArchetype::Xy(t) = &s.archetype else { panic!("expected Xy") };
+        t
+    }
+    pub(crate) fn as_col(s: &DataSheet) -> &ColumnTable {
+        let TableArchetype::Column(t) = &s.archetype else { panic!("expected Column") };
+        t
+    }
+    pub(crate) fn as_grp(s: &DataSheet) -> &GroupedTable {
+        let TableArchetype::Grouped(t) = &s.archetype else { panic!("expected Grouped") };
+        t
+    }
+    pub(crate) fn as_mv(s: &DataSheet) -> &MultipleVariablesTable {
+        let TableArchetype::MultipleVariables(t) = &s.archetype else { panic!("expected MV") };
+        t
+    }
+    pub(crate) fn into_xy(s: DataSheet) -> XyTable {
+        let TableArchetype::Xy(t) = s.archetype else { panic!("expected Xy") };
+        t
+    }
+    pub(crate) fn into_col(s: DataSheet) -> ColumnTable {
+        let TableArchetype::Column(t) = s.archetype else { panic!("expected Column") };
+        t
+    }
+    pub(crate) fn into_grp(s: DataSheet) -> GroupedTable {
+        let TableArchetype::Grouped(t) = s.archetype else { panic!("expected Grouped") };
+        t
+    }
+    pub(crate) fn into_mv(s: DataSheet) -> MultipleVariablesTable {
+        let TableArchetype::MultipleVariables(t) = s.archetype else { panic!("expected MV") };
+        t
+    }
+    pub(crate) fn num(c: &Cell) -> f64 {
+        c.active_number().unwrap()
+    }
+    pub(crate) fn nums(vs: &[f64]) -> Vec<Cell> {
+        vs.iter().copied().map(Cell::number).collect()
+    }
+    pub(crate) fn texts(vs: &[&str]) -> Vec<Cell> {
+        vs.iter().copied().map(Cell::text).collect()
+    }
+    pub(crate) fn col_sheet(id: &str, cols: &[Vec<Cell>]) -> DataSheet {
+        let rows = cols.first().map_or(0, Vec::len);
+        let mut t = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols.len(), rows).unwrap();
+        for (c, col) in cols.iter().enumerate() {
+            t.data_sets[c].cells = col.iter().cloned().map(|cell| vec![cell]).collect();
+        }
+        DataSheet::new(id, id, TableArchetype::Column(t)).unwrap()
+    }
+    pub(crate) fn xy_sheet(id: &str, mode: SubcolumnMode, xs: &[f64], cols: &[Vec<Vec<Cell>>]) -> DataSheet {
+        let mut t = XyTable::new(mode, cols.len(), xs.len()).unwrap();
+        for (r, &x) in xs.iter().enumerate() {
+            t.set_x_cell(r, Cell::number(x)).unwrap();
+        }
+        for (c, col) in cols.iter().enumerate() {
+            t.data_sets[c].cells = col.clone();
+        }
+        DataSheet::new(id, id, TableArchetype::Xy(t)).unwrap()
+    }
+    pub(crate) fn xy_gen_seq(start: f64, step: f64, prog: SequenceProgression, mode: SubcolumnMode, cols: usize, rows: usize) -> XyTable {
+        XyTable::new_with_x_mode(XColumnMode::GeneratedSequence { start, step, progression: prog }, mode, cols, rows).unwrap()
+    }
+    pub(crate) fn mv_sheet(id: &str, cols: &[(&str, Option<VariableRole>, Vec<Cell>)]) -> DataSheet {
+        let rows = cols.first().map_or(0, |(_, _, c)| c.len());
+        let mut mv = MultipleVariablesTable::new(cols.len(), rows).unwrap();
+        for (i, (title, role, cells)) in cols.iter().enumerate() {
+            mv.variables[i].title = (*title).to_owned();
+            if let Some(r) = role {
+                mv.variables[i].lock_role(*r);
+            }
+            mv.variables[i].cells = cells.clone();
+        }
+        DataSheet::new(id, id, TableArchetype::MultipleVariables(mv)).unwrap()
+    }
+    pub(crate) fn excl_note(row: usize, col: usize, sub: usize, tag: &str, note: &str) -> CellExclusionNote {
+        CellExclusionNote { coord: CellCoord::new(row, col, sub), reason_tag: tag.to_owned(), note: note.to_owned(), timestamp_utc: String::new() }
+    }
+    pub(crate) fn assert_close(actual: f64, expected: f64, tol: f64) {
+        assert!((actual - expected).abs() < tol, "expected {expected} ± {tol}, got {actual}");
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::TransformKind;
 

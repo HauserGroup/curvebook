@@ -824,144 +824,97 @@ fn transform_explicit_limits(
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{
-        Cell, CellCoord, CellExclusionNote, CellValue, DataSheet, DocError, ErrorPropagationMode, MAX_TITLE_BYTES, MathTransformPreset,
-        MultipleVariablesTable, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableRole, VariableSource, XyTable,
+        Cell, CellCoord, CellValue, DataSheet, DocError, ErrorPropagationMode as Epm, MAX_TITLE_BYTES, MathTransformPreset, MultipleVariablesTable,
+        PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableRole, VariableSource, XyTable,
     };
 
-    use super::{MathTransformOp, execute_math_op, execute_math_transform};
+    use super::{MathTransformOp as Op, execute_math_op, execute_math_transform};
     use crate::error::TransformError;
     use crate::formula::evaluate_calculated_variables;
-    use crate::ops::TransformContext;
+    use crate::ops::{TransformContext, TransformOutput};
+    use crate::test_helpers as th;
+
+    fn run(s: &DataSheet, op: Op, mode: Epm) -> Result<TransformOutput, TransformError> {
+        execute_math_op(s, &op, mode, &TransformContext::default())
+    }
+
+    fn delta(s: &DataSheet, op: Op) -> Result<TransformOutput, TransformError> {
+        run(s, op, Epm::FirstOrderDeltaMethod)
+    }
 
     #[test]
     fn aud04_09_math_rejects_survival_y_allows_nonneg_survival_time_and_rejects_negative_pow() {
-        let mut srv = SurvivalTable::new(1, 3).unwrap();
-        srv.times = vec![Cell::number(10.0), Cell::number(20.0), Cell::number(30.0)];
-        srv.cohorts[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)], vec![Cell::number(1.0)]];
-        let srv_sheet = DataSheet::new("srv-1", "Survival", TableArchetype::Survival(srv)).unwrap();
         let ctx = TransformContext::default();
+        let mut srv = SurvivalTable::new(1, 3).unwrap();
+        srv.times = th::nums(&[10.0, 20.0, 30.0]);
+        srv.cohorts[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)], vec![Cell::number(1.0)]];
+        let srv_s = DataSheet::new("srv-1", "Survival", TableArchetype::Survival(srv)).unwrap();
 
-        // Any y_op on Survival must fail with IncompatibleTable so status codes are never corrupted.
-        let err_y = execute_math_op(&srv_sheet, &MathTransformOp::Log10, ErrorPropagationMode::FirstOrderDeltaMethod, &ctx).unwrap_err();
-        assert!(matches!(err_y, TransformError::IncompatibleTable { operation: "math_transform_y", kind: TableKind::Survival }));
+        assert!(matches!(
+            delta(&srv_s, Op::Log10),
+            Err(TransformError::IncompatibleTable { operation: "math_transform_y", kind: TableKind::Survival })
+        ));
+        let ok_x = execute_math_transform(&srv_s, Some(&Op::MultiplyByConstant(24.0)), None, Epm::FirstOrderDeltaMethod, &ctx).unwrap();
+        let TableArchetype::Survival(out_srv) = &ok_x.data_sheet.archetype else { panic!("expected Survival") };
+        assert_eq!(
+            (th::num(&out_srv.times[0]), th::num(&out_srv.cohorts[0].cells[0][0]), th::num(&out_srv.cohorts[0].cells[1][0])),
+            (240.0, 1.0, 0.0)
+        );
+        let bad_x = execute_math_transform(&srv_s, Some(&Op::AddConstant(-15.0)), None, Epm::FirstOrderDeltaMethod, &ctx);
+        assert!(matches!(bad_x, Err(TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Survival, row: 0, .. }))));
 
-        // x_op only on Survival scales elapsed times while preserving status codes.
-        let ok_x = execute_math_transform(
-            &srv_sheet,
-            Some(&MathTransformOp::MultiplyByConstant(24.0)),
-            None,
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &ctx,
-        )
-        .unwrap();
-        let TableArchetype::Survival(out_srv) = &ok_x.data_sheet.archetype else {
-            panic!("expected Survival");
-        };
-        assert_eq!(out_srv.times[0].active_number(), Some(240.0));
-        assert_eq!(out_srv.cohorts[0].cells[0][0].active_number(), Some(1.0));
-        assert_eq!(out_srv.cohorts[0].cells[1][0].active_number(), Some(0.0));
-
-        // x_op producing negative survival time is rejected with InvalidCellValue.
-        let bad_x =
-            execute_math_transform(&srv_sheet, Some(&MathTransformOp::AddConstant(-15.0)), None, ErrorPropagationMode::FirstOrderDeltaMethod, &ctx)
-                .unwrap_err();
-        assert!(matches!(bad_x, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Survival, row: 0, .. })));
-
-        // PartsOfWhole rejects negative transformed slice values while allowing non-negative ones.
         let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
         pow.data_sets[0].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(15.0)]];
-        let pow_sheet = DataSheet::new("pow-1", "Slices", TableArchetype::PartsOfWhole(pow)).unwrap();
-        let bad_pow =
-            execute_math_op(&pow_sheet, &MathTransformOp::SubtractConstant(10.0), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx).unwrap_err();
-        assert!(matches!(bad_pow, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::PartsOfWhole, row: 0, .. })));
-        let ok_pow =
-            execute_math_op(&pow_sheet, &MathTransformOp::MultiplyByConstant(2.0), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx).unwrap();
-        let TableArchetype::PartsOfWhole(out_pow) = &ok_pow.data_sheet.archetype else {
-            panic!("expected PartsOfWhole");
-        };
+        let pow_s = DataSheet::new("pow-1", "Slices", TableArchetype::PartsOfWhole(pow)).unwrap();
+        assert!(matches!(
+            delta(&pow_s, Op::SubtractConstant(10.0)),
+            Err(TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::PartsOfWhole, row: 0, .. }))
+        ));
+        let ok_pow = delta(&pow_s, Op::MultiplyByConstant(2.0)).unwrap();
+        let TableArchetype::PartsOfWhole(out_pow) = &ok_pow.data_sheet.archetype else { panic!("expected PartsOfWhole") };
         assert_eq!(out_pow.data_sets[0].cells[0][0].active_number(), Some(10.0));
     }
 
     #[test]
     fn aud04_10_math_mean_cv_zero_input_mean_blanks_cv_with_warning() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanCvN, 1, 2).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.set_x_cell(1, Cell::number(2.0)).unwrap();
-        xy.data_sets[0].cells[0] = vec![Cell::number(0.0), Cell::number(25.0), Cell::number(5.0)];
-        xy.data_sets[0].cells[1] = vec![Cell::number(0.0), Cell::excluded_number(25.0), Cell::number(5.0)];
-        let sheet = DataSheet::new("cv-zero-in", "CV Zero", TableArchetype::Xy(xy)).unwrap();
-        let ctx = TransformContext::default();
-
-        for mode in [ErrorPropagationMode::FirstOrderDeltaMethod, ErrorPropagationMode::ReplicateEndpoints] {
-            let out = execute_math_op(&sheet, &MathTransformOp::AddConstant(10.0), mode, &ctx).unwrap();
-            let TableArchetype::Xy(out_xy) = &out.data_sheet.archetype else {
-                panic!("expected Xy");
-            };
-            assert_eq!(out_xy.data_sets[0].cells[0][0].active_number(), Some(10.0));
-            assert_eq!(out_xy.data_sets[0].cells[0][1].value, CellValue::Empty);
-            assert_eq!(out_xy.data_sets[0].cells[0][2].active_number(), Some(5.0));
-            assert_eq!(out_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
-            assert!(out_xy.data_sets[0].cells[1][1].excluded);
-            assert_eq!(out.warnings.len(), 1, "only non-excluded zero-mean CV row should warn: {:?}", out.warnings);
-            assert!(out.warnings[0].contains("input mean is zero"));
+        let rows = vec![th::nums(&[0.0, 25.0, 5.0]), vec![Cell::number(0.0), Cell::excluded_number(25.0), Cell::number(5.0)]];
+        let sheet = th::xy_sheet("cv-zero-in", SubcolumnMode::MeanCvN, &[1.0, 2.0], &[rows]);
+        for mode in [Epm::FirstOrderDeltaMethod, Epm::ReplicateEndpoints] {
+            let out = run(&sheet, Op::AddConstant(10.0), mode).unwrap();
+            let cells = &th::as_xy(&out.data_sheet).data_sets[0].cells;
+            assert_eq!((cells[0][0].active_number(), &cells[0][1].value, cells[0][2].active_number()), (Some(10.0), &CellValue::Empty, Some(5.0)));
+            assert!(cells[1][1].value == CellValue::Empty && cells[1][1].excluded);
+            assert!(out.warnings.len() == 1 && out.warnings[0].contains("input mean is zero"), "{:?}", out.warnings);
         }
     }
 
     #[test]
     fn aud04_14_math_snapshots_all_calculated_mv_variables() {
         let mut mv = MultipleVariablesTable::new(3, 2).unwrap();
-        mv.variables[0].title = String::from("A");
-        mv.variables[1].title = String::from("B");
-        mv.variables[2].title = String::from("Tag");
-        mv.variables[0].cells = vec![Cell::number(10.0), Cell::number(100.0)];
+        for (i, t) in ["A", "B", "Tag"].into_iter().enumerate() {
+            mv.variables[i].title = String::from(t);
+        }
+        mv.variables[0].cells = th::nums(&[10.0, 100.0]);
         mv.variables[1].set_calculated_formula("=A * 2");
         mv.variables[2].set_calculated_formula("=if(A > 50, \"Hi\", \"Lo\")");
         evaluate_calculated_variables(&mut mv, None).unwrap();
         let sheet = DataSheet::new("mv-math", "MV Math", TableArchetype::MultipleVariables(mv)).unwrap();
-
-        // Transform only column 0; unselected calculated columns B and Tag must STILL be snapshotted.
         let ctx = TransformContext { selected_data_sets: vec![0], ..TransformContext::default() };
-        let out = execute_math_op(&sheet, &MathTransformOp::Log10, ErrorPropagationMode::FirstOrderDeltaMethod, &ctx).unwrap();
-        let TableArchetype::MultipleVariables(mut out_mv) = out.data_sheet.archetype else {
-            panic!("expected MV");
-        };
-        assert_eq!(out_mv.variables[1].source, VariableSource::Entered);
-        assert_eq!(out_mv.variables[1].role, VariableRole::Continuous);
-        assert_eq!(out_mv.variables[2].source, VariableSource::Entered);
-        assert_eq!(out_mv.variables[2].role, VariableRole::Categorical);
-        // Downstream recalculation must NOT overwrite snapshotted values.
+        let mut out_mv = th::into_mv(execute_math_op(&sheet, &Op::Log10, Epm::FirstOrderDeltaMethod, &ctx).unwrap().data_sheet);
+        assert_eq!((out_mv.variables[1].source.clone(), out_mv.variables[1].role), (VariableSource::Entered, VariableRole::Continuous));
+        assert_eq!((out_mv.variables[2].source.clone(), out_mv.variables[2].role), (VariableSource::Entered, VariableRole::Categorical));
         assert!(evaluate_calculated_variables(&mut out_mv, None).unwrap().is_empty());
-        assert_eq!(out_mv.variables[1].cells[0].active_number(), Some(20.0));
-        assert_eq!(out_mv.variables[2].cells[1].active_text(), Some("Hi"));
+        assert_eq!((out_mv.variables[1].cells[0].active_number(), out_mv.variables[2].cells[1].active_text()), (Some(20.0), Some("Hi")));
     }
 
     #[test]
     fn aud04_38_math_batched_swapped_error_notes_exact() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanLowHigh, 1, 4).unwrap();
-        for r in 0..4 {
-            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
-            xy.data_sets[0].cells[r] = vec![Cell::number(10.0), Cell::excluded_number(1.0), Cell::number(2.0)];
-        }
-        let mut sheet = DataSheet::new("mlh-swap", "MLH", TableArchetype::Xy(xy)).unwrap();
-        for r in 0..4 {
-            sheet.exclusion_notes.push(CellExclusionNote {
-                coord: CellCoord::new(r, 0, 1),
-                reason_tag: String::from("qc"),
-                note: format!("r{r}"),
-                timestamp_utc: String::new(),
-            });
-        }
-        let out = execute_math_op(
-            &sheet,
-            &MathTransformOp::Preset(MathTransformPreset::LinearScale { slope: -1.0, intercept: 0.0 }),
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        assert_eq!(out.data_sheet.exclusion_notes.len(), 4);
-        for (r, note) in out.data_sheet.exclusion_notes.iter().enumerate() {
-            assert_eq!(note.coord, CellCoord::new(r, 0, 2));
-        }
+        let row = vec![Cell::number(10.0), Cell::excluded_number(1.0), Cell::number(2.0)];
+        let mut sheet = th::xy_sheet("mlh-swap", SubcolumnMode::MeanLowHigh, &[1.0, 2.0, 3.0, 4.0], &[vec![row; 4]]);
+        sheet.exclusion_notes.extend((0..4).map(|r| th::excl_note(r, 0, 1, "qc", &format!("r{r}"))));
+        let out = delta(&sheet, Op::Preset(MathTransformPreset::LinearScale { slope: -1.0, intercept: 0.0 })).unwrap();
+        let coords: Vec<_> = out.data_sheet.exclusion_notes.iter().map(|n| n.coord).collect();
+        assert_eq!(coords, (0..4).map(|r| CellCoord::new(r, 0, 2)).collect::<Vec<_>>());
     }
 
     #[test]
@@ -970,129 +923,44 @@ mod tests {
         xy.set_x_cell(0, Cell::number(1.0)).unwrap();
         xy.data_sets[0].cells[0][0] = Cell::number(10.0);
         let sheet = DataSheet::new("s-long", "T".repeat(MAX_TITLE_BYTES), TableArchetype::Xy(xy)).unwrap();
-        let ok = execute_math_op(&sheet, &MathTransformOp::Log10, ErrorPropagationMode::FirstOrderDeltaMethod, &TransformContext::default()).unwrap();
-        assert!(ok.data_sheet.validate().is_ok());
-        assert!(ok.data_sheet.title.len() <= MAX_TITLE_BYTES);
-
+        let ok = delta(&sheet, Op::Log10).unwrap();
+        assert!(ok.data_sheet.validate().is_ok() && ok.data_sheet.title.len() <= MAX_TITLE_BYTES);
         let bad_ctx = TransformContext { output_id: Some(String::from("bad\0id")), ..TransformContext::default() };
         assert!(matches!(
-            execute_math_op(&sheet, &MathTransformOp::Log10, ErrorPropagationMode::FirstOrderDeltaMethod, &bad_ctx),
+            execute_math_op(&sheet, &Op::Log10, Epm::FirstOrderDeltaMethod, &bad_ctx),
             Err(TransformError::Doc(DocError::InvalidIdentifier { .. }))
         ));
     }
 
     #[test]
     fn aud04_48_math_concentration_log_and_cv_avoid_premature_underflow_overflow() {
-        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.set_x_cell(1, Cell::number(2.0)).unwrap();
-        xy.set_x_cell(2, Cell::number(3.0)).unwrap();
-        // Normal float whose naive product with 1e-25 underflows to 0.0 (`1e-305 * 1e-25 == 0.0`).
-        xy.data_sets[0].cells[0][0] = Cell::number(1e-305);
-        // Subnormal float whose naive product with 1e-9 also underflows to 0.0.
-        xy.data_sets[0].cells[1][0] = Cell::number(1e-316);
-        // Normal float whose naive product with 1e9 overflows to +inf (`1e305 * 1e9 == inf`).
-        xy.data_sets[0].cells[2][0] = Cell::number(1e305);
-        let sheet = DataSheet::new("conc-ext", "Conc", TableArchetype::Xy(xy)).unwrap();
-        let ctx = TransformContext::default();
-
-        let low_normal = execute_math_op(
-            &sheet,
-            &MathTransformOp::Preset(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-25 }),
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &ctx,
-        )
-        .unwrap();
-        let TableArchetype::Xy(low_normal_xy) = &low_normal.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((low_normal_xy.data_sets[0].cells[0][0].active_number().unwrap() - 330.0).abs() < 1e-12);
-
-        let low_subnormal = execute_math_op(
-            &sheet,
-            &MathTransformOp::Preset(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-9 }),
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &ctx,
-        )
-        .unwrap();
-        let TableArchetype::Xy(low_sub_xy) = &low_subnormal.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((low_sub_xy.data_sets[0].cells[1][0].active_number().unwrap() - 325.0).abs() < 1e-7);
-
-        let high = execute_math_op(
-            &sheet,
-            &MathTransformOp::Preset(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e9 }),
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &ctx,
-        )
-        .unwrap();
-        let TableArchetype::Xy(high_xy) = &high.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((high_xy.data_sets[0].cells[2][0].active_number().unwrap() - (-314.0)).abs() < 1e-12);
-
-        // Large MeanCvN (mean = 1e308, %CV = 5.0 -> sd = 5e306): identity transform keeps %CV = 5.0 without 100 * sd overflow.
-        let mut cv_xy = XyTable::new(SubcolumnMode::MeanCvN, 1, 1).unwrap();
-        cv_xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        cv_xy.data_sets[0].cells[0] = vec![Cell::number(1e308), Cell::number(5.0), Cell::number(3.0)];
-        let cv_sheet = DataSheet::new("cv-big", "CV Big", TableArchetype::Xy(cv_xy)).unwrap();
-        let cv_out =
-            execute_math_op(&cv_sheet, &MathTransformOp::MultiplyByConstant(1.0), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx).unwrap();
-        let TableArchetype::Xy(out_cv_xy) = &cv_out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((out_cv_xy.data_sets[0].cells[0][1].active_number().unwrap() - 5.0).abs() < 1e-12);
+        let col = vec![vec![Cell::number(1e-305)], vec![Cell::number(1e-316)], vec![Cell::number(1e305)]];
+        let sheet = th::xy_sheet("conc-ext", SubcolumnMode::Single, &[1.0, 2.0, 3.0], &[col]);
+        for (factor, row, expected, tol) in [(1e-25, 0, 330.0, 1e-12), (1e-9, 1, 325.0, 1e-7), (1e9, 2, -314.0, 1e-12)] {
+            let op = Op::Preset(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: factor });
+            th::assert_close(th::num(&th::into_xy(delta(&sheet, op).unwrap().data_sheet).data_sets[0].cells[row][0]), expected, tol);
+        }
+        let cv_s = th::xy_sheet("cv-big", SubcolumnMode::MeanCvN, &[1.0], &[vec![th::nums(&[1e308, 5.0, 3.0])]]);
+        th::assert_close(th::num(&th::into_xy(delta(&cv_s, Op::MultiplyByConstant(1.0)).unwrap().data_sheet).data_sets[0].cells[0][1]), 5.0, 1e-12);
     }
 
     #[test]
     fn aud04_50_user_expr_relative_derivative_and_mean_low_high_overflow_warning() {
-        // Small positive molar concentration (1e-9 M) under UserExpression("-log10(y)") keeps valid delta spread.
-        let mut xy = XyTable::new(SubcolumnMode::MeanSdN, 1, 1).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.data_sets[0].cells[0] = vec![Cell::number(1e-9), Cell::number(1e-10), Cell::number(3.0)];
-        let sheet = DataSheet::new("nano", "Nano", TableArchetype::Xy(xy)).unwrap();
-        let ctx = TransformContext::default();
-        let out =
-            execute_math_op(&sheet, &MathTransformOp::UserExpression(String::from("-log10(y)")), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx)
-                .unwrap();
-        assert!(out.warnings.is_empty(), "unexpected warnings: {:?}", out.warnings);
-        let TableArchetype::Xy(out_xy) = &out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        let expected_sd = 0.1 / std::f64::consts::LN_10;
-        assert!((out_xy.data_sets[0].cells[0][0].active_number().unwrap() - 9.0).abs() < 1e-12);
-        assert!((out_xy.data_sets[0].cells[0][1].active_number().unwrap() - expected_sd).abs() < 1e-8);
+        let nano_s = th::xy_sheet("nano", SubcolumnMode::MeanSdN, &[1.0], &[vec![th::nums(&[1e-9, 1e-10, 3.0])]]);
+        let nano = delta(&nano_s, Op::UserExpression(String::from("-log10(y)"))).unwrap();
+        assert!(nano.warnings.is_empty(), "unexpected warnings: {:?}", nano.warnings);
+        let r0 = &th::as_xy(&nano.data_sheet).data_sets[0].cells[0];
+        th::assert_close(th::num(&r0[0]), 9.0, 1e-12);
+        th::assert_close(th::num(&r0[1]), 0.1 / std::f64::consts::LN_10, 1e-8);
 
-        // One-sided derivative fallback at domain boundary y = 0 for sqrt(y + 1) shifted / y = 1 for asin(sqrt(y)):
-        // Use UserExpression("ln(y - 1e-9 + 1e-15)")? Even cleaner: sqrt(y) at y = 0.0 -> f(0 - h) OOD, f(0 + h) valid -> finite forward diff!
-        let mut bnd = XyTable::new(SubcolumnMode::MeanSdN, 1, 1).unwrap();
-        bnd.set_x_cell(0, Cell::number(1.0)).unwrap();
-        bnd.data_sets[0].cells[0] = vec![Cell::number(0.0), Cell::number(0.01), Cell::number(3.0)];
-        let bnd_sheet = DataSheet::new("bnd", "Boundary", TableArchetype::Xy(bnd)).unwrap();
-        let bnd_out = execute_math_op(
-            &bnd_sheet,
-            &MathTransformOp::UserExpression(String::from("if(y >= 0, 2 * y, nan)")),
-            ErrorPropagationMode::FirstOrderDeltaMethod,
-            &ctx,
-        )
-        .unwrap();
-        assert!(bnd_out.warnings.is_empty(), "{:?}", bnd_out.warnings);
-        let TableArchetype::Xy(bnd_xy) = &bnd_out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((bnd_xy.data_sets[0].cells[0][1].active_number().unwrap() - 0.02).abs() < 1e-9);
+        let bnd_s = th::xy_sheet("bnd", SubcolumnMode::MeanSdN, &[1.0], &[vec![th::nums(&[0.0, 0.01, 3.0])]]);
+        let bnd = delta(&bnd_s, Op::UserExpression(String::from("if(y >= 0, 2 * y, nan)"))).unwrap();
+        assert!(bnd.warnings.is_empty(), "{:?}", bnd.warnings);
+        th::assert_close(th::num(&th::as_xy(&bnd.data_sheet).data_sets[0].cells[0][1]), 0.02, 1e-9);
 
-        // MeanLowHigh ReplicateEndpoints overflowing offset emits explicit warning.
-        let mut lh = XyTable::new(SubcolumnMode::MeanLowHigh, 1, 1).unwrap();
-        lh.set_x_cell(0, Cell::number(1.0)).unwrap();
-        lh.data_sets[0].cells[0] = vec![Cell::number(1e307), Cell::number(2e307), Cell::number(1e306)];
-        let lh_sheet = DataSheet::new("lh-ovf", "LH Overflow", TableArchetype::Xy(lh)).unwrap();
-        let lh_out = execute_math_op(&lh_sheet, &MathTransformOp::MultiplyByConstant(10.0), ErrorPropagationMode::ReplicateEndpoints, &ctx).unwrap();
-        let TableArchetype::Xy(lh_xy) = &lh_out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert_eq!(lh_xy.data_sets[0].cells[0][1].value, CellValue::Empty);
-        assert!(lh_out.warnings.iter().any(|w| w.contains("overflowed")), "{:?}", lh_out.warnings);
+        let lh_s = th::xy_sheet("lh-ovf", SubcolumnMode::MeanLowHigh, &[1.0], &[vec![th::nums(&[1e307, 2e307, 1e306])]]);
+        let lh = run(&lh_s, Op::MultiplyByConstant(10.0), Epm::ReplicateEndpoints).unwrap();
+        assert_eq!(th::as_xy(&lh.data_sheet).data_sets[0].cells[0][1].value, CellValue::Empty);
+        assert!(lh.warnings.iter().any(|w| w.contains("overflowed")), "{:?}", lh.warnings);
     }
 }

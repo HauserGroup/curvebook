@@ -2068,11 +2068,10 @@ fn brent_root<F: Fn(f64) -> f64>(f: F, mut a: f64, mut b: f64, mut fa: f64, mut 
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use curvebook_doc::{
-        AnalysisKind, AnalysisSpec, Cell, DataSheet, ResultCell, ResultTabKind, SplineLowessMethod, SplineLowessSpec, SubcolumnMode, TableArchetype,
-        XyTable,
+        AnalysisKind, AnalysisSpec, Cell, DataSheet, ResultCell, ResultTabKind, SplineLowessMethod as Method, SplineLowessSpec as Spec,
+        SubcolumnMode, TableArchetype, XyTable,
     };
 
     use super::{
@@ -2080,192 +2079,144 @@ mod tests {
         fit_smoothing_spline,
     };
     use crate::error::TransformError;
+    use crate::test_helpers as th;
+
+    fn run_spline(sheet: &DataSheet, spec: &Spec) -> Result<curvebook_doc::ResultSheet, TransformError> {
+        let analysis = AnalysisSpec::new("res", sheet.id.as_str(), AnalysisKind::FitSplineLowess(spec.clone())).unwrap();
+        execute_spline_lowess(sheet, &analysis, spec)
+    }
 
     #[test]
     fn aud_04_04_lowess_constant_midpoint_and_bisquare_peak_never_collapse_to_zero() {
-        // 1. q = 2 on constant Y = 100.0 evaluated at exact midpoints and interior offsets.
-        let pts: Vec<(f64, f64)> = (0..6).map(|i| (i as f64, 100.0)).collect();
-        let model = fit_lowess_curve(&pts, 0.25, 0).expect("q=2 LOWESS fit");
+        let model = fit_lowess_curve(&(0..6).map(|i| (i as f64, 100.0)).collect::<Vec<_>>(), 0.25, 0).unwrap();
         for xq in [0.5, 1.5, 2.5, 3.5, 4.5, 0.25, 2.75] {
-            let y = model.eval(xq);
-            assert!((y - 100.0).abs() < 1e-12, "LOWESS q=2 collapsed at x={xq}: got {y}");
+            th::assert_close(model.eval(xq), 100.0, 1e-12);
         }
-
-        // 2. Bisquare robustness passes on flat baseline (Y = 50.0) + narrow peak (Y = 200.0).
         let mut peak_pts: Vec<(f64, f64)> = (0..21).map(|i| (i as f64, 50.0)).collect();
-        peak_pts[10].1 = 200.0;
-        peak_pts[11].1 = 200.0;
-        let peak_model = fit_lowess_curve(&peak_pts, 0.15, 3).expect("bisquare peak LOWESS");
-        for i in 0..21 {
+        (peak_pts[10].1, peak_pts[11].1) = (200.0, 200.0);
+        let peak_model = fit_lowess_curve(&peak_pts, 0.15, 3).unwrap();
+        assert!((0..21).all(|i| {
             let y = peak_model.eval(i as f64);
-            assert!(y.is_finite() && y >= 49.0, "LOWESS peak/baseline collapsed at x={i}: got {y}");
-        }
+            y.is_finite() && y >= 49.0
+        }));
     }
 
     #[test]
     fn aud_04_05_solve_inverse_scale_invariance_and_extrapolated_tails() {
-        // (a) Large X scale arch: interior maximum (exact analytical S(1.5e8) = 1.15) must not be skipped.
-        let arch = fit_natural_cubic_spline(&[(0.0, 0.0), (1e8, 1.0), (2e8, 1.0), (3e8, 0.0)]).expect("large-X spline");
-        let mid_y = arch.eval(1.5e8);
-        assert!((mid_y - 1.15).abs() < 1e-12, "expected arch maximum 1.15, got {mid_y}");
+        let arch = fit_natural_cubic_spline(&[(0.0, 0.0), (1e8, 1.0), (2e8, 1.0), (3e8, 0.0)]).unwrap();
+        th::assert_close(arch.eval(1.5e8), 1.15, 1e-12);
         let arch_roots = arch.solve_inverse(1.1, 0.0, 3e8);
-        assert_eq!(arch_roots.len(), 2, "must find both roots on large-X arch: {arch_roots:?}");
+        assert_eq!(arch_roots.len(), 2, "{arch_roots:?}");
         for r in arch_roots {
-            assert!((arch.eval(r) - 1.1).abs() < 1e-9, "arch root residual too large at x={r}");
+            th::assert_close(arch.eval(r), 1.1, 1e-9);
         }
 
-        // (b) Small Y scale (1e-13): out-of-range query 5e-13 must return zero bogus roots.
-        let small_y = fit_natural_cubic_spline(&[(0.0, 0.0), (1.0, 1e-13), (2.0, 0.0), (3.0, 1e-13)]).expect("small-Y spline");
-        assert!(small_y.solve_inverse(5e-13, 0.0, 3.0).is_empty(), "must not emit bogus roots on small-Y spline");
-        let small_lowess = fit_lowess_curve(&[(0.0, 0.0), (1.0, 1e-13), (2.0, 0.0), (3.0, 1e-13)], 0.75, 0).expect("small-Y LOWESS");
-        assert!(small_lowess.solve_inverse(5e-13, 0.0, 3.0).is_empty(), "must not emit bogus roots on small-Y LOWESS");
+        let small = [(0.0, 0.0), (1.0, 1e-13), (2.0, 0.0), (3.0, 1e-13)];
+        assert!(fit_natural_cubic_spline(&small).unwrap().solve_inverse(5e-13, 0.0, 3.0).is_empty());
+        assert!(fit_lowess_curve(&small, 0.75, 0).unwrap().solve_inverse(5e-13, 0.0, 3.0).is_empty());
 
-        // (c) Nanomolar & picomolar X scales: distinct roots preserved and accurately refined.
-        let nano = fit_natural_cubic_spline(&[(0.0, 0.0), (5e-10, 1.0), (1e-9, 0.0)]).expect("nano-X spline");
-        let nano_roots = nano.solve_inverse(0.5, 0.0, 1e-9);
-        assert_eq!(nano_roots.len(), 2, "nanomolar roots must not collapse: {nano_roots:?}");
-        for r in nano_roots {
-            assert!((nano.eval(r) - 0.5).abs() < 1e-10, "nanomolar root inaccuracy at x={r}");
-        }
-        let pico = fit_natural_cubic_spline(&[(0.0, 0.0), (5e-13, 1.0), (1e-12, 0.0)]).expect("pico-X spline");
-        let pico_roots = pico.solve_inverse(0.5, 0.0, 1e-12);
-        assert_eq!(pico_roots.len(), 2, "picomolar roots must refine accurately: {pico_roots:?}");
-        for r in pico_roots {
-            assert!((pico.eval(r) - 0.5).abs() < 1e-10, "picomolar root inaccuracy at x={r}");
+        for scale in [1e-9_f64, 1e-12_f64] {
+            let m = fit_natural_cubic_spline(&[(0.0, 0.0), (0.5 * scale, 1.0), (scale, 0.0)]).unwrap();
+            let roots = m.solve_inverse(0.5, 0.0, scale);
+            assert_eq!(roots.len(), 2, "scale={scale:e}: {roots:?}");
+            for r in roots {
+                th::assert_close(m.eval(r), 0.5, 1e-10);
+            }
         }
 
-        // (d) Extrapolated linear tails for PiecewiseCubic and PiecewiseLinear.
-        let lin_cubic = fit_natural_cubic_spline(&[(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]).expect("linear cubic");
-        let left_r = lin_cubic.solve_inverse(-4.0, -5.0, 5.0);
-        let right_r = lin_cubic.solve_inverse(8.0, -5.0, 5.0);
-        assert_eq!(left_r.len(), 1);
-        assert!((left_r[0] - (-2.0)).abs() < 1e-12);
-        assert_eq!(right_r.len(), 1);
-        assert!((right_r[0] - 4.0).abs() < 1e-12);
-
-        let p2p = fit_point_to_point(&[(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)]).expect("p2p");
-        let p2p_left = p2p.solve_inverse(-4.0, -5.0, 5.0);
-        let p2p_right = p2p.solve_inverse(8.0, -5.0, 5.0);
-        assert_eq!(p2p_left.len(), 1);
-        assert!((p2p_left[0] - (-2.0)).abs() < 1e-12);
-        assert_eq!(p2p_right.len(), 1);
-        assert!((p2p_right[0] - 4.0).abs() < 1e-12);
+        let lin = [(0.0, 0.0), (1.0, 2.0), (2.0, 4.0)];
+        for model in [fit_natural_cubic_spline(&lin).unwrap(), fit_point_to_point(&lin).unwrap()] {
+            for (y, exp_x) in [(-4.0, -2.0), (8.0, 4.0)] {
+                let r = model.solve_inverse(y, -5.0, 5.0);
+                assert_eq!(r.len(), 1);
+                th::assert_close(r[0], exp_x, 1e-12);
+            }
+        }
     }
 
     #[test]
     fn aud_04_06_excluded_and_text_cells_not_fabricated_as_unknowns() {
-        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).expect("xy");
-        let pts = [(0.0, 0.0), (1.0, 2.0), (2.0, 4.0), (3.0, 6.0)];
-        for (r, &(x, y)) in pts.iter().enumerate() {
-            xy.set_x_cell(r, Cell::number(x)).expect("x");
-            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 8).unwrap();
+        for (r, (x, y)) in [
+            (Cell::number(0.0), Cell::number(0.0)),
+            (Cell::number(1.0), Cell::number(2.0)),
+            (Cell::number(2.0), Cell::number(4.0)),
+            (Cell::number(3.0), Cell::number(6.0)),
+            (Cell::number(1.5), Cell::excluded_number(999.0)),
+            (Cell::excluded_number(2.5), Cell::number(5.0)),
+            (Cell::number(2.0), Cell::text("BLQ")),
+            (Cell::number(1.5), Cell::empty()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            xy.set_x_cell(r, x).unwrap();
+            xy.data_sets[0].cells[r][0] = y;
         }
-        // Row 4: excluded Y outlier with active X -> must NOT become forward unknown.
-        xy.set_x_cell(4, Cell::number(1.5)).expect("x4");
-        xy.data_sets[0].cells[4][0] = Cell::excluded_number(999.0);
-        // Row 5: excluded X with active Y -> must NOT become inverse unknown.
-        xy.set_x_cell(5, Cell::excluded_number(2.5)).expect("x5");
-        xy.data_sets[0].cells[5][0] = Cell::number(5.0);
-        // Row 6: non-empty text Y ("BLQ") with active X -> must NOT become forward unknown.
-        xy.set_x_cell(6, Cell::number(2.0)).expect("x6");
-        xy.data_sets[0].cells[6][0] = Cell::text("BLQ");
-        // Row 7: genuinely blank Y with active X -> MUST be interpolated as forward unknown.
-        xy.set_x_cell(7, Cell::number(1.5)).expect("x7");
-
-        let sheet = DataSheet::new("excl-unk", "Excl", TableArchetype::Xy(xy)).expect("sheet");
-        let spec = SplineLowessSpec { method: SplineLowessMethod::NaturalCubicSpline, interpolate_unknowns: true, ..SplineLowessSpec::default() };
-        let analysis = AnalysisSpec::new("res", "excl-unk", AnalysisKind::FitSplineLowess(spec.clone())).expect("spec");
-        let res = execute_spline_lowess(&sheet, &analysis, &spec).expect("execute");
-        let unk_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("unk tab");
-        assert_eq!(unk_tab.rows.len(), 1, "only genuine blank row 7 should be interpolated, got {:?}", unk_tab.row_labels);
-        assert_eq!(unk_tab.row_labels[0], "Row 8");
+        let spec = Spec { method: Method::NaturalCubicSpline, interpolate_unknowns: true, ..Spec::default() };
+        let res = run_spline(&DataSheet::new("excl-unk", "Excl", TableArchetype::Xy(xy)).unwrap(), &spec).unwrap();
+        let unk = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).unwrap();
+        assert_eq!((unk.rows.len(), unk.row_labels[0].as_str()), (1, "Row 8"));
     }
 
     #[test]
     fn aud_13_20_presummarized_y_validation_rejects_malformed_summary_rows() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanSdN, 1, 4).expect("xy MeanSdN");
-        xy.set_x_cell(0, Cell::number(0.0)).expect("x0");
-        xy.data_sets[0].cells[0] = vec![Cell::number(1.0), Cell::number(0.1), Cell::number(3.0)];
-        xy.set_x_cell(1, Cell::number(1.0)).expect("x1");
-        xy.data_sets[0].cells[1] = vec![Cell::number(2.0), Cell::number(-0.5), Cell::number(3.0)]; // invalid negative SD
-        xy.set_x_cell(2, Cell::number(2.0)).expect("x2");
-        xy.data_sets[0].cells[2] = vec![Cell::number(3.0), Cell::number(0.2), Cell::number(3.0)];
-        // Row 3: blank X with mean-only Y for inverse unknown must be allowed once row 1 is fixed.
-        xy.data_sets[0].cells[3] = vec![Cell::number(1.5), Cell::empty(), Cell::empty()];
-
-        let spec = SplineLowessSpec { method: SplineLowessMethod::NaturalCubicSpline, interpolate_unknowns: true, ..SplineLowessSpec::default() };
-        let analysis = AnalysisSpec::new("res-ps", "ps-bad", AnalysisKind::FitSplineLowess(spec.clone())).expect("analysis");
-        let bad_sheet = DataSheet::new("ps-bad", "Bad", TableArchetype::Xy(xy.clone())).expect("bad sheet");
-        assert!(
-            matches!(execute_spline_lowess(&bad_sheet, &analysis, &spec), Err(TransformError::SummaryPoint(_))),
-            "negative SD in MeanSdN must return SummaryPoint error"
-        );
-
-        // Fix row 1 SD -> should succeed and interpolate inverse unknown row 3.
+        let mut xy = XyTable::new(SubcolumnMode::MeanSdN, 1, 4).unwrap();
+        for r in 0..3 {
+            xy.set_x_cell(r, Cell::number(r as f64)).unwrap();
+        }
+        xy.data_sets[0].cells = vec![
+            th::nums(&[1.0, 0.1, 3.0]),
+            th::nums(&[2.0, -0.5, 3.0]),
+            th::nums(&[3.0, 0.2, 3.0]),
+            vec![Cell::number(1.5), Cell::empty(), Cell::empty()],
+        ];
+        let spec = Spec { method: Method::NaturalCubicSpline, interpolate_unknowns: true, ..Spec::default() };
+        assert!(matches!(
+            run_spline(&DataSheet::new("ps-bad", "Bad", TableArchetype::Xy(xy.clone())).unwrap(), &spec),
+            Err(TransformError::SummaryPoint(_))
+        ));
         xy.data_sets[0].cells[1][1] = Cell::number(0.2);
-        let good_sheet = DataSheet::new("ps-bad", "Good", TableArchetype::Xy(xy)).expect("good sheet");
-        let res = execute_spline_lowess(&good_sheet, &analysis, &spec).expect("valid MeanSdN fit");
-        let unk_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("unk tab");
-        assert_eq!(unk_tab.rows.len(), 1);
-        assert_eq!(unk_tab.row_labels[0], "Row 4");
+        let res = run_spline(&DataSheet::new("ps-bad", "Good", TableArchetype::Xy(xy)).unwrap(), &spec).unwrap();
+        let unk = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).unwrap();
+        assert_eq!((unk.rows.len(), unk.row_labels[0].as_str()), (1, "Row 4"));
     }
 
     #[test]
     fn aud_04_19_large_lowess_completes_quickly_and_reuses_fitted_y() {
         let n = 4_000_usize;
         let pts: Vec<(f64, f64)> = (0..n).map(|i| (i as f64, (i as f64 * 0.01).sin())).collect();
-        let model = fit_lowess_curve(&pts, 0.25, 2).expect("large LOWESS");
-        let FittedCurveModel::Lowess { fitted_y, .. } = &model else {
-            panic!("expected Lowess model");
-        };
-        assert_eq!(fitted_y.len(), n);
-        assert!(fitted_y.iter().all(|v| v.is_finite()));
-        assert!(model.eval(2_000.5).is_finite());
+        let model = fit_lowess_curve(&pts, 0.25, 2).unwrap();
+        let FittedCurveModel::Lowess { fitted_y, .. } = &model else { panic!("expected Lowess") };
+        assert!(fitted_y.len() == n && fitted_y.iter().all(|v| v.is_finite()) && model.eval(2_000.5).is_finite());
     }
 
     #[test]
     fn aud_04_26_and_40_akima_overflow_guard_reinsch_clamp_and_infinite_lambda() {
-        // 1. Akima with extreme spacing: must either produce finite coefficients or reject cleanly (never Ok with NaN/Inf).
-        let tiny_dx = [(0.0, 0.0), (1e-160, 1.0), (2e-160, 0.5), (3e-160, 2.0)];
-        if let Ok(FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, .. }) = fit_akima_subspline(&tiny_dx) {
-            assert!(left_slope.is_finite() && right_slope.is_finite());
-            for p in pieces {
-                assert!(p.a.is_finite() && p.b.is_finite() && p.c.is_finite() && p.d.is_finite());
-            }
-        }
-        // Moderate large slopes (~1e100) where old w1*d_m1 overflowed (1e200 ok, 1e160 -> w*d = 1e320 overflowed!)
-        // Check y ~ 1e160 with h = 1.0: c and d are ~1e160 (finite!), while old w1*d_m1 = 1e320 overflowed!
-        let large_y = [(0.0, 0.0), (1.0, 1e160), (2.0, 0.5e160), (3.0, 2e160), (4.0, 1.5e160)];
-        let ak = fit_akima_subspline(&large_y).expect("normalized Akima weights must handle 1e160 ordinates");
-        let FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, .. } = ak else {
-            panic!("expected PiecewiseCubic");
+        let check_cubic = |m: FittedCurveModel| {
+            let FittedCurveModel::PiecewiseCubic { pieces, left_slope, right_slope, .. } = m else { panic!("expected PiecewiseCubic") };
+            assert!(
+                left_slope.is_finite()
+                    && right_slope.is_finite()
+                    && pieces.iter().all(|p| p.a.is_finite() && p.b.is_finite() && p.c.is_finite() && p.d.is_finite())
+            );
         };
-        assert!(left_slope.is_finite() && right_slope.is_finite());
-        for p in pieces {
-            assert!(p.a.is_finite() && p.b.is_finite() && p.c.is_finite() && p.d.is_finite());
+        if let Ok(m) = fit_akima_subspline(&[(0.0, 0.0), (1e-160, 1.0), (2e-160, 0.5), (3e-160, 2.0)]) {
+            check_cubic(m);
         }
+        check_cubic(fit_akima_subspline(&[(0.0, 0.0), (1.0, 1e160), (2.0, 0.5e160), (3.0, 2e160), (4.0, 1.5e160)]).unwrap());
 
-        // 2. Reinsch solve_lambda_for_df near df = 2.0 on large X scale must not overflow hi.exp().
         let large_x = [(0.0, 1.0), (1e6, 2.1), (2e6, 2.9), (3e6, 4.2), (4e6, 5.0)];
-        let fit_near = fit_smoothing_spline(&large_x, None, Some(2.00001)).expect("near-linear smoothing spline");
-        assert!(fit_near.model.eval(1.5e6).is_finite());
-
-        // 3. AUD-04-40: df = 2.0 returns lambda = +Inf and renders "Infinity (linear limit)" without leaking f64::MAX into scalars.
-        let fit_lin = fit_smoothing_spline(&large_x, None, Some(2.0)).expect("df=2 smoothing spline");
+        assert!(fit_smoothing_spline(&large_x, None, Some(2.00001)).unwrap().model.eval(1.5e6).is_finite());
+        let fit_lin = fit_smoothing_spline(&large_x, None, Some(2.0)).unwrap();
         assert!(fit_lin.lambda.is_infinite() && fit_lin.lambda.is_sign_positive());
 
-        let mut xy = XyTable::new(SubcolumnMode::Single, 1, large_x.len()).expect("xy");
-        for (r, &(x, y)) in large_x.iter().enumerate() {
-            xy.set_x_cell(r, Cell::number(x)).expect("x");
-            xy.data_sets[0].cells[r][0] = Cell::number(y);
-        }
-        let sheet = DataSheet::new("ss-lin", "SS Lin", TableArchetype::Xy(xy)).expect("sheet");
-        let spec = SplineLowessSpec { method: SplineLowessMethod::SmoothingSpline, smoothing_df: Some(2.0), ..SplineLowessSpec::default() };
-        let analysis = AnalysisSpec::new("res-ss", "ss-lin", AnalysisKind::FitSplineLowess(spec.clone())).expect("analysis");
-        let res = execute_spline_lowess(&sheet, &analysis, &spec).expect("execute ss");
-        assert!(!res.scalars.iter().any(|s| s.key == "smoothing_lambda"), "non-finite linear-limit lambda must not leak into scalars");
-        let summary = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary).expect("summary");
-        let lam_row = summary.row_labels.iter().position(|l| l.contains("lambda")).expect("lambda row");
+        let ys: Vec<_> = large_x.iter().map(|&(_, y)| vec![Cell::number(y)]).collect();
+        let sheet = th::xy_sheet("ss-lin", SubcolumnMode::Single, &[0.0, 1e6, 2e6, 3e6, 4e6], &[ys]);
+        let res = run_spline(&sheet, &Spec { method: Method::SmoothingSpline, smoothing_df: Some(2.0), ..Spec::default() }).unwrap();
+        assert!(!res.scalars.iter().any(|s| s.key == "smoothing_lambda"));
+        let summary = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary).unwrap();
+        let lam_row = summary.row_labels.iter().position(|l| l.contains("lambda")).unwrap();
         assert_eq!(summary.rows[lam_row][0], ResultCell::Text(String::from("Infinity (linear limit)")));
     }
 }

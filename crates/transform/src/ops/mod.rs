@@ -412,60 +412,41 @@ fn column_title_at(arch: &TableArchetype, idx: usize) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use curvebook_doc::error::MAX_SHEET_ID_BYTES;
-    use curvebook_doc::{CellCoord, CellExclusionNote, ColumnDesignHint, ColumnTable, DataSheet, MAX_TITLE_BYTES, TableArchetype};
+    use curvebook_doc::{CellCoord, ColumnDesignHint, ColumnTable, DataSheet, MAX_TITLE_BYTES, TableArchetype};
 
     use super::{TransformContext, bounded_suffixed_str, remap_swapped_error_notes, remap_swapped_error_notes_batch};
+    use crate::test_helpers as th;
 
     #[test]
     fn aud04_38_batched_remap_swapped_error_notes_handles_large_tables() {
         let n = 10_000_usize;
-        let mut notes: Vec<CellExclusionNote> = (0..n)
-            .map(|r| CellExclusionNote {
-                coord: CellCoord::new(r, r % 2, if r % 3 == 0 { 1 } else { 2 }),
-                reason_tag: String::from("qc"),
-                note: String::from("note"),
-                timestamp_utc: String::from("2026-11-25T00:00:00Z"),
-            })
-            .collect();
+        let mut notes: Vec<_> = (0..n).map(|r| th::excl_note(r, r % 2, if r % 3 == 0 { 1 } else { 2 }, "qc", "note")).collect();
         let swapped: Vec<(usize, usize)> = (0..n).step_by(2).map(|r| (r, r % 2)).collect();
         remap_swapped_error_notes_batch(&mut notes, &swapped);
-        assert_eq!(notes.len(), n);
-        assert!(notes.windows(2).all(|w| w[0].coord <= w[1].coord));
+        assert!(notes.len() == n && notes.windows(2).all(|w| w[0].coord <= w[1].coord));
         for note in &notes {
             let orig_sub = if note.coord.row % 3 == 0 { 1 } else { 2 };
-            let expected_sub = if note.coord.row % 2 == 0 { 3 - orig_sub } else { orig_sub };
-            assert_eq!(note.coord.subcol, expected_sub);
+            assert_eq!(note.coord.subcol, if note.coord.row % 2 == 0 { 3 - orig_sub } else { orig_sub });
         }
-
-        // Single-column helper also uses O(N + M log M) HashSet lookup and flips subcol 1 <-> 2.
-        let mut single_notes = vec![CellExclusionNote {
-            coord: CellCoord::new(4, 0, 1),
-            reason_tag: String::from("qc"),
-            note: String::from("n"),
-            timestamp_utc: String::new(),
-        }];
-        remap_swapped_error_notes(&mut single_notes, &[4], 0);
-        assert_eq!(single_notes[0].coord, CellCoord::new(4, 0, 2));
+        let mut single = vec![th::excl_note(4, 0, 1, "qc", "n")];
+        remap_swapped_error_notes(&mut single, &[4], 0);
+        assert_eq!(single[0].coord, CellCoord::new(4, 0, 2));
     }
 
     #[test]
     fn aud04_45_derived_ids_bounds_auto_suffixes_preserving_utf8() {
-        let long_id = "s".repeat(MAX_SHEET_ID_BYTES);
-        let long_title = "µ".repeat(MAX_TITLE_BYTES / 2); // 2-byte UTF-8 chars filling MAX_TITLE_BYTES
+        let long_title = "µ".repeat(MAX_TITLE_BYTES / 2);
         assert_eq!(long_title.len(), MAX_TITLE_BYTES);
-        let sheet =
-            DataSheet::new(long_id, long_title, TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
-                .unwrap();
-        let ctx = TransformContext::default();
-        let (id, title) = ctx.derived_ids(&sheet, "normalize", "Normalized");
-        assert!(id.len() <= MAX_SHEET_ID_BYTES);
-        assert!(id.ends_with("-normalize"));
-        assert!(title.len() <= MAX_TITLE_BYTES);
-        assert!(title.ends_with(" (Normalized)"));
-
-        // Degenerate tiny max_bytes truncates suffix cleanly on char boundary.
+        let sheet = DataSheet::new(
+            "s".repeat(MAX_SHEET_ID_BYTES),
+            long_title,
+            TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()),
+        )
+        .unwrap();
+        let (id, title) = TransformContext::default().derived_ids(&sheet, "normalize", "Normalized");
+        assert!(id.len() <= MAX_SHEET_ID_BYTES && id.ends_with("-normalize"));
+        assert!(title.len() <= MAX_TITLE_BYTES && title.ends_with(" (Normalized)"));
         let tiny = bounded_suffixed_str("abc", "µµµ", 3);
-        assert!(tiny.len() <= 3);
-        assert_eq!(tiny, "µ");
+        assert!(tiny.len() <= 3 && tiny == "µ");
     }
 }

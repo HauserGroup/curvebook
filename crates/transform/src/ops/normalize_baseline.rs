@@ -859,227 +859,125 @@ fn baseline_spread_scale(b: f64, op: BaselineOperation) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{
-        BaselineOperation, Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MAX_TITLE_BYTES,
-        MultipleVariablesTable, NormalizeAnchor, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableRole,
-        VariableSource, XyTable,
+        BaselineOperation as Bo, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MAX_TITLE_BYTES,
+        MultipleVariablesTable, NormalizeAnchor as Na, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableRole,
+        VariableSource,
     };
 
-    use super::{BaselineKind, execute_normalize, execute_remove_baseline_kind};
+    use super::{BaselineKind as Bk, execute_normalize, execute_remove_baseline_kind};
     use crate::error::TransformError;
     use crate::formula::evaluate_calculated_variables;
-    use crate::ops::TransformContext;
+    use crate::ops::{TransformContext, TransformOutput};
+    use crate::test_helpers as th;
+
+    fn norm(s: &DataSheet, lo: Na, hi: Na, pct: bool, per_ds: bool) -> Result<TransformOutput, TransformError> {
+        execute_normalize(s, &lo, &hi, pct, per_ds, &TransformContext::default())
+    }
+
+    fn base(s: &DataSheet, kind: Bk, op: Bo) -> Result<TransformOutput, TransformError> {
+        execute_remove_baseline_kind(s, &kind, op, &TransformContext::default())
+    }
 
     #[test]
     fn aud04_08_normalize_mean_cv_row_normalizes_mean_when_cv_empty() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanCvN, 1, 3).unwrap();
-        for (r, row) in [
-            vec![Cell::number(10.0), Cell::number(5.0), Cell::number(3.0)],
-            vec![Cell::number(50.0), Cell::empty(), Cell::number(1.0)],
-            vec![Cell::number(90.0), Cell::number(10.0), Cell::number(3.0)],
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
-            xy.data_sets[0].cells[r] = row;
+        let rows = vec![th::nums(&[10.0, 5.0, 3.0]), vec![Cell::number(50.0), Cell::empty(), Cell::number(1.0)], th::nums(&[90.0, 10.0, 3.0])];
+        let sheet = th::xy_sheet("cv-empty", SubcolumnMode::MeanCvN, &[1.0, 2.0, 3.0], &[rows]);
+        let out_xy = th::into_xy(norm(&sheet, Na::ColumnMin, Na::ColumnMax, false, true).unwrap().data_sheet);
+        for (r, exp) in [(0, 0.0), (1, 0.5), (2, 1.0)] {
+            th::assert_close(th::num(&out_xy.data_sets[0].cells[r][0]), exp, 1e-12);
         }
-        let sheet = DataSheet::new("cv-empty", "CV Empty", TableArchetype::Xy(xy)).unwrap();
-        let out =
-            execute_normalize(&sheet, &NormalizeAnchor::ColumnMin, &NormalizeAnchor::ColumnMax, false, true, &TransformContext::default()).unwrap();
-        let TableArchetype::Xy(out_xy) = &out.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((out_xy.data_sets[0].cells[0][0].active_number().unwrap() - 0.0).abs() < 1e-12);
-        assert!((out_xy.data_sets[0].cells[1][0].active_number().unwrap() - 0.5).abs() < 1e-12);
         assert_eq!(out_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
-        assert!((out_xy.data_sets[0].cells[2][0].active_number().unwrap() - 1.0).abs() < 1e-12);
     }
 
     #[test]
     fn aud04_09_normalize_and_baseline_reject_survival_and_negative_parts_of_whole() {
         let mut srv = SurvivalTable::new(1, 2).unwrap();
-        srv.times = vec![Cell::number(5.0), Cell::number(10.0)];
-        srv.cohorts[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)]];
-        let srv_sheet = DataSheet::new("srv", "Survival", TableArchetype::Survival(srv)).unwrap();
-        let ctx = TransformContext::default();
-
+        (srv.times, srv.cohorts[0].cells) = (th::nums(&[5.0, 10.0]), vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)]]);
+        let srv_s = DataSheet::new("srv", "Survival", TableArchetype::Survival(srv)).unwrap();
         assert!(matches!(
-            execute_normalize(&srv_sheet, &NormalizeAnchor::ColumnMin, &NormalizeAnchor::ColumnMax, false, true, &ctx),
+            norm(&srv_s, Na::ColumnMin, Na::ColumnMax, false, true),
             Err(TransformError::IncompatibleTable { operation: "Normalize", kind: TableKind::Survival })
         ));
         assert!(matches!(
-            execute_remove_baseline_kind(&srv_sheet, &BaselineKind::Constant(1.0), BaselineOperation::Difference, &ctx),
+            base(&srv_s, Bk::Constant(1.0), Bo::Difference),
             Err(TransformError::IncompatibleTable { operation: "RemoveBaseline", kind: TableKind::Survival })
         ));
 
         let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
         pow.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(30.0)]];
-        let pow_sheet = DataSheet::new("pow", "Slices", TableArchetype::PartsOfWhole(pow)).unwrap();
-
+        let pow_s = DataSheet::new("pow", "Slices", TableArchetype::PartsOfWhole(pow)).unwrap();
         assert!(matches!(
-            execute_normalize(&pow_sheet, &NormalizeAnchor::FixedValue(20.0), &NormalizeAnchor::FixedValue(30.0), true, true, &ctx),
+            norm(&pow_s, Na::FixedValue(20.0), Na::FixedValue(30.0), true, true),
             Err(TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::PartsOfWhole, row: 0, .. }))
         ));
         assert!(matches!(
-            execute_remove_baseline_kind(&pow_sheet, &BaselineKind::Constant(20.0), BaselineOperation::Difference, &ctx),
+            base(&pow_s, Bk::Constant(20.0), Bo::Difference),
             Err(TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::PartsOfWhole, row: 0, .. }))
         ));
     }
 
     #[test]
     fn aud04_10_normalize_and_baseline_mean_cv_zero_input_mean_blanks_cv_with_warning() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanCvN, 1, 1).unwrap();
-        xy.set_x_cell(0, Cell::number(1.0)).unwrap();
-        xy.data_sets[0].cells[0] = vec![Cell::number(0.0), Cell::number(25.0), Cell::number(5.0)];
-        let sheet = DataSheet::new("cv-z", "CV Zero", TableArchetype::Xy(xy)).unwrap();
-        let ctx = TransformContext::default();
-
-        let norm = execute_normalize(&sheet, &NormalizeAnchor::FixedValue(-10.0), &NormalizeAnchor::FixedValue(10.0), true, true, &ctx).unwrap();
-        let TableArchetype::Xy(n_xy) = &norm.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((n_xy.data_sets[0].cells[0][0].active_number().unwrap() - 50.0).abs() < 1e-12);
-        assert_eq!(n_xy.data_sets[0].cells[0][1].value, CellValue::Empty);
-        assert!(norm.warnings.iter().any(|w| w.contains("input mean is zero")), "{:?}", norm.warnings);
-
-        let base = execute_remove_baseline_kind(&sheet, &BaselineKind::Constant(-5.0), BaselineOperation::Difference, &ctx).unwrap();
-        let TableArchetype::Xy(b_xy) = &base.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((b_xy.data_sets[0].cells[0][0].active_number().unwrap() - 5.0).abs() < 1e-12);
-        assert_eq!(b_xy.data_sets[0].cells[0][1].value, CellValue::Empty);
-        assert!(base.warnings.iter().any(|w| w.contains("input mean is zero")), "{:?}", base.warnings);
+        let sheet = th::xy_sheet("cv-z", SubcolumnMode::MeanCvN, &[1.0], &[vec![th::nums(&[0.0, 25.0, 5.0])]]);
+        for (out, exp_mean) in [
+            (norm(&sheet, Na::FixedValue(-10.0), Na::FixedValue(10.0), true, true).unwrap(), 50.0),
+            (base(&sheet, Bk::Constant(-5.0), Bo::Difference).unwrap(), 5.0),
+        ] {
+            let row0 = &th::as_xy(&out.data_sheet).data_sets[0].cells[0];
+            th::assert_close(th::num(&row0[0]), exp_mean, 1e-12);
+            assert_eq!(row0[1].value, CellValue::Empty);
+            assert!(out.warnings.iter().any(|w| w.contains("input mean is zero")), "{:?}", out.warnings);
+        }
     }
 
     #[test]
     fn aud04_14_normalize_and_baseline_snapshot_all_calculated_mv_variables() {
         let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
-        mv.variables[0].title = String::from("X");
-        mv.variables[1].title = String::from("Double");
-        mv.variables[0].cells = vec![Cell::number(10.0), Cell::number(20.0)];
+        (mv.variables[0].title, mv.variables[1].title) = (String::from("X"), String::from("Double"));
+        mv.variables[0].cells = th::nums(&[10.0, 20.0]);
         mv.variables[1].set_calculated_formula("=X * 2");
         evaluate_calculated_variables(&mut mv, None).unwrap();
         let sheet = DataSheet::new("mv-nb", "MV NB", TableArchetype::MultipleVariables(mv)).unwrap();
         let ctx = TransformContext { selected_data_sets: vec![0], ..TransformContext::default() };
-
-        let norm = execute_normalize(&sheet, &NormalizeAnchor::ColumnMin, &NormalizeAnchor::ColumnMax, true, true, &ctx).unwrap();
-        let TableArchetype::MultipleVariables(n_mv) = &norm.data_sheet.archetype else {
-            panic!("expected MV");
-        };
-        assert_eq!(n_mv.variables[1].source, VariableSource::Entered);
-        assert_eq!(n_mv.variables[1].role, VariableRole::Continuous);
-
-        let base = execute_remove_baseline_kind(&sheet, &BaselineKind::Constant(5.0), BaselineOperation::Difference, &ctx).unwrap();
-        let TableArchetype::MultipleVariables(b_mv) = &base.data_sheet.archetype else {
-            panic!("expected MV");
-        };
-        assert_eq!(b_mv.variables[1].source, VariableSource::Entered);
-        assert_eq!(b_mv.variables[1].role, VariableRole::Continuous);
+        for out in [
+            execute_normalize(&sheet, &Na::ColumnMin, &Na::ColumnMax, true, true, &ctx).unwrap(),
+            execute_remove_baseline_kind(&sheet, &Bk::Constant(5.0), Bo::Difference, &ctx).unwrap(),
+        ] {
+            let v1 = &th::as_mv(&out.data_sheet).variables[1];
+            assert_eq!((v1.source.clone(), v1.role), (VariableSource::Entered, VariableRole::Continuous));
+        }
     }
 
     #[test]
     fn aud04_31_linear_baseline_overflow_safe_and_non_finite_baseline_guards() {
-        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3).unwrap();
-        col.data_sets[0].cells = vec![vec![Cell::number(-1e308)], vec![Cell::number(5e307)], vec![Cell::number(1e308)]];
-        let sheet = DataSheet::new("lin-big", "Big", TableArchetype::Column(col)).unwrap();
-        let out = execute_remove_baseline_kind(
-            &sheet,
-            &BaselineKind::FirstAndLastLinear { first_k: 1, last_k: 1 },
-            BaselineOperation::Ratio,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        let TableArchetype::Column(out_col) = &out.data_sheet.archetype else {
-            panic!("expected Column");
-        };
-        // Row 0: -1e308 / -1e308 = 1.0; Row 1: baseline = 0 -> blanked; Row 2: 1e308 / 1e308 = 1.0 (NOT 0.0!).
-        assert!((out_col.data_sets[0].cells[0][0].active_number().unwrap() - 1.0).abs() < 1e-12);
-        assert_eq!(out_col.data_sets[0].cells[1][0].value, CellValue::Empty);
-        assert!((out_col.data_sets[0].cells[2][0].active_number().unwrap() - 1.0).abs() < 1e-12);
+        let kind = Bk::FirstAndLastLinear { first_k: 1, last_k: 1 };
+        let out = th::into_col(base(&th::col_sheet("lin-big", &[th::nums(&[-1e308, 5e307, 1e308])]), kind.clone(), Bo::Ratio).unwrap().data_sheet);
+        th::assert_close(th::num(&out.data_sets[0].cells[0][0]), 1.0, 1e-12);
+        assert_eq!(out.data_sets[0].cells[1][0].value, CellValue::Empty);
+        th::assert_close(th::num(&out.data_sets[0].cells[2][0]), 1.0, 1e-12);
 
-        // Single-row large value [1e308] uses 0.5*y_start + 0.5*y_end without overflowing to Inf.
-        let mut one = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        one.data_sets[0].cells = vec![vec![Cell::number(1e308)]];
-        let one_sheet = DataSheet::new("lin-one", "One", TableArchetype::Column(one)).unwrap();
-        let one_out = execute_remove_baseline_kind(
-            &one_sheet,
-            &BaselineKind::FirstAndLastLinear { first_k: 1, last_k: 1 },
-            BaselineOperation::Ratio,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        let TableArchetype::Column(one_col) = &one_out.data_sheet.archetype else {
-            panic!("expected Column");
-        };
-        assert!((one_col.data_sets[0].cells[0][0].active_number().unwrap() - 1.0).abs() < 1e-12);
+        let one = th::into_col(base(&th::col_sheet("lin-one", &[th::nums(&[1e308])]), kind, Bo::Ratio).unwrap().data_sheet);
+        th::assert_close(th::num(&one.data_sets[0].cells[0][0]), 1.0, 1e-12);
     }
 
     #[test]
     fn aud04_36_normalize_first_and_last_row_anchors_scan_non_empty_rows() {
-        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 6).unwrap();
-        // Col 0: blank row 0, active rows 1..=3 (10, 20, 30), blank rows 4..=5.
-        col.data_sets[0].cells = vec![
-            vec![Cell::empty()],
-            vec![Cell::number(10.0)],
-            vec![Cell::number(20.0)],
-            vec![Cell::number(30.0)],
-            vec![Cell::empty()],
-            vec![Cell::empty()],
-        ];
-        // Col 1: excluded row 0, active rows 1..=2 (100, 200), blank rows 3..=5.
-        col.data_sets[1].cells = vec![
-            vec![Cell::excluded_number(999.0)],
-            vec![Cell::number(100.0)],
-            vec![Cell::number(200.0)],
-            vec![Cell::empty()],
-            vec![Cell::empty()],
-            vec![Cell::empty()],
-        ];
-        let sheet = DataSheet::new("first-last", "FirstLast", TableArchetype::Column(col)).unwrap();
-        let out = execute_normalize(&sheet, &NormalizeAnchor::FirstRow, &NormalizeAnchor::LastRow, true, true, &TransformContext::default()).unwrap();
-        let TableArchetype::Column(out_col) = &out.data_sheet.archetype else {
-            panic!("expected Column");
-        };
-        assert!((out_col.data_sets[0].cells[1][0].active_number().unwrap() - 0.0).abs() < 1e-12);
-        assert!((out_col.data_sets[0].cells[2][0].active_number().unwrap() - 50.0).abs() < 1e-12);
-        assert!((out_col.data_sets[0].cells[3][0].active_number().unwrap() - 100.0).abs() < 1e-12);
-        assert!((out_col.data_sets[1].cells[1][0].active_number().unwrap() - 0.0).abs() < 1e-12);
-        assert!((out_col.data_sets[1].cells[2][0].active_number().unwrap() - 100.0).abs() < 1e-12);
+        let c0 = vec![Cell::empty(), Cell::number(10.0), Cell::number(20.0), Cell::number(30.0), Cell::empty(), Cell::empty()];
+        let c1 = vec![Cell::excluded_number(999.0), Cell::number(100.0), Cell::number(200.0), Cell::empty(), Cell::empty(), Cell::empty()];
+        let out_col = th::into_col(norm(&th::col_sheet("first-last", &[c0, c1]), Na::FirstRow, Na::LastRow, true, true).unwrap().data_sheet);
+        for (c, r, exp) in [(0, 1, 0.0), (0, 2, 50.0), (0, 3, 100.0), (1, 1, 0.0), (1, 2, 100.0)] {
+            th::assert_close(th::num(&out_col.data_sets[c].cells[r][0]), exp, 1e-12);
+        }
     }
 
     #[test]
     fn aud04_38_normalize_and_baseline_batched_swapped_notes() {
-        let mut xy = XyTable::new(SubcolumnMode::MeanLowHigh, 2, 2).unwrap();
-        for r in 0..2 {
-            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
-            for c in 0..2 {
-                xy.data_sets[c].cells[r] = vec![Cell::number(10.0), Cell::excluded_number(1.0), Cell::number(2.0)];
-            }
-        }
-        let mut sheet = DataSheet::new("nb-swap", "Swap", TableArchetype::Xy(xy)).unwrap();
-        sheet.exclusion_notes.push(CellExclusionNote {
-            coord: CellCoord::new(0, 0, 1),
-            reason_tag: String::from("qc"),
-            note: String::from("c0"),
-            timestamp_utc: String::new(),
-        });
-        sheet.exclusion_notes.push(CellExclusionNote {
-            coord: CellCoord::new(1, 1, 1),
-            reason_tag: String::from("qc"),
-            note: String::from("c1"),
-            timestamp_utc: String::new(),
-        });
-        let norm = execute_normalize(
-            &sheet,
-            &NormalizeAnchor::FixedValue(20.0),
-            &NormalizeAnchor::FixedValue(0.0),
-            true,
-            false,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        assert_eq!(norm.data_sheet.exclusion_notes[0].coord, CellCoord::new(0, 0, 2));
-        assert_eq!(norm.data_sheet.exclusion_notes[1].coord, CellCoord::new(1, 1, 2));
+        let row = vec![Cell::number(10.0), Cell::excluded_number(1.0), Cell::number(2.0)];
+        let mut sheet = th::xy_sheet("nb-swap", SubcolumnMode::MeanLowHigh, &[1.0, 2.0], &[vec![row.clone(); 2], vec![row; 2]]);
+        sheet.exclusion_notes.extend([th::excl_note(0, 0, 1, "qc", "c0"), th::excl_note(1, 1, 1, "qc", "c1")]);
+        let out = norm(&sheet, Na::FixedValue(20.0), Na::FixedValue(0.0), true, false).unwrap();
+        let coords: Vec<_> = out.data_sheet.exclusion_notes.iter().map(|n| n.coord).collect();
+        assert_eq!(coords, vec![CellCoord::new(0, 0, 2), CellCoord::new(1, 1, 2)]);
     }
 
     #[test]
@@ -1087,47 +985,21 @@ mod tests {
         let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
         col.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)]];
         let sheet = DataSheet::new("nb-long", "T".repeat(MAX_TITLE_BYTES), TableArchetype::Column(col)).unwrap();
-        let norm =
-            execute_normalize(&sheet, &NormalizeAnchor::ColumnMin, &NormalizeAnchor::ColumnMax, true, true, &TransformContext::default()).unwrap();
-        assert!(norm.data_sheet.validate().is_ok());
-        assert!(norm.data_sheet.title.len() <= MAX_TITLE_BYTES);
-
+        let out = norm(&sheet, Na::ColumnMin, Na::ColumnMax, true, true).unwrap();
+        assert!(out.data_sheet.validate().is_ok() && out.data_sheet.title.len() <= MAX_TITLE_BYTES);
         let bad_ctx = TransformContext { output_id: Some(String::from("bad\0id")), ..TransformContext::default() };
         assert!(matches!(
-            execute_remove_baseline_kind(&sheet, &BaselineKind::Constant(1.0), BaselineOperation::Difference, &bad_ctx),
+            execute_remove_baseline_kind(&sheet, &Bk::Constant(1.0), Bo::Difference, &bad_ctx),
             Err(TransformError::Doc(DocError::InvalidIdentifier { .. }))
         ));
     }
 
     #[test]
     fn aud04_48_baseline_percent_change_and_cv_avoid_premature_overflow() {
-        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        col.data_sets[0].cells = vec![vec![Cell::number(1e308)]];
-        let sheet = DataSheet::new("pct-big", "PctBig", TableArchetype::Column(col)).unwrap();
-        let out =
-            execute_remove_baseline_kind(&sheet, &BaselineKind::Constant(1e307), BaselineOperation::PercentChange, &TransformContext::default())
-                .unwrap();
-        let TableArchetype::Column(out_col) = &out.data_sheet.archetype else {
-            panic!("expected Column");
-        };
-        assert!((out_col.data_sets[0].cells[0][0].active_number().unwrap() - 900.0).abs() < 1e-10);
-
-        let mut cv = XyTable::new(SubcolumnMode::MeanCvN, 1, 1).unwrap();
-        cv.set_x_cell(0, Cell::number(1.0)).unwrap();
-        cv.data_sets[0].cells[0] = vec![Cell::number(1e308), Cell::number(5.0), Cell::number(4.0)];
-        let cv_sheet = DataSheet::new("cv-norm-big", "CVNormBig", TableArchetype::Xy(cv)).unwrap();
-        let norm = execute_normalize(
-            &cv_sheet,
-            &NormalizeAnchor::FixedValue(0.0),
-            &NormalizeAnchor::FixedValue(1e308),
-            false,
-            true,
-            &TransformContext::default(),
-        )
-        .unwrap();
-        let TableArchetype::Xy(norm_xy) = &norm.data_sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((norm_xy.data_sets[0].cells[0][1].active_number().unwrap() - 5.0).abs() < 1e-12);
+        let out = base(&th::col_sheet("pct-big", &[th::nums(&[1e308])]), Bk::Constant(1e307), Bo::PercentChange).unwrap();
+        th::assert_close(th::num(&th::as_col(&out.data_sheet).data_sets[0].cells[0][0]), 900.0, 1e-10);
+        let cv_sheet = th::xy_sheet("cv-norm-big", SubcolumnMode::MeanCvN, &[1.0], &[vec![th::nums(&[1e308, 5.0, 4.0])]]);
+        let out_cv = norm(&cv_sheet, Na::FixedValue(0.0), Na::FixedValue(1e308), false, true).unwrap();
+        th::assert_close(th::num(&th::as_xy(&out_cv.data_sheet).data_sets[0].cells[0][1]), 5.0, 1e-12);
     }
 }

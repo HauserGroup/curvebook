@@ -2465,63 +2465,44 @@ fn validate_title_slice(titles: &[String]) -> Result<(), TransformError> {
 mod audit_w1_convert_tests {
     use curvebook_doc::{
         Cell, CellCoord, DataSheet, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion,
-        MultipleVariablesTable, SequenceProgression, SheetCellRange, SubcolumnMode, TableArchetype, ThreeWayColumnGrouping, VariableRole,
-        XColumnMode, XyTable,
+        MAX_SUBCOLUMNS, SequenceProgression, SheetCellRange, SubcolumnMode, TableArchetype, ThreeWayColumnGrouping, VariableRole, XColumnMode,
+        XyTable,
     };
 
-    use super::{TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
+    use super::{ConversionPreview, TargetArchetypeKind as K, convert_datasheet_archetype as conv, preview_datasheet_conversion as prev};
     use crate::error::TransformError;
+    use crate::test_helpers as th;
+
+    fn assert_lossy(p: &ConversionPreview, min_dropped: usize) {
+        assert!(p.lossy && p.dropped_cells >= min_dropped && !p.warnings.is_empty(), "{p:?}");
+    }
 
     #[test]
     fn aud_04_11_generated_sequence_x_exclusions_preserved_or_flagged_lossy() {
-        let mut xy = XyTable::new_with_x_mode(
-            XColumnMode::GeneratedSequence { start: 0.0, step: 10.0, progression: SequenceProgression::Arithmetic },
-            SubcolumnMode::Single,
-            1,
-            3,
-        )
-        .unwrap();
+        let mut xy = th::xy_gen_seq(0.0, 10.0, SequenceProgression::Arithmetic, SubcolumnMode::Single, 1, 3);
         xy.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
         let mut sheet = DataSheet::new("xy-gen-excl", "GenSeq", TableArchetype::Xy(xy)).unwrap();
         sheet.set_x_or_time_excluded(1, 0, true).unwrap();
 
-        // Xy -> Column preserves excluded=true on row 1 X cell.
-        let (col_sheet, col_prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Column, false).unwrap();
-        assert!(!col_prev.lossy);
-        assert!(col_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().excluded);
-
-        // Xy -> MultipleVariables preserves excluded=true on row 1 X cell.
-        let (mv_sheet, mv_prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::MultipleVariables, false).unwrap();
-        assert!(!mv_prev.lossy);
-        assert!(mv_sheet.cell(CellCoord::new(1, 0, 0)).unwrap().excluded);
-
-        // Xy -> Grouped and Xy -> Contingency cannot retain excluded X flags: must flag lossy & refuse allow_lossy=false.
-        for target in [TargetArchetypeKind::Grouped, TargetArchetypeKind::Contingency] {
-            let prev = preview_datasheet_conversion(&sheet, target).unwrap();
-            assert!(prev.lossy && prev.dropped_cells >= 1 && !prev.warnings.is_empty(), "{target:?}: {prev:?}");
-            assert!(matches!(convert_datasheet_archetype(&sheet, target, false), Err(TransformError::InvalidSpec { .. })));
+        for k in [K::Column, K::MultipleVariables] {
+            let (out, p) = conv(&sheet, k, false).unwrap();
+            assert!(!p.lossy && out.cell(CellCoord::new(1, 0, 0)).unwrap().excluded, "{k:?}");
+        }
+        for k in [K::Grouped, K::Contingency] {
+            assert_lossy(&prev(&sheet, k).unwrap(), 1);
+            assert!(matches!(conv(&sheet, k, false), Err(TransformError::InvalidSpec { .. })));
         }
     }
 
     #[test]
     fn aud_04_29_crosstab_rejects_above_2_to_53_and_sum_overflow() {
-        let mut mv = MultipleVariablesTable::new(3, 2).unwrap();
-        mv.variables[0].title = String::from("RowFac");
-        mv.variables[0].lock_role(VariableRole::Categorical);
-        mv.variables[0].cells = vec![Cell::text("A"), Cell::text("A")];
-        mv.variables[1].title = String::from("ColFac");
-        mv.variables[1].lock_role(VariableRole::Categorical);
-        mv.variables[1].cells = vec![Cell::text("X"), Cell::text("X")];
-        mv.variables[2].title = String::from("Count");
-        mv.variables[2].cells = vec![Cell::number(9_007_199_254_740_992.0), Cell::number(1.0)];
-        let s_sum = DataSheet::new("mv-sum-ovf", "SumOvf", TableArchetype::MultipleVariables(mv.clone())).unwrap();
-        assert!(matches!(convert_datasheet_archetype(&s_sum, TargetArchetypeKind::Contingency, true), Err(TransformError::InvalidInput { .. })));
-
-        // 2^64 must also be rejected cleanly as invalid count cell value.
-        mv.variables[2].cells = vec![Cell::number(18_446_744_073_709_551_616.0), Cell::number(0.0)];
-        let s_big = DataSheet::new("mv-big-cnt", "BigCnt", TableArchetype::MultipleVariables(mv)).unwrap();
+        let cat = Some(VariableRole::Categorical);
+        let mk = |cnt: &[f64]| {
+            th::mv_sheet("mv", &[("RowFac", cat, th::texts(&["A", "A"])), ("ColFac", cat, th::texts(&["X", "X"])), ("Count", None, th::nums(cnt))])
+        };
+        assert!(matches!(conv(&mk(&[9_007_199_254_740_992.0, 1.0]), K::Contingency, true), Err(TransformError::InvalidInput { .. })));
         assert!(matches!(
-            convert_datasheet_archetype(&s_big, TargetArchetypeKind::Contingency, true),
+            conv(&mk(&[18_446_744_073_709_551_616.0, 0.0]), K::Contingency, true),
             Err(TransformError::Doc(DocError::InvalidCellValue { .. }))
         ));
     }
@@ -2532,217 +2513,133 @@ mod audit_w1_convert_tests {
             XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
         xy.data_sets[0].title = String::new();
         xy.x_cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)]];
-        xy.data_sets[0].cells = vec![vec![Cell::number(10.0), Cell::number(11.0)], vec![Cell::number(20.0), Cell::number(21.0)]];
+        xy.data_sets[0].cells = vec![th::nums(&[10.0, 11.0]), th::nums(&[20.0, 21.0])];
         let s = DataSheet::new("xy-blank", "BlankTitle", TableArchetype::Xy(xy)).unwrap();
-        let (mv_s, prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::MultipleVariables, false).unwrap();
-        assert!(!prev.lossy);
-        let TableArchetype::MultipleVariables(mv) = &mv_s.archetype else { panic!("expected MV") };
+        let (mv_s, p) = conv(&s, K::MultipleVariables, false).unwrap();
+        assert!(!p.lossy);
+        let mv = th::as_mv(&mv_s);
         assert_eq!((mv.variables[1].role, mv.variables[1].role_inferred), (VariableRole::Categorical, false));
         assert!(mv.variables[1].cells.iter().all(|c| c.active_text() == Some("A")));
 
-        let (xy_rt, rt_prev) = convert_datasheet_archetype(&mv_s, TargetArchetypeKind::Xy, false).unwrap();
-        assert!(!rt_prev.lossy);
-        let TableArchetype::Xy(rt) = &xy_rt.archetype else { panic!("expected Xy") };
-        assert_eq!(rt.active_xy_pairs(0), vec![(1.0, 10.0), (1.0, 11.0), (2.0, 20.0), (2.0, 21.0)]);
+        let (xy_rt, rt_p) = conv(&mv_s, K::Xy, false).unwrap();
+        assert!(!rt_p.lossy);
+        assert_eq!(th::as_xy(&xy_rt).active_xy_pairs(0), vec![(1.0, 10.0), (1.0, 11.0), (2.0, 20.0), (2.0, 21.0)]);
     }
 
     #[test]
     fn aud_04_34_grouped_three_way_and_spacing_loss_flagged_lossy() {
         let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 4, 2).unwrap();
-        grp.row_titles = vec![String::from("Low"), String::from("High")];
-        grp.row_numeric_spacing = Some(vec![Some(1.0), Some(10.0)]);
+        (grp.row_titles, grp.row_numeric_spacing) = (vec![String::from("Low"), String::from("High")], Some(vec![Some(1.0), Some(10.0)]));
         grp.three_way_grouping = Some(ThreeWayColumnGrouping {
             factor_1_name: String::from("Drug"),
             factor_1_levels: [String::from("Vehicle"), String::from("Active")],
             factor_2_name: String::from("Sex"),
             factor_2_levels: [String::from("F"), String::from("M")],
         });
-        for c in 0..4 {
-            grp.data_sets[c].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(6.0)]];
+        for ds in &mut grp.data_sets {
+            ds.cells = vec![vec![Cell::number(5.0)], vec![Cell::number(6.0)]];
         }
         let s = DataSheet::new("grp-3way", "3Way", TableArchetype::Grouped(grp)).unwrap();
-        for target in [TargetArchetypeKind::Column, TargetArchetypeKind::Xy, TargetArchetypeKind::MultipleVariables, TargetArchetypeKind::Contingency]
-        {
-            let prev = preview_datasheet_conversion(&s, target).unwrap();
-            assert!(prev.lossy && !prev.warnings.is_empty(), "{target:?}: {prev:?}");
-            assert!(matches!(convert_datasheet_archetype(&s, target, false), Err(TransformError::InvalidSpec { .. })));
+        for k in [K::Column, K::Xy, K::MultipleVariables, K::Contingency] {
+            assert_lossy(&prev(&s, k).unwrap(), 0);
+            assert!(matches!(conv(&s, k, false), Err(TransformError::InvalidSpec { .. })));
         }
     }
 
     #[test]
     fn aud_04_35_and_44_mv_xy_text_y_consistency_warnings_and_duplicate_rep_ordering() {
-        // AUD-04-35 part 1: direct MV -> XY preserves text in Y (matching Column/Grouped/pivoted -> XY).
-        let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
-        mv.variables[0].title = String::from("Dose");
-        mv.variables[0].cells = vec![Cell::number(1.0), Cell::number(2.0)];
-        mv.variables[1].title = String::from("Response");
-        mv.variables[1].lock_role(VariableRole::Continuous);
-        mv.variables[1].cells = vec![Cell::number(10.0), Cell::text("BLQ")];
-        let s = DataSheet::new("mv-blq", "BLQ", TableArchetype::MultipleVariables(mv)).unwrap();
-        let (xy_s, prev) = convert_datasheet_archetype(&s, TargetArchetypeKind::Xy, false).unwrap();
-        assert!(!prev.lossy);
-        let TableArchetype::Xy(xy) = &xy_s.archetype else { panic!("expected Xy") };
-        assert_eq!(xy.data_sets[0].cells[1][0].active_text(), Some("BLQ"));
+        let y = vec![Cell::number(10.0), Cell::text("BLQ")];
+        let s = th::mv_sheet("mv-blq", &[("Dose", None, th::nums(&[1.0, 2.0])), ("Response", Some(VariableRole::Continuous), y)]);
+        let (xy_s, p) = conv(&s, K::Xy, false).unwrap();
+        assert!(!p.lossy && th::as_xy(&xy_s).data_sets[0].cells[1][0].active_text() == Some("BLQ"));
 
-        // AUD-04-35 part 3: GeneratedSequence -> Contingency marks lossy=true.
-        let mut xy_gen = XyTable::new_with_x_mode(
-            XColumnMode::GeneratedSequence { start: 1.0, step: 2.0, progression: SequenceProgression::Arithmetic },
-            SubcolumnMode::Single,
-            1,
-            2,
-        )
-        .unwrap();
+        let mut xy_gen = th::xy_gen_seq(1.0, 2.0, SequenceProgression::Arithmetic, SubcolumnMode::Single, 1, 2);
         xy_gen.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(9.0)]];
-        let s_gen = DataSheet::new("xy-gen-cnt", "GenCnt", TableArchetype::Xy(xy_gen)).unwrap();
-        let gen_prev = preview_datasheet_conversion(&s_gen, TargetArchetypeKind::Contingency).unwrap();
-        assert!(gen_prev.lossy && !gen_prev.warnings.is_empty());
+        assert_lossy(&prev(&DataSheet::new("xy-gen-cnt", "GenCnt", TableArchetype::Xy(xy_gen)).unwrap(), K::Contingency).unwrap(), 0);
 
-        // AUD-04-44 part 2: duplicate Replicate=2 rows place into Y2 then Y3 (never reordering into Y1 ahead of Y2).
-        let mut mv_dup = MultipleVariablesTable::new(4, 2).unwrap();
-        mv_dup.variables[0].title = String::from("Dose");
-        mv_dup.variables[0].lock_role(VariableRole::Categorical);
-        mv_dup.variables[0].cells = vec![Cell::text("1"), Cell::text("1")];
-        mv_dup.variables[1].title = String::from("Arm");
-        mv_dup.variables[1].lock_role(VariableRole::Categorical);
-        mv_dup.variables[1].cells = vec![Cell::text("A"), Cell::text("A")];
-        mv_dup.variables[2].title = String::from("Replicate");
-        mv_dup.variables[2].cells = vec![Cell::number(2.0), Cell::number(2.0)];
-        mv_dup.variables[3].title = String::from("Value");
-        mv_dup.variables[3].cells = vec![Cell::number(100.0), Cell::number(200.0)];
-        let s_dup = DataSheet::new("mv-dup-rep", "DupRep", TableArchetype::MultipleVariables(mv_dup)).unwrap();
-        let (grp_dup, dup_prev) = convert_datasheet_archetype(&s_dup, TargetArchetypeKind::Grouped, false).unwrap();
-        let TableArchetype::Grouped(g) = &grp_dup.archetype else { panic!("expected Grouped") };
-        assert!(g.data_sets[0].cells[0][0].is_empty(), "Y1 must remain empty");
-        assert_eq!(g.data_sets[0].cells[0][1].active_number(), Some(100.0));
-        assert_eq!(g.data_sets[0].cells[0][2].active_number(), Some(200.0));
-        assert!(dup_prev.warnings.iter().any(|w| w.contains("collision")));
+        let cat = Some(VariableRole::Categorical);
+        let cols = [
+            ("Dose", cat, th::texts(&["1", "1"])),
+            ("Arm", cat, th::texts(&["A", "A"])),
+            ("Replicate", None, th::nums(&[2.0, 2.0])),
+            ("Value", None, th::nums(&[100.0, 200.0])),
+        ];
+        let mut s_dup = th::mv_sheet("mv-dup-rep", &cols);
+        let (grp_dup, dup_p) = conv(&s_dup, K::Grouped, false).unwrap();
+        let row0 = &th::as_grp(&grp_dup).data_sets[0].cells[0];
+        assert!(row0[0].is_empty() && row0[1].active_number() == Some(100.0) && row0[2].active_number() == Some(200.0));
+        assert!(dup_p.warnings.iter().any(|w| w.contains("collision")));
 
-        // AUD-04-44 part 3: linked_regions emit an informational warning without forcing lossy.
-        let mut s_linked = s_dup;
-        s_linked.linked_regions.push(LinkedDataRegion {
+        s_dup.linked_regions.push(LinkedDataRegion {
             id: String::from("l1"),
             spec: ImportLinkSpec { source: LinkSource::Clipboard, filter: ImportFilterSpec::default(), placement: ImportPlacementSpec::default() },
             target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
             provenance_summary: String::from("test"),
         });
-        let lnk_prev = preview_datasheet_conversion(&s_linked, TargetArchetypeKind::Grouped).unwrap();
-        assert!(!lnk_prev.lossy);
-        assert!(lnk_prev.warnings.iter().any(|w| w.contains("linked data region")));
+        let lnk_p = prev(&s_dup, K::Grouped).unwrap();
+        assert!(!lnk_p.lossy && lnk_p.warnings.iter().any(|w| w.contains("linked data region")));
     }
 
     #[test]
     fn aud_04_22_grouped_and_xy_to_mv_reject_over_max_rows_before_allocating_tuples() {
-        // 500 rows x 10 cols x 250 reps = 1,250,000 output rows > MAX_ROWS (1,000,000) while valid input table.
         let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(250), 10, 500).unwrap();
-        for ds in &mut grp.data_sets {
-            for r in 0..500 {
-                ds.cells[r][0] = Cell::number(1.0);
-            }
-        }
-        let s_grp = DataSheet::new("grp-big-mv", "BigGrp", TableArchetype::Grouped(grp)).unwrap();
-        assert!(matches!(
-            preview_datasheet_conversion(&s_grp, TargetArchetypeKind::MultipleVariables),
-            Err(TransformError::Doc(DocError::TooManyRows { .. }))
-        ));
-
         let mut xy =
             XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::RawReplicates(250), 10, 500)
                 .unwrap();
-        for ds in &mut xy.data_sets {
+        for ds in grp.data_sets.iter_mut().chain(xy.data_sets.iter_mut()) {
             for r in 0..500 {
                 ds.cells[r][0] = Cell::number(1.0);
             }
         }
-        let s_xy = DataSheet::new("xy-big-mv", "BigXy", TableArchetype::Xy(xy)).unwrap();
-        assert!(matches!(
-            preview_datasheet_conversion(&s_xy, TargetArchetypeKind::MultipleVariables),
-            Err(TransformError::Doc(DocError::TooManyRows { .. }))
-        ));
+        for arch in [TableArchetype::Grouped(grp), TableArchetype::Xy(xy)] {
+            let s = DataSheet::new("big-mv", "Big", arch).unwrap();
+            assert!(matches!(prev(&s, K::MultipleVariables), Err(TransformError::Doc(DocError::TooManyRows { .. }))));
+        }
     }
 
     #[test]
     fn aud_04_35_all_drop_paths_emit_non_empty_warnings() {
-        // Unstack MV -> Column with missing group token drops cell and emits warning.
-        let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
-        mv.variables[0].title = String::from("Group");
-        mv.variables[0].lock_role(VariableRole::Categorical);
-        mv.variables[0].cells = vec![Cell::text("Ctrl"), Cell::empty()];
-        mv.variables[1].title = String::from("Val");
-        mv.variables[1].cells = vec![Cell::number(1.0), Cell::number(2.0)];
-        let s = DataSheet::new("mv-drop-warn", "DropWarn", TableArchetype::MultipleVariables(mv)).unwrap();
-        let prev = preview_datasheet_conversion(&s, TargetArchetypeKind::Column).unwrap();
-        assert!(prev.lossy && prev.dropped_cells >= 1 && !prev.warnings.is_empty());
+        let c_g = vec![Cell::text("Ctrl"), Cell::empty()];
+        let s_col = th::mv_sheet("mv-drop", &[("Group", Some(VariableRole::Categorical), c_g), ("Val", None, th::nums(&[1.0, 2.0]))]);
+        assert_lossy(&prev(&s_col, K::Column).unwrap(), 1);
 
-        // Direct MV -> XY with non-numeric text in X drops text and emits warning.
-        let mut mv_xy = MultipleVariablesTable::new(2, 2).unwrap();
-        mv_xy.variables[0].title = String::from("X");
-        mv_xy.variables[0].lock_role(VariableRole::Continuous);
-        mv_xy.variables[0].cells = vec![Cell::number(1.0), Cell::text("bad_x")];
-        mv_xy.variables[1].title = String::from("Y");
-        mv_xy.variables[1].cells = vec![Cell::number(10.0), Cell::number(20.0)];
-        let s_xy = DataSheet::new("mv-xy-warn", "XyWarn", TableArchetype::MultipleVariables(mv_xy)).unwrap();
-        let prev_xy = preview_datasheet_conversion(&s_xy, TargetArchetypeKind::Xy).unwrap();
-        assert!(prev_xy.lossy && prev_xy.dropped_cells == 1 && !prev_xy.warnings.is_empty());
+        let c_x = vec![Cell::number(1.0), Cell::text("bad_x")];
+        let s_xy = th::mv_sheet("mv-xy", &[("X", Some(VariableRole::Continuous), c_x), ("Y", None, th::nums(&[10.0, 20.0]))]);
+        let p_xy = prev(&s_xy, K::Xy).unwrap();
+        assert!(p_xy.lossy && p_xy.dropped_cells == 1 && !p_xy.warnings.is_empty());
 
-        // GeneratedSequence -> Contingency with explicit row titles on every row still flags lossy=true.
-        let mut xy_gen_titled = XyTable::new_with_x_mode(
-            XColumnMode::GeneratedSequence { start: 1.0, step: 2.0, progression: SequenceProgression::Arithmetic },
-            SubcolumnMode::Single,
-            1,
-            2,
-        )
-        .unwrap();
-        xy_gen_titled.row_titles = vec![String::from("R1"), String::from("R2")];
-        xy_gen_titled.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(9.0)]];
-        let s_gen_titled = DataSheet::new("xy-gen-titled", "GenTitled", TableArchetype::Xy(xy_gen_titled)).unwrap();
-        let gen_titled_prev = preview_datasheet_conversion(&s_gen_titled, TargetArchetypeKind::Contingency).unwrap();
-        assert!(gen_titled_prev.lossy && !gen_titled_prev.warnings.is_empty());
+        let mut xy_gen = th::xy_gen_seq(1.0, 2.0, SequenceProgression::Arithmetic, SubcolumnMode::Single, 1, 2);
+        xy_gen.row_titles = vec![String::from("R1"), String::from("R2")];
+        xy_gen.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(9.0)]];
+        assert_lossy(&prev(&DataSheet::new("xy-gen-titled", "GenTitled", TableArchetype::Xy(xy_gen)).unwrap(), K::Contingency).unwrap(), 0);
     }
 
     #[test]
     fn aud_04_11_and_22_overflowing_excluded_generated_sequence_x_with_replicates_no_panic() {
-        let mut xy = XyTable::new_with_x_mode(
-            XColumnMode::GeneratedSequence { start: 1e308, step: 10.0, progression: SequenceProgression::Geometric },
-            SubcolumnMode::RawReplicates(2),
-            1,
-            3,
-        )
-        .unwrap();
+        let mut xy = th::xy_gen_seq(1e308, 10.0, SequenceProgression::Geometric, SubcolumnMode::RawReplicates(2), 1, 3);
         xy.row_titles = vec![String::from("R0"), String::from("R1"), String::from("R2")];
-        // Row 0: finite X + occupied Y; Row 1: overflowing excluded X + occupied Y; Row 2: overflowing excluded X-only.
-        xy.data_sets[0].cells[0] = vec![Cell::number(1.0), Cell::number(2.0)];
-        xy.data_sets[0].cells[1] = vec![Cell::number(10.0), Cell::number(20.0)];
+        (xy.data_sets[0].cells[0], xy.data_sets[0].cells[1]) = (th::nums(&[1.0, 2.0]), th::nums(&[10.0, 20.0]));
         let mut sheet = DataSheet::new("xy-gen-ovf", "GenOvf", TableArchetype::Xy(xy)).unwrap();
         sheet.set_x_or_time_excluded(1, 0, true).unwrap();
         sheet.set_x_or_time_excluded(2, 0, true).unwrap();
 
-        let (mv_sheet, prev) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::MultipleVariables, false).unwrap();
-        assert!(!prev.lossy);
-        let TableArchetype::MultipleVariables(mv) = &mv_sheet.archetype else { panic!("expected MV") };
-        // 2 paired rows * 2 reps + 1 unpaired excluded X-only row = 5 rows.
-        assert_eq!(mv.row_count(), 5);
-        assert!(mv.variables[0].cells[2].excluded, "overflowing generated X on paired row must keep excluded=true");
-        assert!(mv.variables[0].cells[3].excluded);
-        assert!(mv.variables[0].cells[4].excluded, "unpaired overflowing excluded X row must keep excluded=true");
-        assert_eq!(mv.row_titles[4], "R2");
+        let (mv_sheet, p) = conv(&sheet, K::MultipleVariables, false).unwrap();
+        assert!(!p.lossy);
+        let mv = th::as_mv(&mv_sheet);
+        assert_eq!((mv.row_count(), mv.row_titles[4].as_str()), (5, "R2"));
+        assert!(mv.variables[0].cells[2].excluded && mv.variables[0].cells[3].excluded && mv.variables[0].cells[4].excluded);
     }
 
     #[test]
     fn aud_04_44_duplicate_replicate_collisions_fail_fast_at_max_subcolumns() {
-        let n = curvebook_doc::MAX_SUBCOLUMNS + 2_000;
-        let mut mv = MultipleVariablesTable::new(4, n).unwrap();
-        mv.variables[0].title = String::from("Dose");
-        mv.variables[0].lock_role(VariableRole::Categorical);
-        mv.variables[0].cells = vec![Cell::text("1"); n];
-        mv.variables[1].title = String::from("Arm");
-        mv.variables[1].lock_role(VariableRole::Categorical);
-        mv.variables[1].cells = vec![Cell::text("A"); n];
-        mv.variables[2].title = String::from("Replicate");
-        mv.variables[2].cells = vec![Cell::number(1.0); n];
-        mv.variables[3].title = String::from("Value");
-        mv.variables[3].cells = vec![Cell::number(5.0); n];
-        let s = DataSheet::new("mv-dup-ovf", "DupOvf", TableArchetype::MultipleVariables(mv)).unwrap();
-        let err = preview_datasheet_conversion(&s, TargetArchetypeKind::Grouped).unwrap_err();
+        let (n, cat) = (MAX_SUBCOLUMNS + 2_000, Some(VariableRole::Categorical));
+        let cols = [
+            ("Dose", cat, vec![Cell::text("1"); n]),
+            ("Arm", cat, vec![Cell::text("A"); n]),
+            ("Replicate", None, vec![Cell::number(1.0); n]),
+            ("Value", None, vec![Cell::number(5.0); n]),
+        ];
+        let err = prev(&th::mv_sheet("mv-dup-ovf", &cols), K::Grouped).unwrap_err();
         assert!(matches!(err, TransformError::Doc(DocError::TooManySubcolumns { .. })), "got {err:?}");
     }
 }

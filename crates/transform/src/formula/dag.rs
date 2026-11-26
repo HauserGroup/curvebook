@@ -328,7 +328,6 @@ fn dfs_cycle(start: usize, adj: &[Vec<usize>], state: &mut [u8]) -> Option<Vec<u
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use curvebook_doc::{Cell, MultipleVariablesTable};
 
@@ -337,36 +336,31 @@ mod tests {
 
     #[test]
     fn aud_04_02_dag_handles_deep_ast_and_long_cycle_iteratively() {
-        let handle = std::thread::Builder::new()
+        std::thread::Builder::new()
             .stack_size(1024 * 1024)
             .spawn(|| {
-                // 1. Deep left-leaning calculated variable (8,000 additions) on 1 MiB stack.
-                let mut mv = MultipleVariablesTable::new(2, 1).expect("mv");
-                mv.variables[0].title = String::from("X");
+                let mut mv = MultipleVariablesTable::new(2, 1).unwrap();
+                (mv.variables[0].title, mv.variables[1].title) = (String::from("X"), String::from("Sum"));
                 mv.variables[0].cells[0] = Cell::number(1.0);
-                mv.variables[1].title = String::from("Sum");
                 let deep = format!("={}", vec!["1"; 8_000].join("+"));
                 mv.variables[1].set_calculated_formula(&deep);
-                validate_no_formula_cycle(&mv, 1, &deep).expect("no cycle");
-                evaluate_calculated_variables(&mut mv, None).expect("evaluate deep formula");
+                validate_no_formula_cycle(&mv, 1, &deep).unwrap();
+                evaluate_calculated_variables(&mut mv, None).unwrap();
                 assert_eq!(mv.variables[1].cells[0].active_number(), Some(8_000.0));
 
-                // 2. 600-column cyclic chain tests iterative dfs_cycle on 1 MiB stack.
                 let n = 600_usize;
-                let mut cyc = MultipleVariablesTable::new(n, 1).expect("cyc mv");
+                let mut cyc = MultipleVariablesTable::new(n, 1).unwrap();
                 for i in 0..n {
                     cyc.variables[i].title = format!("V{i}");
-                    let prev = (i + n - 1) % n;
-                    let formula = format!("=[V{prev}] + 1");
-                    cyc.variables[i].set_calculated_formula(&formula);
+                    cyc.variables[i].set_calculated_formula(&format!("=[V{}] + 1", (i + n - 1) % n));
                 }
-                let err = evaluate_calculated_variables(&mut cyc, None).expect_err("must detect 600-col cycle");
-                let TransformError::CircularDependency { cycle } = err else {
-                    panic!("expected CircularDependency, got {err:?}");
+                let TransformError::CircularDependency { cycle } = evaluate_calculated_variables(&mut cyc, None).unwrap_err() else {
+                    panic!("expected CircularDependency")
                 };
-                assert_eq!(cycle.len(), n + 1, "expected full cycle closure");
+                assert_eq!(cycle.len(), n + 1);
             })
-            .expect("spawn 1 MiB worker");
-        handle.join().expect("DAG planning and cycle detection must not stack overflow");
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

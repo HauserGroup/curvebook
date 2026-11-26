@@ -497,34 +497,26 @@ fn looks_like_expression(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use curvebook_doc::{MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, TransformAnalysisSpec};
+    use curvebook_doc::{MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise as Sn, TransformAnalysisSpec};
 
     use super::*;
     use crate::ops::{TransformContext, execute_transform};
+    use crate::test_helpers as th;
+
+    fn params(pairs: &[(&str, f64)]) -> Vec<(String, f64)> {
+        pairs.iter().map(|&(k, v)| (k.to_owned(), v)).collect()
+    }
+
+    fn sim(seed: u64, shape: (usize, usize), xr: (f64, f64), eq: &str, ps: &[(&str, f64)], noise: Sn) -> Result<DataSheet, TransformError> {
+        simulate_xy_sheet("sim", "Sim", seed, shape.0, shape.1, xr.0, xr.1, eq, &params(ps), noise)
+    }
 
     #[test]
     fn r1_s04_08_simulate_enforces_cell_budget_before_allocation() {
-        // 1,000,000 rows x 512 replicates passes per-axis limits but requests 513M total cells.
-        let err = simulate_xy_sheet(
-            "sim-oom",
-            "Too Big",
-            1,
-            MAX_ROWS,
-            MAX_SUBCOLUMNS,
-            0.0,
-            1.0,
-            "linear",
-            &[(String::from("m"), 1.0), (String::from("b"), 0.0)],
-            SimulationNoise::Gaussian { sd: 1.0 },
-        )
-        .unwrap_err();
+        let err = sim(1, (MAX_ROWS, MAX_SUBCOLUMNS), (0.0, 1.0), "linear", &[("m", 1.0), ("b", 0.0)], Sn::Gaussian { sd: 1.0 }).unwrap_err();
         assert!(matches!(err, TransformError::InvalidSpec { ref message } if message.contains("budget")), "unexpected error: {err:?}");
+        assert!(matches!(sim(1, (1_000_000, 10), (0.0, 1.0), "linear", &[], Sn::None), Err(TransformError::InvalidSpec { .. })));
 
-        // Exact Y boundary (1,000,000 * 10 = 10M Y cells) still exceeds MAX_IMPORT_CELLS once X column is included (11M > 10M).
-        let err_with_x = simulate_xy_sheet("sim-x-over", "With X", 1, 1_000_000, 10, 0.0, 1.0, "linear", &[], SimulationNoise::None).unwrap_err();
-        assert!(matches!(err_with_x, TransformError::InvalidSpec { .. }), "expected InvalidSpec when X+Y exceeds cap, got {err_with_x:?}");
-
-        // Execute transform path must also enforce the same budget.
         let seed_sheet = DataSheet::new("seed", "Seed", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 1).unwrap())).unwrap();
         let spec = TransformAnalysisSpec::Simulate {
             seed: 42,
@@ -534,110 +526,68 @@ mod tests {
             x_max: 10.0,
             equation_id: String::from("linear"),
             parameters: vec![],
-            noise: SimulationNoise::None,
+            noise: Sn::None,
         };
-        let exec_err = execute_transform(&seed_sheet, &spec, &TransformContext::default()).unwrap_err();
-        assert!(matches!(exec_err, TransformError::InvalidSpec { .. }), "expected InvalidSpec, got {exec_err:?}");
-
-        // Overflow-checked budget helper accepts exact cap and rejects usize overflow cleanly.
+        assert!(matches!(execute_transform(&seed_sheet, &spec, &TransformContext::default()), Err(TransformError::InvalidSpec { .. })));
         assert_eq!(check_simulation_cell_budget(1_000_000, 1, 9, 1).unwrap(), MAX_IMPORT_CELLS);
         assert!(matches!(check_simulation_cell_budget(usize::MAX, 1, 2, 1), Err(TransformError::InvalidSpec { .. })));
-
-        // Small trace within per-axis max subcolumns remains accepted.
-        let ok = simulate_xy_sheet("sim-ok", "Small", 1, 2, MAX_SUBCOLUMNS, 0.0, 1.0, "linear", &[], SimulationNoise::None).unwrap();
+        let ok = sim(1, (2, MAX_SUBCOLUMNS), (0.0, 1.0), "linear", &[], Sn::None).unwrap();
         assert_eq!(ok.archetype.allocated_cell_slots(), 2 * (1 + MAX_SUBCOLUMNS));
     }
 
     #[test]
     fn aud04_25_canonical_fit_library_equations_match_exact_formulas() {
-        let p4 = vec![(String::from("Bottom"), 10.0), (String::from("Top"), 90.0), (String::from("LogEC50"), -6.0), (String::from("HillSlope"), 2.0)];
-        // Agonist 4PL: 10 + 80 / (1 + 10^((-6 - (-5)) * 2)) = 10 + 80 / 1.01
-        let exp_ag4 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf((-6.0 - (-5.0)) * 2.0));
-        for id in ["log_agonist_vs_response_4pl", "log_agonist_vs_response_variable_slope", "dose_response_4pl", "agonist_4pl"] {
-            assert!((evaluate_equation(id, -5.0, &p4).unwrap() - exp_ag4).abs() < 1e-12, "{id}");
+        let p4 = params(&[("Bottom", 10.0), ("Top", 90.0), ("LogEC50", -6.0), ("HillSlope", 2.0)]);
+        let pi4 = params(&[("Bottom", 10.0), ("Top", 90.0), ("LogIC50", -6.0), ("HillSlope", 2.0)]);
+        let (ag4, ag3) = (10.0 + 80.0 / (1.0 + 10.0_f64.powf(-2.0)), 10.0 + 80.0 / (1.0 + 10.0_f64.powf(-1.0)));
+        let (inh4, inh3) = (10.0 + 80.0 / (1.0 + 10.0_f64.powf(2.0)), 10.0 + 80.0 / (1.0 + 10.0_f64.powf(1.0)));
+        for (ids, ps, exp) in [
+            (&["log_agonist_vs_response_4pl", "log_agonist_vs_response_variable_slope", "dose_response_4pl", "agonist_4pl"][..], &p4, ag4),
+            (&["log_agonist_vs_response_3pl", "log_agonist_vs_response"][..], &p4, ag3),
+            (&["log_inhibitor_vs_response_4pl", "log_inhibitor_vs_response_variable_slope"][..], &pi4, inh4),
+            (&["log_inhibitor_vs_response_3pl", "log_inhibitor_vs_response"][..], &pi4, inh3),
+            (&["log_agonist_vs_response_normalized"][..], &p4, 100.0 / 1.1),
+            (&["log_agonist_vs_response_normalized_var"][..], &p4, 100.0 / 1.01),
+            (&["log_inhibitor_vs_response_normalized"][..], &pi4, 100.0 / 11.0),
+            (&["log_inhibitor_vs_response_normalized_var"][..], &pi4, 100.0 / 101.0),
+        ] {
+            for &id in ids {
+                th::assert_close(evaluate_equation(id, -5.0, ps).unwrap(), exp, 1e-12);
+            }
         }
-
-        // Agonist 3PL (fixed HillSlope = 1):
-        let exp_ag3 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf(-6.0 - (-5.0)));
-        for id in ["log_agonist_vs_response_3pl", "log_agonist_vs_response"] {
-            assert!((evaluate_equation(id, -5.0, &p4).unwrap() - exp_ag3).abs() < 1e-12, "{id}");
-        }
-
-        // Inhibitor 4PL (descending): 10 + 80 / (1 + 10^((-5 - (-6)) * 2)) = 10 + 80 / 101
-        let pi4 =
-            vec![(String::from("Bottom"), 10.0), (String::from("Top"), 90.0), (String::from("LogIC50"), -6.0), (String::from("HillSlope"), 2.0)];
-        let exp_inh4 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf((-5.0 - (-6.0)) * 2.0));
-        for id in ["log_inhibitor_vs_response_4pl", "log_inhibitor_vs_response_variable_slope"] {
-            assert!((evaluate_equation(id, -5.0, &pi4).unwrap() - exp_inh4).abs() < 1e-12, "{id}");
-        }
-
-        // Inhibitor 3PL (descending, HillSlope = 1):
-        let exp_inh3 = 10.0 + 80.0 / (1.0 + 10.0_f64.powf(-5.0 - (-6.0)));
-        for id in ["log_inhibitor_vs_response_3pl", "log_inhibitor_vs_response"] {
-            assert!((evaluate_equation(id, -5.0, &pi4).unwrap() - exp_inh3).abs() < 1e-12, "{id}");
-        }
-
-        // Normalized agonist & inhibitor variants (Bottom=0, Top=100):
-        assert!((evaluate_equation("log_agonist_vs_response_normalized", -5.0, &p4).unwrap() - 100.0 / 1.1).abs() < 1e-12);
-        assert!((evaluate_equation("log_agonist_vs_response_normalized_var", -5.0, &p4).unwrap() - 100.0 / 1.01).abs() < 1e-12);
-        assert!((evaluate_equation("log_inhibitor_vs_response_normalized", -5.0, &pi4).unwrap() - 100.0 / 11.0).abs() < 1e-12);
-        assert!((evaluate_equation("log_inhibitor_vs_response_normalized_var", -5.0, &pi4).unwrap() - 100.0 / 101.0).abs() < 1e-12);
-
-        // Exponential growth & one-site specific binding:
-        let growth_p = vec![(String::from("Y0"), 5.0), (String::from("k"), 0.5)];
-        assert!((evaluate_equation("exponential_growth", 2.0, &growth_p).unwrap() - 5.0 * 1.0_f64.exp()).abs() < 1e-12);
-        let bind_p = vec![(String::from("Bmax"), 120.0), (String::from("Kd"), 4.0)];
-        assert!((evaluate_equation("one_site_specific_binding", 4.0, &bind_p).unwrap() - 60.0).abs() < 1e-12);
+        let bind_p = params(&[("Bmax", 120.0), ("Kd", 4.0)]);
+        th::assert_close(evaluate_equation("exponential_growth", 2.0, &params(&[("Y0", 5.0), ("k", 0.5)])).unwrap(), 5.0 * 1.0_f64.exp(), 1e-12);
+        th::assert_close(evaluate_equation("one_site_specific_binding", 4.0, &bind_p).unwrap(), 60.0, 1e-12);
         assert!(matches!(evaluate_equation("one_site_specific_binding", -1.0, &bind_p), Err(TransformError::EvalError { .. })));
-        assert!(matches!(evaluate_equation("one_site_specific_binding", 1.0, &[(String::from("Kd"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
-
-        // Default engine/GUI Simulate call with log_agonist_vs_response_4pl succeeds end-to-end.
-        let sim = simulate_xy_sheet("sim-4pl", "4PL", 42, 10, 2, -9.0, -3.0, "log_agonist_vs_response_4pl", &p4, SimulationNoise::None).unwrap();
-        assert_eq!(sim.archetype.row_count(), 10);
+        assert!(matches!(evaluate_equation("one_site_specific_binding", 1.0, &params(&[("Kd", 0.0)])), Err(TransformError::InvalidSpec { .. })));
+        let s4 = simulate_xy_sheet("sim-4pl", "4PL", 42, 10, 2, -9.0, -3.0, "log_agonist_vs_response_4pl", &p4, Sn::None).unwrap();
+        assert_eq!(s4.archetype.row_count(), 10);
     }
 
     #[test]
     fn aud04_37_simulate_compiles_custom_formula_once_across_many_rows() {
-        let params = vec![(String::from("a"), 2.0), (String::from("b"), 3.0)];
-        let sheet = simulate_xy_sheet("sim-expr", "Expr", 7, 2_000, 1, 0.0, 1999.0, "EXPR: a * x + b", &params, SimulationNoise::None).unwrap();
-        let TableArchetype::Xy(xy) = &sheet.archetype else {
-            panic!("expected Xy");
-        };
-        assert!((xy.data_sets[0].cells[0][0].active_number().unwrap() - 3.0).abs() < 1e-12);
-        assert!((xy.data_sets[0].cells[1999][0].active_number().unwrap() - 4001.0).abs() < 1e-12);
+        let sheet = sim(7, (2_000, 1), (0.0, 1999.0), "EXPR: a * x + b", &[("a", 2.0), ("b", 3.0)], Sn::None).unwrap();
+        let cells = &th::as_xy(&sheet).data_sets[0].cells;
+        th::assert_close(th::num(&cells[0][0]), 3.0, 1e-12);
+        th::assert_close(th::num(&cells[1999][0]), 4001.0, 1e-12);
     }
 
     #[test]
     fn aud04_47_relative_percent_overflow_and_parameter_validation_and_case_insensitive_prefix() {
-        // RelativePercent near f64::MAX must NOT abort via MathError when finite rows exist.
-        let sim = simulate_xy_sheet(
-            "sim-rel-big",
-            "RelBig",
-            42,
-            3,
-            1,
-            0.0,
-            10.0,
-            "linear",
-            &[(String::from("m"), 1e307), (String::from("b"), 0.0)],
-            SimulationNoise::RelativePercent { cv_percent: 200.0 },
-        )
-        .unwrap();
-        let TableArchetype::Xy(xy) = &sim.archetype else {
-            panic!("expected Xy");
-        };
-        assert_eq!(xy.data_sets[0].cells[0][0].active_number(), Some(0.0));
-
-        // Non-finite parameters rejected upfront (including Gaussian NaN sd).
-        assert!(matches!(evaluate_equation("gaussian", 0.0, &[(String::from("sd"), f64::NAN)]), Err(TransformError::InvalidSpec { .. })));
-        assert!(matches!(evaluate_equation("linear", 0.0, &[(String::from("slope"), f64::INFINITY)]), Err(TransformError::InvalidSpec { .. })));
-        // Sine wavelength == 0 rejected instead of silently substituting freq = 1.0.
-        assert!(matches!(evaluate_equation("sine", 1.0, &[(String::from("wavelength"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
-        // Hill ec50 <= 0 rejected.
-        assert!(matches!(evaluate_equation("hill_4pl", 1.0, &[(String::from("ec50"), 0.0)]), Err(TransformError::InvalidSpec { .. })));
-        assert!(matches!(evaluate_equation("hill_4pl", 1.0, &[(String::from("ec50"), -5.0)]), Err(TransformError::InvalidSpec { .. })));
-        // Case-insensitive expr: / custom: prefix stripping.
-        assert!((evaluate_equation("EXPR: 2 * x + 1", 3.0, &[]).unwrap() - 7.0).abs() < 1e-12);
-        assert!((evaluate_equation("CUSTOM: x^2", 4.0, &[]).unwrap() - 16.0).abs() < 1e-12);
+        let s = sim(42, (3, 1), (0.0, 10.0), "linear", &[("m", 1e307), ("b", 0.0)], Sn::RelativePercent { cv_percent: 200.0 }).unwrap();
+        assert_eq!(th::as_xy(&s).data_sets[0].cells[0][0].active_number(), Some(0.0));
+        let bad = [
+            ("gaussian", 0.0, "sd", f64::NAN),
+            ("linear", 0.0, "slope", f64::INFINITY),
+            ("sine", 1.0, "wavelength", 0.0),
+            ("hill_4pl", 1.0, "ec50", 0.0),
+            ("hill_4pl", 1.0, "ec50", -5.0),
+        ];
+        for (eq, x, k, v) in bad {
+            assert!(matches!(evaluate_equation(eq, x, &params(&[(k, v)])), Err(TransformError::InvalidSpec { .. })), "{eq} {k}={v}");
+        }
+        for (eq, x, exp) in [("EXPR: 2 * x + 1", 3.0, 7.0), ("CUSTOM: x^2", 4.0, 16.0)] {
+            th::assert_close(evaluate_equation(eq, x, &[]).unwrap(), exp, 1e-12);
+        }
     }
 }

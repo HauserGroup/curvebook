@@ -1571,75 +1571,63 @@ fn normalize_special_call(pos: usize, name: String, args: Vec<Expr>) -> Result<E
 
 #[cfg(test)]
 mod rewrite_tests {
-    use super::{parse_formula, rewrite_formula_column_refs};
+    use super::{MAX_FORMULA_BYTES, MAX_STRING_LITERAL_BYTES, parse_formula, rewrite_formula_column_refs};
 
     #[test]
     fn rewrites_bracketed_bare_and_col_refs_preserving_literals_and_info() {
-        assert_eq!(rewrite_formula_column_refs("[Dose] / [Weight]", &[("Dose", "Dose (mg/kg)")]), Some(String::from("[Dose (mg/kg)] / [Weight]")));
-        assert_eq!(
-            rewrite_formula_column_refs("= [ Dose ] / [Weight]", &[("Dose", "Dose (mg/kg)")]),
-            Some(String::from("= [Dose (mg/kg)] / [Weight]"))
-        );
-        assert_eq!(rewrite_formula_column_refs("Dose / Weight", &[("Dose", "Dose (mg/kg)")]), Some(String::from("[Dose (mg/kg)] / Weight")));
-        assert_eq!(
-            rewrite_formula_column_refs("col(\"Dose\") + col('Weight')", &[("Dose", "Dose (mg/kg)")]),
-            Some(String::from("col(\"Dose (mg/kg)\") + col('Weight')"))
-        );
-        // String literals, partial substrings, different case, and Info(...) must remain untouched.
-        assert_eq!(
-            rewrite_formula_column_refs("IF([Dose] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])", &[("Dose", "Dose (mg/kg)")]),
-            Some(String::from("IF([Dose (mg/kg)] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])"))
-        );
-        assert_eq!(rewrite_formula_column_refs("\"[Dose]\" + [Dose_2] + [dose]", &[("Dose", "Dose (mg/kg)")]), None);
+        let map = [("Dose", "Dose (mg/kg)")];
+        for (src, exp) in [
+            ("[Dose] / [Weight]", Some("[Dose (mg/kg)] / [Weight]")),
+            ("= [ Dose ] / [Weight]", Some("= [Dose (mg/kg)] / [Weight]")),
+            ("Dose / Weight", Some("[Dose (mg/kg)] / Weight")),
+            ("col(\"Dose\") + col('Weight')", Some("col(\"Dose (mg/kg)\") + col('Weight')")),
+            (
+                "IF([Dose] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])",
+                Some("IF([Dose (mg/kg)] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])"),
+            ),
+            ("\"[Dose]\" + [Dose_2] + [dose]", None),
+        ] {
+            assert_eq!(rewrite_formula_column_refs(src, &map).as_deref(), exp);
+        }
     }
 
     #[test]
     fn simultaneous_swap_and_closing_bracket_titles_parse_cleanly() {
-        let swapped = rewrite_formula_column_refs("[Dose] / [Weight]", &[("Dose", "Weight"), ("Weight", "Dose")]);
-        assert_eq!(swapped, Some(String::from("[Weight] / [Dose]")));
-
-        let with_bracket = rewrite_formula_column_refs("[Dose] * 2", &[("Dose", "Dose [mg]")]).expect("rewritten");
-        assert_eq!(with_bracket, "col(\"Dose [mg]\") * 2");
-        assert!(parse_formula(&with_bracket).is_ok());
+        assert_eq!(rewrite_formula_column_refs("[Dose] / [Weight]", &[("Dose", "Weight"), ("Weight", "Dose")]).as_deref(), Some("[Weight] / [Dose]"));
+        let with_bracket = rewrite_formula_column_refs("[Dose] * 2", &[("Dose", "Dose [mg]")]).unwrap();
+        assert!(with_bracket == "col(\"Dose [mg]\") * 2" && parse_formula(&with_bracket).is_ok());
     }
 
     #[test]
     fn aud_04_42_reserved_literals_are_never_rewritten_as_bare_idents() {
         assert_eq!(rewrite_formula_column_refs("=if([X] > 0, true, false) + nan", &[("true", "Flag"), ("false", "Zero"), ("nan", "Missing")]), None);
-        // Explicit bracketed or col("...") references to a column titled "true" ARE still rewritten.
         assert_eq!(
-            rewrite_formula_column_refs("=if([true] > 0, true, col(\"false\"))", &[("true", "Flag"), ("false", "Zero")]),
-            Some(String::from("=if([Flag] > 0, true, col(\"Zero\"))"))
+            rewrite_formula_column_refs("=if([true] > 0, true, col(\"false\"))", &[("true", "Flag"), ("false", "Zero")]).as_deref(),
+            Some("=if([Flag] > 0, true, col(\"Zero\"))")
         );
     }
 
     #[test]
     fn aud_04_02_deep_left_leaning_ast_clone_eq_debug_and_drop_are_iterative() {
         let chain = vec!["1"; 8_191].join("+");
-        let handle = std::thread::Builder::new()
+        std::thread::Builder::new()
             .stack_size(1024 * 1024)
             .spawn(move || {
-                let ast = parse_formula(&chain).expect("8191-term chain parses");
+                let ast = parse_formula(&chain).unwrap();
                 let cloned = ast.clone();
                 assert_eq!(ast, cloned);
-                let dbg = format!("{ast:?}");
-                assert!(dbg.starts_with("Binary { op: Add"));
-                drop(cloned);
-                drop(ast);
+                assert!(format!("{ast:?}").starts_with("Binary { op: Add"));
+                drop((cloned, ast));
             })
-            .expect("spawn 1 MiB worker");
-        handle.join().expect("iterative Clone/PartialEq/Debug/Drop must not overflow 1 MiB stack");
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn aud_04_20_formula_byte_cap_and_string_literal_cap_enforced() {
-        let huge_formula = " ".repeat(super::MAX_FORMULA_BYTES + 1) + "1";
-        assert!(parse_formula(&huge_formula).is_err(), "formula > MAX_FORMULA_BYTES must fail");
-
-        let huge_literal = format!("\"{}\"", "a".repeat(super::MAX_STRING_LITERAL_BYTES + 1));
-        assert!(parse_formula(&huge_literal).is_err(), "string literal > MAX_STRING_LITERAL_BYTES must fail");
-
-        let ok_literal = format!("\"{}\"", "a".repeat(super::MAX_STRING_LITERAL_BYTES));
-        assert!(parse_formula(&ok_literal).is_ok(), "string literal at MAX_STRING_LITERAL_BYTES must succeed");
+        assert!(parse_formula(&(" ".repeat(MAX_FORMULA_BYTES + 1) + "1")).is_err());
+        assert!(parse_formula(&format!("\"{}\"", "a".repeat(MAX_STRING_LITERAL_BYTES + 1))).is_err());
+        assert!(parse_formula(&format!("\"{}\"", "a".repeat(MAX_STRING_LITERAL_BYTES))).is_ok());
     }
 }

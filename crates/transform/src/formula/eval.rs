@@ -2882,51 +2882,41 @@ fn eval_unary_math(lower: &str, x: f64) -> f64 {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use curvebook_doc::{Cell, DataSheet, MultipleVariablesTable, TableArchetype};
+    use curvebook_doc::{Cell, DataSheet};
 
     use super::{FormulaContext, FormulaValue, ScalarEnv, eval_column_expr, eval_scalar_expr, evaluate_formula_for_sheet};
     use crate::error::TransformError;
     use crate::formula::parser::parse_formula;
+    use crate::test_helpers as th;
 
-    fn mv_sheet_from_cols(cols: &[(&str, Vec<Cell>)]) -> DataSheet {
-        let rows = cols.first().map_or(0, |(_, c)| c.len());
-        let mut mv = MultipleVariablesTable::new(cols.len(), rows).expect("mv");
-        for (idx, (title, cells)) in cols.iter().enumerate() {
-            mv.variables[idx].title = (*title).to_owned();
-            mv.variables[idx].cells = cells.clone();
-        }
-        DataSheet::new("eval-test", "Eval", TableArchetype::MultipleVariables(mv)).expect("sheet")
+    fn eval_s(expr: &str, s: &DataSheet) -> Vec<FormulaValue> {
+        evaluate_formula_for_sheet(expr, s, None).unwrap()
+    }
+
+    fn eval_sc(expr: &str) -> Result<FormulaValue, TransformError> {
+        eval_scalar_expr(&parse_formula(expr).unwrap(), &ScalarEnv::default())
     }
 
     #[test]
     fn aud_04_07_two_arg_log_rejects_invalid_base_and_nonpositive_input() {
-        let env = ScalarEnv::default();
         for bad in ["log(100, 0)", "log(100, 1)", "log(100, -2)", "log(0, 10)", "log(-5, 10)"] {
-            let val = eval_scalar_expr(&parse_formula(bad).expect("parse"), &env).expect("eval");
-            assert_eq!(val, FormulaValue::Missing, "`{bad}` must yield Missing, got {val:?}");
+            assert_eq!(eval_sc(bad).unwrap(), FormulaValue::Missing, "{bad}");
         }
-        let ok10 = eval_scalar_expr(&parse_formula("log(100, 10)").expect("parse"), &env).expect("eval");
-        assert!((ok10.as_finite_f64().unwrap() - 2.0).abs() < 1e-12);
-        let ok2 = eval_scalar_expr(&parse_formula("log(8, 2)").expect("parse"), &env).expect("eval");
-        assert!((ok2.as_finite_f64().unwrap() - 3.0).abs() < 1e-12);
+        for (expr, exp) in [("log(100, 10)", 2.0), ("log(8, 2)", 3.0)] {
+            th::assert_close(eval_sc(expr).unwrap().as_finite_f64().unwrap(), exp, 1e-12);
+        }
     }
 
     #[test]
     fn aud_04_20_arity_before_eval_streaming_variadics_text_budget_and_fast_windows() {
-        // 1. Unknown function & arity mismatch fail BEFORE evaluating arguments (even with unknown vars inside args).
-        let env = ScalarEnv::default();
-        assert!(matches!(eval_scalar_expr(&parse_formula("bogus(NoSuchCol, 1, 2)").unwrap(), &env), Err(TransformError::UnknownFunction { .. })));
-        assert!(matches!(eval_scalar_expr(&parse_formula("sqrt(NoSuchCol, 2)").unwrap(), &env), Err(TransformError::ArityMismatch { .. })));
+        assert!(matches!(eval_sc("bogus(NoSuchCol, 1, 2)"), Err(TransformError::UnknownFunction { .. })));
+        assert!(matches!(eval_sc("sqrt(NoSuchCol, 2)"), Err(TransformError::ArityMismatch { .. })));
 
-        // 2. Streaming variadics (min/max/sum/mean/and/or/coalesce) with overflow-safe mean on 1e308.
-        let s = mv_sheet_from_cols(&[("A", vec![Cell::number(1e308), Cell::empty()]), ("B", vec![Cell::number(1e308), Cell::number(5.0)])]);
-        let mean_vals = evaluate_formula_for_sheet("mean(A, B)", &s, None).expect("streaming mean");
-        assert!((mean_vals[0].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
-        assert_eq!(mean_vals[1], FormulaValue::Number(5.0));
+        let s = th::mv_sheet("eval-test", &[("A", None, vec![Cell::number(1e308), Cell::empty()]), ("B", None, th::nums(&[1e308, 5.0]))]);
+        let mv = eval_s("mean(A, B)", &s);
+        assert!((mv[0].as_finite_f64().unwrap() - 1e308).abs() <= 1e295 && mv[1] == FormulaValue::Number(5.0));
 
-        // 3. Text broadcast memory budget blocks multi-GB allocation cleanly.
         struct VirtualRowsContext(usize);
         impl FormulaContext for VirtualRowsContext {
             fn row_count(&self) -> usize {
@@ -2945,109 +2935,72 @@ mod tests {
                 None
             }
         }
-        let lit = format!("\"{}\"", "x".repeat(4_000));
-        let ast = parse_formula(&lit).expect("4000-byte literal parses");
-        assert!(
-            matches!(eval_column_expr(&ast, &VirtualRowsContext(50_000)), Err(TransformError::InvalidSpec { .. })),
-            "200 MB text broadcast must be rejected before allocation"
-        );
+        let ast = parse_formula(&format!("\"{}\"", "x".repeat(4_000))).unwrap();
+        assert!(matches!(eval_column_expr(&ast, &VirtualRowsContext(50_000)), Err(TransformError::InvalidSpec { .. })));
 
-        // 4. O(N) / O(N log N) window frames run quickly and accurately on N = 20,000 rows.
         let n = 20_000_usize;
-        let big = mv_sheet_from_cols(&[("X", (1..=n).map(|i| Cell::number(i as f64)).collect())]);
-        let run_sum = evaluate_formula_for_sheet("sum(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &big, None)
-            .expect("20k running sum");
-        assert!((run_sum[n - 1].as_finite_f64().unwrap() - ((n * (n + 1)) as f64) * 0.5).abs() < 1e-3);
-        let run_med = evaluate_formula_for_sheet("median(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &big, None)
-            .expect("20k running median");
-        assert!((run_med[n - 1].as_finite_f64().unwrap() - ((n + 1) as f64) * 0.5).abs() < 1e-12);
-        let roll_mean = evaluate_formula_for_sheet("rolling_mean(X, 500)", &big, None).expect("20k rolling mean");
-        assert!((roll_mean[n - 1].as_finite_f64().unwrap() - ((n as f64) - 249.5)).abs() < 1e-9);
+        let big = th::mv_sheet("eval-big", &[("X", None, (1..=n).map(|i| Cell::number(i as f64)).collect())]);
+        for (expr, exp, tol) in [
+            ("sum(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", ((n * (n + 1)) as f64) * 0.5, 1e-3),
+            ("median(X) OVER (ORDER BY X ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", ((n + 1) as f64) * 0.5, 1e-12),
+            ("rolling_mean(X, 500)", (n as f64) - 249.5, 1e-9),
+        ] {
+            th::assert_close(eval_s(expr, &big)[n - 1].as_finite_f64().unwrap(), exp, tol);
+        }
     }
 
     #[test]
     fn aud_04_27_rank_multikey_desc_text_keys_and_deep_expr_equality() {
-        let s = mv_sheet_from_cols(&[
-            ("Grp", vec![Cell::text("G1"), Cell::text("G1"), Cell::text("G1"), Cell::text("G1")]),
-            ("Score", vec![Cell::number(10.0), Cell::number(20.0), Cell::number(30.0), Cell::empty()]),
-            ("Id", vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0), Cell::number(4.0)]),
-            ("Label", vec![Cell::text("B"), Cell::text("A"), Cell::text("A"), Cell::text("C")]),
-        ]);
-
-        // Multi-key ORDER BY Score DESC, Id ASC must honor DESC for rank(Score).
-        let r_desc = evaluate_formula_for_sheet("rank(Score) OVER (PARTITION BY Grp ORDER BY Score DESC, Id ASC)", &s, None).expect("multikey rank");
-        assert_eq!(r_desc, vec![FormulaValue::Number(3.0), FormulaValue::Number(2.0), FormulaValue::Number(1.0), FormulaValue::Missing]);
-
-        // Text ordering in 1-arg rank(Label) and dense_rank(Label).
-        let r_txt = evaluate_formula_for_sheet("rank(Label)", &s, None).expect("text rank");
-        assert_eq!(r_txt, vec![FormulaValue::Number(3.0), FormulaValue::Number(1.5), FormulaValue::Number(1.5), FormulaValue::Number(4.0)]);
-        let dr_txt = evaluate_formula_for_sheet("dense_rank(Label) OVER (ORDER BY Label DESC, Id ASC)", &s, None).expect("text dense_rank desc");
-        assert_eq!(dr_txt, vec![FormulaValue::Number(2.0), FormulaValue::Number(3.0), FormulaValue::Number(3.0), FormulaValue::Number(1.0)]);
-
-        // AUD-04-02: deep left-leaning expression inside rank(expr) OVER (ORDER BY expr) uses iterative PartialEq.
+        let cols = [
+            ("Grp", None, th::texts(&["G1", "G1", "G1", "G1"])),
+            ("Score", None, vec![Cell::number(10.0), Cell::number(20.0), Cell::number(30.0), Cell::empty()]),
+            ("Id", None, th::nums(&[1.0, 2.0, 3.0, 4.0])),
+            ("Label", None, th::texts(&["B", "A", "A", "C"])),
+        ];
+        let s = th::mv_sheet("eval-rank", &cols);
+        let fv = FormulaValue::Number;
+        for (expr, exp) in [
+            ("rank(Score) OVER (PARTITION BY Grp ORDER BY Score DESC, Id ASC)", vec![fv(3.0), fv(2.0), fv(1.0), FormulaValue::Missing]),
+            ("rank(Label)", vec![fv(3.0), fv(1.5), fv(1.5), fv(4.0)]),
+            ("dense_rank(Label) OVER (ORDER BY Label DESC, Id ASC)", vec![fv(2.0), fv(3.0), fv(3.0), fv(1.0)]),
+        ] {
+            assert_eq!(eval_s(expr, &s), exp, "{expr}");
+        }
         let deep = vec!["1"; 4_000].join("+");
         let formula = format!("rank({deep}) OVER (ORDER BY {deep} DESC)");
-        let handle = std::thread::Builder::new()
-            .stack_size(1024 * 1024)
-            .spawn(move || evaluate_formula_for_sheet(&formula, &s, None).expect("deep rank over"))
-            .expect("spawn 1 MiB worker");
-        let res = handle.join().expect("rank PartialEq must not stack overflow");
+        let res = std::thread::Builder::new().stack_size(1024 * 1024).spawn(move || eval_s(&formula, &s)).unwrap().join().unwrap();
         assert_eq!(res.len(), 4);
     }
 
     #[test]
     fn aud_04_28_explicit_rows_frames_and_rolling_aggregate_over_missing_current_row_and_large_mean() {
-        let s = mv_sheet_from_cols(&[
-            ("Y", vec![Cell::number(10.0), Cell::number(20.0), Cell::empty(), Cell::number(40.0)]),
-            ("Big", vec![Cell::number(1e308), Cell::number(1e308), Cell::empty(), Cell::number(1e308)]),
-        ]);
-
-        // Explicit ROWS frame on rolling_mean & cumsum must NOT blank row 2 when neighbors are finite.
-        let r_mean =
-            evaluate_formula_for_sheet("rolling_mean(Y) OVER (ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)", &s, None).expect("rows rolling_mean");
-        assert_eq!(r_mean[2], FormulaValue::Number(30.0));
-        let c_sum = evaluate_formula_for_sheet("cumsum(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &s, None).expect("rows cumsum");
-        assert_eq!(c_sum[2], FormulaValue::Number(30.0));
-        let c_mean =
-            evaluate_formula_for_sheet("cummean(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", &s, None).expect("rows cummean");
-        assert_eq!(c_mean[2], FormulaValue::Number(15.0));
-
-        // 2-arg rolling_mean(Y, 3) on [10, 20, Missing, 40]: row 2 window [10, 20, Missing] -> mean 15.0.
-        let r2 = evaluate_formula_for_sheet("rolling_mean(Y, 3)", &s, None).expect("2-arg rolling_mean");
-        assert_eq!(r2[2], FormulaValue::Number(15.0));
-
-        // Overflow-safe rolling mean on [1e308, 1e308].
-        let big_roll = evaluate_formula_for_sheet("rolling_mean(Big, 2)", &s, None).expect("big rolling_mean");
-        assert!((big_roll[1].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
-        let big_rows =
-            evaluate_formula_for_sheet("rolling_mean(Big) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)", &s, None).expect("big rows mean");
-        assert!((big_rows[1].as_finite_f64().unwrap() - 1e308).abs() <= 1e295);
+        let y = vec![Cell::number(10.0), Cell::number(20.0), Cell::empty(), Cell::number(40.0)];
+        let big = vec![Cell::number(1e308), Cell::number(1e308), Cell::empty(), Cell::number(1e308)];
+        let s = th::mv_sheet("eval-rows", &[("Y", None, y), ("Big", None, big)]);
+        for (expr, exp) in [
+            ("rolling_mean(Y) OVER (ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING)", 30.0),
+            ("cumsum(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", 30.0),
+            ("cummean(Y) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)", 15.0),
+            ("rolling_mean(Y, 3)", 15.0),
+        ] {
+            assert_eq!(eval_s(expr, &s)[2], FormulaValue::Number(exp), "{expr}");
+        }
+        for expr in ["rolling_mean(Big, 2)", "rolling_mean(Big) OVER (ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)"] {
+            assert!((eval_s(expr, &s)[1].as_finite_f64().unwrap() - 1e308).abs() <= 1e295, "{expr}");
+        }
     }
 
     #[test]
     fn aud_04_20_moments_agg_tiny_scale_sd_sem_and_zscore_do_not_underflow() {
-        let s =
-            mv_sheet_from_cols(&[("Tiny", vec![Cell::number(1e-200), Cell::number(2e-200)]), ("Const", vec![Cell::number(5.0), Cell::number(5.0)])]);
-        let expected_sd = std::f64::consts::FRAC_1_SQRT_2 * 1e-200;
-        let expected_sem = 0.5e-200;
-
-        let sd_res =
-            evaluate_formula_for_sheet("sd(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None).expect("tiny framed sd");
-        let sem_res = evaluate_formula_for_sheet("sem(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
-            .expect("tiny framed sem");
-        let z_res = evaluate_formula_for_sheet("zscore(Tiny) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
-            .expect("tiny framed zscore");
-        let const_sd = evaluate_formula_for_sheet("sd(Const) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)", &s, None)
-            .expect("constant framed sd");
-
-        let sd_val = sd_res[0].as_finite_f64().expect("tiny sd finite");
-        assert!((sd_val - expected_sd).abs() <= 1e-214, "expected {expected_sd:e}, got {sd_val:e}");
-        let sem_val = sem_res[0].as_finite_f64().expect("tiny sem finite");
-        assert!((sem_val - expected_sem).abs() <= 1e-214, "expected {expected_sem:e}, got {sem_val:e}");
-        let z0 = z_res[0].as_finite_f64().expect("tiny zscore[0] finite");
-        let z1 = z_res[1].as_finite_f64().expect("tiny zscore[1] finite");
-        assert!((z0 + std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "z0={z0}");
-        assert!((z1 - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12, "z1={z1}");
-        assert_eq!(const_sd[0], FormulaValue::Number(0.0));
+        let s = th::mv_sheet("eval-tiny", &[("Tiny", None, th::nums(&[1e-200, 2e-200])), ("Const", None, th::nums(&[5.0, 5.0]))]);
+        let frame = "OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)";
+        for (fn_name, exp) in [("sd", std::f64::consts::FRAC_1_SQRT_2 * 1e-200), ("sem", 0.5e-200)] {
+            let v = eval_s(&format!("{fn_name}(Tiny) {frame}"), &s)[0].as_finite_f64().unwrap();
+            assert!((v - exp).abs() <= 1e-214, "{fn_name}: expected {exp:e}, got {v:e}");
+        }
+        let z = eval_s(&format!("zscore(Tiny) {frame}"), &s);
+        th::assert_close(z[0].as_finite_f64().unwrap(), -std::f64::consts::FRAC_1_SQRT_2, 1e-12);
+        th::assert_close(z[1].as_finite_f64().unwrap(), std::f64::consts::FRAC_1_SQRT_2, 1e-12);
+        assert_eq!(eval_s(&format!("sd(Const) {frame}"), &s)[0], FormulaValue::Number(0.0));
     }
 }
