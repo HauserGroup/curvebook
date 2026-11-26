@@ -439,8 +439,8 @@ mod tests {
 
     #[test]
     fn stiff_variance_numacc1_and_numacc4_exact() {
-        // NIST StRD NumAcc1: [10000001, 10000002, 10000003] -> mean = 10000002, sd = 1.0
-        let numacc1 = [10_000_001.0, 10_000_002.0, 10_000_003.0];
+        // NIST StRD NumAcc1 (`NumAcc1.dat`): [10000001, 10000003, 10000002] -> mean = 10000002, sd = 1.0, r(1) = -0.5
+        let numacc1 = [10_000_001.0, 10_000_003.0, 10_000_002.0];
         let m1 = SummaryMoments::from_slice(&numacc1).unwrap();
         assert!((m1.mean - 10_000_002.0).abs() <= 1e-15 * m1.mean);
         assert!((m1.sample_sd().unwrap() - 1.0).abs() <= 1e-15);
@@ -469,7 +469,7 @@ mod tests {
         assert!((sd4 - exact_f64_sd4).abs() < 1e-15, "sd4 = {sd4:.17e} vs {exact_f64_sd4:.17e}");
         assert!((sd4 - 0.1).abs() < 1e-9, "sd4 = {sd4:.17e}");
         let r1 = lag1_autocorrelation(&numacc1).unwrap();
-        assert!(r1.is_finite());
+        assert!((r1 - (-0.5)).abs() <= 1e-15, "NumAcc1 r1 = {r1:.17e}");
     }
 
     #[test]

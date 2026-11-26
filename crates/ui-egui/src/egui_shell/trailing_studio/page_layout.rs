@@ -9,7 +9,7 @@ use crate::egui_shell::{FrameInspectMeta, PendingUiIntents, widgets};
 use crate::i18n::tr;
 
 use super::helpers::{MediaControlsSpec, StudioButtonSpec, StudioChipSpec, render_canvas_media_buttons, studio_chip, studio_full_button};
-use super::{TrailingStudioContext, TrailingStudioEguiState};
+use super::{LayoutPanelSizeDraft, TrailingStudioContext, TrailingStudioEguiState, set_studio_panel_size_preview};
 
 /// Auto-arrange `LiveGraph`/`LiveTable` panels inside the printable page bounds, expanding rows
 /// when `panel_count > rows * cols` so excess panels are never pushed off-page (`AUD-09-19`).
@@ -409,7 +409,7 @@ pub(super) fn render_page_layout_composer_studio(
     let can_reorder = ctx_in.enabled && spec.items.len() >= 2;
     let target_panel_idx = ctx_in.selected_panel_index.unwrap_or(0).min(spec.items.len().saturating_sub(1));
 
-    render_selected_panel_bounds_controls(ui, ls, target_panel_idx, ctx_in, meta, intents);
+    render_selected_panel_bounds_controls(ui, ls, target_panel_idx, state, ctx_in, meta, intents);
 
     ui.add_space(6.0);
     widgets::subheader(ui, "Panel Z-Order & Scaling");
@@ -570,95 +570,163 @@ fn render_selected_panel_bounds_controls(
     ui: &mut egui::Ui,
     ls: &LayoutSheet,
     target_panel_idx: usize,
+    state: &mut TrailingStudioEguiState,
     ctx_in: TrailingStudioContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
     let Some(item) = ls.spec.items.get(target_panel_idx) else {
+        set_studio_panel_size_preview(ui.ctx(), None);
+        if !ui.ctx().will_discard() {
+            state.panel_size_draft = None;
+        }
         return;
     };
     let bounds = match item {
         LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
-        _ => return,
+        _ => {
+            set_studio_panel_size_preview(ui.ctx(), None);
+            if !ui.ctx().will_discard() {
+                state.panel_size_draft = None;
+            }
+            return;
+        }
     };
+    let enabled = ctx_in.enabled;
+    let will_discard = ui.ctx().will_discard();
+    let matching_draft = state.panel_size_draft.as_ref().filter(|d| enabled && d.sheet_id == ls.id && d.panel_index == target_panel_idx).cloned();
+    if !will_discard && matching_draft.is_none() {
+        state.panel_size_draft = None;
+    }
+
     ui.add_space(6.0);
     widgets::subheader(ui, "Selected Panel Size");
-    let enabled = ctx_in.enabled;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
-        let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
-        ui.label("W:");
-        let mut w_pt = bounds.width;
-        let w_sized = ui
-            .add_enabled_ui(enabled, |ui| {
-                ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut w_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
-            })
-            .inner;
-        w_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
-        if w_sized.rect.intersect(vis_clip).is_positive() && w_sized.interact_rect.intersect(vis_clip).is_positive() {
-            meta.record_response(
-                ui,
-                &w_sized,
-                crate::egui_shell::FrameInspectEntryInput {
-                    widget_id: "inspector.layout.panel.width_pt",
-                    role: "spinbutton",
-                    label: "Panel Width (pt)",
-                    command_id: Some("layout.setSpec"),
-                    value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
-                    enabled,
-                    disabled_reason: None,
-                    z_layer: crate::inspect::ZLayer::Workspace,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-        }
-        if w_sized.changed() && enabled {
-            let mut next_items = ls.spec.items.clone();
-            if let Some(it) = next_items.get_mut(target_panel_idx)
-                && let Some(b) = layout_item_bounds_mut(it)
-            {
-                b.width = w_pt.clamp(24.0, 2000.0);
+    let mut w_pt = matching_draft.as_ref().map_or(bounds.width, |d| d.width_pt);
+    let mut h_pt = matching_draft.as_ref().map_or(bounds.height, |d| d.height_pt);
+    let (w_sized, h_sized) = ui
+        .horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+            let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
+            ui.label("W:");
+            let w_sized = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut w_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+                })
+                .inner;
+            w_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
+            if w_sized.rect.intersect(vis_clip).is_positive() && w_sized.interact_rect.intersect(vis_clip).is_positive() {
+                meta.record_response(
+                    ui,
+                    &w_sized,
+                    crate::egui_shell::FrameInspectEntryInput {
+                        widget_id: "inspector.layout.panel.width_pt",
+                        role: "spinbutton",
+                        label: "Panel Width (pt)",
+                        command_id: Some("layout.setSpec"),
+                        value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
+                        enabled,
+                        disabled_reason: None,
+                        z_layer: crate::inspect::ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
             }
-            intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": next_items } }));
-        }
 
-        ui.label("H:");
-        let mut h_pt = bounds.height;
-        let h_sized = ui
-            .add_enabled_ui(enabled, |ui| {
-                ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut h_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
-            })
-            .inner;
-        h_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
-        if h_sized.rect.intersect(vis_clip).is_positive() && h_sized.interact_rect.intersect(vis_clip).is_positive() {
-            meta.record_response(
-                ui,
-                &h_sized,
-                crate::egui_shell::FrameInspectEntryInput {
-                    widget_id: "inspector.layout.panel.height_pt",
-                    role: "spinbutton",
-                    label: "Panel Height (pt)",
-                    command_id: Some("layout.setSpec"),
-                    value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
-                    enabled,
-                    disabled_reason: None,
-                    z_layer: crate::inspect::ZLayer::Workspace,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
+            ui.label("H:");
+            let h_sized = ui
+                .add_enabled_ui(enabled, |ui| {
+                    ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut h_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+                })
+                .inner;
+            h_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
+            if h_sized.rect.intersect(vis_clip).is_positive() && h_sized.interact_rect.intersect(vis_clip).is_positive() {
+                meta.record_response(
+                    ui,
+                    &h_sized,
+                    crate::egui_shell::FrameInspectEntryInput {
+                        widget_id: "inspector.layout.panel.height_pt",
+                        role: "spinbutton",
+                        label: "Panel Height (pt)",
+                        command_id: Some("layout.setSpec"),
+                        value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
+                        enabled,
+                        disabled_reason: None,
+                        z_layer: crate::inspect::ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+            }
+            (w_sized, h_sized)
+        })
+        .inner;
+
+    // Preview live during drag/edit and commit a single `layout.setSpec` on drag release, Enter, or
+    // focus loss so multi-frame drags produce 1 undo entry and 1 recovery checkpoint (`GAP-07-06`).
+    let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let w_clamped = w_pt.clamp(24.0, 2000.0);
+    let h_clamped = h_pt.clamp(24.0, 2000.0);
+    let w_dragging = enabled && w_sized.dragged();
+    let h_dragging = enabled && h_sized.dragged();
+    let w_editing = enabled && w_sized.has_focus();
+    let h_editing = enabled && h_sized.has_focus();
+    let was_dragging_w = matching_draft.as_ref().is_some_and(|d| d.dragging_w);
+    let was_dragging_h = matching_draft.as_ref().is_some_and(|d| d.dragging_h);
+    let was_editing_w = matching_draft.as_ref().is_some_and(|d| d.editing_w);
+    let was_editing_h = matching_draft.as_ref().is_some_and(|d| d.editing_h);
+
+    let w_finished = enabled && (w_sized.drag_stopped() || (was_dragging_w && !w_dragging) || w_sized.lost_focus() || (was_editing_w && !w_editing));
+    let h_finished = enabled && (h_sized.drag_stopped() || (was_dragging_h && !h_dragging) || h_sized.lost_focus() || (was_editing_h && !h_editing));
+    let instant_w = enabled && w_sized.changed() && !w_dragging && !w_editing;
+    let instant_h = enabled && h_sized.changed() && !h_dragging && !h_editing;
+
+    if escape_pressed && (w_finished || h_finished) {
+        set_studio_panel_size_preview(ui.ctx(), None);
+        if !will_discard {
+            state.panel_size_draft = None;
         }
-        if h_sized.changed() && enabled {
+    } else if w_dragging || h_dragging || w_editing || h_editing {
+        let next_w =
+            if w_dragging || w_editing || w_sized.changed() { w_clamped } else { matching_draft.as_ref().map_or(bounds.width, |d| d.width_pt) };
+        let next_h =
+            if h_dragging || h_editing || h_sized.changed() { h_clamped } else { matching_draft.as_ref().map_or(bounds.height, |d| d.height_pt) };
+        set_studio_panel_size_preview(ui.ctx(), Some((ls.id.clone(), target_panel_idx, next_w, next_h)));
+        if !will_discard {
+            state.panel_size_draft = Some(LayoutPanelSizeDraft {
+                sheet_id: ls.id.clone(),
+                panel_index: target_panel_idx,
+                width_pt: next_w,
+                height_pt: next_h,
+                dragging_w: w_dragging,
+                dragging_h: h_dragging,
+                editing_w: w_editing,
+                editing_h: h_editing,
+            });
+        }
+    } else if w_finished || h_finished || instant_w || instant_h {
+        let commit_w = if w_finished || instant_w { w_clamped } else { matching_draft.as_ref().map_or(bounds.width, |d| d.width_pt) };
+        let commit_h = if h_finished || instant_h { h_clamped } else { matching_draft.as_ref().map_or(bounds.height, |d| d.height_pt) };
+        set_studio_panel_size_preview(ui.ctx(), None);
+        if !will_discard {
+            state.panel_size_draft = None;
+        }
+        if (commit_w - bounds.width).abs() > 1e-6 || (commit_h - bounds.height).abs() > 1e-6 {
             let mut next_items = ls.spec.items.clone();
             if let Some(it) = next_items.get_mut(target_panel_idx)
                 && let Some(b) = layout_item_bounds_mut(it)
             {
-                b.height = h_pt.clamp(24.0, 2000.0);
+                b.width = commit_w;
+                b.height = commit_h;
             }
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "spec": { "items": next_items } }));
         }
-    });
+    } else {
+        set_studio_panel_size_preview(ui.ctx(), None);
+        if !will_discard {
+            state.panel_size_draft = None;
+        }
+    }
 }
 
 fn render_layout_media_controls(

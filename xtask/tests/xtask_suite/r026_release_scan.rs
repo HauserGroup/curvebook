@@ -280,6 +280,11 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
             },
             "components": [
                 {
+                    "type": "application",
+                    "name": "curvebook-cli",
+                    "version": "0.1.0"
+                },
+                {
                     "type": "library",
                     "name": "serde",
                     "version": "1.0.219",
@@ -738,7 +743,19 @@ fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Resul
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
             "version": 1,
+            "metadata": {
+                "component": {
+                    "type": "application",
+                    "name": "curvebook",
+                    "version": "0.1.0-beta.1"
+                }
+            },
             "components": [
+                {
+                    "type": "application",
+                    "name": "curvebook-cli",
+                    "version": "0.1.0-beta.1"
+                },
                 {
                     "type": "library",
                     "name": "curvebook-math",
@@ -765,7 +782,19 @@ fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Resul
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
             "version": 1,
+            "metadata": {
+                "component": {
+                    "type": "application",
+                    "name": "curvebook",
+                    "version": "0.1.0-beta.1"
+                }
+            },
             "components": [
+                {
+                    "type": "application",
+                    "name": "curvebook-cli",
+                    "version": "0.1.0-beta.1"
+                },
                 {
                     "type": "library",
                     "name": "curvebook-doc",

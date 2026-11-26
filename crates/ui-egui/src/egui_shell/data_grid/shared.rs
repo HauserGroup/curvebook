@@ -35,7 +35,10 @@ pub(super) struct SelectionFastLookup<'a> {
 }
 
 impl<'a> SelectionFastLookup<'a> {
-    pub(super) fn new(app: &'a UiApp, geom: &MultiGridGeom) -> Self {
+    pub(super) fn new(app: &'a UiApp, sheet_id: &SheetId, geom: &MultiGridGeom) -> Self {
+        if !app.grid.selection_belongs_to(sheet_id) {
+            return Self { active: None, rect_bounds: None, discontig_slice: None, discontig_set: None };
+        }
         let active = app.grid.tool.active;
         let has_discontig =
             app.grid.selected_coords.len() > 1 || (!app.grid.selected_coords.is_empty() && app.grid.tool.anchor == app.grid.tool.active);
@@ -911,7 +914,7 @@ pub(super) fn handle_cell_pointer_drag_select(
         {
             ui.ctx().data_mut(|d| d.insert_temp(key, Some(GridDragAnchor { coord, press_pos })));
         }
-        intents.push(UiIntent::SelectGridCell { coord });
+        intents.push(UiIntent::SelectGridCell { sheet_id: Some(sheet_id.clone()), coord });
         set_grid_focus_active(ui, true);
         return true;
     }
@@ -924,7 +927,7 @@ pub(super) fn handle_cell_pointer_drag_select(
             && a.coord != coord
             && pos.distance(a.press_pos) >= 4.0
         {
-            intents.push(UiIntent::ExtendGridSelection { coord });
+            intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(sheet_id.clone()), coord });
             set_grid_focus_active(ui, true);
             return true;
         }

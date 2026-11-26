@@ -76,32 +76,58 @@ pub(super) fn resolve_fitted_overlay<'a>(
     Some((FittedOverlayData { spec: effective_spec, curve: effective_curve }, outliers))
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct OverlayDrawTarget<'a> {
+    pub(super) x_axis: &'a SegmentedAxis,
+    pub(super) y_axis: &'a SegmentedAxis,
+    pub(super) color: Rgba8,
+    pub(super) clip: RectPt,
+    pub(super) dx_data: f64,
+    pub(super) dx_pt: f64,
+    pub(super) dy_pt: f64,
+}
+
 pub(super) fn render_fitted_curve_overlay(
     primitives: &mut Vec<ScenePrimitive>,
     warnings: &mut Vec<ChartWarning>,
     overlay: &FittedOverlayData,
-    x_axis: &SegmentedAxis,
-    y_axis: &SegmentedAxis,
-    color: Rgba8,
-    clip: RectPt,
+    target: OverlayDrawTarget<'_>,
 ) {
-    let mut src: Vec<CurveSamplePoint> = overlay.curve.points.iter().copied().filter(|p| p.x.is_finite() && p.y.is_finite()).collect();
+    let mut src: Vec<CurveSamplePoint> = overlay
+        .curve
+        .points
+        .iter()
+        .copied()
+        .filter(|p| p.x.is_finite() && p.y.is_finite())
+        .map(|mut p| {
+            p.x += target.dx_data;
+            p
+        })
+        .filter(|p| p.x.is_finite())
+        .collect();
     if src.len() < 2 {
         return;
     }
     src.sort_by(|a, b| a.x.total_cmp(&b.x));
     let total_samples = usize::from(overlay.spec.sample_segments.clamp(256, 1024));
-    let total_x_span: f64 = x_axis.segments.iter().map(|s| (s.span_end_pt - s.span_start_pt).abs()).sum::<f64>().max(1.0);
+    let total_x_span: f64 = target.x_axis.segments.iter().map(|s| (s.span_end_pt - s.span_start_pt).abs()).sum::<f64>().max(1.0);
 
-    for seg_x in &x_axis.segments {
+    for seg_x in &target.x_axis.segments {
         let seg_weight = ((seg_x.span_end_pt - seg_x.span_start_pt).abs() / total_x_span).clamp(0.1, 1.0);
         let seg_samples = ((total_samples as f64) * seg_weight).round().max(16.0) as usize;
         let resampled = resample_curve_for_x_segment(&src, seg_x, seg_samples);
         if resampled.len() < 2 {
             continue;
         }
-        let ctx = OverlayRenderCtx { spec: &overlay.spec, ambiguous: overlay.curve.ambiguous, color, clip };
-        emit_overlay_bands_and_curve(primitives, warnings, &resampled, seg_x, y_axis, ctx);
+        let ctx = OverlayRenderCtx {
+            spec: &overlay.spec,
+            ambiguous: overlay.curve.ambiguous,
+            color: target.color,
+            clip: target.clip,
+            dx_pt: target.dx_pt,
+            dy_pt: target.dy_pt,
+        };
+        emit_overlay_bands_and_curve(primitives, warnings, &resampled, seg_x, target.y_axis, ctx);
     }
 }
 
@@ -218,6 +244,8 @@ struct OverlayRenderCtx<'a> {
     ambiguous: bool,
     color: Rgba8,
     clip: RectPt,
+    dx_pt: f64,
+    dy_pt: f64,
 }
 
 #[derive(Default)]
@@ -241,16 +269,17 @@ fn emit_overlay_bands_and_curve(
     let mut warned_clip = false;
 
     for sp in samples {
-        let Some(px) = seg_x.map_strict(sp.x) else {
+        let Some(raw_px) = seg_x.map_strict(sp.x) else {
             continue;
         };
+        let px = raw_px + ctx.dx_pt;
         let mapped_y = y_axis.map_value(sp.y);
         if let Some((sy, py)) = mapped_y {
             if active_y_seg.is_some() && active_y_seg != Some(sy) {
                 flush_overlay_run(primitives, &mut bufs, ctx);
             }
             active_y_seg = Some(sy);
-            bufs.curve.push(PointPt::new(px, py));
+            bufs.curve.push(PointPt::new(px, py + ctx.dy_pt));
             if let Some(y_seg) = y_axis.segments.get(sy) {
                 if ctx.spec.show_prediction_band
                     && let (Some(lo), Some(hi)) = (sp.pred_lower, sp.pred_upper)
@@ -261,7 +290,7 @@ fn emit_overlay_bands_and_curve(
                         warned_clip = true;
                         warnings.push(ChartWarning::new("log_axis_floor_clip", "prediction band clipped cleanly to log-axis floor"));
                     }
-                    bufs.pred.push((PointPt::new(px, py_lo), PointPt::new(px, py_hi)));
+                    bufs.pred.push((PointPt::new(px, py_lo + ctx.dy_pt), PointPt::new(px, py_hi + ctx.dy_pt)));
                 }
                 if ctx.spec.show_confidence_band
                     && let (Some(lo), Some(hi)) = (sp.ci_lower, sp.ci_upper)
@@ -272,7 +301,7 @@ fn emit_overlay_bands_and_curve(
                         warned_clip = true;
                         warnings.push(ChartWarning::new("log_axis_floor_clip", "confidence band clipped cleanly to log-axis floor"));
                     }
-                    bufs.ci.push((PointPt::new(px, py_lo), PointPt::new(px, py_hi)));
+                    bufs.ci.push((PointPt::new(px, py_lo + ctx.dy_pt), PointPt::new(px, py_hi + ctx.dy_pt)));
                 }
             }
         } else {

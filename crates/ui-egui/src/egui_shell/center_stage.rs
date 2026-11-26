@@ -900,7 +900,10 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
         io.intents,
     );
 
-    let click_in_pane = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| body_rect.contains(p)));
+    let click_in_pane = ui.input(|i| {
+        (i.pointer.primary_pressed() || i.pointer.primary_clicked() || i.pointer.secondary_clicked())
+            && i.pointer.interact_pos().is_some_and(|p| body_rect.contains(p))
+    });
     if enabled && click_in_pane {
         io.views.center_stage.focused_split_pane = slot;
         if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
@@ -1321,24 +1324,31 @@ fn sync_two_way_split_brushing(
     };
 
     let mut has_brush_intent = false;
-    let mut selected_coord: Option<GridCellCoord> = None;
+    let mut selected_coord: Option<(Option<SheetId>, GridCellCoord)> = None;
     for intent in intents.intents() {
         match intent {
             UiIntent::BrushPoint { .. } | UiIntent::ClearBrush => has_brush_intent = true,
-            UiIntent::SelectGridCell { coord } | UiIntent::ExtendGridSelection { coord } => selected_coord = Some(*coord),
+            UiIntent::SelectGridCell { sheet_id, coord } | UiIntent::ExtendGridSelection { sheet_id, coord } => {
+                selected_coord = Some((sheet_id.clone(), *coord));
+            }
             _ => {}
         }
     }
 
-    if let Some(coord) = selected_coord {
+    if let Some((sel_sheet_id, coord)) = selected_coord {
+        let brush_sheet = sel_sheet_id.filter(|id| doc.data_sheet(id).is_some()).unwrap_or(grid_id);
         views.center_stage.last_synced_grid_coord = Some(coord);
         if !has_brush_intent {
-            intents.push(UiIntent::BrushPoint { sheet_id: grid_id, coord });
+            intents.push(UiIntent::BrushPoint { sheet_id: brush_sheet, coord });
         }
         return;
     }
 
-    if !has_brush_intent && doc.active_sheet_id.as_ref() == Some(&grid_id) && app.grid.tool.active != views.center_stage.last_synced_grid_coord {
+    if !has_brush_intent
+        && doc.active_sheet_id.as_ref() == Some(&grid_id)
+        && app.grid.selection_belongs_to(&grid_id)
+        && app.grid.tool.active != views.center_stage.last_synced_grid_coord
+    {
         views.center_stage.last_synced_grid_coord = app.grid.tool.active;
         if let Some(coord) = app.grid.tool.active {
             intents.push(UiIntent::BrushPoint { sheet_id: grid_id, coord });

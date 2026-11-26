@@ -370,6 +370,19 @@ fn collect_ranked_metrics(doc: &ProjectDocument, res: &ResultSheet, data_set_ind
     ranked.into_iter().map(|(_, _, label, formatted_value)| FitSummaryMetric { label: label.to_owned(), formatted_value }).collect()
 }
 
+/// Resolve the curve/swatch color for `series`, matching the fitted curve stroke color rendered by
+/// `xy::series::render_xy_series` (explicit connecting-line color -> marker stroke color ->
+/// palette fallback `default_color`; `GAP-01-06`).
+#[must_use]
+pub(crate) fn resolved_series_curve_color(series: &curvebook_doc::SeriesSpec, default_color: Rgba8) -> Rgba8 {
+    match &series.gdo {
+        curvebook_doc::GraphicalDataObject::ScatterAndLine { line: Some(l), .. } => l.color,
+        curvebook_doc::GraphicalDataObject::ScatterAndLine { marker: Some(m), .. }
+        | curvebook_doc::GraphicalDataObject::AlignedDotPlot { marker: m, .. } => m.stroke_color,
+        _ => default_color,
+    }
+}
+
 /// Extract structured fit summary entries for every fitted regression overlay on `graph`.
 #[must_use]
 pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, max_metrics_per_series: usize) -> Vec<FitSummaryEntry> {
@@ -403,7 +416,7 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
         out.push(FitSummaryEntry {
             series_label,
             equation_label,
-            color: palette.color_at(idx),
+            color: resolved_series_curve_color(series, palette.color_at(idx)),
             converged: curve.converged,
             ambiguous: curve.ambiguous,
             metrics,

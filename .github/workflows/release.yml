@@ -313,58 +313,28 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.event_name != 'schedule' }}
-      - name: Import macOS Developer ID signing certificate
-        if: inputs.alpha != true
+      - name: Build macOS universal binaries
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
-            echo "error: APPLE_CERTIFICATE secret is required for non-Alpha macOS release builds" >&2
-            exit 1
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            export CURVEBOOK_VERSION="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
           fi
-          if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
-            echo "error: APPLE_CERTIFICATE_PASSWORD secret is required for non-Alpha macOS release builds" >&2
-            exit 1
-          fi
-          if [[ -z "${KEYCHAIN_PASSWORD:-}" ]]; then
-            echo "error: KEYCHAIN_PASSWORD secret is required for non-Alpha macOS release builds" >&2
-            exit 1
-          fi
-          kc="$RUNNER_TEMP/curvebook-signing.keychain-db"
-          cert="$RUNNER_TEMP/cert.p12"
-          trap 'rm -f "$cert"' EXIT
-          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert"
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
-          security set-keychain-settings -lut 21600 "$kc"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
-          security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
-          existing_kcs=()
-          while IFS= read -r kc_line; do
-            kc_line="${kc_line#"${kc_line%%[![:space:]]*}"}"
-            kc_line="${kc_line%\"}"
-            kc_line="${kc_line#\"}"
-            if [[ -n "$kc_line" ]]; then
-              existing_kcs+=("$kc_line")
-            fi
-          done < <(security list-keychains -d user)
-          security list-keychains -d user -s "$kc" "${existing_kcs[@]}"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
-          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
-          if [[ -z "$identity" ]]; then
-            echo "error: no Developer ID Application codesigning identity found in imported certificate" >&2
-            exit 1
-          fi
-          echo "MACOS_KEYCHAIN=$kc" >> "$GITHUB_ENV"
-          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-      - name: Build and verify macOS universal DMG
+          ./packaging/macos/package.sh --arch universal --build-only
+      - name: Sign, package, and verify macOS universal DMG
         env:
           ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          APPLE_CERTIFICATE: ${{ !inputs.alpha && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ !inputs.alpha && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          KEYCHAIN_PASSWORD: ${{ !inputs.alpha && secrets.KEYCHAIN_PASSWORD || '' }}
           APPLE_ID: ${{ !inputs.alpha && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ !inputs.alpha && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ !inputs.alpha && secrets.APPLE_TEAM_ID || '' }}
@@ -377,18 +347,64 @@ jobs:
           fi
           if [ "${ALPHA_RELEASE:-}" = "true" ]; then
             export MACOS_SIGN_IDENTITY="-"
-            ./packaging/macos/package.sh --arch universal
+            ./packaging/macos/package.sh --arch universal --skip-build
             ./packaging/macos/verify.sh --arch universal
           else
-            if [[ -z "${MACOS_SIGN_IDENTITY:-}" ]] || [[ "${MACOS_SIGN_IDENTITY:-}" = "-" ]]; then
-              echo "error: MACOS_SIGN_IDENTITY is required for non-Alpha macOS release builds" >&2
+            if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+              echo "error: APPLE_CERTIFICATE secret is required for non-Alpha macOS release builds" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+              echo "error: APPLE_CERTIFICATE_PASSWORD secret is required for non-Alpha macOS release builds" >&2
+              exit 1
+            fi
+            if [[ -z "${KEYCHAIN_PASSWORD:-}" ]]; then
+              echo "error: KEYCHAIN_PASSWORD secret is required for non-Alpha macOS release builds" >&2
               exit 1
             fi
             if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${APPLE_PASSWORD:-}" ]] || [[ -z "${APPLE_TEAM_ID:-}" ]]; then
               echo "error: APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID secrets are required for non-Alpha macOS notarization" >&2
               exit 1
             fi
-            ./packaging/macos/package.sh --arch universal --require-signing
+            kc="$RUNNER_TEMP/curvebook-signing.keychain-db"
+            cert="$RUNNER_TEMP/cert.p12"
+            existing_kcs=()
+            cleanup_keychain() {
+              rm -f "$cert"
+              if [[ -f "$kc" ]]; then
+                security lock-keychain "$kc" >/dev/null 2>&1 || true
+                if [[ ${#existing_kcs[@]} -gt 0 ]]; then
+                  security list-keychains -d user -s "${existing_kcs[@]}" >/dev/null 2>&1 || true
+                fi
+                security delete-keychain "$kc" >/dev/null 2>&1 || true
+                rm -f "$kc"
+              fi
+            }
+            trap cleanup_keychain EXIT
+            while IFS= read -r kc_line; do
+              kc_line="${kc_line#"${kc_line%%[![:space:]]*}"}"
+              kc_line="${kc_line%\"}"
+              kc_line="${kc_line#\"}"
+              if [[ -n "$kc_line" ]]; then
+                existing_kcs+=("$kc_line")
+              fi
+            done < <(security list-keychains -d user)
+            (umask 077 && printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert")
+            security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+            security set-keychain-settings -lut 3600 "$kc"
+            security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+            security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -x -t cert -f pkcs12 -k "$kc" -T /usr/bin/codesign
+            rm -f "$cert"
+            security list-keychains -d user -s "$kc" "${existing_kcs[@]+"${existing_kcs[@]}"}"
+            security set-key-partition-list -S apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
+            identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+            if [[ -z "$identity" ]]; then
+              echo "error: no Developer ID Application codesigning identity found in imported certificate" >&2
+              exit 1
+            fi
+            MACOS_KEYCHAIN="$kc" MACOS_SIGN_IDENTITY="$identity" \
+              ./packaging/macos/package.sh --arch universal --require-signing --skip-build
+            cleanup_keychain
             ./packaging/macos/verify.sh --arch universal --require-notarized
           fi
       - name: Scan macOS release assets
@@ -440,7 +456,21 @@ jobs:
           $tools >> $env:GITHUB_PATH
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.Util.wixext/5.0.2
-      - name: Build Windows MSI
+      - name: Build Windows binaries
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          if ($env:INPUT_VERSION) {
+            $env:CURVEBOOK_VERSION = $env:INPUT_VERSION
+          } elseif ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
+            $env:CURVEBOOK_VERSION = $env:GITHUB_REF_NAME.Substring(1)
+          }
+          ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH -BuildOnly
+      - name: Sign and package Windows MSI
         shell: pwsh
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -464,9 +494,9 @@ jobs:
           }
           $requireSigning = ($env:WINDOWS_SIGNING_ENABLED -eq 'true') -or [bool]$env:WINDOWS_CERTIFICATE -or [bool]$env:AZURE_SIGNING_ACCOUNT
           if ($requireSigning) {
-            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH -RequireSigning
+            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH -SkipBuild -RequireSigning
           } else {
-            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
+            ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH -SkipBuild
           }
       - name: Scan Windows release assets
         shell: pwsh

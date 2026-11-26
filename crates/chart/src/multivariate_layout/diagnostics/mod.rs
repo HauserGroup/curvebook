@@ -21,6 +21,12 @@ use crate::scene::{ChartWarning, SourceCellId};
 // 2. All 7 DiagnosticPlotKinds
 // ============================================================================
 
+fn push_unique_warning(warnings: &mut Vec<ChartWarning>, code: &'static str, message: String) {
+    if !warnings.iter().any(|w| w.code == code && w.message == message) {
+        warnings.push(ChartWarning::new(code, message));
+    }
+}
+
 fn raw_matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
     if let Some(direct) = doc.result_sheet(&graph.spec.primary_source_sheet_id) {
         return vec![direct];
@@ -29,7 +35,7 @@ fn raw_matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec
 }
 
 fn matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
-    raw_matching_results(graph, doc).into_iter().filter(|r| !matches!(r.status, ResultStatus::Failed { .. })).collect()
+    raw_matching_results(graph, doc).into_iter().filter(|r| matches!(r.status, ResultStatus::UpToDate)).collect()
 }
 
 fn find_matching_result_where<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> Option<&'a ResultSheet> {
@@ -43,12 +49,23 @@ fn find_matching_result_where_checked<'a>(
     pred: impl Fn(&ResultSheet) -> bool,
 ) -> Option<&'a ResultSheet> {
     let found = find_matching_result_where(graph, doc, &pred);
-    if found.is_none()
-        && let Some(failed) = raw_matching_results(graph, doc).into_iter().find(|r| matches!(r.status, ResultStatus::Failed { .. }) && pred(r))
-    {
-        warnings.push(ChartWarning::new("failed_result_sheet", format!("result sheet '{}' failed; omitted stale analysis results", failed.id)));
+    if found.is_none() {
+        let raw = raw_matching_results(graph, doc);
+        if let Some(failed) = raw.iter().copied().find(|r| matches!(r.status, ResultStatus::Failed { .. }) && pred(r)) {
+            push_unique_warning(warnings, "failed_result_sheet", format!("result sheet '{}' failed; omitted stale analysis results", failed.id));
+        } else if let Some(pending) = raw.iter().copied().find(|r| !matches!(r.status, ResultStatus::UpToDate) && pred(r)) {
+            push_unique_warning(
+                warnings,
+                "pending_analysis_result",
+                format!("result sheet '{}' is pending recalculation; omitted stale analysis results", pending.id),
+            );
+        }
     }
     found
+}
+
+fn has_blocked_matching_result(graph: &GraphSheet, doc: &ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> bool {
+    raw_matching_results(graph, doc).into_iter().any(|r| !matches!(r.status, ResultStatus::UpToDate) && pred(r))
 }
 
 fn find_matching_result_checked<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<&'a ResultSheet> {
@@ -244,8 +261,89 @@ fn collect_ds_active_values_with_sources(ds: &DataSheet, col_idx: usize) -> (Vec
     }
 }
 
-fn resolve_source_data_sheet<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
-    crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id)
+pub(super) fn resolve_source_data_sheet_checked<'a>(
+    graph: &GraphSheet,
+    doc: &'a ProjectDocument,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<&'a DataSheet> {
+    resolve_fresh_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id, warnings)
+}
+
+fn resolve_fresh_data_sheet_or_upstream<'a>(doc: &'a ProjectDocument, id: &SheetId, warnings: &mut Vec<ChartWarning>) -> Option<&'a DataSheet> {
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = id;
+    while visited.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return Some(ds);
+        }
+        let res = doc.result_sheet(cursor)?;
+        match &res.status {
+            ResultStatus::UpToDate => {}
+            ResultStatus::Failed { .. } => {
+                push_unique_warning(warnings, "failed_result_sheet", format!("result sheet '{}' failed; omitted stale analysis results", res.id));
+                return None;
+            }
+            ResultStatus::Dirty => {
+                push_unique_warning(
+                    warnings,
+                    "pending_analysis_result",
+                    format!("result sheet '{}' is pending recalculation; omitted stale analysis results", res.id),
+                );
+                return None;
+            }
+        }
+        if let Some(analyzable) = res.analyzable_data.as_ref() {
+            return Some(analyzable);
+        }
+        cursor = &res.analysis.source_sheet_id;
+    }
+    None
+}
+
+fn resolve_analysis_source_data_sheet<'a>(res: &ResultSheet, graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
+    doc.data_sheet(&res.analysis.source_sheet_id)
+        .or_else(|| crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id))
+        .or_else(|| crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id))
+}
+
+fn row_label_dataset_prefix(lbl: &str) -> Option<(&str, usize)> {
+    let (prefix, num_str) = lbl.rsplit_once(" #")?;
+    let trimmed = prefix.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let idx = num_str.trim().parse::<usize>().ok()?;
+    (idx >= 1).then_some((trimmed, idx - 1))
+}
+
+fn selected_dataset_prefix_in_row_labels(res: &ResultSheet, tab: &ResultTab, graph: &GraphSheet, doc: &ProjectDocument) -> Option<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for lbl in &tab.row_labels {
+        if let Some((prefix, _)) = row_label_dataset_prefix(lbl)
+            && !seen.iter().any(|existing| existing == prefix)
+        {
+            seen.push(prefix.to_owned());
+        }
+    }
+    if seen.len() <= 1 {
+        return None;
+    }
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+    if let Some(ds) = resolve_analysis_source_data_sheet(res, graph, doc) {
+        let desired_title = match &ds.archetype {
+            TableArchetype::Column(col) => col.data_sets.get(ds_idx).map(|d| d.title.as_str()),
+            TableArchetype::Grouped(g) => g.data_sets.get(ds_idx).map(|d| d.title.as_str()),
+            TableArchetype::Xy(xy) => xy.data_sets.get(ds_idx).map(|d| d.title.as_str()),
+            TableArchetype::MultipleVariables(mv) => mv.variables.get(ds_idx).map(|v| v.title.as_str()),
+            _ => None,
+        };
+        if let Some(title) = desired_title
+            && seen.iter().any(|s| s == title)
+        {
+            return Some(title.to_owned());
+        }
+    }
+    seen.get(ds_idx).or_else(|| seen.first()).cloned()
 }
 
 fn result_cell_num(cell: &ResultCell) -> Option<f64> {
@@ -302,11 +400,11 @@ fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, 
 
 fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
     let (ds_col, x_col, y_col, obs_col) = extract_residuals_cols(&tab.column_headers);
-    let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
+    let target_label = selected_dataset_label_in_tab(res, tab, ds_col, graph, doc);
+    let legacy_row_prefix = if ds_col.is_none() { selected_dataset_prefix_in_row_labels(res, tab, graph, doc) } else { None };
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
-    let fallback_sheet_id = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id)
-        .map(|d| d.id.clone())
-        .unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
+    let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
+    let fallback_sheet_id = ds_opt.map(|d| d.id.clone()).unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
 
     let pairs: Vec<(usize, f64, f64)> = tab
         .rows
@@ -317,6 +415,12 @@ fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &Grap
                 && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
             {
                 return None;
+            }
+            if let Some(prefix) = legacy_row_prefix.as_deref() {
+                let row_lbl = tab.row_labels.get(i).map(String::as_str).unwrap_or("");
+                if !matches!(row_label_dataset_prefix(row_lbl), Some((p, _)) if p == prefix) {
+                    return None;
+                }
             }
             let (xv, yv) = match (x_col, y_col, obs_col) {
                 (Some(xc), Some(yc), _) => (result_cell_num(row.get(xc)?)?, result_cell_num(row.get(yc)?)?),
@@ -348,7 +452,6 @@ fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &Grap
         AnalysisKind::GeneralizedLinearModel(glm) => glm.response_column,
         _ => ds_idx,
     };
-    let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
     let (resolved_sources, series_label) = if let Some(ds) = ds_opt {
         let (all_rep_sources, lbl) = collect_ds_active_point_sources(ds, source_col, true);
         if all_rep_sources.len() == pairs.len() {
@@ -358,17 +461,23 @@ fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &Grap
             if row_sources.len() == pairs.len() { (Some(row_sources), lbl_row) } else { (None, lbl) }
         }
     } else {
-        (None, target_label.clone().unwrap_or_else(|| graph.spec.title.clone()))
+        (None, target_label.clone().or_else(|| legacy_row_prefix.clone()).unwrap_or_else(|| graph.spec.title.clone()))
     };
     let resolved_label = if series_label.is_empty() { graph.spec.title.clone() } else { series_label };
+    let filtered_by_dataset = target_label.is_some() || legacy_row_prefix.is_some();
 
     pairs
         .into_iter()
         .enumerate()
         .map(|(k, (tab_row_idx, x, y))| {
+            let fallback_row = if filtered_by_dataset {
+                tab.row_labels.get(tab_row_idx).and_then(|l| row_label_dataset_prefix(l).map(|(_, idx)| idx)).unwrap_or(k)
+            } else {
+                tab_row_idx
+            };
             let source = resolved_sources.as_ref().and_then(|v| v.get(k)).cloned().unwrap_or(SourceCellId {
                 sheet_id: fallback_sheet_id.clone(),
-                row: tab_row_idx,
+                row: fallback_row,
                 col: source_col,
                 subcol: 0,
             });

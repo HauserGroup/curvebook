@@ -1597,6 +1597,12 @@ pub struct GridViewState {
     pub selected_rows: Vec<usize>,
     #[serde(default)]
     pub selected_coords: Vec<GridCellCoord>,
+    /// Sheet that owns `tool` / `selected_rows` / `selected_coords` / `active_x_cell` (`GAP-07-02`).
+    ///
+    /// When `Some(id)`, selection queries against any other `DataSheet` return empty so clicking
+    /// cells in one split pane can never target another sheet pinned in Trailing Studio.
+    #[serde(default)]
+    pub selection_sheet_id: Option<SheetId>,
     /// Currently focused/active X (or Time) column cell `(row, subcol)` for XY / Survival sheets.
     #[serde(default)]
     pub active_x_cell: Option<(usize, usize)>,
@@ -1745,12 +1751,46 @@ impl GridViewState {
         }
     }
 
+    /// Return `true` when the current grid selection belongs to `sheet_id` (or is unbound legacy state; `GAP-07-02`).
+    #[must_use]
+    pub fn selection_belongs_to(&self, sheet_id: &SheetId) -> bool {
+        self.selection_sheet_id.as_ref().is_none_or(|id| id == sheet_id)
+    }
+
+    /// Return the active grid cell coordinate only when the current selection belongs to `sheet_id` (`GAP-07-02`).
+    #[must_use]
+    pub fn active_cell_for_sheet(&self, sheet_id: &SheetId) -> Option<GridCellCoord> {
+        self.selection_belongs_to(sheet_id).then_some(self.tool.active).flatten()
+    }
+
+    /// Return the active X-column cell coordinate only when the current selection belongs to `sheet_id` (`GAP-07-02`).
+    #[must_use]
+    pub fn active_x_cell_for_sheet(&self, sheet_id: &SheetId) -> Option<(usize, usize)> {
+        self.selection_belongs_to(sheet_id).then_some(self.active_x_cell).flatten()
+    }
+
+    /// Clear active cell, anchor, discontiguous selection, and sheet binding.
+    pub fn clear_selection(&mut self) {
+        self.active_x_cell = None;
+        self.tool.active = None;
+        self.tool.anchor = None;
+        self.selected_rows.clear();
+        self.selected_coords.clear();
+        self.selection_sheet_id = None;
+    }
+
     /// Clear multi-selection and select a single coordinate (`coord`).
     pub fn select_single_sync(&mut self, coord: GridCellCoord) {
         self.active_x_cell = None;
         self.tool.select_single(coord);
         self.selected_rows = vec![coord.row];
         self.selected_coords = vec![coord];
+    }
+
+    /// Clear multi-selection, bind selection ownership to `sheet_id`, and select `coord` (`GAP-07-02`).
+    pub fn select_single_for_sheet(&mut self, sheet_id: &SheetId, coord: GridCellCoord) {
+        self.selection_sheet_id = Some(sheet_id.clone());
+        self.select_single_sync(coord);
     }
 
     /// Focus/select a single X-column (or Survival Time-column) cell at `(row, subcol)`.
@@ -1762,9 +1802,20 @@ impl GridViewState {
         self.selected_coords.clear();
     }
 
+    /// Focus/select a single X-column cell and bind selection ownership to `sheet_id` (`GAP-07-02`).
+    pub fn select_x_cell_for_sheet(&mut self, sheet_id: &SheetId, row: usize, subcol: usize) {
+        self.selection_sheet_id = Some(sheet_id.clone());
+        self.select_x_cell_sync(row, subcol);
+    }
+
     /// Extend a contiguous rectangular / multi-row selection (`Shift+Click` or pointer drag) in `O(1)`
     /// range bounds without materializing every cell coordinate in multi-million-cell ranges (`RV-50`).
     pub fn extend_shift_range(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
+        if !self.selection_belongs_to(&sheet.id) {
+            self.select_single_for_sheet(&sheet.id, coord);
+            return;
+        }
+        self.selection_sheet_id = Some(sheet.id.clone());
         self.active_x_cell = None;
         self.tool.extend_selection(coord);
         self.selected_coords.clear();
@@ -1775,6 +1826,11 @@ impl GridViewState {
     pub fn toggle_cmd_selection(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
         use std::collections::BTreeSet;
 
+        if !self.selection_belongs_to(&sheet.id) {
+            self.select_single_for_sheet(&sheet.id, coord);
+            return;
+        }
+        self.selection_sheet_id = Some(sheet.id.clone());
         self.active_x_cell = None;
         let mut set: BTreeSet<GridCellCoord> = if !self.selected_coords.is_empty() {
             self.selected_coords.iter().copied().collect()
@@ -1819,6 +1875,10 @@ impl GridViewState {
     /// range and `Cmd/Ctrl+Click` discontiguous multi-row selection (`WF-22`).
     #[cfg(any(test, feature = "test-support"))]
     pub fn select_row_click(&mut self, sheet: &DataSheet, row: usize, shift: bool, command: bool) {
+        if !self.selection_belongs_to(&sheet.id) {
+            self.clear_selection();
+        }
+        self.selection_sheet_id = Some(sheet.id.clone());
         self.active_x_cell = None;
         let total_rows = sheet.archetype.row_count();
         if total_rows == 0 {
@@ -1918,6 +1978,9 @@ impl GridViewState {
     #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn is_cell_selected(&self, sheet: &DataSheet, coord: GridCellCoord) -> bool {
+        if !self.selection_belongs_to(&sheet.id) {
+            return false;
+        }
         let total_rows = sheet.archetype.row_count();
         let total_flat = total_flat_data_subcolumns(&sheet.archetype);
         if coord.row >= total_rows || total_flat == 0 {
@@ -1943,6 +2006,9 @@ impl GridViewState {
     /// - empty selections fall back to whole-sheet copy (and cut is a no-op).
     #[must_use]
     pub fn clipboard_target(&self, sheet: &DataSheet) -> GridClipboardTarget {
+        if !self.selection_belongs_to(&sheet.id) {
+            return GridClipboardTarget::WholeSheetFallback;
+        }
         let total_rows = sheet.archetype.row_count();
         let total_cols = sheet.archetype.column_count();
         if total_rows == 0 || total_cols == 0 {
@@ -2023,6 +2089,11 @@ impl GridViewState {
     }
 
     fn refresh_selection_stats_for_sheet(&mut self, sheet: &DataSheet) {
+        if !self.selection_belongs_to(&sheet.id) {
+            self.quick_stats = None;
+            self.extended_stats = None;
+            return;
+        }
         if !self.selected_coords.is_empty() {
             self.refresh_selection_stats_slice(sheet);
             return;
@@ -2046,6 +2117,9 @@ impl GridViewState {
     /// discontiguous `Cmd/Ctrl+Click` selections), bounded to populated sheet dimensions.
     #[must_use]
     pub fn all_selected_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+        if !self.selection_belongs_to(&sheet.id) {
+            return Vec::new();
+        }
         if !self.selected_coords.is_empty() {
             let total_rows = sheet.archetype.row_count();
             let total_cols = sheet.archetype.column_count();
@@ -2073,6 +2147,9 @@ impl GridViewState {
     /// intersecting with populated sheet rows and deduplicating in `O(n)` via `HashSet` (`RV-50`).
     #[must_use]
     pub fn selected_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
+        if !self.selection_belongs_to(&sheet.id) {
+            return Vec::new();
+        }
         if !self.selected_coords.is_empty() {
             return self.discontiguous_graph_point_targets(sheet, max_series);
         }
@@ -2149,6 +2226,9 @@ impl GridViewState {
     /// intersected with populated sheet dimensions and capped safely (`RV-50`).
     #[must_use]
     pub fn selection_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+        if !self.selection_belongs_to(&sheet.id) {
+            return Vec::new();
+        }
         let Some((r0, r1, lo, hi)) = self.materialized_selection_flat_rect(sheet, false) else {
             return Vec::new();
         };
@@ -2257,10 +2337,15 @@ impl GridViewState {
         let decimal_sep = if self.decimal_separator == ',' { ',' } else { '.' };
         let (tier1_groups, tier2_subcolumns) = build_visible_headers(&sheet.archetype, window.start_col, window.end_col);
 
-        let sel_bounds = selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active);
-        let selected_set: std::collections::HashSet<GridCellCoord> =
-            if !self.selected_coords.is_empty() { self.selected_coords.iter().copied().collect() } else { std::collections::HashSet::new() };
-        let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, selected_set: &selected_set, active_coord: self.tool.active };
+        let matches_sheet = self.selection_belongs_to(&sheet.id);
+        let sel_bounds = matches_sheet.then(|| selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active)).flatten();
+        let selected_set: std::collections::HashSet<GridCellCoord> = if matches_sheet && !self.selected_coords.is_empty() {
+            self.selected_coords.iter().copied().collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let active_coord = matches_sheet.then_some(self.tool.active).flatten();
+        let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, selected_set: &selected_set, active_coord };
         let mut rows = Vec::with_capacity(window.end_row.saturating_sub(window.start_row));
         for r in window.start_row..window.end_row {
             let leading = build_leading_row(sheet, r, decimal_sep);
@@ -2315,7 +2400,8 @@ impl GridViewState {
         if total_rows == 0 || total_flat == 0 {
             return;
         }
-        let current = self.tool.active.unwrap_or_default();
+        let same_sheet = self.selection_belongs_to(&sheet.id);
+        let current = if same_sheet { self.tool.active.unwrap_or_default() } else { GridCellCoord::default() };
         let curr_flat = flat_index_for_coord(&sheet.archetype, current.col, current.subcol).min(total_flat - 1);
         let curr_row = current.row.min(total_rows - 1);
 
@@ -2329,9 +2415,10 @@ impl GridViewState {
             return;
         };
         let next = GridCellCoord::new(next_row, col, subcol);
+        self.selection_sheet_id = Some(sheet.id.clone());
         self.active_x_cell = None;
         self.selected_coords.clear();
-        if extend_selection {
+        if extend_selection && same_sheet {
             if self.tool.anchor.is_none() {
                 self.tool.anchor = Some(GridCellCoord::new(curr_row, current.col, current.subcol));
             }
@@ -2348,6 +2435,9 @@ impl GridViewState {
     /// exclusion across the current selection (`docs/implementation/data-tables-and-transforms.md` §1.2).
     /// Returns the number of `"range"` command intents queued into `tool.pending_intents`.
     pub fn emit_toggle_exclude_intents(&mut self, sheet: &DataSheet, excluded: bool) -> usize {
+        if !self.selection_belongs_to(&sheet.id) {
+            return 0;
+        }
         let total_rows = sheet.archetype.row_count();
         let total_flat = total_flat_data_subcolumns(&sheet.archetype);
         if total_rows == 0 || total_flat == 0 {
@@ -3712,7 +3802,7 @@ pub(crate) fn apply_type_text_to_x_cell(
                 )
             }
         })?;
-        app.grid.select_x_cell_sync(x_row, x_subcol);
+        app.grid.select_x_cell_for_sheet(sheet_id, x_row, x_subcol);
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(json!({
             "pasted": true,
@@ -3742,7 +3832,7 @@ pub(crate) fn apply_type_text_to_x_cell(
         }),
     )?;
     let next_row = if commit_enter { x_row + 1 } else { x_row };
-    app.grid.select_x_cell_sync(next_row, x_subcol);
+    app.grid.select_x_cell_for_sheet(sheet_id, next_row, x_subcol);
     if wid.is_some() || app.focus_widget_id.as_deref().and_then(parse_x_cell_widget_id).is_some() {
         app.focus_widget_id = Some(format!("grid.xcell.{next_row}.{x_subcol}"));
     }
@@ -3836,7 +3926,7 @@ pub fn handle_grid_text_input(app: &crate::UiApp, text: &str) -> crate::interact
     if ds.frozen {
         return crate::interaction::UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..Default::default() };
     }
-    let Some(active) = app.grid.tool.active else {
+    let Some(active) = app.grid.active_cell_for_sheet(&ds.id) else {
         return crate::interaction::UiEventOutcome::default();
     };
     if linked_region_for_cell_subcol(ds, active.row, active.col, active.subcol).is_some() {
@@ -3907,7 +3997,7 @@ fn prepare_clear_selected_cells(ds: &DataSheet, grid: &GridViewState) -> ClearSe
         return ClearSelectionPlan::Frozen;
     }
     let target = match grid.clipboard_target(ds) {
-        GridClipboardTarget::WholeSheetFallback => match grid.tool.active {
+        GridClipboardTarget::WholeSheetFallback => match grid.active_cell_for_sheet(&ds.id) {
             Some(c) if c.row < ds.archetype.row_count() && c.col < ds.archetype.column_count() => {
                 GridClipboardTarget::Cells(vec![CellCoord::new(c.row, c.col, c.subcol)])
             }
@@ -3936,21 +4026,21 @@ fn prepare_clear_selected_cells(ds: &DataSheet, grid: &GridViewState) -> ClearSe
 }
 
 fn step_tab_cell(grid: &mut GridViewState, ds: &DataSheet, backward: bool) {
-    let before = grid.tool.active.unwrap_or_default();
+    let before = grid.active_cell_for_sheet(&ds.id).unwrap_or_default();
     let dir = if backward { MoveDirection::Left } else { MoveDirection::Right };
     grid.navigate(ds, dir, false, false);
-    if grid.tool.active.unwrap_or_default() == before {
+    if grid.active_cell_for_sheet(&ds.id).unwrap_or_default() == before {
         let total_rows = ds.archetype.row_count();
         let total_cols = ds.archetype.column_count();
         if total_rows == 0 || total_cols == 0 {
             return;
         }
         if !backward && before.row + 1 < total_rows {
-            grid.select_single_sync(GridCellCoord::new(before.row + 1, 0, 0));
+            grid.select_single_for_sheet(&ds.id, GridCellCoord::new(before.row + 1, 0, 0));
         } else if backward && before.row > 0 {
             let last_col = total_cols.saturating_sub(1);
             let last_sub = data_set_subcolumn_count(&ds.archetype, last_col).saturating_sub(1);
-            grid.select_single_sync(GridCellCoord::new(before.row - 1, last_col, last_sub));
+            grid.select_single_for_sheet(&ds.id, GridCellCoord::new(before.row - 1, last_col, last_sub));
         }
     }
 }
@@ -3998,25 +4088,25 @@ fn apply_grid_nav_event(app: &mut crate::UiApp, event: GridNavEvent) -> Result<c
         match event {
             GridNavEvent::Arrow { dir, extend, jump } => {
                 app.grid.navigate(ds, dir, extend, jump);
-                let cur = app.grid.tool.active.unwrap_or_default();
+                let cur = app.grid.active_cell_for_sheet(&ds.id).unwrap_or_default();
                 if extend {
                     app.grid.extend_shift_range(ds, cur);
                 } else {
-                    app.grid.select_single_sync(cur);
+                    app.grid.select_single_for_sheet(&ds.id, cur);
                 }
                 outcome.action = format!("grid_core.arrow:{dir:?}:extend={extend}:jump={jump}->({},{},{})", cur.row, cur.col, cur.subcol);
             }
             GridNavEvent::Tab { backward } => {
                 step_tab_cell(&mut app.grid, ds, backward);
-                let cur = app.grid.tool.active.unwrap_or_default();
-                app.grid.select_single_sync(cur);
+                let cur = app.grid.active_cell_for_sheet(&ds.id).unwrap_or_default();
+                app.grid.select_single_for_sheet(&ds.id, cur);
                 outcome.action = format!("grid_core.tab:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
             }
             GridNavEvent::Enter { backward } => {
                 let dir = if backward { MoveDirection::Up } else { MoveDirection::Down };
                 app.grid.navigate(ds, dir, false, false);
-                let cur = app.grid.tool.active.unwrap_or_default();
-                app.grid.select_single_sync(cur);
+                let cur = app.grid.active_cell_for_sheet(&ds.id).unwrap_or_default();
+                app.grid.select_single_for_sheet(&ds.id, cur);
                 outcome.action = format!("grid_core.enter:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
             }
             GridNavEvent::ClearSelection => {}

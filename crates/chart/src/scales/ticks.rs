@@ -100,18 +100,12 @@ pub(crate) fn compute_segment_tick_values(
     let target_major = target_major_override.unwrap_or_else(|| ((span_pt / 54.0).round() as usize).clamp(3, 9));
     match seg.scale {
         AxisScale::Linear => linear_major_minor(seg, target_major, warnings),
-        AxisScale::Log10 => {
-            if seg.major_tick_interval.is_some_and(|s| s.is_finite() && s > 0.0) && target_major_override.is_some() {
-                linear_major_minor(seg, target_major, warnings)
-            } else {
-                log10_major_minor(seg, auto_log_minor_ticks, warnings)
-            }
-        }
-        AxisScale::Log2 => log_base_major_minor(seg, 2.0, warnings),
-        AxisScale::Ln => log_base_major_minor(seg, std::f64::consts::E, warnings),
-        AxisScale::Logit(LogitDomain::Percent) => candidate_prob_ticks(seg, LOGIT_PCT_TICKS, warnings),
-        AxisScale::Logit(LogitDomain::Proportion) => candidate_prob_ticks(seg, LOGIT_PROP_TICKS, warnings),
-        AxisScale::Probit => candidate_prob_ticks(seg, PROBIT_PCT_TICKS, warnings),
+        AxisScale::Log10 => log10_major_minor(seg, target_major, auto_log_minor_ticks, warnings),
+        AxisScale::Log2 => log_base_major_minor(seg, 2.0, target_major, warnings),
+        AxisScale::Ln => log_base_major_minor(seg, std::f64::consts::E, target_major, warnings),
+        AxisScale::Logit(LogitDomain::Percent) => candidate_prob_ticks(seg, LOGIT_PCT_TICKS, target_major, warnings),
+        AxisScale::Logit(LogitDomain::Proportion) => candidate_prob_ticks(seg, LOGIT_PROP_TICKS, target_major, warnings),
+        AxisScale::Probit => candidate_prob_ticks(seg, PROBIT_PCT_TICKS, target_major, warnings),
         AxisScale::Reciprocal => {
             if seg.major_tick_interval.is_some_and(|s| s.is_finite() && s > 0.0) {
                 linear_major_minor(seg, target_major, warnings)
@@ -561,18 +555,129 @@ fn log_exponent_range(lo: f64, hi: f64, base: f64) -> Option<(i32, i32, i32)> {
     Some((lo_exp_f as i32, hi_exp_f as i32, (stride_f as i32).max(1)))
 }
 
-fn log10_major_minor(seg: &ResolvedSegment, auto_log_minor_ticks: bool, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
+fn pow_in_base(base: f64, exp: f64) -> f64 {
+    let rounded = exp.round();
+    if (exp - rounded).abs() <= 1e-12 && rounded >= f64::from(i32::MIN) && rounded <= f64::from(i32::MAX) {
+        #[allow(clippy::cast_possible_truncation)]
+        let k = rounded as i32;
+        base.powi(k)
+    } else {
+        base.powf(exp)
+    }
+}
+
+fn explicit_log_major_ticks(lo: f64, hi: f64, base: f64, exp_step: f64, target_major: usize, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, f64) {
+    let t_lo = log_in_base(lo, base);
+    let t_hi = log_in_base(hi, base);
+    if !t_lo.is_finite() || !t_hi.is_finite() || t_hi <= t_lo {
+        return (Vec::new(), exp_step);
+    }
+    let (exp_ticks, eff_step, _) = compute_safe_linear_ticks(t_lo, t_hi, Some(exp_step), target_major, warnings);
+    let lo_tol = lo * (1.0 - 1e-9);
+    let hi_tol = if hi <= f64::MAX / (1.0 + 1e-9) { hi * (1.0 + 1e-9) } else { f64::MAX };
+    let majors = exp_ticks
+        .into_iter()
+        .map(|e| pow_in_base(base, e))
+        .filter(|&v| v.is_finite() && v > 0.0 && v >= lo_tol && v <= hi_tol)
+        .take(MAX_TICKS_PER_SEGMENT)
+        .collect();
+    (majors, eff_step)
+}
+
+fn compute_log_spaced_minors(majors: &[f64], minor_per_interval: u8) -> Vec<f64> {
+    let mut minors = Vec::new();
+    if minor_per_interval == 0 || majors.len() < 2 {
+        return minors;
+    }
+    let divs = usize::from(minor_per_interval) + 1;
+    for pair in majors.windows(2) {
+        let [a, b] = *pair else { continue };
+        let ta = a.ln();
+        let tb = b.ln();
+        for j in 1..divs {
+            if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                break;
+            }
+            let t = ta + (tb - ta) * ((j as f64) / (divs as f64));
+            let v = t.exp();
+            if v.is_finite() && v > 0.0 {
+                minors.push(v);
+            }
+        }
+    }
+    minors
+}
+
+fn compute_log10_decade_minors(k_lo: i32, k_hi: i32, lo_tol: f64, hi_tol: f64, majors: &[f64], minor_per_interval: u8) -> Vec<f64> {
+    let mut minors = Vec::new();
+    let use_standard_2_to_9 = minor_per_interval == 0 || minor_per_interval == 8;
+    let divs = f64::from(minor_per_interval) + 1.0;
+    let mut dec = k_lo.saturating_sub(1);
+    while dec <= k_hi && minors.len() < MAX_TICKS_PER_SEGMENT {
+        let base = 10.0_f64.powi(dec);
+        if base.is_finite() && base > 0.0 {
+            if use_standard_2_to_9 {
+                for mult in 2_u8..=9 {
+                    if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                        break;
+                    }
+                    let v = f64::from(mult) * base;
+                    if v.is_finite() && v > 0.0 && v >= lo_tol && v <= hi_tol && !majors.iter().any(|&m| (m - v).abs() <= m * 1e-9) {
+                        minors.push(v);
+                    }
+                }
+            } else {
+                for j in 1..=minor_per_interval {
+                    if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                        break;
+                    }
+                    let v = base + (9.0 * base) * (f64::from(j) / divs);
+                    if v.is_finite() && v > 0.0 && v >= lo_tol && v <= hi_tol && !majors.iter().any(|&m| (m - v).abs() <= m * 1e-9) {
+                        minors.push(v);
+                    }
+                }
+            }
+        }
+        let Some(next_dec) = dec.checked_add(1) else {
+            break;
+        };
+        dec = next_dec;
+    }
+    minors
+}
+
+fn log10_major_minor(
+    seg: &ResolvedSegment,
+    target_major: usize,
+    auto_log_minor_ticks: bool,
+    warnings: &mut Vec<ChartWarning>,
+) -> (Vec<f64>, Vec<f64>) {
     if !seg.domain_min.is_finite() || !seg.domain_max.is_finite() || seg.domain_min <= 0.0 || seg.domain_max <= 0.0 {
         return (Vec::new(), Vec::new());
     }
     let lo = seg.domain_min.min(seg.domain_max);
     let hi = seg.domain_min.max(seg.domain_max);
+    let lo_tol = lo * (1.0 - 1e-9);
+    let hi_tol = if hi <= f64::MAX / (1.0 + 1e-9) { hi * (1.0 + 1e-9) } else { f64::MAX };
+
+    if let Some(exp_step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
+        let (majors, eff_step) = explicit_log_major_ticks(lo, hi, 10.0, exp_step, target_major, warnings);
+        let minors = if (eff_step - 1.0).abs() <= 1e-9
+            && let Some((k_lo, k_hi, _)) = log_exponent_range(lo, hi, 10.0)
+            && (i64::from(k_hi) - i64::from(k_lo)) <= 8
+            && (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0)
+        {
+            compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval)
+        } else {
+            compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval)
+        };
+        return (majors, minors);
+    }
+
     let Some((k_lo, k_hi, stride)) = log_exponent_range(lo, hi, 10.0) else {
         return (Vec::new(), Vec::new());
     };
 
-    let lo_tol = lo * (1.0 - 1e-9);
-    let hi_tol = if hi <= f64::MAX / (1.0 + 1e-9) { hi * (1.0 + 1e-9) } else { f64::MAX };
     let mut majors = Vec::new();
     let mut k = k_lo;
     while k <= k_hi && majors.len() < MAX_TICKS_PER_SEGMENT {
@@ -594,36 +699,13 @@ fn log10_major_minor(seg: &ResolvedSegment, auto_log_minor_ticks: bool, warnings
     }
 
     let decades = i64::from(k_hi) - i64::from(k_lo);
-    let mut minors = Vec::new();
     let emit_minors = (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0) && decades <= 8 && stride == 1;
-    if emit_minors {
-        let mut dec = k_lo.saturating_sub(1);
-        while dec <= k_hi && minors.len() < MAX_TICKS_PER_SEGMENT {
-            let base = 10.0_f64.powi(dec);
-            if base.is_finite() && base > 0.0 {
-                for mult in 2_u8..=9 {
-                    if minors.len() >= MAX_TICKS_PER_SEGMENT {
-                        break;
-                    }
-                    let v = f64::from(mult) * base;
-                    if v.is_finite() && v > 0.0 && v >= lo_tol && v <= hi_tol {
-                        let is_major = majors.iter().any(|&m| (m - v).abs() <= m * 1e-9);
-                        if !is_major {
-                            minors.push(v);
-                        }
-                    }
-                }
-            }
-            let Some(next_dec) = dec.checked_add(1) else {
-                break;
-            };
-            dec = next_dec;
-        }
-    }
+    let minors =
+        if emit_minors { compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval) } else { Vec::new() };
     (majors, minors)
 }
 
-fn log_base_major_minor(seg: &ResolvedSegment, base: f64, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
+fn log_base_major_minor(seg: &ResolvedSegment, base: f64, target_major: usize, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
     if !seg.domain_min.is_finite()
         || !seg.domain_max.is_finite()
         || seg.domain_min <= 0.0
@@ -635,6 +717,13 @@ fn log_base_major_minor(seg: &ResolvedSegment, base: f64, warnings: &mut Vec<Cha
     }
     let lo = seg.domain_min.min(seg.domain_max);
     let hi = seg.domain_min.max(seg.domain_max);
+
+    if let Some(exp_step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
+        let (majors, _) = explicit_log_major_ticks(lo, hi, base, exp_step, target_major, warnings);
+        let minors = compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval);
+        return (majors, minors);
+    }
+
     let Some((k_lo, k_hi, stride)) = log_exponent_range(lo, hi, base) else {
         return (Vec::new(), Vec::new());
     };
@@ -657,31 +746,48 @@ fn log_base_major_minor(seg: &ResolvedSegment, base: f64, warnings: &mut Vec<Cha
         return linear_major_minor(seg, 4, warnings);
     }
 
+    let minors = compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval);
+    (majors, minors)
+}
+
+fn compute_transformed_prob_minors(seg: &ResolvedSegment, majors: &[f64]) -> Vec<f64> {
     let mut minors = Vec::new();
-    if seg.minor_ticks_per_interval > 0 && majors.len() >= 2 {
-        let divs = usize::from(seg.minor_ticks_per_interval) + 1;
-        for pair in majors.windows(2) {
-            let [a, b] = *pair else { continue };
-            let ta = a.ln();
-            let tb = b.ln();
+    if seg.minor_ticks_per_interval == 0 || majors.len() < 2 {
+        return minors;
+    }
+    let divs = usize::from(seg.minor_ticks_per_interval) + 1;
+    for pair in majors.windows(2) {
+        let [a, b] = *pair else { continue };
+        if let (Some(ta), Some(tb)) = (scale_transform(seg.scale, a), scale_transform(seg.scale, b)) {
             for j in 1..divs {
                 if minors.len() >= MAX_TICKS_PER_SEGMENT {
                     break;
                 }
                 let t = ta + (tb - ta) * ((j as f64) / (divs as f64));
-                let v = t.exp();
-                if v.is_finite() && v > 0.0 {
+                if let Some(v) = scale_inverse(seg.scale, t)
+                    && v.is_finite()
+                    && scale_transform(seg.scale, v).is_some()
+                {
                     minors.push(v);
                 }
             }
         }
     }
-    (majors, minors)
+    minors
 }
 
-fn candidate_prob_ticks(seg: &ResolvedSegment, candidates: &[f64], warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
+fn candidate_prob_ticks(seg: &ResolvedSegment, candidates: &[f64], target_major: usize, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
     let lo = seg.domain_min.min(seg.domain_max);
     let hi = seg.domain_min.max(seg.domain_max);
+    if let Some(step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
+        let (raw_majors, _, _) = compute_safe_linear_ticks(lo, hi, Some(step), target_major, warnings);
+        let majors: Vec<f64> = raw_majors.into_iter().filter(|&v| v.is_finite() && scale_transform(seg.scale, v).is_some()).collect();
+        if !majors.is_empty() {
+            let minors = compute_transformed_prob_minors(seg, &majors);
+            return (majors, minors);
+        }
+    }
+
     let eps = 1e-12 * hi.abs().max(1.0);
     let mut majors: Vec<f64> = candidates.iter().copied().filter(|&v| v >= lo - eps && v <= hi + eps).collect();
     if majors.len() < 2
@@ -700,27 +806,7 @@ fn candidate_prob_ticks(seg: &ResolvedSegment, candidates: &[f64], warnings: &mu
         }
     }
     if majors.len() >= 2 {
-        let mut minors = Vec::new();
-        if seg.minor_ticks_per_interval > 0 {
-            let divs = usize::from(seg.minor_ticks_per_interval) + 1;
-            for pair in majors.windows(2) {
-                let [a, b] = *pair else { continue };
-                if let (Some(ta), Some(tb)) = (scale_transform(seg.scale, a), scale_transform(seg.scale, b)) {
-                    for j in 1..divs {
-                        if minors.len() >= MAX_TICKS_PER_SEGMENT {
-                            break;
-                        }
-                        let t = ta + (tb - ta) * ((j as f64) / (divs as f64));
-                        if let Some(v) = scale_inverse(seg.scale, t)
-                            && v.is_finite()
-                            && scale_transform(seg.scale, v).is_some()
-                        {
-                            minors.push(v);
-                        }
-                    }
-                }
-            }
-        }
+        let minors = compute_transformed_prob_minors(seg, &majors);
         (majors, minors)
     } else {
         linear_major_minor(seg, 4, warnings)
@@ -832,21 +918,30 @@ fn format_engineering_si(value: f64, policy: &LocaleNumberPolicy) -> String {
     }
     let abs = value.abs();
     let log3 = (abs.log10() / 3.0).floor();
-    let mut exp3 = if log3.is_finite() { (log3 as i32).clamp(-8, 8) } else { 0 };
+    if !log3.is_finite() {
+        return format_scientific_e(value, policy);
+    }
+    let mut exp3 = log3 as i32;
+    if !(-9..=8).contains(&exp3) {
+        return format_scientific_e(value, policy);
+    }
     let mut scaled = abs / 10.0_f64.powi(exp3 * 3);
-    while scaled >= 1000.0 && exp3 < 8 {
+    while scaled >= 1000.0 && exp3 < 9 {
         exp3 += 1;
         scaled = abs / 10.0_f64.powi(exp3 * 3);
     }
-    while scaled < 1.0 && exp3 > -8 {
+    while scaled < 1.0 && exp3 > -9 {
         exp3 -= 1;
         scaled = abs / 10.0_f64.powi(exp3 * 3);
     }
     let mut rounded = format!("{scaled:.3}");
-    if exp3 < 8 && rounded.split('.').next().and_then(|int_part| int_part.parse::<u64>().ok()).is_some_and(|n| n >= 1000) {
+    if rounded.split('.').next().and_then(|int_part| int_part.parse::<u64>().ok()).is_some_and(|n| n >= 1000) {
         exp3 += 1;
         scaled = abs / 10.0_f64.powi(exp3 * 3);
         rounded = format!("{scaled:.3}");
+    }
+    if !(-8..=8).contains(&exp3) {
+        return format_scientific_e(value, policy);
     }
     let prefix = SI_PREFIXES.get((exp3 + 8) as usize).copied().unwrap_or("");
     let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };

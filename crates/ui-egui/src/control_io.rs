@@ -2042,7 +2042,20 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     spec.height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
     spec.tiff_compression =
         opt_non_empty_str_param(params, &["tiff_compression"])?.map(parse_tiff_compression).transpose()?.unwrap_or(TiffCompression::Lzw);
-    spec.transparent_bg = opt_bool_param(params, &["transparent_bg"])?.unwrap_or(false);
+    let transparent_bg = opt_bool_param(params, &["transparent_bg"])?.unwrap_or(false);
+    if transparent_bg && !matches!(format, DocumentExportFormat::Svg | DocumentExportFormat::Png | DocumentExportFormat::Tiff) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!(
+                "`transparent_bg: true` is not supported for `{}` exports; only `svg`, `png`, and `tiff` support transparent canvas backgrounds",
+                format.as_str()
+            ),
+        )
+        .with_details(json!({ "pointer": "/transparent_bg", "format": format.as_str() }))
+        .with_remediation("Omit `transparent_bg`, pass `transparent_bg: false`, or export as `svg`, `png`, or `tiff`.")
+        .into());
+    }
+    spec.transparent_bg = transparent_bg;
     spec.embedded_ttf_font = if format == DocumentExportFormat::Pdf {
         opt_ttf_font.map(|raw| load_validated_ttf_font(app.session().path_policy(), raw)).transpose()?
     } else {
@@ -4580,6 +4593,113 @@ mod tests {
         ))?;
         assert_eq!(bad_font_reply["ok"], serde_json::json!(false));
 
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn gap_06_m1_doc_export_transparent_bg_policy_and_path_warnings() -> Result<(), Box<dyn std::error::Error>> {
+        use super::handle_control_line;
+        use crate::UiApp;
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, Cell, CurveSamplePoint, DataSheet, FittedCurveOverlay, GraphSheet, NonlinearFitSpec, ProjectDocument,
+            RegressionOverlaySpec, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
+        };
+
+        let mut base_doc = ProjectDocument::new("Transparent Export")?;
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3)?;
+        for (r, (x, y)) in [(1.0, 10.0), (2.0, 21.0), (3.0, 29.0)].into_iter().enumerate() {
+            xy.set_x_cell(r, Cell::number(x))?;
+            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        let ds = DataSheet::new("ds-tb", "Dose Response", TableArchetype::Xy(xy))?;
+        base_doc.add_data_sheet(ds.clone())?;
+        let graph = GraphSheet::new_uninitialized_for_data("g-tb", &ds)?;
+        base_doc.add_graph_sheet(graph)?;
+        let graph_id = String::from("g-tb");
+        let mut app = UiApp::from_session(curvebook_engine::Session::from_document(base_doc));
+
+        // 1. Supported figure formats honor `transparent_bg: true`.
+        let svg_opaque: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "svg-op", "method": "doc.export", "params": { "format": "svg", "sheet_id": graph_id, "transparent_bg": false } }).to_string(),
+        ))?;
+        let svg_trans: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({ "id": "svg-tr", "method": "doc.export", "params": { "format": "svg", "sheet_id": graph_id, "transparent_bg": true } }).to_string(),
+        ))?;
+        assert_eq!(svg_opaque["ok"], serde_json::json!(true));
+        assert_eq!(svg_trans["ok"], serde_json::json!(true));
+        assert_ne!(svg_opaque["result"]["data_base64"], svg_trans["result"]["data_base64"], "transparent SVG must differ from opaque SVG");
+
+        for fmt in ["png", "tiff"] {
+            let reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+                &mut app,
+                &serde_json::json!({ "id": fmt, "method": "doc.export", "params": { "format": fmt, "sheet_id": graph_id, "dpi": 72, "transparent_bg": true } }).to_string(),
+            ))?;
+            assert_eq!(reply["ok"], serde_json::json!(true), "{fmt} with transparent_bg=true failed: {reply}");
+        }
+
+        // 2. Unsupported formats reject `transparent_bg: true` with structured `bad_input` rather than silently ignoring it.
+        for (fmt, sheet) in [("pdf", graph_id.as_str()), ("emf", graph_id.as_str()), ("csv", "ds-tb"), ("tsv", "ds-tb"), ("json", "ds-tb")] {
+            let err_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+                &mut app,
+                &serde_json::json!({ "id": format!("bad-{fmt}"), "method": "doc.export", "params": { "format": fmt, "sheet_id": sheet, "transparent_bg": true } }).to_string(),
+            ))?;
+            assert_eq!(err_reply["ok"], serde_json::json!(false), "{fmt} must reject transparent_bg=true: {err_reply}");
+            assert_eq!(err_reply["error_detail"]["code"], serde_json::json!("bad_input"), "{fmt}: {err_reply}");
+            assert_eq!(err_reply["error_detail"]["details"]["pointer"], serde_json::json!("/transparent_bg"), "{fmt}: {err_reply}");
+        }
+
+        // 3. Passing `transparent_bg: false` on opaque formats remains accepted (matches default no-op).
+        for fmt in ["pdf", "emf"] {
+            let ok_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+                &mut app,
+                &serde_json::json!({ "id": format!("ok-{fmt}"), "method": "doc.export", "params": { "format": fmt, "sheet_id": graph_id, "transparent_bg": false } }).to_string(),
+            ))?;
+            assert_eq!(ok_reply["ok"], serde_json::json!(true), "{fmt} with transparent_bg=false failed: {ok_reply}");
+        }
+
+        // 4. Direct-to-disk `doc.export` on a graph with a pending (`Dirty`) regression fit emits `exported: true` + `warnings`.
+        let mut doc = app.document().clone();
+        let mut res = ResultSheet::new(AnalysisSpec::new("fit-dirty", "ds-tb", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("linear")))?)?;
+        res.status = ResultStatus::Dirty;
+        res.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("linear"),
+            converged: true,
+            ambiguous: false,
+            points: vec![
+                CurveSamplePoint { x: 1.0, y: 10.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+                CurveSamplePoint { x: 3.0, y: 30.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None },
+            ],
+        });
+        doc.add_result_sheet(res)?;
+        let g_sheet = doc.graph_sheet_mut(&SheetId::new(&graph_id)).ok_or("missing graph")?;
+        g_sheet.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+            result_sheet_id: SheetId::new("fit-dirty"),
+            sample_segments: 16,
+            show_confidence_band: false,
+            show_prediction_band: false,
+            shaded_ribbon: false,
+        });
+        let mut app_dirty = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        let dir = std::env::temp_dir().join(format!("cb_control_doc_export_warn_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let out_svg = dir.join("dirty.svg");
+        let warn_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app_dirty,
+            &serde_json::json!({ "id": "warn-svg", "method": "doc.export", "params": { "format": "svg", "sheet_id": graph_id, "path": out_svg.display().to_string() } }).to_string(),
+        ))?;
+        assert_eq!(warn_reply["ok"], serde_json::json!(true), "dirty svg export failed: {warn_reply}");
+        assert_eq!(warn_reply["result"]["exported"], serde_json::json!(true));
+        let warnings = warn_reply["result"]["warnings"].as_array().ok_or("missing warnings array")?;
+        assert!(
+            warnings.iter().any(|w| w["code"] == serde_json::json!("pending_regression_result")),
+            "expected pending_regression_result warning in doc.export path response: {warnings:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

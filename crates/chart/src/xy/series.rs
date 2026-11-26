@@ -7,7 +7,7 @@ use curvebook_doc::{
 use curvebook_math::AxisScale;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
-use super::fit_overlay::{FittedOverlayData, render_fitted_curve_overlay, resolve_fitted_overlay};
+use super::fit_overlay::{FittedOverlayData, OverlayDrawTarget, render_fitted_curve_overlay, resolve_fitted_overlay};
 use super::{
     AxisErrorTarget, LegendItem, SegmentedAxis, configure_plot_rect, emit_directional_error_bar, format_point_value, is_log_like,
     primary_info_sheet_id, render_cartesian_chrome, render_legend_and_annotations_with_offset, resolve_data_sheet, stroke_with_dash,
@@ -62,6 +62,30 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
     compile_xy_graph_with_options(graph, doc, &crate::CompileOptions::default(), scene)
 }
 
+fn push_unresolved_source_warning(doc: &ProjectDocument, sheet_id: &SheetId, is_primary: bool, warnings: &mut Vec<ChartWarning>) {
+    if let Some(res) = doc.result_sheet(sheet_id) {
+        match &res.status {
+            curvebook_doc::ResultStatus::Dirty => {
+                warnings.push(ChartWarning::new(
+                    "pending_source_result",
+                    format!("source result sheet '{sheet_id}' is pending recalculation; derived data omitted"),
+                ));
+                return;
+            }
+            curvebook_doc::ResultStatus::Failed { message, .. } => {
+                warnings.push(ChartWarning::new(
+                    "failed_source_result",
+                    format!("source result sheet '{sheet_id}' failed: {message}; derived data omitted"),
+                ));
+                return;
+            }
+            curvebook_doc::ResultStatus::UpToDate => {}
+        }
+    }
+    let prefix = if is_primary { "primary data sheet" } else { "series source sheet" };
+    warnings.push(ChartWarning::new("missing_source_sheet", format!("{prefix} '{sheet_id}' not found")));
+}
+
 /// Compile an XY graph sheet into vector primitives inside `scene` with explicit [`crate::CompileOptions`].
 pub fn compile_xy_graph_with_options(
     graph: &GraphSheet,
@@ -70,9 +94,7 @@ pub fn compile_xy_graph_with_options(
     scene: &mut ChartScene,
 ) -> Result<(), ChartError> {
     if resolve_data_sheet(doc, &graph.spec.primary_source_sheet_id).is_none() {
-        scene
-            .warnings
-            .push(ChartWarning::new("missing_source_sheet", format!("primary data sheet '{}' not found", graph.spec.primary_source_sheet_id)));
+        push_unresolved_source_warning(doc, &graph.spec.primary_source_sheet_id, true, &mut scene.warnings);
     }
 
     let has_y2_series = graph.spec.series.iter().any(|s| s.bind_to_right_y2);
@@ -123,9 +145,11 @@ pub fn compile_xy_graph_with_options(
         if options.fit_summary.enabled
             && let Some(ov) = &data.fitted_overlay
         {
+            let dx_data = series_data_x_offset(series_spec);
+            let (dx_pt, dy_pt) = series_pt_offset(series_spec);
             for cp in &ov.curve.points {
-                if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(cp.x), target_y.map_value(cp.y)) {
-                    curve_samples_pt.push(PointPt::new(px, py));
+                if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(cp.x + dx_data), target_y.map_value(cp.y)) {
+                    curve_samples_pt.push(PointPt::new(px + dx_pt, py + dy_pt));
                 }
             }
         }
@@ -188,7 +212,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         let color = palette.color_at(idx);
         let sheet_opt = resolve_data_sheet(doc, &series_spec.source_sheet_id);
         if sheet_opt.is_none() && series_spec.source_sheet_id != graph.spec.primary_source_sheet_id {
-            warnings.push(ChartWarning::new("missing_source_sheet", format!("series source sheet '{}' not found", series_spec.source_sheet_id)));
+            push_unresolved_source_warning(doc, &series_spec.source_sheet_id, false, warnings);
         }
 
         let mut active_x_rows = Vec::new();
@@ -340,8 +364,8 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
     let mut y2_vals = Vec::new();
     for (s_spec, item) in spec.series.iter().zip(extracted.iter()) {
         let target_y = if s_spec.bind_to_right_y2 { &mut y2_vals } else { &mut y_vals };
+        let dx = series_data_x_offset(s_spec);
         if s_spec.show_raw_data {
-            let dx = series_data_x_offset(s_spec);
             for pt in &item.points {
                 x_vals.push(pt.x_center + dx);
                 if item.has_x_err {
@@ -365,7 +389,7 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
         }
         if let Some(ov) = &item.fitted_overlay {
             for cp in &ov.curve.points {
-                x_vals.push(cp.x);
+                x_vals.push(cp.x + dx);
                 target_y.push(cp.y);
                 if ov.spec.show_confidence_band {
                     if let Some(lo) = cp.ci_lower {
@@ -408,18 +432,23 @@ fn render_xy_series(
         _ => (Some(MarkerStyle { fill_color: data.default_color, stroke_color: data.default_color, ..MarkerStyle::default() }), None, None, false),
     };
 
+    let dx_data = series_data_x_offset(spec);
+    let (dx_pt, dy_pt) = series_pt_offset(spec);
+
     // 1. Fitted regression curve overlay & bands (always rendered even when `show_raw_data == false`)
     if let Some(ov) = &data.fitted_overlay {
-        let curve_color = line_opt.map_or_else(|| marker_opt.map_or(data.default_color, |m| m.stroke_color), |l| l.color);
-        render_fitted_curve_overlay(&mut scene.primitives, &mut scene.warnings, ov, x_axis, y_axis, curve_color, clip);
+        let curve_color = crate::fit_summary::resolved_series_curve_color(spec, data.default_color);
+        render_fitted_curve_overlay(
+            &mut scene.primitives,
+            &mut scene.warnings,
+            ov,
+            OverlayDrawTarget { x_axis, y_axis, color: curve_color, clip, dx_data, dx_pt, dy_pt },
+        );
     }
 
     if !spec.show_raw_data {
         return;
     }
-
-    let dx_data = series_data_x_offset(spec);
-    let (dx_pt, dy_pt) = series_pt_offset(spec);
 
     // 2. Map summary points & emit warnings for off-domain coordinates
     let mut mapped_runs: Vec<Vec<PointPt>> = Vec::new();

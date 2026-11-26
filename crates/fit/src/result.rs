@@ -1720,9 +1720,11 @@ fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         "Weighted Residual",
         "Studentized Residual",
         "Q-Q Normal Quantile",
+        "Data Set",
     ]);
     let mut flat_idx = 0_usize;
     for ds in &fit.datasets {
+        let ds_label = if ds.label.trim().is_empty() { format!("DS{}", ds.data_set_index + 1) } else { ds.label.clone() };
         for i in 0..ds.y_hat.len() {
             let lbl = if multi_ds { format!("{} #{}", ds.label, i + 1) } else { format!("Pt {}", i + 1) };
             let yh = ds.y_hat[i];
@@ -1734,7 +1736,7 @@ fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
                 num_cell(ds.studentized_residuals.get(i).copied().unwrap_or(f64::NAN))
             };
             let qq = qq_quantiles[flat_idx];
-            tab.push_row(lbl, [num_cell(yh), num_cell(res), num_cell(w_res), stud_cell, num_cell(qq)]);
+            tab.push_row(lbl, [num_cell(yh), num_cell(res), num_cell(w_res), stud_cell, num_cell(qq), text_cell(ds_label.clone())]);
             flat_idx += 1;
         }
     }

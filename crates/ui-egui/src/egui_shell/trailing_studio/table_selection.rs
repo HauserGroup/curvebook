@@ -95,7 +95,11 @@ pub(super) fn render_table_selection_studio(
     ui.add_space(6.0);
     widgets::subheader(ui, "Selection & Graph Subset");
     let resolved_sel = crate::egui_shell::data_grid::resolve_grid_selection(app, ds);
-    let sel_text = resolved_sel.as_ref().map_or_else(|| String::from("No cells selected"), |s| s.summary_label());
+    let selection_in_other_sheet = app.grid.selection_sheet_id.as_ref().is_some_and(|sid| sid != &ds.id);
+    let sel_text = resolved_sel.as_ref().map_or_else(
+        || String::from(if selection_in_other_sheet { "No cells selected in this table" } else { "No cells selected" }),
+        |s| s.summary_label(),
+    );
     state.selected_subset_rows_summary = sel_text.clone();
     widgets::dim_label(ui, &sel_text);
 

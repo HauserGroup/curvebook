@@ -28,45 +28,47 @@ pub const VIRIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(253, 231, 37),
 ];
 
-/// Exact 17-point lookup table for Cividis (`t = 0/16 .. 16/16`).
+/// Exact 17-point lookup table for Cividis (`t = 0/16 .. 16/16`), sampled from the published
+/// 256-entry CC0 LUT of Nuñez, Anderton & Renslow (*PLOS ONE* 13(7):e0199239, 2018; `viridisLite`).
 pub const CIVIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(0, 32, 77),
-    Rgba8::rgb(0, 42, 100),
-    Rgba8::rgb(20, 53, 108),
-    Rgba8::rgb(46, 65, 108),
-    Rgba8::rgb(66, 77, 107),
-    Rgba8::rgb(84, 89, 108),
-    Rgba8::rgb(101, 102, 112),
-    Rgba8::rgb(118, 115, 117),
-    Rgba8::rgb(135, 129, 121),
-    Rgba8::rgb(153, 143, 121),
-    Rgba8::rgb(172, 158, 118),
-    Rgba8::rgb(191, 173, 112),
-    Rgba8::rgb(210, 189, 103),
-    Rgba8::rgb(228, 205, 91),
-    Rgba8::rgb(245, 221, 77),
-    Rgba8::rgb(254, 230, 68),
+    Rgba8::rgb(0, 43, 105),
+    Rgba8::rgb(3, 54, 110),
+    Rgba8::rgb(45, 66, 108),
+    Rgba8::rgb(65, 77, 107),
+    Rgba8::rgb(81, 88, 108),
+    Rgba8::rgb(96, 100, 111),
+    Rgba8::rgb(110, 111, 115),
+    Rgba8::rgb(124, 123, 120),
+    Rgba8::rgb(140, 135, 120),
+    Rgba8::rgb(156, 148, 119),
+    Rgba8::rgb(172, 161, 116),
+    Rgba8::rgb(188, 175, 111),
+    Rgba8::rgb(206, 188, 104),
+    Rgba8::rgb(224, 204, 93),
+    Rgba8::rgb(240, 218, 82),
     Rgba8::rgb(255, 234, 70),
 ];
 
-/// Exact 17-point lookup table for Plasma (`t = 0/16 .. 16/16`).
+/// Exact 17-point lookup table for Plasma (`t = 0/16 .. 16/16`), sampled from the published
+/// 256-entry CC0 LUT of van der Walt & Smith (2015; Matplotlib `_plasma_data` / `viridisLite`).
 pub const PLASMA_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(13, 8, 135),
-    Rgba8::rgb(46, 5, 150),
-    Rgba8::rgb(75, 3, 161),
+    Rgba8::rgb(49, 5, 151),
+    Rgba8::rgb(76, 2, 161),
     Rgba8::rgb(102, 0, 167),
     Rgba8::rgb(126, 3, 168),
-    Rgba8::rgb(150, 19, 161),
-    Rgba8::rgb(171, 36, 148),
-    Rgba8::rgb(190, 56, 133),
-    Rgba8::rgb(206, 75, 117),
-    Rgba8::rgb(220, 95, 103),
-    Rgba8::rgb(233, 116, 88),
-    Rgba8::rgb(243, 138, 73),
-    Rgba8::rgb(250, 161, 58),
-    Rgba8::rgb(253, 185, 45),
-    Rgba8::rgb(252, 210, 37),
-    Rgba8::rgb(246, 235, 35),
+    Rgba8::rgb(149, 18, 162),
+    Rgba8::rgb(169, 35, 150),
+    Rgba8::rgb(187, 53, 135),
+    Rgba8::rgb(203, 71, 120),
+    Rgba8::rgb(217, 89, 106),
+    Rgba8::rgb(230, 108, 92),
+    Rgba8::rgb(240, 127, 79),
+    Rgba8::rgb(248, 149, 64),
+    Rgba8::rgb(253, 172, 51),
+    Rgba8::rgb(253, 195, 40),
+    Rgba8::rgb(249, 221, 37),
     Rgba8::rgb(240, 249, 33),
 ];
 

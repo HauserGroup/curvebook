@@ -143,8 +143,21 @@ pub struct InfoDownstreamRef {
     pub binding_summary: String,
 }
 
+/// Live-preview draft held while dragging or typing Panel Width/Height in Page Layout Studio (`GAP-07-06`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct LayoutPanelSizeDraft {
+    pub sheet_id: SheetId,
+    pub panel_index: usize,
+    pub width_pt: f64,
+    pub height_pt: f64,
+    pub dragging_w: bool,
+    pub dragging_h: bool,
+    pub editing_w: bool,
+    pub editing_h: bool,
+}
+
 /// Persistent `egui_shell` UI state for the Trailing Studio Dock.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TrailingStudioEguiState {
     pub results_tab: ResultsStudioTab,
     pub graph_tab: GraphStudioTab,
@@ -181,6 +194,7 @@ pub struct TrailingStudioEguiState {
     pub layout_margin_mm: u16,
     pub layout_dpi: u16,
     pub snap_enabled: bool,
+    pub panel_size_draft: Option<LayoutPanelSizeDraft>,
 }
 
 impl Default for TrailingStudioEguiState {
@@ -221,12 +235,14 @@ impl Default for TrailingStudioEguiState {
             layout_margin_mm: 8,
             layout_dpi: 300,
             snap_enabled: true,
+            panel_size_draft: None,
         }
     }
 }
 
 const STUDIO_SNAP_ENABLED_KEY: &str = "curvebook.trailing_studio.snap_enabled";
 const STUDIO_TABLE_DECIMALS_KEY: &str = "curvebook.trailing_studio.table_decimals";
+const STUDIO_PANEL_SIZE_PREVIEW_KEY: &str = "curvebook.trailing_studio.panel_size_preview";
 
 pub(crate) fn studio_snap_enabled(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(STUDIO_SNAP_ENABLED_KEY))).unwrap_or(true)
@@ -242,6 +258,14 @@ pub(crate) fn studio_table_decimals(ctx: &egui::Context) -> Option<u8> {
 
 pub(crate) fn set_studio_table_decimals(ctx: &egui::Context, decimals: Option<u8>) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STUDIO_TABLE_DECIMALS_KEY), decimals));
+}
+
+pub(crate) fn studio_panel_size_preview(ctx: &egui::Context) -> Option<(SheetId, usize, f64, f64)> {
+    ctx.data(|d| d.get_temp::<Option<(SheetId, usize, f64, f64)>>(egui::Id::unique(STUDIO_PANEL_SIZE_PREVIEW_KEY))).flatten()
+}
+
+pub(crate) fn set_studio_panel_size_preview(ctx: &egui::Context, preview: Option<(SheetId, usize, f64, f64)>) {
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STUDIO_PANEL_SIZE_PREVIEW_KEY), preview));
 }
 
 pub(super) fn format_studio_toggle_tooltip(app: &UiApp, verb: &str) -> String {
@@ -317,6 +341,12 @@ pub fn render_trailing_studio(
     set_studio_snap_enabled(ui.ctx(), state.snap_enabled);
     set_studio_table_decimals(ui.ctx(), state.table_decimals);
     let surface = resolve_studio_surface(app);
+    if surface != StudioContextSurface::PageLayoutComposer {
+        set_studio_panel_size_preview(ui.ctx(), None);
+        if !ui.ctx().will_discard() {
+            state.panel_size_draft = None;
+        }
+    }
     let mut report = TrailingStudioFrameReport {
         dock_rect_pt: None,
         surface,

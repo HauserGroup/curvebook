@@ -50,7 +50,7 @@ options:
   --ui-backend <name>      select UI backend (`egui` sole desktop backend; `legacy` is rejected; overrides CURVEBOOK_UI_BACKEND)
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
-  --headless-once       render one egui software frame and exit
+  --headless-once       render one discarded 800x520 egui software smoke frame and exit
   --portable-dir <dir>  store config, shortcuts, and crash-recovery journal under <dir>/curvebook-data
   --ttf-font <path>     load and validate an external TrueType/SFNT (.ttf) font file
   --rulers              show physical canvas rulers on startup

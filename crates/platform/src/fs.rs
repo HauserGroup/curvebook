@@ -10,6 +10,8 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, SystemTime};
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::PlatformError;
@@ -22,6 +24,14 @@ const MAX_TEMP_CREATE_ATTEMPTS: usize = 32;
 
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Default minimum age (5 minutes) before an orphaned `.{stem}.tmp.{pid}.{seq}` sibling file
+/// from a dead/other process is removed by automatic atomic-save cleanup.
+#[cfg(not(target_arch = "wasm32"))]
+pub const DEFAULT_STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(300);
+
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_AUTO_SWEEP_DIR_ENTRIES: usize = 1024;
 
 /// Guard owning a freshly written, `sync_all`-ed sibling staging file.
 ///
@@ -144,6 +154,10 @@ where
     staged.persist_to(&resolved_target)?;
 
     sync_dir(parent)?;
+    // Best-effort cleanup of stale orphaned `.{stem}.tmp.{pid}.{seq}` siblings left behind by
+    // prior hard crashes (SIGKILL/power loss) for the same target stem.
+    let stem = sanitize_sibling_stem(&resolved_target);
+    let _ = sweep_stale_temp_files_inner(parent, Some(&stem), DEFAULT_STALE_TEMP_MAX_AGE, MAX_AUTO_SWEEP_DIR_ENTRIES);
     Ok(())
 }
 
@@ -258,12 +272,151 @@ fn create_unique_sibling_temp(parent: &Path, stem: &str, tag: &str, restrict_mod
     })
 }
 
+/// Remove orphaned `.{stem}.tmp.{pid}.{seq}` staging files in `dir` that were left behind by a
+/// hard crash (`SIGKILL` / power loss) between temp creation and atomic rename.
+///
+/// Safety guarantees against racing active writers:
+/// - Only regular files (never symlinks or directories, verified via `symlink_metadata`) matching
+///   the exact `.{stem}.tmp.{pid}.{seq}` naming pattern are considered.
+/// - Files owned by the current process (`pid == std::process::id()`) are never removed.
+/// - On Unix, any candidate whose PID is still alive (or cannot be proven absent due to `EPERM`)
+///   is skipped.
+/// - Every candidate must have a modification timestamp at least `max_age` in the past.
+///
+/// Returns the number of stale temp files removed.
+///
+/// # Errors
+/// Returns [`PlatformError::InvalidPath`] if `dir` is empty or not a directory, or
+/// [`PlatformError::Io`] if reading `dir` fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sweep_stale_temp_files(dir: &Path, max_age: Duration) -> Result<usize, PlatformError> {
+    if dir.as_os_str().is_empty() {
+        return Err(PlatformError::InvalidPath { reason: String::from("directory path must not be empty") });
+    }
+    let meta = std::fs::metadata(dir).map_err(|err| io_err(&format!("inspect directory `{}`", dir.display()), &err))?;
+    if !meta.is_dir() {
+        return Err(PlatformError::InvalidPath { reason: format!("path `{}` must be a directory", dir.display()) });
+    }
+    sweep_stale_temp_files_inner(dir, None, max_age, usize::MAX)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_sibling_temp_name(file_name: &str) -> Option<(&str, &str, u32, u64)> {
+    let rest = file_name.strip_prefix('.')?;
+    let (before_seq, seq_str) = rest.rsplit_once('.')?;
+    let (before_pid, pid_str) = before_seq.rsplit_once('.')?;
+    let (stem, tag) = before_pid.rsplit_once('.')?;
+    if stem.is_empty() || tag.is_empty() {
+        return None;
+    }
+    let pid: u32 = pid_str.parse().ok()?;
+    let seq: u64 = seq_str.parse().ok()?;
+    if pid == 0 || seq == 0 {
+        return None;
+    }
+    Some((stem, tag, pid, seq))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn is_pid_alive(pid: u32) -> Option<bool> {
+    if pid == std::process::id() {
+        return Some(true);
+    }
+    if Path::new("/proc/self").is_dir() {
+        return Some(Path::new(&format!("/proc/{pid}")).exists());
+    }
+    let pid_str = pid.to_string();
+    for bin in ["/bin/kill", "/usr/bin/kill", "/run/current-system/sw/bin/kill", "/run/current-system/profile/bin/kill"] {
+        let output = std::process::Command::new(bin)
+            .env_clear()
+            .args(["-0", "--", &pid_str])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .output();
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    return Some(true);
+                }
+                let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
+                // Distinguish definite ESRCH ("no such process") from EPERM (another user's live PID).
+                if stderr.contains("no such process") {
+                    return Some(false);
+                }
+                return Some(true);
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+fn is_pid_alive(pid: u32) -> Option<bool> {
+    if pid == std::process::id() { Some(true) } else { None }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_stale_temp_files_inner(dir: &Path, stem_filter: Option<&str>, max_age: Duration, max_entries: usize) -> Result<usize, PlatformError> {
+    let entries = std::fs::read_dir(dir).map_err(|err| io_err(&format!("read directory `{}`", dir.display()), &err))?;
+    let now = SystemTime::now();
+    let current_pid = std::process::id();
+    let mut removed = 0usize;
+
+    for (scanned, entry_res) in entries.enumerate() {
+        if scanned >= max_entries {
+            break;
+        }
+        let Ok(entry) = entry_res else {
+            continue;
+        };
+        let os_name = entry.file_name();
+        let Some(name) = os_name.to_str() else {
+            continue;
+        };
+        let Some((stem, tag, pid, _seq)) = parse_sibling_temp_name(name) else {
+            continue;
+        };
+        if tag != "tmp" || pid == current_pid {
+            continue;
+        }
+        if let Some(expected_stem) = stem_filter
+            && stem != expected_stem
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !meta.file_type().is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(elapsed) = now.duration_since(modified) else {
+            continue;
+        };
+        if elapsed < max_age {
+            continue;
+        }
+        if is_pid_alive(pid) == Some(true) {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
+}
+
 /// Read all bytes from an existing regular file at `path`, enforcing a hard `max_bytes` cap.
 ///
-/// Inspects file metadata before opening (rejecting directories, FIFOs, sockets, and device
-/// nodes without blocking, and oversized files before allocating), re-validates the open
-/// descriptor's metadata against TOCTOU swaps, and reads through [`Read::take`] capped at
-/// `max_bytes + 1`.
+/// Inspects file metadata before opening, opens with `O_NONBLOCK` on Unix so a concurrent TOCTOU
+/// swap to a FIFO cannot block `open(2)`, re-validates the open descriptor's metadata (`fstat`),
+/// and reads through [`Read::take`] capped at `max_bytes + 1`.
 ///
 /// # Errors
 /// Returns [`PlatformError::InvalidPath`] when `path` is empty or does not refer to a regular
@@ -281,7 +434,8 @@ pub fn read_regular_file_bytes(path: &Path, max_bytes: usize) -> Result<Vec<u8>,
 ///
 /// Returns `Ok(None)` when `path` does not exist. Non-regular files (directories, FIFOs,
 /// character/block devices, sockets) and oversized files return explicit errors without blocking
-/// or unbounded allocation.
+/// or unbounded allocation. On Unix, `open(2)` uses `O_NONBLOCK` prior to `fstat` validation so
+/// TOCTOU swaps to a FIFO return an error immediately instead of hanging.
 ///
 /// # Errors
 /// Returns [`PlatformError::InvalidPath`] when `path` is empty or non-regular,
@@ -303,6 +457,90 @@ pub fn read_regular_file_utf8(path: &Path, max_bytes: usize) -> Result<String, P
     String::from_utf8(bytes).map_err(|err| PlatformError::Io { context: format!("decode UTF-8 file `{}`", path.display()), message: err.to_string() })
 }
 
+/// Target-exact `O_NONBLOCK` flag for safe `OpenOptionsExt::custom_flags` without `unsafe` or
+/// extra crate dependencies.
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+const fn unix_o_nonblock() -> Option<i32> {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"))]
+    {
+        Some(0x0004)
+    }
+    #[cfg(all(
+        any(target_os = "linux", target_os = "android"),
+        any(
+            target_arch = "x86",
+            target_arch = "x86_64",
+            target_arch = "arm",
+            target_arch = "aarch64",
+            target_arch = "riscv32",
+            target_arch = "riscv64",
+            target_arch = "powerpc",
+            target_arch = "powerpc64",
+            target_arch = "s390x",
+            target_arch = "loongarch64"
+        )
+    ))]
+    {
+        Some(0x0800)
+    }
+    #[cfg(all(any(target_os = "linux", target_os = "android"), any(target_arch = "mips", target_arch = "mips64")))]
+    {
+        Some(0x0080)
+    }
+    #[cfg(all(any(target_os = "linux", target_os = "android"), any(target_arch = "sparc", target_arch = "sparc64")))]
+    {
+        Some(0x4000)
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly",
+        all(
+            any(target_os = "linux", target_os = "android"),
+            any(
+                target_arch = "x86",
+                target_arch = "x86_64",
+                target_arch = "arm",
+                target_arch = "aarch64",
+                target_arch = "riscv32",
+                target_arch = "riscv64",
+                target_arch = "powerpc",
+                target_arch = "powerpc64",
+                target_arch = "s390x",
+                target_arch = "loongarch64",
+                target_arch = "mips",
+                target_arch = "mips64",
+                target_arch = "sparc",
+                target_arch = "sparc64"
+            )
+        )
+    )))]
+    {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_nonblocking_regular_file(path: &Path, max_bytes: usize, allow_missing: bool) -> Result<Option<(File, Metadata)>, PlatformError> {
+    let mut opts = OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    if let Some(flag) = unix_o_nonblock() {
+        opts.custom_flags(flag);
+    }
+    let file = match opts.open(path) {
+        Ok(file) => file,
+        Err(err) if allow_missing && err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(io_err(&format!("open file `{}`", path.display()), &err)),
+    };
+    let fd_meta = file.metadata().map_err(|err| io_err(&format!("inspect open file `{}`", path.display()), &err))?;
+    validate_regular_file_meta(path, &fd_meta, max_bytes)?;
+    Ok(Some((file, fd_meta)))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn read_regular_file_inner(path: &Path, max_bytes: usize, allow_missing: bool) -> Result<Option<Vec<u8>>, PlatformError> {
     if path.as_os_str().is_empty() {
@@ -315,13 +553,9 @@ fn read_regular_file_inner(path: &Path, max_bytes: usize, allow_missing: bool) -
     };
     validate_regular_file_meta(path, &pre_meta, max_bytes)?;
 
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(err) if allow_missing && err.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(io_err(&format!("open file `{}`", path.display()), &err)),
+    let Some((file, fd_meta)) = open_nonblocking_regular_file(path, max_bytes, allow_missing)? else {
+        return Ok(None);
     };
-    let fd_meta = file.metadata().map_err(|err| io_err(&format!("inspect open file `{}`", path.display()), &err))?;
-    validate_regular_file_meta(path, &fd_meta, max_bytes)?;
 
     let reserve = usize::try_from(fd_meta.len()).unwrap_or(0).min(max_bytes);
     let mut bytes = Vec::with_capacity(reserve);
@@ -519,17 +753,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn read_regular_file_rejects_fifo_symlink_to_fifo_and_char_device_without_blocking() {
+        use std::time::{Duration, Instant};
+
         let dir = temp_dir("unix-special");
         let fifo = dir.join("input.pipe");
         let mkfifo_status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
         assert!(mkfifo_status.success());
 
+        let start = Instant::now();
         assert!(matches!(read_regular_file_bytes(&fifo, 1024), Err(PlatformError::InvalidPath { .. })));
         assert!(matches!(read_regular_file_bytes_if_exists(&fifo, 1024), Err(PlatformError::InvalidPath { .. })));
+
+        // GAP-04-04: directly exercise the O_NONBLOCK open + fstat path on the raw FIFO without
+        // pre-open `metadata()`, proving a TOCTOU swap to a FIFO returns `InvalidPath` immediately
+        // instead of hanging in blocking `open(2)`.
+        assert!(super::unix_o_nonblock().is_some());
+        assert!(matches!(super::open_nonblocking_regular_file(&fifo, 1024, false), Err(PlatformError::InvalidPath { .. })));
+        assert!(start.elapsed() < Duration::from_secs(2), "FIFO check blocked unexpectedly: {:?}", start.elapsed());
 
         let fifo_link = dir.join("link_to_fifo.csv");
         std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
         assert!(matches!(read_regular_file_bytes(&fifo_link, 1024), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(super::open_nonblocking_regular_file(&fifo_link, 1024, false), Err(PlatformError::InvalidPath { .. })));
 
         let dev_zero = Path::new("/dev/zero");
         if dev_zero.exists() {
@@ -672,5 +917,80 @@ mod tests {
         assert!(!dir.join("nested").exists());
         remove_dir_all_if_not_symlink(&dir).unwrap();
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn gap_04_07_sweep_stale_temp_files_cleans_dead_orphans_without_touching_live_writers() {
+        use std::time::Duration;
+
+        use super::{parse_sibling_temp_name, sweep_stale_temp_files, sweep_stale_temp_files_inner};
+
+        assert_eq!(parse_sibling_temp_name(".my.proj.curvebook.tmp.4242.7"), Some(("my.proj.curvebook", "tmp", 4242, 7)));
+        assert_eq!(parse_sibling_temp_name(".gitignore"), None);
+        assert_eq!(parse_sibling_temp_name("not_hidden.tmp.4242.7"), None);
+        assert_eq!(parse_sibling_temp_name(".file.tmp.0.1"), None);
+
+        let dir = temp_dir("stale-sweep");
+        let cur_pid = std::process::id();
+
+        // Obtain a guaranteed-dead PID by spawning and reaping a trivial child.
+        #[cfg(unix)]
+        let dead_pid = {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", "exit 0"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            let _ = child.wait();
+            pid
+        };
+        #[cfg(not(unix))]
+        let dead_pid = cur_pid.wrapping_add(50_000).max(2);
+
+        let stale_orphan = dir.join(format!(".project.curvebook.tmp.{dead_pid}.1"));
+        let other_stem_orphan = dir.join(format!(".other.curvebook.tmp.{dead_pid}.2"));
+        let live_self = dir.join(format!(".project.curvebook.tmp.{cur_pid}.99"));
+        let unrelated_hidden = dir.join(".gitignore");
+        let non_tmp_tag = dir.join(format!(".project.curvebook.stage.{dead_pid}.3"));
+        std::fs::write(&stale_orphan, b"orphaned").unwrap();
+        std::fs::write(&other_stem_orphan, b"other-orphaned").unwrap();
+        std::fs::write(&live_self, b"active-writer").unwrap();
+        std::fs::write(&unrelated_hidden, b"*.tmp\n").unwrap();
+        std::fs::write(&non_tmp_tag, b"staged").unwrap();
+
+        #[cfg(unix)]
+        let symlink_orphan = {
+            let real_keep = dir.join("keep.txt");
+            std::fs::write(&real_keep, b"do not delete").unwrap();
+            let link = dir.join(format!(".project.curvebook.tmp.{dead_pid}.4"));
+            std::os::unix::fs::symlink(&real_keep, &link).unwrap();
+            link
+        };
+
+        // High max_age must preserve newly created files even for dead PIDs.
+        assert_eq!(sweep_stale_temp_files(&dir, Duration::from_secs(3600)).unwrap(), 0);
+        assert!(stale_orphan.exists());
+
+        // Stem-filtered sweep removes only the matching stem's stale dead-PID `.tmp.` file.
+        assert_eq!(sweep_stale_temp_files_inner(&dir, Some("project.curvebook"), Duration::ZERO, 1024).unwrap(), 1);
+        assert!(!stale_orphan.exists(), "matching dead-PID orphan must be removed");
+        assert!(other_stem_orphan.exists(), "non-matching stem must be preserved by stem-filtered sweep");
+        assert!(live_self.exists(), "active current-PID temp file must never be removed");
+        assert!(unrelated_hidden.exists());
+        assert!(non_tmp_tag.exists());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(&symlink_orphan).unwrap().file_type().is_symlink());
+
+        // Full directory sweep cleans the remaining dead-PID `.tmp.` orphan and leaves everything else.
+        assert_eq!(sweep_stale_temp_files(&dir, Duration::ZERO).unwrap(), 1);
+        assert!(!other_stem_orphan.exists());
+        assert!(live_self.exists());
+        assert!(unrelated_hidden.exists());
+        assert!(non_tmp_tag.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

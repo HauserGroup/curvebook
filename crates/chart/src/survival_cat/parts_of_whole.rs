@@ -6,7 +6,10 @@ use curvebook_doc::{GraphSheet, GraphSpec, GraphicalDataObject, PartsOfWholeLayo
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::{RichText, parse_markup};
 
-use super::shared::{LegendEntry, PlotMarginConfig, draw_legend_entries, solid_stroke, trim_trailing_zeros, update_plot_rect_for_labels, wedge_path};
+use super::shared::{
+    LegendEntry, PlotMarginConfig, draw_legend_entries, resolve_fresh_data_sheet_or_upstream, solid_stroke, trim_trailing_zeros,
+    update_plot_rect_for_labels, wedge_path,
+};
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, TextAnchor};
 
 // ============================================================================
@@ -15,7 +18,7 @@ use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, Poin
 
 pub(super) fn compile_parts_of_whole(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
     let (layout_mode, show_center_total) = resolve_parts_of_whole_style(&graph.spec.series);
-    let slices = extract_parts_of_whole_slices(graph, doc);
+    let slices = extract_parts_of_whole_slices(graph, doc, &mut scene.warnings);
     if slices.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_parts_of_whole", "no non-negative parts-of-whole slices available"));
         return Ok(());
@@ -64,8 +67,8 @@ fn resolve_parts_of_whole_style(series: &[SeriesSpec]) -> (PartsOfWholeLayout, b
     (PartsOfWholeLayout::Donut, true)
 }
 
-fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<curvebook_doc::SliceFraction> {
-    let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id) else { return Vec::new() };
+fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<curvebook_doc::SliceFraction> {
+    let Some(ds) = resolve_fresh_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id, warnings) else { return Vec::new() };
     let series_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     match &ds.archetype {
         TableArchetype::PartsOfWhole(pow) => pow.fractions_for_series(series_idx).unwrap_or_default(),

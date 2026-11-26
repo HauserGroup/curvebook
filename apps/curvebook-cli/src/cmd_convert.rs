@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-use curvebook_doc::{ColumnEqualsFilter, ErrorCode, ProjectDocument};
+use curvebook_doc::{ColumnEqualsFilter, ErrorCode, ProjectDocument, ResultStatus, SheetId};
 use curvebook_engine::EngineError;
 use curvebook_engine::services::{
     self, DEFAULT_EXPORT_DPI, DocumentExportFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
@@ -156,11 +156,37 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
         let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
 
         let xlsx_options = parsed.build_xlsx_options();
-        let (loaded, _input_bytes) = load_project_from_path_with_xlsx_options(in_path, true, xlsx_options.as_ref())?;
+        let (mut loaded, _input_bytes) = load_project_from_path_with_xlsx_options(in_path, true, xlsx_options.as_ref())?;
         let format = match parsed.format {
             Some(fmt) => fmt,
             None => detect_export_format_from_path(out_path)?,
         };
+
+        let dirty_ids: Vec<SheetId> =
+            loaded.doc.result_sheets.iter().filter(|res| matches!(res.status, ResultStatus::Dirty)).map(|res| res.id.clone()).collect();
+        if !dirty_ids.is_empty() {
+            if matches!(format, ExportFormat::CurveBook | ExportFormat::CurveBookDir) {
+                let ids = dirty_ids.iter().map(SheetId::as_str).collect::<Vec<_>>().join(", ");
+                loaded.warnings.push(format!("pending_result_sheet: {} analysis sheet(s) pending recalculation ({ids})", dirty_ids.len()));
+            } else {
+                match curvebook_engine::dag::recalculate_dirty_with_report(&mut loaded.doc, &dirty_ids) {
+                    Ok(report) => {
+                        if !report.failed_result_sheets.is_empty() {
+                            let failed = report.failed_result_sheets.iter().map(SheetId::as_str).collect::<Vec<_>>().join(", ");
+                            loaded.warnings.push(format!(
+                                "failed_recalculation: recalculated pending analyses before export; {} failed ({failed})",
+                                report.failed_result_sheets.len()
+                            ));
+                        }
+                    }
+                    Err(err) => {
+                        loaded.warnings.push(format!(
+                            "pending_recalculation_failed: could not recalculate pending analyses before export ({err}); stale results omitted"
+                        ));
+                    }
+                }
+            }
+        }
 
         let summary = export_from_document(&ExportRequest {
             doc: &loaded.doc,
@@ -206,6 +232,9 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
             println!("{text}");
         } else {
             for warning in &loaded.warnings {
+                eprintln!("warning: {warning}");
+            }
+            for warning in &summary.warnings {
                 eprintln!("warning: {warning}");
             }
             println!(
@@ -367,7 +396,28 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         }
         write_atomic(req.out_path, &artifact.bytes)?;
 
-        let warnings: Vec<String> = artifact.warnings.iter().map(|w| format!("{}: {}", w.code, w.message)).collect();
+        let mut warnings: Vec<String> = artifact.warnings.iter().map(|w| format!("{}: {}", w.code, w.message)).collect();
+        if matches!(req.format, ExportFormat::Csv | ExportFormat::Tsv | ExportFormat::Json) {
+            match sheet_id.as_deref() {
+                Some(sid) => {
+                    if let Some(res) = req.doc.result_sheet(&SheetId::new(sid))
+                        && matches!(res.status, ResultStatus::Dirty)
+                    {
+                        warnings.push(format!("pending_result_sheet: result sheet '{sid}' is pending recalculation; exported data may be stale"));
+                    }
+                }
+                None => {
+                    for res in &req.doc.result_sheets {
+                        if matches!(res.status, ResultStatus::Dirty) {
+                            warnings.push(format!(
+                                "pending_result_sheet: result sheet '{}' is pending recalculation; exported data may be stale",
+                                res.id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
         for w in &warnings {
             eprintln!("warning: {w}");
         }
@@ -846,5 +896,84 @@ mod tests {
         assert_eq!(super::detect_export_format_from_path(&suffixed).unwrap(), super::ExportFormat::CurveBookDir);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn gap_01_03_cli_convert_recalculates_dirty_analysis_and_warns_on_direct_dirty_tabular_export() {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, DescriptiveSpec, EmbeddedTableStyle, GraphAnnotation, RectPt as DocRectPt, ResultCell, ResultSheet,
+            ResultStatus, ResultTab, ResultTabKind,
+        };
+
+        let mut doc = build_sample_doc_with_graph_and_layout().unwrap();
+        let spec = AnalysisSpec::new("res-desc", "data-1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+        let mut res = ResultSheet::new(spec).unwrap();
+        res.status = ResultStatus::Dirty;
+        res.tabs.push(ResultTab {
+            id: String::from("summary"),
+            title: String::from("Summary"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Value")],
+            row_labels: vec![String::from("Stale")],
+            rows: vec![vec![ResultCell::Text(String::from("STALECACHED999"))]],
+            footnotes: Vec::new(),
+        });
+        doc.add_result_sheet(res).unwrap();
+        doc.graph_sheet_mut(&SheetId::new("graph-1")).unwrap().spec.annotations.push(GraphAnnotation::EmbeddedResultTable {
+            result_sheet_id: SheetId::new("res-desc"),
+            tab_id: None,
+            bounds_pt: DocRectPt::new(180.0, 20.0, 120.0, 50.0),
+            selected_rows: None,
+            selected_cols: None,
+            style: EmbeddedTableStyle::default(),
+        });
+
+        let dir = unique_temp_dir("gap-01-03-dirty-convert");
+        // 1. Direct `export_from_document` on Dirty doc: SVG omits stale table with `pending_embedded_result_table`,
+        //    and CSV warns `pending_result_sheet`.
+        let direct_svg = dir.join("direct.svg");
+        let svg_summary = super::export_from_document(&super::ExportRequest {
+            doc: &doc,
+            out_path: &direct_svg,
+            format: ExportFormat::Svg,
+            sheet: Some("graph-1"),
+            dpi: None,
+            pretty: true,
+            tab_index: None,
+            pdf_version: PdfVersion::default(),
+            embedded_truetype_font: None,
+        })
+        .unwrap();
+        assert!(svg_summary.warnings.iter().any(|w| w.starts_with("pending_embedded_result_table: ")), "warnings: {:?}", svg_summary.warnings);
+        let direct_svg_text = std::fs::read_to_string(&direct_svg).unwrap();
+        assert!(!direct_svg_text.contains("STALECACHED999"), "stale cached cell leaked into SVG");
+
+        let direct_csv = dir.join("direct.csv");
+        let csv_summary = super::export_from_document(&super::ExportRequest {
+            doc: &doc,
+            out_path: &direct_csv,
+            format: ExportFormat::Csv,
+            sheet: Some("res-desc"),
+            dpi: None,
+            pretty: true,
+            tab_index: None,
+            pdf_version: PdfVersion::default(),
+            embedded_truetype_font: None,
+        })
+        .unwrap();
+        assert!(csv_summary.warnings.iter().any(|w| w.starts_with("pending_result_sheet: ")), "csv warnings: {:?}", csv_summary.warnings);
+
+        // 2. `run_convert` on a saved archive with Dirty `res-desc` recalculates before exporting SVG,
+        //    so the exported SVG replaces `STALECACHED999` with freshly computed DescriptiveStats values.
+        let src_archive = dir.join("dirty_study.curvebook");
+        save_project_file(&src_archive, &doc).unwrap();
+        let converted_svg = dir.join("recalculated.svg");
+        run_convert(&[src_archive.display().to_string(), converted_svg.display().to_string(), String::from("--sheet"), String::from("graph-1")])
+            .unwrap();
+        let converted_svg_text = std::fs::read_to_string(&converted_svg).unwrap();
+        assert!(!converted_svg_text.contains("STALECACHED999"), "recalculated convert SVG must not contain stale cached text");
+        assert!(converted_svg_text.contains("Mean") || converted_svg_text.contains("5"), "recalculated convert SVG should render fresh stats");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

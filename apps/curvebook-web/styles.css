@@ -87,6 +87,59 @@ html, body {
   flex-shrink: 0;
 }
 
+#curvebook_recovery_banner {
+  position: fixed;
+  top: env(safe-area-inset-top, 12px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  max-width: min(760px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #e05d5d;
+  background: rgba(42, 16, 20, 0.97);
+  color: #ffd9d9;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+#curvebook_recovery_banner[data-visible="true"] {
+  display: flex;
+}
+
+#curvebook_recovery_badge {
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: #e05d5d;
+  color: #181c28;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+#curvebook_recovery_reload {
+  margin-left: auto;
+  padding: 5px 10px;
+  border-radius: 5px;
+  border: 1px solid #f08a8a;
+  background: #c93d3d;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+#curvebook_recovery_reload:hover {
+  background: #de4b4b;
+}
+
 #curvebook_drop_overlay {
   position: fixed;
   inset: 12px;
@@ -163,6 +216,7 @@ html, body {
   #curvebook_canvas,
   #curvebook_loading,
   #curvebook_readonly_banner,
+  #curvebook_recovery_banner,
   #curvebook_drop_overlay,
   #curvebook_toast,
   #curvebook_a11y_chrome,

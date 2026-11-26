@@ -6,7 +6,8 @@ use curvebook_doc::{
 use curvebook_palette::{LineDashStyle, Rgba8};
 
 use super::shared::{
-    LegendEntry, PlotMarginConfig, SegmentedFrameSpec, draw_empty_open_frame, draw_legend_entries, layout_and_render_segmented_chrome, solid_stroke,
+    LegendEntry, PlotMarginConfig, SegmentedFrameSpec, draw_empty_open_frame, draw_legend_entries, layout_and_render_segmented_chrome,
+    resolve_fresh_data_sheet_or_upstream, solid_stroke,
 };
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, RectPt, ScenePrimitive};
 
@@ -23,7 +24,7 @@ struct ContingencyMatrix {
 }
 
 pub(super) fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some(mat) = extract_contingency_matrix(graph, doc) else {
+    let Some(mat) = extract_contingency_matrix(graph, doc, &mut scene.warnings) else {
         scene.warnings.push(ChartWarning::new("empty_contingency_data", "no contingency counts found"));
         draw_empty_open_frame(scene);
         return Ok(());
@@ -176,19 +177,24 @@ pub(super) fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, sce
 }
 
 fn detect_proportion_scale(spec: &GraphSpec) -> Option<f64> {
-    let seg_max = spec.y_axis.segments.first().and_then(|s| s.max);
+    // Only normalize contingency counts to row proportions when the Y axis title explicitly asks
+    // for proportions/percentages (never infer normalization from a manual Y-axis max of 1 or 100,
+    // which would silently rewrite raw counts on a "Count" chart).
     let title = spec.y_axis.title.to_ascii_lowercase();
-    if title.contains("proportion") || title.contains("fraction") || seg_max.is_some_and(|m| (m - 1.0).abs() < 1e-6) {
+    if title.contains("count") {
+        return None;
+    }
+    if title.contains("proportion") || title.contains("fraction") {
         Some(1.0)
-    } else if title.contains('%') || title.contains("percent") || seg_max.is_some_and(|m| (m - 100.0).abs() < 1e-6) {
+    } else if title.contains('%') || title.contains("percent") {
         Some(100.0)
     } else {
         None
     }
 }
 
-fn extract_contingency_matrix(graph: &GraphSheet, doc: &ProjectDocument) -> Option<ContingencyMatrix> {
-    let ds = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id)?;
+fn extract_contingency_matrix(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<ContingencyMatrix> {
+    let ds = resolve_fresh_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id, warnings)?;
     let by_columns = matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(CategoricalTickSource::ColumnTitles));
     match &ds.archetype {
         TableArchetype::Contingency(cont) => {

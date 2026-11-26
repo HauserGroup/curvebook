@@ -386,8 +386,7 @@ fn open_import_mode_prompt_if_needed(win: &mut DesktopWindowSession, command_id:
     if win.app().document().total_sheet_count() == 0 && !has_unsaved {
         return false;
     }
-    win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved);
-    true
+    win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved)
 }
 
 fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
@@ -1654,10 +1653,61 @@ pub fn execute_native_import_at_path_with_params(
     Ok(())
 }
 
-fn sanitize_export_table_stem(title: &str, fallback_id: &str) -> String {
-    let mut out = String::with_capacity(title.len());
+/// Maximum UTF-8 byte length of any single filename (`<stem>.<ext>`) planned by Export All Data Tables (`GAP-07-05`).
+///
+/// Kept safely below the 255-byte POSIX/APFS/ext4/NTFS component limit so sibling atomic staging
+/// temp files (`<name>.tmp.<pid>.<seq>`) also stay well within filesystem limits.
+const MAX_EXPORT_TABLE_FILENAME_BYTES: usize = 200;
+
+static BATCH_EXPORT_STAGE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn truncate_utf8_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s.get(..end).unwrap_or("")
+}
+
+/// Returns `true` when `stem` (bare or before its first `.`) is a Windows reserved device name
+/// (`CON`, `PRN`, `AUX`, `NUL`, `COM1`..`COM9`, `LPT1`..`LPT9`, ASCII case-insensitive; `GAP-07-05`).
+fn is_windows_reserved_device_name(stem: &str) -> bool {
+    let head = stem.split('.').next().unwrap_or(stem).trim_end_matches([' ', '.']);
+    let upper = head.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn sanitize_raw_export_stem(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(MAX_EXPORT_TABLE_FILENAME_BYTES));
     let mut last_was_sep = false;
-    for ch in title.trim().chars() {
+    for ch in raw.trim().chars() {
         let is_bad = matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || ch.is_control();
         if is_bad {
             if !last_was_sep && !out.is_empty() {
@@ -1669,8 +1719,41 @@ fn sanitize_export_table_stem(title: &str, fallback_id: &str) -> String {
             last_was_sep = false;
         }
     }
-    let trimmed = out.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_');
-    if trimmed.is_empty() { fallback_id.to_owned() } else { trimmed.to_owned() }
+    out.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '_').to_owned()
+}
+
+fn sanitize_export_table_stem(title: &str, fallback_id: &str) -> String {
+    let mut stem = sanitize_raw_export_stem(title);
+    if stem.is_empty() {
+        stem = sanitize_raw_export_stem(fallback_id);
+    }
+    if stem.is_empty() {
+        stem = String::from("table");
+    }
+    if is_windows_reserved_device_name(&stem) {
+        stem = format!("table_{stem}");
+    }
+    stem
+}
+
+fn build_bounded_export_stem(base: &str, fallback_id: &str, ext: &str, suffix: usize) -> String {
+    let suffix_str = if suffix == 1 { String::new() } else { format!("-{suffix}") };
+    let reserved_bytes = ext.len().saturating_add(1).saturating_add(suffix_str.len());
+    let max_prefix_bytes = MAX_EXPORT_TABLE_FILENAME_BYTES.saturating_sub(reserved_bytes).max(1);
+
+    let mut prefix = truncate_utf8_bytes(base, max_prefix_bytes).trim_end_matches(|c: char| c.is_whitespace() || c == '.' || c == '_').to_owned();
+    if prefix.is_empty() {
+        let fb = sanitize_export_table_stem(fallback_id, "table");
+        prefix = truncate_utf8_bytes(&fb, max_prefix_bytes).trim_end_matches(|c: char| c.is_whitespace() || c == '.' || c == '_').to_owned();
+    }
+    if prefix.is_empty() {
+        prefix = String::from("table");
+    }
+    if is_windows_reserved_device_name(&prefix) {
+        let prefixed = format!("table_{prefix}");
+        prefix = truncate_utf8_bytes(&prefixed, max_prefix_bytes).trim_end_matches(|c: char| c.is_whitespace() || c == '.' || c == '_').to_owned();
+    }
+    format!("{prefix}{suffix_str}")
 }
 
 /// Whether anything (a file, a folder, or a link, even a dangling one) already occupies `path`.
@@ -1678,31 +1761,126 @@ fn export_path_is_occupied(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
-/// Plan one output path per data table for Export All Data Tables.
+/// Plan one output path per data table for Export All Data Tables (`GAP-07-05`).
 ///
-/// Tables whose sanitized titles match get `-2`, `-3`, … suffixes so one batch never writes two
-/// tables to the same file (compared ASCII case-insensitively, as on case-insensitive file
-/// systems). With `avoid_existing`, names already present in `dir` are skipped the same way, so
-/// the batch leaves every file that was in the folder before it started untouched.
-fn plan_all_tables_export_paths(dir: &Path, sheets: Vec<(SheetId, String)>, ext: &str, avoid_existing: bool) -> Vec<(SheetId, PathBuf)> {
+/// Tables whose sanitized titles collide under full Unicode case-folding (`.to_lowercase()`) get
+/// `-2`, `-3`, … suffixes so one batch never writes two tables to the same file on case-insensitive
+/// filesystems (APFS/NTFS). Every filename is bounded safely below 255 bytes on UTF-8 char
+/// boundaries and guards Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`,
+/// `LPT1..9`). With `avoid_existing`, names already present in `dir` are skipped the same way so
+/// the batch leaves every pre-existing file untouched.
+pub(crate) fn plan_all_tables_export_paths(dir: &Path, sheets: Vec<(SheetId, String)>, ext: &str, avoid_existing: bool) -> Vec<(SheetId, PathBuf)> {
     let mut used_stems: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut planned: Vec<(SheetId, PathBuf)> = Vec::with_capacity(sheets.len());
     for (sheet_id, title) in sheets {
         let base = sanitize_export_table_stem(&title, sheet_id.as_str());
-        let mut candidate = base.clone();
         let mut suffix = 1usize;
         loop {
+            let candidate = build_bounded_export_stem(&base, sheet_id.as_str(), ext, suffix);
             let path = dir.join(format!("{candidate}.{ext}"));
             let free_on_disk = !avoid_existing || !export_path_is_occupied(&path);
-            if free_on_disk && used_stems.insert(candidate.to_ascii_lowercase()) {
+            if free_on_disk && used_stems.insert(candidate.to_lowercase()) {
                 planned.push((sheet_id, path));
                 break;
             }
             suffix = suffix.saturating_add(1);
-            candidate = format!("{base}-{suffix}");
         }
     }
     planned
+}
+
+/// Stage all batch CSV files into sibling temp files inside `dir`, then move them into place with
+/// automatic backup-and-rollback if any rename fails partway through (`GAP-07-05`).
+fn write_staged_export_batch_with_hook<F>(dir: &Path, entries: &[(PathBuf, Vec<u8>)], mut before_commit_target: F) -> Result<Vec<String>, String>
+where
+    F: FnMut(usize, &Path) -> Result<(), String>,
+{
+    use std::io::Write as _;
+
+    // 1. Validate every target before writing any temp file.
+    for (target_path, _) in entries {
+        if let Ok(meta) = std::fs::symlink_metadata(target_path)
+            && meta.is_dir()
+        {
+            return Err(format!("cannot export `{}`: destination path is an existing directory", target_path.display()));
+        }
+    }
+
+    let pid = std::process::id();
+    let batch_seq = BATCH_EXPORT_STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    // 2. Write and sync all staged temp files inside `dir`.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(entries.len());
+    for (idx, (target_path, bytes)) in entries.iter().enumerate() {
+        let stage_path = dir.join(format!(".cb-export-stage.{pid}.{batch_seq}.{idx}.tmp"));
+        let write_res: Result<(), std::io::Error> = (|| {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&stage_path)?;
+            f.write_all(bytes)?;
+            f.sync_all()?;
+            Ok(())
+        })();
+        if let Err(err) = write_res {
+            let _ = std::fs::remove_file(&stage_path);
+            for (prev_stage, _) in &staged {
+                let _ = std::fs::remove_file(prev_stage);
+            }
+            return Err(format!("failed to stage export `{}`: {err}", target_path.display()));
+        }
+        staged.push((stage_path, target_path.clone()));
+    }
+
+    // 3. Commit staged files into target paths, backing up replaced targets for clean rollback.
+    let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::with_capacity(staged.len());
+    let mut commit_err: Option<String> = None;
+    for (idx, (stage_path, target_path)) in staged.iter().enumerate() {
+        if let Err(err) = before_commit_target(idx, target_path) {
+            commit_err = Some(err);
+            break;
+        }
+        let backup_path = if export_path_is_occupied(target_path) {
+            let bak = dir.join(format!(".cb-export-bak.{pid}.{batch_seq}.{idx}.tmp"));
+            if let Err(err) = std::fs::rename(target_path, &bak) {
+                commit_err = Some(format!("failed to prepare replacement for `{}`: {err}", target_path.display()));
+                break;
+            }
+            Some(bak)
+        } else {
+            None
+        };
+
+        if let Err(err) = std::fs::rename(stage_path, target_path) {
+            if let Some(bak) = &backup_path {
+                let _ = std::fs::rename(bak, target_path);
+            }
+            commit_err = Some(format!("failed to finalize export `{}`: {err}", target_path.display()));
+            break;
+        }
+        committed.push((target_path.clone(), backup_path));
+    }
+
+    if let Some(err) = commit_err {
+        // Roll back every previously committed file in reverse order and delete remaining staged temps.
+        for (target_path, backup_path) in committed.into_iter().rev() {
+            let _ = std::fs::remove_file(&target_path);
+            if let Some(bak) = backup_path {
+                let _ = std::fs::rename(&bak, &target_path);
+            }
+        }
+        for (stage_path, _) in &staged {
+            let _ = std::fs::remove_file(stage_path);
+        }
+        return Err(err);
+    }
+
+    // 4. All targets committed cleanly; remove temporary backups.
+    let mut exported_files = Vec::with_capacity(committed.len());
+    for (target_path, backup_path) in committed {
+        if let Some(bak) = backup_path {
+            let _ = std::fs::remove_file(bak);
+        }
+        exported_files.push(target_path.to_string_lossy().into_owned());
+    }
+    Ok(exported_files)
 }
 
 fn resolve_native_export_sheet_id_with_hint(doc: &ProjectDocument, kind: NativeExportTargetKind, hint: Option<&str>) -> Option<SheetId> {
@@ -1963,12 +2141,19 @@ impl DesktopHostRuntime {
         }
         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
-            && let Some(merge) = params.get("merge").and_then(Value::as_bool)
         {
-            let path = PathBuf::from(explicit_path);
-            let win = self.window_mut(window_id)?;
-            execute_native_import_at_path_with_params(win, command_id, &path, merge, params)?;
-            return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
+            if params.get("new_window").and_then(Value::as_bool) == Some(true) {
+                return self.open_interchange_in_new_window(window_id, command_id, PathBuf::from(explicit_path)).map(Some);
+            }
+            if let Some(merge) = params.get("merge").and_then(Value::as_bool) {
+                let path = PathBuf::from(explicit_path);
+                let win = self.window_mut(window_id)?;
+                execute_native_import_at_path_with_params(win, command_id, &path, merge, params)?;
+                if matches!(win.app().canvas_dialogs.active_dialog, curvebook_ui_egui::dialogs_canvas::ActiveDialog::ImportProjectMode { .. }) {
+                    win.app_mut().canvas_dialogs.close_dialog();
+                }
+                return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
+            }
         }
         if command_id == "project.open"
             && let Some(mut hook) = self.open_file_dialog_hook.take()
@@ -2157,8 +2342,8 @@ impl DesktopHostRuntime {
                         let path_str = path.to_string_lossy().into_owned();
                         let export_params = Self::build_native_export_params(spec.command, &target_sheet_id, &path, &path_str, params);
                         let win = self.window_mut(window_id)?;
-                        win.execute_and_journal(spec.command, export_params)?;
-                        Self::completed_file_dialog_outcome(window_id, spec.command, &path)
+                        let export_outcome = win.execute_and_journal(spec.command, export_params)?;
+                        Self::completed_file_dialog_outcome_with_warnings(window_id, spec.command, &path, &export_outcome.warnings)
                     }
                     None => Self::cancelled_file_dialog_outcome(window_id, spec.command),
                 }
@@ -2271,12 +2456,27 @@ impl DesktopHostRuntime {
     }
 
     fn completed_file_dialog_outcome(window_id: DesktopWindowId, command_id: &str, path: &Path) -> DesktopEventOutcome {
+        Self::completed_file_dialog_outcome_with_warnings(window_id, command_id, path, &[])
+    }
+
+    fn completed_file_dialog_outcome_with_warnings(
+        window_id: DesktopWindowId,
+        command_id: &str,
+        path: &Path,
+        warnings: &[String],
+    ) -> DesktopEventOutcome {
+        let mut payload = serde_json::Map::new();
+        payload.insert(String::from("path"), json!(path.to_string_lossy()));
+        if !warnings.is_empty() {
+            payload.insert(String::from("warnings_count"), json!(warnings.len()));
+            payload.insert(String::from("warnings"), json!(warnings));
+        }
         DesktopEventOutcome {
             handled: true,
             action: format!("native_file_dialog.completed:{command_id}"),
             window_id: Some(window_id),
             command_id: Some(command_id.to_owned()),
-            command_result: Some(json!({ "path": path.to_string_lossy() })),
+            command_result: Some(Value::Object(payload)),
             ..Default::default()
         }
     }
@@ -2338,20 +2538,25 @@ impl DesktopHostRuntime {
             }
         }
 
-        let mut exported_files: Vec<String> = Vec::with_capacity(planned.len());
+        // Render and validate every table before modifying any file on disk (`GAP-07-05`).
+        let mut staged_entries: Vec<(PathBuf, Vec<u8>)> = Vec::with_capacity(planned.len());
         for (sheet_id, file_path) in planned {
-            let file_path_str = file_path.to_string_lossy().into_owned();
-            win.execute_and_journal(
+            let outcome = win.execute_and_journal(
                 "table.exportCsv",
                 json!({
                     "sheet_id": sheet_id.as_str(),
-                    "path": file_path_str,
                     "delimiter": batch.delimiter,
                     "decimal_separator": batch.decimal_separator,
                 }),
             )?;
-            exported_files.push(file_path_str);
+            let csv_text = outcome
+                .payload
+                .get("csv")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("table `{}` export did not produce CSV payload", sheet_id.as_str()))?;
+            staged_entries.push((file_path, csv_text.as_bytes().to_vec()));
         }
+        let exported_files = write_staged_export_batch_with_hook(&dir, &staged_entries, |_, _| Ok(()))?;
         Ok(DesktopEventOutcome {
             handled: true,
             action: format!("native_file_dialog.completed:{COMMAND_ID}"),
@@ -2956,16 +3161,25 @@ impl DesktopHostRuntime {
 
     /// Handle an OS file drop onto `window_id`.
     ///
+    /// Rejects drops while any modal dialog is active (`GAP-07-04`). When `--new-instance` is
+    /// requested, opens interchange files directly in a new window (`GAP-07-03`); otherwise
     /// `.prism`, `.pzfx`, and `.xlsx` drops onto a window whose document has sheets or unsaved
-    /// changes open the same replace-or-merge prompt as File › Import (see
+    /// changes open the same replace-or-merge-or-new-window prompt as File › Import (see
     /// [`open_import_mode_prompt_if_needed`]); every other drop goes through [`Self::open_path_in_window`].
     fn handle_file_dropped(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
-        let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
-        if let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
-            && !is_unpacked_project_target(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();
+            if win.app().has_open_modal() {
+                return Err(String::from("cannot drop files while a dialog is open; close or finish the current dialog first"));
+            }
+        }
+        let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
+        if !self.config.new_instance
+            && let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
+            && !is_unpacked_project_target(&resolved_path)
+        {
+            let win = self.window_mut(window_id)?;
             if open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
                 return Ok(DesktopEventOutcome {
                     handled: true,
@@ -2980,12 +3194,13 @@ impl DesktopHostRuntime {
         self.open_path_in_window(window_id, resolved_path)
     }
 
-    /// Open `path` into `window_id`, prompting replace-or-merge first when `path` is a `.prism`,
-    /// `.pzfx`, or `.xlsx` interchange file and the window already has sheets or unsaved changes
-    /// (`R10.29`, matching `File › Import` and drag-and-drop).
+    /// Open `path` into `window_id`, opening directly in a new window when `--new-instance` is set
+    /// (`GAP-07-03`) or prompting replace/merge/new-window first when `path` is a `.prism`, `.pzfx`,
+    /// or `.xlsx` interchange file and the window already has sheets or unsaved changes (`R10.29`).
     fn open_or_prompt_interchange_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
         let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
-        if let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
+        if !self.config.new_instance
+            && let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
             && !is_unpacked_project_target(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
@@ -3002,6 +3217,65 @@ impl DesktopHostRuntime {
             }
         }
         self.open_path_in_window(window_id, resolved_path)
+    }
+
+    fn record_loaded_project_import_warnings(
+        app: &mut UiApp,
+        path: &Path,
+        import_command_id: Option<&'static str>,
+        import_warnings: &[curvebook_format::ImportWarning],
+    ) {
+        if let Some(cmd_id) = import_command_id {
+            let source_label = path.file_name().and_then(|n| n.to_str()).map_or_else(|| path.to_string_lossy().into_owned(), str::to_owned);
+            let mut synthetic = CommandOutcome::mutated(cmd_id, "imported file", json!({ "warnings": import_warnings }));
+            synthetic.warnings = import_warnings
+                .iter()
+                .map(|w| {
+                    if w.source.trim().is_empty() {
+                        format!("[{:?}] {}", w.kind, w.message)
+                    } else {
+                        format!("[{:?}] {}: {}", w.kind, w.source, w.message)
+                    }
+                })
+                .collect();
+            app.record_import_warnings(cmd_id, &source_label, &synthetic);
+        }
+    }
+
+    /// Open a `.prism`, `.pzfx`, or `.xlsx` interchange file in a brand-new desktop window from the
+    /// `ImportProjectMode` modal without altering the originating window's document or dirty state (`GAP-07-03`).
+    fn open_interchange_in_new_window(&mut self, window_id: DesktopWindowId, command_id: &str, path: PathBuf) -> Result<DesktopEventOutcome, String> {
+        let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
+        let viewport = self.window(window_id)?.viewport;
+        let LoadedPathPayload::Project { doc, archive_path, clean_archive, import_warnings, import_command_id } =
+            classify_and_load_path(&resolved_path)?
+        else {
+            return Err(format!("file `{}` did not yield a project document", resolved_path.display()));
+        };
+        let mut session = Session::from_document(*doc);
+        if let Some(p) = archive_path {
+            session.set_file_path(Some(p), clean_archive);
+        } else if !session.is_dirty() {
+            let _ = session.collapse_atomic_group(Session::new());
+        }
+        let new_id = self.open_window_with_session(session, viewport, self.config.recovery_root.is_some())?;
+        if let Ok(new_win) = self.window_mut(new_id) {
+            Self::record_loaded_project_import_warnings(new_win.app_mut(), &resolved_path, import_command_id, &import_warnings);
+        }
+        if let Ok(orig_win) = self.window_mut(window_id)
+            && matches!(orig_win.app().canvas_dialogs.active_dialog, curvebook_ui_egui::dialogs_canvas::ActiveDialog::ImportProjectMode { .. })
+        {
+            orig_win.app_mut().canvas_dialogs.close_dialog();
+        }
+        Ok(DesktopEventOutcome {
+            handled: true,
+            action: format!("native_file_dialog.opened_new_window:{command_id}"),
+            window_id: Some(window_id),
+            opened_window_id: Some(new_id),
+            command_id: Some(command_id.to_owned()),
+            command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "new_window": true })),
+            ..Default::default()
+        })
     }
 
     /// Open or import `path` into `window_id` without an import-mode prompt: CSV/TSV become a new
@@ -3040,24 +3314,6 @@ impl DesktopHostRuntime {
                 })
             }
             LoadedPathPayload::Project { doc, archive_path, clean_archive, import_warnings, import_command_id } => {
-                let record_dropped_warnings = |app: &mut UiApp, path: &Path| {
-                    if let Some(cmd_id) = import_command_id {
-                        let source_label =
-                            path.file_name().and_then(|n| n.to_str()).map_or_else(|| path.to_string_lossy().into_owned(), str::to_owned);
-                        let mut synthetic = CommandOutcome::mutated(cmd_id, "imported file", json!({ "warnings": &import_warnings }));
-                        synthetic.warnings = import_warnings
-                            .iter()
-                            .map(|w| {
-                                if w.source.trim().is_empty() {
-                                    format!("[{:?}] {}", w.kind, w.message)
-                                } else {
-                                    format!("[{:?}] {}: {}", w.kind, w.source, w.message)
-                                }
-                            })
-                            .collect();
-                        app.record_import_warnings(cmd_id, &source_label, &synthetic);
-                    }
-                };
                 let (open_new, viewport) = {
                     let win = self.window(window_id)?;
                     (self.config.new_instance || win.has_unsaved_changes(), win.viewport)
@@ -3071,7 +3327,7 @@ impl DesktopHostRuntime {
                     }
                     let new_id = self.open_window_with_session(session, viewport, self.config.recovery_root.is_some())?;
                     if let Ok(new_win) = self.window_mut(new_id) {
-                        record_dropped_warnings(new_win.app_mut(), &path);
+                        Self::record_loaded_project_import_warnings(new_win.app_mut(), &path, import_command_id, &import_warnings);
                     }
                     return Ok(DesktopEventOutcome {
                         handled: true,
@@ -3108,7 +3364,7 @@ impl DesktopHostRuntime {
                 {
                     win.app.set_clipboard_adapter(adapter);
                 }
-                record_dropped_warnings(win.app_mut(), &path);
+                Self::record_loaded_project_import_warnings(win.app_mut(), &path, import_command_id, &import_warnings);
                 win.dirty_commands.clear();
                 win.checkpoint_recovery_journal()?;
                 Ok(DesktopEventOutcome {
@@ -4524,6 +4780,99 @@ mod wave_b_host_tests {
         let copy_out = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("edit.copy") })?;
         assert!(copy_out.handled, "edit.copy on ResultSheet should copy active tab TSV");
         assert!(rt.clipboard_text.as_deref().is_some_and(|t| !t.trim().is_empty()), "expected non-empty ResultSheet TSV");
+        Ok(())
+    }
+
+    #[test]
+    fn gap_07_05_plan_all_tables_export_paths_unicode_length_and_windows_reserved_names() {
+        let dir = std::path::PathBuf::from("nonexistent-plan-dir");
+
+        // 1. Unicode case-folding deduplicates `"Überblick"` and `"überblick"`.
+        let unicode_plan = super::plan_all_tables_export_paths(
+            &dir,
+            vec![(SheetId::new("u1"), String::from("Überblick")), (SheetId::new("u2"), String::from("überblick"))],
+            "csv",
+            false,
+        );
+        let u_names: Vec<String> = unicode_plan.iter().map(|(_, p)| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
+        assert_eq!(u_names.len(), 2);
+        assert_ne!(u_names[0].to_lowercase(), u_names[1].to_lowercase(), "Unicode case pairs must not collide: {u_names:?}");
+        assert_eq!(u_names[0], "Überblick.csv");
+        assert_eq!(u_names[1], "überblick-2.csv");
+
+        // 2. 4096-byte ASCII & multi-byte UTF-8 titles are capped safely below 255 bytes on UTF-8 boundaries.
+        let long_ascii = "A".repeat(4096);
+        let long_utf8 = "α".repeat(2048); // 4096 bytes
+        let long_plan = super::plan_all_tables_export_paths(
+            &dir,
+            vec![
+                (SheetId::new("l1"), long_ascii.clone()),
+                (SheetId::new("l2"), long_ascii),
+                (SheetId::new("l3"), long_utf8.clone()),
+                (SheetId::new("l4"), long_utf8),
+            ],
+            "csv",
+            false,
+        );
+        let mut seen_lower = std::collections::HashSet::new();
+        for (_, p) in &long_plan {
+            let fname = p.file_name().unwrap().to_str().expect("valid UTF-8 filename");
+            assert!(fname.len() <= super::MAX_EXPORT_TABLE_FILENAME_BYTES && fname.len() < 255, "filename too long ({} B): {fname}", fname.len());
+            assert!(fname.ends_with(".csv"));
+            assert!(seen_lower.insert(fname.to_lowercase()), "duplicate folded filename: {fname}");
+        }
+
+        // 3. Windows reserved device names (bare or with extension, any case) are guarded.
+        let reserved_inputs = ["CON", "con", "PRN", "AUX", "NUL", "nul.csv", "COM1", "com9.txt", "LPT1", "lpt9.backup"];
+        let reserved_plan = super::plan_all_tables_export_paths(
+            &dir,
+            reserved_inputs.iter().enumerate().map(|(i, t)| (SheetId::new(format!("r{i}")), (*t).to_owned())).collect(),
+            "csv",
+            false,
+        );
+        let mut seen_reserved = std::collections::HashSet::new();
+        for (_, p) in &reserved_plan {
+            let fname = p.file_name().unwrap().to_str().expect("valid UTF-8");
+            assert!(!super::is_windows_reserved_device_name(fname), "planned filename must not be Windows reserved device name: {fname}");
+            assert!(fname.starts_with("table_"), "expected table_ prefix on reserved name, got: {fname}");
+            assert!(seen_reserved.insert(fname.to_lowercase()), "duplicate reserved filename: {fname}");
+        }
+    }
+
+    #[test]
+    fn gap_07_05_staged_batch_export_rolls_back_cleanly_on_mid_batch_error() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("cb-gap0705-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+        let existing = dir.join("TableA.csv");
+        let created = dir.join("TableB.csv");
+        let failing = dir.join("TableC.csv");
+        let orig_bytes = b"precious,original\n1,2\n";
+        std::fs::write(&existing, orig_bytes).map_err(|e| e.to_string())?;
+
+        let entries = vec![
+            (existing.clone(), b"new,a\n9,9\n".to_vec()),
+            (created.clone(), b"new,b\n8,8\n".to_vec()),
+            (failing.clone(), b"new,c\n7,7\n".to_vec()),
+        ];
+        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |idx, _| {
+            if idx == 2 { Err(String::from("simulated mid-batch I/O error")) } else { Ok(()) }
+        })
+        .expect_err("mid-batch error must abort and roll back");
+        assert!(err.contains("simulated mid-batch I/O error"));
+
+        assert_eq!(std::fs::read(&existing).map_err(|e| e.to_string())?, orig_bytes, "earlier replaced file must be restored byte-for-byte");
+        assert!(!created.exists(), "earlier newly created file must be rolled back");
+        assert!(!failing.exists(), "failing target must not exist");
+        let leftover_temps: Vec<String> = std::fs::read_dir(&dir)
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".cb-export-"))
+            .collect();
+        assert!(leftover_temps.is_empty(), "staging/backup temp files leaked: {leftover_temps:?}");
+        let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
 }

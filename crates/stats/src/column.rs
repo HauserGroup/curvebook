@@ -9,6 +9,16 @@
 //!   `doi:10.1093/biomet/6.1.1`.
 //! - Kirkwood, T. B. L. (1979). Geometric means and measures of dispersion. *Biometrics*, 35,
 //!   908-909 (letter; JSTOR 2530139).
+//! - Bland, J. M., & Altman, D. G. (1996). Transformations, means, and confidence intervals. *BMJ*,
+//!   312(7038), 1079. `doi:10.1136/bmj.312.7038.1079`.
+//! - Lam, F. C., Hung, C. T., & Perrier, D. G. (1985). Estimation of variance for harmonic mean
+//!   half-lives. *Journal of Pharmaceutical Sciences*, 74(2), 229-231.
+//!   `doi:10.1002/jps.2600740229`.
+//! - Casella, G., & Berger, R. L. (2002). *Statistical Inference* (2nd ed.). Duxbury / Thomson
+//!   Learning. §9.2.1 (monotone transformation equivariance of confidence intervals).
+//! - Bullen, P. S. (2003). *Handbook of Means and Their Inequalities* (2nd ed.). Kluwer Academic /
+//!   Springer. Ch. III (generalized power means: harmonic, geometric, arithmetic, and quadratic/RMS).
+//!   `doi:10.1007/978-94-017-0399-4`.
 //! - Blom, G. (1958). *Statistical Estimates and Transformed Beta-Variables*. Stockholm: Almqvist &
 //!   Wiksell; New York: Wiley.
 //! - D'Agostino, R. B. (1970). Transformation to normality of the null distribution of `g1`.
@@ -176,13 +186,28 @@ pub struct DescriptiveSummary {
     pub geometric_sd_factor: Option<f64>,
     /// Two-sided exponentiated Student *t* confidence interval on log scale for `geometric_mean` (`None` when `n < 2` or any value `<= 0.0`).
     pub geometric_mean_ci: Option<(f64, f64)>,
-    /// Harmonic mean $n / \sum (1 / x_i)$ (`None` when any value `<= 0.0` or reciprocal sum is zero).
+    /// Harmonic mean $n / \sum (1 / x_i)$ (Bullen 2003; `None` when any value `<= 0.0` or reciprocal sum is zero).
     pub harmonic_mean: Option<f64>,
-    /// Two-sided Student *t* CI transformed on reciprocal scale (`None` when `n < 2`, any value `<= 0.0`, or CI denominator hits zero/negative).
+    /// Two-sided Student *t* confidence interval for the population harmonic mean `1 / E[1/X]`,
+    /// obtained by forming the Student (1908) *t* interval `[L, U]` on the reciprocal-transformed
+    /// sample `1 / x_i` and monotonically back-transforming via `[1 / U, 1 / L]` (Bland & Altman 1996;
+    /// Lam, Hung & Perrier 1985; Casella & Berger 2002).
+    ///
+    /// Returns `None` when `n < 2`, any observation is `<= 0.0`, the reciprocal-scale interval
+    /// touches or crosses zero (`L <= 0.0`, where `u -> 1 / u` is singular), or bounds overflow.
     pub harmonic_mean_ci: Option<(f64, f64)>,
-    /// Quadratic mean (root-mean-square) $\sqrt{\frac{1}{n}\sum x_i^2} \ge 0$.
+    /// Quadratic mean (root-mean-square) $\sqrt{\frac{1}{n}\sum x_i^2} \ge 0$ (Bullen 2003).
     pub quadratic_mean: f64,
-    /// Two-sided delta-method / Student *t* CI for `quadratic_mean` (`None` when `n < 2` or `quadratic_mean == 0.0`).
+    /// Two-sided monotone back-transformed Student *t* confidence interval for the population
+    /// quadratic mean (RMS) `sqrt(E[X^2])`, obtained by forming the Student (1908) *t* interval
+    /// `[L_sq, U_sq]` on the squared observations `x_i^2` and back-transforming via
+    /// `[sqrt(max(L_sq, 0)), sqrt(U_sq)]` (Bland & Altman 1996; Casella & Berger 2002; Bullen 2003).
+    ///
+    /// Unlike a linearized delta-method interval (`rms +/- t * SE(x^2) / (2 * rms)`), this monotone
+    /// endpoint back-transformation preserves the non-negative domain `sqrt(E[X^2]) >= 0` (clamping
+    /// the lower endpoint to `0.0` whenever `L_sq <= 0.0`) and preserves coverage for `sqrt(E[X^2])`
+    /// whenever `[L_sq, U_sq]` covers `E[X^2]`. Returns `None` when `n < 2`, all observations are
+    /// `0.0` (`quadratic_mean == 0.0`), or bounds overflow.
     pub quadratic_mean_ci: Option<(f64, f64)>,
     /// Sample Fisher–Pearson skewness `G_1` (Joanes & Gill 1998 Type 2 unbiased adjustment; `None` when `n < 3` or zero SD).
     pub skewness: Option<f64>,
@@ -197,7 +222,10 @@ pub struct DescriptiveSummary {
 /// Moments use the compensated pairwise algorithm of Chan, Golub & LeVeque (1983); quartiles
 /// (`q1`, `median`, `q3`) use Hyndman & Fan (1996) Definition 6, optional custom symmetric
 /// percentiles use Hyndman & Fan (1996) Definition 7, the mean CI is the Student (1908) *t*
-/// interval, and the SD CI is the chi-square interval on `n - 1` df.
+/// interval, the SD CI is the chi-square interval on `n - 1` df, and the generalized power-mean
+/// CIs (`geometric_mean_ci`, `harmonic_mean_ci`, `quadratic_mean_ci`; Bullen 2003) are monotone
+/// back-transformations of the Student (1908) *t* interval on `ln x`, `1 / x`, and `x^2`
+/// respectively (Kirkwood 1979; Lam, Hung & Perrier 1985; Bland & Altman 1996; Casella & Berger 2002).
 pub fn summarize_column(
     label: impl Into<String>,
     values: &[f64],
@@ -361,6 +389,13 @@ fn compute_geometric_stats(values: &[f64], confidence: ConfidenceLevel) -> Resul
     Ok((Some(gm), gsd, g_ci))
 }
 
+/// Harmonic mean `n / sum(1 / x_i)` (Bullen 2003) and its reciprocal-scale back-transformed
+/// Student *t* CI `[1 / U_inv, 1 / L_inv]` for `1 / E[1 / X]` (Bland & Altman 1996; Lam, Hung &
+/// Perrier 1985; Casella & Berger 2002).
+///
+/// Reciprocals are scaled by `min_v = min(x_i) > 0` (`u_i = min_v / x_i in (0, 1]`) so extreme
+/// magnitudes never underflow or overflow. Returns `(None, None)` if any observation is `<= 0.0`,
+/// and `ci = None` when `n < 2` or the reciprocal-scale CI lower endpoint `L_inv <= 0.0`.
 fn compute_harmonic_stats(values: &[f64], confidence: ConfidenceLevel) -> Result<OptionalMeanCi, StatsError> {
     if values.iter().any(|&v| v <= 0.0) {
         return Ok((None, None));
@@ -383,6 +418,15 @@ fn compute_harmonic_stats(values: &[f64], confidence: ConfidenceLevel) -> Result
     Ok((hm, ci))
 }
 
+/// Quadratic mean (RMS) `sqrt(mean(x_i^2))` (Bullen 2003) and its exact monotone back-transformed
+/// Student *t* CI `[sqrt(max(L_sq, 0)), sqrt(U_sq)]` for `sqrt(E[X^2])` (Bland & Altman 1996;
+/// Casella & Berger 2002).
+///
+/// Observations are scaled by `max_abs = max(|x_i|)` (`w_i = (x_i / max_abs)^2 in [0, 1]`) before
+/// squaring to avoid overflow/underflow. Because `E[X^2] >= 0`, any negative lower endpoint
+/// `L_sq < 0` on the squared scale is clamped at `0.0` before taking the square root, preserving
+/// non-negativity and nominal coverage. Returns `(0.0, None)` when all values are `0.0`, and
+/// `ci = None` when `n < 2`.
 fn compute_quadratic_stats(values: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
     let n = values.len();
     let max_abs = values.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));

@@ -569,9 +569,19 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
     let cross_os_reports = options.cross_os_reports_dir.as_deref().map(CrossOsReportCatalog::load).transpose()?;
 
     let asset_catalog = crate::assets::load_repo_asset_catalog(root)?;
+    let workspace_version = std::fs::read_to_string(root.join("Cargo.toml")).ok().and_then(|toml| crate::version::read_workspace_version(&toml).ok());
     let scratch = ScratchDirGuard::new("batch")?;
     let mut records = Vec::with_capacity(discovered.len());
     let mut violations = Vec::new();
+
+    let sbom_expected_ver = options.expect_beta_set.as_deref();
+    let scan_ctx = AssetScanContext {
+        asset_catalog: &asset_catalog,
+        tools,
+        cross_os_reports: cross_os_reports.as_ref(),
+        expected_beta_version: sbom_expected_ver,
+        workspace_version: workspace_version.as_deref(),
+    };
 
     for (idx, item) in discovered.iter().enumerate() {
         for hit in crate::brands::scan_dist_label(&item.name, &item.name) {
@@ -579,7 +589,7 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
         }
         let item_scratch = scratch.path.join(format!("item-{idx}"));
         std::fs::create_dir_all(&item_scratch).map_err(|e| format!("create staging dir for `{}`: {e}", item.name))?;
-        let outcome = scan_single_asset(&asset_catalog, tools, cross_os_reports.as_ref(), item, &item_scratch, &mut violations)?;
+        let outcome = scan_single_asset(&scan_ctx, item, &item_scratch, &mut violations)?;
         records.push(outcome);
     }
 
@@ -749,10 +759,16 @@ fn parse_sha256_line(line: &str) -> Option<(&str, &str)> {
     Some((digest, filename))
 }
 
+struct AssetScanContext<'a> {
+    asset_catalog: &'a crate::assets::RepoAssetCatalog,
+    tools: &'a ToolConfig,
+    cross_os_reports: Option<&'a CrossOsReportCatalog>,
+    expected_beta_version: Option<&'a str>,
+    workspace_version: Option<&'a str>,
+}
+
 fn scan_single_asset(
-    asset_catalog: &crate::assets::RepoAssetCatalog,
-    tools: &ToolConfig,
-    cross_os_reports: Option<&CrossOsReportCatalog>,
+    ctx: &AssetScanContext<'_>,
     item: &DiscoveredAsset,
     item_scratch: &Path,
     violations: &mut Vec<String>,
@@ -776,22 +792,18 @@ fn scan_single_asset(
         AssetKind::Sbom => {
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_COMPLIANCE_TEXT_BYTES, &item.name)?;
             let text = std::str::from_utf8(&bytes).map_err(|e| format!("`{}` is not valid UTF-8: {e}", item.name))?;
-            validate_cyclonedx_sbom_json(&item.name, text)?;
+            let expected_version = resolve_expected_sbom_version(&item.name, ctx.expected_beta_version, ctx.workspace_version);
+            let sbom_err = validate_cyclonedx_sbom_json(&item.name, text, expected_version).err();
             collect_compliance_hits(&item.name, text, &bytes, violations);
             let mut secret_hits = Vec::new();
             crate::secrets::scan_text(&item.name, text, &mut secret_hits);
             for hit in secret_hits {
                 violations.push(format!("{}:{}: [secrets] {}", hit.location, hit.line, hit.kind));
             }
-            Ok(ScannedAssetRecord {
-                name: item.name.clone(),
-                kind: item.kind.label(),
-                size_bytes: item.size_bytes,
-                sha256: item.sha256.clone(),
-                unpacked_files: 1,
-                nested_archive_entries: 0,
-                checked_assets: 0,
-            })
+            if let Some(err) = sbom_err {
+                violations.push(format!("{}: [sbom] {err}", item.name));
+            }
+            Ok(compliance_record())
         }
         AssetKind::Zsync => {
             let bytes = read_non_symlink_regular_bytes(&item.path, MAX_ZSYNC_BYTES, &item.name)?;
@@ -801,11 +813,11 @@ fn scan_single_asset(
         }
         _ => {
             let cross_os_host = match item.kind {
-                AssetKind::Dmg if !tools.allow_dmg => Some(("macos", "macOS")),
-                AssetKind::Msi if !tools.allow_msi => Some(("windows", "Windows")),
+                AssetKind::Dmg if !ctx.tools.allow_dmg => Some(("macos", "macOS")),
+                AssetKind::Msi if !ctx.tools.allow_msi => Some(("windows", "Windows")),
                 _ => None,
             };
-            if let (Some((host_id, host_label)), Some(reports)) = (cross_os_host, cross_os_reports) {
+            if let (Some((host_id, host_label)), Some(reports)) = (cross_os_host, ctx.cross_os_reports) {
                 return reports.match_native_asset(host_id, item).ok_or_else(|| {
                     format!(
                         "`{}`: missing matching verified {host_label} native scan report (`host_os={host_id}`, exact size/sha256, `unpacked_files > 0`)",
@@ -815,8 +827,8 @@ fn scan_single_asset(
             }
             let stage_dir = item_scratch.join("unpacked");
             std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
-            unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
-            scan_unpacked_tree(asset_catalog, item, &stage_dir, violations)
+            unpack_container_asset(ctx.tools, item, item_scratch, &stage_dir, violations)?;
+            scan_unpacked_tree(ctx.asset_catalog, item, &stage_dir, violations)
         }
     }
 }
@@ -830,7 +842,19 @@ fn collect_compliance_hits(asset_name: &str, text: &str, raw_bytes: &[u8], viola
     }
 }
 
-fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str) -> Result<(), String> {
+fn filename_sbom_version(asset_name: &str) -> Option<&str> {
+    asset_name.strip_prefix("curvebook-").and_then(|rest| rest.strip_suffix(SBOM_EXT)).filter(|ver| !ver.trim().is_empty())
+}
+
+fn resolve_expected_sbom_version<'a>(
+    asset_name: &'a str,
+    expected_beta_version: Option<&'a str>,
+    workspace_version: Option<&'a str>,
+) -> Option<&'a str> {
+    expected_beta_version.or_else(|| filename_sbom_version(asset_name)).or(workspace_version)
+}
+
+fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str, expected_version: Option<&str>) -> Result<(), String> {
     let val: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("`{asset_name}`: invalid CycloneDX JSON: {e}"))?;
     let Some(obj) = val.as_object() else {
         return Err(format!("`{asset_name}`: CycloneDX SBOM root must be a JSON object"));
@@ -843,17 +867,79 @@ fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str) -> Result<(), Stri
     if spec_version.is_empty() {
         return Err(format!("`{asset_name}`: CycloneDX SBOM is missing non-empty `specVersion`"));
     }
+    let component_versions = collect_cyclonedx_components(asset_name, obj)?;
+    validate_cyclonedx_metadata_and_binaries(asset_name, obj, &component_versions, expected_version)
+}
+
+fn collect_cyclonedx_components<'a>(
+    asset_name: &str,
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+) -> Result<BTreeMap<&'a str, Option<&'a str>>, String> {
     let Some(components) = obj.get("components").and_then(serde_json::Value::as_array) else {
         return Err(format!("`{asset_name}`: CycloneDX SBOM is missing `components` array"));
     };
     if components.is_empty() {
         return Err(format!("`{asset_name}`: CycloneDX SBOM has empty `components` array"));
     }
+    let mut component_versions: BTreeMap<&'a str, Option<&'a str>> = BTreeMap::new();
     for (idx, comp) in components.iter().enumerate() {
-        let has_name = comp.as_object().and_then(|c| c.get("name")).and_then(serde_json::Value::as_str).is_some_and(|n| !n.trim().is_empty());
-        if !has_name {
+        let Some(comp_obj) = comp.as_object() else {
+            return Err(format!("`{asset_name}`: CycloneDX `components[{idx}]` must be a JSON object"));
+        };
+        let Some(name) = comp_obj.get("name").and_then(serde_json::Value::as_str).map(str::trim).filter(|n| !n.is_empty()) else {
             return Err(format!("`{asset_name}`: CycloneDX `components[{idx}]` is missing a non-empty string `name`"));
-        }
+        };
+        let version = comp_obj.get("version").and_then(serde_json::Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+        component_versions.entry(name).or_insert(version);
+    }
+    Ok(component_versions)
+}
+
+fn validate_cyclonedx_metadata_and_binaries(
+    asset_name: &str,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    component_versions: &BTreeMap<&str, Option<&str>>,
+    expected_version: Option<&str>,
+) -> Result<(), String> {
+    let Some(meta_component) =
+        obj.get("metadata").and_then(serde_json::Value::as_object).and_then(|m| m.get("component")).and_then(serde_json::Value::as_object)
+    else {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM is missing `metadata.component` object"));
+    };
+    let root_name = meta_component.get("name").and_then(serde_json::Value::as_str).map(str::trim).unwrap_or("");
+    if root_name != "curvebook" {
+        return Err(format!("`{asset_name}`: CycloneDX `metadata.component.name` must be `\"curvebook\"`, found `{root_name}`"));
+    }
+    let root_version = meta_component.get("version").and_then(serde_json::Value::as_str).map(str::trim).unwrap_or("");
+    if root_version.is_empty() {
+        return Err(format!("`{asset_name}`: CycloneDX `metadata.component.version` is missing or empty"));
+    }
+    semver::Version::parse(root_version)
+        .map_err(|err| format!("`{asset_name}`: CycloneDX `metadata.component.version` `{root_version}` is not valid SemVer: {err}"))?;
+    if let Some(file_ver) = filename_sbom_version(asset_name)
+        && root_version != file_ver
+    {
+        return Err(format!(
+            "`{asset_name}`: CycloneDX `metadata.component.version` `{root_version}` does not match SBOM filename version `{file_ver}`"
+        ));
+    }
+    if let Some(expected_ver) = expected_version.map(str::trim).filter(|v| !v.is_empty())
+        && root_version != expected_ver
+    {
+        return Err(format!(
+            "`{asset_name}`: CycloneDX `metadata.component.version` `{root_version}` does not match expected version `{expected_ver}`"
+        ));
+    }
+
+    // `packaging/sbom.sh` places the desktop app (`curvebook`) in `metadata.component` and merges
+    // `curvebook-cli` into `components`; require both shipped binaries to be accounted for (`GAP-05-05`).
+    let Some(cli_ver) = component_versions.get("curvebook-cli") else {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM `components` is missing shipped binary component `curvebook-cli`"));
+    };
+    if let Some(ver) = cli_ver
+        && *ver != root_version
+    {
+        return Err(format!("`{asset_name}`: CycloneDX component `curvebook-cli` version `{ver}` does not match root version `{root_version}`"));
     }
     Ok(())
 }
@@ -2185,7 +2271,17 @@ mod tests {
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
             "version": 1,
-            "components": [{ "type": "library", "name": "serde", "version": "1.0.219" }]
+            "metadata": {
+                "component": {
+                    "type": "application",
+                    "name": "curvebook",
+                    "version": ver
+                }
+            },
+            "components": [
+                { "type": "application", "name": "curvebook-cli", "version": ver },
+                { "type": "library", "name": "serde", "version": "1.0.219" }
+            ]
         }))
         .unwrap();
         let dmg_name = format!("curvebook-{ver}-macos-universal.dmg");
@@ -2244,24 +2340,101 @@ mod tests {
 
     #[test]
     fn cyclonedx_sbom_validator_accepts_valid_and_rejects_malformed() {
-        let valid =
-            r#"{"bomFormat":"CycloneDX","specVersion":"1.5","version":1,"components":[{"type":"library","name":"serde","version":"1.0.219"}]}"#;
-        assert!(super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", valid).is_ok());
+        let valid = r#"{
+            "bomFormat":"CycloneDX",
+            "specVersion":"1.5",
+            "version":1,
+            "metadata":{"component":{"type":"application","name":"curvebook","version":"0.1.0"}},
+            "components":[
+                {"type":"application","name":"curvebook-cli","version":"0.1.0"},
+                {"type":"library","name":"serde","version":"1.0.219"}
+            ]
+        }"#;
+        assert!(super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", valid, Some("0.1.0")).is_ok());
 
-        for (case, payload, expected_needle) in [
-            ("not json", "not-json", "invalid CycloneDX JSON"),
-            ("non-object root", "[]", "must be a JSON object"),
-            ("wrong bomFormat", r#"{"bomFormat":"SPDX","specVersion":"2.3","components":[{"name":"serde"}]}"#, "bomFormat"),
-            ("missing specVersion", r#"{"bomFormat":"CycloneDX","components":[{"name":"serde"}]}"#, "specVersion"),
-            ("missing components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#, "missing `components`"),
-            ("empty components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}"#, "empty `components`"),
+        // Also accepts SBOMs that list both `curvebook` and `curvebook-cli` in `components`.
+        let valid_with_both_in_components = r#"{
+            "bomFormat":"CycloneDX",
+            "specVersion":"1.5",
+            "version":1,
+            "metadata":{"component":{"type":"application","name":"curvebook","version":"0.1.0-beta.1"}},
+            "components":[
+                {"type":"application","name":"curvebook","version":"0.1.0-beta.1"},
+                {"type":"application","name":"curvebook-cli","version":"0.1.0-beta.1"},
+                {"type":"library","name":"serde","version":"1.0.219"}
+            ]
+        }"#;
+        assert!(super::validate_cyclonedx_sbom_json("curvebook-0.1.0-beta.1.cdx.json", valid_with_both_in_components, Some("0.1.0-beta.1")).is_ok());
+
+        for (case, payload, expected_ver, expected_needle) in [
+            ("not json", "not-json", Some("0.1.0"), "invalid CycloneDX JSON"),
+            ("non-object root", "[]", Some("0.1.0"), "must be a JSON object"),
+            ("wrong bomFormat", r#"{"bomFormat":"SPDX","specVersion":"2.3","components":[{"name":"serde"}]}"#, Some("0.1.0"), "bomFormat"),
+            ("missing specVersion", r#"{"bomFormat":"CycloneDX","components":[{"name":"serde"}]}"#, Some("0.1.0"), "specVersion"),
+            ("missing components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#, Some("0.1.0"), "missing `components`"),
+            ("empty components", r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}"#, Some("0.1.0"), "empty `components`"),
             (
                 "nameless component",
                 r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"type":"library","name":"   "}]}"#,
+                Some("0.1.0"),
                 "components[0]",
             ),
+            (
+                "missing metadata",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"curvebook-cli","version":"0.1.0"}]}"#,
+                Some("0.1.0"),
+                "metadata.component",
+            ),
+            (
+                "missing metadata.component",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{},"components":[{"name":"curvebook-cli","version":"0.1.0"}]}"#,
+                Some("0.1.0"),
+                "metadata.component",
+            ),
+            (
+                "wrong metadata.component.name",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"other-app","version":"0.1.0"}},"components":[{"name":"curvebook-cli","version":"0.1.0"}]}"#,
+                Some("0.1.0"),
+                "metadata.component.name",
+            ),
+            (
+                "empty metadata.component.version",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"   "}},"components":[{"name":"curvebook-cli","version":"0.1.0"}]}"#,
+                Some("0.1.0"),
+                "metadata.component.version",
+            ),
+            (
+                "invalid semver metadata.component.version",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"not-semver"}},"components":[{"name":"curvebook-cli","version":"not-semver"}]}"#,
+                None,
+                "not valid SemVer",
+            ),
+            (
+                "version mismatch against filename",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"0.2.0"}},"components":[{"name":"curvebook-cli","version":"0.2.0"}]}"#,
+                None,
+                "does not match SBOM filename version",
+            ),
+            (
+                "version mismatch against expected version",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"0.1.0"}},"components":[{"name":"curvebook-cli","version":"0.1.0"}]}"#,
+                Some("0.9.0"),
+                "does not match expected version",
+            ),
+            (
+                "missing curvebook-cli binary component",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"0.1.0"}},"components":[{"type":"library","name":"serde","version":"1.0.219"}]}"#,
+                Some("0.1.0"),
+                "curvebook-cli",
+            ),
+            (
+                "curvebook-cli version mismatch",
+                r#"{"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":"0.1.0"}},"components":[{"type":"application","name":"curvebook-cli","version":"0.2.0"}]}"#,
+                Some("0.1.0"),
+                "curvebook-cli",
+            ),
         ] {
-            let err = super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", payload).unwrap_err();
+            let err = super::validate_cyclonedx_sbom_json("curvebook-0.1.0.cdx.json", payload, expected_ver).unwrap_err();
             assert!(err.contains(expected_needle), "case `{case}` error `{err}` did not contain `{expected_needle}`");
         }
     }

@@ -29,6 +29,11 @@
     <span id="curvebook_readonly_badge">Read-Only</span>
     <span id="curvebook_readonly_text"></span>
   </div>
+  <div id="curvebook_recovery_banner" role="alert" aria-live="assertive" data-visible="false">
+    <span id="curvebook_recovery_badge">Recovery Required</span>
+    <span id="curvebook_recovery_text"></span>
+    <button id="curvebook_recovery_reload" type="button">Reload to Recover</button>
+  </div>
   <div id="curvebook_drop_overlay" data-active="false">
     Drop .curvebook, .curvebook.d, .pzfx, .prism, .csv, or .tsv files to open locally
   </div>
@@ -53,6 +58,9 @@
       const loadingEl = document.getElementById("curvebook_loading");
       const bannerEl = document.getElementById("curvebook_readonly_banner");
       const bannerTextEl = document.getElementById("curvebook_readonly_text");
+      const recoveryBannerEl = document.getElementById("curvebook_recovery_banner");
+      const recoveryTextEl = document.getElementById("curvebook_recovery_text");
+      const recoveryReloadBtn = document.getElementById("curvebook_recovery_reload");
       const dropOverlayEl = document.getElementById("curvebook_drop_overlay");
       const toastEl = document.getElementById("curvebook_toast");
       const a11yChromeEl = document.getElementById("curvebook_a11y_chrome");
@@ -117,6 +125,7 @@
       let holdsCurrentWebLock = false;
       let documentDirty = false;
       let hasUnflushedAutosave = false;
+      let wasmTrapDetected = false;
       let lastRenderedFrameCmd = null;
       let toastTimerId = null;
       let dispatchFn = null;
@@ -308,7 +317,67 @@
         return out;
       }
 
+      function isWasmTrapError(err) {
+        if (!err) {
+          return false;
+        }
+        if (typeof WebAssembly !== "undefined" && typeof WebAssembly.RuntimeError === "function" && err instanceof WebAssembly.RuntimeError) {
+          return true;
+        }
+        const name = typeof err.name === "string" ? err.name : "";
+        const msg = typeof err.message === "string" ? err.message : String(err);
+        return name === "RuntimeError" || /unreachable|memory access out of bounds|recursive use of an object|wasm/i.test(msg);
+      }
+
+      function enterWasmTrapRecovery(detailMessage) {
+        const alreadyTrapped = wasmTrapDetected;
+        wasmTrapDetected = true;
+        if (autosaveTimerId !== null) {
+          clearTimeout(autosaveTimerId);
+          autosaveTimerId = null;
+        }
+        hasUnflushedAutosave = false;
+        pendingEvents.length = 0;
+        if (!alreadyTrapped) {
+          releaseLockOnExit();
+        }
+        if (loadingEl) {
+          loadingEl.style.display = "none";
+        }
+        const msg = (typeof detailMessage === "string" && detailMessage.trim().length > 0)
+          ? detailMessage.trim()
+          : "CurveBook encountered an internal WebAssembly error. Autosave has been paused to protect your backup; reload the page to recover.";
+        if (recoveryBannerEl && recoveryTextEl) {
+          recoveryTextEl.textContent = msg;
+          recoveryBannerEl.setAttribute("data-visible", "true");
+        }
+        if (!alreadyTrapped) {
+          showNotice("error", msg);
+        }
+      }
+
+      if (recoveryReloadBtn) {
+        recoveryReloadBtn.addEventListener("click", () => {
+          window.location.reload();
+        });
+      }
+
+      window.addEventListener("error", (ev) => {
+        if (ev && isWasmTrapError(ev.error)) {
+          enterWasmTrapRecovery();
+        }
+      });
+
+      window.addEventListener("unhandledrejection", (ev) => {
+        if (ev && isWasmTrapError(ev.reason)) {
+          enterWasmTrapRecovery();
+        }
+      });
+
       function emitEvent(eventObj) {
+        if (wasmTrapDetected) {
+          return null;
+        }
         if (typeof dispatchFn !== "function") {
           pendingEvents.push(eventObj);
           return null;
@@ -318,6 +387,11 @@
           if (reply) {
             const cmds = typeof reply === "string" ? JSON.parse(reply) : reply;
             if (Array.isArray(cmds)) {
+              const poisonedNotice = cmds.find((c) => c && c.kind === "notify_status" && c.code === "wasm_session_poisoned");
+              if (poisonedNotice) {
+                enterWasmTrapRecovery(poisonedNotice.message);
+                return cmds;
+              }
               const switchesDoc = cmds.some((c) => c && c.kind === "set_document_lock" && c.doc_id && c.doc_id !== activeLockDocId);
               if (switchesDoc) {
                 if (autosaveTimerId !== null) {
@@ -334,6 +408,9 @@
           }
         } catch (err) {
           console.error("CurveBook bridge dispatch error:", err);
+          if (isWasmTrapError(err)) {
+            enterWasmTrapRecovery();
+          }
         }
         return null;
       }
@@ -552,6 +629,9 @@
       }
 
       function applyLocalStorageCommand(cmd) {
+        if (wasmTrapDetected) {
+          return;
+        }
         const isManagedKey = (k) => typeof k === "string" && (k === PREFERENCES_KEY || k.startsWith(AUTOSAVE_PREFIX));
         const allowedWrites = Array.isArray(cmd.writes) ? cmd.writes.filter((e) => e && isManagedKey(e.key) && typeof e.value === "string") : [];
         const allowedRemovals = Array.isArray(cmd.removals) ? cmd.removals.filter((k) => isManagedKey(k)) : [];
@@ -838,18 +918,33 @@
         }
       }
 
-      function scheduleAutosave(action) {
-        if (!holdsCurrentWebLock || !dispatchFn || !action) {
-          return;
-        }
-        if (
+      function isPassiveNonMutatingAction(action) {
+        return (
           action === "storage.hydrated" ||
+          action === "chrome.hover" ||
+          action === "render.frame" ||
+          action === "drag.state" ||
+          action === "grid.scroll" ||
+          action === "popup.wheel_scroll" ||
+          action === "modal.backdrop_blocked" ||
+          action === "ime.preedit" ||
+          action === "palette.no_match" ||
+          action === "file.close_prompt" ||
+          action.startsWith("chrome.pressed:") ||
+          action.startsWith("context_menu.") ||
           action.startsWith("sync_directory.") ||
           action.startsWith("viewport.") ||
           action.startsWith("view.") ||
           action.startsWith("clipboard.") ||
-          (!documentDirty && (action === "open_file" || action === "import_directory" || action === "import_dropped_files" || action === "project.new" || action === "file.new"))
-        ) {
+          action.startsWith("ui.")
+        );
+      }
+
+      function scheduleAutosave(action) {
+        if (wasmTrapDetected || !holdsCurrentWebLock || !dispatchFn || !action || !documentDirty) {
+          return;
+        }
+        if (isPassiveNonMutatingAction(action)) {
           return;
         }
         if (autosaveTimerId !== null) {
@@ -858,13 +953,21 @@
         hasUnflushedAutosave = true;
         autosaveTimerId = setTimeout(() => {
           autosaveTimerId = null;
-          if (holdsCurrentWebLock && dispatchFn) {
+          if (!wasmTrapDetected && holdsCurrentWebLock && dispatchFn && documentDirty) {
             emitEvent({ kind: "save_autosave", now_ms: Date.now() });
           }
         }, 400);
       }
 
       function flushPendingAutosave() {
+        if (wasmTrapDetected) {
+          if (autosaveTimerId !== null) {
+            clearTimeout(autosaveTimerId);
+            autosaveTimerId = null;
+          }
+          hasUnflushedAutosave = false;
+          return false;
+        }
         const pending = autosaveTimerId !== null || hasUnflushedAutosave;
         if (!pending) {
           return false;
@@ -873,7 +976,7 @@
           clearTimeout(autosaveTimerId);
           autosaveTimerId = null;
         }
-        if (holdsCurrentWebLock && dispatchFn) {
+        if (holdsCurrentWebLock && dispatchFn && documentDirty) {
           emitEvent({ kind: "save_autosave", now_ms: Date.now() });
           return true;
         }
@@ -912,7 +1015,11 @@
           case "render_rgba_frame":
             if (cmd.chrome && typeof cmd.chrome.dirty === "boolean") {
               documentDirty = cmd.chrome.dirty;
-              if (!documentDirty && autosaveTimerId === null) {
+              if (!documentDirty) {
+                if (autosaveTimerId !== null) {
+                  clearTimeout(autosaveTimerId);
+                  autosaveTimerId = null;
+                }
                 hasUnflushedAutosave = false;
               }
             }
@@ -955,7 +1062,11 @@
             }
             break;
           case "notify_status":
-            showNotice(cmd.level || "info", cmd.message || cmd.code || "");
+            if (cmd.code === "wasm_session_poisoned") {
+              enterWasmTrapRecovery(cmd.message);
+            } else {
+              showNotice(cmd.level || "info", cmd.message || cmd.code || "");
+            }
             break;
           default:
             break;
@@ -1273,7 +1384,6 @@
               const file = files[0];
               assertFileWithinImportBudget(file, singleFileLimitForName(file.name), null);
               const bytes = new Uint8Array(await file.arrayBuffer());
-              activeDirectoryHandle = null;
               emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
             } else {
               const batch = [];
@@ -1284,7 +1394,6 @@
                 const bytes = new Uint8Array(await file.arrayBuffer());
                 batch.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
               }
-              activeDirectoryHandle = null;
               emitEvent({ kind: "import_dropped_files", files: batch });
             }
           } catch (err) {
@@ -1314,8 +1423,14 @@
               const bytes = new Uint8Array(await file.arrayBuffer());
               entries.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
             }
-            activeDirectoryHandle = null;
-            emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
+            const cmds = emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
+            if (
+              Array.isArray(cmds) &&
+              cmds.some((c) => c && c.kind === "set_document_lock") &&
+              !cmds.some((c) => c && c.kind === "notify_status" && c.level === "error")
+            ) {
+              activeDirectoryHandle = null;
+            }
           } catch (err) {
             showNotice("error", err && err.message ? err.message : String(err));
           } finally {
@@ -1363,7 +1478,6 @@
             return true;
           }
           const bytes = new Uint8Array(await file.arrayBuffer());
-          activeDirectoryHandle = null;
           emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
           return true;
         } catch (err) {
@@ -1481,38 +1595,57 @@
         if (!dt) {
           return;
         }
+        // Snapshot all FileSystemEntry / File handles synchronously before the first `await`
+        // because browsers clear `DataTransfer` lists once synchronous drop dispatch returns (GAP-05-03).
+        const droppedHandles = [];
+        if (dt.items && dt.items.length > 0) {
+          for (let i = 0; i < dt.items.length; i += 1) {
+            const item = dt.items[i];
+            if (!item) {
+              continue;
+            }
+            if (typeof item.webkitGetAsEntry === "function") {
+              const entry = item.webkitGetAsEntry();
+              if (entry) {
+                droppedHandles.push({ kind: "entry", entry });
+                continue;
+              }
+            }
+            if (typeof item.getAsFile === "function") {
+              const file = item.getAsFile();
+              if (file) {
+                droppedHandles.push({ kind: "file", file });
+              }
+            }
+          }
+        }
+        if (droppedHandles.length === 0 && dt.files && dt.files.length > 0) {
+          for (let i = 0; i < dt.files.length; i += 1) {
+            const file = dt.files[i];
+            if (file) {
+              droppedHandles.push({ kind: "file", file });
+            }
+          }
+        }
+        if (droppedHandles.length === 0) {
+          return;
+        }
         try {
           const collected = [];
           const batchState = { count: 0, totalBytes: 0 };
-          if (dt.items && dt.items.length > 0) {
-            for (let i = 0; i < dt.items.length; i += 1) {
-              const item = dt.items[i];
-              if (typeof item.webkitGetAsEntry === "function") {
-                const entry = item.webkitGetAsEntry();
-                if (entry) {
-                  await collectDroppedEntry(entry, "", collected, batchState);
-                  continue;
-                }
-              }
-              const file = item.getAsFile();
-              if (file) {
-                const limit = dt.items.length === 1 ? singleFileLimitForName(file.name) : MAX_ARCHIVE_BYTES;
-                assertFileWithinImportBudget(file, limit, batchState);
-                const bytes = new Uint8Array(await file.arrayBuffer());
-                collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
-              }
-            }
-          } else if (dt.files && dt.files.length > 0) {
-            for (let i = 0; i < dt.files.length; i += 1) {
-              const file = dt.files[i];
-              const limit = dt.files.length === 1 ? singleFileLimitForName(file.name) : MAX_ARCHIVE_BYTES;
+          const singleFileDrop = droppedHandles.length === 1 && droppedHandles[0].kind === "file";
+          for (const handle of droppedHandles) {
+            if (handle.kind === "entry") {
+              await collectDroppedEntry(handle.entry, "", collected, batchState);
+            } else {
+              const file = handle.file;
+              const limit = singleFileDrop ? singleFileLimitForName(file.name) : MAX_ARCHIVE_BYTES;
               assertFileWithinImportBudget(file, limit, batchState);
               const bytes = new Uint8Array(await file.arrayBuffer());
               collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
             }
           }
           if (collected.length > 0) {
-            activeDirectoryHandle = null;
             emitEvent({ kind: "import_dropped_files", files: collected });
           }
         } catch (err) {
@@ -1746,6 +1879,10 @@
       });
 
       window.addEventListener("beforeunload", (ev) => {
+        if (wasmTrapDetected) {
+          releaseLockOnExit();
+          return undefined;
+        }
         flushPendingAutosave();
         if (documentDirty || hasUnflushedAutosave) {
           ev.preventDefault();

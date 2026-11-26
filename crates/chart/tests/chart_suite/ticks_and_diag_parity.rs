@@ -8,8 +8,8 @@ use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
 use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BlandAltmanSpec, Cell, ColumnDesignHint,
     ColumnTable, DataSheet, DescriptiveSpec, DiagnosticPlotKind, GraphKind, GraphSheet, GroupedTable, LogitDomain, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SizePt,
-    SubcolumnMode, TableArchetype, XyTable,
+    MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    SheetId, SizePt, SubcolumnMode, TableArchetype, XyTable,
 };
 use curvebook_fit::execute_analysis as execute_fit_analysis;
 use curvebook_palette::{LineDashStyle, Rgba8};
@@ -333,6 +333,7 @@ fn normal_qq_plot_consumes_normal_qq_tab_and_residuals_tab() -> TestResult {
         AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("four_pl_log_agonist")),
     )?;
     let mut fit_res = ResultSheet::new(nl_spec)?;
+    fit_res.status = ResultStatus::UpToDate;
     fit_res.tabs.push(ResultTab {
         id: String::from("nl-residuals"),
         title: String::from("Residuals"),

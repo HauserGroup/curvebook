@@ -105,6 +105,25 @@ finally {
   if ($null -ne $importedStore -and $null -ne $importedCert) {
     try { $importedStore.Remove($importedCert) } catch {}
   }
+  if ($null -ne $importedCert) {
+    try {
+      $rsaKey = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($importedCert)
+      if ($rsaKey -is [System.Security.Cryptography.RSACng]) {
+        $rsaKey.Key.Delete()
+      } elseif ($rsaKey -is [System.Security.Cryptography.RSACryptoServiceProvider]) {
+        $rsaKey.PersistKeyInCsp = $false
+        $rsaKey.Clear()
+      }
+      if ($null -ne $rsaKey) { $rsaKey.Dispose() }
+    } catch {}
+    try {
+      $ecdsaKey = [System.Security.Cryptography.X509Certificates.ECDsaCertificateExtensions]::GetECDsaPrivateKey($importedCert)
+      if ($ecdsaKey -is [System.Security.Cryptography.ECDsaCng]) {
+        $ecdsaKey.Key.Delete()
+      }
+      if ($null -ne $ecdsaKey) { $ecdsaKey.Dispose() }
+    } catch {}
+  }
   if ($null -ne $importedStore) { $importedStore.Dispose() }
   if ($null -ne $importedCert) { $importedCert.Dispose() }
   Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

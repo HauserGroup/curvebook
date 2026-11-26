@@ -22,10 +22,19 @@
 //! - Noncentral-*t* and noncentral-*F* effect-size CIs (`cohens_d_ci`,
 //!   `hedges_g_ci`, `hedges_gz_ci`, `eta_squared_ci`) against `R 4.5.2` `pt`/`pf`
 //!   and `SciPy 1.18.1` `scipy.stats.nct`.
+//! - Generalized power-mean CIs (`harmonic_mean_ci`, `quadratic_mean_ci` in
+//!   `summarize_column`) against `R 4.5.2 stats::t.test` and independent Python
+//!   Simpson quadrature on the Student-*t* PDF (Bland & Altman 1996; Lam, Hung &
+//!   Perrier 1985; Casella & Berger 2002; Bullen 2003).
 //!
 //! D1 Provenance:
 //! - `R 4.5.2 (2025-10-31)` via `crates/stats/tests/reference/stats_extended_oracles.R` (2026-11-23).
+//! - `R 4.5.2 (2025-10-31)` `stats::t.test` cross-checked by independent Python 3 Simpson quadrature on the Student-*t* PDF (2026-11-26) for harmonic and quadratic mean CIs.
 //! - `SciPy 1.18.1` + `statsmodels 0.15.0` via `crates/stats/tests/reference/scipy_statsmodels_oracles.py` (2026-11-23).
+//! - Bland & Altman (1996), *BMJ* 312(7038):1079 (doi:10.1136/bmj.312.7038.1079);
+//!   Lam, Hung & Perrier (1985), *J Pharm Sci* 74(2):229–231 (doi:10.1002/jps.2600740229);
+//!   Casella & Berger (2002), *Statistical Inference* (2nd ed.), Duxbury, §9.2.1;
+//!   Bullen (2003), *Handbook of Means and Their Inequalities* (2nd ed.), Springer, Ch. III (doi:10.1007/978-94-017-0399-4).
 //! - NIST/SEMATECH e-Handbook of Statistical Methods §1.3.5.17.1 (Grubbs 1969, *Technometrics* 11(1):1–21, doi:10.1080/00401706.1969.10490657).
 //! - Bland & Altman (1986), *Lancet* 327(8476):307–310 (doi:10.1016/s0140-6736(86)90837-8), Table 1;
 //!   Bland & Altman (1999), *Stat Methods Med Res* 8(2):135–160 (doi:10.1177/096228029900800204).
@@ -51,7 +60,7 @@ use curvebook_doc::KappaWeighting;
 use curvebook_math::ConfidenceLevel;
 use curvebook_stats::anova::ordinary_one_way_anova;
 use curvebook_stats::categorical::cohens_kappa;
-use curvebook_stats::column::{anderson_darling, dagostino_pearson_k2, grubbs_outliers, lilliefors_ks};
+use curvebook_stats::column::{anderson_darling, dagostino_pearson_k2, grubbs_outliers, lilliefors_ks, summarize_column};
 use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, adjust_two_stage_bky, compare_groups_with_procedure};
 use curvebook_stats::two_group::{bland_altman, ks_two_sample, levene_variance_test, paired_t_test, unpaired_t_test};
 use curvebook_testkit::assert_approx_eq;
@@ -393,4 +402,129 @@ fn oracle_noncentral_t_and_f_effect_size_cis() {
     let eta_low_ci = ow_low.effect_sizes.eta_squared_ci.expect("ANOVA low-F eta2_ci");
     assert_approx_eq(eta_low_ci.0, 0.0, 1e-12, 0.0, "ANOVA low-F eta2 CI lo");
     assert_approx_eq(eta_low_ci.1, 0.271_778_259_118, 1e-6, 1e-6, "ANOVA low-F eta2 CI hi");
+}
+
+// ============================================================================
+// 7. Harmonic and Quadratic (RMS) Mean Confidence Intervals (GAP-06-04 / R19.1)
+// ============================================================================
+
+#[test]
+fn oracle_harmonic_and_quadratic_mean_cis() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::t.test(1/x)` & `stats::t.test(x^2)` back-transformed
+    // endpoints, independently cross-checked to >= 14 digits by Python 3 Simpson quadrature on the
+    // Student-t PDF (2026-11-26). Citations: Bland & Altman (1996), Lam, Hung & Perrier (1985),
+    // Casella & Berger (2002) §9.2.1, Bullen (2003) Ch. III.
+    let conf_90 = ConfidenceLevel::from_percent(90.0).unwrap();
+    let conf_99 = ConfidenceLevel::from_percent(99.0).unwrap();
+
+    // 1. Positive skewed pharmacokinetic half-lives across 95%, 90%, and 99% confidence levels.
+    let pk = [2.4, 3.1, 3.8, 4.2, 5.0, 6.5, 8.2, 11.4];
+
+    let s95 = summarize_column("PK95", &pk, 0, conf_95(), None).unwrap();
+    assert_approx_eq(s95.harmonic_mean.expect("pk95 hm"), 4.434_547_725_670_957, 1e-12, 1e-12, "pk95 hm");
+    let hm95 = s95.harmonic_mean_ci.expect("pk95 hm_ci");
+    assert_approx_eq(hm95.0, 3.158_989_777_088_647, 1e-11, 1e-11, "pk95 hm_ci lo");
+    assert_approx_eq(hm95.1, 7.437_853_985_145_783, 1e-11, 1e-11, "pk95 hm_ci hi");
+    assert_approx_eq(s95.quadratic_mean, 6.243_997_117_231_878, 1e-12, 1e-12, "pk95 rms");
+    let rms95 = s95.quadratic_mean_ci.expect("pk95 rms_ci");
+    assert_approx_eq(rms95.0, 1.983_567_450_639_152, 1e-11, 1e-11, "pk95 rms_ci lo");
+    assert_approx_eq(rms95.1, 8.604_676_645_218_278, 1e-11, 1e-11, "pk95 rms_ci hi");
+    // Monotone back-transformed RMS CI is asymmetric around `rms` (unlike symmetric linearized delta-method bounds).
+    assert!(((s95.quadratic_mean - rms95.0) - (rms95.1 - s95.quadratic_mean)).abs() > 1.0);
+
+    let s90 = summarize_column("PK90", &pk, 0, conf_90, None).unwrap();
+    let hm90 = s90.harmonic_mean_ci.expect("pk90 hm_ci");
+    assert_approx_eq(hm90.0, 3.350_568_491_928_193, 1e-11, 1e-11, "pk90 hm_ci lo");
+    assert_approx_eq(hm90.1, 6.555_336_760_697_462, 1e-11, 1e-11, "pk90 hm_ci hi");
+    let rms90 = s90.quadratic_mean_ci.expect("pk90 rms_ci");
+    assert_approx_eq(rms90.0, 3.301_885_950_082_799, 1e-11, 1e-11, "pk90 rms_ci lo");
+    assert_approx_eq(rms90.1, 8.189_783_218_904_259, 1e-11, 1e-11, "pk90 rms_ci hi");
+
+    // At 99%, `t.test(pk^2)` lower endpoint is -12.8885 < 0, so RMS CI lower bound clamps to 0.0 while HM CI remains strictly positive.
+    let s99 = summarize_column("PK99", &pk, 0, conf_99, None).unwrap();
+    let hm99 = s99.harmonic_mean_ci.expect("pk99 hm_ci");
+    assert_approx_eq(hm99.0, 2.775_796_199_768_79, 1e-11, 1e-11, "pk99 hm_ci lo");
+    assert_approx_eq(hm99.1, 11.019_613_639_982_806, 1e-11, 1e-11, "pk99 hm_ci hi");
+    let rms99 = s99.quadratic_mean_ci.expect("pk99 rms_ci");
+    assert_approx_eq(rms99.0, 0.0, 1e-15, 0.0, "pk99 rms_ci clamped lo");
+    assert_approx_eq(rms99.1, 9.532_234_806_434_092, 1e-11, 1e-11, "pk99 rms_ci hi");
+
+    // 2. Signed / zero-crossing observations: harmonic mean & CI are undefined; quadratic mean & CI stay well-defined.
+    let signed = [-4.5, -1.2, 0.0, 2.3, 3.8, 5.1, -6.0];
+    let sg95 = summarize_column("Signed95", &signed, 0, conf_95(), None).unwrap();
+    assert_eq!(sg95.harmonic_mean, None);
+    assert_eq!(sg95.harmonic_mean_ci, None);
+    assert_approx_eq(sg95.quadratic_mean, 3.843_919_131_006_047, 1e-12, 1e-12, "signed95 rms");
+    let sg_rms95 = sg95.quadratic_mean_ci.expect("signed95 rms_ci");
+    assert_approx_eq(sg_rms95.0, 1.514_500_707_269_609, 1e-11, 1e-11, "signed95 rms_ci lo");
+    assert_approx_eq(sg_rms95.1, 5.220_892_278_060_18, 1e-11, 1e-11, "signed95 rms_ci hi");
+
+    let sg99 = summarize_column("Signed99", &signed, 0, conf_99, None).unwrap();
+    let sg_rms99 = sg99.quadratic_mean_ci.expect("signed99 rms_ci");
+    assert_approx_eq(sg_rms99.0, 0.0, 1e-15, 0.0, "signed99 rms_ci clamped lo");
+    assert_approx_eq(sg_rms99.1, 5.804_116_301_904_712, 1e-11, 1e-11, "signed99 rms_ci hi");
+
+    // 3. Reciprocal-CI zero crossing (singularity): `harmonic_mean` exists, `harmonic_mean_ci` must be `None`,
+    //    and `quadratic_mean_ci` clamps its lower endpoint to `0.0`.
+    let pair = [1.0, 100.0];
+    let pr95 = summarize_column("Pair95", &pair, 0, conf_95(), None).unwrap();
+    assert_approx_eq(pr95.harmonic_mean.expect("pair hm"), 1.980_198_019_801_980_2, 1e-12, 1e-12, "pair hm");
+    assert_eq!(pr95.harmonic_mean_ci, None, "reciprocal CI crossing <= 0 must return None");
+    assert_approx_eq(pr95.quadratic_mean, 70.714_213_564_176_76, 1e-11, 1e-11, "pair rms");
+    let pr_rms95 = pr95.quadratic_mean_ci.expect("pair rms_ci");
+    assert_approx_eq(pr_rms95.0, 0.0, 1e-15, 0.0, "pair rms_ci clamped lo");
+    assert_approx_eq(pr_rms95.1, 261.773_128_067_999_7, 1e-10, 1e-10, "pair rms_ci hi");
+
+    let skew4 = [0.1, 0.2, 0.3, 15.0];
+    let sk95 = summarize_column("Skew4", &skew4, 0, conf_95(), None).unwrap();
+    assert_approx_eq(sk95.harmonic_mean.expect("skew4 hm"), 0.217_391_304_347_826_1, 1e-12, 1e-12, "skew4 hm");
+    assert_eq!(sk95.harmonic_mean_ci, None);
+    let sk_rms95 = sk95.quadratic_mean_ci.expect("skew4 rms_ci");
+    assert_approx_eq(sk_rms95.0, 0.0, 1e-15, 0.0, "skew4 rms_ci clamped lo");
+    assert_approx_eq(sk_rms95.1, 15.338_203_409_601_526, 1e-11, 1e-11, "skew4 rms_ci hi");
+
+    // 4. Sign invariance for RMS and extreme-scale (1e-200 / 1e200) overflow/underflow-safe scaling.
+    let base = [10.0, 12.0, 14.0, 16.0, 18.0];
+    let exp_hm = 13.411_389_036_721_66;
+    let exp_hm_ci = (10.370_175_470_115_683, 18.976_556_221_719_093);
+    let exp_rms = 14.282_856_857_085_7;
+    let exp_rms_ci = (9.678_142_021_597_955, 17.729_454_786_027_12);
+
+    for scale in [1.0, 1e-200, 1e200] {
+        let scaled: Vec<f64> = base.iter().map(|&v| v * scale).collect();
+        let res = summarize_column("Scaled", &scaled, 0, conf_95(), None).unwrap();
+        assert_approx_eq(res.harmonic_mean.expect("scaled hm"), exp_hm * scale, 0.0, 1e-11, "scaled hm");
+        let hm_ci = res.harmonic_mean_ci.expect("scaled hm_ci");
+        assert_approx_eq(hm_ci.0, exp_hm_ci.0 * scale, 0.0, 1e-11, "scaled hm_ci lo");
+        assert_approx_eq(hm_ci.1, exp_hm_ci.1 * scale, 0.0, 1e-11, "scaled hm_ci hi");
+        assert_approx_eq(res.quadratic_mean, exp_rms * scale, 0.0, 1e-11, "scaled rms");
+        let rms_ci = res.quadratic_mean_ci.expect("scaled rms_ci");
+        assert_approx_eq(rms_ci.0, exp_rms_ci.0 * scale, 0.0, 1e-11, "scaled rms_ci lo");
+        assert_approx_eq(rms_ci.1, exp_rms_ci.1 * scale, 0.0, 1e-11, "scaled rms_ci hi");
+    }
+
+    let negated: Vec<f64> = base.iter().map(|&v| -v).collect();
+    let neg_res = summarize_column("Negated", &negated, 0, conf_95(), None).unwrap();
+    assert_eq!((neg_res.harmonic_mean, neg_res.harmonic_mean_ci), (None, None));
+    assert_approx_eq(neg_res.quadratic_mean, exp_rms, 1e-12, 1e-12, "negated rms");
+    let neg_rms_ci = neg_res.quadratic_mean_ci.expect("negated rms_ci");
+    assert_approx_eq(neg_rms_ci.0, exp_rms_ci.0, 1e-11, 1e-11, "negated rms_ci lo");
+    assert_approx_eq(neg_rms_ci.1, exp_rms_ci.1, 1e-11, 1e-11, "negated rms_ci hi");
+
+    // 5. Degenerate cases: constant nonzero, alternating constant magnitude, all-zero, and n = 1.
+    let constant = summarize_column("Const", &[5.0, 5.0, 5.0, 5.0], 0, conf_95(), None).unwrap();
+    assert_eq!(constant.harmonic_mean, Some(5.0));
+    assert_eq!(constant.harmonic_mean_ci, Some((5.0, 5.0)));
+    assert_eq!(constant.quadratic_mean, 5.0);
+    assert_eq!(constant.quadratic_mean_ci, Some((5.0, 5.0)));
+
+    let alt = summarize_column("Alt", &[-5.0, 5.0, -5.0, 5.0], 0, conf_95(), None).unwrap();
+    assert_eq!((alt.harmonic_mean, alt.harmonic_mean_ci), (None, None));
+    assert_eq!((alt.quadratic_mean, alt.quadratic_mean_ci), (5.0, Some((5.0, 5.0))));
+
+    let zeros = summarize_column("Zero", &[0.0, 0.0, 0.0], 0, conf_95(), None).unwrap();
+    assert_eq!((zeros.harmonic_mean, zeros.harmonic_mean_ci, zeros.quadratic_mean, zeros.quadratic_mean_ci), (None, None, 0.0, None));
+
+    let single = summarize_column("One", &[42.0], 0, conf_95(), None).unwrap();
+    assert_eq!((single.harmonic_mean, single.harmonic_mean_ci, single.quadratic_mean, single.quadratic_mean_ci), (Some(42.0), None, 42.0, None));
 }

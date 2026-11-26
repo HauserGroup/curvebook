@@ -1611,7 +1611,7 @@ fn render_lhs_rhs_dsl(fixed_lhs_tex: &str, lhs_expr_src: Option<&str>, rhs_src: 
 
 fn fallback_lhs_tex(lhs_src: &str, ctx: &EqCtx<'_>) -> String {
     let s = substitute_and_escape_fallback(lhs_src.trim(), ctx);
-    format_fallback_operators(&s)
+    sanitize_fallback_tex_specials(&format_fallback_operators(&s))
 }
 
 fn append_helper_locals(core: String, parsed_locals: &[(&str, &str, Option<Expr>)], ctx: &EqCtx<'_>) -> String {
@@ -2092,6 +2092,8 @@ fn escape_tex_fallback_char(ch: char, out: &mut String) {
         '%' => out.push_str("\\%"),
         '&' => out.push_str("\\&"),
         '_' => out.push_str("\\_"),
+        '<' => out.push_str("\\textless{}"),
+        '>' => out.push_str("\\textgreater{}"),
         _ => out.push(ch),
     }
 }
@@ -2105,6 +2107,196 @@ fn escape_tex_fallback_into(input: &str, out: &mut String) {
 fn format_fallback_operators(input: &str) -> String {
     let with_pow = input.replace("**", "^");
     with_pow.replace('*', " \\cdot ")
+}
+
+const MAX_FALLBACK_POWERS: usize = 8;
+
+fn is_fallback_func_open_paren(prefix: &str) -> bool {
+    const FUNCS: [&str; 9] = ["\\exp", "\\log", "\\ln", "\\text{sqrt}", "\\sin", "\\cos", "\\tan", "\\min", "\\max"];
+    FUNCS.iter().any(|f| prefix.ends_with(f))
+}
+
+fn is_fallback_power_break_token(s: &str, pos: usize) -> Option<usize> {
+    let rest = s.get(pos..)?;
+    for kw in ["\\cdot", "\\textless{}", "\\textgreater{}"] {
+        if rest.starts_with(kw) {
+            return Some(kw.len());
+        }
+    }
+    None
+}
+
+/// Escape chained/excessive/orphan `^` and unmatched `(`, `)`, `[`, `]`, `|` delimiters in the
+/// unparseable custom-DSL fallback path (`GAP-01-01`, `GAP-01-02`) without disturbing simple
+/// balanced expressions or single recognized function-call prefixes.
+fn sanitize_fallback_tex_specials(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut paren_stack: Vec<usize> = Vec::new();
+    let mut bracket_stack: Vec<usize> = Vec::new();
+    let mut pipe_stack: Vec<(usize, usize, usize)> = Vec::new();
+    let mut unmatched = vec![false; bytes.len()];
+    let mut unmatched_open_parens: Vec<usize> = Vec::new();
+    let mut caret_positions: Vec<(usize, bool)> = Vec::new();
+    let mut seen_caret_in_term = false;
+    let mut has_operand_before = false;
+    let mut i = 0usize;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if let Some(kw_len) = is_fallback_power_break_token(input, i) {
+                seen_caret_in_term = false;
+                has_operand_before = false;
+                i += kw_len;
+                continue;
+            }
+            if input.get(i..).is_some_and(|s| s.starts_with("\\text{")) {
+                i += "\\text{".len();
+                let mut depth = 1usize;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'\\' {
+                        i += if i + 1 < bytes.len() { 2 } else { 1 };
+                        continue;
+                    }
+                    if bytes[i] == b'{' {
+                        depth += 1;
+                    } else if bytes[i] == b'}' {
+                        depth -= 1;
+                    }
+                    i += 1;
+                }
+                has_operand_before = true;
+                continue;
+            }
+            let next_len = input.get(i + 1..).and_then(|s| s.chars().next()).map_or(0, char::len_utf8);
+            i += 1 + next_len;
+            has_operand_before = true;
+            continue;
+        }
+        match bytes[i] {
+            b'(' => {
+                paren_stack.push(i);
+                seen_caret_in_term = false;
+                has_operand_before = false;
+                i += 1;
+            }
+            b')' => {
+                if paren_stack.pop().is_none() {
+                    unmatched[i] = true;
+                    while let Some((p, _, _)) = pipe_stack.pop() {
+                        unmatched[p] = true;
+                    }
+                } else {
+                    while pipe_stack.last().is_some_and(|&(_, pd, _)| pd > paren_stack.len()) {
+                        if let Some((p, _, _)) = pipe_stack.pop() {
+                            unmatched[p] = true;
+                        }
+                    }
+                }
+                has_operand_before = true;
+                i += 1;
+            }
+            b'[' => {
+                bracket_stack.push(i);
+                seen_caret_in_term = false;
+                has_operand_before = false;
+                i += 1;
+            }
+            b']' => {
+                if bracket_stack.pop().is_none() {
+                    unmatched[i] = true;
+                    while let Some((p, _, _)) = pipe_stack.pop() {
+                        unmatched[p] = true;
+                    }
+                } else {
+                    while pipe_stack.last().is_some_and(|&(_, _, bd)| bd > bracket_stack.len()) {
+                        if let Some((p, _, _)) = pipe_stack.pop() {
+                            unmatched[p] = true;
+                        }
+                    }
+                }
+                has_operand_before = true;
+                i += 1;
+            }
+            b'|' => {
+                let p_depth = paren_stack.len();
+                let b_depth = bracket_stack.len();
+                if pipe_stack.last().is_some_and(|&(_, pd, bd)| pd == p_depth && bd == b_depth) {
+                    pipe_stack.pop();
+                } else {
+                    pipe_stack.push((i, p_depth, b_depth));
+                }
+                seen_caret_in_term = false;
+                has_operand_before = false;
+                i += 1;
+            }
+            b'^' => {
+                let after = input.get(i + 1..).unwrap_or("").trim_start();
+                let has_operand_after = after.chars().next().is_some_and(|c| !matches!(c, '+' | '-' | '/' | '=' | ',' | ';' | ')' | ']' | '^'));
+                let is_unsafe = seen_caret_in_term || !has_operand_before || !has_operand_after;
+                caret_positions.push((i, is_unsafe));
+                seen_caret_in_term = true;
+                has_operand_before = false;
+                i += 1;
+            }
+            b'+' | b'-' | b'/' | b'=' | b',' | b';' => {
+                seen_caret_in_term = false;
+                has_operand_before = false;
+                i += 1;
+            }
+            b' ' | b'\t' | b'\r' | b'\n' => {
+                i += 1;
+            }
+            _ => {
+                let ch_len = input.get(i..).and_then(|s| s.chars().next()).map_or(1, char::len_utf8);
+                has_operand_before = true;
+                i += ch_len;
+            }
+        }
+    }
+
+    for pos in paren_stack {
+        unmatched[pos] = true;
+        unmatched_open_parens.push(pos);
+    }
+    for pos in bracket_stack {
+        unmatched[pos] = true;
+    }
+    for (pos, _, _) in pipe_stack {
+        unmatched[pos] = true;
+    }
+    if unmatched_open_parens.len() == 1
+        && let Some(&pos) = unmatched_open_parens.first()
+        && input.get(..pos).is_some_and(is_fallback_func_open_paren)
+    {
+        unmatched[pos] = false;
+    }
+
+    let escape_all_carets = caret_positions.len() > MAX_FALLBACK_POWERS;
+    let mut escape_caret = vec![false; bytes.len()];
+    for &(pos, is_unsafe) in &caret_positions {
+        if escape_all_carets || is_unsafe {
+            escape_caret[pos] = true;
+        }
+    }
+
+    let mut out = String::with_capacity(input.len() + 16);
+    for (idx, ch) in input.char_indices() {
+        if escape_caret.get(idx).copied().unwrap_or(false) {
+            out.push_str("\\^");
+        } else if unmatched.get(idx).copied().unwrap_or(false) {
+            match ch {
+                '(' | ')' | '[' | ']' => {
+                    out.push('\\');
+                    out.push(ch);
+                }
+                '|' => out.push_str("\\text{|}"),
+                _ => out.push(ch),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, ctx: &EqCtx<'_>) -> String {
@@ -2124,6 +2316,7 @@ fn fallback_custom_dsl_tex(lhs: &str, rhs_raw: &str, ctx: &EqCtx<'_>) -> String 
         s = replace_ident_word_prefix(&s, pat, rep);
     }
     s = format_fallback_operators(&s);
+    s = sanitize_fallback_tex_specials(&s);
     format!("{lhs} = {}", s.trim())
 }
 
@@ -2661,5 +2854,21 @@ mod tests {
         assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = exp10(X)^2"), &[], false, 4), "Y = (10^{X})^{2}");
         // Single-level parenthesized base stays cleanly unwrapped (no double parens).
         assert_eq!(format_model_equation_tex("custom_dsl", Some("Y = (a + b)^2"), &[], false, 4), "Y = (a + b)^{2}");
+    }
+
+    #[test]
+    fn gap_01_01_and_02_fallback_escapes_chained_carets_html_and_unmatched_delims() {
+        // Exceeds DSL MAX_PARSE_DEPTH (128), so formatting enters `fallback_custom_dsl_tex`.
+        let chained = format!("Y = X{}", "^2".repeat(150));
+        let tex_chained = format_model_equation_tex("custom_dsl", Some(&chained), &[], false, 4);
+        assert!(tex_chained.contains("\\^"), "excessive fallback carets must be escaped: {tex_chained}");
+
+        let short_chain = format_model_equation_tex("custom_dsl", Some("Y = X^2^3 @ 1"), &[], false, 4);
+        assert!(short_chain.contains("\\^"), "chained fallback caret must be escaped: {short_chain}");
+
+        let unmatched = format_model_equation_tex("custom_dsl", Some("Y = ((([|(|(<b>x"), &[], false, 4);
+        assert!(unmatched.contains("\\(") && unmatched.contains("\\[") && unmatched.contains("\\text{|}"), "got: {unmatched}");
+        assert!(unmatched.contains("\\textless{}") && unmatched.contains("\\textgreater{}"), "got: {unmatched}");
+        assert!(!unmatched.contains("<b>"), "got: {unmatched}");
     }
 }

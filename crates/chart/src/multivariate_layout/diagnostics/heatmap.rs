@@ -10,12 +10,52 @@ use curvebook_stats::multivariate::{DendrogramMerge, hierarchical_clustering_pai
 use curvebook_text::{RichText, parse_markup};
 
 use super::super::multivariate::cell_token;
-use super::{find_matching_result_where_checked, resolve_source_data_sheet, result_cell_num};
+use super::{find_matching_result_where_checked, resolve_source_data_sheet_checked, result_cell_num};
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, TextAnchor};
 use crate::survival_cat::{
     PlotMarginConfig, draw_colorbar, draw_empty_open_frame, path_line, path_move, sanitize_range, solid_stroke, text_metrics,
     update_plot_rect_for_labels,
 };
+
+/// Maximum vector heatmap tiles emitted per compiled scene (`GAP-02-13` OOM DoS guard).
+const MAX_HEATMAP_RENDER_CELLS: usize = 25_000;
+const MAX_HEATMAP_RENDER_ROWS: usize = 1_000;
+const MAX_HEATMAP_RENDER_COLS: usize = 250;
+/// Maximum cells for which per-cell text value annotations are rendered.
+const MAX_HEATMAP_ANNOTATED_CELLS: usize = 2_500;
+
+fn cap_heatmap_dimensions(orig_rows: usize, orig_cols: usize, warnings: &mut Vec<ChartWarning>) -> (usize, usize, bool) {
+    if orig_rows == 0 || orig_cols == 0 {
+        return (orig_rows, orig_cols, false);
+    }
+    let mut rows = orig_rows.min(MAX_HEATMAP_RENDER_ROWS);
+    let mut cols = orig_cols.min(MAX_HEATMAP_RENDER_COLS);
+    if rows.saturating_mul(cols) > MAX_HEATMAP_RENDER_CELLS {
+        if orig_cols <= MAX_HEATMAP_RENDER_COLS && MAX_HEATMAP_RENDER_CELLS / cols >= 1 {
+            rows = (MAX_HEATMAP_RENDER_CELLS / cols).clamp(1, MAX_HEATMAP_RENDER_ROWS);
+        } else if orig_rows <= MAX_HEATMAP_RENDER_ROWS && MAX_HEATMAP_RENDER_CELLS / rows >= 1 {
+            cols = (MAX_HEATMAP_RENDER_CELLS / rows).clamp(1, MAX_HEATMAP_RENDER_COLS);
+        } else {
+            let scale = ((MAX_HEATMAP_RENDER_CELLS as f64) / ((rows as f64) * (cols as f64))).sqrt();
+            rows = ((rows as f64) * scale).floor().max(1.0) as usize;
+            cols = (MAX_HEATMAP_RENDER_CELLS / rows).max(1).min(cols);
+            while rows.saturating_mul(cols) > MAX_HEATMAP_RENDER_CELLS && rows > 1 {
+                rows -= 1;
+            }
+        }
+    }
+    let truncated = rows < orig_rows || cols < orig_cols;
+    if truncated {
+        warnings.push(ChartWarning::new(
+            "heatmap_cell_budget_exceeded",
+            format!(
+                "heatmap matrix ({orig_rows}x{orig_cols} = {} cells) exceeded rendering budget ({MAX_HEATMAP_RENDER_CELLS} cells); truncated to {rows}x{cols}",
+                orig_rows.saturating_mul(orig_cols),
+            ),
+        ));
+    }
+    (rows, cols, truncated)
+}
 
 // 2a. Heatmap (+ Perceptual Colorbar + Optional Hierarchical Dendrogram)
 
@@ -90,6 +130,14 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
     };
 
     let lbl_spec = graph.spec.heatmap_labels;
+    let total_cells = n_rows.saturating_mul(n_cols);
+    let annotate_cells = lbl_spec.annotate_cells && total_cells <= MAX_HEATMAP_ANNOTATED_CELLS;
+    if lbl_spec.annotate_cells && !annotate_cells {
+        scene.warnings.push(ChartWarning::new(
+            "heatmap_cell_annotations_capped",
+            format!("heatmap cell text annotations suppressed for {total_cells} cells (limit {MAX_HEATMAP_ANNOTATED_CELLS})"),
+        ));
+    }
     let max_row_lbl_w = match lbl_spec.row_labels {
         HeatmapRowLabelMode::RowTitles => hm.row_labels.iter().map(|l| text_metrics(l, 7.5).width_pt).fold(0.0_f64, f64::max),
         HeatmapRowLabelMode::RowNumbers => text_metrics(&format!("{n_rows}"), 7.5).width_pt,
@@ -152,7 +200,7 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
                     stroke: Some(cell_border),
                     clip: None,
                 });
-                if lbl_spec.annotate_cells {
+                if annotate_cells {
                     let font_pt = crate::clamp_f64_safe(tile_rect.width.min(tile_rect.height) * 0.36, 5.5, 9.0);
                     let ink =
                         if Rgba8::WHITE.contrast_ratio(fill_color) >= Rgba8::BLACK.contrast_ratio(fill_color) { Rgba8::WHITE } else { Rgba8::BLACK };
@@ -253,11 +301,15 @@ fn spreadsheet_column_letters(mut index: usize) -> String {
     chars.into_iter().rev().collect()
 }
 
-fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
-    let mut matrix = Vec::with_capacity(tab.rows.len());
-    for row in &tab.rows {
+fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab, warnings: &mut Vec<ChartWarning>) -> HeatmapData {
+    let orig_rows = tab.rows.len();
+    let orig_cols = tab.column_headers.len();
+    let (n_rows, n_cols, truncated) = cap_heatmap_dimensions(orig_rows, orig_cols, warnings);
+    let mut matrix = Vec::with_capacity(n_rows);
+    for row in tab.rows.iter().take(n_rows) {
         let vals: Vec<Option<f64>> = row
             .iter()
+            .take(n_cols)
             .map(|c| match c {
                 ResultCell::Number { value, .. } if value.is_finite() => Some(*value),
                 _ => None,
@@ -265,16 +317,15 @@ fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
             .collect();
         matrix.push(vals);
     }
-    let n_rows = matrix.len();
     let has_missing = matrix.iter().flatten().any(Option::is_none);
-    let merges = if has_missing {
+    let merges = if has_missing || truncated {
         Vec::new()
     } else {
         res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, n_rows))
     };
     HeatmapData {
-        row_labels: tab.row_labels.clone(),
-        col_labels: tab.column_headers.clone(),
+        row_labels: tab.row_labels.iter().take(n_rows).cloned().collect(),
+        col_labels: tab.column_headers.iter().take(n_cols).cloned().collect(),
         values: matrix,
         merges,
         cluster_distance: ClusterDistance::Euclidean,
@@ -302,8 +353,15 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             warnings.push(ChartWarning::new("failed_result_sheet", format!("result sheet '{}' failed; omitted stale heatmap matrix", res.id)));
             return None;
         }
+        if !matches!(res.status, ResultStatus::UpToDate) {
+            warnings.push(ChartWarning::new(
+                "pending_analysis_result",
+                format!("result sheet '{}' is pending recalculation; omitted stale heatmap matrix", res.id),
+            ));
+            return None;
+        }
         if let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary) {
-            return Some(correlation_heatmap_data(res, tab));
+            return Some(correlation_heatmap_data(res, tab, warnings));
         }
     }
 
@@ -318,14 +376,14 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
         })
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
     {
-        return Some(correlation_heatmap_data(res, tab));
+        return Some(correlation_heatmap_data(res, tab, warnings));
     }
 
     let selected_cols = clustering_res.map(|r| r.analysis.selected_data_sets.as_slice()).unwrap_or(&[]);
-    let ds = resolve_source_data_sheet(graph, doc)?;
-    let (mut hm, expect_rows) = match &ds.archetype {
+    let ds = resolve_source_data_sheet_checked(graph, doc, warnings)?;
+    let (mut hm, expect_rows, truncated) = match &ds.archetype {
         TableArchetype::MultipleVariables(mv) => {
-            let num_cols: Vec<(usize, String)> = if selected_cols.is_empty() {
+            let mut num_cols: Vec<(usize, String)> = if selected_cols.is_empty() {
                 mv.variables
                     .iter()
                     .enumerate()
@@ -344,15 +402,17 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if num_cols.is_empty() {
                 return None;
             }
+            let (n_rows, n_cols, truncated) = cap_heatmap_dimensions(mv.row_count(), num_cols.len(), warnings);
+            num_cols.truncate(n_cols);
             let label_col = graph
                 .spec
                 .multivariate
                 .as_ref()
                 .and_then(|m| m.label_column)
                 .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Label));
-            let mut row_labels = Vec::new();
-            let mut values = Vec::new();
-            for r in 0..mv.row_count() {
+            let mut row_labels = Vec::with_capacity(n_rows);
+            let mut values = Vec::with_capacity(n_rows);
+            for r in 0..n_rows {
                 let row_vals: Vec<Option<f64>> = num_cols
                     .iter()
                     .map(|(ci, _)| mv.variables.get(*ci).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()).filter(|x| x.is_finite()))
@@ -365,7 +425,6 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                 row_labels.push(lbl);
                 values.push(row_vals);
             }
-            let n_rows = values.len();
             let col_labels = num_cols.into_iter().map(|(_, t)| t).collect();
             (
                 HeatmapData {
@@ -378,10 +437,11 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                     clustering_cue: None,
                 },
                 n_rows,
+                truncated,
             )
         }
         TableArchetype::Column(col) => {
-            let col_indices: Vec<usize> = if selected_cols.is_empty() {
+            let mut col_indices: Vec<usize> = if selected_cols.is_empty() {
                 (0..col.data_sets.len()).collect()
             } else {
                 resolve_selected_heatmap_cols(selected_cols, col.data_sets.len())
@@ -389,8 +449,9 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if col_indices.is_empty() {
                 return None;
             }
+            let (nrows, ncols, truncated) = cap_heatmap_dimensions(col.row_count(), col_indices.len(), warnings);
+            col_indices.truncate(ncols);
             let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| col.data_sets.get(c).map(|d| d.title.clone())).collect();
-            let nrows = col.row_count();
             let row_labels =
                 (0..nrows).map(|r| col.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("R{}", r + 1))).collect();
             let values = (0..nrows)
@@ -419,10 +480,11 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                     clustering_cue: None,
                 },
                 nrows,
+                truncated,
             )
         }
         TableArchetype::Grouped(g) => {
-            let col_indices: Vec<usize> = if selected_cols.is_empty() {
+            let mut col_indices: Vec<usize> = if selected_cols.is_empty() {
                 (0..g.data_sets.len()).collect()
             } else {
                 resolve_selected_heatmap_cols(selected_cols, g.data_sets.len())
@@ -430,8 +492,9 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if col_indices.is_empty() {
                 return None;
             }
+            let (nrows, ncols, truncated) = cap_heatmap_dimensions(g.row_count(), col_indices.len(), warnings);
+            col_indices.truncate(ncols);
             let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| g.data_sets.get(c).map(|d| d.title.clone())).collect();
-            let nrows = g.row_count();
             let row_labels =
                 (0..nrows).map(|r| g.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("R{}", r + 1))).collect();
             let values = (0..nrows)
@@ -465,12 +528,14 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                     clustering_cue: None,
                 },
                 nrows,
+                truncated,
             )
         }
         _ => return None,
     };
 
-    if let Some(cres) = clustering_res
+    if !truncated
+        && let Some(cres) = clustering_res
         && let AnalysisKind::Multivariate(MultivariateSpec::Clustering { distance, linkage, .. }) = cres.analysis.kind
     {
         hm.cluster_distance = distance;

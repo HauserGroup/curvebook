@@ -323,53 +323,55 @@ fn wrap_math_nodes(nodes: &[MathNode], ctx: LayoutCtx, max_width: f64) -> Vec<Ve
 }
 
 fn flatten_for_wrap(nodes: &[MathNode], ctx: LayoutCtx) -> Vec<MathNode> {
+    enum FlattenItem<'a> {
+        Node(&'a MathNode, usize),
+        Literal(&'static str),
+    }
+
     let mut out = Vec::new();
-    for node in nodes {
-        match node {
-            MathNode::Group(inner) => out.extend(flatten_for_wrap(inner, ctx)),
-            MathNode::Delimited { left, inner, right, explicit: false } => {
-                let d = ctx.dimens();
-                let inner_box = layout_nodes(inner, ctx);
-                let delta = (inner_box.height - d.axis).max(0.0).max((inner_box.depth + d.axis).max(0.0));
-                if 2.0 * delta <= 1.25 * d.em {
-                    let l_text = match left {
-                        DelimKind::Paren => "(",
-                        DelimKind::Bracket => "[",
-                        DelimKind::Brace => "{",
-                        DelimKind::Pipe => "|",
-                        DelimKind::DoublePipe => "\u{2016}",
-                        DelimKind::Null => "",
-                    };
-                    let r_text = match right {
-                        DelimKind::Paren => ")",
-                        DelimKind::Bracket => "]",
-                        DelimKind::Brace => "}",
-                        DelimKind::Pipe => "|",
-                        DelimKind::DoublePipe => "\u{2016}",
-                        DelimKind::Null => "",
-                    };
-                    if !l_text.is_empty() {
-                        out.push(MathNode::Text {
-                            text: l_text.to_owned(),
-                            weight: SpanWeight::Regular,
-                            slope: SpanSlope::Upright,
-                            is_single_char: true,
-                        });
-                    }
-                    out.extend(flatten_for_wrap(inner, ctx));
-                    if !r_text.is_empty() {
-                        out.push(MathNode::Text {
-                            text: r_text.to_owned(),
-                            weight: SpanWeight::Regular,
-                            slope: SpanSlope::Upright,
-                            is_single_char: true,
-                        });
-                    }
-                } else {
-                    out.push(node.clone());
+    let mut stack: Vec<FlattenItem<'_>> = nodes.iter().rev().map(|n| FlattenItem::Node(n, ctx.depth)).collect();
+    while let Some(item) = stack.pop() {
+        match item {
+            FlattenItem::Literal(text) => {
+                if !text.is_empty() {
+                    out.push(MathNode::Text { text: text.to_owned(), weight: SpanWeight::Regular, slope: SpanSlope::Upright, is_single_char: true });
                 }
             }
-            _ => out.push(node.clone()),
+            FlattenItem::Node(node, depth) => match node {
+                MathNode::Group(inner) if depth < super::MAX_TEX_DEPTH => {
+                    stack.extend(inner.iter().rev().map(|n| FlattenItem::Node(n, depth + 1)));
+                }
+                MathNode::Delimited { left, inner, right, explicit: false } if depth < super::MAX_TEX_DEPTH => {
+                    let inner_ctx = LayoutCtx { depth: depth + 1, ..ctx };
+                    let d = ctx.dimens();
+                    let inner_box = layout_nodes(inner, inner_ctx);
+                    let delta = (inner_box.height - d.axis).max(0.0).max((inner_box.depth + d.axis).max(0.0));
+                    if 2.0 * delta <= 1.25 * d.em {
+                        let l_text = match left {
+                            DelimKind::Paren => "(",
+                            DelimKind::Bracket => "[",
+                            DelimKind::Brace => "{",
+                            DelimKind::Pipe => "|",
+                            DelimKind::DoublePipe => "\u{2016}",
+                            DelimKind::Null => "",
+                        };
+                        let r_text = match right {
+                            DelimKind::Paren => ")",
+                            DelimKind::Bracket => "]",
+                            DelimKind::Brace => "}",
+                            DelimKind::Pipe => "|",
+                            DelimKind::DoublePipe => "\u{2016}",
+                            DelimKind::Null => "",
+                        };
+                        stack.push(FlattenItem::Literal(r_text));
+                        stack.extend(inner.iter().rev().map(|n| FlattenItem::Node(n, depth + 1)));
+                        stack.push(FlattenItem::Literal(l_text));
+                    } else {
+                        out.push(node.clone());
+                    }
+                }
+                _ => out.push(node.clone()),
+            },
         }
     }
     out

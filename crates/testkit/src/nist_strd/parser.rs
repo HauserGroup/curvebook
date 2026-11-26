@@ -733,16 +733,17 @@ Level of Difficulty:  Lower
 Certified Values:
  Sample Mean                        : 10000002.0
  Sample Standard Deviation          :        1.0
- Sample Autocorrelation Coefficient :        0.0
+ Sample Autocorrelation Coefficient :       -0.5
 Data:  y
  10000001
- 10000002
  10000003
+ 10000002
 ";
         let uni = parse_univariate_dat(uni_dat).unwrap();
         assert_eq!(uni.name, "NumAcc1");
         assert_eq!(uni.difficulty, NistDifficulty::Lower);
-        assert_eq!(uni.values, vec![10_000_001.0, 10_000_002.0, 10_000_003.0]);
+        assert_eq!(uni.certified_r1, -0.5);
+        assert_eq!(uni.values, vec![10_000_001.0, 10_000_003.0, 10_000_002.0]);
 
         let anova_dat = "\
 Dataset Name:  MiniAnova          (MiniAnova.dat)

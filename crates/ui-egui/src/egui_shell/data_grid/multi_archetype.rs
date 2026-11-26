@@ -81,14 +81,15 @@ pub(super) fn render_multi_archetype_grid(
         state.active_link_popover = None;
         state.context_menu = None;
     }
-    let cur_app_y_sel = Some((app.grid.tool.active, app.grid.tool.anchor, app.grid.selected_coords.len()));
-    if app.grid.active_x_cell != aux.last_app_x_cell {
-        aux.selected_x_cell = app.grid.active_x_cell;
-        aux.last_app_x_cell = app.grid.active_x_cell;
+    let cur_app_y_sel = app.grid.selection_belongs_to(&ds.id).then_some((app.grid.tool.active, app.grid.tool.anchor, app.grid.selected_coords.len()));
+    let app_x_cell = app.grid.active_x_cell_for_sheet(&ds.id);
+    if app_x_cell != aux.last_app_x_cell {
+        aux.selected_x_cell = app_x_cell;
+        aux.last_app_x_cell = app_x_cell;
     }
     if cur_app_y_sel != aux.last_app_y_selection {
         aux.last_app_y_selection = cur_app_y_sel;
-        if app.grid.tool.active.is_some() && app.grid.active_x_cell.is_none() {
+        if app.grid.active_cell_for_sheet(&ds.id).is_some() && app_x_cell.is_none() {
             aux.selected_x_cell = None;
         }
     }
@@ -198,7 +199,10 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
             #[allow(clippy::cast_precision_loss)]
             let y0 = g_rect.min.y + (row as f32) * geom.row_h - scroll_y;
             let y1 = y0 + geom.row_h;
-            let row_selected = fstate.aux.selected_x_cell.map_or_else(|| app.grid.selected_rows.contains(&row), |(xr, _)| xr == row);
+            let row_selected = fstate
+                .aux
+                .selected_x_cell
+                .map_or_else(|| app.grid.selection_belongs_to(&ds.id) && app.grid.selected_rows.contains(&row), |(xr, _)| xr == row);
             let num_r = Rect::from_min_max(pos2(x0, y0), pos2(x_mid, y1)).intersect(g_rect);
             if num_r.height() > 1.0 {
                 if row_selected {
@@ -235,8 +239,10 @@ fn render_multi_gutter_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                 );
                 if resp.clicked() && !blocked && geom.col_count > 0 {
                     fstate.aux.selected_x_cell = None;
-                    fstate.intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(row, 0, 0) });
-                    fstate.intents.push(UiIntent::ExtendGridSelection { coord: GridCellCoord::new(row, last_col, last_sub) });
+                    fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord: GridCellCoord::new(row, 0, 0) });
+                    fstate
+                        .intents
+                        .push(UiIntent::ExtendGridSelection { sheet_id: Some(ds.id.clone()), coord: GridCellCoord::new(row, last_col, last_sub) });
                     set_grid_focus_active(gui, true);
                     gui.ctx().request_repaint();
                 }
@@ -442,7 +448,7 @@ fn render_multi_body(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGri
                 out.vis_rows = vis_rows.clone();
                 out.vis_all_flat = vis_all_flat.clone();
 
-                let sel = SelectionFastLookup::new(mctx.app, geom);
+                let sel = SelectionFastLookup::new(mctx.app, &mctx.ds.id, geom);
                 let has_links = !ds.linked_regions.is_empty();
                 let mut text_buf = String::with_capacity(32);
                 let mut id_buf = String::with_capacity(32);
@@ -906,11 +912,11 @@ fn handle_multi_data_cell_interactions(
         set_grid_focus_active(body_ui, true);
         let (shift_held, cmd_held) = body_ui.input(|i| (i.modifiers.shift, i.modifiers.command || i.modifiers.mac_cmd || i.modifiers.ctrl));
         if shift_held {
-            fstate.intents.push(UiIntent::ExtendGridSelection { coord });
+            fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(ds.id.clone()), coord });
         } else if cmd_held {
-            fstate.intents.push(UiIntent::ToggleGridCell { coord });
+            fstate.intents.push(UiIntent::ToggleGridCell { sheet_id: Some(ds.id.clone()), coord });
         } else {
-            fstate.intents.push(UiIntent::SelectGridCell { coord });
+            fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord });
         }
         if is_multi_click_edit(resp) {
             if flags.mv_is_calc {
@@ -946,9 +952,10 @@ fn handle_multi_data_cell_interactions(
     {
         interacted = true;
         fstate.aux.selected_x_cell = None;
-        let already_selected = app.grid.selected_coords.contains(&coord) || app.grid.tool.active == Some(coord);
+        let already_selected =
+            app.grid.selection_belongs_to(&ds.id) && (app.grid.selected_coords.contains(&coord) || app.grid.tool.active == Some(coord));
         if !already_selected {
-            fstate.intents.push(UiIntent::SelectGridCell { coord });
+            fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord });
         }
         fstate.state.context_menu = Some(ContextMenuState {
             pos,
@@ -1049,7 +1056,7 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     let target_dup_col = cell_ctx
         .filter(|t| !t.is_x)
         .map(|t| t.col)
-        .or_else(|| app.grid.tool.active.map(|c| c.col))
+        .or_else(|| app.grid.active_cell_for_sheet(&ds.id).map(|c| c.col))
         .unwrap_or(0)
         .min(ds.archetype.column_count().saturating_sub(1));
     let unequal_nested_units = nested_group_has_unequal_units(ds, target_dup_col);
@@ -1231,7 +1238,7 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                                     push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, intents);
                                 }
                             } else {
-                                intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.tool.active });
+                                intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.active_cell_for_sheet(&ds.id) });
                             }
                         }
                         "grid.ctx.duplicate_column" => {
@@ -1271,8 +1278,12 @@ fn build_duplicate_column_intent(app: &UiApp, ds: &DataSheet, cell_ctx: Option<C
     if col_count == 0 {
         return None;
     }
-    let src_col =
-        cell_ctx.filter(|t| !t.is_x).map(|t| t.col).or_else(|| app.grid.tool.active.map(|c| c.col)).unwrap_or(0).min(col_count.saturating_sub(1));
+    let src_col = cell_ctx
+        .filter(|t| !t.is_x)
+        .map(|t| t.col)
+        .or_else(|| app.grid.active_cell_for_sheet(&ds.id).map(|c| c.col))
+        .unwrap_or(0)
+        .min(col_count.saturating_sub(1));
     build_duplicate_column_intent_for_col(ds, src_col)
 }
 
@@ -1441,7 +1452,7 @@ fn handle_grid_ctx_exclude(
     let c = cell_ctx
         .filter(|t| !t.is_x)
         .map(|t| GridCellCoord::new(t.row, t.col, t.subcol))
-        .or(app.grid.tool.active)
+        .or_else(|| app.grid.active_cell_for_sheet(&ds.id))
         .unwrap_or(GridCellCoord::new(row, 0, 0));
     if let Some(reg) = linked_region_for_cell(ds, c.row, c.col) {
         return Some(reg.clone());
@@ -1475,7 +1486,7 @@ fn handle_grid_ctx_cut(
     }
     let linked = resolve_grid_selection(app, ds)
         .and_then(|sel| first_linked_region_in_selection(ds, &sel))
-        .or_else(|| app.grid.tool.active.and_then(|active| linked_region_for_cell(ds, active.row, active.col)));
+        .or_else(|| app.grid.active_cell_for_sheet(&ds.id).and_then(|active| linked_region_for_cell(ds, active.row, active.col)));
     if let Some(reg) = linked {
         return Some(reg.clone());
     }

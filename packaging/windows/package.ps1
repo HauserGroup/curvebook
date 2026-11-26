@@ -8,10 +8,14 @@
 #>
 param(
   [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
+  [switch] $BuildOnly,
   [switch] $SkipBuild,
   [switch] $RequireSigning
 )
 $ErrorActionPreference = 'Stop'
+if ($BuildOnly -and $SkipBuild) {
+  throw 'cannot combine -BuildOnly and -SkipBuild'
+}
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 function Invoke-Native([string] $What, [scriptblock] $Block) {
@@ -41,11 +45,39 @@ if (-not $env:CURVEBOOK_BUILD_DATE) { $env:CURVEBOOK_BUILD_DATE = (Get-Date).ToU
 
 Write-Output "CurveBook $Version for Windows $Arch ($Target)"
 
+$signingSecretVars = @(
+  'WINDOWS_CERTIFICATE',
+  'WINDOWS_CERTIFICATE_PASSWORD',
+  'AZURE_TENANT_ID',
+  'AZURE_CLIENT_ID',
+  'AZURE_CLIENT_SECRET',
+  'AZURE_SIGNING_ENDPOINT',
+  'AZURE_SIGNING_ACCOUNT',
+  'AZURE_CERT_PROFILE'
+)
+
 if (-not $SkipBuild) {
   $flagVar = 'CARGO_TARGET_' + ($Target.ToUpper() -replace '-', '_') + '_RUSTFLAGS'
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
   $env:CURVEBOOK_REQUIRE_WINRES = '1'
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p curvebook -p curvebook-cli --target $Target }
+  # Scrub signing secrets during Cargo compilation so dependency build.rs/proc-macros never observe them (GAP-05-02).
+  $savedSecrets = @{}
+  foreach ($varName in $signingSecretVars) {
+    $savedSecrets[$varName] = [Environment]::GetEnvironmentVariable($varName)
+    [Environment]::SetEnvironmentVariable($varName, $null)
+  }
+  try {
+    Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p curvebook -p curvebook-cli --target $Target }
+  }
+  finally {
+    foreach ($varName in $signingSecretVars) {
+      [Environment]::SetEnvironmentVariable($varName, $savedSecrets[$varName])
+    }
+  }
+}
+
+if ($BuildOnly) {
+  return
 }
 
 $Bin = Join-Path $TargetDir "$Target\release"
@@ -151,6 +183,9 @@ Invoke-Native 'wix build' {
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
 & (Join-Path $PSScriptRoot 'sign.ps1') @signFlags $Msi
 
+foreach ($varName in $signingSecretVars) {
+  [Environment]::SetEnvironmentVariable($varName, $null)
+}
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
   Invoke-Native 'curvebook-cli --version' { & (Join-Path $Stage 'curvebook-cli.exe') --version }

@@ -92,6 +92,37 @@ pub use text_bridge::{FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, Shape
 pub use theme::{DerivedUiPalette, FontBook, ThemeSeeds, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
+/// Prefix used when surfacing non-fatal figure export warnings in the UI status banner (`GAP-06-02`).
+pub const FIGURE_EXPORT_WARNING_PREFIX: &str = "Figure exported with ";
+
+/// Returns `true` for engine figure-export commands whose [`CommandOutcome::warnings`] should be
+/// surfaced to desktop and UI users (`GAP-06-02`).
+#[must_use]
+pub fn is_figure_export_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "export.svg"
+            | "export.pdf"
+            | "export.png"
+            | "export.tiff"
+            | "graph.exportSvg"
+            | "graph.exportPdf"
+            | "graph.exportPng"
+            | "graph.exportEmf"
+            | "layout.exportEmf"
+    )
+}
+
+/// Format non-fatal figure export warnings for display in UI/desktop toast banners (`GAP-06-02`).
+#[must_use]
+pub fn format_figure_export_warnings_banner(warnings: &[String]) -> Option<String> {
+    let cleaned: Vec<&str> = warnings.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(format!("{FIGURE_EXPORT_WARNING_PREFIX}{} warning(s): {}", cleaned.len(), cleaned.join("; ")))
+}
+
 /// Whether the UI crate was compiled with bundled interface/document fonts enabled.
 #[must_use]
 pub const fn bundled_fonts_enabled() -> bool {
@@ -873,10 +904,30 @@ impl UiApp {
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
     }
 
+    /// Return `true` when any modal dialog or blocking overlay is currently open (`GAP-07-04`).
+    #[must_use]
+    pub fn has_open_modal(&self) -> bool {
+        self.canvas_dialogs.active_dialog != ActiveDialog::None
+            || self.egui_views.app_modals.unsaved_changes_open
+            || self.egui_views.app_modals.preferences_open
+            || self.egui_views.app_modals.find_replace_open
+            || self.grid.variables_dialog.open
+            || self.grid.import_wizard.open
+            || self.egui_views.transform_modals.open_kind.is_some()
+            || self.egui_views.leading_dock.delete_confirm.is_some()
+            || self.egui_views.progress_modal.is_some()
+    }
+
     /// Open the replace-or-merge confirmation modal before importing a multi-sheet file (`R10.29`).
-    pub fn open_import_project_mode_dialog(&mut self, command_id: impl Into<String>, path: impl Into<String>, has_unsaved_changes: bool) {
+    ///
+    /// Returns `false` without altering UI state if another modal dialog is already open (`GAP-07-04`).
+    pub fn open_import_project_mode_dialog(&mut self, command_id: impl Into<String>, path: impl Into<String>, has_unsaved_changes: bool) -> bool {
+        if self.has_open_modal() {
+            return false;
+        }
         self.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode { command_id: command_id.into(), path: path.into(), has_unsaved_changes };
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+        true
     }
 
     /// Open the existing-files prompt for Export All Data Tables before anything is written (`R10.29`).
@@ -1027,8 +1078,21 @@ impl UiApp {
         let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_as_ui(command_id, params)
         })?;
+        self.surface_figure_export_warnings(command_id, &outcome.warnings);
         self.sync_views();
         Ok(outcome)
+    }
+
+    /// Surface non-fatal warnings emitted by figure export commands in `status_banner` (`GAP-06-02`).
+    pub fn surface_figure_export_warnings(&mut self, command_id: &str, warnings: &[String]) {
+        if !is_figure_export_command(command_id) {
+            return;
+        }
+        if let Some(banner) = format_figure_export_warnings_banner(warnings) {
+            self.canvas_dialogs.status_banner = Some(banner);
+        } else if self.canvas_dialogs.status_banner.as_deref().is_some_and(|b| b.starts_with(FIGURE_EXPORT_WARNING_PREFIX)) {
+            self.canvas_dialogs.status_banner = None;
+        }
     }
 
     /// Execute an external control-protocol command (`Caller::Control`).
@@ -1205,7 +1269,7 @@ impl UiApp {
             && self.session.document().active_sheet_id.as_ref() == Some(&brushed.sheet_id)
         {
             let _ = ds;
-            self.grid.select_single_sync(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
+            self.grid.select_single_for_sheet(&brushed.sheet_id, GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
         }
         self.brushed_cell = Some(brushed.clone());
         self.brushed_points = vec![brushed.clone()];

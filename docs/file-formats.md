@@ -25,6 +25,7 @@ Schema v6 adds the source cell coordinates for cached ROUT exclusions. In v5 pro
 Schema v7 adds project-level content-addressed embedded raster image assets (`image_assets[]` in `document.json` with empty inline bytes, binary PNG/JPEG/TIFF payloads stored under `assets/<asset_id>.<ext>`, and CRC-32/SHA-256 metadata tracked in `ArchiveManifest::assets`), together with `GraphAnnotation::EmbeddedImage` and `LayoutItem::EmbeddedImage`. Projects saved under `v6` migrate forward cleanly (`v6 -> v7`) with an empty `image_assets` catalog; SVG image import is intentionally omitted under CurveBook's permissive-only dependency policy ([`licences.md`](licences.md)).
 
 Schema v8 (`CURRENT_SCHEMA_VERSION = 8`, `migrate_v7_to_v8`) adds:
+- `AnalysisKind::LeveneTest` (`LeveneTestSpec { center: LeveneCenter::Median | LeveneCenter::Mean }` for standalone Levene / Brown–Forsythe homogeneity-of-variance analysis),
 - `ImportFilterSpec::row_match` (`Option<ColumnEqualsFilter>` for exact trimmed column-equality filtering on `.xlsx`, `.csv`, and live-linked imports),
 - `AnalysisKind::AreaUnderCurve` (`AreaUnderCurveSpec` and `AucBaseline` for standalone partial-window trapezoidal AUC analysis), and
 - `DataSheet::plate_well_origins` (`Vec<PlateCellOrigin>` mapping microplate-imported cells back to physical well IDs, preserved during `.curvebook` streaming archive deserialization in `DataSheetVisitor` and cleared when stripping project templates via `strip_project_data_for_template`).

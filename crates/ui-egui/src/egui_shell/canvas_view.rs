@@ -173,6 +173,27 @@ impl Default for CanvasViewEguiState {
     }
 }
 
+impl CanvasViewEguiState {
+    /// Return `(selected_panel_index, selected_graph_annotation)` scoped to `sheet_id` (`GAP-07-01`).
+    ///
+    /// Reads the live fields when `sheet_id` matches [`Self::active_viewport_sheet`] (or before the
+    /// first viewport sync), and falls back to saved per-sheet state in [`Self::sheet_viewports`]
+    /// so stale selections from a previously viewed sheet never leak into another sheet's inspector.
+    #[must_use]
+    pub fn selection_for_sheet(&self, sheet_id: Option<&SheetId>) -> (Option<usize>, Option<usize>) {
+        let Some(target) = sheet_id else {
+            return (self.selected_panel_index, self.selected_graph_annotation);
+        };
+        if self.active_viewport_sheet.as_ref() == Some(target) || self.active_viewport_sheet.is_none() {
+            (self.selected_panel_index, self.selected_graph_annotation)
+        } else if let Some(saved) = self.sheet_viewports.get(target) {
+            (saved.selected_panel_index, saved.selected_graph_annotation)
+        } else {
+            (None, None)
+        }
+    }
+}
+
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
 #[derive(Debug, Clone, Copy)]
 pub struct CanvasViewContext<'a> {
@@ -1049,7 +1070,17 @@ fn render_graph_hud_overlays(
     let screen_to_scene =
         |pos: Pos2| PointPt::new(f64::from((pos.x - paper_rect.left()) / sx.max(1e-4)), f64::from((pos.y - paper_rect.top()) / sy.max(1e-4)));
 
-    let canvas_ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
+    let canvas_ov = CanvasOverlayCtx {
+        app,
+        painter,
+        mat_rect,
+        paper_rect,
+        sx,
+        sy,
+        tokens,
+        enabled: ctx_in.enabled,
+        is_secondary_split: ctx_in.is_secondary_split,
+    };
     let (ann_claimed_click, ann_opened_ctx_menu) = render_graph_embedded_objects(ui, &canvas_ov, gs, state, meta, intents);
 
     if ctx_in.enabled && !ann_opened_ctx_menu && canvas_resp.secondary_clicked() {
@@ -1126,7 +1157,7 @@ fn render_graph_hud_overlays(
                     intents.push(UiIntent::AddBrushedPoint { sheet_id: hit.source_cell.sheet_id.clone(), coord });
                 } else {
                     intents.push(UiIntent::BrushPoint { sheet_id: hit.source_cell.sheet_id.clone(), coord });
-                    intents.push(UiIntent::SelectGridCell { coord });
+                    intents.push(UiIntent::SelectGridCell { sheet_id: Some(hit.source_cell.sheet_id.clone()), coord });
                 }
             }
         } else {
@@ -1764,6 +1795,31 @@ fn collect_layout_snap_plot_origins(ctx: &egui::Context, app: &UiApp, ls: &Layou
         .collect()
 }
 
+fn resolve_layout_panel_bounds_with_preview(
+    state: &CanvasViewEguiState,
+    sheet_id: &SheetId,
+    idx: usize,
+    item: &LayoutItem,
+    studio_size_preview: Option<&(SheetId, usize, f64, f64)>,
+) -> DocRectPt {
+    let mut bounds = layout_item_bounds_doc(item);
+    if let Some(drag) = &state.layout_drag
+        && drag.sheet_id == *sheet_id
+        && drag.item_index == idx
+    {
+        return drag.current_bounds_pt;
+    }
+    if let Some((preview_sheet, preview_idx, preview_w, preview_h)) = studio_size_preview
+        && preview_sheet == sheet_id
+        && *preview_idx == idx
+    {
+        bounds.width = *preview_w;
+        bounds.height = *preview_h;
+        return bounds;
+    }
+    active_gesture_bounds(state, sheet_id, true, idx, bounds)
+}
+
 fn render_layout_hud_overlays(
     ui: &mut egui::Ui,
     input: LayoutHudInput<'_>,
@@ -1780,7 +1836,17 @@ fn render_layout_hud_overlays(
     let sx = paper_rect.width() / scene_w;
     let sy = paper_rect.height() / scene_h;
     let _ = eff_scale;
-    let ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
+    let ov = CanvasOverlayCtx {
+        app,
+        painter,
+        mat_rect,
+        paper_rect,
+        sx,
+        sy,
+        tokens,
+        enabled: ctx_in.enabled,
+        is_secondary_split: ctx_in.is_secondary_split,
+    };
 
     let selected_img = state.selected_panel_index.and_then(|sel_idx| match ls.spec.items.get(sel_idx) {
         Some(LayoutItem::EmbeddedImage { bounds_pt, rotation_deg, lock_aspect_ratio, .. }) => {
@@ -1799,17 +1865,10 @@ fn render_layout_hud_overlays(
     let (selected_non_img_idx, pointer_in_panel_resize, panel_resize_active) =
         selected_non_image_panel_state(ls, state, paper_rect, sx, sy, ptr_pos, selected_img.is_some());
 
+    let studio_size_preview = super::trailing_studio::studio_panel_size_preview(ui.ctx());
     let mut panel_rects = Vec::with_capacity(ls.spec.items.len());
     for (idx, item) in ls.spec.items.iter().enumerate() {
-        let mut bounds = layout_item_bounds_doc(item);
-        if let Some(drag) = &state.layout_drag
-            && drag.sheet_id == ls.id
-            && drag.item_index == idx
-        {
-            bounds = drag.current_bounds_pt;
-        } else {
-            bounds = active_gesture_bounds(state, &ls.id, true, idx, bounds);
-        }
+        let bounds = resolve_layout_panel_bounds_with_preview(state, &ls.id, idx, item, studio_size_preview.as_ref());
         let r = doc_rect_to_screen(paper_rect, sx, sy, bounds);
         panel_rects.push((idx, item, bounds, r));
     }
@@ -1821,7 +1880,7 @@ fn render_layout_hud_overlays(
         let selected = state.selected_panel_index == Some(idx);
         let suppress_drag = selected && (pointer_in_img_handle || resize_or_rot_active || pointer_in_panel_resize || panel_resize_active);
         let sense = if ctx_in.enabled && !suppress_drag { Sense::click_and_drag() } else { Sense::hover() };
-        let p_resp = ui.interact(r, Id::unique(("layout_panel", ls.id.as_str(), idx)), sense);
+        let p_resp = ui.interact(r, Id::unique(("layout_panel", ctx_in.is_secondary_split, ls.id.as_str(), idx)), sense);
 
         let stroke_col = if selected {
             tokens.accent
@@ -2211,6 +2270,7 @@ struct CanvasOverlayCtx<'a> {
     sy: f32,
     tokens: &'a Tokens,
     enabled: bool,
+    is_secondary_split: bool,
 }
 
 impl CanvasOverlayCtx<'_> {
@@ -2361,7 +2421,7 @@ fn render_graph_embedded_objects(
         let selected = state.selected_graph_annotation == Some(ann_idx);
         let suppress_drag = selected && is_image && (pointer_in_handle || resize_or_rot_active);
         let sense = if ov.enabled && !suppress_drag { Sense::click_and_drag() } else { Sense::hover() };
-        let resp = ui.interact(r_vis, Id::unique(("graph_ann", gs.id.as_str(), ann_idx)), sense);
+        let resp = ui.interact(r_vis, Id::unique(("graph_ann", ov.is_secondary_split, gs.id.as_str(), ann_idx)), sense);
         if selected || resp.hovered() {
             let stroke_col = if selected { ov.tokens.accent } else { ov.tokens.focus_ring };
             ov.painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(if selected { 2.0 } else { 1.0 }, stroke_col), StrokeKind::Inside);
@@ -2539,8 +2599,10 @@ fn render_graph_context_menu(
     let locale = ov.tokens.locale;
 
     let mut close_menu = false;
-    let area_resp =
-        egui::Area::new(Id::unique(("graph_ctx_menu", gs.id.as_str()))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |menu_ui| {
+    let area_resp = egui::Area::new(Id::unique(("graph_ctx_menu", ov.is_secondary_split, gs.id.as_str())))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |menu_ui| {
             egui::Frame::popup(menu_ui.style())
                 .fill(ov.tokens.surface_bg)
                 .stroke(Stroke::new(1.0, ov.tokens.border))
@@ -2790,9 +2852,10 @@ fn render_layout_context_menu_popup(
         anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 360.0).max(screen.top() + 4.0)),
     );
     let mut close_menu = false;
-    let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ls.id.as_str()))).order(egui::Order::Foreground).fixed_pos(pos).show(
-        ui.ctx(),
-        |menu_ui| {
+    let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ov.is_secondary_split, ls.id.as_str())))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .show(ui.ctx(), |menu_ui| {
             egui::Frame::popup(menu_ui.style())
                 .fill(ov.tokens.surface_bg)
                 .stroke(Stroke::new(1.0, ov.tokens.border))
@@ -2842,8 +2905,7 @@ fn render_layout_context_menu_popup(
                         close_menu = true;
                     }
                 });
-        },
-    );
+        });
     let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
     let outside_click = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
     if close_menu || esc || outside_click {
@@ -2913,7 +2975,7 @@ fn render_layout_panel_resize_handle(
 
     let wid = format!("canvas.layout_panel.{sel_idx}.resize_se");
     let h_resp = ui
-        .interact(se_vis, Id::unique(("layout_panel_resize_se", ls.id.as_str(), sel_idx)), Sense::click_and_drag())
+        .interact(se_vis, Id::unique(("layout_panel_resize_se", ov.is_secondary_split, ls.id.as_str(), sel_idx)), Sense::click_and_drag())
         .on_hover_cursor(egui::CursorIcon::ResizeNwSe);
     h_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ov.enabled, "Resize Panel Corner (SE)"));
     let fill = if h_resp.hovered() || resizing_this { ov.tokens.accent } else { ov.tokens.surface_bg };
@@ -3058,7 +3120,8 @@ fn render_selected_image_handles(
         }
         ov.painter.rect_filled(h_vis, CornerRadius::same(1), ov.tokens.paper_white);
         ov.painter.rect_stroke(h_vis, CornerRadius::same(1), Stroke::new(1.5, ov.tokens.accent), StrokeKind::Inside);
-        let h_resp = ui.interact(h_vis, Id::unique(("img_handle", sheet_id.as_str(), is_layout, target_idx, slug)), Sense::drag());
+        let h_resp =
+            ui.interact(h_vis, Id::unique(("img_handle", ov.is_secondary_split, sheet_id.as_str(), is_layout, target_idx, slug)), Sense::drag());
         let wid = format!("canvas.image.handle.{slug}");
         meta.record_response(
             ui,
@@ -3132,7 +3195,8 @@ fn render_selected_image_handles(
         ov.painter.line_segment([pos2(r.center().x, r.top()), rot_center], Stroke::new(1.25, ov.tokens.accent));
         ov.painter.circle_filled(rot_center, 5.0, ov.tokens.paper_white);
         ov.painter.circle_stroke(rot_center, 5.0, Stroke::new(1.5, ov.tokens.accent));
-        let rot_resp = ui.interact(rot_vis, Id::unique(("img_rot_handle", sheet_id.as_str(), is_layout, target_idx)), Sense::drag());
+        let rot_resp =
+            ui.interact(rot_vis, Id::unique(("img_rot_handle", ov.is_secondary_split, sheet_id.as_str(), is_layout, target_idx)), Sense::drag());
         meta.record_response(
             ui,
             &rot_resp,

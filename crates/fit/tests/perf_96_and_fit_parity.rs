@@ -304,12 +304,16 @@ fn residuals_and_covariance_matrix_tabs_emitted_with_qq_and_studentized_columns(
     let res_on = exec_nl(&ds, nl_on);
 
     let res_tab = find_tab_kind(&res_on.tabs, ResultTabKind::Residuals).unwrap();
-    assert_eq!(res_tab.column_headers, vec!["Predicted Y", "Residual", "Weighted Residual", "Studentized Residual", "Q-Q Normal Quantile"]);
+    assert_eq!(
+        res_tab.column_headers,
+        vec!["Predicted Y", "Residual", "Weighted Residual", "Studentized Residual", "Q-Q Normal Quantile", "Data Set"]
+    );
     assert_eq!(res_tab.rows.len(), log_concs.len());
     let mut qq_vals = Vec::with_capacity(res_tab.rows.len());
     for row in &res_tab.rows {
-        assert_eq!(row.len(), 5);
-        assert!(row.iter().all(|cell| matches!(cell, ResultCell::Number { value, .. } if value.is_finite())));
+        assert_eq!(row.len(), 6);
+        assert!(row[..5].iter().all(|cell| matches!(cell, ResultCell::Number { value, .. } if value.is_finite())));
+        assert!(matches!(&row[5], ResultCell::Text(s) if s == "A"));
         if let ResultCell::Number { value, .. } = row[4] {
             qq_vals.push(value);
         }

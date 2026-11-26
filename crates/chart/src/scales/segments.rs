@@ -3,7 +3,7 @@
 use curvebook_doc::{AxisSegment, AxisSpec, BreakOrnament};
 use curvebook_math::{AxisScale, LogitDomain};
 
-use super::mapping::{AxisMapping, ScaleDiagnostics, scale_transform, transformed_fraction};
+use super::mapping::{AxisMapping, ScaleDiagnostics, scale_inverse, scale_transform, transformed_fraction};
 use super::ticks::{clean_zero, nice_linear_step};
 use super::{LOG_POSITIVE_FLOOR_DEFAULT, MIN_FINITE_AXIS_SPAN};
 use crate::scene::{ChartWarning, Path2D, PathCmd, PointPt, RectPt};
@@ -287,26 +287,17 @@ impl ResolvedAxis {
         let usable_len = (total_len - gap_pt * (num_gaps as f64)).max(1.0);
 
         let shares = normalize_length_shares(&raw_segments);
+        let domains = resolve_all_segment_domains(&raw_segments, &shares, source, &spec.title, warnings);
         let mut resolved = Vec::with_capacity(n);
         let mut breaks = Vec::with_capacity(num_gaps);
         let mut cursor = axis_start_pt;
-        let mut prev_hi: Option<f64> = None;
 
         for (idx, seg) in raw_segments.iter().enumerate() {
             let fraction = shares.get(idx).copied().unwrap_or(1.0 / (n as f64));
             let seg_len = usable_len * fraction;
             let span_start_pt = cursor;
             let span_end_pt = cursor + dir * seg_len;
-            let (domain_min, domain_max) = match source {
-                DomainResolveSource::Bounds(data_bounds) => {
-                    let seg_bounds_hint = segment_data_bounds_hint(idx, n, data_bounds);
-                    resolve_segment_domain(seg, seg_bounds_hint, prev_hi, &spec.title, warnings)
-                }
-                DomainResolveSource::Samples { data_values, include_zero_if_linear, top_headroom_frac } => {
-                    resolve_sample_segment_domain(seg, data_values, include_zero_if_linear, top_headroom_frac, warnings)
-                }
-            };
-            prev_hi = Some(domain_max);
+            let (domain_min, domain_max) = domains.get(idx).copied().unwrap_or_else(|| default_domain_for_scale(seg.scale, None));
 
             resolved.push(ResolvedSegment {
                 segment_index: idx,
@@ -561,18 +552,263 @@ fn collect_non_empty_cell_paths(x_axis: &ResolvedAxis, y_axis: &ResolvedAxis, ce
     out
 }
 
-fn segment_data_bounds_hint(idx: usize, count: usize, data_bounds: Option<(f64, f64)>) -> Option<(f64, f64)> {
-    let (lo, hi) = data_bounds?;
-    if count <= 1 {
-        return Some((lo, hi));
+fn resolve_all_segment_domains(
+    raw_segments: &[AxisSegment],
+    shares: &[f64],
+    source: DomainResolveSource<'_>,
+    axis_title: &str,
+    warnings: &mut Vec<ChartWarning>,
+) -> Vec<(f64, f64)> {
+    let n = raw_segments.len();
+    if n <= 1 {
+        let Some(seg) = raw_segments.first() else {
+            return Vec::new();
+        };
+        let domain = match source {
+            DomainResolveSource::Bounds(data_bounds) => resolve_segment_domain(seg, data_bounds, None, axis_title, warnings),
+            DomainResolveSource::Samples { data_values, include_zero_if_linear, top_headroom_frac } => {
+                resolve_sample_segment_domain(seg, data_values, include_zero_if_linear, top_headroom_frac, warnings)
+            }
+        };
+        return vec![domain];
     }
-    if idx == 0 {
-        Some((lo, lo))
-    } else if idx + 1 == count {
-        Some((hi, hi))
-    } else {
-        None
+
+    let mut exp_mins = Vec::with_capacity(n);
+    let mut exp_maxs = Vec::with_capacity(n);
+    for seg in raw_segments {
+        exp_mins.push(parse_explicit_bound(seg.min, seg.scale, "minimum", warnings));
+        exp_maxs.push(parse_explicit_bound(seg.max, seg.scale, "maximum", warnings));
     }
+
+    if (0..n).all(|i| exp_mins[i].is_some() && exp_maxs[i].is_some()) {
+        let mut prev_hi = None;
+        let mut out = Vec::with_capacity(n);
+        for (i, seg) in raw_segments.iter().enumerate() {
+            let domain = resolve_segment_domain_with_explicit(seg, exp_mins[i], exp_maxs[i], None, prev_hi, axis_title, warnings);
+            prev_hi = Some(domain.1);
+            out.push(domain);
+        }
+        return out;
+    }
+
+    let overall = compute_overall_multi_segment_bounds(raw_segments, source, warnings);
+    let partitioned = partition_multi_segment_bounds(raw_segments, shares, &exp_mins, &exp_maxs, overall);
+
+    let mut prev_hi = None;
+    let mut out = Vec::with_capacity(n);
+    for (i, seg) in raw_segments.iter().enumerate() {
+        let hint = partitioned.get(i).copied().flatten();
+        let domain = resolve_partitioned_segment_domain(seg, exp_mins[i], exp_maxs[i], hint, prev_hi, axis_title, warnings);
+        prev_hi = Some(domain.1);
+        out.push(domain);
+    }
+    out
+}
+
+fn compute_overall_multi_segment_bounds(
+    raw_segments: &[AxisSegment],
+    source: DomainResolveSource<'_>,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<(f64, f64)> {
+    let first_seg = raw_segments.first()?;
+    let last_seg = raw_segments.last()?;
+    let first_scale = first_seg.scale;
+    let last_scale = last_seg.scale;
+    match source {
+        DomainResolveSource::Bounds(data_bounds) => {
+            let (d_lo, d_hi) = data_bounds?;
+            if !d_lo.is_finite() || !d_hi.is_finite() {
+                return None;
+            }
+            let (lo_raw, hi_raw) = (d_lo.min(d_hi), d_lo.max(d_hi));
+            let (ov_lo, lo_pair_hi) = compute_nice_bounds_for_scale(lo_raw, hi_raw, first_scale);
+            let (hi_pair_lo, ov_hi) =
+                if last_scale == first_scale { (ov_lo, lo_pair_hi) } else { compute_nice_bounds_for_scale(lo_raw, hi_raw, last_scale) };
+            if ov_lo.is_finite() && ov_hi.is_finite() && ov_lo < ov_hi {
+                Some((ov_lo, ov_hi))
+            } else if hi_pair_lo.is_finite() && ov_hi.is_finite() && hi_pair_lo < ov_hi {
+                Some((hi_pair_lo, ov_hi))
+            } else {
+                Some((ov_lo, lo_pair_hi))
+            }
+        }
+        DomainResolveSource::Samples { data_values, include_zero_if_linear, top_headroom_frac } => {
+            let valid_lo_raw: Vec<f64> =
+                data_values.iter().copied().filter(|&v| v.is_finite() && scale_transform(first_scale, v).is_some()).collect();
+            let valid_lo = if first_scale == AxisScale::Reciprocal {
+                filter_reciprocal_segment_values(first_seg, &valid_lo_raw, warnings)
+            } else {
+                valid_lo_raw
+            };
+            let valid_hi_raw: Vec<f64> = if last_scale == first_scale {
+                valid_lo.clone()
+            } else {
+                data_values.iter().copied().filter(|&v| v.is_finite() && scale_transform(last_scale, v).is_some()).collect()
+            };
+            let valid_hi = if last_scale == AxisScale::Reciprocal && last_scale != first_scale {
+                filter_reciprocal_segment_values(last_seg, &valid_hi_raw, warnings)
+            } else {
+                valid_hi_raw
+            };
+            if valid_lo.is_empty() && valid_hi.is_empty() {
+                return None;
+            }
+            let mut ov_lo = if !valid_lo.is_empty() {
+                sample_auto_domain_min(&valid_lo, first_scale, include_zero_if_linear)
+            } else {
+                sample_auto_domain_min(&valid_hi, last_scale, include_zero_if_linear)
+            };
+            let mut ov_hi = if !valid_hi.is_empty() {
+                sample_auto_domain_max(&valid_hi, last_scale, top_headroom_frac)
+            } else {
+                sample_auto_domain_max(&valid_lo, first_scale, top_headroom_frac)
+            };
+            if matches!(first_scale, AxisScale::Linear) && include_zero_if_linear && ov_lo > 0.0 && ov_lo <= ov_hi {
+                ov_lo = 0.0;
+            }
+            if matches!(last_scale, AxisScale::Linear) && include_zero_if_linear && ov_hi < 0.0 && ov_lo <= ov_hi {
+                ov_hi = 0.0;
+            }
+            if !ov_lo.is_finite() || !ov_hi.is_finite() || ov_lo >= ov_hi || is_degenerate_domain(ov_lo, ov_hi, first_scale) {
+                (ov_lo, ov_hi) = expand_degenerate_domain(ov_lo, first_scale);
+            }
+            Some((ov_lo, ov_hi))
+        }
+    }
+}
+
+fn interpolate_interior_split(left_v: f64, right_v: f64, frac: f64, common_scale: Option<AxisScale>, seg_count: usize, prev_bound: f64) -> f64 {
+    if let Some(scale) = common_scale
+        && scale != AxisScale::Linear
+        && let (Some(tl), Some(tr)) = (scale_transform(scale, left_v), scale_transform(scale, right_v))
+    {
+        let t = tl + frac * (tr - tl);
+        if let Some(val) = scale_inverse(scale, t)
+            && val.is_finite()
+            && val > prev_bound
+            && val < right_v
+        {
+            return val;
+        }
+    }
+    let span = right_v - left_v;
+    let raw = if span.is_finite() { left_v + frac * span } else { left_v * (1.0 - frac) + right_v * frac };
+    if matches!(common_scale, Some(AxisScale::Linear)) && span.is_finite() && span > 0.0 {
+        let step = nice_linear_step(span / ((seg_count as f64) * 2.5));
+        if step.is_finite() && step > 0.0 {
+            let snapped = clean_zero((raw / step).round() * step);
+            let min_margin = span * 0.05;
+            if snapped.is_finite() && snapped > prev_bound + min_margin && snapped < right_v - min_margin {
+                return snapped;
+            }
+        }
+    }
+    clean_zero(raw)
+}
+
+fn partition_multi_segment_bounds(
+    raw_segments: &[AxisSegment],
+    shares: &[f64],
+    exp_mins: &[Option<f64>],
+    exp_maxs: &[Option<f64>],
+    overall: Option<(f64, f64)>,
+) -> Vec<Option<(f64, f64)>> {
+    let n = raw_segments.len();
+    let Some((ov_lo, ov_hi)) = overall else {
+        return vec![None; n];
+    };
+    let mut lo_bounds: Vec<Option<f64>> = exp_mins.to_vec();
+    let mut hi_bounds: Vec<Option<f64>> = exp_maxs.to_vec();
+
+    if lo_bounds[0].is_none() {
+        lo_bounds[0] = Some(ov_lo);
+    }
+    if hi_bounds[n - 1].is_none() {
+        hi_bounds[n - 1] = Some(ov_hi);
+    }
+
+    for k in 1..n {
+        if hi_bounds[k - 1].is_some() && lo_bounds[k].is_none() {
+            lo_bounds[k] = hi_bounds[k - 1];
+        } else if hi_bounds[k - 1].is_none() && lo_bounds[k].is_some() {
+            hi_bounds[k - 1] = lo_bounds[k];
+        }
+    }
+
+    let mut start = 0usize;
+    while start < n {
+        let mut end = start;
+        while end + 1 < n && hi_bounds[end].is_none() && lo_bounds[end + 1].is_none() {
+            end += 1;
+        }
+        if start < end
+            && let (Some(lv), Some(rv)) = (lo_bounds[start], hi_bounds[end])
+        {
+            let run_len = end - start + 1;
+            if lv.is_finite() && rv.is_finite() && lv < rv {
+                let first_s = raw_segments[start].scale;
+                let common_scale = raw_segments[start..=end].iter().all(|s| s.scale == first_s).then_some(first_s);
+                let total_share: f64 = shares[start..=end].iter().sum::<f64>().max(1e-12);
+                let mut cum_share = 0.0;
+                let mut prev_bound = lv;
+                for k in start..end {
+                    cum_share += shares[k];
+                    let frac = (cum_share / total_share).clamp(0.05, 0.95);
+                    let split = interpolate_interior_split(lv, rv, frac, common_scale, run_len, prev_bound);
+                    hi_bounds[k] = Some(split);
+                    lo_bounds[k + 1] = Some(split);
+                    prev_bound = split;
+                }
+            } else {
+                let mut cur = lv;
+                for k in start..end {
+                    let next = extend_upper_bound(cur, raw_segments[k].scale);
+                    hi_bounds[k] = Some(next);
+                    lo_bounds[k + 1] = Some(next);
+                    cur = next;
+                }
+                if exp_maxs[end].is_none() {
+                    hi_bounds[end] = Some(extend_upper_bound(cur, raw_segments[end].scale));
+                }
+            }
+        }
+        start = end + 1;
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut lo = lo_bounds[i];
+        let mut hi = hi_bounds[i];
+        if let (Some(l), Some(h)) = (lo, hi)
+            && l >= h
+            && (exp_mins[i].is_none() || exp_maxs[i].is_none())
+        {
+            if exp_mins[i].is_some() || (i > 0 && exp_maxs[i - 1].is_some() && exp_maxs[i].is_none()) {
+                hi = Some(extend_upper_bound(l, raw_segments[i].scale));
+            } else if exp_maxs[i].is_some() || (i + 1 < n && exp_mins[i + 1].is_some() && exp_mins[i].is_none()) {
+                lo = Some(extend_lower_bound(h, raw_segments[i].scale));
+            }
+        }
+        out.push(lo.zip(hi));
+    }
+    out
+}
+
+fn resolve_partitioned_segment_domain(
+    seg: &AxisSegment,
+    explicit_min: Option<f64>,
+    explicit_max: Option<f64>,
+    partition_hint: Option<(f64, f64)>,
+    prev_hi: Option<f64>,
+    axis_title: &str,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
+    let (def_lo, def_hi) = default_domain_for_scale(seg.scale, prev_hi);
+    let (auto_lo, auto_hi) = match partition_hint {
+        Some((p_lo, p_hi)) if p_lo.is_finite() && p_hi.is_finite() => (p_lo, p_hi),
+        _ => (def_lo, def_hi),
+    };
+    finalize_segment_domain(seg, explicit_min, explicit_max, (auto_lo, auto_hi), (def_lo, def_hi), axis_title, warnings)
 }
 
 fn normalize_segment_slice(segments: &[AxisSegment], title: &str, warnings: &mut Vec<ChartWarning>) -> Vec<AxisSegment> {
@@ -781,15 +1017,50 @@ fn resolve_segment_domain(
     axis_title: &str,
     warnings: &mut Vec<ChartWarning>,
 ) -> (f64, f64) {
+    let explicit_min = parse_explicit_bound(seg.min, seg.scale, "minimum", warnings);
+    let explicit_max = parse_explicit_bound(seg.max, seg.scale, "maximum", warnings);
+    resolve_segment_domain_with_explicit(seg, explicit_min, explicit_max, data_bounds, prev_hi, axis_title, warnings)
+}
+
+fn resolve_segment_domain_with_explicit(
+    seg: &AxisSegment,
+    explicit_min: Option<f64>,
+    explicit_max: Option<f64>,
+    data_bounds: Option<(f64, f64)>,
+    prev_hi: Option<f64>,
+    axis_title: &str,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
     let (def_lo, def_hi) = default_domain_for_scale(seg.scale, prev_hi);
     let (auto_lo, auto_hi) = match data_bounds {
         Some((d_lo, d_hi)) if d_lo.is_finite() && d_hi.is_finite() => compute_nice_bounds_for_scale(d_lo.min(d_hi), d_lo.max(d_hi), seg.scale),
         _ => (def_lo, def_hi),
     };
-    let explicit_min = parse_explicit_bound(seg.min, seg.scale, "minimum", warnings);
-    let explicit_max = parse_explicit_bound(seg.max, seg.scale, "maximum", warnings);
+    finalize_segment_domain(seg, explicit_min, explicit_max, (auto_lo, auto_hi), (def_lo, def_hi), axis_title, warnings)
+}
+
+fn finalize_segment_domain(
+    seg: &AxisSegment,
+    explicit_min: Option<f64>,
+    explicit_max: Option<f64>,
+    (auto_lo, auto_hi): (f64, f64),
+    (def_lo, def_hi): (f64, f64),
+    axis_title: &str,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
     let mut lo = explicit_min.unwrap_or(auto_lo);
     let mut hi = explicit_max.unwrap_or(auto_hi);
+    if is_log_like_scale(seg.scale) && (scale_transform(seg.scale, lo).is_none() || scale_transform(seg.scale, hi).is_none()) {
+        (lo, hi) = repair_log_exact_domain(lo, hi, auto_lo, auto_hi, explicit_min.is_some() || explicit_max.is_some(), seg.scale, warnings);
+    } else if matches!(seg.scale, AxisScale::Reciprocal) && (lo == 0.0 || hi == 0.0 || lo.signum() != hi.signum()) {
+        (lo, hi) = repair_reciprocal_exact_domain(lo, hi, auto_lo, auto_hi, explicit_min, explicit_max, warnings);
+    } else if matches!(seg.scale, AxisScale::Logit(_) | AxisScale::Probit)
+        && (scale_transform(seg.scale, lo).is_none() || scale_transform(seg.scale, hi).is_none())
+    {
+        let upper = if matches!(seg.scale, AxisScale::Logit(LogitDomain::Proportion)) { 1.0 } else { 100.0 };
+        lo = repair_prob_bound(lo, true, explicit_min.is_some(), auto_lo, upper, seg.scale, warnings);
+        hi = repair_prob_bound(hi, false, explicit_max.is_some(), auto_hi, upper, seg.scale, warnings);
+    }
     if explicit_min.is_some() && explicit_max.is_none() && hi <= lo {
         hi = extend_upper_bound(lo, seg.scale);
     }

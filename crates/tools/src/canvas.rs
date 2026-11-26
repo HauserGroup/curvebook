@@ -786,15 +786,24 @@ struct CategoryDataSlots {
     slots: Vec<(usize, f64, f64)>,
 }
 
+/// Safe upper bound on materialized category hit-test slots so large grouped/column tables
+/// cannot trigger integer overflow or multi-gigabyte allocations during canvas hit-testing.
+const MAX_CATEGORY_HIT_TEST_SLOTS: usize = 65_536;
+
+fn checked_slot_count(nrows: usize, ncols: usize) -> Option<usize> {
+    let total = nrows.checked_mul(ncols)?;
+    (total <= MAX_CATEGORY_HIT_TEST_SLOTS).then_some(total)
+}
+
 fn category_data_slots(spec: &GraphSpec, sheet: &DataSheet) -> Option<CategoryDataSlots> {
     match (spec.kind, &sheet.archetype) {
         (GraphKind::Column, TableArchetype::Column(col)) => {
-            let slots = linear_column_slots(spec, col.data_sets.len());
+            let slots = linear_column_slots(spec, col.data_sets.len())?;
             let count = slots.len().max(1) as f64;
             Some(CategoryDataSlots { domain_bounds: (0.0, count), slots })
         }
         (GraphKind::Column, TableArchetype::Nested(nested)) => {
-            let slots = linear_column_slots(spec, nested.groups.len());
+            let slots = linear_column_slots(spec, nested.groups.len())?;
             let count = slots.len().max(1) as f64;
             Some(CategoryDataSlots { domain_bounds: (0.0, count), slots })
         }
@@ -803,11 +812,17 @@ fn category_data_slots(spec: &GraphSpec, sheet: &DataSheet) -> Option<CategoryDa
     }
 }
 
-fn linear_column_slots(spec: &GraphSpec, fallback_count: usize) -> Vec<(usize, f64, f64)> {
+fn linear_column_slots(spec: &GraphSpec, fallback_count: usize) -> Option<Vec<(usize, f64, f64)>> {
     if spec.series.is_empty() {
-        (0..fallback_count).map(|idx| (idx, idx as f64, idx as f64 + 1.0)).collect()
+        if fallback_count > MAX_CATEGORY_HIT_TEST_SLOTS {
+            return None;
+        }
+        Some((0..fallback_count).map(|idx| (idx, idx as f64, idx as f64 + 1.0)).collect())
     } else {
-        spec.series.iter().enumerate().map(|(pos, s)| (s.data_set_index, pos as f64, pos as f64 + 1.0)).collect()
+        if spec.series.len() > MAX_CATEGORY_HIT_TEST_SLOTS {
+            return None;
+        }
+        Some(spec.series.iter().enumerate().map(|(pos, s)| (s.data_set_index, pos as f64, pos as f64 + 1.0)).collect())
     }
 }
 
@@ -818,28 +833,44 @@ fn grouped_category_slots(arrangement: GroupedArrangement, grouped: &GroupedTabl
         return None;
     }
     if arrangement == GroupedArrangement::Separated {
+        let cap = checked_slot_count(nrows, ncols)?;
         let total_span = (ncols as f64) * (nrows as f64) + (ncols.saturating_sub(1) as f64) * 0.9;
-        let mut slots = Vec::with_capacity(nrows * ncols);
+        let mut slots = Vec::with_capacity(cap);
         for c in 0..ncols {
             for r in 0..nrows {
                 let cx = (c as f64) * (nrows as f64 + 0.9) + (r as f64) + 0.5;
-                slots.push((c * nrows + r, cx - 0.5, cx + 0.5));
+                let idx = c.checked_mul(nrows)?.checked_add(r)?;
+                slots.push((idx, cx - 0.5, cx + 0.5));
             }
         }
         return Some(CategoryDataSlots { domain_bounds: (0.0, total_span.max(1.0)), slots });
     }
 
-    let (centers, step, dmin, dmax) = grouped_row_centers(grouped, nrows);
+    let (centers, step, dmin, dmax) = match arrangement {
+        GroupedArrangement::Interleaved => {
+            let _ = checked_slot_count(nrows, ncols)?;
+            grouped_row_centers(grouped, nrows)
+        }
+        GroupedArrangement::Stacked | GroupedArrangement::Superimposed => {
+            if nrows > MAX_CATEGORY_HIT_TEST_SLOTS {
+                return None;
+            }
+            grouped_row_centers(grouped, nrows)
+        }
+        GroupedArrangement::Separated => return None,
+    };
     let mut slots = Vec::new();
     match arrangement {
         GroupedArrangement::Interleaved => {
+            let cap = checked_slot_count(nrows, ncols)?;
             let cluster_w = step * 0.76;
             let slot_w = cluster_w / ncols as f64;
-            slots.reserve(nrows * ncols);
+            slots.reserve(cap);
             for (r, &cx) in centers.iter().enumerate() {
                 for c in 0..ncols {
                     let slot_cx = cx - 0.5 * cluster_w + (c as f64 + 0.5) * slot_w;
-                    slots.push((r * ncols + c, slot_cx - 0.5 * slot_w, slot_cx + 0.5 * slot_w));
+                    let idx = r.checked_mul(ncols)?.checked_add(c)?;
+                    slots.push((idx, slot_cx - 0.5 * slot_w, slot_cx + 0.5 * slot_w));
                 }
             }
         }
@@ -1995,5 +2026,24 @@ mod tests {
         assert_eq!(state.zoom, super::MAX_ZOOM);
         assert_eq!(super::MIN_ZOOM, 0.1);
         assert_eq!(super::MAX_ZOOM, 32.0);
+    }
+
+    #[test]
+    fn gap_04_06_grouped_category_slots_caps_large_and_overflowing_products() {
+        use curvebook_doc::{GroupedArrangement, GroupedTable, SubcolumnMode};
+
+        assert_eq!(super::checked_slot_count(usize::MAX, 2), None);
+        assert_eq!(super::checked_slot_count(1_000, 100), None);
+        assert_eq!(super::checked_slot_count(10, 4), Some(40));
+
+        // Construct a valid GroupedTable whose `nrows * ncols` exceeds `MAX_CATEGORY_HIT_TEST_SLOTS`
+        // (e.g. 2000 rows x 40 datasets = 80_000 > 65_536) without allocating 80_000 slots.
+        let grouped = GroupedTable::new(SubcolumnMode::RawReplicates(1), 40, 2_000).expect("grouped table");
+
+        assert!(super::grouped_category_slots(GroupedArrangement::Separated, &grouped).is_none());
+        assert!(super::grouped_category_slots(GroupedArrangement::Interleaved, &grouped).is_none());
+        // Stacked/Superimposed only allocates `nrows = 2000 <= 65_536`, so it succeeds cleanly.
+        let stacked = super::grouped_category_slots(GroupedArrangement::Stacked, &grouped).expect("stacked slots fit cap");
+        assert_eq!(stacked.slots.len(), 2_000);
     }
 }

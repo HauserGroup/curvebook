@@ -319,11 +319,22 @@ impl FormatAxesState {
     }
 
     /// Add a discontinuous [`AxisSegment`], enforcing `1..=3` bounds. Returns `false` if already at `3`.
+    ///
+    /// Inherits the previous segment's scale and, when the previous segment has an explicit valid
+    /// upper bound `max`, seeds the new segment's lower bound `min` from it so newly added segments
+    /// partition the axis cleanly rather than duplicating the previous range (`GAP-01-04`).
     pub fn add_segment(&mut self) -> bool {
         if self.axis_draft.segments.len() >= 3 {
             return false;
         }
-        self.axis_draft.segments.push(AxisSegment::default());
+        let next = if let Some(prev) = self.axis_draft.segments.last() {
+            let seeded_min =
+                prev.max.filter(|&hi| hi.is_finite() && prev.min.is_none_or(|lo| lo < hi) && is_valid_seeded_min_for_scale(hi, prev.scale));
+            AxisSegment { scale: prev.scale, min: seeded_min, max: None, ..AxisSegment::default() }
+        } else {
+            AxisSegment::default()
+        };
+        self.axis_draft.segments.push(next);
         true
     }
 
@@ -519,6 +530,19 @@ impl FormatAxesState {
     }
 }
 
+fn is_valid_seeded_min_for_scale(val: f64, scale: GraphAxisScale) -> bool {
+    if !val.is_finite() {
+        return false;
+    }
+    match scale {
+        GraphAxisScale::Linear => true,
+        GraphAxisScale::Log10 | GraphAxisScale::Log2 | GraphAxisScale::Ln => val > 0.0,
+        GraphAxisScale::Reciprocal => val != 0.0,
+        GraphAxisScale::Logit(curvebook_doc::LogitDomain::Percent) | GraphAxisScale::Probit => val > 0.0 && val < 100.0,
+        GraphAxisScale::Logit(curvebook_doc::LogitDomain::Proportion) => val > 0.0 && val < 1.0,
+    }
+}
+
 fn insert_secondary_axis_payload(
     payload: &mut serde_json::Map<String, Value>,
     field_key: &str,
@@ -559,4 +583,32 @@ fn build_pending_axis_patch(
         obj.insert(String::from("additional_ticks"), serde_json::to_value(ticks).ok()?);
     }
     Some(obj)
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::GraphAxisScale;
+
+    use super::FormatAxesState;
+
+    #[test]
+    fn gap_01_04_add_segment_inherits_scale_and_seeds_min_from_explicit_max() {
+        let mut state = FormatAxesState::default();
+        assert!(state.set_segment_scale(0, GraphAxisScale::Log10));
+        assert!(state.set_segment_bounds(0, Some(1.0), Some(100.0)).is_ok());
+        assert!(state.add_segment());
+        assert_eq!(state.axis_draft.segments.len(), 2);
+        assert_eq!(state.axis_draft.segments[1].scale, GraphAxisScale::Log10);
+        assert_eq!(state.axis_draft.segments[1].min, Some(100.0));
+        assert_eq!(state.axis_draft.segments[1].max, None);
+        assert!(state.axis_draft.validate().is_ok());
+
+        // Adding a 3rd segment after an open-ended segment preserves scale and leaves auto bounds.
+        assert!(state.add_segment());
+        assert_eq!(state.axis_draft.segments.len(), 3);
+        assert_eq!(state.axis_draft.segments[2].scale, GraphAxisScale::Log10);
+        assert_eq!(state.axis_draft.segments[2].min, None);
+        assert_eq!(state.axis_draft.segments[2].max, None);
+        assert!(!state.add_segment());
+    }
 }

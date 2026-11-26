@@ -158,6 +158,46 @@ mod tests {
     }
 
     #[test]
+    fn gap_03_06_cividis_and_plasma_match_published_luts_with_smooth_cie_lstar() {
+        use super::{CIVIDIS_STOPS, PLASMA_STOPS};
+
+        fn cie_lstar(c: Rgba8) -> f64 {
+            let lin = c.to_linear();
+            // IEC 61966-2-1 sRGB D65 luminance Y -> CIE 1976 L*
+            let y = 0.212_672_9 * lin.r + 0.715_152_2 * lin.g + 0.072_175_0 * lin.b;
+            let eps = (6.0_f64 / 29.0).powi(3);
+            if y > eps { 116.0 * y.cbrt() - 16.0 } else { (29.0_f64 / 3.0).powi(3) * y }
+        }
+
+        // Exact published anchor stops (Nuñez, Anderton & Renslow 2018; van der Walt & Smith 2015):
+        assert_eq!(CIVIDIS_STOPS[0], Rgba8::rgb(0, 32, 77)); // #00204D
+        assert_eq!(CIVIDIS_STOPS[8], Rgba8::rgb(124, 123, 120)); // #7C7B78 (t = 0.50)
+        assert_eq!(CIVIDIS_STOPS[12], Rgba8::rgb(188, 175, 111)); // #BCAF6F (t = 0.75)
+        assert_eq!(CIVIDIS_STOPS[16], Rgba8::rgb(255, 234, 70)); // #FFEA46
+
+        assert_eq!(PLASMA_STOPS[0], Rgba8::rgb(13, 8, 135)); // #0D0887
+        assert_eq!(PLASMA_STOPS[4], Rgba8::rgb(126, 3, 168)); // #7E03A8 (t = 0.25)
+        assert_eq!(PLASMA_STOPS[8], Rgba8::rgb(203, 71, 120)); // #CB4778 (t = 0.50)
+        assert_eq!(PLASMA_STOPS[12], Rgba8::rgb(248, 149, 64)); // #F89540 (t = 0.75)
+        assert_eq!(PLASMA_STOPS[16], Rgba8::rgb(240, 249, 33)); // #F0F921
+
+        // Cividis CIE Delta L* smoothness across all 16 intervals (previously collapsed to 3.01 & 1.11 at stops 15-16).
+        let civ_deltas: Vec<f64> = CIVIDIS_STOPS.windows(2).map(|w| cie_lstar(w[1]) - cie_lstar(w[0])).collect();
+        for (idx, &dl) in civ_deltas.iter().enumerate() {
+            assert!((3.8..=6.2).contains(&dl), "Cividis stop {idx}->{} Delta L* = {dl:.2} out of smooth range [3.8, 6.2]", idx + 1);
+        }
+        for (idx, &dl) in civ_deltas.iter().enumerate().skip(11) {
+            assert!((4.5..=5.8).contains(&dl), "Cividis upper-half stop {idx}->{} Delta L* = {dl:.2} collapsed", idx + 1);
+        }
+
+        // Plasma CIE Delta L* monotonicity & smoothness across all 16 intervals.
+        let plasma_deltas: Vec<f64> = PLASMA_STOPS.windows(2).map(|w| cie_lstar(w[1]) - cie_lstar(w[0])).collect();
+        for (idx, &dl) in plasma_deltas.iter().enumerate() {
+            assert!((3.8..=6.8).contains(&dl), "Plasma stop {idx}->{} Delta L* = {dl:.2} out of smooth range [3.8, 6.8]", idx + 1);
+        }
+    }
+
+    #[test]
     fn custom_color_ramp_and_non_finite_inputs_never_panic() {
         let ramp =
             ColorRamp::Custom { stops: vec![ColorStop { position: 1.0, color: Rgba8::WHITE }, ColorStop { position: 0.0, color: Rgba8::BLACK }] };

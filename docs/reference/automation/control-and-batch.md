@@ -22,6 +22,8 @@ Single-call request and response syntax:
 
 Built-in control methods are `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, and interactive UI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`, `ui.answer_dialog`). You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
 
+When calling `doc.export`, optional `transparent_bg: true` is supported only for `svg`, `png`, and `tiff`; passing `transparent_bg: true` for opaque formats such as `pdf` or `emf` fails with `bad_input`.
+
 ## Batch manifest format (`curvebook.batch.v1`) {#batch-manifest}
 
 A `curvebook.batch.v1` manifest is a JSON document validated strictly against the schema (`additionalProperties: false`) in the [Formats & Schemas Registry](../registry/formats.html#schema-batch-v1) before anything runs. Run a manifest with `curvebook-cli batch <manifest> [--workdir <dir>] [--json]`.

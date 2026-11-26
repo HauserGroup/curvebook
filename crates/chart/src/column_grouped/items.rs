@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 
-use curvebook_doc::{ErrorBarDirection, GraphSpec, GraphicalDataObject, ReplicateOverlayStyle, SummaryMeasure, TableArchetype, WhiskerMethod};
+use curvebook_doc::{
+    ErrorBarDirection, GraphSpec, GraphicalDataObject, ReplicateOverlayStyle, SubcolumnMode, SummaryMeasure, TableArchetype, WhiskerMethod,
+};
 use curvebook_math::sum::SummaryMoments;
 use curvebook_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
@@ -65,6 +67,7 @@ pub(super) fn render_before_after_connectors_oriented(
     let mut ext_per_slot: Vec<f64> = vec![if is_horizontal { clip.x } else { clip.bottom() }; items.len()];
 
     struct BaObsPoint<'a> {
+        slot_idx: usize,
         col_index: usize,
         row: usize,
         subcol: usize,
@@ -72,9 +75,9 @@ pub(super) fn render_before_after_connectors_oriented(
         val: f64,
     }
 
-    let mut emit_trajectory = |traj: &[BaObsPoint<'_>], slot_indices: &[usize]| {
+    let mut emit_trajectory = |traj: &[BaObsPoint<'_>]| {
         let mut pts: Vec<(usize, usize, usize, &CategorySlotItem, PointPt, f64)> = Vec::with_capacity(traj.len());
-        for (idx_in_traj, obs) in traj.iter().enumerate() {
+        for obs in traj {
             let item = obs.item;
             let target_val = if !is_horizontal && item.bind_to_right_y2 { axes.y2.unwrap_or(axes.y) } else { axes.y };
             let mapped = if is_horizontal {
@@ -89,8 +92,7 @@ pub(super) fn render_before_after_connectors_oriented(
                 }
             };
             if let Some(pt) = mapped {
-                let slot_idx = slot_indices[idx_in_traj];
-                if let Some(ext) = ext_per_slot.get_mut(slot_idx) {
+                if let Some(ext) = ext_per_slot.get_mut(obs.slot_idx) {
                     *ext = if is_horizontal { ext.max(pt.x) } else { ext.min(pt.y) };
                 }
                 pts.push((obs.col_index, obs.row, obs.subcol, item, pt, obs.val));
@@ -134,17 +136,16 @@ pub(super) fn render_before_after_connectors_oriented(
     match &sheet.archetype {
         TableArchetype::Column(col_table) => {
             ba_cols.sort_by(|(_, a), (_, b)| a.x_pos.total_cmp(&b.x_pos).then_with(|| a.col_index.cmp(&b.col_index)));
-            let slot_indices: Vec<usize> = ba_cols.iter().map(|&(idx, _)| idx).collect();
             for row in 0..col_table.row_count() {
                 let mut traj = Vec::new();
-                for &(_, item) in &ba_cols {
+                for &(slot_idx, item) in &ba_cols {
                     if let Some(val) =
                         col_table.data_sets.get(item.col_index).and_then(|d| d.cell(row, 0)).and_then(curvebook_doc::Cell::active_number)
                     {
-                        traj.push(BaObsPoint { col_index: item.col_index, row, subcol: 0, item, val });
+                        traj.push(BaObsPoint { slot_idx, col_index: item.col_index, row, subcol: 0, item, val });
                     }
                 }
-                emit_trajectory(&traj, &slot_indices);
+                emit_trajectory(&traj);
             }
         }
         TableArchetype::Grouped(grp_table) => {
@@ -163,18 +164,17 @@ pub(super) fn render_before_after_connectors_oriented(
                         continue;
                     }
                     connected_any = true;
-                    let slot_indices: Vec<usize> = row_slots.iter().map(|&(idx, _)| idx).collect();
                     if grp_table.subcolumn_mode.is_pre_summarized() {
                         let traj: Vec<BaObsPoint<'_>> = row_slots
                             .iter()
-                            .filter_map(|&(_, item)| match &item.payload {
+                            .filter_map(|&(slot_idx, item)| match &item.payload {
                                 ExtractedKind::PreSummarized { center, .. } if center.is_finite() => {
-                                    Some(BaObsPoint { col_index: item.col_index, row, subcol: 0, item, val: *center })
+                                    Some(BaObsPoint { slot_idx, col_index: item.col_index, row, subcol: 0, item, val: *center })
                                 }
                                 _ => None,
                             })
                             .collect();
-                        emit_trajectory(&traj, &slot_indices);
+                        emit_trajectory(&traj);
                     } else {
                         let max_sub = row_slots
                             .iter()
@@ -183,7 +183,6 @@ pub(super) fn render_before_after_connectors_oriented(
                             .unwrap_or(0);
                         for subcol in 0..max_sub {
                             let mut traj = Vec::new();
-                            let mut used_slots = Vec::new();
                             for &(slot_idx, item) in &row_slots {
                                 if let Some(val) = grp_table
                                     .data_sets
@@ -191,11 +190,10 @@ pub(super) fn render_before_after_connectors_oriented(
                                     .and_then(|d| d.cell(row, subcol))
                                     .and_then(curvebook_doc::Cell::active_number)
                                 {
-                                    traj.push(BaObsPoint { col_index: item.col_index, row, subcol, item, val });
-                                    used_slots.push(slot_idx);
+                                    traj.push(BaObsPoint { slot_idx, col_index: item.col_index, row, subcol, item, val });
                                 }
                             }
-                            emit_trajectory(&traj, &used_slots);
+                            emit_trajectory(&traj);
                         }
                     }
                 }
@@ -226,7 +224,6 @@ pub(super) fn render_before_after_connectors_oriented(
                 };
                 for subcol in 0..max_sub {
                     let mut traj = Vec::new();
-                    let mut used_slots = Vec::new();
                     for &(slot_idx, item) in &ba_cols {
                         let Some(row) = item.row_index else { continue };
                         let val_opt = if grp_table.subcolumn_mode.is_pre_summarized() {
@@ -238,11 +235,10 @@ pub(super) fn render_before_after_connectors_oriented(
                             grp_table.data_sets.get(item.col_index).and_then(|d| d.cell(row, subcol)).and_then(curvebook_doc::Cell::active_number)
                         };
                         if let Some(val) = val_opt {
-                            traj.push(BaObsPoint { col_index: item.col_index, row, subcol, item, val });
-                            used_slots.push(slot_idx);
+                            traj.push(BaObsPoint { slot_idx, col_index: item.col_index, row, subcol, item, val });
                         }
                     }
-                    emit_trajectory(&traj, &used_slots);
+                    emit_trajectory(&traj);
                 }
             }
         }
@@ -512,16 +508,118 @@ fn render_aligned_dot_item_oriented(
     Some(extent_pt)
 }
 
-fn sorted_obs_for_item(payload: &ExtractedKind) -> Vec<RawObs> {
-    match payload {
-        ExtractedKind::Raw(obs) => sorted_finite_obs(obs),
-        ExtractedKind::PreSummarized { center, lower, upper, source } => {
-            let mut out: Vec<RawObs> =
-                [*lower, *center, *upper].into_iter().filter(|v| v.is_finite()).map(|value| RawObs { value, source: source.clone() }).collect();
-            out.sort_by(|a, b| a.value.total_cmp(&b.value));
-            out
+struct PresumIntervalCfg<'a> {
+    spec: &'a GraphSpec,
+    override_series_index: Option<usize>,
+    slot: SlotGeom,
+    val_axis: &'a SegmentedAxis,
+    series_label: &'a str,
+    is_horizontal: bool,
+    fill_color: Rgba8,
+    stroke_color: Rgba8,
+}
+
+/// Render an honest summary marker + error interval for pre-summarized data whenever a raw
+/// distribution plot (KDE violin or non-IQR box-and-whisker) cannot be legitimately synthesized
+/// from summary columns (`GAP-02-09`).
+fn render_presummarized_summary_interval(
+    scene: &mut ChartScene,
+    center: f64,
+    lower: f64,
+    upper: f64,
+    source: &SourceCellId,
+    cfg: &PresumIntervalCfg<'_>,
+) -> Option<f64> {
+    if !center.is_finite() {
+        return None;
+    }
+    let clip = scene.plot_rect_pt;
+    let cx = cfg.slot.cx;
+    let is_horizontal = cfg.is_horizontal;
+    let lo = if lower.is_finite() && upper.is_finite() { lower.min(upper) } else { center };
+    let hi = if lower.is_finite() && upper.is_finite() { lower.max(upper) } else { center };
+
+    let (_, py_lo, c_lo) = cfg.val_axis.map_clamped_to_nearest(lo);
+    let (_, py_center, c_center) = cfg.val_axis.map_clamped_to_nearest(center);
+    let (_, py_hi, c_hi) = cfg.val_axis.map_clamped_to_nearest(hi);
+    if c_lo || c_center || c_hi {
+        emit_clipped_domain_warning(&mut scene.warnings, cfg.val_axis, &[lo, center, hi]);
+    }
+
+    let stroke = StrokePaint::solid(cfg.stroke_color, 1.2);
+    let cap_half = (cfg.slot.width_pt * 0.22).max(2.5);
+    if (py_hi - py_lo).abs() > 0.25 {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(oriented_pt(cx, is_horizontal, 0.0, py_lo), oriented_pt(cx, is_horizontal, 0.0, py_hi)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: Some(clip),
+        });
+        for end_pv in [py_lo, py_hi] {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(oriented_pt(cx, is_horizontal, -cap_half, end_pv), oriented_pt(cx, is_horizontal, cap_half, end_pv)),
+                fill: None,
+                stroke: Some(stroke),
+                clip: Some(clip),
+            });
         }
     }
+
+    let base_marker = MarkerStyle {
+        shape: MarkerShape::Circle,
+        fill_mode: curvebook_palette::MarkerFillMode::Filled,
+        size_pt: 5.5,
+        fill_color: cfg.fill_color,
+        stroke_color: cfg.stroke_color,
+        stroke_width_pt: 0.85,
+    };
+    let resolved = if let Some(series_index) = cfg.override_series_index {
+        crate::resolve_overridden_marker_for_cell(cfg.spec, series_index, source.row, Some(source.subcol), base_marker)
+    } else {
+        Some(base_marker)
+    };
+    if let Some(marker) = resolved {
+        let pt = oriented_pt(cx, is_horizontal, 0.0, py_center);
+        emit_marker(&mut scene.primitives, pt, &marker, Some(clip));
+        let obs = RawObs { value: center, source: source.clone() };
+        push_col_point_meta(scene, pt, marker.size_pt, &obs, cfg.series_label);
+    }
+
+    Some(if is_horizontal { py_hi.max(py_center) } else { py_hi.min(py_center) })
+}
+
+/// Render an honest `[lower, upper]` filled range bar with a center rule for non-parametric
+/// pre-summarized range columns (`MedianIqr` quartiles or explicit `UpperLowerLimits`).
+fn render_presummarized_range_box(scene: &mut ChartScene, lower: f64, center: f64, upper: f64, cfg: &PresumIntervalCfg<'_>) -> Option<f64> {
+    if !lower.is_finite() || !center.is_finite() || !upper.is_finite() {
+        return None;
+    }
+    let clip = scene.plot_rect_pt;
+    let cx = cfg.slot.cx;
+    let box_w = cfg.slot.width_pt * 0.72;
+    let is_horizontal = cfg.is_horizontal;
+    let (lo, hi) = (lower.min(upper), lower.max(upper));
+    let (_, py_lo, c_lo) = cfg.val_axis.map_clamped_to_nearest(lo);
+    let (_, py_center, c_center) = cfg.val_axis.map_clamped_to_nearest(center);
+    let (_, py_hi, c_hi) = cfg.val_axis.map_clamped_to_nearest(hi);
+    if c_lo || c_center || c_hi {
+        emit_clipped_domain_warning(&mut scene.warnings, cfg.val_axis, &[lo, center, hi]);
+    }
+    let stroke = StrokePaint::solid(cfg.stroke_color, 1.1);
+    let box_rect = oriented_span_rect(cx, is_horizontal, 0.5 * box_w, py_lo, py_hi);
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(box_rect),
+        fill: Some(FillPaint::solid(cfg.fill_color)),
+        stroke: Some(stroke),
+        clip: Some(clip),
+    });
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(oriented_pt(cx, is_horizontal, -0.5 * box_w, py_center), oriented_pt(cx, is_horizontal, 0.5 * box_w, py_center)),
+        fill: None,
+        stroke: Some(StrokePaint::solid(cfg.stroke_color, 1.75)),
+        clip: Some(clip),
+    });
+    Some(if is_horizontal { box_rect.right() } else { box_rect.y })
 }
 
 fn emit_clipped_domain_warning(warnings: &mut Vec<ChartWarning>, axis: &SegmentedAxis, vals: &[f64]) {
@@ -575,25 +673,63 @@ fn render_box_whisker_item_oriented(
     let GraphicalDataObject::BoxAndWhisker { whiskers, fill_color, stroke_color, show_outliers, show_all_points } = item.gdo else {
         return None;
     };
-    let sorted_obs = sorted_obs_for_item(&item.payload);
-    render_box_whisker_obs(
-        scene,
-        &sorted_obs,
-        &BoxWhiskerRenderCfg {
-            spec: graph_spec,
-            override_series_index: item.override_series_index,
-            cx: slot.cx,
-            box_w: slot.width_pt * 0.72,
-            whiskers,
-            fill_color,
-            stroke_color,
-            show_outliers,
-            show_all_points,
-            val_axis,
-            series_label: &item.match_label,
-            is_horizontal,
-        },
-    )
+    match &item.payload {
+        ExtractedKind::Raw(obs) => {
+            let sorted_obs = sorted_finite_obs(obs);
+            render_box_whisker_obs(
+                scene,
+                &sorted_obs,
+                &BoxWhiskerRenderCfg {
+                    spec: graph_spec,
+                    override_series_index: item.override_series_index,
+                    cx: slot.cx,
+                    box_w: slot.width_pt * 0.72,
+                    whiskers,
+                    fill_color,
+                    stroke_color,
+                    show_outliers,
+                    show_all_points,
+                    val_axis,
+                    series_label: &item.match_label,
+                    is_horizontal,
+                },
+            )
+        }
+        ExtractedKind::PreSummarized { mode, center, lower, upper, source } => {
+            let cfg = PresumIntervalCfg {
+                spec: graph_spec,
+                override_series_index: item.override_series_index,
+                slot,
+                val_axis,
+                series_label: &item.match_label,
+                is_horizontal,
+                fill_color,
+                stroke_color,
+            };
+            if *mode == SubcolumnMode::MedianIqr {
+                render_presummarized_range_box(scene, *lower, *center, *upper, &cfg)
+            } else if *mode == SubcolumnMode::UpperLowerLimits {
+                if !scene.warnings.iter().any(|w| w.code == "boxplot_unsupported_pre_summarized") {
+                    scene.warnings.push(ChartWarning::new(
+                        "boxplot_unsupported_pre_summarized",
+                        "box-and-whisker quartiles require raw replicates or Median/IQR columns; rendered explicit lower/upper range bar instead for UpperLowerLimits data",
+                    ));
+                }
+                render_presummarized_range_box(scene, *lower, *center, *upper, &cfg)
+                    .or_else(|| render_presummarized_summary_interval(scene, *center, *lower, *upper, source, &cfg))
+            } else {
+                if !scene.warnings.iter().any(|w| w.code == "boxplot_unsupported_pre_summarized") {
+                    scene.warnings.push(ChartWarning::new(
+                        "boxplot_unsupported_pre_summarized",
+                        format!(
+                            "box-and-whisker quartiles require raw replicates or Median/IQR columns; rendered summary point and interval instead for pre-summarized ({mode:?}) data"
+                        ),
+                    ));
+                }
+                render_presummarized_summary_interval(scene, *center, *lower, *upper, source, &cfg)
+            }
+        }
+    }
 }
 
 pub(crate) fn render_box_whisker_obs(scene: &mut ChartScene, sorted_obs: &[RawObs], cfg: &BoxWhiskerRenderCfg<'_>) -> Option<f64> {
@@ -768,25 +904,55 @@ fn render_violin_item_oriented(
     else {
         return None;
     };
-    let sorted_obs = sorted_obs_for_item(&item.payload);
-    render_violin_obs(
-        scene,
-        &sorted_obs,
-        &ViolinRenderCfg {
-            spec: graph_spec,
-            override_series_index: item.override_series_index,
-            cx: slot.cx,
-            half_max_w: slot.width_pt * 0.45,
-            fill_color,
-            stroke_color,
-            clip_to_observed_range,
-            show_median_and_quartiles,
-            half_violin_with_points,
-            val_axis,
-            series_label: &item.match_label,
-            is_horizontal,
-        },
-    )
+    match &item.payload {
+        ExtractedKind::Raw(obs) => {
+            let sorted_obs = sorted_finite_obs(obs);
+            render_violin_obs(
+                scene,
+                &sorted_obs,
+                &ViolinRenderCfg {
+                    spec: graph_spec,
+                    override_series_index: item.override_series_index,
+                    cx: slot.cx,
+                    half_max_w: slot.width_pt * 0.45,
+                    fill_color,
+                    stroke_color,
+                    clip_to_observed_range,
+                    show_median_and_quartiles,
+                    half_violin_with_points,
+                    val_axis,
+                    series_label: &item.match_label,
+                    is_horizontal,
+                },
+            )
+        }
+        ExtractedKind::PreSummarized { mode, center, lower, upper, source } => {
+            if !scene.warnings.iter().any(|w| w.code == "violin_unsupported_pre_summarized") {
+                scene.warnings.push(ChartWarning::new(
+                    "violin_unsupported_pre_summarized",
+                    format!(
+                        "KDE violin density requires raw replicate observations; rendered summary point and interval instead for pre-summarized ({mode:?}) data"
+                    ),
+                ));
+            }
+            let cfg = PresumIntervalCfg {
+                spec: graph_spec,
+                override_series_index: item.override_series_index,
+                slot,
+                val_axis,
+                series_label: &item.match_label,
+                is_horizontal,
+                fill_color,
+                stroke_color,
+            };
+            if matches!(*mode, SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
+                render_presummarized_range_box(scene, *lower, *center, *upper, &cfg)
+                    .or_else(|| render_presummarized_summary_interval(scene, *center, *lower, *upper, source, &cfg))
+            } else {
+                render_presummarized_summary_interval(scene, *center, *lower, *upper, source, &cfg)
+            }
+        }
+    }
 }
 
 pub(crate) fn render_violin_obs(scene: &mut ChartScene, sorted_obs: &[RawObs], cfg: &ViolinRenderCfg<'_>) -> Option<f64> {

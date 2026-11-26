@@ -40,7 +40,7 @@ pub(crate) struct RawObs {
 #[derive(Debug, Clone)]
 enum ExtractedKind {
     Raw(Vec<RawObs>),
-    PreSummarized { center: f64, lower: f64, upper: f64, source: SourceCellId },
+    PreSummarized { mode: SubcolumnMode, center: f64, lower: f64, upper: f64, source: SourceCellId },
 }
 
 #[derive(Debug, Clone)]
@@ -198,9 +198,22 @@ fn item_z_footprint(item: &CategorySlotItem) -> (f64, f64) {
     let val_extent = match &item.payload {
         ExtractedKind::PreSummarized { center, upper, .. } => center.abs().max(upper.abs()),
         ExtractedKind::Raw(obs) => {
-            let mut tmp_warnings = Vec::new();
-            let vals = raw_values(obs);
-            compute_central_tendency(&vals, gdo_summary_measure(&item.gdo), &mut tmp_warnings).map_or(0.0, f64::abs)
+            let summary = gdo_summary_measure(&item.gdo);
+            if matches!(summary, SummaryMeasure::Mean) {
+                let mut sum = 0.0;
+                let mut count = 0_usize;
+                for o in obs {
+                    if o.value.is_finite() {
+                        sum += o.value;
+                        count += 1;
+                    }
+                }
+                if count > 0 { (sum / (count as f64)).abs() } else { 0.0 }
+            } else {
+                let mut tmp_warnings = Vec::new();
+                let vals = raw_values(obs);
+                compute_central_tendency(&vals, summary, &mut tmp_warnings).map_or(0.0, f64::abs)
+            }
         }
     };
     let marker_size = match &item.gdo {
@@ -215,18 +228,38 @@ fn item_z_footprint(item: &CategorySlotItem) -> (f64, f64) {
     }
 }
 
-fn prepare_superimposed_items(items: &mut [CategorySlotItem]) {
-    items.sort_by(|a, b| {
-        let za = item_z_footprint(a);
-        let zb = item_z_footprint(b);
-        zb.0.total_cmp(&za.0).then_with(|| zb.1.total_cmp(&za.1)).then_with(|| a.group_key.cmp(&b.group_key))
-    });
-    for i in 0..items.len() {
-        let x = items[i].x_pos;
-        let rank_at_x = items[..i].iter().filter(|prev| (prev.x_pos - x).abs() < 1e-6).count();
-        if rank_at_x > 0 && matches!(items[i].gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::FloatingBar { .. }) {
-            items[i].slot_width_data *= (1.0 - 0.12 * (rank_at_x as f64).min(4.0)).max(0.35);
+/// Precompute item footprints once in $O(S)$, z-sort in $O(S \log S)$, and narrow co-located
+/// superimposed bars in $O(S \log S)$ instead of scanning prior slots quadratically (`GAP-02-07`).
+fn prepare_superimposed_items(items: &mut Vec<CategorySlotItem>) {
+    if items.len() <= 1 {
+        return;
+    }
+    let mut tagged: Vec<((f64, f64), CategorySlotItem)> = std::mem::take(items).into_iter().map(|it| (item_z_footprint(&it), it)).collect();
+    tagged.sort_by(|(za, a), (zb, b)| zb.0.total_cmp(&za.0).then_with(|| zb.1.total_cmp(&za.1)).then_with(|| a.group_key.cmp(&b.group_key)));
+    *items = tagged.into_iter().map(|(_, it)| it).collect();
+
+    let mut x_order: Vec<(f64, usize)> = items.iter().enumerate().filter_map(|(pos, it)| it.x_pos.is_finite().then_some((it.x_pos, pos))).collect();
+    x_order.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+    let mut start = 0_usize;
+    while start < x_order.len() {
+        let anchor_x = x_order[start].0;
+        let mut end = start + 1;
+        while end < x_order.len() && (x_order[end].0 - anchor_x).abs() < 1e-6 {
+            end += 1;
         }
+        if end - start > 1 {
+            let cluster = &mut x_order[start..end];
+            if cluster.windows(2).any(|w| w[0].1 > w[1].1) {
+                cluster.sort_unstable_by_key(|&(_, pos)| pos);
+            }
+            for (rank_at_x, &(_, pos)) in cluster.iter().enumerate().skip(1) {
+                if matches!(items[pos].gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::FloatingBar { .. }) {
+                    items[pos].slot_width_data *= (1.0 - 0.12 * (rank_at_x as f64).min(4.0)).max(0.35);
+                }
+            }
+        }
+        start = end;
     }
 }
 
@@ -442,12 +475,24 @@ fn extract_column_presummarized(
         if !lower.is_finite() || !upper.is_finite() {
             return ExtractedKind::Raw(Vec::new());
         }
-        return ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row: row0, col, subcol: 0 } };
+        return ExtractedKind::PreSummarized {
+            mode,
+            center,
+            lower,
+            upper,
+            source: SourceCellId { sheet_id: sheet_id.clone(), row: row0, col, subcol: 0 },
+        };
     }
 
     for (row, subcells) in ds.cells.iter().enumerate() {
         if let Some((center, lower, upper)) = summarize_subcells(mode, subcells, SummaryMeasure::Mean, err_spec, warnings) {
-            return ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row, col, subcol: 0 } };
+            return ExtractedKind::PreSummarized {
+                mode,
+                center,
+                lower,
+                upper,
+                source: SourceCellId { sheet_id: sheet_id.clone(), row, col, subcol: 0 },
+            };
         }
     }
     ExtractedKind::Raw(Vec::new())
@@ -669,7 +714,13 @@ fn push_grouped_cell(
         let mut scratch = None;
         let eff_err = effective_presum_err_spec(&gdo, &y_error_bars, &mut scratch);
         if let Some((center, lower, upper)) = summarize_subcells(table.subcolumn_mode, cells, SummaryMeasure::Mean, eff_err, warnings) {
-            ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol: 0 } }
+            ExtractedKind::PreSummarized {
+                mode: table.subcolumn_mode,
+                center,
+                lower,
+                upper,
+                source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol: 0 },
+            }
         } else {
             ExtractedKind::Raw(Vec::new())
         }

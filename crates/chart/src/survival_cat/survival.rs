@@ -11,7 +11,7 @@ use curvebook_text::{RichText, parse_markup};
 
 use super::shared::{
     LegendEntry, PlotMarginConfig, SegmentedFrameSpec, alpha_fill, draw_empty_open_frame, draw_legend_entries, layout_and_render_segmented_chrome,
-    path_line, path_move, polygon_path, solid_stroke, text_metrics,
+    path_line, path_move, polygon_path, resolve_fresh_data_sheet_or_upstream, solid_stroke, text_metrics,
 };
 use crate::scales::compute_segment_tick_values;
 use crate::scene::{
@@ -180,6 +180,13 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
                 .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; omitted failed result curves", res.id)));
             return Vec::new();
         }
+        if !matches!(res.status, ResultStatus::UpToDate) {
+            warnings.push(ChartWarning::new(
+                "pending_analysis_result",
+                format!("survival result sheet '{}' is pending recalculation; omitted stale result curves", res.id),
+            ));
+            return Vec::new();
+        }
         if !res.fitted_curves.is_empty() || matches!(res.analysis.kind, AnalysisKind::Survival(_)) {
             return build_km_from_result_sheet(graph, res);
         }
@@ -190,28 +197,38 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
         .iter()
         .find(|r| {
             r.analysis.source_sheet_id == *primary
-                && !matches!(r.status, ResultStatus::Failed { .. })
+                && matches!(r.status, ResultStatus::UpToDate)
                 && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
         })
         .or_else(|| {
             doc.result_sheets.iter().find(|r| {
                 r.analysis.source_sheet_id == *primary
-                    && !matches!(r.status, ResultStatus::Failed { .. })
+                    && matches!(r.status, ResultStatus::UpToDate)
                     && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
                     && !r.fitted_curves.is_empty()
             })
         });
-    if km_result.is_none()
-        && let Some(failed) = doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && matches!(r.status, ResultStatus::Failed { .. }))
-    {
-        warnings
-            .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; fell back to raw survival table", failed.id)));
+    if km_result.is_none() {
+        if let Some(failed) = doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && matches!(r.status, ResultStatus::Failed { .. }))
+        {
+            warnings.push(ChartWarning::new(
+                "failed_result_sheet",
+                format!("survival result sheet '{}' failed; fell back to raw survival table", failed.id),
+            ));
+        } else if let Some(pending) =
+            doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && !matches!(r.status, ResultStatus::UpToDate))
+        {
+            warnings.push(ChartWarning::new(
+                "pending_analysis_result",
+                format!("survival result sheet '{}' is pending recalculation; omitted stale result curves", pending.id),
+            ));
+        }
     }
 
-    if let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, primary)
+    if let Some(ds) = resolve_fresh_data_sheet_or_upstream(doc, primary, warnings)
         && let TableArchetype::Survival(surv) = &ds.archetype
     {
-        return build_km_from_survival_table(graph, &ds.id, surv, km_result);
+        return build_km_from_survival_table(graph, &ds.id, surv, km_result, warnings);
     }
 
     if let Some(res) = km_result {
@@ -285,6 +302,7 @@ fn build_km_from_survival_table(
     sheet_id: &SheetId,
     surv: &curvebook_doc::SurvivalTable,
     km_result: Option<&ResultSheet>,
+    warnings: &mut Vec<ChartWarning>,
 ) -> Vec<KmCurveData> {
     let indices: Vec<usize> = if graph.spec.series.is_empty() {
         (0..surv.cohorts.len()).collect()
@@ -295,7 +313,16 @@ fn build_km_from_survival_table(
     let mut out = Vec::with_capacity(indices.len());
     for (pos, &c_idx) in indices.iter().enumerate() {
         let Some(cohort_col) = surv.cohorts.get(c_idx) else { continue };
-        let Ok(raw_obs) = surv.cohort_observations(c_idx) else { continue };
+        let raw_obs = match surv.cohort_observations(c_idx) {
+            Ok(obs) => obs,
+            Err(err) => {
+                warnings.push(ChartWarning::new(
+                    "invalid_survival_cohort",
+                    format!("survival cohort '{}' omitted due to invalid cell(s): {err}", cohort_col.title),
+                ));
+                continue;
+            }
+        };
         let obs = filter_finite_survival_observations(raw_obs);
         if obs.is_empty() {
             continue;
@@ -350,24 +377,32 @@ fn build_km_from_survival_table(
             }
         }
 
-        if let Some((n_total, steps)) = compute_km_steps_guarded(&label, &obs) {
-            out.push(KmCurveData {
-                sheet_id: Some(sheet_id.clone()),
-                col_index: c_idx,
-                label,
-                color: style.color,
-                stroke_width_pt: style.stroke_width_pt,
-                show_censored_ticks: style.show_censored_ticks,
-                show_greenwood_ci: style.show_greenwood_ci,
-                ci_dashed: style.ci_dashed,
-                display_metric: style.display_metric,
-                staircase: style.staircase,
-                error_display: style.error_display,
-                n_total,
-                steps,
-                censored_times,
-                observations: obs,
-            });
+        match compute_km_steps_result(&label, &obs) {
+            Ok((n_total, steps)) => {
+                out.push(KmCurveData {
+                    sheet_id: Some(sheet_id.clone()),
+                    col_index: c_idx,
+                    label,
+                    color: style.color,
+                    stroke_width_pt: style.stroke_width_pt,
+                    show_censored_ticks: style.show_censored_ticks,
+                    show_greenwood_ci: style.show_greenwood_ci,
+                    ci_dashed: style.ci_dashed,
+                    display_metric: style.display_metric,
+                    staircase: style.staircase,
+                    error_display: style.error_display,
+                    n_total,
+                    steps,
+                    censored_times,
+                    observations: obs,
+                });
+            }
+            Err(err) => {
+                warnings.push(ChartWarning::new(
+                    "invalid_survival_cohort",
+                    format!("survival cohort '{}' omitted because Kaplan-Meier computation failed: {err}", cohort_col.title),
+                ));
+            }
         }
     }
     out
@@ -377,12 +412,12 @@ fn filter_finite_survival_observations(obs: Vec<curvebook_doc::SurvivalObservati
     obs.into_iter().filter(|o| o.time.is_finite()).collect()
 }
 
-pub(super) fn compute_km_steps_guarded(label: &str, obs: &[curvebook_doc::SurvivalObservation]) -> Option<(usize, Vec<KmPointStep>)> {
+fn compute_km_steps_result(label: &str, obs: &[curvebook_doc::SurvivalObservation]) -> Result<(usize, Vec<KmPointStep>), String> {
     let finite_obs: Vec<curvebook_doc::SurvivalObservation> = obs.iter().copied().filter(|o| o.time.is_finite()).collect();
     if finite_obs.is_empty() {
-        return None;
+        return Err(String::from("no finite survival observations"));
     }
-    let km = kaplan_meier_curve(label, &finite_obs, false, ConfidenceLevel::DEFAULT_95).ok()?;
+    let km = kaplan_meier_curve(label, &finite_obs, false, ConfidenceLevel::DEFAULT_95).map_err(|e| e.to_string())?;
     let mut steps = Vec::with_capacity(km.steps.len() + 1);
     steps.push(KmPointStep { time: 0.0, survival: 1.0, greenwood_se: 0.0, ci_lower: 1.0, ci_upper: 1.0, n_at_risk_before: km.n_total });
     for s in &km.steps {
@@ -395,7 +430,11 @@ pub(super) fn compute_km_steps_guarded(label: &str, obs: &[curvebook_doc::Surviv
             n_at_risk_before: s.n_at_risk,
         });
     }
-    Some((km.n_total, steps))
+    Ok((km.n_total, steps))
+}
+
+pub(super) fn compute_km_steps_guarded(label: &str, obs: &[curvebook_doc::SurvivalObservation]) -> Option<(usize, Vec<KmPointStep>)> {
+    compute_km_steps_result(label, obs).ok()
 }
 
 fn result_curve_label(res: &ResultSheet, fc: &curvebook_doc::FittedCurveOverlay, idx: usize) -> String {
@@ -426,7 +465,8 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
     let mut out = Vec::with_capacity(res.fitted_curves.len());
     for (idx, fc) in res.fitted_curves.iter().enumerate() {
         let style = km_series_style(graph, fc.data_set_index, idx);
-        let label = style.legend_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| result_curve_label(res, fc, idx));
+        let canonical_label = result_curve_label(res, fc, idx);
+        let label = style.legend_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| canonical_label.clone());
         let steps: Vec<KmPointStep> = fc
             .points
             .iter()
@@ -441,7 +481,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
                     greenwood_se: se,
                     ci_lower: ci_lo,
                     ci_upper: ci_hi,
-                    n_at_risk_before: nar_at_time_from_tab(nar_tab, &label, p.x).unwrap_or(0),
+                    n_at_risk_before: nar_at_time_from_tab(nar_tab, &canonical_label, p.x).unwrap_or(0),
                 }
             })
             .collect();
@@ -455,7 +495,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
         let n_total = steps.first().map_or(0, |s| s.n_at_risk_before);
         let mut censored_times = Vec::new();
         if let Some(tab) = nar_tab {
-            extract_censored_from_nar_tab(tab, &label, fc.data_set_index, &mut censored_times);
+            extract_censored_from_nar_tab(tab, &canonical_label, fc.data_set_index, &mut censored_times);
         }
         out.push(KmCurveData {
             sheet_id: None,
@@ -495,7 +535,10 @@ fn nar_at_time_from_tab(nar_tab: Option<&ResultTab>, cohort_label: &str, t: f64)
 }
 
 fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, col_idx: usize, out: &mut Vec<(f64, Option<usize>, usize)>) {
-    let mut prev_risk: Option<usize> = None;
+    // Each KM schedule row i records (t_i, n_i = at_risk_before, d_i = events at t_i)
+    // with recurrence n_{i+1} = n_i - d_i - c_i (and n_m = 0 after the final row m - 1).
+    // Therefore c_i = n_i - d_i - n_{i+1} subjects are censored at time t_i.
+    let mut rows: Vec<(f64, usize, usize)> = Vec::new();
     for row in &tab.rows {
         let Some(ResultCell::Text(lbl)) = row.first() else { continue };
         if lbl != cohort_label {
@@ -507,14 +550,13 @@ fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, col_idx: u
         if !row_t.is_finite() || !risk.is_finite() || !events.is_finite() || *risk < 0.0 || *events < 0.0 {
             continue;
         }
-        let r_now = *risk as usize;
-        let ev_now = *events as usize;
-        if let Some(prev) = prev_risk
-            && prev > r_now + ev_now
-        {
-            out.push((*row_t, None, col_idx));
+        rows.push((*row_t, *risk as usize, *events as usize));
+    }
+    for (i, &(t_i, n_i, d_i)) in rows.iter().enumerate() {
+        let next_n = rows.get(i + 1).map_or(0, |&(_, n_next, _)| n_next);
+        if n_i > d_i.saturating_add(next_n) {
+            out.push((t_i, None, col_idx));
         }
-        prev_risk = Some(r_now);
     }
 }
 
@@ -789,7 +831,7 @@ fn draw_number_at_risk_table(scene: &mut ChartScene, r: RectPt, cohorts: &[KmCur
     let mut dummy_warnings = Vec::new();
     let mut tick_points = Vec::new();
     for seg in &x_axis.segments {
-        let (majors, _) = compute_segment_tick_values(seg, None, true, &mut dummy_warnings);
+        let (majors, _) = compute_segment_tick_values(seg, None, false, &mut dummy_warnings);
         for t_val in majors {
             if let Some(x_pt) = seg.map_strict(t_val)
                 && x_pt >= r.x - 2.0

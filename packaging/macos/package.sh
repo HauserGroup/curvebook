@@ -3,13 +3,14 @@
 #
 #   $DIST/curvebook-<version>-macos-<arch>.dmg          CurveBook.app (with bundled curvebook-cli) on a drag-to-Applications DMG
 #
-# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build] [--require-signing]
+# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--build-only | --skip-build] [--require-signing]
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/macos"
 
 ARCH=universal
+BUILD_ONLY=0
 SKIP_BUILD=0
 REQUIRE_SIGNING=0
 case "${CURVEBOOK_REQUIRE_MACOS_SIGNING:-0}" in
@@ -25,12 +26,17 @@ while [[ $# -gt 0 ]]; do
       ARCH="$2"
       shift 2
       ;;
+    --build-only) BUILD_ONLY=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     --require-signing) REQUIRE_SIGNING=1; shift ;;
     -h | --help) sed -n '2,8p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+if [[ "$BUILD_ONLY" = 1 && "$SKIP_BUILD" = 1 ]]; then
+  echo "error: cannot combine --build-only and --skip-build" >&2
+  exit 2
+fi
 case "$ARCH" in
   universal) TARGETS=(aarch64-apple-darwin x86_64-apple-darwin) ;;
   aarch64) TARGETS=(aarch64-apple-darwin) ;;
@@ -39,6 +45,26 @@ case "$ARCH" in
 esac
 
 export MACOSX_DEPLOYMENT_TARGET=11.0
+
+build_release_binaries() {
+  local args=() t
+  for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
+  # Scrub signing/notarization credentials before invoking Cargo so dependency build.rs/proc-macros never observe them (GAP-05-02).
+  (
+    cd "$ROOT" && env \
+      -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
+      -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD \
+      -u KEYCHAIN_PASSWORD -u MACOS_KEYCHAIN -u MACOS_SIGN_IDENTITY \
+      cargo build --release --locked -p curvebook -p curvebook-cli "${args[@]}"
+  )
+}
+
+if [[ "$BUILD_ONLY" = 1 ]]; then
+  echo "==> building CurveBook $VERSION binaries for macOS ($ARCH) without signing credentials"
+  build_release_binaries
+  exit 0
+fi
+
 IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
@@ -65,9 +91,7 @@ fi
 echo "==> CurveBook $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
-  args=()
-  for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p curvebook -p curvebook-cli "${args[@]}")
+  build_release_binaries
 fi
 
 rm -rf "$WORK"
@@ -170,6 +194,10 @@ if [[ "$NOTARIZE" = 1 ]]; then
   spctl --assess --type open --context context:primary-signature -vvv "$DMG"
 fi
 
-"$APP/Contents/MacOS/curvebook-cli" --version
+env \
+  -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
+  -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD \
+  -u KEYCHAIN_PASSWORD -u MACOS_KEYCHAIN -u MACOS_SIGN_IDENTITY \
+  "$APP/Contents/MacOS/curvebook-cli" --version
 echo "==> done"
 ls -lh "$DMG"

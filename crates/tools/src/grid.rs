@@ -1078,11 +1078,7 @@ pub fn parse_tsv_clipboard(raw: &str, decimal_separator: char, parse_asterisk_ex
         return Ok(Vec::new());
     }
 
-    let raw_rows = split_tsv_records(trimmed_end);
-    let total_cells = raw_rows.iter().map(Vec::len).sum();
-    if total_cells > MAX_CLIPBOARD_CELLS {
-        return Err(GridToolError::ClipboardTooLarge { cell_count: total_cells, max: MAX_CLIPBOARD_CELLS });
-    }
+    let raw_rows = split_tsv_records(trimmed_end, MAX_CLIPBOARD_CELLS)?;
     let (inferred_dec, inferred_thousands) =
         curvebook_doc::infer_number_separators(raw_rows.iter().take(32).flat_map(|row| row.iter().map(String::as_str)), '\t');
     let thousands = if inferred_dec == decimal_separator { inferred_thousands } else { None };
@@ -1098,10 +1094,21 @@ pub fn parse_tsv_clipboard(raw: &str, decimal_separator: char, parse_asterisk_ex
     Ok(rows)
 }
 
-fn split_tsv_records(input: &str) -> Vec<Vec<String>> {
+fn push_bounded_cell(current_row: &mut Vec<String>, field: &mut String, cell_count: &mut usize, max_cells: usize) -> Result<(), GridToolError> {
+    let next_count = cell_count.saturating_add(1);
+    if next_count > max_cells {
+        return Err(GridToolError::ClipboardTooLarge { cell_count: next_count, max: max_cells });
+    }
+    *cell_count = next_count;
+    current_row.push(std::mem::take(field));
+    Ok(())
+}
+
+fn split_tsv_records(input: &str, max_cells: usize) -> Result<Vec<Vec<String>>, GridToolError> {
     let mut rows = Vec::new();
     let mut current_row = Vec::new();
     let mut field = String::new();
+    let mut cell_count = 0usize;
     let mut in_quotes = false;
     let mut chars = input.chars().peekable();
 
@@ -1123,26 +1130,26 @@ fn split_tsv_records(input: &str) -> Vec<Vec<String>> {
         match ch {
             '"' if field.is_empty() => in_quotes = true,
             '\t' => {
-                current_row.push(std::mem::take(&mut field));
+                push_bounded_cell(&mut current_row, &mut field, &mut cell_count, max_cells)?;
             }
             '\r' => {
                 if chars.peek() == Some(&'\n') {
                     let _ = chars.next();
                 }
-                current_row.push(std::mem::take(&mut field));
+                push_bounded_cell(&mut current_row, &mut field, &mut cell_count, max_cells)?;
                 rows.push(std::mem::take(&mut current_row));
             }
             '\n' => {
-                current_row.push(std::mem::take(&mut field));
+                push_bounded_cell(&mut current_row, &mut field, &mut cell_count, max_cells)?;
                 rows.push(std::mem::take(&mut current_row));
             }
             other => field.push(other),
         }
     }
 
-    current_row.push(field);
+    push_bounded_cell(&mut current_row, &mut field, &mut cell_count, max_cells)?;
     rows.push(current_row);
-    rows
+    Ok(rows)
 }
 
 fn format_cell_display(cell: &Cell, decimal_separator: char) -> String {
@@ -1705,5 +1712,14 @@ mod tests {
     fn bounds_constants_and_ordering_smoke() {
         assert_eq!(Ordering::Less.cmp(&Ordering::Equal), Ordering::Less);
         const { assert!(super::MAX_DATA_SETS > 0 && super::MAX_ROWS > 0) };
+    }
+
+    #[test]
+    fn gap_04_06_parse_tsv_clipboard_stops_incrementally_at_max_cells() {
+        // An input with far more tabs than `MAX_CLIPBOARD_CELLS` must abort as soon as cell
+        // `MAX_CLIPBOARD_CELLS + 1` is encountered without materializing all remaining cells.
+        let excess = "\t".repeat(super::MAX_CLIPBOARD_CELLS + 50_000);
+        let err = parse_tsv_clipboard(&excess, '.', true).unwrap_err();
+        assert_eq!(err, GridToolError::ClipboardTooLarge { cell_count: super::MAX_CLIPBOARD_CELLS + 1, max: super::MAX_CLIPBOARD_CELLS });
     }
 }

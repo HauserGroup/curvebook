@@ -807,10 +807,12 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         }
         "app.preferences" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenPreferences { category: None })),
         "ui.brush.point" => {
-            let params = match (resolve_data_sheet_id(doc), app.grid.tool.active) {
-                (Some(id), Some(coord)) => json!({ "sheet_id": id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol }),
-                (Some(id), None) => json!({ "sheet_id": id.as_str(), "row": 0, "col": 0, "subcol": 0 }),
-                (None, _) => json!({}),
+            let params = match resolve_data_sheet_id(doc) {
+                Some(id) => match app.grid.active_cell_for_sheet(&id) {
+                    Some(coord) => json!({ "sheet_id": id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol }),
+                    None => json!({ "sheet_id": id.as_str(), "row": 0, "col": 0, "subcol": 0 }),
+                },
+                None => json!({}),
             };
             Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.brush.point"), params })
         }

@@ -2793,7 +2793,7 @@ fn render_import_project_mode_modal(
 ) -> AppModalFrameReport {
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "import.mode.title");
-    let (inner_w, max_h, body_w) = modal_bounds(ctx, 500.0);
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 540.0);
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         intents.push(UiIntent::CloseAllModals);
@@ -2863,6 +2863,24 @@ fn render_import_project_mode_modal(
                     ui,
                     meta,
                     AppBtn {
+                        widget_id: "import_project_mode.new_window",
+                        label: crate::i18n::tr_or_fallback(locale, "import.mode.open_in_new_window", "Open in new window"),
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push_ui(cmd_owned.clone(), json!({ "path": path_owned, "new_window": true }));
+                    intents.push(UiIntent::CloseAllModals);
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
                         widget_id: "import_project_mode.replace",
                         label: tr(locale, "import.mode.open_as_new"),
                         command_id: None,
@@ -2874,7 +2892,6 @@ fn render_import_project_mode_modal(
                 )
                 .clicked()
                 {
-                    let _ = (&cmd_owned, &path_owned);
                     intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_replace") });
                 }
                 if app_button(
@@ -2892,7 +2909,6 @@ fn render_import_project_mode_modal(
                 )
                 .clicked()
                 {
-                    let _ = (&cmd_owned, &path_owned);
                     intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_merge") });
                 }
             });

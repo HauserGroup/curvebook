@@ -1412,10 +1412,13 @@ fn build_canvas_snapshot(
 fn build_grid_selection_snapshot(app: &UiApp) -> GridSelectionSnapshot {
     let doc = app.document();
     let active_ds = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
+    let matches_active = active_ds.is_some_and(|ds| app.grid.selection_belongs_to(&ds.id));
     let selected_coords: Vec<GridCoordSnapshot> = active_ds
         .map(|ds| app.grid.all_selected_coords(ds).into_iter().take(MAX_INSPECT_SELECTED_COORDS).map(GridCoordSnapshot::from).collect())
         .unwrap_or_default();
-    let selected_cells_count = if !app.grid.selected_coords.is_empty() {
+    let selected_cells_count = if !matches_active {
+        0
+    } else if !app.grid.selected_coords.is_empty() {
         app.grid.selected_coords.len()
     } else if let (Some(ds), Some(a), Some(b)) = (active_ds, app.grid.tool.anchor, app.grid.tool.active) {
         selection_cell_count(ds, a, b)
@@ -1423,12 +1426,12 @@ fn build_grid_selection_snapshot(app: &UiApp) -> GridSelectionSnapshot {
         0
     };
     GridSelectionSnapshot {
-        active_cell: app.grid.tool.active.map(GridCoordSnapshot::from),
-        anchor_cell: app.grid.tool.anchor.map(GridCoordSnapshot::from),
-        selected_rows: app.grid.selected_rows.iter().copied().take(MAX_INSPECT_SELECTED_COORDS).collect(),
+        active_cell: matches_active.then_some(app.grid.tool.active).flatten().map(GridCoordSnapshot::from),
+        anchor_cell: matches_active.then_some(app.grid.tool.anchor).flatten().map(GridCoordSnapshot::from),
+        selected_rows: if matches_active { app.grid.selected_rows.iter().copied().take(MAX_INSPECT_SELECTED_COORDS).collect() } else { Vec::new() },
         selected_coords,
         selected_cells_count,
-        quick_stats: app.grid.quick_stats,
+        quick_stats: matches_active.then_some(app.grid.quick_stats).flatten(),
     }
 }
 
@@ -2518,7 +2521,8 @@ pub fn clear_right_click_miss_context_menu(app: &mut UiApp) {
 /// Return whether `wid` addresses the already-selected active grid cell without an open inline editor.
 #[must_use]
 pub fn is_grid_cell_widget_selected_without_inline_edit(app: &UiApp, wid: &str) -> bool {
-    crate::grid_view::parse_grid_cell_widget_id(wid).is_some_and(|coord| app.grid.tool.active == Some(coord))
+    let active_for_sheet = app.document().active_sheet_id.as_ref().and_then(|sid| app.grid.active_cell_for_sheet(sid));
+    crate::grid_view::parse_grid_cell_widget_id(wid).is_some_and(|coord| active_for_sheet == Some(coord))
         && app.egui_views.column_grid.inline_edit.is_none()
 }
 
@@ -2768,7 +2772,7 @@ pub fn prepare_grid_type_text_target(
         widget_id.and_then(parse_grid_cell_widget_id).or_else(|| live_focus_wid.and_then(parse_grid_cell_widget_id)).or_else(|| {
             if widget_id.is_none() && !modal_backdrop_active && !app.grid.formula_bar.active && live_focus_wid.is_none_or(|f| f.starts_with("grid."))
             {
-                app.grid.tool.active
+                app.document().active_sheet_id.as_ref().and_then(|sid| app.grid.active_cell_for_sheet(sid))
             } else {
                 None
             }
@@ -3637,7 +3641,14 @@ pub fn render_egui_shell_frame_with_host(
 
     let history_can_back = views.can_go_back();
     let history_can_forward = views.can_go_forward();
-    let hover_readout = views.canvas_view.hover_readout.clone();
+    let focused_secondary = views.center_stage.focused_split_pane == crate::egui_shell::center_stage::SplitPaneSlot::Secondary;
+    let hover_readout = if app.split.enabled && focused_secondary {
+        views.center_stage.secondary_canvas_view.hover_readout.clone().or_else(|| views.canvas_view.hover_readout.clone())
+    } else if app.split.enabled {
+        views.canvas_view.hover_readout.clone().or_else(|| views.center_stage.secondary_canvas_view.hover_readout.clone())
+    } else {
+        views.canvas_view.hover_readout.clone()
+    };
     let foot_rep = render_status_footer(
         ui,
         app,
@@ -3664,6 +3675,14 @@ pub fn render_egui_shell_frame_with_host(
     );
     report.leading_dock_rect_pt = lead_rep.dock_rect_pt;
 
+    let inspector_target_sheet = app.split.effective_inspector_target(app.document());
+    let inspector_canvas_view = if app.split.inspector_targets_secondary_pane(app.document(), focused_secondary) {
+        &views.center_stage.secondary_canvas_view
+    } else {
+        &views.canvas_view
+    };
+    let (selected_panel_index, selected_graph_annotation) = inspector_canvas_view.selection_for_sheet(inspector_target_sheet);
+
     let trail_rep = render_trailing_studio(
         ui,
         app,
@@ -3673,8 +3692,8 @@ pub fn render_egui_shell_frame_with_host(
             layout,
             enabled,
             focused: app.nav.active_pane == ActiveWorkspacePane::Inspector,
-            selected_panel_index: views.canvas_view.selected_panel_index,
-            selected_graph_annotation: views.canvas_view.selected_graph_annotation,
+            selected_panel_index,
+            selected_graph_annotation,
         },
         meta,
         intents,

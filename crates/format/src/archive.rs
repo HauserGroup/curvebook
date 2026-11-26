@@ -2971,6 +2971,9 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
     if let Some(nested) = kind.get_mut("NestedComparison").and_then(serde_json::Value::as_object_mut) {
         nested.entry(String::from("df_method")).or_insert_with(|| serde_json::Value::String(String::from("KenwardRoger")));
     }
+    if let Some(levene) = kind.get_mut("LeveneTest").and_then(serde_json::Value::as_object_mut) {
+        levene.entry(String::from("center")).or_insert_with(|| serde_json::Value::String(String::from("Median")));
+    }
 }
 
 fn backfill_graph_sheet_defaults(gs: &mut serde_json::Value) {

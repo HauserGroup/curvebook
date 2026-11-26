@@ -20,7 +20,7 @@ pub(super) fn active_mv_formula_operands(app: &UiApp, ds: &DataSheet) -> HashSet
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else { return out };
     let formula_opt = if app.grid.formula_bar.active && !app.grid.formula_bar.input.trim().is_empty() {
         Some(app.grid.formula_bar.input.as_str())
-    } else if let Some(active) = app.grid.tool.active {
+    } else if let Some(active) = app.grid.active_cell_for_sheet(&ds.id) {
         mv.variables.get(active.col).and_then(|v| match &v.source {
             VariableSource::Calculated { formula, .. } => Some(formula.as_str()),
             VariableSource::Entered => None,

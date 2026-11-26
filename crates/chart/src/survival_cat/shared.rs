@@ -10,7 +10,9 @@ use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerStyle, R
 use curvebook_text::{LocaleNumberPolicy, RichText, TextMetricsPt, format_axis_tick, measure_text_pt, parse_markup};
 
 use crate::scales::{LegendEntry as ScaledLegendEntry, format_tick_markup, sanitize_linear_range};
-use crate::scene::{ChartError, ChartScene, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
+use crate::scene::{
+    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+};
 use crate::xy::{ChromeAxes, SegmentedAxis, render_cartesian_chrome_full};
 
 const COLORBAR_STEPS: usize = 48;
@@ -405,7 +407,7 @@ pub(crate) struct SheetGrid {
 
 pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetId, tab_id: Option<&str>) -> Option<SheetGrid> {
     if let Some(res) = doc.result_sheet(source_sheet_id) {
-        if matches!(res.status, ResultStatus::Failed { .. }) {
+        if !matches!(res.status, ResultStatus::UpToDate) {
             return None;
         }
         let tab: Option<&ResultTab> = tab_id.and_then(|tid| res.tabs.iter().find(|t| t.id == tid)).or_else(|| res.tabs.first());
@@ -433,6 +435,45 @@ pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetI
         let row_labels = info.constants.iter().map(|c| c.name.clone()).collect();
         let rows = info.constants.iter().map(|c| vec![c.value.display_text(), c.units.clone().unwrap_or_default()]).collect();
         return Some(SheetGrid { headers, row_labels, rows });
+    }
+    None
+}
+
+/// Resolve a [`DataSheet`] from `id`, refusing to read stale `Dirty` or `Failed` intermediate
+/// [`curvebook_doc::ResultSheet`]s and emitting an explicit [`ChartWarning`] when blocked.
+pub(super) fn resolve_fresh_data_sheet_or_upstream<'a>(
+    doc: &'a ProjectDocument,
+    id: &SheetId,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<&'a DataSheet> {
+    let mut visited = std::collections::HashSet::new();
+    let mut cursor = id;
+    while visited.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return Some(ds);
+        }
+        let res = doc.result_sheet(cursor)?;
+        match &res.status {
+            ResultStatus::UpToDate => {}
+            ResultStatus::Failed { .. } => {
+                let msg = format!("result sheet '{}' failed; omitted stale analysis data", res.id);
+                if !warnings.iter().any(|w| w.code == "failed_result_sheet" && w.message == msg) {
+                    warnings.push(ChartWarning::new("failed_result_sheet", msg));
+                }
+                return None;
+            }
+            ResultStatus::Dirty => {
+                let msg = format!("result sheet '{}' is pending recalculation; omitted stale analysis data", res.id);
+                if !warnings.iter().any(|w| w.code == "pending_analysis_result" && w.message == msg) {
+                    warnings.push(ChartWarning::new("pending_analysis_result", msg));
+                }
+                return None;
+            }
+        }
+        if let Some(analyzable) = res.analyzable_data.as_ref() {
+            return Some(analyzable);
+        }
+        cursor = &res.analysis.source_sheet_id;
     }
     None
 }

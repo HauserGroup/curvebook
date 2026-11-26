@@ -1,16 +1,17 @@
 //! ROC curve (sensitivity vs 1-specificity + AUC) and forest plot diagnostic builders.
 
 use curvebook_doc::{
-    AnalysisKind, FittedCurveOverlay, GlmFamily, GlmSpec, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode,
-    TableArchetype, VariableRole,
+    AnalysisKind, FittedCurveOverlay, GlmFamily, GlmSpec, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind,
+    SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, VariableRole,
 };
+use curvebook_math::dist::norm_two_sided_isf;
 use curvebook_math::{AxisScale, ConfidenceLevel};
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_text::{RichText, parse_markup};
 
 use super::super::multivariate::{cell_token, column_categorical_levels};
-use super::{find_matching_result_checked, find_matching_result_where_checked, raw_matching_results, resolve_source_data_sheet};
+use super::{find_matching_result_where_checked, has_blocked_matching_result, raw_matching_results, resolve_source_data_sheet_checked};
 use crate::markers::emit_marker;
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, ScenePrimitive, TextAnchor};
 use crate::survival_cat::{
@@ -155,7 +156,7 @@ fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Ve
         return None;
     }
 
-    let ds = resolve_source_data_sheet(graph, doc)?;
+    let ds = resolve_source_data_sheet_checked(graph, doc, warnings)?;
     match &ds.archetype {
         TableArchetype::Column(col) if col.data_sets.len() >= 2 => {
             let controls: Vec<f64> = col.data_sets.first()?.cells.iter().filter_map(|s| s.first().and_then(|c| c.active_number())).collect();
@@ -233,12 +234,20 @@ struct ForestEntry {
     is_pooled: bool,
 }
 
+struct ForestExtracted {
+    entries: Vec<ForestEntry>,
+    is_covariate_regression: bool,
+    is_ratio_scale: bool,
+    confidence: ConfidenceLevel,
+}
+
 pub(in crate::multivariate_layout) fn compile_forest_plot(
     graph: &GraphSheet,
     doc: &ProjectDocument,
     scene: &mut ChartScene,
 ) -> Result<(), ChartError> {
-    let mut entries = extract_forest_entries(graph, doc, &mut scene.warnings);
+    let extracted = extract_forest_entries(graph, doc, &mut scene.warnings);
+    let mut entries = extracted.entries;
     if entries.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_forest", "no effect estimates & confidence intervals for forest plot"));
         draw_empty_open_frame(scene);
@@ -250,19 +259,25 @@ pub(in crate::multivariate_layout) fn compile_forest_plot(
     let all_positive = entries.iter().all(|e| e.lower > 0.0 && e.estimate > 0.0 && e.upper > 0.0);
     let ref_x: f64 = if is_log
         || (all_positive
-            && (graph.spec.x_axis.title.contains("OR") || graph.spec.x_axis.title.contains("HR") || graph.spec.x_axis.title.contains("Ratio")))
+            && (extracted.is_ratio_scale
+                || graph.spec.x_axis.title.contains("OR")
+                || graph.spec.x_axis.title.contains("HR")
+                || graph.spec.x_axis.title.contains("Ratio")))
     {
         1.0
     } else {
         0.0
     };
 
-    if graph.spec.forest_show_pooled_diamond
-        && entries.len() >= 2
-        && !entries.iter().any(|e| e.is_pooled)
-        && let Some(pooled) = compute_pooled_forest_entry(&entries, is_log || ref_x == 1.0)
-    {
-        entries.push(pooled);
+    if graph.spec.forest_show_pooled_diamond && entries.len() >= 2 && !entries.iter().any(|e| e.is_pooled) {
+        if extracted.is_covariate_regression {
+            scene.warnings.push(ChartWarning::new(
+                "pooled_diamond_suppressed_for_covariates",
+                "fixed-effect pooled summary diamond is not applicable to heterogeneous regression covariates and was omitted",
+            ));
+        } else if let Some(pooled) = compute_pooled_forest_entry(&entries, is_log || ref_x == 1.0, extracted.confidence, &mut scene.warnings) {
+            entries.push(pooled);
+        }
     }
 
     let mut x_min = f64::INFINITY;
@@ -479,43 +494,145 @@ fn extract_subcolumn_forest_entries(
     entries
 }
 
-fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<ForestEntry> {
-    if let Some(res) = find_matching_result_checked(graph, doc, warnings)
+fn is_covariate_regression_kind(kind: &AnalysisKind) -> bool {
+    matches!(
+        kind,
+        AnalysisKind::GeneralizedLinearModel(_)
+            | AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. })
+            | AnalysisKind::SimpleLogisticRegression(_)
+            | AnalysisKind::LinearRegression(_)
+            | AnalysisKind::NonlinearRegression(_)
+    )
+}
+
+fn is_forest_result_sheet(res: &ResultSheet) -> bool {
+    is_covariate_regression_kind(&res.analysis.kind)
+        || res.tabs.iter().any(|t| {
+            (t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.kind == ResultTabKind::MainSummary)
+                && t.rows.iter().any(|r| r.iter().any(|c| matches!(c, ResultCell::ConfidenceInterval { .. })))
+        })
+}
+
+fn is_excluded_forest_est_header(lower: &str) -> bool {
+    lower.contains("ci")
+        || lower.contains("likelihood")
+        || lower.contains("p value")
+        || lower.contains("p-value")
+        || lower.contains("wald")
+        || lower.contains("schoenfeld")
+        || lower == "se"
+        || lower.contains("std. error")
+        || lower.contains("asymptotic se")
+}
+
+fn find_forest_ci_col(tab: &ResultTab, preferred_idx: Option<usize>) -> Option<usize> {
+    let has_ci_cell = |col: usize| tab.rows.iter().any(|r| matches!(r.get(col), Some(ResultCell::ConfidenceInterval { .. })));
+    if let Some(pref) = preferred_idx
+        && has_ci_cell(pref)
+    {
+        return Some(pref);
+    }
+    let ratio_ci = tab.column_headers.iter().enumerate().position(|(idx, h)| {
+        let l = h.to_ascii_lowercase();
+        has_ci_cell(idx) && (l.contains("(hr)") || l.contains("(or)") || l.contains("(rr)") || l.contains("ratio"))
+    });
+    if ratio_ci.is_some() {
+        return ratio_ci;
+    }
+    (0..tab.column_headers.len())
+        .find(|&idx| has_ci_cell(idx))
+        .or_else(|| tab.rows.iter().find_map(|r| r.iter().position(|c| matches!(c, ResultCell::ConfidenceInterval { .. }))))
+}
+
+/// Select `(estimate_col, ci_col, is_ratio_scale)` for a parameter/summary result tab so ratio
+/// columns (`Hazard Ratio`, `Odds Ratio`, `Rate Ratio`) are preferred over log-scale `"beta"`
+/// whenever paired with a ratio-scale CI (`GAP-02-02`).
+fn select_forest_columns(tab: &ResultTab) -> (Option<usize>, Option<usize>, bool) {
+    let ratio_col = tab.column_headers.iter().position(|h| {
+        let l = h.to_ascii_lowercase();
+        !is_excluded_forest_est_header(&l) && (l.contains("ratio") || l == "hr" || l == "or" || l == "rr")
+    });
+    if let Some(rc) = ratio_col {
+        let ci_col = find_forest_ci_col(tab, Some(rc + 1));
+        let ci_is_beta = ci_col.and_then(|c| tab.column_headers.get(c)).is_some_and(|h| {
+            let l = h.to_ascii_lowercase();
+            l.contains("beta") || l.contains("log(")
+        });
+        if !ci_is_beta {
+            return (Some(rc), ci_col, true);
+        }
+    }
+    let ci_col = find_forest_ci_col(tab, None);
+    let est_col = tab
+        .column_headers
+        .iter()
+        .position(|h| {
+            let l = h.to_ascii_lowercase();
+            !is_excluded_forest_est_header(&l) && (l.contains("estimate") || l.contains("best-fit") || l.contains("diff") || l.contains("effect"))
+        })
+        .or_else(|| {
+            tab.column_headers.iter().position(|h| {
+                let l = h.to_ascii_lowercase();
+                !is_excluded_forest_est_header(&l) && (l.contains("beta") || l.contains("coef"))
+            })
+        })
+        .or_else(|| (ci_col != Some(0)).then_some(0));
+    (est_col, ci_col, false)
+}
+
+fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> ForestExtracted {
+    let empty =
+        ForestExtracted { entries: Vec::new(), is_covariate_regression: false, is_ratio_scale: false, confidence: ConfidenceLevel::DEFAULT_95 };
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, is_forest_result_sheet)
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.kind == ResultTabKind::MainSummary)
     {
         let mut entries = Vec::new();
         let is_log_x = is_log_like(graph.spec.x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale));
-        let est_idx = tab
-            .column_headers
-            .iter()
-            .position(|h| {
-                let l = h.to_ascii_lowercase();
-                l.contains("ratio") || l.contains("estimate") || l.contains("diff") || l.contains("beta")
-            })
-            .unwrap_or(0);
+        let (est_col_opt, ci_col_opt, is_ratio_scale) = select_forest_columns(tab);
         for (r, row) in tab.rows.iter().enumerate() {
-            if let Some((lo, hi)) = row.iter().find_map(|c| match c {
-                ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Finite(hi) } => {
-                    Some((*lo, *hi))
-                }
-                _ => None,
-            }) {
-                let est = match row.get(est_idx) {
+            let ci_pair = ci_col_opt
+                .and_then(|ci_c| match row.get(ci_c) {
+                    Some(ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Finite(hi) }) => {
+                        Some((*lo, *hi))
+                    }
+                    _ => None,
+                })
+                .or_else(|| {
+                    row.iter().find_map(|c| match c {
+                        ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Finite(hi) } => {
+                            Some((*lo, *hi))
+                        }
+                        _ => None,
+                    })
+                });
+            if let Some((lo, hi)) = ci_pair {
+                let est = match est_col_opt.and_then(|ec| row.get(ec)) {
                     Some(ResultCell::Number { value, .. }) if value.is_finite() => *value,
-                    _ if is_log_x && lo > 0.0 && hi > 0.0 => (lo * hi).sqrt(),
+                    _ if (is_log_x || is_ratio_scale) && lo > 0.0 && hi > 0.0 => (lo * hi).sqrt(),
                     _ => 0.5 * (lo + hi),
                 };
                 let label = tab.row_labels.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Study {}", r + 1));
                 push_validated_forest_entry(&mut entries, warnings, label, est, lo, hi);
             }
         }
-        if !entries.is_empty() {
-            return entries;
+        if !entries.is_empty() || is_covariate_regression_kind(&res.analysis.kind) {
+            return ForestExtracted {
+                entries,
+                is_covariate_regression: is_covariate_regression_kind(&res.analysis.kind),
+                is_ratio_scale,
+                confidence: res.analysis.confidence_level,
+            };
         }
     }
 
-    let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
-    match &ds.archetype {
+    // Never silently fall back to raw MultipleVariables columns (e.g. Time/Status/Dose) when a
+    // linked regression/survival/forest result is pending recalculation or failed (`GAP-02-02`/`GAP-06-03`).
+    if has_blocked_matching_result(graph, doc, is_forest_result_sheet) {
+        return empty;
+    }
+
+    let Some(ds) = resolve_source_data_sheet_checked(graph, doc, warnings) else { return empty };
+    let entries = match &ds.archetype {
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 3 => {
             let num_cols: Vec<usize> = mv
                 .variables
@@ -531,7 +648,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                 .and_then(|m| m.label_column)
                 .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Label || v.role == VariableRole::Categorical));
             let (Some(&c_est), Some(&c_lo), Some(&c_hi)) = (num_cols.first(), num_cols.get(1), num_cols.get(2)) else {
-                return Vec::new();
+                return empty;
             };
             let mut entries = Vec::new();
             for r in 0..mv.row_count() {
@@ -551,11 +668,11 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
             entries
         }
         TableArchetype::Grouped(grouped) if matches!(grouped.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
-            let Some(ds_col) = grouped.data_sets.first() else { return Vec::new() };
+            let Some(ds_col) = grouped.data_sets.first() else { return empty };
             extract_subcolumn_forest_entries(grouped.subcolumn_mode, &ds_col.cells, &grouped.row_titles, warnings)
         }
         TableArchetype::Column(col) if matches!(col.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
-            let Some(ds_col) = col.data_sets.first() else { return Vec::new() };
+            let Some(ds_col) = col.data_sets.first() else { return empty };
             extract_subcolumn_forest_entries(col.subcolumn_mode, &ds_col.cells, &col.row_titles, warnings)
         }
         TableArchetype::Column(col) if col.data_sets.len() >= 3 => {
@@ -573,38 +690,56 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
             entries
         }
         TableArchetype::Xy(xy) if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits) => {
-            let Some(ds_col) = xy.data_sets.first() else { return Vec::new() };
+            let Some(ds_col) = xy.data_sets.first() else { return empty };
             extract_subcolumn_forest_entries(xy.y_subcolumn_mode, &ds_col.cells, &xy.row_titles, warnings)
         }
         _ => Vec::new(),
-    }
+    };
+    ForestExtracted { entries, is_covariate_regression: false, is_ratio_scale: false, confidence: ConfidenceLevel::DEFAULT_95 }
 }
 
-fn compute_pooled_forest_entry(entries: &[ForestEntry], on_log_scale: bool) -> Option<ForestEntry> {
+fn compute_pooled_forest_entry(
+    entries: &[ForestEntry],
+    on_log_scale: bool,
+    confidence: ConfidenceLevel,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<ForestEntry> {
+    let z = norm_two_sided_isf(confidence.alpha()).unwrap_or(1.959_963_984_540_054);
     let mut sum_w = 0.0;
     let mut sum_wy = 0.0;
     for e in entries {
         if on_log_scale && (e.estimate <= 0.0 || e.lower <= 0.0 || e.upper <= 0.0) {
             return None;
         }
-        let (y, se) = if on_log_scale {
-            (e.estimate.ln(), ((e.upper.ln() - e.lower.ln()) / (2.0 * 1.96)).max(1e-6))
-        } else {
-            (e.estimate, ((e.upper - e.lower) / (2.0 * 1.96)).max(1e-6))
-        };
+        let (y, half_width) =
+            if on_log_scale { (e.estimate.ln(), 0.5 * (e.upper.ln() - e.lower.ln())) } else { (e.estimate, 0.5 * (e.upper - e.lower)) };
+        if !y.is_finite() || !half_width.is_finite() || half_width <= 1e-12 {
+            warnings.push(ChartWarning::new(
+                "pooled_diamond_degenerate_ci",
+                format!("omitted pooled fixed-effect diamond: entry '{}' has zero-width or non-finite CI", e.label),
+            ));
+            return None;
+        }
+        let se = half_width / z;
         let w = 1.0 / (se * se);
+        if !w.is_finite() || w <= 0.0 {
+            return None;
+        }
         sum_w += w;
         sum_wy += w * y;
     }
-    if sum_w <= 0.0 {
+    if !sum_w.is_finite() || sum_w <= 0.0 {
         return None;
     }
     let y_pool = sum_wy / sum_w;
     let se_pool = (1.0 / sum_w).sqrt();
     let (est, lo, hi) = if on_log_scale {
-        (y_pool.exp(), (y_pool - 1.96 * se_pool).exp(), (y_pool + 1.96 * se_pool).exp())
+        (y_pool.exp(), (y_pool - z * se_pool).exp(), (y_pool + z * se_pool).exp())
     } else {
-        (y_pool, y_pool - 1.96 * se_pool, y_pool + 1.96 * se_pool)
+        (y_pool, y_pool - z * se_pool, y_pool + z * se_pool)
     };
+    if !est.is_finite() || !lo.is_finite() || !hi.is_finite() {
+        return None;
+    }
     Some(ForestEntry { label: String::from("Pooled (FE)"), estimate: est, lower: lo, upper: hi, is_pooled: true })
 }

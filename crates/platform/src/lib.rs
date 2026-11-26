@@ -19,7 +19,10 @@ use std::fmt;
 pub use base64::Base64Error;
 pub use control_auth::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth, MAX_CONTROL_TOKEN_BYTES};
 #[cfg(not(target_arch = "wasm32"))]
-pub use fs::{read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, sync_dir, write_atomic, write_atomic_with_hook};
+pub use fs::{
+    DEFAULT_STALE_TEMP_MAX_AGE, read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, sweep_stale_temp_files, sync_dir,
+    write_atomic, write_atomic_with_hook,
+};
 pub use path_guard::PATH_PARAM_KEYS;
 #[cfg(not(target_arch = "wasm32"))]
 pub use path_guard::{PathResolver, WorkdirGuard, ensure_regular_file};

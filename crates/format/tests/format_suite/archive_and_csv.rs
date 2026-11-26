@@ -485,3 +485,79 @@ fn rout_outlier_cells_migrate_v5_and_round_trip() {
     doc.result_sheets[0].eliminated_outliers.push(source.clone());
     assert_eq!(open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap().result_sheets[0].eliminated_outliers, [source]);
 }
+
+#[test]
+fn gap_06_05_levene_test_schema_v8_upgrades_v7_and_rejects_future_before_serde() {
+    assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+
+    // 1. Persisting `AnalysisKind::LeveneTest` stamps both manifest and document with schema v8 and round-trips cleanly.
+    let mut doc = ProjectDocument::new("Levene Schema V8").unwrap();
+    doc.add_data_sheet(col_sheet("data-col", 3, 4)).unwrap();
+    doc.add_result_sheet(result_sheet_with_kind(
+        "res-bf",
+        "data-col",
+        AnalysisKind::LeveneTest(curvebook_doc::LeveneTestSpec { center: curvebook_doc::LeveneCenter::Median }),
+    ))
+    .unwrap();
+    doc.add_result_sheet(result_sheet_with_kind(
+        "res-lev",
+        "data-col",
+        AnalysisKind::LeveneTest(curvebook_doc::LeveneTestSpec { center: curvebook_doc::LeveneCenter::Mean }),
+    ))
+    .unwrap();
+
+    let saved = save_project_bytes(&doc).unwrap();
+    let zip = curvebook_format::zip::ZipArchive::from_bytes(&saved).unwrap();
+    let manifest_val: Value = serde_json::from_str(zip.get_utf8("manifest.json").unwrap().unwrap()).unwrap();
+    let doc_val: Value = serde_json::from_str(zip.get_utf8("document.json").unwrap().unwrap()).unwrap();
+    assert_eq!(manifest_val["schema_version"], json!(8));
+    assert_eq!(doc_val["schema_version"], json!(8));
+
+    let reopened = open_project_bytes(&saved).unwrap();
+    assert_eq!(reopened.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(
+        reopened.result_sheets[0].analysis.kind,
+        AnalysisKind::LeveneTest(curvebook_doc::LeveneTestSpec { center: curvebook_doc::LeveneCenter::Median })
+    );
+    assert_eq!(
+        reopened.result_sheets[1].analysis.kind,
+        AnalysisKind::LeveneTest(curvebook_doc::LeveneTestSpec { center: curvebook_doc::LeveneCenter::Mean })
+    );
+
+    // 2. An older schema-v7 reader (max_supported = 7) rejects the v8 LeveneTest payload with
+    //    `UnsupportedSchemaVersion` instead of attempting serde deserialization and failing with `unknown variant 'LeveneTest'`.
+    fn noop_step(_: &mut Value) -> Result<(), FormatError> {
+        Ok(())
+    }
+    let v7_steps: Vec<curvebook_format::versioned::VersionStep> =
+        (0..7).map(|from_version| curvebook_format::versioned::VersionStep { from_version, apply: noop_step }).collect();
+    let v7_reader_err = curvebook_format::versioned::upgrade(doc_val.clone(), 8, 0, 7, &v7_steps).unwrap_err();
+    assert!(
+        matches!(v7_reader_err, FormatError::UnsupportedSchemaVersion { version: 8, max_supported: 7 }),
+        "expected UnsupportedSchemaVersion(8, 7), got {v7_reader_err:?}"
+    );
+
+    // 3. A schema-v7 fixture (no LeveneTest) upgrades cleanly through `v7 -> v8` to `CURRENT_SCHEMA_VERSION == 8`.
+    let base_v7 = sample_dose_project();
+    let mut v7_val = serde_json::to_value(&base_v7).unwrap();
+    v7_val["schema_version"] = json!(7_u32);
+    let upgraded_v7 = open_project_bytes(&build_archive_zip_from_value(&v7_val, 7)).unwrap();
+    assert_eq!(upgraded_v7.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(upgraded_v7.data_sheets.len(), base_v7.data_sheets.len());
+    assert_eq!(upgraded_v7.result_sheets.len(), base_v7.result_sheets.len());
+
+    // 4. Forward-compat guard on current v8 reader: a v9 archive carrying an unknown future `AnalysisKind`
+    //    variant must fail with `UnsupportedSchemaVersion { version: 9, max_supported: 8 }`, NOT raw serde `unknown variant`.
+    let mut v9_val = doc_val;
+    v9_val["schema_version"] = json!(CURRENT_SCHEMA_VERSION + 1);
+    v9_val["result_sheets"][0]["analysis"]["kind"] = json!({ "FutureAnalysisV9": { "option": true } });
+    let future_err = open_project_bytes(&build_archive_zip_from_value(&v9_val, CURRENT_SCHEMA_VERSION + 1)).unwrap_err();
+    assert!(
+        matches!(
+            future_err,
+            FormatError::UnsupportedSchemaVersion { version, max_supported }
+                if version == CURRENT_SCHEMA_VERSION + 1 && max_supported == CURRENT_SCHEMA_VERSION
+        ),
+        "expected UnsupportedSchemaVersion(9, 8) before serde, got {future_err:?}"
+    );
+}

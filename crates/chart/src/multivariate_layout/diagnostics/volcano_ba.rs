@@ -13,7 +13,8 @@ use curvebook_text::{RichText, parse_markup};
 use super::super::multivariate::cell_token;
 use super::{
     DiagPoint, active_xy_pairs_with_sources, find_header_col, find_matching_result_checked, find_matching_result_where,
-    find_matching_result_where_checked, resolve_source_data_sheet, result_cell_num, result_cell_p_or_num,
+    find_matching_result_where_checked, has_blocked_matching_result, resolve_analysis_source_data_sheet, resolve_source_data_sheet_checked,
+    result_cell_num, result_cell_p_or_num,
 };
 use crate::markers::emit_marker;
 use crate::scene::{
@@ -24,10 +25,21 @@ use crate::survival_cat::{
 };
 use crate::xy::format_point_value;
 
-// 2b. Volcano Plot (-log10(p) vs log2FC + Threshold Crosshairs)
+struct VolcanoPoint {
+    diag: DiagPoint,
+    significant: Option<bool>,
+}
+
+struct VolcanoExtracted {
+    points: Vec<VolcanoPoint>,
+    is_difference_units: bool,
+}
+
+// 2b. Volcano Plot (-log10(p) vs log2FC or Difference + Threshold Crosshairs)
 
 pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let pts = extract_volcano_points(graph, doc, &mut scene.warnings);
+    let extracted = extract_volcano_points(graph, doc, &mut scene.warnings);
+    let pts = extracted.points;
     if pts.is_empty() {
         scene.warnings.push(ChartWarning::new("empty_volcano", "no fold-change / p-value observations for volcano plot"));
         draw_empty_open_frame(scene);
@@ -43,15 +55,28 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
         }
         _ => None,
     });
-    let (fc_neg, fc_pos, default_p_thresh) = volcano_thresholds(&graph.spec);
-    let p_thresh = if graph.spec.y_axis.thresholds.is_empty() { mr_threshold.unwrap_or(default_p_thresh) } else { default_p_thresh };
-    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
-    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
-    let x_abs = x_min.abs().max(x_max.abs()).max(fc_pos).max(1.0) * 1.1;
+    let is_difference_units = extracted.is_difference_units || mr_res.is_some();
+    let has_user_x_thresholds = !graph.spec.x_axis.thresholds.is_empty();
+    let has_user_y_thresholds = !graph.spec.y_axis.thresholds.is_empty();
+    let (fc_cuts_opt, default_p_thresh) = volcano_thresholds(&graph.spec, is_difference_units);
+    let p_thresh = if !has_user_y_thresholds { mr_threshold.unwrap_or(default_p_thresh) } else { default_p_thresh };
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.diag.x), b.max(p.diag.x)));
+    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.diag.y), b.max(p.diag.y)));
+    let raw_x_abs = x_min.abs().max(x_max.abs());
+    let x_abs = match fc_cuts_opt {
+        Some((fc_neg, fc_pos)) => raw_x_abs.max(fc_neg.abs()).max(fc_pos.abs()).max(1.0) * 1.1,
+        None => {
+            if raw_x_abs > 1e-12 {
+                raw_x_abs * 1.1
+            } else {
+                1.0
+            }
+        }
+    };
 
     let mut frame_graph = graph.clone();
     if frame_graph.spec.x_axis.title.trim().is_empty() || frame_graph.spec.x_axis.title == "X" {
-        frame_graph.spec.x_axis.title = String::from(if mr_threshold.is_some() { "Difference (A - B)" } else { "log2 Fold Change" });
+        frame_graph.spec.x_axis.title = String::from(if is_difference_units { "Difference (A - B)" } else { "log2 Fold Change" });
     }
     if frame_graph.spec.y_axis.title.trim().is_empty() || frame_graph.spec.y_axis.title == "Y" {
         frame_graph.spec.y_axis.title = String::from("-log10(P)");
@@ -75,15 +100,24 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
     let r = scene.plot_rect_pt;
 
     let crosshair_stroke = solid_stroke(Rgba8::rgb(110, 118, 128), 1.0, LineDashStyle::Dashed);
-    for xv in [fc_neg, fc_pos] {
-        if let Some((_, xp)) = x_axis.map_value(xv) {
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::line(PointPt::new(xp, r.y), PointPt::new(xp, r.bottom())),
-                fill: None,
-                stroke: Some(crosshair_stroke),
-                clip: Some(r),
-            });
+    if let Some((fc_neg, fc_pos)) = fc_cuts_opt {
+        for xv in [fc_neg, fc_pos] {
+            if let Some((_, xp)) = x_axis.map_value(xv) {
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::line(PointPt::new(xp, r.y), PointPt::new(xp, r.bottom())),
+                    fill: None,
+                    stroke: Some(crosshair_stroke),
+                    clip: Some(r),
+                });
+            }
         }
+    } else if !has_user_x_thresholds && let Some((_, xp0)) = x_axis.map_value(0.0) {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(xp0, r.y), PointPt::new(xp0, r.bottom())),
+            fill: None,
+            stroke: Some(crosshair_stroke),
+            clip: Some(r),
+        });
     }
     if let Some((_, yp)) = y_axis.map_value(p_thresh) {
         scene.primitives.push(ScenePrimitive::Path {
@@ -97,15 +131,20 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
     let up_col = Rgba8::rgb(213, 94, 0);
     let down_col = Rgba8::rgb(0, 114, 178);
     let ns_col = Rgba8::rgb(145, 153, 163);
+    let x_summary_prefix = if is_difference_units { "Difference" } else { "log2FC" };
     for pt in &pts {
-        let (fc, neg_log_p) = (pt.x, pt.y);
+        let (fc, neg_log_p) = (pt.diag.x, pt.diag.y);
         let (Some((_, px)), Some((_, py))) = (x_axis.map_value(fc), y_axis.map_value(neg_log_p)) else {
             continue;
         };
-        let is_sig = neg_log_p >= p_thresh;
-        let col = if is_sig && fc >= fc_pos {
+        let is_sig = if !has_user_y_thresholds && let Some(sig) = pt.significant { sig } else { neg_log_p >= p_thresh };
+        let (is_up, is_down) = match fc_cuts_opt {
+            Some((fc_neg, fc_pos)) => (is_sig && fc >= fc_pos, is_sig && fc <= fc_neg),
+            None => (is_sig && fc > 0.0, is_sig && fc < 0.0),
+        };
+        let col = if is_up {
             up_col
-        } else if is_sig && fc <= fc_neg {
+        } else if is_down {
             down_col
         } else {
             ns_col
@@ -113,17 +152,17 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
         let base_marker = MarkerStyle {
             shape: MarkerShape::Circle,
             fill_mode: MarkerFillMode::Filled,
-            size_pt: if is_sig { 5.0 } else { 3.8 },
+            size_pt: if is_up || is_down { 5.0 } else { 3.8 },
             fill_color: col,
             stroke_color: Rgba8::WHITE,
             stroke_width_pt: 0.4,
         };
         let Some(marker) = crate::resolve_overridden_marker_for_col(
             &graph.spec,
-            &pt.source.sheet_id,
-            pt.source.col,
-            pt.source.row,
-            Some(pt.source.subcol),
+            &pt.diag.source.sheet_id,
+            pt.diag.source.col,
+            pt.diag.source.row,
+            Some(pt.diag.source.subcol),
             base_marker,
         ) else {
             continue;
@@ -133,13 +172,12 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
             radius_pt: (marker.size_pt * 0.5).max(3.0),
-            source_cell: pt.source.clone(),
-            series_label: pt.series_label.clone(),
-            value_summary: format!("log2FC={}, -log10P={}", format_point_value(fc), format_point_value(neg_log_p)),
+            source_cell: pt.diag.source.clone(),
+            series_label: pt.diag.series_label.clone(),
+            value_summary: format!("{x_summary_prefix}={}, -log10P={}", format_point_value(fc), format_point_value(neg_log_p)),
         });
-        if is_sig
-            && (fc >= fc_pos || fc <= fc_neg)
-            && let Some(lbl) = &pt.label
+        if (is_up || is_down)
+            && let Some(lbl) = &pt.diag.label
         {
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: parse_markup(lbl),
@@ -179,16 +217,16 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
     Ok(())
 }
 
-fn volcano_thresholds(spec: &GraphSpec) -> (f64, f64, f64) {
+fn volcano_thresholds(spec: &GraphSpec, is_difference_units: bool) -> (Option<(f64, f64)>, f64) {
     let mut fc_cuts: Vec<f64> = spec.x_axis.thresholds.iter().map(|t| t.value).filter(|v| v.is_finite()).collect();
     fc_cuts.sort_by(f64::total_cmp);
-    let (neg_fc, pos_fc) = match fc_cuts.as_slice() {
-        [neg, pos, ..] => (*neg, *pos),
-        [one] => (-one.abs(), one.abs()),
-        [] => (-1.0, 1.0),
+    let cuts = match fc_cuts.as_slice() {
+        [neg, pos, ..] => Some((*neg, *pos)),
+        [one] => Some((-one.abs(), one.abs())),
+        [] => (!is_difference_units).then_some((-1.0, 1.0)),
     };
     let p_cut = spec.y_axis.thresholds.first().map_or_else(|| -(0.05_f64.log10()), |t| t.value);
-    (neg_fc, pos_fc, p_cut)
+    (cuts, p_cut)
 }
 
 fn parse_source_row_hint(tab: &ResultTab, tab_idx: usize, ds_opt: Option<&DataSheet>) -> usize {
@@ -216,15 +254,17 @@ fn parse_source_row_hint(tab: &ResultTab, tab_idx: usize, ds_opt: Option<&DataSh
     tab_idx
 }
 
-fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
+fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> VolcanoExtracted {
+    let empty = VolcanoExtracted { points: Vec::new(), is_difference_units: false };
     if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| matches!(r.analysis.kind, AnalysisKind::MultipleRowTTests(_)))
         .or_else(|| find_matching_result_checked(graph, doc, warnings))
         && (matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_)) || doc.result_sheet(&graph.spec.primary_source_sheet_id).is_some())
     {
         let ds_id = res.analysis.source_sheet_id.clone();
-        let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &ds_id);
+        let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
         let default_col = graph.spec.series.first().map_or(0, |s| s.data_set_index);
-        let from_pairs: Vec<DiagPoint> = res
+        let is_mr = matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_));
+        let from_pairs: Vec<VolcanoPoint> = res
             .pairwise_comparisons
             .iter()
             .filter_map(|rec| {
@@ -235,17 +275,20 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                 let neg_log_p = -crate::clamp_f64_safe(rec.raw_p_or_q, 1e-300, 1.0).log10();
                 let lbl = (!rec.label_a.trim().is_empty()).then(|| rec.label_a.clone());
                 let series_label = lbl.clone().unwrap_or_else(|| graph.spec.title.clone());
-                Some(DiagPoint {
-                    x: diff,
-                    y: neg_log_p,
-                    label: lbl,
-                    source: SourceCellId { sheet_id: ds_id.clone(), row: rec.group_a, col: default_col, subcol: 0 },
-                    series_label,
+                Some(VolcanoPoint {
+                    diag: DiagPoint {
+                        x: diff,
+                        y: neg_log_p,
+                        label: lbl,
+                        source: SourceCellId { sheet_id: ds_id.clone(), row: rec.group_a, col: default_col, subcol: 0 },
+                        series_label,
+                    },
+                    significant: Some(rec.significant),
                 })
             })
             .collect();
         if !from_pairs.is_empty() {
-            return from_pairs;
+            return VolcanoExtracted { points: from_pairs, is_difference_units: is_mr };
         }
 
         if let Some(tab) = res
@@ -261,9 +304,14 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                 find_header_col(&tab.column_headers, |h| h.contains("adj") || h.contains("q value") || h.contains("q-value") || h.contains("p / q"))
                     .or_else(|| find_header_col(&tab.column_headers, |h| h.contains("raw p") || h.contains("p value") || h.contains("p-value")))
                     .or_else(|| tab.rows.first().and_then(|r| r.iter().position(|c| matches!(c, ResultCell::PValue { .. }))));
+            let sig_col = find_header_col(&tab.column_headers, |h| h == "significant" || h.contains("discover"));
             if let (Some(dc), Some(pc)) = (diff_col, p_col) {
                 let already_neg_log = tab.column_headers.get(pc).is_some_and(|h| h.to_ascii_lowercase().contains("-log10"));
-                let from_tab: Vec<DiagPoint> = tab
+                let hdr_is_diff = tab.column_headers.get(dc).is_some_and(|h| {
+                    let l = h.to_ascii_lowercase();
+                    l.contains("diff") && !l.contains("log2") && !l.contains("fold")
+                });
+                let from_tab: Vec<VolcanoPoint> = tab
                     .rows
                     .iter()
                     .enumerate()
@@ -277,26 +325,37 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                         } else {
                             return None;
                         };
+                        let significant = sig_col.and_then(|sc| match row.get(sc) {
+                            Some(ResultCell::Boolean(b)) => Some(*b),
+                            _ => None,
+                        });
                         let lbl = tab.row_labels.get(i).filter(|s| !s.trim().is_empty()).cloned();
                         let row_idx = parse_source_row_hint(tab, i, ds_opt);
                         let series_label = lbl.clone().unwrap_or_else(|| graph.spec.title.clone());
-                        Some(DiagPoint {
-                            x: diff,
-                            y: neg_log_p,
-                            label: lbl,
-                            source: SourceCellId { sheet_id: ds_id.clone(), row: row_idx, col: default_col, subcol: 0 },
-                            series_label,
+                        Some(VolcanoPoint {
+                            diag: DiagPoint {
+                                x: diff,
+                                y: neg_log_p,
+                                label: lbl,
+                                source: SourceCellId { sheet_id: ds_id.clone(), row: row_idx, col: default_col, subcol: 0 },
+                                series_label,
+                            },
+                            significant,
                         })
                     })
                     .collect();
                 if !from_tab.is_empty() {
-                    return from_tab;
+                    return VolcanoExtracted { points: from_tab, is_difference_units: is_mr || hdr_is_diff };
                 }
             }
         }
     }
 
-    if let Some(ds) = resolve_source_data_sheet(graph, doc) {
+    if has_blocked_matching_result(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::MultipleRowTTests(_))) {
+        return empty;
+    }
+
+    if let Some(ds) = resolve_source_data_sheet_checked(graph, doc, warnings) {
         match &ds.archetype {
             TableArchetype::MultipleVariables(mv) => {
                 let x_idx = graph.spec.multivariate.as_ref().map_or(0, |m| m.x_column);
@@ -308,35 +367,44 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                         if let (Some(x), Some(y)) = (xc.cells.get(r).and_then(|c| c.active_number()), yc.cells.get(r).and_then(|c| c.active_number()))
                         {
                             let lbl = lbl_idx.and_then(|li| mv.variables.get(li)).and_then(|c| cell_token(c, r));
-                            raw.push(DiagPoint {
-                                x,
-                                y,
-                                label: lbl,
-                                source: SourceCellId { sheet_id: ds.id.clone(), row: r, col: y_idx, subcol: 0 },
-                                series_label: yc.title.clone(),
+                            raw.push(VolcanoPoint {
+                                diag: DiagPoint {
+                                    x,
+                                    y,
+                                    label: lbl,
+                                    source: SourceCellId { sheet_id: ds.id.clone(), row: r, col: y_idx, subcol: 0 },
+                                    series_label: yc.title.clone(),
+                                },
+                                significant: None,
                             });
                         }
                     }
                     let y_title_low = yc.title.to_ascii_lowercase();
-                    let looks_raw_p = !y_title_low.contains("log") && !raw.is_empty() && raw.iter().all(|pt| pt.y > 0.0 && pt.y <= 1.0);
+                    let looks_raw_p = !y_title_low.contains("log") && !raw.is_empty() && raw.iter().all(|pt| pt.diag.y > 0.0 && pt.diag.y <= 1.0);
                     if looks_raw_p {
                         for pt in &mut raw {
-                            pt.y = -pt.y.max(1e-300).log10();
+                            pt.diag.y = -pt.diag.y.max(1e-300).log10();
                         }
                     }
-                    return raw;
+                    let x_title_low = xc.title.to_ascii_lowercase();
+                    let is_diff = x_title_low.contains("diff") && !x_title_low.contains("log2") && !x_title_low.contains("fold");
+                    return VolcanoExtracted { points: raw, is_difference_units: is_diff };
                 }
             }
             TableArchetype::Xy(xy) => {
-                return active_xy_pairs_with_sources(&ds.id, xy, 0)
+                let pts = active_xy_pairs_with_sources(&ds.id, xy, 0)
                     .into_iter()
-                    .map(|(x, y, source, series_label)| DiagPoint { x, y, label: None, source, series_label })
+                    .map(|(x, y, source, series_label)| VolcanoPoint {
+                        diag: DiagPoint { x, y, label: None, source, series_label },
+                        significant: None,
+                    })
                     .collect();
+                return VolcanoExtracted { points: pts, is_difference_units: false };
             }
             _ => {}
         }
     }
-    Vec::new()
+    empty
 }
 
 // 2c. Bland-Altman Agreement Plot (Difference vs Average + Bias ± 1.96*SD LoA)
@@ -638,7 +706,7 @@ fn extract_bland_altman_from_result(res: &ResultSheet, graph: &GraphSheet, doc: 
         .or_else(|| find_tab_row_value(res, |l| l.contains("upper") && l.contains("loa")));
     let mut sd_bias_opt = find_scalar_ci(res, |k| k == "sdbias" || k == "sd_bias").or_else(|| find_tab_row_value(res, |l| l.contains("sd of bias")));
 
-    let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+    let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
     let ds_pairs = ds_opt.and_then(|ds| extract_bland_altman_pairs_from_ds(ds, col_a, col_b, xy_compare_x_vs_y, true, graph));
     if (raw_pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
         && let Some(ref extracted) = ds_pairs
@@ -709,9 +777,12 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument, warnings
     {
         return Some(data);
     }
+    if has_blocked_matching_result(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::BlandAltman(_))) {
+        return None;
+    }
 
     let z_default = norm_two_sided_isf(ConfidenceLevel::DEFAULT_95.alpha()).unwrap_or(1.959_963_984_540_054);
-    let ds = resolve_source_data_sheet(graph, doc)?;
+    let ds = resolve_source_data_sheet_checked(graph, doc, warnings)?;
     if let TableArchetype::Xy(xy) = &ds.archetype
         && xy.data_sets.len() == 1
         && graph.spec.y_axis.title.to_ascii_lowercase().contains("diff")

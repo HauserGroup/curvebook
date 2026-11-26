@@ -10,8 +10,8 @@ use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSpec, BlandAltmanSpec, Cell, ColorChannelMapping, ColumnDesignHint, ColumnTable, DataSheet,
     DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, GraphKind, GraphSheet, GraphicalDataObject, GroupedTable,
     LineConnectionKind, MultipleVariablesTable, MultivariateGraphEncoding, MultivariatePlotMode, PointStyleOverride, ProjectDocument, RectPt,
-    ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, TableArchetype,
-    VariableRole, XyTable,
+    ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure,
+    TableArchetype, VariableRole, XyTable,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
@@ -602,6 +602,7 @@ fn sec09_04_bland_altman_mv_ignores_graph_multivariate_and_dynamic_loa_captions(
     // 3. Custom Student-t ResultSheet LoA (k = 2.26 symmetric around bias=1.0 with sd_bias=2.0 -> [-3.52, 5.52])
     let t_spec = AnalysisSpec::new(SheetId::new("res-t"), ds_col.id.clone(), AnalysisKind::BlandAltman(ba_90))?;
     let mut res_t = ResultSheet::new(t_spec)?;
+    res_t.status = ResultStatus::UpToDate;
     res_t.scalars = vec![
         ResultScalarEntry { key: String::from("bias"), data_set_index: None, value: 1.0, units: None },
         ResultScalarEntry { key: String::from("sd_bias"), data_set_index: None, value: 2.0, units: None },
@@ -635,6 +636,7 @@ fn sec09_04_bland_altman_mv_ignores_graph_multivariate_and_dynamic_loa_captions(
     // 4. Nonparametric / asymmetric LoA -> Upper LoA / Lower LoA (never ±1.96 SD)
     let np_spec = AnalysisSpec::new(SheetId::new("res-np"), ds_col.id.clone(), AnalysisKind::BlandAltman(ba_90))?;
     let mut res_np = ResultSheet::new(np_spec)?;
+    res_np.status = ResultStatus::UpToDate;
     res_np.scalars = vec![
         ResultScalarEntry { key: String::from("bias"), data_set_index: None, value: 1.0, units: None },
         ResultScalarEntry { key: String::from("sd_bias"), data_set_index: None, value: 2.0, units: None },

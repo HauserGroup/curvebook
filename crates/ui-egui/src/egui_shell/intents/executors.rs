@@ -100,18 +100,24 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             app.theme.ui_scale = clamped;
             Ok(UiIntentOutcome::ShellUpdated)
         }
-        UiIntent::SelectGridCell { coord } => {
-            app.grid.select_single_sync(coord);
+        UiIntent::SelectGridCell { sheet_id, coord } => {
+            let target_sheet = sheet_id.or_else(|| app.document().active_sheet_id.clone());
+            if let Some(sid) = target_sheet {
+                app.grid.select_single_for_sheet(&sid, coord);
+            } else {
+                app.grid.select_single_sync(coord);
+            }
             app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
             Ok(UiIntentOutcome::ShellUpdated)
         }
-        UiIntent::ExtendGridSelection { coord } => {
+        UiIntent::ExtendGridSelection { sheet_id, coord } => {
             let mut grid = std::mem::take(&mut app.grid);
-            let brushed_sheet = if let Some(active_id) = app.document().active_sheet_id.as_ref()
-                && let Some(ds) = app.document().data_sheet(active_id)
+            let target_id = sheet_id.or_else(|| app.document().active_sheet_id.clone());
+            let brushed_sheet = if let Some(target_id) = target_id
+                && let Some(ds) = app.document().data_sheet(&target_id)
             {
                 grid.extend_shift_range(ds, coord);
-                Some(active_id.clone())
+                Some(target_id)
             } else {
                 None
             };
@@ -121,13 +127,14 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             }
             Ok(UiIntentOutcome::ShellUpdated)
         }
-        UiIntent::ToggleGridCell { coord } => {
+        UiIntent::ToggleGridCell { sheet_id, coord } => {
             let mut grid = std::mem::take(&mut app.grid);
-            let brushed_sheet = if let Some(active_id) = app.document().active_sheet_id.as_ref()
-                && let Some(ds) = app.document().data_sheet(active_id)
+            let target_id = sheet_id.or_else(|| app.document().active_sheet_id.clone());
+            let brushed_sheet = if let Some(target_id) = target_id
+                && let Some(ds) = app.document().data_sheet(&target_id)
             {
                 grid.toggle_cmd_selection(ds, coord);
-                Some(active_id.clone())
+                Some(target_id)
             } else {
                 None
             };
@@ -142,11 +149,11 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             let doc = app.session.document();
             if let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) {
                 app.grid.navigate(ds, dir, extend, jump);
-                let cur = app.grid.tool.active.unwrap_or_default();
+                let cur = app.grid.active_cell_for_sheet(&ds.id).unwrap_or_default();
                 if extend {
                     app.grid.extend_shift_range(ds, cur);
                 } else {
-                    app.grid.select_single_sync(cur);
+                    app.grid.select_single_for_sheet(&ds.id, cur);
                 }
                 app.grid.refresh_selection_stats(doc);
             }
@@ -560,7 +567,7 @@ fn apply_search_and_find_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
             app.nav.gallery.open = false;
             app.egui_views.column_grid.scroll_to_column_title(col);
             let coord = curvebook_tools::GridCellCoord::new(0, col, 0);
-            app.grid.select_single_sync(coord);
+            app.grid.select_single_for_sheet(&sheet_id, coord);
             app.focus_widget_id = Some(format!("grid.cell.0.{col}.0"));
         }
         UiIntent::OpenSheetFind => {
@@ -991,7 +998,7 @@ fn execute_grid_clipboard_paste(app: &mut UiApp, start_coord: Option<curvebook_t
     if clip.is_empty() {
         return Ok(UiIntentOutcome::ShellUpdated);
     }
-    let anchor = start_coord.or(app.grid.tool.active).unwrap_or(curvebook_tools::GridCellCoord::new(0, 0, 0));
+    let anchor = start_coord.or_else(|| app.grid.active_cell_for_sheet(&ds_id)).unwrap_or(curvebook_tools::GridCellCoord::new(0, 0, 0));
     let clean_clip = clip.strip_prefix('\u{FEFF}').unwrap_or(&clip).replace('\0', "");
     let dec = app.locale_preset.decimal_separator;
     let mut paste_params = serde_json::json!({
@@ -1379,10 +1386,10 @@ fn apply_find_replace_on_active_sheet(
     }
 
     app.egui_views.app_modals.find_replace.match_count = matches.len();
-    let cur_pos_key = if let Some((xr, xs)) = app.grid.active_x_cell {
+    let cur_pos_key = if let Some((xr, xs)) = app.grid.active_x_cell_for_sheet(&ds_id) {
         Some((xr, false, 0usize, xs))
     } else {
-        app.grid.tool.active.map(|ac| (ac.row, true, ac.col, ac.subcol))
+        app.grid.active_cell_for_sheet(&ds_id).map(|ac| (ac.row, true, ac.col, ac.subcol))
     };
 
     let selected_match = if replace_all {
@@ -1396,11 +1403,11 @@ fn apply_find_replace_on_active_sheet(
     if let Some(chosen) = selected_match {
         match chosen.target {
             FindCellTarget::XCell { row, subcol } => {
-                app.grid.select_x_cell_sync(row, subcol);
+                app.grid.select_x_cell_for_sheet(&ds_id, row, subcol);
                 app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
             }
             FindCellTarget::DataCell { coord } => {
-                app.grid.select_single_sync(curvebook_tools::GridCellCoord::new(coord.row, coord.col, coord.subcol));
+                app.grid.select_single_for_sheet(&ds_id, curvebook_tools::GridCellCoord::new(coord.row, coord.col, coord.subcol));
                 app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
             }
         }

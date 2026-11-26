@@ -215,7 +215,7 @@ fn temme_corr_and_z(a: f64, x: f64) -> (f64, f64, f64) {
 }
 
 /// Temme's (1979) uniform asymptotic expansion `(P(a, x), Q(a, x))` for large `a` across `|x - a| <= 0.25 * a`.
-fn temme_uniform_pq(a: f64, x: f64) -> (f64, f64) {
+pub(crate) fn temme_uniform_pq(a: f64, x: f64) -> (f64, f64) {
     let (z_sq, z, corr) = temme_corr_and_z(a, x);
     if z >= 0.0 {
         if z <= 2.0 {
@@ -695,6 +695,23 @@ mod tests {
         let q_diag = reg_gamma_q(a, a).unwrap();
         let ramanujan = 0.5 - (1.0 / (std::f64::consts::TAU * a).sqrt()) * (1.0 / 3.0 + 1.0 / (540.0 * a));
         assert!((q_diag - ramanujan).abs() < 1e-15, "q_diag={q_diag} vs {ramanujan}");
+
+        // GAP-03-04: verify Temme c1(eta) Taylor expansion (`1/378` eta^2 term, Temme 1979 §3 / DLMF 8.11)
+        // is continuous across the `|eta| = 0.02` branch boundary.
+        let a_seam = 4096.0_f64;
+        let (_, _, corr_below) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + 0.019_999));
+        let (_, _, corr_above) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + 0.020_100));
+        // Smooth linear slope across dx/a = 1.01e-4; jump from the wrong 25/12096 coeff would be ~1e-12.
+        assert!((corr_above - corr_below).abs() < 5e-7, "Temme seam jump: {corr_below} vs {corr_above}");
+        // Direct check of the exact c1(eta) identity against the Taylor polynomial at mu = 0.05
+        // using Sterbenz-exact `gamma_deviance` (no truncation error in `lambda(eta)`). The buggy
+        // `25/12096` coefficient would deviate by ~1.4e-6 here, while exact `1/378` matches to ~1e-9.
+        let mu_hi = 0.05_f64;
+        let lam_hi = 1.0 + mu_hi;
+        let eta_hi = (2.0 * super::gamma_deviance(1.0, lam_hi)).sqrt();
+        let c1_exact = eta_hi.powi(-3) - lam_hi * mu_hi.powi(-3) - 1.0 / (12.0 * mu_hi);
+        let c1_taylor = -1.0 / 540.0 + eta_hi * (-1.0 / 288.0 + eta_hi * (1.0 / 378.0 + eta_hi * (-77.0 / 77_760.0)));
+        assert!((c1_taylor - c1_exact).abs() < 1e-8, "c1_taylor={c1_taylor} vs c1_exact={c1_exact}");
     }
 
     #[test]

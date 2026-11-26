@@ -230,6 +230,9 @@ pub(super) fn render_data_point_drill_back_studio(
         },
     ) {
         intents.push_engine("sheet.select", json!({ "sheet_id": brushed.sheet_id.as_str() }));
-        intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(brushed.row, brushed.col, brushed.subcol) });
+        intents.push(UiIntent::SelectGridCell {
+            sheet_id: Some(brushed.sheet_id.clone()),
+            coord: GridCellCoord::new(brushed.row, brushed.col, brushed.subcol),
+        });
     }
 }

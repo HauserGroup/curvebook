@@ -26,6 +26,7 @@ mod control_auth_and_panic;
 mod descriptive_custom_percentile_ui;
 mod dialogs_canvas;
 mod feedback_github_issue;
+mod gap_desktop_ui_fixes;
 mod helpers;
 mod i18n_theme;
 mod interaction_hidpi_qol;

@@ -159,12 +159,12 @@ fn should_bypass_native_file_picker(command_id: &str, params: &serde_json::Value
         }
         "table.importCsv" => has_non_null_field(params, "path") || has_non_null_field(params, "csv"),
         "table.importXlsx" => {
-            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge"))
+            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge") && !has_non_null_field(params, "new_window"))
                 || has_non_null_field(params, "bytes_base64")
                 || has_non_null_field(params, "bytes")
         }
         "table.importPrism" | "table.importPzfx" => {
-            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge"))
+            (has_non_null_field(params, "path") && !has_non_null_field(params, "merge") && !has_non_null_field(params, "new_window"))
                 || has_non_null_field(params, "bytes_base64")
                 || has_non_null_field(params, "xml")
         }
@@ -1647,6 +1647,19 @@ impl CurveBookNativeApp {
             }
             if let Some(err) = batch_err {
                 self.status_banner = Some(err);
+            } else {
+                let mut export_warnings: Vec<String> = Vec::new();
+                for out in batch.outcomes() {
+                    if let curvebook_ui_egui::egui_shell::UiIntentOutcome::Engine { command_id, outcome } = out
+                        && curvebook_ui_egui::is_figure_export_command(&command_id)
+                        && !outcome.warnings.is_empty()
+                    {
+                        export_warnings.extend(outcome.warnings);
+                    }
+                }
+                if let Some(warn_banner) = curvebook_ui_egui::format_figure_export_warnings_banner(&export_warnings) {
+                    self.status_banner = Some(warn_banner);
+                }
             }
             unsaved_action = win.app_mut().egui_views.app_modals.pending_unsaved_action.take();
             let changed = Some(win.app().ui_scale()) != prev_scale
@@ -2137,6 +2150,12 @@ impl CurveBookNativeApp {
         if outcome.opened_window_id.is_some() {
             self.on_active_window_switched();
         }
+        if let Some(warnings) = outcome.command_result.as_ref().and_then(|res| res.get("warnings")).and_then(serde_json::Value::as_array) {
+            let warning_lines: Vec<String> = warnings.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
+            if let Some(warn_banner) = curvebook_ui_egui::format_figure_export_warnings_banner(&warning_lines) {
+                self.status_banner = Some(warn_banner);
+            }
+        }
         let completed = !outcome.action.starts_with("native_file_dialog.cancelled:");
         Some(Ok(completed))
     }
@@ -2175,10 +2194,15 @@ impl CurveBookNativeApp {
         dnd_acted || key_acted
     }
 
+    fn window_has_blocking_modal(&self, window_id: DesktopWindowId) -> bool {
+        self.close_dialog_open || self.runtime.window(window_id).is_ok_and(|w| w.app().has_open_modal())
+    }
+
     fn dispatch_file_dnd(&mut self, window_id: DesktopWindowId, hovered: &[egui::HoveredFile], dropped: &[egui::DroppedFileHandle]) -> bool {
         let mut acted = false;
+        let modal_open_before = self.window_has_blocking_modal(window_id);
         let hovered_paths: Vec<PathBuf> = hovered.iter().filter_map(|f| f.path.clone()).collect();
-        if !hovered.is_empty() {
+        if !hovered.is_empty() && !modal_open_before {
             self.hovered_paths_active = true;
             let _ = self.runtime.dispatch(DesktopHostEvent::FileHovered { window_id, paths: hovered_paths });
             acted = true;
@@ -2188,17 +2212,38 @@ impl CurveBookNativeApp {
             acted = true;
         }
 
-        if !dropped.is_empty() {
-            self.status_banner = None;
-            acted = true;
+        if dropped.is_empty() {
+            return acted;
         }
+        self.hovered_paths_active = false;
+        let _ = self.runtime.dispatch(DesktopHostEvent::FileHoverCancelled { window_id });
+        if modal_open_before {
+            self.status_banner = Some(String::from("Cannot drop files while a dialog is open. Close or finish the current dialog first."));
+            return true;
+        }
+
+        self.status_banner = None;
+        acted = true;
         // Track the active drop target across a multi-file batch so dropping a project + CSV
-        // routes follow-up files into the newly opened project window, and join all errors
-        // rather than overwriting earlier failures (`AUD-06-13`).
+        // routes follow-up files into the newly opened project window, join all errors rather than
+        // overwriting earlier failures (`AUD-06-13`), and stop immediately if an earlier drop opens
+        // a modal prompt so subsequent files are never imported behind an active modal (`GAP-07-04`).
         let mut target_window_id = window_id;
         let mut drop_errors: Vec<String> = Vec::new();
-        for file in dropped {
-            self.hovered_paths_active = false;
+        for (idx, file) in dropped.iter().enumerate() {
+            if idx > 0 && self.window_has_blocking_modal(target_window_id) {
+                let skipped: Vec<String> = dropped
+                    .get(idx..)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|f| f.path().file_name().and_then(|n| n.to_str()).map_or_else(|| f.path().display().to_string(), str::to_owned))
+                    .collect();
+                drop_errors.push(format!(
+                    "Skipped {} while an import dialog is open; finish the dialog before dropping additional files.",
+                    skipped.join(", ")
+                ));
+                break;
+            }
             match self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id: target_window_id, path: file.path().to_path_buf() }) {
                 Ok(outcome) => {
                     if let Some(opened_id) = outcome.opened_window_id {
@@ -2218,7 +2263,7 @@ impl CurveBookNativeApp {
     }
 
     fn render_dnd_hover_overlay(&self, ui: &egui::Ui) {
-        if !self.hovered_paths_active {
+        if !self.hovered_paths_active || self.window_has_blocking_modal(self.active_window_id()) {
             return;
         }
         let ctx = ui.ctx();
@@ -2259,13 +2304,19 @@ impl CurveBookNativeApp {
         };
         let rect = ctx.content_rect();
         let mut dismiss = false;
+        let is_warning = msg.starts_with(curvebook_ui_egui::FIGURE_EXPORT_WARNING_PREFIX);
+        let (fill_color, stroke_color) = if is_warning {
+            (egui::Color32::from_rgb(146, 64, 14), egui::Color32::from_rgb(251, 191, 36))
+        } else {
+            (egui::Color32::from_rgb(127, 29, 29), egui::Color32::from_rgb(248, 113, 113))
+        };
         egui::Area::new(egui::Id::unique("desktop.status_banner"))
             .order(egui::Order::Foreground)
             .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -14.0))
             .show(ctx, |ui| {
                 egui::Frame::window(ui.style())
-                    .fill(egui::Color32::from_rgb(127, 29, 29))
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(248, 113, 113)))
+                    .fill(fill_color)
+                    .stroke(egui::Stroke::new(1.0, stroke_color))
                     .inner_margin(egui::Margin::symmetric(12, 8))
                     .show(ui, |row| {
                         row.set_max_width((rect.width() - 48.0).max(220.0));
@@ -2846,25 +2897,43 @@ fn viewport_icon_for_launch() -> egui::IconData {
 const GRAPHICS_TROUBLESHOOTING_HINT: &str =
     "See docs/reference/troubleshooting.md#gpu-graphics for GPU/Metal driver compatibility and fallback guidance.";
 
-fn format_graphics_init_diagnostic(stage: &str, detail: &str) -> String {
+fn format_graphics_init_diagnostic_for_platform(is_macos: bool, stage: &str, detail: &str) -> String {
+    let backend_step = if is_macos {
+        "- On macOS, CurveBook compiles wgpu with Metal only (`WGPU_BACKEND=metal`; OpenGL is unavailable on macOS builds). Try `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1` if a legacy or virtualized GPU adapter is rejected."
+    } else {
+        "- Try launching with an explicit backend override: WGPU_BACKEND=vulkan, WGPU_BACKEND=dx12 (Windows), or WGPU_BACKEND=gl (Linux/Windows), or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1."
+    };
     format!(
         "CurveBook could not initialize GPU graphics ({stage}): {detail}\n\
          Cause: Your system's GPU or graphics driver (such as older macOS / non-native Metal, virtualized GPUs, or incomplete Vulkan/DirectX 12 drivers) may not support the required wgpu features.\n\
          Next steps:\n\
          - Update your OS and GPU drivers (on macOS, ensure native Metal GPU support is available).\n\
-         - Try launching with an explicit backend override: WGPU_BACKEND=gl (or metal/vulkan/dx12) or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1.\n\
-         - For headless analysis and figure export without a GPU, use `curvebook-cli` or `curvebook --headless-once`.\n\
+         {backend_step}\n\
+         - For CPU-only statistical analysis and SVG/PDF/PNG/TIFF figure export without a GPU, use `curvebook-cli` or `curvebook-cli mcp` (`curvebook --headless-once` renders a single discarded 800x520 smoke frame and exits).\n\
+         {GRAPHICS_TROUBLESHOOTING_HINT}"
+    )
+}
+
+fn format_graphics_init_diagnostic(stage: &str, detail: &str) -> String {
+    format_graphics_init_diagnostic_for_platform(cfg!(target_os = "macos"), stage, detail)
+}
+
+fn format_graphics_runtime_diagnostic_for_platform(is_macos: bool, event: &str, detail: &str) -> String {
+    let recovery_step = if is_macos {
+        "If the window becomes unresponsive, relaunch with WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 (macOS builds use Metal only), or use `curvebook-cli` for CPU-only analysis and export."
+    } else {
+        "If the window becomes unresponsive, relaunch with WGPU_BACKEND=vulkan/dx12/gl or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1, or use `curvebook-cli` for CPU-only analysis and export."
+    };
+    format!(
+        "CurveBook graphics runtime warning ({event}): {detail}\n\
+         This can occur on older macOS / non-native Metal GPUs, virtualized displays, or after a GPU driver reset.\n\
+         {recovery_step}\n\
          {GRAPHICS_TROUBLESHOOTING_HINT}"
     )
 }
 
 fn format_graphics_runtime_diagnostic(event: &str, detail: &str) -> String {
-    format!(
-        "CurveBook graphics runtime warning ({event}): {detail}\n\
-         This can occur on older macOS / non-native Metal GPUs, virtualized displays, or after a GPU driver reset.\n\
-         If the window becomes unresponsive, relaunch with WGPU_BACKEND=gl or WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1, or use `curvebook-cli`.\n\
-         {GRAPHICS_TROUBLESHOOTING_HINT}"
-    )
+    format_graphics_runtime_diagnostic_for_platform(cfg!(target_os = "macos"), event, detail)
 }
 
 fn format_graphics_init_error(err: &eframe::Error) -> String {
@@ -3813,6 +3882,19 @@ mod tests {
         assert!(adapter_msg.contains("no Metal adapter") && adapter_msg.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"));
         let lost_msg = super::format_graphics_runtime_diagnostic("GPU device lost", "Unknown: Metal device reset");
         assert!(lost_msg.contains("GPU device lost") && lost_msg.contains("Metal") && lost_msg.contains("curvebook-cli"));
+
+        // GAP-07-08: macOS diagnostics must never advise unavailable `WGPU_BACKEND=gl`, and must clarify `--headless-once`.
+        let mac_init = super::format_graphics_init_diagnostic_for_platform(true, "GPU adapter selection failed", "no Metal adapter");
+        assert!(!mac_init.contains("WGPU_BACKEND=gl"), "macOS init diagnostic must not advise WGPU_BACKEND=gl: {mac_init}");
+        assert!(mac_init.contains("WGPU_BACKEND=metal") && mac_init.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"));
+        assert!(mac_init.contains("curvebook-cli mcp") && mac_init.contains("discarded 800x520 smoke frame"));
+
+        let mac_runtime = super::format_graphics_runtime_diagnostic_for_platform(true, "GPU device lost", "Metal reset");
+        assert!(!mac_runtime.contains("WGPU_BACKEND=gl"), "macOS runtime diagnostic must not advise WGPU_BACKEND=gl: {mac_runtime}");
+        assert!(mac_runtime.contains("Metal") && mac_runtime.contains("WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1"));
+
+        let non_mac_init = super::format_graphics_init_diagnostic_for_platform(false, "GPU adapter selection failed", "no Vulkan adapter");
+        assert!(non_mac_init.contains("WGPU_BACKEND=gl") && non_mac_init.contains("WGPU_BACKEND=vulkan"));
     }
 
     #[test]

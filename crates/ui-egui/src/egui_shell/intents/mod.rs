@@ -98,12 +98,15 @@ pub enum UiIntent {
     SetLocale(String),
     SetUiScale(f32),
     SelectGridCell {
+        sheet_id: Option<SheetId>,
         coord: curvebook_tools::GridCellCoord,
     },
     ExtendGridSelection {
+        sheet_id: Option<SheetId>,
         coord: curvebook_tools::GridCellCoord,
     },
     ToggleGridCell {
+        sheet_id: Option<SheetId>,
         coord: curvebook_tools::GridCellCoord,
     },
     GridNavigate {
@@ -683,7 +686,7 @@ mod tests {
     fn pending_intents_route_grid_and_dialog_actions_once_settled() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = UiApp::new();
         let mut intents = PendingUiIntents::new();
-        intents.push(UiIntent::SelectGridCell { coord: curvebook_tools::GridCellCoord::new(2, 1, 0) });
+        intents.push(UiIntent::SelectGridCell { sheet_id: None, coord: curvebook_tools::GridCellCoord::new(2, 1, 0) });
         intents.push(UiIntent::SetRowTitlesCollapsed { collapsed: true });
         let outcomes = intents.commit_if_settled(&mut app, false)?;
         assert_eq!(outcomes.len(), 2);

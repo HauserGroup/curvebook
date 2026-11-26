@@ -1992,7 +1992,7 @@ fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEvent
     let Some(clip) = read_clipboard_text_for_paste(app) else {
         return Ok(None);
     };
-    if let Some((x_row, x_subcol)) = app.grid.active_x_cell {
+    if let Some((x_row, x_subcol)) = app.grid.active_x_cell_for_sheet(&ds_id) {
         let res = crate::grid_view::paste_text_into_active_x_cell(app, &ds_id, x_row, x_subcol, &clip).map_err(|e| e.to_string())?;
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(Some(UiEventOutcome {
@@ -2002,7 +2002,7 @@ fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEvent
             command_result: Some(res),
         }));
     }
-    let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
+    let anchor = app.grid.active_cell_for_sheet(&ds_id).unwrap_or(GridCellCoord::new(0, 0, 0));
     let decimal_sep = app.locale_preset.decimal_separator;
     let mut paste_params = json!({
         "sheet_id": ds_id.as_str(),
@@ -2062,7 +2062,7 @@ fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOut
             command_result: Some(json!({ "sheet_id": ds.id.as_str(), "excluded": target_excluded, "count": coords.len() })),
         }));
     }
-    if let Some((row, subcol)) = app.grid.active_x_cell {
+    if let Some((row, subcol)) = app.grid.active_x_cell_for_sheet(&ds.id) {
         let cur_excl = ds.x_or_time_cell(row, subcol).is_some_and(|c| c.excluded);
         let next_excl = !cur_excl;
         app.execute_command(
@@ -2077,7 +2077,7 @@ fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOut
             command_result: Some(json!({ "sheet_id": ds.id.as_str(), "excluded": next_excl, "row": row, "subcol": subcol })),
         }));
     }
-    if let Some(c) = app.grid.tool.active {
+    if let Some(c) = app.grid.active_cell_for_sheet(&ds.id) {
         let cur_excl = ds.cell(CellCoord::from(c)).is_some_and(|cell| cell.excluded);
         let next_excl = !cur_excl;
         let single = SheetCellRange::new(CellCoord::from(c), CellCoord::from(c));
@@ -2220,6 +2220,12 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
 
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
         let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
+        if app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet).is_some_and(|m| m.command_id == "table.excludeCells") {
+            if let Some(out) = toggle_exclude_active_grid_cells(app)? {
+                return Ok(out);
+            }
+            return Ok(UiEventOutcome { handled: false, action: String::from("shortcut:grid.toggle_exclude_empty"), ..Default::default() });
+        }
         if let Some(exec) = app.handle_key_combo_for_context(&candidate, on_result_sheet)? {
             if matches!(exec.command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
                 clear_inspector_axis_buffers(app);

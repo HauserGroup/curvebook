@@ -326,6 +326,30 @@ impl SplitWorkspaceState {
         doc.active_sheet_id.as_ref()
     }
 
+    /// Return `true` when Trailing Studio Inspector targets a sheet hosted in the secondary split pane (`GAP-07-01`).
+    ///
+    /// When the target sheet is displayed only in the secondary pane this returns `true`; when
+    /// displayed only in the primary pane this returns `false`; when both panes display the same
+    /// sheet (or neither matches), `focused_secondary` breaks the tie.
+    #[must_use]
+    pub fn inspector_targets_secondary_pane(&self, doc: &ProjectDocument, focused_secondary: bool) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        let (primary, secondary) = self.resolve_sheets(doc);
+        if let Some(target) = self.effective_inspector_target(doc) {
+            let in_primary = primary.as_ref() == Some(target);
+            let in_secondary = secondary.as_ref() == Some(target);
+            if in_secondary && !in_primary {
+                return true;
+            }
+            if in_primary && !in_secondary {
+                return false;
+            }
+        }
+        focused_secondary
+    }
+
     /// Enforce three-way split pin lifecycle invariants (`gui-layout-spec.md` §2.4):
     /// auto-unpin whenever Split closes, the pinned sheet is deleted, or it leaves the split pair.
     pub fn sync_pin_invariants(&mut self, doc: &ProjectDocument) {

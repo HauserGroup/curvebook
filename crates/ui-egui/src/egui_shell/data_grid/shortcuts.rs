@@ -145,7 +145,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
             return true;
         }
         if !ds.frozen {
-            if let Some(active) = app.grid.tool.active
+            if let Some(active) = app.grid.active_cell_for_sheet(&ds.id)
                 && let Some(reg) = linked_region_for_cell(ds, active.row, active.col)
             {
                 open_link_popover(fstate.state, reg, mctx.locale);
@@ -175,7 +175,8 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
         if ds.frozen {
             return true;
         }
-        if let Some(active) = app.grid.tool.active
+        let active_for_sheet = app.grid.active_cell_for_sheet(&ds.id);
+        if let Some(active) = active_for_sheet
             && let Some(reg) = linked_region_for_cell(ds, active.row, active.col)
         {
             open_link_popover(fstate.state, reg, mctx.locale);
@@ -187,7 +188,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
             if live_avail { None } else { read_x_cached_clipboard_if_fresher(ui, app) }
         });
         if let Some(clip) = x_fallback {
-            let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
+            let anchor = active_for_sheet.unwrap_or(GridCellCoord::new(0, 0, 0));
             let dec = app.locale_preset.decimal_separator;
             let delim = if dec == ',' && !clip.contains('\t') { if clip.contains(';') { ";" } else { "\t" } } else { "\t" };
             let mut paste_params = json!({
@@ -207,7 +208,7 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
             fstate.intents.push_engine("table.paste", paste_params);
             return true;
         }
-        fstate.intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.tool.active });
+        fstate.intents.push(UiIntent::GridPasteFromClipboard { start_coord: active_for_sheet });
         return true;
     }
     false
@@ -323,6 +324,9 @@ pub fn selected_visual_subranges(ds: &DataSheet, a: GridCellCoord, b: GridCellCo
 /// and flat visual multi-subcolumn spans (`AUD-09-04`).
 #[must_use]
 pub fn resolve_grid_selection(app: &UiApp, ds: &DataSheet) -> Option<ResolvedGridSelection> {
+    if !app.grid.selection_belongs_to(&ds.id) {
+        return None;
+    }
     let row_count = ds.archetype.row_count();
     let col_count = ds.archetype.column_count();
     if row_count == 0 || col_count == 0 {
@@ -495,7 +499,7 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
             }
             return true;
         }
-        if let Some(c) = app.grid.tool.active {
+        if let Some(c) = app.grid.active_cell_for_sheet(&ds.id) {
             if matches!(&ds.archetype, TableArchetype::MultipleVariables(mv) if mv.variables.get(c.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })))
             {
                 fstate.intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": c.col }));
@@ -533,7 +537,7 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
                 }
                 return true;
             }
-            if let Some(c) = app.grid.tool.active {
+            if let Some(c) = app.grid.active_cell_for_sheet(&ds.id) {
                 if let Some(reg) = linked_region_for_cell(ds, c.row, c.col) {
                     open_link_popover(fstate.state, reg, mctx.locale);
                     ui.ctx().request_repaint();
@@ -557,7 +561,11 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
     if fstate.state.inline_edit.is_some() || fstate.aux.aux_edit.is_some() || ui.ctx().egui_wants_keyboard_input() {
         return;
     }
-    if !is_grid_focus_active(ui, app, &ds.id) && fstate.aux.selected_x_cell.is_none() && app.grid.tool.active.is_none() {
+    if app.grid.selection_sheet_id.as_ref().is_some_and(|sid| sid != &ds.id) && fstate.aux.selected_x_cell.is_none() {
+        return;
+    }
+    let active_for_sheet = app.grid.active_cell_for_sheet(&ds.id);
+    if !is_grid_focus_active(ui, app, &ds.id) && fstate.aux.selected_x_cell.is_none() && active_for_sheet.is_none() {
         return;
     }
     if handle_multi_exclude_shortcut(ui, mctx, fstate) || handle_multi_clipboard_shortcuts(ui, mctx, fstate) {
@@ -572,8 +580,8 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
             if geom.row_count == 0 || geom.total_flat_cols == 0 {
                 return;
             }
-            let cur_row = fstate.aux.selected_x_cell.map(|(r, _)| r).or_else(|| app.grid.tool.active.map(|c| c.row)).unwrap_or(0);
-            let cur_flat = match (fstate.aux.selected_x_cell, app.grid.tool.active) {
+            let cur_row = fstate.aux.selected_x_cell.map(|(r, _)| r).or_else(|| active_for_sheet.map(|c| c.row)).unwrap_or(0);
+            let cur_flat = match (fstate.aux.selected_x_cell, active_for_sheet) {
                 (Some((_, xs)), _) => xs,
                 (None, Some(c)) => geom.coord_to_flat_all(false, c.col, c.subcol),
                 (None, None) => 0,
@@ -587,9 +595,9 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
                 fstate.aux.selected_x_cell = None;
                 let coord = GridCellCoord::new(next_row, nc, ns);
                 if km.shift {
-                    fstate.intents.push(UiIntent::ExtendGridSelection { coord });
+                    fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(ds.id.clone()), coord });
                 } else {
-                    fstate.intents.push(UiIntent::SelectGridCell { coord });
+                    fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord });
                 }
                 ui.ctx().request_repaint();
             }
@@ -606,22 +614,22 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
             let next_row = xr.saturating_add_signed(dy).min(geom.row_count - 1);
             fstate.aux.selected_x_cell = Some((next_row, xs));
             ui.ctx().request_repaint();
-        } else if let Some(c) = app.grid.tool.active {
+        } else if let Some(c) = active_for_sheet {
             let next_row = c.row.saturating_add_signed(dy).min(geom.row_count - 1);
-            fstate.intents.push(UiIntent::SelectGridCell { coord: GridCellCoord::new(next_row, c.col, c.subcol) });
+            fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord: GridCellCoord::new(next_row, c.col, c.subcol) });
             ui.ctx().request_repaint();
         }
         return;
     }
 
     if let Some(km) = pressed_key_event_modifiers(ui, Key::Tab) {
-        let (is_x, nc_opt, x_opt) = step_cell_horiz(geom, app.grid.tool.active, fstate.aux.selected_x_cell, km.shift);
+        let (is_x, nc_opt, x_opt) = step_cell_horiz(geom, active_for_sheet, fstate.aux.selected_x_cell, km.shift);
         if is_x {
             fstate.aux.selected_x_cell = x_opt;
             ui.ctx().request_repaint();
         } else if let Some(nc) = nc_opt {
             fstate.aux.selected_x_cell = None;
-            fstate.intents.push(UiIntent::SelectGridCell { coord: nc });
+            fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord: nc });
             ui.ctx().request_repaint();
         }
     }

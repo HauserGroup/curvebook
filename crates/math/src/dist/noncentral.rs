@@ -19,10 +19,9 @@ use std::sync::OnceLock;
 use crate::dist::core::{chi2_cdf, chi2_sf, f_cdf, f_sf, mul_div3, norm_cdf, norm_isf, norm_ln_sf, norm_sf, student_t_cdf, student_t_sf};
 use crate::error::MathError;
 use crate::roots::{RootOptions, brent_root};
-use crate::special::erf::{erfc, exp_neg_sq};
 use crate::special::gamma::{deviance_bd0, ln_factorial, ln_gamma, stirling_err};
 use crate::special::inc_beta::{ln_beta_kernel, ln_reg_beta_xy, reg_beta_xy};
-use crate::special::inc_gamma::{ln_reg_gamma_p, ln_reg_gamma_q, reg_gamma_p, reg_gamma_q};
+use crate::special::inc_gamma::{ln_reg_gamma_p, ln_reg_gamma_q, reg_gamma_p, reg_gamma_q, temme_uniform_pq};
 
 const MAX_POISSON_TERMS: usize = 4096;
 const POISSON_SUM_MAX_LAM_HALF: f64 = 1_000_000.0;
@@ -89,44 +88,13 @@ fn poisson_pdf_cont(k: f64, lam_half: f64) -> f64 {
     (-deviance_bd0(k, lam_half) - HALF_LN_2PI - 0.5 * k.ln() - stirling_err(k)).exp()
 }
 
-fn temme_pq_large_a(a: f64, x: f64) -> (f64, f64) {
-    let lambda = x / a;
-    let mu = lambda - 1.0;
-    let half_eta2 = deviance_bd0(1.0, lambda);
-    let eta = (2.0 * half_eta2).sqrt().copysign(mu);
-    let (c0, c1, c2) = if eta.abs() < 0.02 {
-        let e = eta;
-        let c0 = -1.0 / 3.0 + e * (1.0 / 12.0 + e * (-2.0 / 135.0 + e * (1.0 / 864.0 + e / 2835.0)));
-        let c1 = -1.0 / 540.0 + e * (-1.0 / 288.0 + e * (25.0 / 12_096.0));
-        let c2 = 25.0 / 6048.0;
-        (c0, c1, c2)
-    } else {
-        let inv_mu = 1.0 / mu;
-        let inv_mu3 = inv_mu * inv_mu * inv_mu;
-        let inv_mu5 = inv_mu3 * inv_mu * inv_mu;
-        let inv_eta = 1.0 / eta;
-        let inv_eta3 = inv_eta * inv_eta * inv_eta;
-        let inv_eta5 = inv_eta3 * inv_eta * inv_eta;
-        let c0 = inv_mu - inv_eta;
-        let c1 = inv_eta3 - lambda * inv_mu3 - inv_mu / 12.0;
-        let c2 = -3.0 * inv_eta5 + lambda * (2.0 * lambda + 1.0) * inv_mu5 + lambda * inv_mu3 / 12.0 + inv_mu / 288.0;
-        (c0, c1, c2)
-    };
-    let inv_a = 1.0 / a;
-    let series = c0 + inv_a * (c1 + inv_a * c2);
-    let z = eta * (0.5 * a).sqrt();
-    let r_a = exp_neg_sq(z) * series / (std::f64::consts::TAU * a).sqrt();
-    let q = (0.5 * erfc(z) + r_a).clamp(0.0, 1.0);
-    let p = (0.5 * erfc(-z) - r_a).clamp(0.0, 1.0);
-    (p, q)
-}
-
 fn reg_gamma_eval_safe(a: f64, z: f64, upper: bool) -> Result<f64, MathError> {
     let res = if upper { reg_gamma_q(a, z) } else { reg_gamma_p(a, z) };
     match res {
         Ok(v) => Ok(v),
         Err(MathError::NotConverged { .. }) if a >= 4096.0 => {
-            let (p, q) = temme_pq_large_a(a, z);
+            // Delegate to the exact Temme (1979) uniform expansion in `special::inc_gamma`.
+            let (p, q) = temme_uniform_pq(a, z);
             Ok(if upper { q } else { p })
         }
         Err(e) => Err(e),
@@ -188,21 +156,67 @@ fn ln_poisson_pmf_at(k: usize, lam_half: f64) -> Result<f64, MathError> {
     }
 }
 
-/// Evaluate `sum_{k=0}^inf P(Poisson(lam_half) = k) * T_k` in log-space via unimodal peak search
-/// + separate `k = 0` evaluation (handling tiny-shape non-unimodality when `a0 < 1`) and log-sum-exp.
-fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
-    lam_half: f64,
-    k0: usize,
-    upper: bool,
-    mut eval_ln_tail: F,
-) -> Result<f64, MathError> {
+fn ln_nct_odd_weight(k: usize, lam_half: f64) -> Result<f64, MathError> {
+    if lam_half == 0.0 {
+        return Ok(f64::NEG_INFINITY);
+    }
+    let a = (k as f64) + 0.5;
+    if k >= 12 {
+        Ok(-deviance_bd0(a, lam_half) - HALF_LN_2PI - 0.5 * a.ln() - stirling_err(a))
+    } else {
+        Ok(-lam_half + a * lam_half.ln() - ln_gamma(a + 1.0)?)
+    }
+}
+
+fn ln_sum_exp2(a: f64, b: f64) -> f64 {
+    let m = a.max(b);
+    if !m.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    m + ((a - m).exp() + (b - m).exp()).ln()
+}
+
+fn ln_sum_exp3(a: f64, b: f64, c: f64) -> f64 {
+    let m = a.max(b).max(c);
+    if !m.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    m + ((a - m).exp() + (b - m).exp() + (c - m).exp()).ln()
+}
+
+/// Evaluate `ln(sum_{k=0}^inf exp(ln_weight(k) + eval_ln_tail(k)))` in log-space via unimodal peak
+/// search + separate `k = 0` evaluation (handling tiny-shape non-unimodality when `a0 < 1`) and
+/// log-sum-exp, returning `f64::NEG_INFINITY` when the sum underflows below `exp(-755)`.
+fn sum_log_mixture_ln<W, F>(k0: usize, upper: bool, mut ln_weight: W, mut eval_ln_tail: F) -> Result<f64, MathError>
+where
+    W: FnMut(usize) -> Result<f64, MathError>,
+    F: FnMut(usize) -> Result<f64, MathError>,
+{
     let mut ln_term = |k: usize| -> Result<f64, MathError> {
-        let lp = ln_poisson_pmf_at(k, lam_half)?;
+        let lp = ln_weight(k)?;
+        if !lp.is_finite() {
+            return Ok(f64::NEG_INFINITY);
+        }
         let lt = eval_ln_tail(k)?;
         Ok(lp + lt)
     };
 
     let l_0 = ln_term(0)?;
+    if k0 == 0 && !upper {
+        if !l_0.is_finite() || l_0 < -755.0 {
+            return Ok(f64::NEG_INFINITY);
+        }
+        let mut sum = 1.0_f64;
+        for k in 1..=50_000 {
+            let diff = ln_term(k)? - l_0;
+            if diff < -42.0 {
+                break;
+            }
+            sum += diff.exp();
+        }
+        return Ok(l_0 + sum.ln());
+    }
+
     let (mut lo, mut hi) = if !upper {
         (1_usize, k0.max(1))
     } else {
@@ -231,21 +245,6 @@ fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
         (prev_prev, bracket_hi)
     };
 
-    if k0 == 0 && !upper {
-        let mut sum = 1.0_f64;
-        if !l_0.is_finite() || l_0 < -755.0 {
-            return Ok(0.0);
-        }
-        for k in 1..=50_000 {
-            let diff = ln_term(k)? - l_0;
-            if diff < -42.0 {
-                break;
-            }
-            sum += diff.exp();
-        }
-        return Ok((l_0 + sum.ln()).exp().clamp(0.0, 1.0));
-    }
-
     while hi - lo > 3 {
         let m1 = lo + (hi - lo) / 3;
         let m2 = hi - (hi - lo) / 3;
@@ -268,7 +267,7 @@ fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
 
     let l_max = if !upper || k0 == 0 { l_0.max(l_star) } else { l_star };
     if !l_max.is_finite() || l_max < -755.0 {
-        return Ok(0.0);
+        return Ok(f64::NEG_INFINITY);
     }
 
     let mut sum = (l_star - l_max).exp();
@@ -290,7 +289,19 @@ fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
         }
         sum += diff.exp();
     }
-    Ok((l_max + sum.ln()).exp().clamp(0.0, 1.0))
+    Ok(l_max + sum.ln())
+}
+
+/// Evaluate `sum_{k=0}^inf P(Poisson(lam_half) = k) * T_k` in log-space via unimodal peak search
+/// + separate `k = 0` evaluation (handling tiny-shape non-unimodality when `a0 < 1`) and log-sum-exp.
+fn sum_poisson_mixture_log_space<F: FnMut(usize) -> Result<f64, MathError>>(
+    lam_half: f64,
+    k0: usize,
+    upper: bool,
+    eval_ln_tail: F,
+) -> Result<f64, MathError> {
+    let ln_total = sum_log_mixture_ln(k0, upper, |k| ln_poisson_pmf_at(k, lam_half), eval_ln_tail)?;
+    Ok(if ln_total.is_finite() { ln_total.exp().clamp(0.0, 1.0) } else { 0.0 })
 }
 
 fn poisson_gl_expectation<F: FnMut(f64) -> Result<f64, MathError>>(lam_half: f64, mut f: F) -> Result<f64, MathError> {
@@ -327,6 +338,16 @@ fn alpha_from_confidence(confidence_percent: f64) -> Result<f64, MathError> {
 /// Lower-tail CDF `P(T_{df, delta} <= t)` of the noncentral Student `t` distribution (`df > 0`,
 /// real noncentrality parameter `delta`).
 ///
+/// # Large-`df` asymptotic bounds
+/// - For `df > 1e6` (`df < 1e9`, `t != 0`, `delta != 0`), uses the two-moment Gaussian
+///   approximation for `U = sqrt(chi^2_df / df)` (Johnson, Kotz & Balakrishnan 1995, *Continuous
+///   Univariate Distributions*, Vol. 2, ch. 31) with Stirling moments; the leading Edgeworth
+///   skewness term bounds the uniform CDF error by `<= 1 / (12 * sqrt(pi * df))` (`<= 4.71e-5` at
+///   `df = 1e6`, decreasing as `O(df^{-1/2})` to `<= 1.49e-6` at `df = 1e9`).
+/// - For `df >= 1e9` (or `df = +inf`), uses the normal limit `Phi(t - delta)`; the leading
+///   asymptotic discrepancy is `phi(t - delta) * (|t| + |t - delta| * t^2) / (4 * df) + O(df^{-2})`
+///   (`<= 1.1e-8` for `|t| <= 10`, `<= 6.2e-7` for `|t| <= 100`, exact at `df = +inf`).
+///
 /// # Errors
 /// Returns an error if `df <= 0` or any argument is `NaN`.
 pub fn nct_cdf(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
@@ -355,6 +376,15 @@ pub fn nct_cdf(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
 }
 
 /// Upper-tail survival probability `P(T_{df, delta} > t)` of the noncentral Student `t` distribution.
+///
+/// # Large-`df` asymptotic bounds
+/// - For `df > 1e6` (`df < 1e9`, `t != 0`, `delta != 0`), uses the two-moment Gaussian
+///   approximation for `U = sqrt(chi^2_df / df)` (Johnson, Kotz & Balakrishnan 1995, ch. 31) with
+///   uniform survival error `<= 1 / (12 * sqrt(pi * df))` (`<= 4.71e-5` at `df = 1e6`, `<= 1.49e-6`
+///   at `df = 1e9`).
+/// - For `df >= 1e9` (or `df = +inf`), uses the normal limit `1 - Phi(t - delta)` (`norm_sf`),
+///   with leading discrepancy `phi(t - delta) * (|t| + |t - delta| * t^2) / (4 * df) + O(df^{-2})`
+///   (`<= 1.1e-8` for `|t| <= 10`, `<= 6.2e-7` for `|t| <= 100`, exact at `df = +inf`).
 ///
 /// # Errors
 /// Returns an error if `df <= 0` or any argument is `NaN`.
@@ -609,6 +639,17 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     Ok(total.clamp(0.0, 1.0))
 }
 
+#[derive(Clone, Copy)]
+struct NctSeriesCtx {
+    k0: usize,
+    lambda_half: f64,
+    p_k0: f64,
+    q_k0: f64,
+    y: f64,
+    one_minus_y: f64,
+    b: f64,
+}
+
 fn nct_positive_t_eval(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
     if upper && delta < 0.0 {
         return nct_sf_pos_t_neg_delta_quad(t, df, delta);
@@ -629,52 +670,86 @@ fn nct_positive_t_eval(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, 
 
     let b = 0.5 * df;
     let k0 = (lambda_half.floor() as usize).min(200_000);
-    let k0_f = k0 as f64;
-
-    let p_k0 = if lambda_half == 0.0 { 1.0 } else { (-lambda_half + k0_f * lambda_half.ln() - ln_factorial(k0 as u64)).exp() };
-    let q_k0 = if delta == 0.0 {
-        0.0
-    } else {
-        let sign = delta.signum();
-        sign * (-lambda_half + (k0_f + 0.5) * lambda_half.ln() - ln_gamma(k0_f + 1.5)?).exp()
-    };
+    let p_k0 = if lambda_half == 0.0 { 1.0 } else { poisson_pmf_at(k0, lambda_half) };
+    let q_k0 = if delta == 0.0 { 0.0 } else { delta.signum() * ln_nct_odd_weight(k0, lambda_half)?.exp() };
+    let ctx = NctSeriesCtx { k0, lambda_half, p_k0, q_k0, y, one_minus_y, b };
 
     // When upper == true and delta >= 0, sum complement I_{1-y}(b, j + 0.5) & I_{1-y}(b, j + 1) directly
     // so every single term is positive with zero `1 - cdf` cancellation!
     if upper && delta >= 0.0 {
-        return Ok(nct_bidirectional_upper_sum(k0, lambda_half, p_k0, q_k0, y, one_minus_y, b)?.clamp(0.0, 1.0));
+        return Ok(nct_bidirectional_upper_sum(&ctx)?.clamp(0.0, 1.0));
     }
 
-    let series_half = nct_bidirectional_lower_sum(k0, lambda_half, p_k0, q_k0, y, one_minus_y, b)?;
+    if let Some(cdf_val) = nct_lower_pos_t_log_space_if_underflowing(delta, &ctx)? {
+        return Ok(if upper { (1.0 - cdf_val).clamp(0.0, 1.0) } else { cdf_val });
+    }
+
+    let series_half = nct_bidirectional_lower_sum(&ctx)?;
     let cdf_val = (norm_sf(delta) + 0.5 * series_half).clamp(0.0, 1.0);
     Ok(if upper { (1.0 - cdf_val).clamp(0.0, 1.0) } else { cdf_val })
 }
 
-fn nct_bidirectional_lower_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64, y: f64, one_minus_y: f64, b: f64) -> Result<f64, MathError> {
-    let a_even0 = (k0 as f64) + 0.5;
-    let a_odd0 = (k0 as f64) + 1.0;
-    let ix_even0 = reg_beta_xy(y, one_minus_y, a_even0, b)?;
-    let ix_odd0 = reg_beta_xy(y, one_minus_y, a_odd0, b)?;
-    let term_even0 = (ln_beta_kernel(y, one_minus_y, a_even0, b)? - a_even0.ln()).exp();
-    let term_odd0 = (ln_beta_kernel(y, one_minus_y, a_odd0, b)? - a_odd0.ln()).exp();
+/// Log-space Poisson-weighted incomplete-beta mixture for `P(T_{df, delta} <= t)` when `t > 0`,
+/// `delta > 0`, and the recurrence seed at `k0 = floor(delta^2 / 2)` is tiny or underflows `f64`.
+fn nct_lower_pos_t_log_space_if_underflowing(delta: f64, ctx: &NctSeriesCtx) -> Result<Option<f64>, MathError> {
+    if delta <= 0.0 {
+        return Ok(None);
+    }
+    let a_even0 = (ctx.k0 as f64) + 0.5;
+    let a_odd0 = (ctx.k0 as f64) + 1.0;
+    let ix_even0 = reg_beta_xy(ctx.y, ctx.one_minus_y, a_even0, ctx.b)?;
+    let ix_odd0 = reg_beta_xy(ctx.y, ctx.one_minus_y, a_odd0, ctx.b)?;
+    let term_even0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_even0, ctx.b)? - a_even0.ln()).exp();
+    let term_odd0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_odd0, ctx.b)? - a_odd0.ln()).exp();
 
-    let mut total = p_k0 * ix_even0 + q_k0 * ix_odd0;
+    let needs_log_space =
+        ctx.p_k0 == 0.0 || ix_even0 < 1e-20 || ix_odd0 < 1e-20 || (ix_even0 < 0.5 && term_even0 == 0.0) || (ix_odd0 < 0.5 && term_odd0 == 0.0);
+    if !needs_log_space {
+        return Ok(None);
+    }
+
+    let ln_base = norm_ln_sf(delta);
+    let ln_even = sum_log_mixture_ln(
+        ctx.k0,
+        false,
+        |k| ln_poisson_pmf_at(k, ctx.lambda_half),
+        |k| ln_reg_beta_eval_safe(ctx.y, ctx.one_minus_y, (k as f64) + 0.5, ctx.b),
+    )? - std::f64::consts::LN_2;
+    let ln_odd = sum_log_mixture_ln(
+        ctx.k0,
+        false,
+        |k| ln_nct_odd_weight(k, ctx.lambda_half),
+        |k| ln_reg_beta_eval_safe(ctx.y, ctx.one_minus_y, (k as f64) + 1.0, ctx.b),
+    )? - std::f64::consts::LN_2;
+    let ln_total = ln_sum_exp3(ln_base, ln_even, ln_odd);
+    Ok(Some(if ln_total.is_finite() { ln_total.exp().clamp(0.0, 1.0) } else { 0.0 }))
+}
+
+fn nct_bidirectional_lower_sum(ctx: &NctSeriesCtx) -> Result<f64, MathError> {
+    let a_even0 = (ctx.k0 as f64) + 0.5;
+    let a_odd0 = (ctx.k0 as f64) + 1.0;
+    let ix_even0 = reg_beta_xy(ctx.y, ctx.one_minus_y, a_even0, ctx.b)?;
+    let ix_odd0 = reg_beta_xy(ctx.y, ctx.one_minus_y, a_odd0, ctx.b)?;
+    let term_even0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_even0, ctx.b)? - a_even0.ln()).exp();
+    let term_odd0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_odd0, ctx.b)? - a_odd0.ln()).exp();
+
+    let mut total = ctx.p_k0 * ix_even0 + ctx.q_k0 * ix_odd0;
 
     // Forward k = k0 + 1, k0 + 2, ...
-    let mut pk = p_k0;
-    let mut qk = q_k0;
+    let mut pk = ctx.p_k0;
+    let mut qk = ctx.q_k0;
     let mut ix_e = ix_even0;
     let mut ix_o = ix_odd0;
     let mut gx_e = term_even0;
     let mut gx_o = term_odd0;
     for step in 1..=MAX_POISSON_TERMS {
-        let j = (k0 + step) as f64;
-        pk *= lambda_half / j;
-        qk *= lambda_half / (j + 0.5);
+        let j = (ctx.k0 + step) as f64;
+        pk *= ctx.lambda_half / j;
+        qk *= ctx.lambda_half / (j + 0.5);
         ix_e = (ix_e - gx_e).max(0.0);
         ix_o = (ix_o - gx_o).max(0.0);
-        gx_e *= y * (j - 0.5 + b) / (j + 0.5);
-        gx_o *= y * (j + b) / (j + 1.0);
+        gx_e *= ctx.y * (j - 0.5 + ctx.b) / (j + 0.5);
+        gx_o *= ctx.y * (j + ctx.b) / (j + 1.0);
         let contrib = pk * ix_e + qk * ix_o;
         total += contrib;
         if (pk.abs() + qk.abs()) <= 0.25 * f64::EPSILON * total.abs().max(1e-300) {
@@ -683,18 +758,18 @@ fn nct_bidirectional_lower_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64
     }
 
     // Backward k = k0 - 1, k0 - 2, ..., 0
-    let mut pk_b = p_k0;
-    let mut qk_b = q_k0;
+    let mut pk_b = ctx.p_k0;
+    let mut qk_b = ctx.q_k0;
     let mut ix_eb = ix_even0;
     let mut ix_ob = ix_odd0;
     let mut gx_eb = term_even0;
     let mut gx_ob = term_odd0;
-    for k_curr in (1..=k0).rev() {
+    for k_curr in (1..=ctx.k0).rev() {
         let jf = k_curr as f64;
-        pk_b *= jf / lambda_half;
-        qk_b *= (jf + 0.5) / lambda_half;
-        gx_eb *= (jf + 0.5) / (y * (jf - 0.5 + b));
-        gx_ob *= (jf + 1.0) / (y * (jf + b));
+        pk_b *= jf / ctx.lambda_half;
+        qk_b *= (jf + 0.5) / ctx.lambda_half;
+        gx_eb *= (jf + 0.5) / (ctx.y * (jf - 0.5 + ctx.b));
+        gx_ob *= (jf + 1.0) / (ctx.y * (jf + ctx.b));
         ix_eb = (ix_eb + gx_eb).min(1.0);
         ix_ob = (ix_ob + gx_ob).min(1.0);
         let contrib = pk_b * ix_eb + qk_b * ix_ob;
@@ -706,30 +781,47 @@ fn nct_bidirectional_lower_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64
     Ok(total)
 }
 
-fn nct_bidirectional_upper_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64, y: f64, one_minus_y: f64, b: f64) -> Result<f64, MathError> {
-    let a_even0 = (k0 as f64) + 0.5;
-    let a_odd0 = (k0 as f64) + 1.0;
-    let iy_even0 = reg_beta_xy(one_minus_y, y, b, a_even0)?;
-    let iy_odd0 = reg_beta_xy(one_minus_y, y, b, a_odd0)?;
-    let term_even0 = (ln_beta_kernel(y, one_minus_y, a_even0, b)? - a_even0.ln()).exp();
-    let term_odd0 = (ln_beta_kernel(y, one_minus_y, a_odd0, b)? - a_odd0.ln()).exp();
+fn nct_bidirectional_upper_sum(ctx: &NctSeriesCtx) -> Result<f64, MathError> {
+    let a_even0 = (ctx.k0 as f64) + 0.5;
+    let a_odd0 = (ctx.k0 as f64) + 1.0;
+    let iy_even0 = reg_beta_xy(ctx.one_minus_y, ctx.y, ctx.b, a_even0)?;
+    let iy_odd0 = reg_beta_xy(ctx.one_minus_y, ctx.y, ctx.b, a_odd0)?;
+    let term_even0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_even0, ctx.b)? - a_even0.ln()).exp();
+    let term_odd0 = (ln_beta_kernel(ctx.y, ctx.one_minus_y, a_odd0, ctx.b)? - a_odd0.ln()).exp();
 
-    let mut total = p_k0 * iy_even0 + q_k0 * iy_odd0;
+    if ctx.p_k0 == 0.0 || iy_even0 < 1e-20 || iy_odd0 < 1e-20 || (iy_even0 < 0.5 && term_even0 == 0.0) || (iy_odd0 < 0.5 && term_odd0 == 0.0) {
+        let ln_even = sum_log_mixture_ln(
+            ctx.k0,
+            true,
+            |k| ln_poisson_pmf_at(k, ctx.lambda_half),
+            |k| ln_reg_beta_eval_safe(ctx.one_minus_y, ctx.y, ctx.b, (k as f64) + 0.5),
+        )?;
+        let ln_odd = sum_log_mixture_ln(
+            ctx.k0,
+            true,
+            |k| ln_nct_odd_weight(k, ctx.lambda_half),
+            |k| ln_reg_beta_eval_safe(ctx.one_minus_y, ctx.y, ctx.b, (k as f64) + 1.0),
+        )?;
+        let ln_total = ln_sum_exp2(ln_even, ln_odd) - std::f64::consts::LN_2;
+        return Ok(if ln_total.is_finite() { ln_total.exp().clamp(0.0, 1.0) } else { 0.0 });
+    }
 
-    let mut pk = p_k0;
-    let mut qk = q_k0;
+    let mut total = ctx.p_k0 * iy_even0 + ctx.q_k0 * iy_odd0;
+
+    let mut pk = ctx.p_k0;
+    let mut qk = ctx.q_k0;
     let mut iy_e = iy_even0;
     let mut iy_o = iy_odd0;
     let mut gx_e = term_even0;
     let mut gx_o = term_odd0;
     for step in 1..=MAX_POISSON_TERMS {
-        let j = (k0 + step) as f64;
-        pk *= lambda_half / j;
-        qk *= lambda_half / (j + 0.5);
+        let j = (ctx.k0 + step) as f64;
+        pk *= ctx.lambda_half / j;
+        qk *= ctx.lambda_half / (j + 0.5);
         iy_e = (iy_e + gx_e).min(1.0);
         iy_o = (iy_o + gx_o).min(1.0);
-        gx_e *= y * (j - 0.5 + b) / (j + 0.5);
-        gx_o *= y * (j + b) / (j + 1.0);
+        gx_e *= ctx.y * (j - 0.5 + ctx.b) / (j + 0.5);
+        gx_o *= ctx.y * (j + ctx.b) / (j + 1.0);
         let contrib = pk * iy_e + qk * iy_o;
         total += contrib;
         if (pk + qk) <= 0.25 * f64::EPSILON * total.max(1e-300) {
@@ -737,18 +829,18 @@ fn nct_bidirectional_upper_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64
         }
     }
 
-    let mut pk_b = p_k0;
-    let mut qk_b = q_k0;
+    let mut pk_b = ctx.p_k0;
+    let mut qk_b = ctx.q_k0;
     let mut iy_eb = iy_even0;
     let mut iy_ob = iy_odd0;
     let mut gx_eb = term_even0;
     let mut gx_ob = term_odd0;
-    for k_curr in (1..=k0).rev() {
+    for k_curr in (1..=ctx.k0).rev() {
         let jf = k_curr as f64;
-        pk_b *= jf / lambda_half;
-        qk_b *= (jf + 0.5) / lambda_half;
-        gx_eb *= (jf + 0.5) / (y * (jf - 0.5 + b));
-        gx_ob *= (jf + 1.0) / (y * (jf + b));
+        pk_b *= jf / ctx.lambda_half;
+        qk_b *= (jf + 0.5) / ctx.lambda_half;
+        gx_eb *= (jf + 0.5) / (ctx.y * (jf - 0.5 + ctx.b));
+        gx_ob *= (jf + 1.0) / (ctx.y * (jf + ctx.b));
         iy_eb = (iy_eb - gx_eb).max(0.0);
         iy_ob = (iy_ob - gx_ob).max(0.0);
         let contrib = pk_b * iy_eb + qk_b * iy_ob;
@@ -765,6 +857,11 @@ fn nct_bidirectional_upper_sum(k0: usize, lambda_half: f64, p_k0: f64, q_k0: f64
 /// `confidence_percent` in `[0.01, 99.99]`.
 ///
 /// Used directly to construct exact confidence intervals for Cohen's `d`, Hedges' `g`, and Glass's `Delta`.
+///
+/// # Large-`df` asymptotic bound
+/// For `df >= 1e9` (or `df = +inf`), returns the normal limit `(t_obs - z_crit, t_obs + z_crit)`
+/// directly; the leading endpoint discrepancy is `(z_crit^3 + z_crit + t_obs^2 * z_crit) / (4 * df) + O(df^{-2})`
+/// (`<= 5.2e-8` at 95% confidence for `|t_obs| <= 10`, `<= 5.0e-6` for `|t_obs| <= 100`).
 ///
 /// # Errors
 /// Returns an error if `df <= 0`, `t_obs` is non-finite, or `confidence_percent` is outside `[0.01, 99.99]`.
@@ -1266,5 +1363,46 @@ mod tests {
             let right = nct_cdf(t, 1_000_001.0, delta).unwrap();
             assert!((left - right).abs() < 5.0e-5, "seam jump at df=1e6 ({t}, {delta}): {left} vs {right}");
         }
+    }
+
+    #[test]
+    fn gap_03_01_nct_cdf_large_delta_log_space_oracle() {
+        // D1 oracle: 80-digit Python `decimal` evaluation of Benton & Krishnamoorthy (2003) /
+        // Lenth AS 243 Poisson-weighted incomplete beta series (`Phi(-delta) + 0.5 * sum_k ...`).
+        // Previously all cases underflowed `ix_even0`/`term_even0` at `k0 = floor(delta^2 / 2)`
+        // and silently collapsed to `Phi(-delta)` (e.g. `3.057e-138` vs `5.560e-106`).
+        let oracles = [
+            (3.0_f64, 300.0_f64, 25.0_f64, 5.560_034_427_961_169e-106_f64),
+            (0.197, 1e5, 14.0, 1.222_331_610_751_068_5e-43),
+            (1.0, 20.0, 20.0, 1.016_948_565_069_739_8e-78),
+            (5.0, 50.0, 30.0, 1.578_512_716_963_242_6e-105),
+            (2.0, 100.0, 35.0, 4.473_329_957_368_135e-234),
+            (0.5, 1_000.0, 18.0, 7.286_492_635_906_922e-69),
+        ];
+        for (t, df, delta, expected) in oracles {
+            let got = nct_cdf(t, df, delta).unwrap();
+            let rel_err = (got - expected).abs() / expected;
+            assert!(rel_err < 1e-11, "nct_cdf({t}, {df}, {delta}): got={got:.16e}, expected={expected:.16e}, rel_err={rel_err:.3e}");
+            // Symmetry check via negative t / negative delta: P(T_{df, -delta} > -t) == P(T_{df, delta} <= t).
+            let sym_sf = nct_sf(-t, df, -delta).unwrap();
+            assert!((sym_sf - got).abs() <= 1e-13 * got, "symmetry mismatch: {sym_sf:.16e} vs {got:.16e}");
+        }
+    }
+
+    #[test]
+    fn gap_03_03_nct_df_1e9_normal_limit_bounds() {
+        // Verify documented asymptotic discrepancy across the `df = 1e9` normal-limit cutoff.
+        for &(t, delta) in &[(1.5_f64, 1.0), (10.0, 9.0), (10.0, 10.0), (100.0, 99.0)] {
+            let below_cdf = nct_cdf(t, 9.99e8, delta).unwrap();
+            let at_cdf = nct_cdf(t, 1e9, delta).unwrap();
+            let below_sf = nct_sf(t, 9.99e8, delta).unwrap();
+            let at_sf = nct_sf(t, 1e9, delta).unwrap();
+            let cap = if t.abs() <= 10.0 { 1.1e-8 + 2.0e-6 } else { 6.2e-7 + 2.0e-6 };
+            assert!((below_cdf - at_cdf).abs() <= cap, "t={t}, delta={delta}: {below_cdf} vs {at_cdf}");
+            assert!((below_sf - at_sf).abs() <= cap, "t={t}, delta={delta}: {below_sf} vs {at_sf}");
+        }
+        let (lo_below, hi_below) = noncentral_t_ci(10.0, 9.99e8, 95.0).unwrap();
+        let (lo_at, hi_at) = noncentral_t_ci(10.0, 1e9, 95.0).unwrap();
+        assert!((lo_below - lo_at).abs() < 1e-5 && (hi_below - hi_at).abs() < 1e-5);
     }
 }

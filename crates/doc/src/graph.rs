@@ -1391,6 +1391,27 @@ pub struct GraphSpec {
     pub heatmap_labels: HeatmapLabelSpec,
 }
 
+/// Return `true` only when `archetype` is a `MultipleVariables` study-level meta-analysis table
+/// whose numeric columns explicitly encode `(Estimate, Lower, Upper)` confidence bounds rather
+/// than heterogeneous regression covariates (`GAP-02-04`).
+fn is_meta_analysis_forest_table(archetype: &TableArchetype) -> bool {
+    let TableArchetype::MultipleVariables(mv) = archetype else {
+        return false;
+    };
+    let num_titles: Vec<String> = mv
+        .variables
+        .iter()
+        .filter(|v| v.role != VariableRole::Label && v.role != VariableRole::Categorical)
+        .map(|v| v.title.trim().to_ascii_lowercase())
+        .collect();
+    let (Some(lo_title), Some(hi_title)) = (num_titles.get(1), num_titles.get(2)) else {
+        return false;
+    };
+    let has_lower = |s: &str| s.contains("lower") || s.contains("lcl") || s == "lo" || s.ends_with("_lo") || s.ends_with(" lo");
+    let has_upper = |s: &str| s.contains("upper") || s.contains("ucl") || s == "hi" || s.ends_with("_hi") || s.ends_with(" hi");
+    has_lower(lo_title) && has_upper(hi_title)
+}
+
 impl GraphSpec {
     /// Synthesize the canonical default [`GraphSpec`] for a newly created [`DataSheet`], honoring
     /// `TableArchetype` and `ColumnDesignHint` (`docs/implementation/data-tables-and-transforms.md` §2.2 &
@@ -1514,7 +1535,7 @@ impl GraphSpec {
             point_overrides: Vec::new(),
             legend: LegendSpec::default(),
             orientation: CartesianOrientation::Vertical,
-            forest_show_pooled_diamond: matches!(sheet.archetype, TableArchetype::MultipleVariables(_)),
+            forest_show_pooled_diamond: is_meta_analysis_forest_table(&sheet.archetype),
             heatmap_labels: HeatmapLabelSpec::default(),
         }
     }

@@ -1258,15 +1258,18 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
             if remote.get("exported").and_then(Value::as_bool) == Some(true) {
                 let written_path = remote.get("path").and_then(Value::as_str).map(ToOwned::to_owned).unwrap_or_else(|| dest.display().to_string());
                 let bytes_written = remote.get("bytes_written").or_else(|| remote.get("bytes_len")).and_then(Value::as_u64).unwrap_or(0);
-                return ToolCallResult::ok_json(&json!({
-                    "exported": true,
-                    "mode": "live_attach",
-                    "control_port": port,
-                    "format": format_str,
-                    "sheet_id": target_id,
-                    "path": written_path,
-                    "bytes_written": bytes_written,
-                }));
+                return attach_figure_warnings(
+                    ToolCallResult::ok_json(&json!({
+                        "exported": true,
+                        "mode": "live_attach",
+                        "control_port": port,
+                        "format": format_str,
+                        "sheet_id": target_id,
+                        "path": written_path,
+                        "bytes_written": bytes_written,
+                    })),
+                    remote.get("warnings"),
+                );
             }
             let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
                 return Ok(errors::result_from_code(

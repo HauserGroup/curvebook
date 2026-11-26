@@ -30,7 +30,7 @@ Supported built-in methods today are `"auth"`, `"ping"`, `"command.list"` (all r
 - `format`: required `"svg"` | `"pdf"` | `"emf"` | `"png"` | `"tiff"` | `"csv"` | `"tsv"` | `"json"`.
 - `sheet_id` / `sheetId`: optional `SheetId` (defaults to the active or first compatible sheet).
 - `path` / `output_path`: optional host filesystem destination path; when non-empty, writes the exported bytes atomically to disk (subject to the session's `ExternalPathPolicy`).
-- Format-specific options: `pdf_color_space` / `color_space`, `pdf_version`, `ttf_font` (optional TrueType font path/embedding for PDF), `all_graphs` / `all`, `svg_precision`, `width_px`, `height_px`, `dpi`, `tiff_compression`, `pretty`, `tidy`, `tab_id` / `tabId`, and `csv_delimiter`.
+- Format-specific options: `pdf_color_space` / `color_space`, `pdf_version`, `ttf_font` (optional TrueType font path/embedding for PDF), `all_graphs` / `all`, `svg_precision`, `width_px`, `height_px`, `dpi`, `tiff_compression`, `transparent_bg` (optional `bool`, default `false`; supported for `svg`, `png`, and `tiff` — passing `transparent_bg: true` for other formats such as `pdf` or `emf` returns `bad_input`), `pretty`, `tidy`, `tab_id` / `tabId`, and `csv_delimiter`.
 
 Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\n`:
 

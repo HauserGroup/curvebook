@@ -38,6 +38,9 @@ const GROUP_SHAPES: [MarkerShape; 9] = [
     MarkerShape::Cross,
 ];
 
+const UNASSIGNED_COLOR: Rgba8 = Rgba8::rgb(148, 154, 164);
+const UNASSIGNED_STROKE: Rgba8 = Rgba8::rgb(96, 102, 112);
+
 // ============================================================================
 // 1. MultipleVariables (5-Channel BubbleScatter & CategoricalSummary)
 // ============================================================================
@@ -46,14 +49,14 @@ struct BubblePoint {
     row: usize,
     x: f64,
     y: f64,
-    color_cat_idx: usize,
+    color_cat_idx: Option<usize>,
     color_scalar: Option<f64>,
     size_scalar: f64,
     label: Option<String>,
 }
 
 pub(super) fn compile_multiple_variables(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
-    let Some(ds) = crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id) else {
+    let Some(ds) = super::diagnostics::resolve_source_data_sheet_checked(graph, doc, &mut scene.warnings) else {
         draw_empty_open_frame(scene);
         return Ok(());
     };
@@ -126,6 +129,8 @@ fn compile_bubble_scatter(
     let x_levels = if x_is_cat { column_categorical_levels(x_col, enc.x_level_order_override.as_ref()) } else { Vec::new() };
 
     let (cat_levels, cat_palette, continuous_ramp, domain_clamp) = resolve_color_channel(mv, enc, graph.spec.palette);
+    let is_cat_color = matches!(enc.color, ColorChannelMapping::Categorical { .. });
+    let mut unassigned_color_count = 0_usize;
     let mut points = Vec::new();
     for row in 0..mv.row_count() {
         let Some(yv) = y_col.cells.get(row).and_then(|c| c.active_number()) else { continue };
@@ -138,9 +143,21 @@ fn compile_bubble_scatter(
         let Some(xv) = xv else { continue };
 
         let (cat_idx, col_scalar) = extract_row_color(mv, &enc.color, &cat_levels, row);
+        if is_cat_color && cat_idx.is_none() {
+            unassigned_color_count += 1;
+        }
         let size_scalar = extract_row_size(mv, enc.size, row);
         let label = enc.label_column.and_then(|lc| mv.variables.get(lc)).and_then(|c| cell_token(c, row));
         points.push(BubblePoint { row, x: xv, y: yv, color_cat_idx: cat_idx, color_scalar: col_scalar, size_scalar, label });
+    }
+
+    if unassigned_color_count > 0 {
+        scene.warnings.push(ChartWarning::new(
+            "unassigned_categorical_color",
+            format!(
+                "{unassigned_color_count} observation(s) have blank, excluded, or unmatched categorical color values; rendered in neutral unassigned style and excluded from group hulls/ellipses"
+            ),
+        ));
     }
 
     if points.is_empty() {
@@ -156,7 +173,12 @@ fn compile_bubble_scatter(
     let has_colorbar = continuous_ramp.is_some();
     let x_cats_opt = x_is_cat.then(|| x_levels.iter().enumerate().map(|(i, lbl)| (i as f64, lbl.clone())).collect::<Vec<_>>());
     let info_id = doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id);
-    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, cat_levels.iter().map(String::as_str), doc, info_id);
+    let mut legend_labels: Vec<&str> = cat_levels.iter().map(String::as_str).collect();
+    if is_cat_color && unassigned_color_count > 0 {
+        legend_labels.push("Unassigned");
+    }
+    let has_cat_legend = !legend_labels.is_empty();
+    let legend_box_width_pt = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, legend_labels, doc, info_id);
     let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
         scene,
         graph,
@@ -167,7 +189,7 @@ fn compile_bubble_scatter(
             y2_bounds: None,
             cat_x: x_cats_opt.as_deref(),
             cat_y: None,
-            margins: PlotMarginConfig { has_legend: !cat_levels.is_empty(), legend_box_width_pt, has_colorbar, ..PlotMarginConfig::default() },
+            margins: PlotMarginConfig { has_legend: has_cat_legend, legend_box_width_pt, has_colorbar, ..PlotMarginConfig::default() },
         },
     );
 
@@ -181,7 +203,9 @@ fn compile_bubble_scatter(
         let (Some((_, px)), Some((_, py))) = (x_axis.map_value(pt.x), y_axis.map_value(pt.y)) else {
             continue;
         };
-        if let Some(slot) = grouped_screen.get_mut(pt.color_cat_idx) {
+        if let Some(cat_idx) = pt.color_cat_idx
+            && let Some(slot) = grouped_screen.get_mut(cat_idx)
+        {
             slot.push((px, py));
         }
         mapped_points.push((px, py, pt));
@@ -190,26 +214,32 @@ fn compile_bubble_scatter(
     draw_hulls_and_ellipses(scene, &grouped_screen, enc, cat_palette, r);
 
     for &(px, py, pt) in &mapped_points {
-        let fill = match (&continuous_ramp, pt.color_scalar) {
-            (Some(ramp), Some(v)) => {
-                let denom = (col_hi - col_lo).abs().max(1e-12);
-                ramp.sample(crate::clamp_f64_safe((v - col_lo) / denom, 0.0, 1.0))
+        let is_unassigned = is_cat_color && pt.color_cat_idx.is_none();
+        let fill = if is_unassigned {
+            UNASSIGNED_COLOR
+        } else {
+            match (&continuous_ramp, pt.color_scalar) {
+                (Some(ramp), Some(v)) => {
+                    let denom = (col_hi - col_lo).abs().max(1e-12);
+                    ramp.sample(crate::clamp_f64_safe((v - col_lo) / denom, 0.0, 1.0))
+                }
+                _ => match enc.color {
+                    ColorChannelMapping::Constant(c) => c,
+                    _ => cat_palette.color_at(pt.color_cat_idx.unwrap_or(0)),
+                },
             }
-            _ => match enc.color {
-                ColorChannelMapping::Constant(c) => c,
-                _ => cat_palette.color_at(pt.color_cat_idx),
-            },
         };
         let radius = bubble_radius_pt(enc.size, pt.size_scalar, max_abs_s);
-        let shape = if cat_levels.is_empty() { MarkerShape::Circle } else { GROUP_SHAPES[pt.color_cat_idx % GROUP_SHAPES.len()] };
-        let base_marker = MarkerStyle {
-            shape,
-            fill_mode: MarkerFillMode::Filled,
-            size_pt: radius * 2.0,
-            fill_color: Rgba8::rgba(fill.r, fill.g, fill.b, 210),
-            stroke_color: Rgba8::rgba(25, 25, 25, 210),
-            stroke_width_pt: 0.75,
+        let (shape, fill_mode, fill_color, stroke_color, stroke_width_pt) = if is_unassigned {
+            (MarkerShape::Circle, MarkerFillMode::Open, Rgba8::rgba(fill.r, fill.g, fill.b, 180), UNASSIGNED_STROKE, 1.0)
+        } else {
+            let s = match pt.color_cat_idx {
+                Some(idx) if !cat_levels.is_empty() => GROUP_SHAPES[idx % GROUP_SHAPES.len()],
+                _ => MarkerShape::Circle,
+            };
+            (s, MarkerFillMode::Filled, Rgba8::rgba(fill.r, fill.g, fill.b, 210), Rgba8::rgba(25, 25, 25, 210), 0.75)
         };
+        let base_marker = MarkerStyle { shape, fill_mode, size_pt: radius * 2.0, fill_color, stroke_color, stroke_width_pt };
         let Some(marker) =
             crate::resolve_overridden_marker_for_col(&graph.spec, &graph.spec.primary_source_sheet_id, enc.y_column, pt.row, Some(0), base_marker)
         else {
@@ -217,11 +247,16 @@ fn compile_bubble_scatter(
         };
         let center_pt = PointPt::new(px, py);
         emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
+        let series_label = if is_unassigned {
+            String::from("Unassigned")
+        } else {
+            pt.color_cat_idx.and_then(|idx| cat_levels.get(idx)).cloned().unwrap_or_else(|| y_col.title.clone())
+        };
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
             radius_pt: (marker.size_pt * 0.5).max(3.0),
             source_cell: SourceCellId { sheet_id: graph.spec.primary_source_sheet_id.clone(), row: pt.row, col: enc.y_column, subcol: 0 },
-            series_label: cat_levels.get(pt.color_cat_idx).cloned().unwrap_or_else(|| y_col.title.clone()),
+            series_label,
             value_summary: format!("X={}, Y={}", format_point_value(pt.x), format_point_value(pt.y)),
         });
         if let Some(lbl) = &pt.label {
@@ -242,8 +277,8 @@ fn compile_bubble_scatter(
             _ => "",
         };
         draw_colorbar(scene, &ramp, col_lo, col_hi, title, RectPt::new(r.right() + 10.0, r.y + 4.0, 11.0, (r.height - 8.0).max(24.0)));
-    } else if !cat_levels.is_empty() {
-        let entries: Vec<LegendEntry> = cat_levels
+    } else if has_cat_legend {
+        let mut entries: Vec<LegendEntry> = cat_levels
             .iter()
             .enumerate()
             .map(|(idx, lbl)| {
@@ -265,6 +300,22 @@ fn compile_bubble_scatter(
                 }
             })
             .collect();
+        if is_cat_color && unassigned_color_count > 0 {
+            entries.push(LegendEntry {
+                label: String::from("Unassigned"),
+                color: UNASSIGNED_COLOR,
+                marker: Some(MarkerStyle {
+                    shape: MarkerShape::Circle,
+                    fill_color: UNASSIGNED_COLOR,
+                    stroke_color: UNASSIGNED_STROKE,
+                    stroke_width_pt: 1.0,
+                    size_pt: 5.5,
+                    fill_mode: MarkerFillMode::Open,
+                }),
+                dash: None,
+                is_line: false,
+            });
+        }
         draw_legend_entries(scene, &graph.spec, &entries, doc);
     }
 
@@ -293,17 +344,16 @@ fn extract_row_color(
     color: &ColorChannelMapping,
     cat_levels: &[String],
     row: usize,
-) -> (usize, Option<f64>) {
+) -> (Option<usize>, Option<f64>) {
     match color {
-        ColorChannelMapping::Constant(_) => (0, None),
+        ColorChannelMapping::Constant(_) => (Some(0), None),
         ColorChannelMapping::Categorical { column, .. } => {
-            let idx =
-                mv.variables.get(*column).and_then(|c| cell_token(c, row)).and_then(|tok| cat_levels.iter().position(|l| l == &tok)).unwrap_or(0);
+            let idx = mv.variables.get(*column).and_then(|c| cell_token(c, row)).and_then(|tok| cat_levels.iter().position(|l| l == &tok));
             (idx, None)
         }
         ColorChannelMapping::Continuous { column, .. } => {
             let val = mv.variables.get(*column).and_then(|c| c.cells.get(row)).and_then(|cell| cell.active_number());
-            (0, val)
+            (Some(0), val)
         }
     }
 }

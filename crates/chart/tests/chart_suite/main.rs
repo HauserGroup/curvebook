@@ -10,6 +10,8 @@ mod audit_r1_s4a_chart_col;
 mod audit_r1_s4a_chart_xy;
 mod audit_r1_s4b_chart_scales;
 mod audit_r2_s08_s09;
+mod gap_chart_core_fixes;
+mod gap_chart_sci_fixes;
 mod point_brushing_preflight;
 mod r1019_format_determinism;
 mod r1019_typeset_equations;

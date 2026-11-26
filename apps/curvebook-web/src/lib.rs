@@ -270,16 +270,23 @@ impl WebWorkspaceHost {
 
     /// Replace the workspace with a fresh project created from in-memory CSV or TSV bytes.
     ///
+    /// Validates UTF-8 and completes CSV/TSV import into a fresh candidate [`Session`] before
+    /// replacing the active workspace so invalid input leaves the current document, virtual
+    /// workspace, format tag, and warnings completely intact (`GAP-05-01`).
+    ///
     /// # Errors
     /// Returns an error description if `bytes` are not valid UTF-8 or CSV import fails.
     pub fn open_delimited_bytes(&mut self, bytes: &[u8], is_tsv: bool, title: Option<&str>, kind: Option<&str>) -> Result<WorkspaceSummary, String> {
-        if bytes.len() > MAX_CSV_FILE_BYTES {
-            return Err(format!("delimited payload exceeds maximum allowed size ({} > {MAX_CSV_FILE_BYTES} bytes)", bytes.len()));
+        let params = Self::build_delimited_import_params(bytes, is_tsv, title, kind)?;
+        let mut candidate = Session::new();
+        candidate.set_path_policy(ExternalPathPolicy::RejectExternal);
+        let outcome = candidate.execute_as_ui("table.importCsv", params).map_err(|err| err.to_string())?;
+        if let Some(sheet_id) = outcome.payload.get("sheet_id").and_then(Value::as_str) {
+            let _ = candidate.execute_as_ui("sheet.select", json!({ "sheet_id": sheet_id }));
         }
-        self.install_session(Session::new(), if is_tsv { "tsv" } else { "csv" }, Vec::new(), false, false);
-        let summary = self.import_delimited_bytes(bytes, is_tsv, title, kind)?;
-        self.format_tag = String::from(if is_tsv { "tsv" } else { "csv" });
-        Ok(self.inspect_summary_with_format(summary))
+        let tag = if is_tsv { "tsv" } else { "csv" };
+        self.install_session(candidate, tag, Vec::new(), false, false);
+        Ok(self.inspect_summary())
     }
 
     /// Import in-memory CSV or TSV bytes as a new sheet inside the currently active project.
@@ -293,6 +300,18 @@ impl WebWorkspaceHost {
         title: Option<&str>,
         kind: Option<&str>,
     ) -> Result<WorkspaceSummary, String> {
+        let params = Self::build_delimited_import_params(bytes, is_tsv, title, kind)?;
+        let outcome = self.app.execute_command("table.importCsv", params).map_err(|err| err.to_string())?;
+        if let Some(sheet_id) = outcome.payload.get("sheet_id").and_then(Value::as_str) {
+            let _ = self.app.execute_command("sheet.select", json!({ "sheet_id": sheet_id }));
+        }
+        if self.format_tag == "empty" {
+            self.format_tag = String::from(if is_tsv { "tsv" } else { "csv" });
+        }
+        Ok(self.inspect_summary())
+    }
+
+    fn build_delimited_import_params(bytes: &[u8], is_tsv: bool, title: Option<&str>, kind: Option<&str>) -> Result<Value, String> {
         if bytes.len() > MAX_CSV_FILE_BYTES {
             return Err(format!("delimited payload exceeds maximum allowed size ({} > {MAX_CSV_FILE_BYTES} bytes)", bytes.len()));
         }
@@ -305,14 +324,7 @@ impl WebWorkspaceHost {
         if is_tsv && let Some(obj) = params.as_object_mut() {
             obj.insert(String::from("delimiter"), Value::String(String::from("\t")));
         }
-        let outcome = self.app.execute_command("table.importCsv", params).map_err(|err| err.to_string())?;
-        if let Some(sheet_id) = outcome.payload.get("sheet_id").and_then(Value::as_str) {
-            let _ = self.app.execute_command("sheet.select", json!({ "sheet_id": sheet_id }));
-        }
-        if self.format_tag == "empty" {
-            self.format_tag = String::from(if is_tsv { "tsv" } else { "csv" });
-        }
-        Ok(self.inspect_summary())
+        Ok(params)
     }
 
     /// Auto-detect format from `file_name` (or sniff content bytes when extension is absent) and
@@ -580,11 +592,6 @@ impl WebWorkspaceHost {
         self.warnings = warnings;
     }
 
-    fn inspect_summary_with_format(&self, mut summary: WorkspaceSummary) -> WorkspaceSummary {
-        summary.format_tag = self.format_tag.clone();
-        summary
-    }
-
     fn sniff_and_open_bytes(&mut self, bytes: &[u8], title: Option<&str>) -> Result<WorkspaceSummary, String> {
         if bytes.starts_with(b"PK") {
             return self.open_curvebook_bytes(bytes).or_else(|_| self.open_prism_bytes(bytes));
@@ -798,5 +805,28 @@ mod tests {
 
         // Non-finite float or malformed root fails cleanly.
         assert!(host.open_project_json_bytes(b"[]").is_err(), "non-object root must fail");
+    }
+
+    #[test]
+    fn gap_05_01_failed_delimited_open_preserves_existing_session_atomically() {
+        let mut host = build_populated_host();
+        let _ = host.save_virtual_unpacked_snapshot().expect("seed virtual snapshot");
+        let before_doc = curvebook_ui_egui::serde_json::to_vec(host.app().document()).expect("serialize doc before");
+        let before_summary = host.inspect_summary();
+        let before_files = host.virtual_workspace().list_files();
+
+        // Non-UTF-8 CSV must return an actionable UTF-8 error while keeping the prior document intact.
+        let utf8_err = host.open_bytes_for_name("corrupt.csv", &[0xff, 0xfe, 0x80, 0x2c, 0x31]).expect_err("non-UTF-8 CSV must fail");
+        assert!(utf8_err.contains("UTF-8"), "expected actionable UTF-8 error, got: {utf8_err}");
+        assert_eq!(curvebook_ui_egui::serde_json::to_vec(host.app().document()).expect("serialize doc after"), before_doc);
+        assert_eq!(host.inspect_summary(), before_summary);
+        assert_eq!(host.virtual_workspace().list_files(), before_files);
+
+        // Engine-level import failure (invalid archetype) must also leave the prior session untouched.
+        let bad_kind_err =
+            host.open_delimited_bytes(b"X,Y\n1,2\n", false, Some("Bad"), Some("not_a_real_archetype")).expect_err("invalid archetype must fail");
+        assert!(!bad_kind_err.is_empty());
+        assert_eq!(curvebook_ui_egui::serde_json::to_vec(host.app().document()).expect("serialize doc after bad kind"), before_doc);
+        assert_eq!(host.inspect_summary(), before_summary);
     }
 }

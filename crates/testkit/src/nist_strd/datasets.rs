@@ -15,7 +15,8 @@ use crate::nist_strd::parser::{AnovaDataset, LinearRegressionDataset, NistDiffic
 // 1. Univariate Stiffness Benchmarks (NumAcc1 - NumAcc4 + BinaryStiff1e8)
 // ============================================================================
 
-/// NIST StRD `NumAcc1` (Lower difficulty): 3 consecutive integers around `10^7`.
+/// NIST StRD `NumAcc1` (Lower difficulty; Simon & Lesage 1989 / `NumAcc1.dat`):
+/// `[10_000_001, 10_000_003, 10_000_002]` with exact certified `mean = 10_000_002`, `sd = 1`, `r(1) = -0.5`.
 #[must_use]
 pub fn numacc1() -> UnivariateDataset {
     UnivariateDataset {
@@ -23,8 +24,8 @@ pub fn numacc1() -> UnivariateDataset {
         difficulty: NistDifficulty::Lower,
         certified_mean: 10_000_002.0,
         certified_sd: 1.0,
-        certified_r1: 0.0,
-        values: vec![10_000_001.0, 10_000_002.0, 10_000_003.0],
+        certified_r1: -0.5,
+        values: vec![10_000_001.0, 10_000_003.0, 10_000_002.0],
     }
 }
 

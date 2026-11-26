@@ -40,6 +40,27 @@ pub fn bootstrap_web_session() -> Result<(WebBridgeSession, Vec<WebBridgeCommand
     Ok((session, commands))
 }
 
+/// Canonical error status code emitted when the WASM bridge session `RefCell` is permanently
+/// borrowed/poisoned (for example after a `wasm32` `panic = "abort"` trap bypassed `RefMut::drop`).
+pub const WASM_SESSION_POISONED_CODE: &str = "wasm_session_poisoned";
+
+/// Build the serialized bridge error command emitted when the WASM session `RefCell` is poisoned (`GAP-05-04`).
+#[must_use]
+pub fn poisoned_session_commands_json() -> String {
+    let notice = WebBridgeCommand::NotifyStatus {
+        level: WebNoticeLevel::Error,
+        code: String::from(WASM_SESSION_POISONED_CODE),
+        message: String::from(
+            "CurveBook encountered an internal WebAssembly error. Autosave has been paused to protect your backup; reload the page to recover.",
+        ),
+    };
+    WebBridgeSession::commands_to_json_string(&[notice]).unwrap_or_else(|_| {
+        String::from(
+            r#"[{"kind":"notify_status","level":"error","code":"wasm_session_poisoned","message":"CurveBook encountered an internal WebAssembly error. Autosave has been paused to protect your backup; reload the page to recover."}]"#,
+        )
+    })
+}
+
 /// Dispatch a raw JSON bridge event and emit a structured `NotifyStatus` command when handling fails (`R2-S11-05`).
 #[must_use]
 pub fn dispatch_bridge_event_json_or_notice(session: &mut WebBridgeSession, raw_json: &str) -> String {
@@ -50,6 +71,16 @@ pub fn dispatch_bridge_event_json_or_notice(session: &mut WebBridgeSession, raw_
             WebBridgeSession::commands_to_json_string(&[notice]).unwrap_or_else(|_| String::from("[]"))
         }
     }
+}
+
+/// Borrow `session_cell` mutably and dispatch `raw_json`, returning a structured poisoned-session
+/// recovery notice instead of silently returning `"[]"` if the `RefCell` is already borrowed (`GAP-05-04`).
+#[must_use]
+pub fn dispatch_refcell_bridge_event(session_cell: &std::cell::RefCell<WebBridgeSession>, raw_json: &str) -> String {
+    let Ok(mut guard) = session_cell.try_borrow_mut() else {
+        return poisoned_session_commands_json();
+    };
+    dispatch_bridge_event_json_or_notice(&mut guard, raw_json)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -88,12 +119,7 @@ fn connect_wasm_bridge() {
         .unwrap_or_else(|| String::from("default"));
     let session = Rc::new(RefCell::new(WebBridgeSession::with_ids(&doc_id, &tab_id)));
     let callback_session = Rc::clone(&session);
-    let handler = Closure::<dyn FnMut(String) -> String>::new(move |raw_json: String| {
-        let Ok(mut guard) = callback_session.try_borrow_mut() else {
-            return String::from("[]");
-        };
-        dispatch_bridge_event_json_or_notice(&mut guard, &raw_json)
-    });
+    let handler = Closure::<dyn FnMut(String) -> String>::new(move |raw_json: String| dispatch_refcell_bridge_event(&callback_session, &raw_json));
 
     let _ = connect_fn.call1(&host, handler.as_ref());
     handler.forget();
@@ -108,7 +134,11 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_web_session, dispatch_bridge_event_json_or_notice, init_web_app};
+    use std::cell::RefCell;
+
+    use super::{
+        WASM_SESSION_POISONED_CODE, bootstrap_web_session, dispatch_bridge_event_json_or_notice, dispatch_refcell_bridge_event, init_web_app,
+    };
     use curvebook_web::{TabAccessMode, WebBridgeCommand, WebBridgeSession, WebNoticeLevel};
 
     #[test]
@@ -150,5 +180,23 @@ mod tests {
         let err_json = dispatch_bridge_event_json_or_notice(&mut session, "{invalid-json");
         let parsed = WebBridgeSession::commands_from_json_str(&err_json).expect("error command array decodes");
         assert!(matches!(parsed.as_slice(), [WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Error, .. }]));
+    }
+
+    #[test]
+    fn gap_05_04_poisoned_refcell_emits_structured_recovery_notice_instead_of_empty_array() {
+        let cell = RefCell::new(WebBridgeSession::with_ids("poison-doc", "tab-poison"));
+        let _leaked_mut_borrow = cell.borrow_mut();
+
+        let reply = dispatch_refcell_bridge_event(&cell, r#"{"kind":"save_autosave","now_ms":1000}"#);
+        assert_ne!(reply, "[]", "poisoned RefCell must never silently return []");
+        let cmds = WebBridgeSession::commands_from_json_str(&reply).expect("poisoned notice decodes");
+        assert!(
+            matches!(
+                cmds.as_slice(),
+                [WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Error, code, message }]
+                    if code == WASM_SESSION_POISONED_CODE && message.contains("reload")
+            ),
+            "unexpected poisoned-session commands: {cmds:?}"
+        );
     }
 }

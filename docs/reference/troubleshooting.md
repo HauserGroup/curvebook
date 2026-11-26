@@ -40,24 +40,28 @@ If running the `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or 
 
 ### GPU and graphics initialization {#gpu-graphics}
 
-The CurveBook desktop window uses native GPU acceleration (Metal on macOS, DirectX 12 or Vulkan on Windows, and Vulkan or OpenGL on Linux). On older Macs without full Metal support, virtualized desktops, or systems with outdated GPU drivers, startup or window resizing can fail with a graphics initialization error (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
+The CurveBook desktop window uses native GPU acceleration (Metal only on macOS, DirectX 12, Vulkan, or OpenGL on Windows, and Vulkan or OpenGL on Linux). On older Macs without full Metal support, virtualized desktops, or systems with outdated GPU drivers, startup or window resizing can fail with a graphics initialization error (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
 
 Try these steps in order:
 
 1. **Update your OS or graphics drivers:** On macOS, use a supported macOS release with native Metal acceleration (or enable host 3D acceleration in VM settings). On Windows and Linux, install current Vulkan, DirectX 12, or OpenGL drivers.
-2. **Override the graphics backend from a terminal:**
+2. **Try a platform-supported graphics backend or adapter override from a terminal:**
 
-   ```sh
-   WGPU_BACKEND=gl curvebook
-   ```
+   - **macOS:** CurveBook compiles `wgpu` with the native Metal backend only (`WGPU_BACKEND=gl` is unavailable on macOS because `wgpu/angle` is not enabled). If your GPU or virtualized adapter is flagged as non-compliant, try:
 
-   You can also test `WGPU_BACKEND=metal` (macOS), `WGPU_BACKEND=vulkan`, or `WGPU_BACKEND=dx12` (Windows). Where available, allow fallback adapters with:
+     ```sh
+     WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 curvebook
+     ```
 
-   ```sh
-   WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1 curvebook
-   ```
+   - **Linux / Windows:** Select an alternative compiled backend (`vulkan`, `gl`, or `dx12` on Windows), or allow non-compliant adapters:
 
-3. **Fall back to CPU-only CLI or MCP mode:** Both `curvebook-cli` and `curvebook-cli mcp` (as well as `curvebook --headless-once`) run every statistical test, curve fit, and SVG/PDF/PNG/TIFF export on the CPU without a GPU.
+     ```sh
+     WGPU_BACKEND=gl curvebook
+     ```
+
+     (or `WGPU_BACKEND=vulkan`, `WGPU_BACKEND=dx12` on Windows, or `WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER=1`).
+
+3. **Fall back to CPU-only CLI or MCP mode:** Both `curvebook-cli` and `curvebook-cli mcp` run every statistical test, curve fit, and SVG/PDF/PNG/TIFF export on the CPU without a GPU. *(Note: `curvebook --headless-once` renders a single discarded 800×520 software smoke frame and exits; it is a startup diagnostic rather than a general headless export mode.)*
 
 ---
 

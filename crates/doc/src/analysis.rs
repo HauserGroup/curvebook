@@ -3234,12 +3234,18 @@ fn parse_strict_number_with_unit(expr: &str, original_title: &str) -> Result<f64
 
 #[cfg(test)]
 mod r18_5_linear_spec_tests {
-    use super::{DemingErrorSpec, LinearRegressionSpec};
+    use super::{AnalysisKind, DemingErrorSpec, LeveneCenter, LeveneTestSpec, LinearRegressionSpec};
     use crate::error::CURRENT_SCHEMA_VERSION;
 
     #[test]
     fn linear_regression_spec_backward_compat_and_deming_error_spec() {
         assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+
+        let levene_default: LeveneTestSpec = serde_json::from_str("{}").unwrap();
+        assert_eq!(levene_default.center, LeveneCenter::Median);
+        let levene_mean = AnalysisKind::LeveneTest(LeveneTestSpec { center: LeveneCenter::Mean });
+        let levene_rt: AnalysisKind = serde_json::from_str(&serde_json::to_string(&levene_mean).unwrap()).unwrap();
+        assert_eq!(levene_rt, levene_mean);
 
         let legacy_json = r#"{
             "deming_model_ii": false,

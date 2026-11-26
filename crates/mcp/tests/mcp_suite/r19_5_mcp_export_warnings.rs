@@ -72,3 +72,73 @@ fn export_tool_adds_nothing_for_current_fit() {
     assert!(result.structured_content.is_none(), "inline SVG without warnings keeps its plain text result: {result:?}");
     assert!(!result.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("Figure warnings"))));
 }
+
+#[test]
+fn gap_06_01_live_attach_export_with_path_forwards_figure_warnings() {
+    let out_dir = std::env::temp_dir().join(format!("cb-gap-06-01-live-export-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&out_dir);
+
+    let mut st = McpServerState::with_control_port(49861).unwrap().with_control_handler(|method, params| {
+        assert_eq!(method, "doc.export");
+        let path = params.get("path").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned();
+        let format = params.get("format").and_then(serde_json::Value::as_str).unwrap_or("svg").to_owned();
+        Ok(json!({
+            "exported": true,
+            "format": format,
+            "sheet_id": "g",
+            "path": path,
+            "bytes_written": 256,
+            "warnings": [
+                {
+                    "code": "pending_regression_result",
+                    "message": "Series 'Y' regression overlay from 'fit' was omitted because the analysis is pending recalculation."
+                }
+            ]
+        }))
+    });
+
+    for (format, path_key) in [("svg", "path"), ("pdf", "output_path"), ("png", "path")] {
+        let dest = out_dir.join(format!("figure.{format}"));
+        let result = call_tool(&mut st, "export", json!({ "format": format, "sheet_id": "g", path_key: dest.display().to_string() }))
+            .unwrap_or_else(|e| panic!("live export {format}: {e:?}"));
+        assert!(!result.is_error, "{format}: {result:?}");
+
+        let sc = result.structured_content.as_ref().expect("live file export structured_content");
+        assert_eq!(sc["exported"], json!(true));
+        assert_eq!(sc["mode"], json!("live_attach"));
+        assert_eq!(sc["bytes_written"], json!(256));
+        let warnings = sc.get("warnings").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+        assert!(
+            warnings.iter().any(|w| w["code"] == json!("pending_regression_result")),
+            "{format}: missing pending_regression_result in structured warnings: {warnings:?}"
+        );
+        assert!(
+            result.content.iter().any(
+                |b| matches!(b, ContentBlock::Text { text } if text.contains("Figure warnings (1):") && text.contains("pending_regression_result"))
+            ),
+            "{format}: missing Figure warnings text block in {:?}",
+            result.content
+        );
+    }
+
+    // Empty warnings array from desktop on a current fit must not inject a warnings block.
+    let mut clean = McpServerState::with_control_port(49862).unwrap().with_control_handler(|method, params| {
+        assert_eq!(method, "doc.export");
+        Ok(json!({
+            "exported": true,
+            "format": "svg",
+            "sheet_id": "g",
+            "path": params["path"],
+            "bytes_written": 128,
+            "warnings": []
+        }))
+    });
+    let clean_dest = out_dir.join("clean.svg");
+    let clean_res = call_tool(&mut clean, "export", json!({ "format": "svg", "sheet_id": "g", "path": clean_dest.display().to_string() })).unwrap();
+    assert!(!clean_res.is_error);
+    let clean_sc = clean_res.structured_content.as_ref().expect("clean structured_content");
+    assert!(clean_sc.get("warnings").is_none(), "empty warnings should not populate structured_content.warnings: {clean_sc:?}");
+    assert!(!clean_res.content.iter().any(|b| matches!(b, ContentBlock::Text { text } if text.contains("Figure warnings"))));
+
+    let _ = std::fs::remove_dir_all(&out_dir);
+}

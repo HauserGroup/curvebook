@@ -112,7 +112,7 @@ impl SegmentedAxis {
         let mut dummy = Vec::new();
         let mut out = Vec::new();
         for seg in &self.segments {
-            let (majors, _) = compute_segment_tick_values(seg, None, true, &mut dummy);
+            let (majors, _) = compute_segment_tick_values(seg, None, false, &mut dummy);
             for val in majors {
                 out.push(format_tick_rich(val, seg.scale, self.tick_format, policy).plain_text());
             }
@@ -877,7 +877,7 @@ fn emit_x_ticks(
     }
 
     for seg in &axis.segments {
-        let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
+        let (majors, minors) = compute_segment_tick_values(seg, None, false, warnings);
         if let Some((o0, o1)) = minor_span {
             for m in minors {
                 if let Some(x_pt) = seg.map_strict(m) {
@@ -966,7 +966,7 @@ fn emit_y_ticks(primitives: &mut Vec<ScenePrimitive>, warnings: &mut Vec<ChartWa
     }
 
     for seg in &axis.segments {
-        let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
+        let (majors, minors) = compute_segment_tick_values(seg, None, false, warnings);
         if let Some((o0, o1)) = minor_span {
             for m in minors {
                 if let Some(y_pt) = seg.map_strict(m) {
@@ -1125,6 +1125,13 @@ fn resolve_embedded_grid(scene: &mut ChartScene, doc: &ProjectDocument, spec: &E
             scene
                 .warnings
                 .push(ChartWarning::new("failed_embedded_result_table", format!("result sheet '{}' failed; omitted embedded table", spec.sheet_id)));
+            return None;
+        }
+        if !matches!(res.status, ResultStatus::UpToDate) {
+            scene.warnings.push(ChartWarning::new(
+                "pending_embedded_result_table",
+                format!("result sheet '{}' is pending recalculation; embedded table omitted", spec.sheet_id),
+            ));
             return None;
         }
         if res.tabs.is_empty() && res.scalars.is_empty() {

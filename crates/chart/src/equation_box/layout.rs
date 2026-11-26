@@ -224,7 +224,7 @@ pub(super) fn translate_path(path: &Path2D, dx: f64, dy: f64) -> Path2D {
 }
 
 pub(super) fn layout_nodes(nodes: &[MathNode], ctx: LayoutCtx) -> LayoutBox {
-    if nodes.is_empty() || ctx.depth >= MAX_TEX_DEPTH {
+    if nodes.is_empty() || ctx.depth > MAX_TEX_DEPTH {
         return LayoutBox::empty();
     }
     if nodes.len() == 1
@@ -248,7 +248,7 @@ pub(super) fn layout_nodes(nodes: &[MathNode], ctx: LayoutCtx) -> LayoutBox {
 }
 
 pub(super) fn layout_single_node(node: &MathNode, ctx: LayoutCtx) -> LayoutBox {
-    if ctx.depth >= MAX_TEX_DEPTH {
+    if ctx.depth > MAX_TEX_DEPTH {
         return LayoutBox::empty();
     }
     let d = ctx.dimens();
@@ -257,6 +257,7 @@ pub(super) fn layout_single_node(node: &MathNode, ctx: LayoutCtx) -> LayoutBox {
         MathNode::Space { width_em } => layout_space_node(*width_em, ctx),
         MathNode::ThinSpace => LayoutBox { width: 0.150 * d.em, ..LayoutBox::empty() },
         MathNode::Kern { width_em } => LayoutBox { width: (width_em * d.em).max(0.0), ..LayoutBox::empty() },
+        _ if ctx.depth >= MAX_TEX_DEPTH => LayoutBox::empty(),
         MathNode::Group(inner) => layout_nodes(inner, ctx.with_style(ctx.style)),
         MathNode::Fraction { numerator, denominator, kind } => layout_fraction(numerator, denominator, *kind, ctx),
         MathNode::Radical { degree, radicand } => layout_radical(degree.as_deref(), radicand, ctx),
@@ -669,9 +670,8 @@ fn layout_scripted(nucleus: &MathNode, sup: Option<&[MathNode]>, sub: Option<&[M
         depth: nuc_box.depth.max(sub_box.as_ref().map_or(0.0, |b| v + b.depth)),
         is_single_char: false,
         italic_end: false,
-        ops: Vec::new(),
+        ops: nuc_box.ops,
     };
-    out.push_shifted(&nuc_box, 0.0, 0.0);
     if let Some(sp) = &sup_box {
         out.push_shifted(sp, nuc_box.width + ic, -u);
     }

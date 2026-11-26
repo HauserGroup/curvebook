@@ -1738,7 +1738,9 @@ pub fn open_os_print_preview_dialog_titled(spool: &crate::PrintSpoolOutput, titl
     #[cfg(target_os = "windows")]
     let candidate = build_windows_preview_candidate(stage_dir.path(), &pdf_path)?;
 
-    match run_candidate(&candidate, None, ProcessBounds::default())? {
+    // Use `discard_output()` so detached viewers launched by `xdg-open` / `open` / `Start-Process`
+    // do not inherit captured pipes (preventing idle-timeout kills and post-close SIGPIPE).
+    match run_candidate_with_stdio(&candidate, None, ProcessBounds::default(), false)? {
         CandidateOutcome::Completed(_output) => {
             stage_dir.disarm();
             Ok(OsAdapterStatus {
@@ -2263,6 +2265,14 @@ mod tests {
         let cap_bounds = ProcessBounds { wall_timeout: Duration::from_secs(2), idle_timeout: Duration::from_secs(2), max_output_bytes: 512 };
         let cap_err = run_candidate(&noisy, None, cap_bounds).unwrap_err();
         assert!(cap_err.contains("output cap"), "unexpected cap err: {cap_err}");
+
+        // GAP-04-01: detached launchers run with `capture_output = false` (`discard_output()`)
+        // must not fail on `idle_timeout` while still alive within `wall_timeout`, and must return
+        // success immediately when a detached viewer stays alive after the launcher exits 0.
+        let slow_launcher = OsCommandCandidate::new("sh", &["-c", "sleep 0.2"]);
+        let launcher_bounds = ProcessBounds { wall_timeout: Duration::from_secs(2), idle_timeout: Duration::from_millis(50), max_output_bytes: 4096 };
+        let outcome = super::run_candidate_with_stdio(&slow_launcher, None, launcher_bounds, false).expect("discard_output ignores idle_timeout");
+        assert!(matches!(outcome, super::CandidateOutcome::Completed(ref out) if out.success));
     }
 
     #[test]

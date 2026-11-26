@@ -1,13 +1,14 @@
 //! Regression residual scatter and normal Q-Q diagnostic plot builders.
 
-use curvebook_doc::{AnalysisKind, GraphSheet, ProjectDocument, ResultCell, ResultTab, ResultTabKind, TableArchetype};
+use curvebook_doc::{AnalysisKind, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, TableArchetype};
 use curvebook_math::dist::norm_ppf;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::common::quartiles_hinge;
 
 use super::{
     DiagPoint, active_xy_pairs_with_sources, collect_ds_active_values_with_sources, extract_residuals_tab_points, find_header_col,
-    find_matching_result_where_checked, is_ds_pre_summarized, resolve_source_data_sheet, result_cell_num,
+    find_matching_result_where_checked, has_blocked_matching_result, is_ds_pre_summarized, resolve_analysis_source_data_sheet,
+    resolve_source_data_sheet_checked, result_cell_num,
 };
 use crate::markers::emit_marker;
 use crate::scene::{ChartError, ChartScene, ChartWarning, Path2D, PlottedPointMeta, PointPt, RectPt, ScenePrimitive, SourceCellId};
@@ -100,17 +101,21 @@ pub(in crate::multivariate_layout) fn compile_residual_plot(
 }
 
 fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
-    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
-        !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
-    }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
+    let has_resid_tab =
+        |r: &ResultSheet| !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals);
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, has_resid_tab)
+        && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
         let pts = extract_residuals_tab_points(res, tab, graph, doc);
         if !pts.is_empty() {
             return pts;
         }
     }
+    if has_blocked_matching_result(graph, doc, has_resid_tab) {
+        return Vec::new();
+    }
 
-    let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
+    let Some(ds) = resolve_source_data_sheet_checked(graph, doc, warnings) else { return Vec::new() };
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     let pairs_with_sources: Vec<(f64, f64, SourceCellId, String)> = match &ds.archetype {
         TableArchetype::Xy(xy) => {
@@ -303,7 +308,13 @@ pub(in crate::multivariate_layout) fn compile_normal_qq_plot(
     Ok(())
 }
 
-pub(super) fn selected_dataset_label_in_tab(tab: &ResultTab, ds_col: Option<usize>, graph: &GraphSheet, doc: &ProjectDocument) -> Option<String> {
+pub(super) fn selected_dataset_label_in_tab(
+    res: &ResultSheet,
+    tab: &ResultTab,
+    ds_col: Option<usize>,
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+) -> Option<String> {
     let dc = ds_col?;
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     let mut seen: Vec<String> = Vec::new();
@@ -318,9 +329,10 @@ pub(super) fn selected_dataset_label_in_tab(tab: &ResultTab, ds_col: Option<usiz
     if seen.len() <= 1 {
         return seen.into_iter().next();
     }
-    if let Some(ds) = resolve_source_data_sheet(graph, doc) {
+    if let Some(ds) = resolve_analysis_source_data_sheet(res, graph, doc) {
         let desired_title = match &ds.archetype {
             TableArchetype::Column(col) => col.data_sets.get(ds_idx).map(|d| d.title.as_str()),
+            TableArchetype::Grouped(g) => g.data_sets.get(ds_idx).map(|d| d.title.as_str()),
             TableArchetype::Xy(xy) => xy.data_sets.get(ds_idx).map(|d| d.title.as_str()),
             TableArchetype::MultipleVariables(mv) => mv.variables.get(ds_idx).map(|v| v.title.as_str()),
             _ => None,
@@ -360,7 +372,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq)
     {
         let ds_col = find_header_col(&tab.column_headers, |h| h == "data set" || h == "dataset" || h == "group");
-        let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
+        let target_label = selected_dataset_label_in_tab(res, tab, ds_col, graph, doc);
         let exp_col = find_header_col(&tab.column_headers, |h| {
             (h.contains("expected") || h.contains("theoretical") || h.contains("normal q")) && !h.contains("lognormal")
         })
@@ -401,7 +413,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
         };
 
         let fallback_sheet_id = res.analysis.source_sheet_id.clone();
-        let ds_opt = crate::resolve_data_sheet_or_upstream(doc, &fallback_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+        let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
         let ds_col_idx = match ds_opt.map(|d| &d.archetype) {
             Some(TableArchetype::MultipleVariables(_)) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
             _ => ds_idx,
@@ -479,6 +491,10 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     }
 
     // 2. Fallback to ResultTabKind::Residuals (excluding BlandAltman pair coordinate tabs).
+    let has_qq_or_resid = |r: &ResultSheet| {
+        !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_))
+            && r.tabs.iter().any(|t| matches!(t.kind, ResultTabKind::NormalQq | ResultTabKind::Residuals))
+    };
     if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
@@ -490,9 +506,12 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
             return pairs;
         }
     }
+    if has_blocked_matching_result(graph, doc, has_qq_or_resid) {
+        return Vec::new();
+    }
 
     // 3. Fallback to raw DataSheet observations.
-    let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
+    let Some(ds) = resolve_source_data_sheet_checked(graph, doc, warnings) else { return Vec::new() };
     let target_col = match &ds.archetype {
         TableArchetype::MultipleVariables(_) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
         _ => ds_idx,

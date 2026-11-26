@@ -41,6 +41,11 @@ fn nist_strd_univariate_stiffness_and_permutation_invariance() {
         };
         assert_lre_at_least(moments.mean, ds.certified_mean, 14.5, &format!("{} decimal mean", ds.name));
         assert_lre_at_least(sd, ds.certified_sd, min_decimal_sd_lre, &format!("{} decimal sd", ds.name));
+        if ds.name == "NumAcc1" {
+            assert_eq!(ds.values, vec![10_000_001.0, 10_000_003.0, 10_000_002.0]);
+            assert_eq!(ds.certified_r1, -0.5);
+            assert_lre_at_least(r1, ds.certified_r1, 14.5, "NumAcc1 decimal r1");
+        }
     }
 
     // Row-permutation invariance under deterministic shuffling on stiff series (mean / sd = 8e8):

@@ -38,6 +38,17 @@ use crate::special::{
 };
 
 const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
+
+/// Degrees-of-freedom cutoff above which Student's `t` functions delegate to the standard normal
+/// limit (Abramowitz & Stegun 1964, §26.7.5; Wallace 1959).
+///
+/// Verified leading-order error bounds for `df >= 1e12`:
+/// - One-sided CDF/SF: `|F_t(t; df) - Phi(t)| = phi(t) * |t^3 + t| / (4 * df) + O(df^{-2}) <= 1.59e-13`
+///   uniformly for all `t in R` (`<= 3.17e-13` for two-sided `p_2`).
+/// - Quantiles (`isf`/`ppf`): `|t_{p, df} - z_p| = (|z_p|^3 + |z_p|) / (4 * df) + O(df^{-2})`
+///   (relative error `<= 1.5e-11` for `p >= 1e-12`, `<= 1.2e-10` even at `p = 1e-100`).
+/// - Log-density (`student_t_ln_pdf`) and log two-sided tail (`student_t_ln_two_sided_p`):
+///   `<= 2.5e-9` for `|t| <= 10`, `<= 5.3e-7` across the non-underflowing support `|t| <= 38`.
 const HUGE_DF_NORMAL_CUTOFF: f64 = 1e12;
 
 fn check_pos_param(name: &'static str, v: f64) -> Result<(), MathError> {
@@ -215,6 +226,10 @@ pub fn norm_two_sided_isf(alpha: f64) -> Result<f64, MathError> {
 
 /// Natural logarithm of the Student `t` probability density with `df > 0`.
 ///
+/// For `df >= 1e12` (or `df = +inf`), delegates to [`norm_ln_pdf`] (Abramowitz & Stegun 1964,
+/// §26.7.5) with leading discrepancy `|t^4 - 2 t^2 - 1| / (4 * df) + O(t^6 / df^2)` (`<= 2.5e-9`
+/// for `|t| <= 10`, `<= 5.3e-7` for `|t| <= 38`).
+///
 /// # Errors
 /// Returns [`MathError::InvalidParameter`] if `df <= 0` or [`MathError::DomainError`] if `t` is `NaN`.
 pub fn student_t_ln_pdf(t: f64, df: f64) -> Result<f64, MathError> {
@@ -235,6 +250,8 @@ pub fn student_t_ln_pdf(t: f64, df: f64) -> Result<f64, MathError> {
 
 /// Student `t` probability density `f(t; df)` for real `df > 0`.
 ///
+/// For `df >= 1e12`, delegates to the standard normal limit (see [`student_t_ln_pdf`]).
+///
 /// # Errors
 /// Returns an error if `df <= 0` or `t` is `NaN`.
 pub fn student_t_pdf(t: f64, df: f64) -> Result<f64, MathError> {
@@ -243,6 +260,9 @@ pub fn student_t_pdf(t: f64, df: f64) -> Result<f64, MathError> {
 
 /// Exact two-sided Student `t` *p*-value `p_2(t, df) = I_{df / (df + t^2)}(df / 2, 1 / 2)`
 /// supporting fractional Welch-Satterthwaite `df > 0` as well as `df = +inf`.
+///
+/// For `df >= 1e12`, delegates to [`norm_two_sided_p`] (Abramowitz & Stegun 1964, §26.7.5) with
+/// uniform absolute error `<= 3.17e-13` over all `t in R` (`<= 1.59e-13` for one-sided tails).
 ///
 /// # Errors
 /// Returns [`MathError::InvalidParameter`] if `df <= 0` or [`MathError::DomainError`] if `t` is `NaN`.
@@ -277,6 +297,9 @@ pub fn student_t_two_sided_p(t: f64, df: f64) -> Result<f64, MathError> {
 }
 
 /// Natural logarithm of the two-sided Student `t` probability `ln P(|T| >= |t|)`.
+///
+/// For `df >= 1e12`, delegates to [`norm_ln_two_sided_p`] (Abramowitz & Stegun 1964, §26.7.5) with
+/// leading discrepancy `~ t^4 / (4 * df)` (`<= 2.5e-9` for `|t| <= 10`, `<= 5.3e-7` for `|t| <= 38`).
 ///
 /// # Errors
 /// Returns an error if `df <= 0` or `t` is `NaN`.
@@ -343,6 +366,12 @@ pub fn student_t_ln_sf(t: f64, df: f64) -> Result<f64, MathError> {
 
 /// Two-sided Student `t` critical value `t_{alpha / 2, df} >= 0` solving `P(|T| >= t) = alpha`.
 ///
+/// For `df >= 1e12`, delegates to [`norm_two_sided_isf`] (Abramowitz & Stegun 1964, §26.7.5) with
+/// Cornish-Fisher error `(|z|^3 + |z|) / (4 * df) + O(df^{-2})` (relative error `<= 1.5e-11` for
+/// `alpha >= 1e-12`, `<= 1.2e-10` even at `alpha = 1e-100`). When the inverse-beta quantile `x`
+/// underflows `exp(-700)`, falls back to the exact power tail `I_x(a, 0.5) ~ x^a / (a B(a, 0.5))`
+/// (relative error `O(x) <= 1e-304`).
+///
 /// # Errors
 /// Returns an error if `df <= 0` or `alpha` is outside `[0, 1]`.
 pub fn student_t_two_sided_isf(alpha: f64, df: f64) -> Result<f64, MathError> {
@@ -377,10 +406,13 @@ pub fn student_t_two_sided_isf(alpha: f64, df: f64) -> Result<f64, MathError> {
     }
     match reg_beta_inv_pair(a, 0.5, alpha, 1.0 - alpha) {
         Ok((x, y)) => Ok(df.sqrt() * (y.sqrt() / x.sqrt())),
-        Err(MathError::NotConverged { .. }) if alpha < 1e-80 => {
+        Err(MathError::NotConverged { .. }) => {
             let ln_x = (alpha.ln() + a.ln() + ln_beta(a, 0.5)?) / a;
-            let ln_t = 0.5 * (df.ln() - ln_x);
-            Ok(if ln_t > 709.78 { f64::INFINITY } else { ln_t.exp() })
+            if alpha < 1e-80 || ln_x <= -700.0 {
+                let ln_t = 0.5 * (df.ln() - ln_x);
+                return Ok(if ln_t > 709.78 { f64::INFINITY } else { ln_t.exp() });
+            }
+            Err(MathError::NotConverged { algorithm: "student_t_two_sided_isf", iterations: 0 })
         }
         Err(e) => Err(e),
     }
@@ -707,6 +739,25 @@ pub fn f_ln_sf(f: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     }
 }
 
+/// Exact small-`x` asymptotic inversion of `P(a, x) = exp(ln_p)` when `x <= exp(-700)`:
+/// `P(a, x) = x^a / Gamma(a + 1) * (1 - a x / (a + 1) + O(x^2))`, so `ln x = (ln p + ln Gamma(a + 1)) / a`
+/// matches the true root to `O(1e-304)` (full IEEE-754 `f64` precision; NIST DLMF §8.7.1).
+fn gamma_lower_tail_ln_x(a: f64, ln_p: f64) -> Result<Option<f64>, MathError> {
+    if !ln_p.is_finite() || ln_p >= 0.0 {
+        return Ok(None);
+    }
+    let ln_x = (ln_p + ln_gamma(a + 1.0)?) / a;
+    if ln_x <= -700.0 { Ok(Some(ln_x)) } else { Ok(None) }
+}
+
+fn beta_small_tail_ln_x(a: f64, b: f64, ln_p: f64) -> Result<Option<f64>, MathError> {
+    if !ln_p.is_finite() || ln_p >= 0.0 {
+        return Ok(None);
+    }
+    let ln_x = (ln_p + a.ln() + ln_beta(a, b)?) / a;
+    if ln_x <= -700.0 && b.ln() + ln_x < -40.0 { Ok(Some(ln_x)) } else { Ok(None) }
+}
+
 /// Snedecor `F(df1, df2)` upper-tail critical value solving `P(F > f) = q` directly from `q in [0, 1]`.
 ///
 /// # Errors
@@ -726,11 +777,31 @@ pub fn f_isf(q: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     }
     if df2.is_infinite() {
         let a = 0.5 * df1;
-        return Ok(reg_gamma_q_inv(a, q)? / a);
+        return match reg_gamma_q_inv(a, q) {
+            Ok(x) => Ok(x / a),
+            Err(MathError::NotConverged { .. }) => {
+                if let Some(ln_x) = gamma_lower_tail_ln_x(a, (-q).ln_1p())? {
+                    let ln_f = ln_x - a.ln();
+                    return Ok(if ln_f < -745.2 { 0.0 } else { ln_f.exp() });
+                }
+                Err(MathError::NotConverged { algorithm: "f_isf", iterations: 0 })
+            }
+            Err(e) => Err(e),
+        };
     }
     if df1.is_infinite() {
         let b = 0.5 * df2;
-        return Ok(b / reg_gamma_p_inv(b, q)?);
+        return match reg_gamma_p_inv(b, q) {
+            Ok(x) => Ok(b / x),
+            Err(MathError::NotConverged { .. }) => {
+                if let Some(ln_x) = gamma_lower_tail_ln_x(b, q.ln())? {
+                    let ln_f = b.ln() - ln_x;
+                    return Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() });
+                }
+                Err(MathError::NotConverged { algorithm: "f_isf", iterations: 0 })
+            }
+            Err(e) => Err(e),
+        };
     }
     let b = 0.5 * df2;
     let a = 0.5 * df1;
@@ -743,10 +814,17 @@ pub fn f_isf(q: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     }
     match reg_beta_inv_pair(b, a, q, 1.0 - q) {
         Ok((x, y)) => Ok(mul_div4(df2, y, df1, x)),
-        Err(MathError::NotConverged { .. }) if q < 1e-80 => {
-            let ln_x = (q.ln() + b.ln() + ln_beta(b, a)?) / b;
-            let ln_f = df2.ln() - df1.ln() - ln_x;
-            Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() })
+        Err(MathError::NotConverged { .. }) => {
+            if q < 1e-80 || beta_small_tail_ln_x(b, a, q.ln())?.is_some() {
+                let ln_x = (q.ln() + b.ln() + ln_beta(b, a)?) / b;
+                let ln_f = df2.ln() - df1.ln() - ln_x;
+                return Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() });
+            }
+            if let Some(ln_y) = beta_small_tail_ln_x(a, b, (-q).ln_1p())? {
+                let ln_f = df2.ln() - df1.ln() + ln_y;
+                return Ok(if ln_f < -745.2 { 0.0 } else { ln_f.exp() });
+            }
+            Err(MathError::NotConverged { algorithm: "f_isf", iterations: 0 })
         }
         Err(e) => Err(e),
     }
@@ -771,11 +849,31 @@ pub fn f_ppf(p: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
     }
     if df2.is_infinite() {
         let a = 0.5 * df1;
-        return Ok(reg_gamma_p_inv(a, p)? / a);
+        return match reg_gamma_p_inv(a, p) {
+            Ok(x) => Ok(x / a),
+            Err(MathError::NotConverged { .. }) => {
+                if let Some(ln_x) = gamma_lower_tail_ln_x(a, p.ln())? {
+                    let ln_f = ln_x - a.ln();
+                    return Ok(if ln_f < -745.2 { 0.0 } else { ln_f.exp() });
+                }
+                Err(MathError::NotConverged { algorithm: "f_ppf", iterations: 0 })
+            }
+            Err(e) => Err(e),
+        };
     }
     if df1.is_infinite() {
         let b = 0.5 * df2;
-        return Ok(b / reg_gamma_q_inv(b, p)?);
+        return match reg_gamma_q_inv(b, p) {
+            Ok(x) => Ok(b / x),
+            Err(MathError::NotConverged { .. }) => {
+                if let Some(ln_x) = gamma_lower_tail_ln_x(b, (-p).ln_1p())? {
+                    let ln_f = b.ln() - ln_x;
+                    return Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() });
+                }
+                Err(MathError::NotConverged { algorithm: "f_ppf", iterations: 0 })
+            }
+            Err(e) => Err(e),
+        };
     }
     let a = 0.5 * df1;
     let b = 0.5 * df2;
@@ -783,15 +881,22 @@ pub fn f_ppf(p: f64, df1: f64, df2: f64) -> Result<f64, MathError> {
         let ln_x = (p.ln() + a.ln() + ln_beta(a, b)?) / a;
         if ln_x < -690.0 && b.ln() + ln_x < -40.0 {
             let ln_f = df2.ln() - df1.ln() + ln_x;
-            return Ok(if ln_f < -745.0 { 0.0 } else { ln_f.exp() });
+            return Ok(if ln_f < -745.2 { 0.0 } else { ln_f.exp() });
         }
     }
     match reg_beta_inv_pair(a, b, p, 1.0 - p) {
         Ok((x, y)) => Ok(mul_div4(df2, x, df1, y)),
-        Err(MathError::NotConverged { .. }) if p < 1e-80 => {
-            let ln_x = (p.ln() + a.ln() + ln_beta(a, b)?) / a;
-            let ln_f = df2.ln() - df1.ln() + ln_x;
-            Ok(if ln_f < -745.0 { 0.0 } else { ln_f.exp() })
+        Err(MathError::NotConverged { .. }) => {
+            if p < 1e-80 || beta_small_tail_ln_x(a, b, p.ln())?.is_some() {
+                let ln_x = (p.ln() + a.ln() + ln_beta(a, b)?) / a;
+                let ln_f = df2.ln() - df1.ln() + ln_x;
+                return Ok(if ln_f < -745.2 { 0.0 } else { ln_f.exp() });
+            }
+            if let Some(ln_y) = beta_small_tail_ln_x(b, a, (-p).ln_1p())? {
+                let ln_f = df2.ln() - df1.ln() - ln_y;
+                return Ok(if ln_f > 709.78 { f64::INFINITY } else { ln_f.exp() });
+            }
+            Err(MathError::NotConverged { algorithm: "f_ppf", iterations: 0 })
         }
         Err(e) => Err(e),
     }
@@ -866,27 +971,57 @@ pub fn chi2_ln_sf(x: f64, df: f64) -> Result<f64, MathError> {
 
 /// Chi-Square lower-tail quantile `F^{-1}(p) = 2 * P^{-1}(df / 2, p)`.
 ///
+/// When the true quantile underflows `exp(-700)` (`solve_gamma_log_space` bracket floor), falls
+/// back to the exact small-`x` incomplete-gamma power tail `P(a, x) ~ x^a / Gamma(a + 1)`
+/// (NIST DLMF §8.7.1, relative error `O(x) <= 1e-304`), returning the exact subnormal or `0.0`.
+///
 /// # Errors
 /// Returns an error if `df <= 0` or `p` lies outside `[0, 1]`.
 pub fn chi2_ppf(p: f64, df: f64) -> Result<f64, MathError> {
     check_pos_param("df", df)?;
-    Ok(2.0 * reg_gamma_p_inv(0.5 * df, p)?)
+    let a = 0.5 * df;
+    match reg_gamma_p_inv(a, p) {
+        Ok(x) => Ok(2.0 * x),
+        Err(MathError::NotConverged { .. }) if p > 0.0 && p < 1.0 => {
+            if let Some(ln_x) = gamma_lower_tail_ln_x(a, p.ln())? {
+                let ln_chi2 = std::f64::consts::LN_2 + ln_x;
+                return Ok(if ln_chi2 < -745.2 { 0.0 } else { ln_chi2.exp() });
+            }
+            Err(MathError::NotConverged { algorithm: "chi2_ppf", iterations: 0 })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Chi-Square upper-tail critical value `S^{-1}(q) = 2 * Q^{-1}(df / 2, q)` directly from `q in [0, 1]`.
+///
+/// When the true quantile underflows `exp(-700)` (e.g. `q` close to `1` with very small `df`),
+/// falls back to the exact small-`x` power tail `P(a, x) = 1 - q ~ x^a / Gamma(a + 1)`
+/// (NIST DLMF §8.7.1, relative error `O(x) <= 1e-304`).
 ///
 /// # Errors
 /// Returns an error if `df <= 0` or `q` lies outside `[0, 1]`.
 pub fn chi2_isf(q: f64, df: f64) -> Result<f64, MathError> {
     check_pos_param("df", df)?;
-    Ok(2.0 * reg_gamma_q_inv(0.5 * df, q)?)
+    let a = 0.5 * df;
+    match reg_gamma_q_inv(a, q) {
+        Ok(x) => Ok(2.0 * x),
+        Err(MathError::NotConverged { .. }) if q > 0.0 && q < 1.0 => {
+            if let Some(ln_x) = gamma_lower_tail_ln_x(a, (-q).ln_1p())? {
+                let ln_chi2 = std::f64::consts::LN_2 + ln_x;
+                return Ok(if ln_chi2 < -745.2 { 0.0 } else { ln_chi2.exp() });
+            }
+            Err(MathError::NotConverged { algorithm: "chi2_isf", iterations: 0 })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        chi2_cdf, chi2_isf, chi2_ln_sf, chi2_sf, f_cdf, f_isf, f_sf, norm_cdf, norm_ln_sf, norm_sf, norm_two_sided_p, student_t_isf, student_t_ln_sf,
-        student_t_sf, student_t_two_sided_isf, student_t_two_sided_p,
+        chi2_cdf, chi2_isf, chi2_ln_sf, chi2_ppf, chi2_sf, f_cdf, f_isf, f_ppf, f_sf, norm_cdf, norm_ln_sf, norm_sf, norm_two_sided_p, student_t_isf,
+        student_t_ln_pdf, student_t_ln_sf, student_t_ln_two_sided_p, student_t_sf, student_t_two_sided_isf, student_t_two_sided_p,
     };
 
     #[test]
@@ -932,5 +1067,59 @@ mod tests {
 
         let c_crit = chi2_isf(1e-15, 5.0).unwrap();
         assert!((chi2_sf(c_crit, 5.0).unwrap() - 1e-15).abs() < 1e-27);
+    }
+
+    #[test]
+    fn gap_03_02_extreme_lower_tail_quantile_asymptotic_fallbacks() {
+        // Exact analytical small-x power tail for chi2(1): P(chi2 <= x) = erf(sqrt(x/2)) ~ sqrt(2 x / pi),
+        // so x ~ (pi / 2) * p^2. At p = 1e-200, true quantile is ~1.57e-400 -> exact f64 0.0.
+        assert_eq!(chi2_ppf(1e-200, 1.0).unwrap(), 0.0);
+        // At p = 1e-161, true quantile is (pi / 2) * 1e-322 ≈ 1.5708e-322 (subnormal f64), whereas
+        // x = chi2 / 2 ≈ 7.85e-323 < exp(-740) ≈ 4.21e-322 triggers the asymptotic fallback cleanly.
+        let sub = chi2_ppf(1e-161, 1.0).unwrap();
+        let expected_sub = (std::f64::consts::FRAC_PI_2.ln() + 2.0 * (1e-161_f64).ln()).exp();
+        assert!(sub > 0.0 && (sub - expected_sub).abs() <= 2.0 * f64::from_bits(1) + 1e-12 * expected_sub, "sub={sub:.3e} vs {expected_sub:.3e}");
+
+        // Tiny-df underflowing lower tails in chi2_ppf, chi2_isf, f_ppf, f_isf, and student_t_two_sided_isf:
+        assert_eq!(chi2_ppf(0.1, 0.002).unwrap(), 0.0);
+        assert_eq!(chi2_isf(0.6, 0.002).unwrap(), 0.0);
+        assert_eq!(f_ppf(1e-200, 1.0, f64::INFINITY).unwrap(), 0.0);
+        assert_eq!(f_isf(1e-200, f64::INFINITY, 1.0).unwrap(), f64::INFINITY);
+        assert_eq!(f_ppf(0.1, 0.002, 10.0).unwrap(), 0.0);
+        assert_eq!(f_isf(0.9, 0.002, 10.0).unwrap(), 0.0);
+        assert_eq!(f_ppf(0.9, 10.0, 0.002).unwrap(), f64::INFINITY);
+        assert_eq!(student_t_two_sided_isf(0.1, 0.002).unwrap(), f64::INFINITY);
+    }
+
+    #[test]
+    fn gap_03_03_student_t_huge_df_normal_shortcut_bounds() {
+        // Verify documented Abramowitz & Stegun §26.7.5 error bounds across the df = 1e12 seam.
+        let df_below = 9.99e11_f64;
+        let df_at = 1e12_f64;
+        for &t in &[0.0_f64, 0.5, 1.0, 1.96, 3.0, 5.0, 10.0] {
+            let p2_below = student_t_two_sided_p(t, df_below).unwrap();
+            let p2_at = student_t_two_sided_p(t, df_at).unwrap();
+            assert!((p2_below - p2_at).abs() <= 3.2e-13, "t={t}: p2 diff={:.3e}", (p2_below - p2_at).abs());
+
+            let sf_below = student_t_sf(t, df_below).unwrap();
+            let sf_at = student_t_sf(t, df_at).unwrap();
+            assert!((sf_below - sf_at).abs() <= 1.6e-13, "t={t}: sf diff={:.3e}", (sf_below - sf_at).abs());
+
+            let lnp_below = student_t_ln_pdf(t, df_below).unwrap();
+            let lnp_at = student_t_ln_pdf(t, df_at).unwrap();
+            assert!((lnp_below - lnp_at).abs() <= 2.6e-9, "t={t}: ln_pdf diff={:.3e}", (lnp_below - lnp_at).abs());
+
+            if t > 0.0 {
+                let ln2_below = student_t_ln_two_sided_p(t, df_below).unwrap();
+                let ln2_at = student_t_ln_two_sided_p(t, df_at).unwrap();
+                assert!((ln2_below - ln2_at).abs() <= 2.6e-9, "t={t}: ln_p2 diff={:.3e}", (ln2_below - ln2_at).abs());
+            }
+        }
+        for &alpha in &[0.05_f64, 1e-6, 1e-12] {
+            let q_below = student_t_two_sided_isf(alpha, df_below).unwrap();
+            let q_at = student_t_two_sided_isf(alpha, df_at).unwrap();
+            let rel = (q_below - q_at).abs() / q_at;
+            assert!(rel <= 1.5e-11, "alpha={alpha}: rel={rel:.3e}");
+        }
     }
 }
