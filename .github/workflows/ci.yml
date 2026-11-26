@@ -198,7 +198,8 @@ jobs:
         with:
           install-gui-libs: 'true'
           install-linters: 'true'
-          install-deny: 'false'
+          # `xtask ci policy` runs `cargo deny check licenses`.
+          install-deny: 'true'
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run policy stage
