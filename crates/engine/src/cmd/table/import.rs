@@ -40,9 +40,10 @@ use crate::cmd::helpers::{
 };
 use crate::cmd::params::{command_schema, deserialize_strict, parse_params};
 use crate::cmd::project::{
-    collect_all_sheet_ids, extract_source_label, merge_imported_document, next_collision_free_sheet_id, recalculate_dirty_with_links,
-    resolve_optional_merged_at, stamp_document_origin,
+    RecalcSummary, collect_all_sheet_ids, extract_source_label, merge_imported_document, merge_imported_document_with_remap,
+    next_collision_free_sheet_id, recalculate_dirty_with_links, resolve_optional_merged_at, stamp_document_origin,
 };
+use crate::services::finalize_promoted_imported_analyses;
 
 fn check_inline_payload_len(len: usize, max_bytes: usize, label: &str) -> Result<(), EngineError> {
     if len > max_bytes {
@@ -898,40 +899,100 @@ fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<C
             .with_remediation("Supply a .prism `path`, `bytes_base64`, or `bytes`."));
     };
 
-    let report = import_prism_bytes(&bytes)?;
+    let mut report = import_prism_bytes(&bytes)?;
     let origin = if merge {
         let format_id = FormatRegistry::default_registry().importer_by_format("prism").map_or(".prism", |imp| imp.descriptor().id);
         Some(SheetOrigin::new(extract_source_label(source_path.as_deref(), "inline.prism"), format_id, merged_at)?)
     } else {
         None
     };
-    let before_result_len = if merge { ctx.session.doc.result_sheets.len() } else { 0 };
-    let mut outcome = finish_project_import_report(ctx, "table.importPrism", "imported .prism file", report, merge, origin)?;
 
-    // §6.1: If the imported archive produced any live-translated (non-ImportedSnapshot) analyses,
-    // recompute them inside the same single journaled undoable step while preserving untouched
-    // `ResultStatus::Imported` snapshots.
-    let live_result_ids: Vec<SheetId> = ctx
+    let mut promoted = std::mem::take(&mut report.promoted_analyses);
+    let before_result_len = if merge { ctx.session.doc.result_sheets.len() } else { 0 };
+    if merge {
+        if let Some(ref orig) = origin {
+            stamp_document_origin(&mut report.document, orig);
+        }
+        let id_map = merge_imported_document_with_remap(&mut ctx.session.doc, report.document)?;
+        if !id_map.is_empty() {
+            for pref in &mut promoted {
+                if let Some(new_id) = id_map.get(&pref.sheet_id) {
+                    pref.sheet_id = new_id.clone();
+                }
+            }
+        }
+    } else {
+        validate_project_cells(0, report.document.total_allocated_cells()?)?;
+        ctx.session.doc = report.document;
+    }
+    sync_info_linked_data_sheets(&mut ctx.session.doc, &HashSet::new());
+
+    // §6.1 / R25.1: Recompute promoted external `.prism` analyses and any remaining newly-imported
+    // live (non-ImportedSnapshot) analyses inside the same single journaled undoable step while
+    // preserving untouched `ResultStatus::Imported` snapshots.
+    let mut handled_ids: HashSet<SheetId> = promoted.iter().map(|pref| pref.sheet_id.clone()).collect();
+    let mut any_recalc = false;
+    let mut recalculated_sheets = 0_usize;
+    let mut refreshed_links = 0_usize;
+    let mut failed_ids: Vec<SheetId> = Vec::new();
+
+    if let Some(promoted_report) = finalize_promoted_imported_analyses(&mut ctx.session.doc, &promoted, &mut report.warnings, Some(ctx.cancelled))? {
+        any_recalc = true;
+        recalculated_sheets = recalculated_sheets.saturating_add(promoted_report.total_updated());
+        for id in &promoted_report.updated_result_sheets {
+            handled_ids.insert(id.clone());
+        }
+        for id in promoted_report.failed_result_sheets {
+            handled_ids.insert(id.clone());
+            if !failed_ids.contains(&id) {
+                failed_ids.push(id);
+            }
+        }
+    }
+
+    let remaining_live_ids: Vec<SheetId> = ctx
         .session
         .doc
         .result_sheets
         .iter()
         .skip(before_result_len)
-        .filter(|rs| !matches!(rs.analysis.kind, AnalysisKind::ImportedSnapshot { .. }) && !rs.is_imported())
+        .filter(|rs| !handled_ids.contains(&rs.id) && !matches!(rs.analysis.kind, AnalysisKind::ImportedSnapshot(_)) && !rs.is_imported())
         .map(|rs| rs.id.clone())
         .collect();
-    if !live_result_ids.is_empty() {
-        let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, &live_result_ids, None, Some(ctx.cancelled))?;
-        if let Some(note) = recalc.failure_note() {
-            outcome.message = format!("{}{note}", outcome.message);
-        }
-        if let Some(obj) = outcome.payload.as_object_mut() {
-            obj.insert(String::from("recalculated_sheets"), json!(recalc.recalculated_sheets));
-            obj.insert(String::from("refreshed_links"), json!(recalc.refreshed_links));
-            obj.insert(String::from("failed_count"), json!(recalc.failed_result_sheets.len()));
-            obj.insert(String::from("failed_result_sheets"), json!(recalc.failed_json()));
+    if !remaining_live_ids.is_empty() {
+        let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, &remaining_live_ids, None, Some(ctx.cancelled))?;
+        any_recalc = true;
+        recalculated_sheets = recalculated_sheets.saturating_add(recalc.recalculated_sheets);
+        refreshed_links = refreshed_links.saturating_add(recalc.refreshed_links);
+        for failed in recalc.failed_result_sheets {
+            if !failed_ids.contains(&failed.sheet_id) {
+                failed_ids.push(failed.sheet_id);
+            }
         }
     }
+
+    let recalc_summary = RecalcSummary {
+        recalculated_sheets,
+        refreshed_links,
+        failed_result_sheets: dag::collect_failed_result_sheets_for_ids(&ctx.session.doc, &failed_ids),
+    };
+    let mut message = String::from("imported .prism file");
+    if any_recalc && let Some(note) = recalc_summary.failure_note() {
+        message = format!("{message}{note}");
+    }
+    let mut payload = json!({
+        "title": ctx.session.doc.title,
+        "sheet_count": ctx.session.doc.total_sheet_count(),
+        "warnings": report.warnings,
+    });
+    if any_recalc && let Some(obj) = payload.as_object_mut() {
+        obj.insert(String::from("recalculated_sheets"), json!(recalc_summary.recalculated_sheets));
+        obj.insert(String::from("refreshed_links"), json!(recalc_summary.refreshed_links));
+        obj.insert(String::from("failed_count"), json!(recalc_summary.failed_result_sheets.len()));
+        obj.insert(String::from("failed_result_sheets"), json!(recalc_summary.failed_json()));
+    }
+    let mut outcome = CommandOutcome::mutated("table.importPrism", message, payload);
+    outcome.warnings = report.warnings.iter().map(format_import_warning_text).collect();
     Ok(outcome)
 }
 

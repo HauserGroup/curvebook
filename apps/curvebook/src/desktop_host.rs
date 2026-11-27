@@ -480,7 +480,8 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
             let payload =
                 importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
             let (doc, import_warnings) = match payload {
-                curvebook_format::ImportPayload::Report(report) => (report.document, report.warnings),
+                curvebook_format::ImportPayload::Report(report) => curvebook_engine::services::finalize_import_report(report)
+                    .map_err(|err| format!("failed to finalize imported `{}`: {err}", path.display()))?,
                 curvebook_format::ImportPayload::Document(doc) => (doc, Vec::new()),
                 curvebook_format::ImportPayload::DataSheet(_) => {
                     return Err(format!("file `{}` did not yield a project document", path.display()));
@@ -506,36 +507,51 @@ struct PendingDelimitedStartup {
     title: String,
 }
 
-/// Load one or more startup files (`.curvebook`, `.curvebook.d`, `.cbtemplate`, `.prism`,
-/// `.pzfx`, `.csv`, `.tsv`) into a [`Session`].
-///
-/// Rejects multiple project archives/templates in one window launch, merges CSV/TSV files before
-/// or after a single project file, and marks the resulting session dirty whenever delimited tables
-/// are merged into an opened project.
+/// Import warnings captured while loading a startup interchange file (`.prism`, `.pzfx`, `.xlsx`).
+#[derive(Debug, Clone)]
+pub struct StartupImportWarnings {
+    pub path: PathBuf,
+    pub command_id: Option<&'static str>,
+    pub warnings: Vec<curvebook_format::ImportWarning>,
+}
+
+struct PrimaryStartupProject {
+    source_path: PathBuf,
+    doc: ProjectDocument,
+    archive_path: Option<PathBuf>,
+    clean_archive: bool,
+    startup_warnings: Option<StartupImportWarnings>,
+}
+
+/// Load one or more startup files into a [`Session`], also returning any non-fatal import warnings
+/// emitted for a primary interchange file (`.prism`, `.pzfx`, `.xlsx`) so the host can record them
+/// on the newly opened window.
 ///
 /// # Errors
 /// Returns an error if multiple project files are passed, or if any path has an unsupported format
 /// or fails to parse.
-pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
+pub fn open_document_from_files_with_warnings(files: &[PathBuf]) -> Result<(Session, Option<StartupImportWarnings>), String> {
     if files.is_empty() {
-        return Ok(Session::new());
+        return Ok((Session::new(), None));
     }
 
     let registry = FormatRegistry::default_registry();
-    let mut primary_project: Option<(PathBuf, ProjectDocument, Option<PathBuf>, bool)> = None;
+    let mut primary_project: Option<PrimaryStartupProject> = None;
     let mut delimited_files: Vec<PendingDelimitedStartup> = Vec::new();
 
     for (idx, path) in files.iter().enumerate() {
         match classify_and_load_path(path)? {
-            LoadedPathPayload::Project { doc, archive_path, clean_archive, .. } => {
-                if let Some((first_path, _, _, _)) = &primary_project {
+            LoadedPathPayload::Project { doc, archive_path, clean_archive, import_warnings, import_command_id } => {
+                if let Some(first) = &primary_project {
                     return Err(format!(
                         "cannot open multiple project files together (`{}` and `{}`); pass at most one project file and optional .csv/.tsv files",
-                        first_path.display(),
+                        first.source_path.display(),
                         path.display()
                     ));
                 }
-                primary_project = Some((path.clone(), *doc, archive_path, clean_archive));
+                let startup_warnings =
+                    import_command_id.map(|_| StartupImportWarnings { path: path.clone(), command_id: import_command_id, warnings: import_warnings });
+                primary_project = Some(PrimaryStartupProject { source_path: path.clone(), doc: *doc, archive_path, clean_archive, startup_warnings });
             }
             LoadedPathPayload::DelimitedTable { importer_id, title, .. } => {
                 delimited_files.push(PendingDelimitedStartup { index: idx, path: path.clone(), importer_id, title });
@@ -544,12 +560,12 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
     }
 
     let primary_had_project = primary_project.is_some();
-    let (mut doc, pre_merge_doc, primary_archive_path, clean_archive) = match primary_project {
-        Some((_, loaded_doc, archive_path, is_clean)) => {
-            let baseline = loaded_doc.clone();
-            (loaded_doc, Some(baseline), archive_path, is_clean)
+    let (mut doc, pre_merge_doc, primary_archive_path, clean_archive, startup_warnings) = match primary_project {
+        Some(primary) => {
+            let baseline = primary.doc.clone();
+            (primary.doc, Some(baseline), primary.archive_path, primary.clean_archive, primary.startup_warnings)
         }
-        None => (ProjectDocument::default(), None, None, false),
+        None => (ProjectDocument::default(), None, None, false, None),
     };
 
     let merged_delimited = !delimited_files.is_empty();
@@ -596,6 +612,21 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
         }
         let _ = session.collapse_atomic_group(baseline);
     }
+    Ok((session, startup_warnings))
+}
+
+/// Load one or more startup files (`.curvebook`, `.curvebook.d`, `.cbtemplate`, `.prism`,
+/// `.pzfx`, `.csv`, `.tsv`) into a [`Session`].
+///
+/// Rejects multiple project archives/templates in one window launch, merges CSV/TSV files before
+/// or after a single project file, and marks the resulting session dirty whenever delimited tables
+/// are merged into an opened project.
+///
+/// # Errors
+/// Returns an error if multiple project files are passed, or if any path has an unsupported format
+/// or fails to parse.
+pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
+    let (session, _) = open_document_from_files_with_warnings(files)?;
     Ok(session)
 }
 
@@ -3156,9 +3187,25 @@ impl DesktopHostRuntime {
             Some(path) => vec![validate_path_with_policy(&self.config.path_policy, &path)?],
             None => Vec::new(),
         };
-        let session = open_document_from_files(&files)?;
+        let (session, startup_warnings) = open_document_from_files_with_warnings(&files)?;
         let attach_recovery = self.config.recovery_root.is_some();
-        self.open_window_with_session(session, viewport, attach_recovery)
+        let id = self.open_window_with_session(session, viewport, attach_recovery)?;
+        if let Some(sw) = startup_warnings {
+            self.record_startup_import_warnings(id, &sw);
+        }
+        Ok(id)
+    }
+
+    /// Record non-fatal import warnings emitted while loading startup interchange files into `window_id`.
+    pub fn record_startup_import_warnings(&mut self, window_id: DesktopWindowId, startup_warnings: &StartupImportWarnings) {
+        if let Ok(win) = self.window_mut(window_id) {
+            Self::record_loaded_project_import_warnings(
+                win.app_mut(),
+                &startup_warnings.path,
+                startup_warnings.command_id,
+                &startup_warnings.warnings,
+            );
+        }
     }
 
     /// Open a new desktop window wrapping a pre-constructed [`Session`].

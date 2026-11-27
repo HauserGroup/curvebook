@@ -301,7 +301,7 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
 
     doc.active_sheet_id = doc.data_sheets.first().map(|s| s.id.clone());
     validate_project_document(&doc)?;
-    Ok(ImportReport { document: doc, warnings })
+    Ok(ImportReport::new(doc, warnings))
 }
 
 fn find_zip_entry<'a>(archive: &'a ZipArchive, target: &str) -> Option<&'a [u8]> {

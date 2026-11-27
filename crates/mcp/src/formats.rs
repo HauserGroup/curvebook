@@ -31,9 +31,9 @@ use std::sync::atomic::Ordering;
 use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableKind, validate_project_cells};
 use curvebook_engine::services::{
     DEFAULT_PREVIEW_DPI, DocumentExportFormat, ExportOptionsSpec, PZFX_EXPORT_DATA_ONLY_NOTICE, PZFX_EXPORT_STRUCTURE_NOTICE, RasterMetadata,
-    compile_visual_scene_for_sheet, export_document_artifact, import_registered_path, load_validated_ttf_font_bytes, parse_csv_delimiter_opt,
-    parse_dpi, parse_pdf_color_space, parse_pdf_version, parse_tiff_compression, resolve_open_importer, resolve_preview_sheet_id,
-    resolve_project_save_exporter, resolve_tidy_flag,
+    compile_visual_scene_for_sheet, export_document_artifact, finalize_import_report, import_registered_path, load_validated_ttf_font_bytes,
+    parse_csv_delimiter_opt, parse_dpi, parse_pdf_color_space, parse_pdf_version, parse_tiff_compression, resolve_open_importer,
+    resolve_preview_sheet_id, resolve_project_save_exporter, resolve_tidy_flag,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_engine::services::{pdf_color_space_str, pdf_version_str, tiff_compression_str};
@@ -488,13 +488,17 @@ fn apply_imported_payload(
             }))
         }
         ("prism" | "pzfx" | "xlsx", ImportPayload::Report(report)) => {
-            let warnings = match serde_json::to_value(&report.warnings) {
+            let (doc, finalized_warnings) = match finalize_import_report(report) {
+                Ok(pair) => pair,
+                Err(err) => return Ok(errors::result_from_engine_error(&err)),
+            };
+            let warnings = match serde_json::to_value(&finalized_warnings) {
                 Ok(v) => v,
                 Err(err) => {
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            apply_report_import_direct(state, resolved_path, format_id, report.document, warnings)
+            apply_report_import_direct(state, resolved_path, format_id, doc, warnings)
         }
         ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
             let Some(bytes) = raw_bytes else {
@@ -590,6 +594,16 @@ fn attach_xlsx_command_params(map: &mut Map<String, Value>, xopts: &XlsxImportOp
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn extract_live_import_warnings(send_res: &Value, append: bool) -> Option<Value> {
+    let candidate = if append {
+        send_res.pointer("/payload/warnings")
+    } else {
+        send_res.pointer("/results/1/result/payload/warnings").or_else(|| send_res.pointer("/results/1/payload/warnings"))
+    };
+    candidate.filter(|v| v.is_array()).cloned()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::too_many_arguments)]
 fn apply_imported_payload_live(
     state: &mut McpServerState,
@@ -680,12 +694,6 @@ fn apply_imported_payload_live(
             }))
         }
         ("prism" | "pzfx" | "xlsx", ImportPayload::Report(report)) => {
-            let warnings = match serde_json::to_value(&report.warnings) {
-                Ok(v) => v,
-                Err(err) => {
-                    return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
-                }
-            };
             let cmd_id = report_import_command_id(format_id);
             let preserve_xlsx_title = !append && format_id == "xlsx" && title_override.is_some();
             let effective_merge = append || preserve_xlsx_title;
@@ -714,9 +722,19 @@ fn apply_imported_payload_live(
                     }),
                 )
             };
-            if let Err(err) = send_res {
-                return Ok(live_attach_import_error(err));
-            }
+            let send_val = match send_res {
+                Ok(v) => v,
+                Err(err) => return Ok(live_attach_import_error(err)),
+            };
+            let warnings = match extract_live_import_warnings(&send_val, append) {
+                Some(live_warnings) => live_warnings,
+                None => match serde_json::to_value(&report.warnings) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
+                    }
+                },
+            };
             let snap = state.send_live_control("doc.inspect", json!({})).ok();
             let title = snap.as_ref().and_then(|v| v.get("title")).and_then(Value::as_str).unwrap_or("");
             let sheet_count = snap.as_ref().and_then(|v| v.pointer("/counts/total")).and_then(Value::as_u64).unwrap_or(0);

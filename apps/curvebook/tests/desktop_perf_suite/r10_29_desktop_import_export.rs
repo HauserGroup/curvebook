@@ -9,6 +9,7 @@ use curvebook::desktop_host::{
     StubNativeFileDialogAdapter,
 };
 use curvebook::gui_window::CurveBookNativeApp;
+use curvebook_doc::{AnalysisKind, ResultProvenance, ResultStatus, SheetId};
 use curvebook_engine::Session;
 use curvebook_format::save_project_file;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
@@ -491,6 +492,158 @@ fn r10_34_native_file_picker_filters_use_extension_naming() -> Result<(), Box<dy
     let open_req = adapter.requests().into_iter().rev().find(|r| r.command_id == "project.open").expect("open dialog request");
     assert_eq!(open_req.filter_label, "CurveBook, .pzfx, .prism & Data files");
     assert!(open_req.extensions.iter().any(|e| e == "pzfx") && open_req.extensions.iter().any(|e| e.ends_with("ism")));
+
+    Ok(())
+}
+
+fn write_promoted_archive_fixture(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let doc_json = serde_json::to_string(&json!({
+        "formatVersion": "1-6-0",
+        "title": "Desktop Promoted Archive",
+        "sheets": { "data": ["d-groups", "d-single"], "analyses": ["an-ttest", "an-stale", "an-fallback"] },
+        "sheetAttributesMap": {
+            "d-groups": { "title": "Groups" },
+            "d-single": { "title": "Single" },
+            "an-ttest": { "title": "Agreeing T-Test" },
+            "an-stale": { "title": "Stale T-Test" },
+            "an-fallback": { "title": "Degenerate T-Test" }
+        }
+    }))?;
+    let ttest_params = serde_json::to_string(&json!({
+        "content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}
+    }))?;
+    let d_groups = serde_json::to_string(&json!({
+        "uid": "d-groups", "title": "Groups",
+        "table": {"uid": "t-groups", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-a", "ds-b"]}
+    }))?;
+    let d_single = serde_json::to_string(&json!({
+        "uid": "d-single", "title": "Single",
+        "table": {"uid": "t-single", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-only"]}
+    }))?;
+    let ds_a = serde_json::to_string(&json!({"title": "Control", "replicates": [{"valueType": "real"}]}))?;
+    let ds_b = serde_json::to_string(&json!({"title": "Treated", "replicates": [{"valueType": "real"}]}))?;
+    let ds_only = serde_json::to_string(&json!({"title": "Only", "replicates": [{"valueType": "real"}]}))?;
+    let an_ttest_sheet = serde_json::to_string(&json!({
+        "uid": "an-ttest", "title": "Agreeing T-Test", "analysisClass": "T_TESTS_AND_NONPARAMETRIC", "inputSheets": [{"uid": "d-groups"}]
+    }))?;
+    let an_ttest_res = serde_json::to_string(&json!({
+        "content": {"unpairedTTestModel": {"unpairedTTest": {"t": -6.123_724_356_957_945, "pValue": {"state": "P_VALUE_EQUAL", "value": 0.003_602_232_609_1}}}}
+    }))?;
+    let an_stale_sheet = serde_json::to_string(&json!({
+        "uid": "an-stale", "title": "Stale T-Test", "analysisClass": "T_TESTS_AND_NONPARAMETRIC", "inputSheets": [{"uid": "d-groups"}]
+    }))?;
+    let an_stale_res = serde_json::to_string(&json!({
+        "content": {"unpairedTTestModel": {"unpairedTTest": {"t": -6.123_724_356_957_945, "pValue": {"state": "P_VALUE_EQUAL", "value": 0.156}}}}
+    }))?;
+    let an_fb_sheet = serde_json::to_string(&json!({
+        "uid": "an-fallback", "title": "Degenerate T-Test", "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+        "inputSheets": [{"uid": "d-single"}], "preferredResultSheet": "rs-fb", "resultSheets": [{"uid": "rs-fb", "title": "Cached Fallback"}]
+    }))?;
+    let rs_fb = serde_json::to_string(&json!({"uid": "rs-fb", "name": "Cached Fallback", "dataSheet": "view-fb"}))?;
+    let view_fb = serde_json::to_string(&json!({
+        "uid": "view-fb", "flags": ["ANALYSIS_VIEW"],
+        "table": {"uid": "t-view-fb", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-fb-rt", "dataSets": ["ds-fb-v"]}
+    }))?;
+    let ds_fb_rt = serde_json::to_string(&json!({"title": "Metric", "replicates": [{"valueType": "string"}]}))?;
+    let ds_fb_v = serde_json::to_string(&json!({"title": "Value", "replicates": [{"valueType": "string"}]}))?;
+
+    fs::write(
+        path,
+        build_zip_entries(&[
+            ("document.json", &doc_json),
+            ("data/sheets/d-groups/sheet.json", &d_groups),
+            ("data/sets/ds-a.json", &ds_a),
+            ("data/sets/ds-b.json", &ds_b),
+            ("data/tables/t-groups/data.csv", "10,20\n12,22\n14,24\n"),
+            ("data/sheets/d-single/sheet.json", &d_single),
+            ("data/sets/ds-only.json", &ds_only),
+            ("data/tables/t-single/data.csv", "1\n2\n3\n"),
+            ("analyses/an-ttest/sheet.json", &an_ttest_sheet),
+            ("analyses/an-ttest/parameters.json", &ttest_params),
+            ("analyses/an-ttest/results.json", &an_ttest_res),
+            ("analyses/an-stale/sheet.json", &an_stale_sheet),
+            ("analyses/an-stale/parameters.json", &ttest_params),
+            ("analyses/an-stale/results.json", &an_stale_res),
+            ("analyses/an-fallback/sheet.json", &an_fb_sheet),
+            ("analyses/an-fallback/parameters.json", &ttest_params),
+            ("analyses/an-fallback/result_sheets/rs-fb.json", &rs_fb),
+            ("data/sheets/view-fb/sheet.json", &view_fb),
+            ("data/sets/ds-fb-rt.json", &ds_fb_rt),
+            ("data/sets/ds-fb-v.json", &ds_fb_v),
+            ("data/tables/t-view-fb/data.csv", "P value,0.042\n"),
+        ])?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn desktop_host_open_promoted_archive_recomputes_live_surfaces_warnings_and_tracks_edits() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDirGuard::new("cb-r25-1-desktop-promoted")?;
+    let archive_path = tmp.child("promoted.prism");
+    write_promoted_archive_fixture(&archive_path)?;
+
+    // 1. Open via `open_path_in_window` (`File > Open` / drag-and-drop on empty window).
+    let (mut rt, wid, _) = spawn_runtime(Session::new())?;
+    let drop_out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: archive_path.clone() })?;
+    assert_eq!(drop_out.action, "file.dropped_loaded_in_window");
+
+    {
+        let win = rt.window(wid)?;
+        assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::ImportWarnings));
+        let warnings = &win.app().import_warnings.warnings;
+        assert!(
+            warnings.iter().any(|w| w.kind == "RecomputedResultDisagreement" && w.message.contains("Stale T-Test") && w.message.contains("0.156")),
+            "missing disagreement warning in app.import_warnings: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.kind == "AnalysisRecomputeFallback" && w.message.contains("Degenerate T-Test")),
+            "missing fallback warning in app.import_warnings: {warnings:?}"
+        );
+
+        let snap = curvebook_ui_egui::inspect::inspect_ui_tree_for_metrics(win.app(), ViewportMetrics::new(1280.0, 800.0, 1.0), None, false);
+        let iw = snap.import_warnings.as_ref().expect("ui.inspect import_warnings");
+        assert!(iw.open && iw.command_id == "table.importPrism" && iw.source_label == "promoted.prism");
+        assert!(iw.warnings.iter().any(|w| w.kind == "RecomputedResultDisagreement"));
+        assert!(iw.warnings.iter().any(|w| w.kind == "AnalysisRecomputeFallback"));
+
+        let doc = win.app().document();
+        assert_eq!(doc.result_sheet(&SheetId::new("an-ttest")).expect("an-ttest").status, ResultStatus::UpToDate);
+        assert_eq!(doc.result_sheet(&SheetId::new("an-stale")).expect("an-stale").status, ResultStatus::UpToDate);
+        assert_eq!(doc.result_sheet(&SheetId::new("an-stale")).expect("an-stale").provenance, ResultProvenance::Computed);
+        let fb = doc.result_sheet(&SheetId::new("an-fallback")).expect("an-fallback");
+        assert_eq!(fb.status, ResultStatus::Imported);
+        assert!(matches!(fb.analysis.kind, AnalysisKind::ImportedSnapshot(_)));
+        assert_eq!(fb.tabs.len(), 1);
+    }
+
+    // 2. Live-editing a source cell immediately recomputes the promoted t-test.
+    let p_before =
+        rt.window(wid)?.app().document().result_sheet(&SheetId::new("an-ttest")).expect("an-ttest").lookup_scalar("PValue", None).expect("p");
+    let _ = rt.window_mut(wid)?.execute_and_journal("table.setCell", json!({ "sheet_id": "d-groups", "row": 0, "col": 0, "value": 19.0 }))?;
+    let p_after =
+        rt.window(wid)?.app().document().result_sheet(&SheetId::new("an-ttest")).expect("an-ttest").lookup_scalar("PValue", None).expect("p");
+    assert!((p_after - p_before).abs() > 1e-3, "live cell edit must recompute promoted t-test: before={p_before}, after={p_after}");
+
+    // 3. Startup `open_window(Some(archive_path), ...)` and `open_document_from_files_with_warnings`
+    //    + `record_startup_import_warnings` (used by `main.rs`) both finalize and record warnings.
+    let mut startup_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let startup_wid = startup_rt.open_window(Some(archive_path.clone()), ViewportMetrics::new(1280.0, 800.0, 1.0))?;
+    let startup_win = startup_rt.window(startup_wid)?;
+    assert!(matches!(startup_win.app().canvas_dialogs.active_dialog, ActiveDialog::ImportWarnings));
+    assert!(startup_win.app().import_warnings.warnings.iter().any(|w| w.kind == "RecomputedResultDisagreement"));
+    assert!(startup_win.app().import_warnings.warnings.iter().any(|w| w.kind == "AnalysisRecomputeFallback"));
+    assert_eq!(startup_win.app().document().result_sheet(&SheetId::new("an-ttest")).expect("an-ttest").status, ResultStatus::UpToDate);
+    assert_eq!(startup_win.app().document().result_sheet(&SheetId::new("an-fallback")).expect("an-fallback").status, ResultStatus::Imported);
+
+    let (cli_session, cli_warnings) = curvebook::desktop_host::open_document_from_files_with_warnings(&[archive_path])?;
+    let mut main_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let main_wid = main_rt.open_window_with_session(cli_session, ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+    let sw = cli_warnings.expect("startup warnings must be returned for .prism file");
+    main_rt.record_startup_import_warnings(main_wid, &sw);
+    let main_win = main_rt.window(main_wid)?;
+    assert!(matches!(main_win.app().canvas_dialogs.active_dialog, ActiveDialog::ImportWarnings));
+    assert!(main_win.app().import_warnings.warnings.iter().any(|w| w.kind == "RecomputedResultDisagreement"));
+    assert!(main_win.app().import_warnings.warnings.iter().any(|w| w.kind == "AnalysisRecomputeFallback"));
 
     Ok(())
 }

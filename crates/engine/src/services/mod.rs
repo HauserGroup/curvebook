@@ -30,9 +30,10 @@ pub use export::{
 };
 pub use fit_diagnostics::compare_result_vs_horizontal_line;
 pub use formats::{
-    LoadedProject, dir_size_bytes, has_unpacked_dir_suffix, import_registered_path, is_unpacked_project_path, load_project_from_bytes,
-    load_project_from_bytes_with_xlsx_options, load_project_from_bytes_with_xlsx_sheets, load_project_from_path,
-    load_project_from_path_with_xlsx_options, load_project_from_path_with_xlsx_sheets, resolve_open_importer, resolve_project_save_exporter,
+    LoadedProject, dir_size_bytes, finalize_import_report, finalize_promoted_imported_analyses, has_unpacked_dir_suffix, import_registered_path,
+    is_unpacked_project_path, load_project_from_bytes, load_project_from_bytes_with_xlsx_options, load_project_from_bytes_with_xlsx_sheets,
+    load_project_from_path, load_project_from_path_with_xlsx_options, load_project_from_path_with_xlsx_sheets, resolve_open_importer,
+    resolve_project_save_exporter,
 };
 pub use inspect::{
     DataSheetSummary, GraphSheetSummary, InfoSheetSummary, LayoutSheetSummary, MAX_CSV_PREVIEW_BYTES, MAX_CSV_PREVIEW_ROWS,

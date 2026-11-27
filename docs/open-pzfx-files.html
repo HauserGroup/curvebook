@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline app for macOS, Windows, and Linux: import data tables, view stored .prism results, and export to CSV or data-only .pzfx.">
+  <meta name="description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline app for macOS, Windows, and Linux: import tables, recompute verified .prism analyses live, and export to CSV or data-only .pzfx.">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
@@ -12,7 +12,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CurveBook">
   <meta property="og:title" content="Open .pzfx and .prism files and export tables — CurveBook">
-  <meta property="og:description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline app for macOS, Windows, and Linux: import data tables, view stored .prism results, and export to CSV or data-only .pzfx.">
+  <meta property="og:description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline app for macOS, Windows, and Linux: import tables, recompute verified .prism analyses live, and export to CSV or data-only .pzfx.">
   <meta property="og:url" content="https://curvebook.org/open-pzfx-files.html">
   <meta property="og:image" content="https://curvebook.org/images/workspace-layout-dark.png">
   <meta property="og:image:alt" content="CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.">
@@ -49,7 +49,7 @@
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
           <p class="eyebrow">File formats · .pzfx · .prism</p>
           <h1 id="page-title">Open .pzfx and .prism files.<br><span>Export tables to CSV or data-only .pzfx.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> opens the data tables and info sheets in <code>.pzfx</code> and <code>.prism</code> files offline on macOS, Windows, and Linux. You can view stored <code>.prism</code> results, export tables to CSV or data-only <code>.pzfx</code>, and re-run analyses.</p>
+          <p class="lead"><strong>CurveBook</strong> opens the data tables and info sheets in <code>.pzfx</code> and <code>.prism</code> files offline on macOS, Windows, and Linux. Verified <code>.prism</code> analyses recompute live on open, while other analyses stay read-only snapshots. You can also export tables to CSV or data-only <code>.pzfx</code> and run new analyses.</p>
           <ul class="pill-row" aria-label="Key facts">
             <li class="pill">Free and open source</li>
             <li class="pill">Offline</li>
@@ -92,7 +92,7 @@
                 </tr>
                 <tr>
                   <th scope="row"><code>.prism</code> (ZIP)</th>
-                  <td>All 8 table types, info sheets, exclusions, read-only results, graph previews when available</td>
+                  <td>All 8 table types, info sheets, exclusions, live verified analyses, read-only snapshots, graph previews when available</td>
                   <td>Import only during Beta</td>
                   <td>Proprietary binary data and undocumented digest files prevent safe export. Export to <code>.pzfx</code> or CSV instead.</td>
                 </tr>
@@ -112,7 +112,7 @@
             </table>
           </div>
           <ul>
-            <li><strong>Importing files:</strong> CurveBook opens tables, exclusions, rich text, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files. Stored <code>.prism</code> results open as read-only snapshots, with graph previews when available, and are never used in calculations. Binary <code>.pzf</code> and <code>PCFF</code> files are refused with a clear message. Re-save them as XML <code>.pzfx</code> or <code>.prism</code> first.</li>
+            <li><strong>Importing files:</strong> CurveBook opens tables, exclusions, rich text, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files. Verified <code>.prism</code> analyses recompute live when you open the file; other analyses stay read-only snapshots, with graph previews when available. If a recomputed value differs from the stored value in the file, CurveBook shows a warning and keeps CurveBook's live result. Binary <code>.pzf</code> and <code>PCFF</code> files are refused with a clear message. Re-save them as XML <code>.pzfx</code> or <code>.prism</code> first.</li>
             <li><strong>Exporting to <code>.pzfx</code>:</strong> <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Each export writes a separate copy and lists any items it leaves out. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications.</li>
             <li><strong>Merging projects:</strong> Choose <strong>File › Merge Project…</strong> to copy sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file. Copied sheets get origin badges that you can remove.</li>
           </ul>
@@ -137,7 +137,7 @@
           <h2 id="desktop-title">Open, merge, and export in the desktop app</h2>
           <ol>
             <li><strong>Open or merge:</strong> Choose <strong>File › Open…</strong> or <strong>File › Import</strong> to open a <code>.pzfx</code> or <code>.prism</code> file. To add its sheets to an open project instead, choose <strong>File › Merge Project…</strong>.</li>
-            <li><strong>Review warnings and snapshots:</strong> Unsupported items are listed under <strong>Import Warnings</strong>. On a read-only <code>.prism</code> snapshot, click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh results.</li>
+            <li><strong>Review warnings and results:</strong> Verified <code>.prism</code> analyses open live. Warnings and unsupported items are listed under <strong>Import Warnings</strong>. On a read-only snapshot, click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh results.</li>
             <li><strong>Export tables:</strong> Choose <strong>File › Export › CSV Table…</strong> to export one table, or <strong>Export All Data Tables…</strong> to export every table to a folder. Choose <strong>File › Export › .pzfx file…</strong> to export data tables and info sheets.</li>
           </ol>
         </section>

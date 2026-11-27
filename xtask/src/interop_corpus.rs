@@ -2905,6 +2905,34 @@ impl PzfxConformanceSummary {
     }
 }
 
+/// Per-design Step 7 cached-vs-recomputed agreement and source-diversity counters.
+#[derive(Debug, Clone, Default)]
+pub struct DesignVariantDiagnostic {
+    #[cfg(feature = "docs-site")]
+    pub design_key: Option<curvebook_format::AnalysisDesignKey>,
+    pub recomputed_ok: usize,
+    pub analyses_compared: usize,
+    pub analyses_fully_agreed: usize,
+    pub pairwise_compared: usize,
+    pub pairwise_agreed: usize,
+    pub source_records_compared: BTreeSet<String>,
+    pub disagreed_scalar_keys: BTreeMap<String, usize>,
+}
+
+impl DesignVariantDiagnostic {
+    fn to_json(&self) -> Value {
+        json!({
+            "recomputed_ok": self.recomputed_ok,
+            "analyses_compared": self.analyses_compared,
+            "analyses_fully_agreed": self.analyses_fully_agreed,
+            "distinct_source_records": self.source_records_compared.len(),
+            "pairwise_compared": self.pairwise_compared,
+            "pairwise_agreed": self.pairwise_agreed,
+            "disagreed_scalar_keys": self.disagreed_scalar_keys,
+        })
+    }
+}
+
 /// Aggregate Step 7 cached-vs-recomputed diagnostic summary for one external `.prism` `analysisClass`.
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisClassDiagnosticSummary {
@@ -2923,10 +2951,12 @@ pub struct AnalysisClassDiagnosticSummary {
     pub scalars_compared: usize,
     pub scalars_agreed: usize,
     pub scalars_disagreed: usize,
+    pub pairwise_compared: usize,
+    pub pairwise_agreed: usize,
     pub disagreed_scalar_keys: BTreeMap<String, usize>,
     pub compared_scalar_keys: BTreeMap<String, usize>,
-    /// Per `experimentalDesign` (or `<default>`): `[recomputed_ok, analyses_compared, analyses_fully_agreed]`.
-    pub variants: BTreeMap<String, [usize; 3]>,
+    /// Per canonical `AnalysisDesignKey` label: per-design agreement, pairwise, and source diversity counts.
+    pub variants: BTreeMap<String, DesignVariantDiagnostic>,
 }
 
 impl AnalysisClassDiagnosticSummary {
@@ -2947,9 +2977,11 @@ impl AnalysisClassDiagnosticSummary {
             "scalars_compared": self.scalars_compared,
             "scalars_agreed": self.scalars_agreed,
             "scalars_disagreed": self.scalars_disagreed,
+            "pairwise_compared": self.pairwise_compared,
+            "pairwise_agreed": self.pairwise_agreed,
             "disagreed_scalar_keys": self.disagreed_scalar_keys,
             "compared_scalar_keys": self.compared_scalar_keys,
-            "variants": self.variants.iter().map(|(k, v)| (k.clone(), json!({"recomputed_ok": v[0], "analyses_compared": v[1], "analyses_fully_agreed": v[2]}))).collect::<Map<String, Value>>(),
+            "variants": self.variants.iter().map(|(k, v)| (k.clone(), v.to_json())).collect::<Map<String, Value>>(),
         })
     }
 }
@@ -3477,6 +3509,7 @@ pub fn run_with_options(workspace_root: &Path, opts: &InteropCorpusOptions) -> R
                     run_engine_pipeline_for_file(
                         InteropFormat::Pzfx,
                         &bytes,
+                        record_id,
                         pzfx_known_corrupt,
                         &mut summary.pipeline,
                         &mut import_durations_ms,
@@ -3509,6 +3542,7 @@ pub fn run_with_options(workspace_root: &Path, opts: &InteropCorpusOptions) -> R
                     run_engine_pipeline_for_file(
                         InteropFormat::ZipArchive,
                         &bytes,
+                        record_id,
                         archive_known_corrupt,
                         &mut summary.pipeline,
                         &mut import_durations_ms,
@@ -3782,13 +3816,24 @@ fn fold_archive_observation(obs: &ArchiveObservation, summary: &mut CorpusRunSum
 }
 
 #[cfg(feature = "docs-site")]
+fn class_mapping_status(foreign_class: &str) -> &'static str {
+    let mut matched = curvebook_format::VERIFIED_ANALYSIS_DESIGNS.iter().filter(|vd| vd.foreign_class.eq_ignore_ascii_case(foreign_class)).peekable();
+    let Some(first) = matched.next() else {
+        return "Unverified";
+    };
+    let whole_class = matched.peek().is_none()
+        && first.experimental_design.is_none()
+        && first.tail == curvebook_format::DesignTail::NotApplicable
+        && first.post_test_family.is_none()
+        && first.post_test.is_none();
+    if whole_class { "Verified" } else { "PartiallyVerified" }
+}
+
+#[cfg(feature = "docs-site")]
 fn seed_analysis_mapping_diagnostics(map: &mut BTreeMap<String, AnalysisClassDiagnosticSummary>) {
-    use curvebook_format::{ANALYSIS_MAPPINGS, AnalysisVerificationStatus};
+    use curvebook_format::ANALYSIS_MAPPINGS;
     for row in ANALYSIS_MAPPINGS {
-        let status = match row.verification {
-            AnalysisVerificationStatus::CorpusVerified => "CorpusVerified",
-            AnalysisVerificationStatus::Unverified => "Unverified",
-        };
+        let status = class_mapping_status(row.foreign_class);
         map.entry(row.foreign_class.to_owned()).or_insert_with(|| AnalysisClassDiagnosticSummary {
             mapping_status: status.to_owned(),
             curvebook_kind: row.curvebook_kind_label.to_owned(),
@@ -3801,6 +3846,7 @@ fn seed_analysis_mapping_diagnostics(map: &mut BTreeMap<String, AnalysisClassDia
 fn run_engine_pipeline_for_file(
     fmt: InteropFormat,
     bytes: &[u8],
+    record_id: &str,
     known_corrupt: bool,
     pipeline: &mut EnginePipelineSummary,
     durations_ms: &mut Vec<u64>,
@@ -3972,7 +4018,7 @@ fn run_engine_pipeline_for_file(
 
     // §6.2 & Step 7 for `.prism`: CSV/JSON data-layer fidelity + cached-result diagnostic comparison.
     if fmt == InteropFormat::ZipArchive {
-        verify_archive_data_layer_and_analyses(bytes, &report, pipeline);
+        verify_archive_data_layer_and_analyses(bytes, record_id, &report, pipeline);
     }
 
     // Step 5: Engine recalculation.
@@ -4155,7 +4201,12 @@ fn format_error_subclass(err: &curvebook_format::FormatError) -> String {
 }
 
 #[cfg(feature = "docs-site")]
-fn verify_archive_data_layer_and_analyses(bytes: &[u8], report: &curvebook_format::ImportReport, pipeline: &mut EnginePipelineSummary) {
+fn verify_archive_data_layer_and_analyses(
+    bytes: &[u8],
+    record_id: &str,
+    report: &curvebook_format::ImportReport,
+    pipeline: &mut EnginePipelineSummary,
+) {
     use curvebook_format::prism::import::external_archive_zip_limits;
     use curvebook_format::prism::schema::{
         ArchiveIdIndex, ExternalDataSetJson, ExternalDataSheetJson, ExternalDocumentIndex, IdLookup, is_external_indexed_document,
@@ -4294,7 +4345,7 @@ fn verify_archive_data_layer_and_analyses(bytes: &[u8], report: &curvebook_forma
 
     // Step 7: `.prism` cached-result diagnostic comparison per `analysisClass`.
     let source_maps = ArchiveSourceMaps { data_uid_to_sheet_id: &data_uid_to_sheet_id, data_set_positions: &data_set_positions };
-    run_archive_analysis_diagnostics(&mut zip_index, &id_index, &doc_index, &source_maps, &report.document, pipeline);
+    run_archive_analysis_diagnostics(&mut zip_index, &id_index, &doc_index, &source_maps, &report.document, record_id, pipeline);
 }
 
 #[cfg(feature = "docs-site")]
@@ -4693,30 +4744,6 @@ fn clamp_utf8_bytes(s: &str, max_bytes: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
-/// Per-design grouping key for agreement counts: `experimentalDesign`, a one-tailed marker, and
-/// the post-test procedure, so promotion can be decided per design rather than per class.
-#[cfg(feature = "docs-site")]
-fn analysis_variant_key(params_val: &Value) -> String {
-    let content = params_val.get("content");
-    let mut key = content.and_then(|c| c.get("experimentalDesign")).and_then(Value::as_str).unwrap_or("<default>").to_owned();
-    if content.and_then(|c| c.pointer("/options/pValueTailType")).and_then(Value::as_str) == Some("P_VALUE_ONE_TAILED") {
-        key.push_str(" | one-tailed");
-    }
-    if let Some(mc) = content.and_then(|c| c.pointer("/postTests/pairwiseTests/multipleComparisons"))
-        && content.and_then(|c| c.pointer("/postTests/type")).and_then(Value::as_str) != Some("NO_TESTS")
-    {
-        let kind = mc.get("type").and_then(Value::as_str).unwrap_or("?");
-        let test = match kind {
-            "STATISTICAL" => mc.pointer("/statistical/test").and_then(Value::as_str),
-            "FDR" => mc.pointer("/fdr/test").and_then(Value::as_str),
-            _ => None,
-        };
-        key.push_str(" | ");
-        key.push_str(test.unwrap_or(kind));
-    }
-    key
-}
-
 /// Per-archive lookup tables shared by the analysis diagnostics pass.
 #[cfg(feature = "docs-site")]
 struct ArchiveSourceMaps<'a> {
@@ -4731,14 +4758,15 @@ fn run_archive_analysis_diagnostics(
     doc_index: &curvebook_format::prism::schema::ExternalDocumentIndex,
     source_maps: &ArchiveSourceMaps<'_>,
     imported_doc: &curvebook_doc::ProjectDocument,
+    record_id: &str,
     pipeline: &mut EnginePipelineSummary,
 ) {
     use curvebook_doc::{AnalysisSpec, ProjectDocument, ResultSheet, ResultStatus, SheetId};
     use curvebook_format::prism::schema::IdLookup;
     use curvebook_format::{
-        AnalysisVerificationStatus, CACHED_SCALAR_LINKS, cached_values_for_link, check_control_in_selection,
-        compare_recomputed_against_cached_results, find_analysis_mapping, primary_input_data_sheet_uid, resolve_selected_data_sets,
-        translate_analysis_parameters,
+        CACHED_SCALAR_LINKS, cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility,
+        compare_recomputed_against_cached_results, extract_analysis_design_key, find_analysis_mapping, primary_input_data_sheet_uid,
+        resolve_selected_data_sets, translate_analysis_parameters,
     };
 
     for analysis_uid in &doc_index.analysis_sheet_ids {
@@ -4761,13 +4789,7 @@ fn run_archive_analysis_diagnostics(
 
         let diag_entry = pipeline.archive_analysis_diagnostics.entry(class_key.clone()).or_insert_with(|| {
             let (status, kind_label) = match mapping_row {
-                Some(row) => {
-                    let st = match row.verification {
-                        AnalysisVerificationStatus::CorpusVerified => "CorpusVerified",
-                        AnalysisVerificationStatus::Unverified => "Unverified",
-                    };
-                    (st, row.curvebook_kind_label)
-                }
+                Some(row) => (class_mapping_status(row.foreign_class), row.curvebook_kind_label),
                 None => ("Unmapped", "<unmapped>"),
             };
             AnalysisClassDiagnosticSummary {
@@ -4824,6 +4846,13 @@ fn run_archive_analysis_diagnostics(
             diag_entry.incompatible_or_unresolved_source += 1;
             continue;
         };
+        if let Err(reason) = check_source_sheet_option_compatibility(&class_key, &params_val, source_ds) {
+            diag_entry.translated_clean = diag_entry.translated_clean.saturating_sub(1);
+            diag_entry.translated_blocked += 1;
+            let cls = classify_blocking_option(&reason);
+            *diag_entry.blocking_reason_classes.entry(cls).or_insert(0) += 1;
+            continue;
+        }
 
         let results_val = match id_index.find_analysis_entry(analysis_uid, "results.json") {
             IdLookup::Found(p) => zip_index.read_entry(&p).ok().flatten().and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
@@ -4867,13 +4896,21 @@ fn run_archive_analysis_diagnostics(
                         row.absolute_tolerance,
                         row.relative_tolerance,
                     );
-                    let variant = analysis_variant_key(&params_val);
-                    let counts = diag_entry.variants.entry(variant).or_insert([0; 3]);
-                    counts[0] += 1;
+                    let pw_agreed = cmp.pairwise_compared_count.saturating_sub(cmp.pairwise_disagreements);
+                    let design_key = extract_analysis_design_key(&class_key, &params_val);
+                    let variant_label = design_key.canonical_label();
+                    let variant = diag_entry
+                        .variants
+                        .entry(variant_label)
+                        .or_insert_with(|| DesignVariantDiagnostic { design_key: Some(design_key), ..DesignVariantDiagnostic::default() });
+                    variant.recomputed_ok += 1;
+                    variant.pairwise_compared = variant.pairwise_compared.saturating_add(cmp.pairwise_compared_count);
+                    variant.pairwise_agreed = variant.pairwise_agreed.saturating_add(pw_agreed);
                     if cmp.compared_count > 0 {
-                        counts[1] += 1;
+                        variant.analyses_compared += 1;
+                        variant.source_records_compared.insert(record_id.to_owned());
                         if cmp.disagreements.is_empty() {
-                            counts[2] += 1;
+                            variant.analyses_fully_agreed += 1;
                         }
                     }
                     for (key, n) in &cmp.compared_by_key {
@@ -4882,7 +4919,10 @@ fn run_archive_analysis_diagnostics(
                     diag_entry.scalars_compared = diag_entry.scalars_compared.saturating_add(cmp.compared_count);
                     diag_entry.scalars_disagreed = diag_entry.scalars_disagreed.saturating_add(cmp.disagreements.len());
                     diag_entry.scalars_agreed = diag_entry.scalars_agreed.saturating_add(cmp.compared_count.saturating_sub(cmp.disagreements.len()));
+                    diag_entry.pairwise_compared = diag_entry.pairwise_compared.saturating_add(cmp.pairwise_compared_count);
+                    diag_entry.pairwise_agreed = diag_entry.pairwise_agreed.saturating_add(pw_agreed);
                     for d in &cmp.disagreements {
+                        *variant.disagreed_scalar_keys.entry(d.key.clone()).or_insert(0) += 1;
                         *diag_entry.disagreed_scalar_keys.entry(d.key.clone()).or_insert(0) += 1;
                     }
                 } else {
@@ -5409,6 +5449,51 @@ fn write_jsonl(path: &Path, records: &[Value]) -> Result<(), String> {
     write_atomic(path, out.as_bytes()).map_err(|e| format!("write ledger jsonl: {e}"))
 }
 
+#[cfg(feature = "docs-site")]
+fn check_verified_design_gates(
+    diagnostics: &BTreeMap<String, AnalysisClassDiagnosticSummary>,
+    verified_designs: &[curvebook_format::VerifiedAnalysisDesign],
+    failures: &mut Vec<String>,
+) {
+    use curvebook_format::{
+        MIN_VERIFIED_DESIGN_AGREEMENT_DEN, MIN_VERIFIED_DESIGN_AGREEMENT_NUM, MIN_VERIFIED_DESIGN_ANALYSES, MIN_VERIFIED_DESIGN_SOURCES,
+    };
+
+    for vd in verified_designs {
+        let label = vd.design_key().canonical_label();
+        let Some(variant) = diagnostics.get(vd.foreign_class).and_then(|cls| cls.variants.get(&label)) else {
+            failures.push(format!(
+                "VERIFIED_ANALYSIS_DESIGNS `{label}` missing from corpus diagnostics (requires >= {MIN_VERIFIED_DESIGN_ANALYSES} analyses)"
+            ));
+            continue;
+        };
+        if variant.analyses_compared < MIN_VERIFIED_DESIGN_ANALYSES {
+            failures.push(format!(
+                "VERIFIED_ANALYSIS_DESIGNS `{label}` has only {} analyses compared (requires >= {MIN_VERIFIED_DESIGN_ANALYSES})",
+                variant.analyses_compared
+            ));
+        }
+        let sources = variant.source_records_compared.len();
+        if sources < MIN_VERIFIED_DESIGN_SOURCES {
+            failures.push(format!(
+                "VERIFIED_ANALYSIS_DESIGNS `{label}` has only {sources} distinct source record(s) (requires >= {MIN_VERIFIED_DESIGN_SOURCES})"
+            ));
+        }
+        let lhs = (variant.analyses_fully_agreed as u128).saturating_mul(MIN_VERIFIED_DESIGN_AGREEMENT_DEN as u128);
+        let rhs = (variant.analyses_compared as u128).saturating_mul(MIN_VERIFIED_DESIGN_AGREEMENT_NUM as u128);
+        if variant.analyses_compared > 0 && lhs < rhs {
+            let pct = (variant.analyses_fully_agreed as f64) * 100.0 / (variant.analyses_compared as f64);
+            failures.push(format!(
+                "VERIFIED_ANALYSIS_DESIGNS `{label}` agreement {}/{} ({pct:.2}%) is below {MIN_VERIFIED_DESIGN_AGREEMENT_NUM}%",
+                variant.analyses_fully_agreed, variant.analyses_compared
+            ));
+        }
+        if vd.requires_pairwise_check && variant.pairwise_compared == 0 {
+            failures.push(format!("VERIFIED_ANALYSIS_DESIGNS `{label}` requires pairwise verification but recorded 0 pairwise comparisons"));
+        }
+    }
+}
+
 fn enforce_strict_gates(summary: &CorpusRunSummary) -> Result<(), String> {
     let mut failures = Vec::new();
     if !summary.provenance_present {
@@ -5483,6 +5568,9 @@ fn enforce_strict_gates(summary: &CorpusRunSummary) -> Result<(), String> {
                     missing_mappings.len(),
                     missing_mappings.join(", ")
                 ));
+            }
+            if summary.archive_gate_met {
+                check_verified_design_gates(&p.archive_analysis_diagnostics, curvebook_format::VERIFIED_ANALYSIS_DESIGNS, &mut failures);
             }
         }
         if p.archive_fidelity_diff_files > 0 {
@@ -5735,7 +5823,7 @@ fn print_aggregate_summary(s: &CorpusRunSummary) {
         println!("  .prism analysis diagnostics (Step 7, {} classes):", p.archive_analysis_diagnostics.len());
         for (cls, d) in &p.archive_analysis_diagnostics {
             println!(
-                "    {cls}: status={}, kind={}, observed={}, clean={}, blocked={}, unresolv={}, recomp_ok={}, recomp_fail={}, panics={}, scalars(cached={}, recomp={}, compared={}, agreed={}, disagreed={})",
+                "    {cls}: status={}, kind={}, observed={}, clean={}, blocked={}, unresolv={}, recomp_ok={}, recomp_fail={}, panics={}, scalars(cached={}, recomp={}, compared={}, agreed={}, disagreed={}), pairwise(compared={}, agreed={})",
                 d.mapping_status,
                 d.curvebook_kind,
                 d.analyses_observed,
@@ -5749,8 +5837,21 @@ fn print_aggregate_summary(s: &CorpusRunSummary) {
                 d.recomputed_scalars_total,
                 d.scalars_compared,
                 d.scalars_agreed,
-                d.scalars_disagreed
+                d.scalars_disagreed,
+                d.pairwise_compared,
+                d.pairwise_agreed,
             );
+            for (variant_label, v) in &d.variants {
+                println!(
+                    "      design `{variant_label}`: recomp_ok={}, compared={}, agreed={}, sources={}, pairwise={}/{}",
+                    v.recomputed_ok,
+                    v.analyses_compared,
+                    v.analyses_fully_agreed,
+                    v.source_records_compared.len(),
+                    v.pairwise_agreed,
+                    v.pairwise_compared,
+                );
+            }
         }
     } else {
         println!("  curvebook pipeline: skipped (--structural-only)");
@@ -6184,6 +6285,111 @@ mod tests {
         assert_eq!(ttest.translated_clean, 1);
         assert_eq!(ttest.recomputed_ok, 1);
         assert_eq!(ttest.recompute_panics, 0);
+        let ttest_variant = ttest.variants.get("T_TESTS_AND_NONPARAMETRIC | UNPAIRED_T_TEST | two-tailed").unwrap();
+        assert_eq!(ttest_variant.recomputed_ok, 1);
+    }
+
+    #[cfg(feature = "docs-site")]
+    #[test]
+    fn verified_design_strict_gate_enforces_all_thresholds() {
+        use curvebook_format::{CorpusDesignEvidence, DesignTail, VerifiedAnalysisDesign};
+
+        use super::{AnalysisClassDiagnosticSummary, DesignVariantDiagnostic, check_verified_design_gates};
+
+        let tukey_design = VerifiedAnalysisDesign {
+            foreign_class: "ONE_WAY_ANOVA",
+            experimental_design: Some("ORDINARY_ANOVA"),
+            tail: DesignTail::NotApplicable,
+            post_test_family: Some("ALL_VS_ALL"),
+            post_test: Some("TUKEY"),
+            requires_pairwise_check: true,
+            evidence: CorpusDesignEvidence {
+                analyses_compared: 100,
+                distinct_source_records: 5,
+                analyses_fully_agreed: 100,
+                verified_on: "2026-11-27",
+            },
+            notes: "synthetic test design",
+        };
+        let no_post_test_design = VerifiedAnalysisDesign {
+            foreign_class: "ONE_WAY_ANOVA",
+            experimental_design: Some("ORDINARY_ANOVA"),
+            tail: DesignTail::NotApplicable,
+            post_test_family: None,
+            post_test: None,
+            requires_pairwise_check: false,
+            evidence: CorpusDesignEvidence {
+                analyses_compared: 25,
+                distinct_source_records: 2,
+                analyses_fully_agreed: 25,
+                verified_on: "2026-11-27",
+            },
+            notes: "synthetic non-pairwise design",
+        };
+
+        let make_diag = |vd: &VerifiedAnalysisDesign, compared: usize, agreed: usize, sources: usize, pw_compared: usize| {
+            let key = vd.design_key();
+            let label = key.canonical_label();
+            let mut src_set = BTreeSet::new();
+            for i in 0..sources {
+                src_set.insert(format!("src:{i}"));
+            }
+            let mut cls = AnalysisClassDiagnosticSummary::default();
+            cls.variants.insert(
+                label,
+                DesignVariantDiagnostic {
+                    design_key: Some(key),
+                    recomputed_ok: compared,
+                    analyses_compared: compared,
+                    analyses_fully_agreed: agreed,
+                    pairwise_compared: pw_compared,
+                    pairwise_agreed: pw_compared,
+                    source_records_compared: src_set,
+                    disagreed_scalar_keys: BTreeMap::new(),
+                },
+            );
+            BTreeMap::from([(vd.foreign_class.to_owned(), cls)])
+        };
+
+        // 1. Passing case (exact 99% boundary with 2 sources and pairwise coverage).
+        let mut failures = Vec::new();
+        check_verified_design_gates(&make_diag(&tukey_design, 100, 99, 2, 12), &[tukey_design], &mut failures);
+        assert!(failures.is_empty(), "expected pass at 99%/2-source/pairwise bar: {failures:?}");
+
+        // Non-pairwise design passes even with 0 pairwise comparisons.
+        let mut no_pw_failures = Vec::new();
+        check_verified_design_gates(&make_diag(&no_post_test_design, 20, 20, 2, 0), &[no_post_test_design], &mut no_pw_failures);
+        assert!(no_pw_failures.is_empty(), "non-pairwise design should pass with 0 pairwise checks: {no_pw_failures:?}");
+
+        // 2. Missing variant fails.
+        let mut missing_failures = Vec::new();
+        check_verified_design_gates(&BTreeMap::new(), &[tukey_design], &mut missing_failures);
+        assert_eq!(missing_failures.len(), 1);
+        assert!(missing_failures[0].contains("missing from corpus diagnostics"), "{missing_failures:?}");
+
+        // 3. Below MIN_VERIFIED_DESIGN_ANALYSES (19 < 20) fails.
+        let mut low_n_failures = Vec::new();
+        check_verified_design_gates(&make_diag(&tukey_design, 19, 19, 3, 10), &[tukey_design], &mut low_n_failures);
+        assert_eq!(low_n_failures.len(), 1);
+        assert!(low_n_failures[0].contains("analyses compared"), "{low_n_failures:?}");
+
+        // 4. Below MIN_VERIFIED_DESIGN_SOURCES (1 < 2) fails.
+        let mut low_src_failures = Vec::new();
+        check_verified_design_gates(&make_diag(&tukey_design, 25, 25, 1, 10), &[tukey_design], &mut low_src_failures);
+        assert_eq!(low_src_failures.len(), 1);
+        assert!(low_src_failures[0].contains("distinct source record"), "{low_src_failures:?}");
+
+        // 5. Below 99% agreement (98/100) fails.
+        let mut low_agree_failures = Vec::new();
+        check_verified_design_gates(&make_diag(&tukey_design, 100, 98, 3, 10), &[tukey_design], &mut low_agree_failures);
+        assert_eq!(low_agree_failures.len(), 1);
+        assert!(low_agree_failures[0].contains("below 99%"), "{low_agree_failures:?}");
+
+        // 6. Pairwise-required design with 0 pairwise comparisons fails.
+        let mut zero_pw_failures = Vec::new();
+        check_verified_design_gates(&make_diag(&tukey_design, 25, 25, 3, 0), &[tukey_design], &mut zero_pw_failures);
+        assert_eq!(zero_pw_failures.len(), 1);
+        assert!(zero_pw_failures[0].contains("0 pairwise comparisons"), "{zero_pw_failures:?}");
     }
 
     #[cfg(feature = "docs-site")]

@@ -80,3 +80,39 @@ This tracked ledger records every structural fact CurveBook relies on for readin
 4. **Beta shipping verdict:**
    - **`.prism` import:** Fully supported from open UTF-8 JSON, headerless CSV, and raster preview PNGs, with opaque `PCFFGRA4` graph/layout definitions explicitly surfaced via typed warnings rather than decoded or silently dropped.
    - **`.prism` export:** **Import-only for Beta** (experimental `.prism` writer stays hidden behind an experimental flag with no GUI menu entry). Because `data/tables/<uid>/data.dt` is a `100%`-present non-excluded entry in `archive-dialect-profile.json` whose 128-bit digest algorithm is undocumented (and graph/font `.bin` entries are legacy `PCFF` binaries), an independent `.prism` writer cannot satisfy the automated corpus-conformance bar without risking silent rejection by external readers. **`.pzfx`** — whose 100%-present non-excluded grammar is fully open UTF-8 XML — serves as CurveBook's conformant Beta interchange export format (data tables and info sheets only, with an explicit preflight summary and `ExportReport` listing dropped non-tabular items).
+
+---
+
+## 6. Verified `.prism` Analysis Designs (`R25.1`)
+
+Default live recomputation on `.prism` open is gated per design by the declarative `VERIFIED_ANALYSIS_DESIGNS` table (`analyses.rs` in the `.prism` archive module of `crates/format`), keyed by `AnalysisDesignKey` (`analysisClass`, `experimentalDesign`, tail `pValueTailType`, and `postTests` family/test). Cached `.prism` values serve strictly as a consistency check and never ground truth (`D1`); CurveBook's live recomputed result always stands, transient references are never persisted in `.curvebook`, and degenerate recompute failures fall back cleanly to `ImportedSnapshot` with `AnalysisRecomputeFallback`.
+
+- **Promotion bar & `--strict` regression gate (`cargo xtask interop-corpus --strict --observe`):** Every promoted design must clear `>= 20` analyses compared (`MIN_VERIFIED_DESIGN_ANALYSES = 20`), `>= 2` distinct source records (`MIN_VERIFIED_DESIGN_SOURCES = 2`), `>= 99%` full agreement (`analyses_fully_agreed * 100 >= analyses_compared * 99`), `pairwise_compared > 0` for post-test designs (`requires_pairwise_check: true`), and an audit of every remaining disagreement.
+- **Verification date:** `2026-11-27` (`0` panics, `0` validation errors, `0` recalculation errors, `0` data-layer cell diffs across `969` valid `.prism` archives / `6,127` tables / `10,217,470` cells).
+
+| Canonical Design Key | Compared | Sources | Agreed | Agreement | Pairwise | Verified On | Notes |
+|---|---:|---:|---:|---:|---:|---|---|
+| `T_TESTS_AND_NONPARAMETRIC \| UNPAIRED_T_TEST \| two-tailed` | 571 | 39 | 570 | 99.82% | — | 2026-11-27 | `1/571` stale cache verified from raw `data.csv` |
+| `T_TESTS_AND_NONPARAMETRIC \| PAIRED_T_TEST \| two-tailed` | 213 | 13 | 213 | 100.00% | — | 2026-11-27 | 100% agreement (`\|t\|`, two-tailed *p*) |
+| `T_TESTS_AND_NONPARAMETRIC \| WELCH_T_TEST \| two-tailed` | 154 | 19 | 154 | 100.00% | — | 2026-11-27 | 100% agreement (`\|t\|`, two-tailed *p*) |
+| `ONE_WAY_ANOVA \| ORDINARY_ANOVA` (no post-test) | 22 | 5 | 22 | 100.00% | — | 2026-11-27 | 100% omnibus agreement (`F`, *p*, *R*², `MS_res`) |
+| `ONE_WAY_ANOVA \| ORDINARY_ANOVA \| ALL_VS_ALL:TUKEY` | 423 | 37 | 421 | 99.53% | 6,057 / 6,080 | 2026-11-27 | `2/423` stale caches verified from raw `data.csv`; `1e-5` external-cache pairwise *p* tolerance |
+| `ONE_WAY_ANOVA \| ORDINARY_ANOVA \| CONTROL_VS_ALL:DUNNETT` | 37 | 17 | 37 | 100.00% | 238 / 238 | 2026-11-27 | 100% omnibus and pairwise agreement when control is selected |
+| `TWO_WAY_ANOVA \| ORDINARY_ANOVA` (no post-test) | 71 | 13 | 71 | 100.00% | — | 2026-11-27 | 100% agreement across 7 Type III omnibus scalars; `includeInteractionTerm: false` blocked |
+| `DESCRIPTIVE_STATISTICS` | 139 | 20 | 139 | 100.00% | — | 2026-11-27 | 100% agreement (`2,240 / 2,240` scalars); `SUB_COLUMN` blocked |
+| `AREA_UNDER_CURVE` | 84 | 6 | 84 | 100.00% | — | 2026-11-27 | 100% agreement (`249 / 249` `TotalArea` scalars) |
+| `IDENTIFY_OUTLIERS` | 96 | 10 | 96 | 100.00% | — | 2026-11-27 | 100% `OutlierCount` agreement (`318 / 318` scalars); `SUB_COLUMN` and multi-subcolumn `AVERAGE` blocked |
+
+### Technical Notes on Audited Disagreements, Tolerances & Option Guards
+
+1. **Stale cached results verified from raw `data.csv` (`3` analyses total):**
+   - `T_TESTS_AND_NONPARAMETRIC | UNPAIRED_T_TEST | two-tailed` (`1 / 571`): direct recomputation from the archive's raw `data.csv` for the two selected columns (zero exclusions) matches CurveBook's `t` and *p* to `12+` digits; no pair of columns in `data.csv` reproduces the cached `|t|`.
+   - `ONE_WAY_ANOVA | ORDINARY_ANOVA | ALL_VS_ALL:TUKEY` (`2 / 423` omnibus + `23 / 6,080` pairwise: `16` `Pairwise adjusted P` + `7` `Pairwise mean difference`, all inside those two stale-cache analyses): in both archives (zero exclusions), raw `data.csv` group means match `results.json` on all groups except one, and direct ANOVA from raw `data.csv` matches CurveBook to `12+` digits.
+2. **External-cache pairwise *p*-value tolerance (`1e-5` on `ordinaryAnovaModel.multipleComparisons.tests`):**
+   - Across the `423` Tukey analyses, `52` analyses (`137 / 6,080` pairwise adjusted *p*-values, all `bound = Equal`) showed absolute differences in `[1.14e-9, 4.76e-6]` (`p50 = 9.07e-9`, `p95 = 1.91e-6`, `max = 4.76e-6`) at small residual degrees of freedom (`df = 5..8`) and far-right-tail quantiles (`q = 10..33`, `p ~ 1e-7..1e-3`).
+   - Independent high-precision 2D quadrature of `P(Q_{k,df} > q)` confirms CurveBook's Studentized-range integration achieves `1e-13..1e-15` relative accuracy, whereas the external cached approximation (coarse AS-190 / Copenhaver–Holland tail quadrature) deviates by up to `4.8e-6` absolute.
+   - CurveBook's statistical kernel stays exact and unchanged (`D1`); `CachedPairwiseLink::p_abs_tol = Some(1e-5)` applies solely to pairwise *p*/*q* comparisons on `ordinaryAnovaModel.multipleComparisons.tests`, while omnibus scalars and pairwise `|meansDifference|` stay at `abs_tol = 1e-9` / `rel_tol = 1e-6`. Cached inequality states (`P_VALUE_LESS`, `P_VALUE_GREATER`) are evaluated as bounds (`CachedBound`), and non-`"VALID"` pairwise entries are skipped.
+3. **Untranslated-option guards keeping promoted designs at 100% clean agreement:**
+   - **Additive two-way ANOVA (`includeInteractionTerm: false`):** `translate_two_way_anova` blocks `options.includeInteractionTerm == false` (main-effects-only models without an interaction term), keeping them as read-only snapshots; the remaining `71 / 71` full-interaction models agree 100% across all 7 Type III omnibus scalars.
+   - **Outlier replicate handling (`SUB_COLUMN` and multi-subcolumn `AVERAGE`):** `translate_outliers` blocks `SUB_COLUMN` and unknown `data.handleReplicatesAs` values, and `check_source_sheet_option_compatibility` blocks `IDENTIFY_OUTLIERS` when `data.handleReplicatesAs` is absent or `"AVERAGE"` on a multi-subcolumn source table (`> 1` Y subcolumn). Single-subcolumn and explicitly pooled (`"COLUMN"`) tables recompute live (`96 / 96` = 100% agreement, `318 / 318` scalars).
+4. **Designs remaining read-only snapshots:** One-tailed *t*-tests, nonparametric tests (Mann–Whitney, Wilcoxon, Kruskal–Wallis with Dunn), repeated-measures and Brown–Forsythe/Welch ANOVAs, two-way ANOVA with post-tests, survival, nonlinear regression, normality tests, and transforms remain `ResultProvenance::Imported` snapshots pending post-Beta accuracy and translation work (`R25.2`–`R25.3`).

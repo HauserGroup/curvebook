@@ -169,7 +169,7 @@ fn route_document_json(zip_index: &mut ZipIndex<'_>, root_prefix: &str, warnings
             warnings.push(ImportWarning::new(ImportWarningKind::UnsupportedChunk, path, msg));
         }
     }
-    Ok(DocumentRoute::NativeEmbedded(Box::new(ImportReport { document: doc, warnings: std::mem::take(warnings) })))
+    Ok(DocumentRoute::NativeEmbedded(Box::new(ImportReport::new(doc, std::mem::take(warnings)))))
 }
 
 // ============================================================================
@@ -221,6 +221,7 @@ fn import_external_indexed_archive(
     )?;
 
     // 3. Analyses (`analyses/<uid>/` via 3-hop `preferredResultSheet` chain).
+    let mut promoted_analyses = Vec::new();
     let mut analysis_ctx = AnalysisImportContext {
         id_index: &id_index,
         doc_index: &doc_index,
@@ -229,6 +230,7 @@ fn import_external_indexed_archive(
         uid_to_sheet_id: &mut uid_to_sheet_id,
         used_ids: &mut used_ids,
         warnings: &mut warnings,
+        promoted_analyses: &mut promoted_analyses,
     };
     import_external_analyses(zip_index, &mut doc, &mut analysis_ctx)?;
 
@@ -260,9 +262,16 @@ fn import_external_indexed_archive(
     // without decompressing them.
     report_unread_opaque_entries(zip_index, &mut warnings);
 
-    sanitize_invalid_document_sheet_ids(&mut doc, &mut warnings);
+    let remap = sanitize_invalid_document_sheet_ids(&mut doc, &mut warnings);
+    if !remap.is_empty() {
+        for pref in &mut promoted_analyses {
+            if let Some(new_id) = remap.get(&pref.sheet_id) {
+                pref.sheet_id = new_id.clone();
+            }
+        }
+    }
     validate_project_document(&doc)?;
-    Ok(ImportReport { document: doc, warnings })
+    Ok(ImportReport { document: doc, warnings, promoted_analyses })
 }
 
 fn report_unread_opaque_entries(zip_index: &ZipIndex<'_>, warnings: &mut Vec<ImportWarning>) {
@@ -1319,7 +1328,7 @@ fn import_generic_archive(
     }
 
     validate_project_document(&doc)?;
-    Ok(ImportReport { document: doc, warnings })
+    Ok(ImportReport::new(doc, warnings))
 }
 
 enum ManifestParseState {
@@ -2360,7 +2369,7 @@ fn parse_subcolumn_mode(kind: TableKind, raw: Option<&str>, replicates: usize, s
     }
 }
 
-fn sanitize_invalid_document_sheet_ids(doc: &mut ProjectDocument, warnings: &mut Vec<ImportWarning>) {
+fn sanitize_invalid_document_sheet_ids(doc: &mut ProjectDocument, warnings: &mut Vec<ImportWarning>) -> BTreeMap<SheetId, SheetId> {
     let mut used_ids = collect_valid_sheet_ids(doc);
     let mut remap: BTreeMap<SheetId, SheetId> = BTreeMap::new();
 
@@ -2391,6 +2400,7 @@ fn sanitize_invalid_document_sheet_ids(doc: &mut ProjectDocument, warnings: &mut
     if !remap.is_empty() {
         remap_document_sheet_references(doc, &remap);
     }
+    remap
 }
 
 fn collect_valid_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {

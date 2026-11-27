@@ -224,7 +224,17 @@ fn plan_imported_id_remap(doc: &ProjectDocument, imported: &ProjectDocument) -> 
 ///
 /// Leaves behind `imported.checkpoints`, project-level settings/title, `active_sheet_id`, and
 /// `family_anchor_sheet_id`, and preserves `ResultStatus::Imported` / `ImportedStale`.
-pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: ProjectDocument) -> Result<(), EngineError> {
+pub(super) fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument) -> Result<(), EngineError> {
+    let _ = merge_imported_document_with_remap(doc, imported)?;
+    Ok(())
+}
+
+/// Merge all sheets and referenced image assets from `imported` into `doc`, returning the
+/// collision-renumbering map (`original_sheet_id -> merged_sheet_id`) applied to colliding sheets.
+pub(super) fn merge_imported_document_with_remap(
+    doc: &mut ProjectDocument,
+    mut imported: ProjectDocument,
+) -> Result<BTreeMap<SheetId, SheetId>, EngineError> {
     let total_sheets = doc.total_sheet_count().saturating_add(imported.total_sheet_count());
     if total_sheets > MAX_SHEETS_PER_PROJECT {
         return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
@@ -245,8 +255,8 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
     }
 
     let id_map = plan_imported_id_remap(doc, &imported)?;
-    if !id_map.is_empty() {
-        let btree_map: BTreeMap<SheetId, SheetId> = id_map.into_iter().collect();
+    let btree_map: BTreeMap<SheetId, SheetId> = id_map.into_iter().collect();
+    if !btree_map.is_empty() {
         curvebook_doc::remap_document_sheet_ids(&mut imported, &btree_map);
     }
 
@@ -269,7 +279,7 @@ pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: P
         doc.add_layout_sheet(ls)?;
     }
     let _ = dag::topological_order(doc)?;
-    Ok(())
+    Ok(btree_map)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

@@ -2,13 +2,14 @@
 //! data-driven mapping table with textbook justifications, and cached-vs-recomputed diagnostics (§5.2).
 
 use std::collections::{BTreeMap, HashSet};
+use std::fmt;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, ChecklistItem, ChecklistStatus, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FitMethod, MathTransformPreset, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec,
-    OneWayMethod, OutlierHandling, OutlierSpec, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResultCell, ResultScalarEntry,
-    ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnAggregation, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    WeightingScheme, default_column_label,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod,
+    MathTransformPreset, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling,
+    OutlierSpec, PairwiseComparisonRecord, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet,
+    ResultTab, ResultTabKind, SheetId, SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, WeightingScheme, default_column_label,
 };
 
 use crate::archive::{BoundedJsonOutcome, parse_bounded_json_outcome};
@@ -32,28 +33,40 @@ const MAX_RESULT_TAB_COLS: usize = 256;
 /// Maximum number of cached scalar entries extracted from `results.json` per analysis.
 const MAX_CACHED_SCALARS_PER_ANALYSIS: usize = 256;
 
-/// Verification status for a foreign `.prism` analysis mapping row (§5.2).
+/// Minimum corpus-compared analyses required to promote a `.prism` analysis design to live recompute.
+pub const MIN_VERIFIED_DESIGN_ANALYSES: usize = 20;
+
+/// Minimum distinct corpus source records required to promote a `.prism` analysis design.
+pub const MIN_VERIFIED_DESIGN_SOURCES: usize = 2;
+
+/// Numerator of the minimum full-agreement ratio (`99 / 100` = 99%) required to promote a design.
+pub const MIN_VERIFIED_DESIGN_AGREEMENT_NUM: usize = 99;
+
+/// Denominator of the minimum full-agreement ratio (`99 / 100` = 99%) required to promote a design.
+pub const MIN_VERIFIED_DESIGN_AGREEMENT_DEN: usize = 100;
+
+/// Verification status for a translated foreign `.prism` analysis design (§5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AnalysisVerificationStatus {
-    /// Recomputed CurveBook outputs matched cached corpus results within tolerance AND CurveBook's
-    /// own statistical kernel passes its textbook D1 oracle.
+    /// Recomputed CurveBook outputs matched cached corpus results within tolerance across the
+    /// promotion bar AND CurveBook's own statistical kernel passes its textbook D1 oracle.
     CorpusVerified,
     /// Parameter mapping is documented and implemented, but live translation remains off by default
-    /// until corpus-wide cached-vs-recomputed verification completes.
+    /// until corpus-wide cached-vs-recomputed verification clears the per-design promotion bar.
     Unverified,
 }
 
 /// Data-driven specification mapping one external `.prism` `analysisClass` identifier to CurveBook
 /// semantics with a textbook justification and numeric comparison tolerance (§5.2).
+///
+/// Per-design promotion status lives in [`VERIFIED_ANALYSIS_DESIGNS`], keyed by
+/// [`AnalysisDesignKey`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnalysisMappingRow {
     /// Exact external `analysisClass` wire identifier (for example `"TRNSFORM"` or `"ONE_WAY_ANOVA"`).
     pub foreign_class: &'static str,
     /// Target CurveBook `AnalysisKind` family label.
     pub curvebook_kind_label: &'static str,
-    /// Whether this mapping is cleared for default live translation (`CorpusVerified`) or imported
-    /// as a read-only snapshot (`Unverified`).
-    pub verification: AnalysisVerificationStatus,
     /// Textbook statistical or mathematical definition justifying semantic equivalence.
     pub justification: &'static str,
     /// Documented relative tolerance for cached-vs-recomputed scalar agreement checks.
@@ -64,14 +77,12 @@ pub struct AnalysisMappingRow {
 
 /// Complete data-driven mapping table covering the 11 corpus-observed `.prism` analysis classes.
 ///
-/// Per §5.2, every row starts as [`AnalysisVerificationStatus::Unverified`] so imported `.prism`
-/// analyses default to read-only v9 `ResultSheet` snapshots until corpus recomputation verifies
-/// agreement against CurveBook's D1 oracles.
+/// Live-recompute promotion is decided per design in [`VERIFIED_ANALYSIS_DESIGNS`]; any design not
+/// listed there (or carrying blocking options) imports as a read-only v9 `ResultSheet` snapshot.
 pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "T_TESTS_AND_NONPARAMETRIC",
         curvebook_kind_label: "TwoGroupComparison",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Student (1908) pooled t-test, Welch (1947) unequal-variance t-test, Mann & Whitney (1947) rank-sum test, Wilcoxon (1945) / Pratt (1959) signed-rank test, and Smirnov (1948) two-sample KS test.",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -79,7 +90,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "ONE_WAY_ANOVA",
         curvebook_kind_label: "OneWayAnova",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Fisher (1925) one-way ANOVA, Brown & Forsythe (1974) / Welch (1951) heteroscedastic ANOVA, Greenhouse & Geisser (1959) RM ANOVA, Kruskal & Wallis (1952), and Friedman (1937).",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -87,7 +97,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "TWO_WAY_ANOVA",
         curvebook_kind_label: "FactorialAnova",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Maxwell, Delaney, & Kelley (2017) Type III factorial ANOVA and Kenward & Roger (1997) REML linear mixed-effects models for repeated-measures factorial designs.",
         relative_tolerance: 1e-5,
         absolute_tolerance: 1e-8,
@@ -95,7 +104,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "NONLINEAR_REGRESSION",
         curvebook_kind_label: "NonlinearRegression",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "More (1978) Levenberg-Marquardt nonlinear least squares, Motulsky & Christopoulos (2004) profile-likelihood and Wald parameter intervals, and Motulsky & Brown (2006) ROUT outlier detection.",
         relative_tolerance: 1e-4,
         absolute_tolerance: 1e-7,
@@ -103,7 +111,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "NORMALITY_TESTS",
         curvebook_kind_label: "DescriptiveStats",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Shapiro & Wilk (1965) / Royston (1995), D'Agostino & Pearson (1973) omnibus K^2, Anderson & Darling (1954) A^2*, and Lilliefors (1967) normality and lognormality tests.",
         relative_tolerance: 1e-5,
         absolute_tolerance: 1e-8,
@@ -111,7 +118,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "TRNSFORM",
         curvebook_kind_label: "Transform::Math",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Element-wise scalar mathematical transforms (log10, ln, exp10, exp, reciprocal, sqrt, square, logit, probit, arcsin-sqrt, affine scaling) with endpoint or first-order delta-method error propagation.",
         relative_tolerance: 1e-9,
         absolute_tolerance: 1e-12,
@@ -119,7 +125,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "NORMALIZE",
         curvebook_kind_label: "Transform::Normalize",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Linear rescaling (y - a0) / (a100 - a0) onto [0%, 100%] or [0, 1] using column extrema, boundary rows, or fixed numeric anchors.",
         relative_tolerance: 1e-9,
         absolute_tolerance: 1e-12,
@@ -127,7 +132,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "DESCRIPTIVE_STATISTICS",
         curvebook_kind_label: "DescriptiveStats",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Univariate sample moments (mean, SD, SEM, CV, skewness, kurtosis, geometric mean), Hyndman & Fan (1996) Type-7 quantiles, and Student-t confidence intervals.",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -135,7 +139,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "AREA_UNDER_CURVE",
         curvebook_kind_label: "AreaUnderCurve",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Composite trapezoidal quadrature above a fixed or first-point baseline with peak filtering and Bailer (1988) independent-cohort AUC standard error.",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -143,7 +146,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "IDENTIFY_OUTLIERS",
         curvebook_kind_label: "OutlierDetection",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Grubbs (1969) extreme studentized deviate (single and iterative ESD) and Motulsky & Brown (2006) univariate ROUT FDR outlier detection.",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -151,7 +153,6 @@ pub const ANALYSIS_MAPPINGS: &[AnalysisMappingRow] = &[
     AnalysisMappingRow {
         foreign_class: "SURVIVAL",
         curvebook_kind_label: "Survival::KaplanMeier",
-        verification: AnalysisVerificationStatus::Unverified,
         justification: "Kaplan & Meier (1958) product-limit survival estimator, Mantel (1966) log-rank test, Gehan (1965) / Breslow (1970) generalized Wilcoxon test, Tarone (1975) trend test, and Kalbfleisch & Prentice (2002) log-log Greenwood CIs.",
         relative_tolerance: 1e-6,
         absolute_tolerance: 1e-9,
@@ -164,6 +165,335 @@ pub fn find_analysis_mapping(foreign_class: &str) -> Option<&'static AnalysisMap
     ANALYSIS_MAPPINGS.iter().find(|row| row.foreign_class.eq_ignore_ascii_case(foreign_class.trim()))
 }
 
+/// Tail qualifier for an external `.prism` analysis design key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DesignTail {
+    /// Analysis class has no one-tailed vs. two-tailed option.
+    NotApplicable,
+    /// Two-tailed hypothesis test (`P_VALUE_TWO_TAILED` or absent default).
+    TwoTailed,
+    /// One-tailed hypothesis test (`P_VALUE_ONE_TAILED`).
+    OneTailed,
+}
+
+/// Canonical per-design key identifying an external `.prism` analysis configuration for
+/// corpus verification and live-recompute promotion.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnalysisDesignKey {
+    pub foreign_class: String,
+    pub experimental_design: Option<String>,
+    pub tail: DesignTail,
+    pub post_test_family: Option<String>,
+    pub post_test: Option<String>,
+}
+
+impl AnalysisDesignKey {
+    /// Stable canonical label shared between `curvebook-format` and `xtask interop-corpus`.
+    #[must_use]
+    pub fn canonical_label(&self) -> String {
+        self.to_string()
+    }
+}
+
+impl fmt::Display for AnalysisDesignKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.foreign_class)?;
+        if let Some(design) = &self.experimental_design {
+            write!(f, " | {design}")?;
+        }
+        match self.tail {
+            DesignTail::NotApplicable => {}
+            DesignTail::TwoTailed => f.write_str(" | two-tailed")?,
+            DesignTail::OneTailed => f.write_str(" | one-tailed")?,
+        }
+        match (&self.post_test_family, &self.post_test) {
+            (Some(family), Some(test)) => write!(f, " | {family}:{test}")?,
+            (Some(family), None) => write!(f, " | {family}:<none>")?,
+            (None, Some(test)) => write!(f, " | <none>:{test}")?,
+            (None, None) => {}
+        }
+        Ok(())
+    }
+}
+
+/// Corpus evidence snapshot justifying live-recompute promotion for one [`VerifiedAnalysisDesign`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CorpusDesignEvidence {
+    pub analyses_compared: usize,
+    pub distinct_source_records: usize,
+    pub analyses_fully_agreed: usize,
+    pub verified_on: &'static str,
+}
+
+impl CorpusDesignEvidence {
+    /// Returns `true` iff this design clears all promotion thresholds (`>= 20` analyses compared,
+    /// `>= 2` distinct source records, `>= 99%` full agreement, and a non-empty verification date).
+    #[must_use]
+    pub const fn meets_bar(&self) -> bool {
+        if self.analyses_compared < MIN_VERIFIED_DESIGN_ANALYSES
+            || self.distinct_source_records < MIN_VERIFIED_DESIGN_SOURCES
+            || self.analyses_fully_agreed > self.analyses_compared
+            || self.verified_on.is_empty()
+        {
+            return false;
+        }
+        let lhs = (self.analyses_fully_agreed as u128) * (MIN_VERIFIED_DESIGN_AGREEMENT_DEN as u128);
+        let rhs = (self.analyses_compared as u128) * (MIN_VERIFIED_DESIGN_AGREEMENT_NUM as u128);
+        lhs >= rhs
+    }
+}
+
+/// Declarative row authorizing default live-recompute promotion for one corpus-verified `.prism`
+/// analysis design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifiedAnalysisDesign {
+    pub foreign_class: &'static str,
+    pub experimental_design: Option<&'static str>,
+    pub tail: DesignTail,
+    pub post_test_family: Option<&'static str>,
+    pub post_test: Option<&'static str>,
+    pub requires_pairwise_check: bool,
+    pub evidence: CorpusDesignEvidence,
+    pub notes: &'static str,
+}
+
+impl VerifiedAnalysisDesign {
+    /// Owned [`AnalysisDesignKey`] corresponding to this static table row.
+    #[must_use]
+    pub fn design_key(&self) -> AnalysisDesignKey {
+        AnalysisDesignKey {
+            foreign_class: self.foreign_class.to_owned(),
+            experimental_design: self.experimental_design.map(str::to_owned),
+            tail: self.tail,
+            post_test_family: self.post_test_family.map(str::to_owned),
+            post_test: self.post_test.map(str::to_owned),
+        }
+    }
+}
+
+/// Corpus-verified `.prism` analysis designs cleared for default live recomputation.
+///
+/// Every entry was empirically audited against the local interop corpus via
+/// `cargo xtask interop-corpus --strict --observe` and clears all three promotion bars
+/// (`>= 20` analyses compared, `>= 2` distinct source records, `>= 99%` full agreement, plus
+/// non-zero pairwise agreement checks for post-test designs).
+pub const VERIFIED_ANALYSIS_DESIGNS: &[VerifiedAnalysisDesign] = &[
+    VerifiedAnalysisDesign {
+        foreign_class: TT,
+        experimental_design: Some("UNPAIRED_T_TEST"),
+        tail: DesignTail::TwoTailed,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 571, distinct_source_records: 39, analyses_fully_agreed: 570, verified_on: "2026-11-27" },
+        notes: "1/571 disagreement audited as stale cached results.json; direct recomputation from raw archive data.csv matches CurveBook to 12+ digits.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: TT,
+        experimental_design: Some("PAIRED_T_TEST"),
+        tail: DesignTail::TwoTailed,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 213, distinct_source_records: 13, analyses_fully_agreed: 213, verified_on: "2026-11-27" },
+        notes: "100% agreement across all compared paired t-test scalars (|t| and two-tailed p).",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: TT,
+        experimental_design: Some("WELCH_T_TEST"),
+        tail: DesignTail::TwoTailed,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 154, distinct_source_records: 19, analyses_fully_agreed: 154, verified_on: "2026-11-27" },
+        notes: "100% agreement across all compared Welch t-test scalars (|t| and two-tailed p).",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: OW,
+        experimental_design: Some("ORDINARY_ANOVA"),
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 22, distinct_source_records: 5, analyses_fully_agreed: 22, verified_on: "2026-11-27" },
+        notes: "100% agreement across omnibus F, P value, R squared, and MS residual.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: OW,
+        experimental_design: Some("ORDINARY_ANOVA"),
+        tail: DesignTail::NotApplicable,
+        post_test_family: Some("ALL_VS_ALL"),
+        post_test: Some("TUKEY"),
+        requires_pairwise_check: true,
+        evidence: CorpusDesignEvidence { analyses_compared: 423, distinct_source_records: 37, analyses_fully_agreed: 421, verified_on: "2026-11-27" },
+        notes: "2/423 omnibus disagreements audited as stale cached results.json against raw data.csv; pairwise adjusted p uses 1e-5 external-cache tolerance for AS-190/Copenhaver-Holland tail quadrature while CurveBook stays exact (1e-13..1e-15) and omnibus/|mean diff| remain at 1e-9/1e-6.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: OW,
+        experimental_design: Some("ORDINARY_ANOVA"),
+        tail: DesignTail::NotApplicable,
+        post_test_family: Some("CONTROL_VS_ALL"),
+        post_test: Some("DUNNETT"),
+        requires_pairwise_check: true,
+        evidence: CorpusDesignEvidence { analyses_compared: 37, distinct_source_records: 17, analyses_fully_agreed: 37, verified_on: "2026-11-27" },
+        notes: "100% omnibus and pairwise agreement (238/238 pairwise quantities) when Dunnett control lies in the analysed selection.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: TW,
+        experimental_design: Some("ORDINARY_ANOVA"),
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 71, distinct_source_records: 13, analyses_fully_agreed: 71, verified_on: "2026-11-27" },
+        notes: "100% agreement across all 7 omnibus Type III ANOVA scalars; additive models with includeInteractionTerm == false remain blocked.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: DS,
+        experimental_design: None,
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 139, distinct_source_records: 20, analyses_fully_agreed: 139, verified_on: "2026-11-27" },
+        notes: "100% agreement across N, Mean, SD, SEM, and Median (2,240/2,240 scalars); SUB_COLUMN replicate handling remains blocked.",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: "AREA_UNDER_CURVE",
+        experimental_design: None,
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 84, distinct_source_records: 6, analyses_fully_agreed: 84, verified_on: "2026-11-27" },
+        notes: "100% agreement across TotalArea (249/249 scalars).",
+    },
+    VerifiedAnalysisDesign {
+        foreign_class: "IDENTIFY_OUTLIERS",
+        experimental_design: None,
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+        requires_pairwise_check: false,
+        evidence: CorpusDesignEvidence { analyses_compared: 96, distinct_source_records: 10, analyses_fully_agreed: 96, verified_on: "2026-11-27" },
+        notes: "100% agreement across OutlierCount; SUB_COLUMN and row-averaged replicates on multi-subcolumn tables remain blocked.",
+    },
+];
+
+fn normalize_experimental_design_alias(raw: &str) -> String {
+    let upper = raw.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "WELCH_T_TEST" | "UNPAIRED_WELCH_T_TEST" => String::from("WELCH_T_TEST"),
+        "BROWN_FORSYTHE_ANOVA" | "BROWN_FORSYTHE_AND_WELCH" | "BROWN_FORSYTHE_WELCH" | "WELCH_ANOVA" => String::from("BROWN_FORSYTHE_ANOVA"),
+        "MANN_WHITNEY" | "MANN_WHITNEY_TEST" => String::from("MANN_WHITNEY_TEST"),
+        "WILCOXON" | "WILCOXON_TEST" | "WILCOXON_MATCHED_PAIRS" => String::from("WILCOXON_TEST"),
+        "KRUSKAL_WALLIS" | "KRUSKAL_WALLIS_TEST" => String::from("KRUSKAL_WALLIS_TEST"),
+        "FRIEDMAN" | "FRIEDMAN_TEST" => String::from("FRIEDMAN_TEST"),
+        "REPEATED_MEASURES_BY_BOTH" | "REPEATED_MEASURES_BY_BOTH_FACTORS" => String::from("REPEATED_MEASURES_BY_BOTH_FACTORS"),
+        _ => upper,
+    }
+}
+
+fn normalize_post_test_alias(upper: &str) -> String {
+    match upper {
+        "TUKEY" | "TUKEY_HSD" => String::from("TUKEY"),
+        "DUNNET" | "DUNNETT" => String::from("DUNNETT"),
+        _ => upper.to_owned(),
+    }
+}
+
+fn normalize_post_test_choice(family: String, raw_test: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(raw) = raw_test.map(str::trim).filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    let upper = raw.to_ascii_uppercase();
+    if matches!(upper.as_str(), "NO_TEST" | "NONE") {
+        return (None, None);
+    }
+    if upper == "NO_CORRECTION" {
+        return (Some(family), Some(String::from("NO_CORRECTION")));
+    }
+    (Some(family), Some(normalize_post_test_alias(&upper)))
+}
+
+fn extract_post_test_key(content: Option<&JsonMap>) -> (Option<String>, Option<String>) {
+    let Some(pt) = get_obj(content, "postTests") else {
+        return (None, None);
+    };
+    let Some(pt_type) = get_str(Some(pt), "type").map(|s| s.trim().to_ascii_uppercase()).filter(|s| !s.is_empty()) else {
+        return (None, None);
+    };
+    if pt_type == "NO_TESTS" {
+        return (None, None);
+    }
+    let Some(pairwise) = get_obj(Some(pt), "pairwiseTests") else {
+        return (Some(pt_type), None);
+    };
+    let design_obj = get_obj(Some(pairwise), "pairwiseDesign");
+    let family =
+        get_str(design_obj, "type").map(|s| s.trim().to_ascii_uppercase()).filter(|s| !s.is_empty()).unwrap_or_else(|| String::from("ALL_VS_ALL"));
+    let mc = get_obj(Some(pairwise), "multipleComparisons");
+    let mc_type = get_str(mc, "type").map(|s| s.trim().to_ascii_uppercase()).filter(|s| !s.is_empty());
+    match mc_type.as_deref() {
+        Some("NO_CORRECTION") => (Some(family), Some(String::from("NO_CORRECTION"))),
+        Some("STATISTICAL") => {
+            let raw = get_str(get_obj(mc, "statistical"), "test").or_else(|| get_str(mc, "statistical"));
+            normalize_post_test_choice(family, raw)
+        }
+        Some("FDR") => {
+            let raw = get_str(get_obj(mc, "fdr"), "test").or_else(|| get_str(mc, "fdr"));
+            normalize_post_test_choice(family, raw)
+        }
+        Some(other) => (Some(family), Some(other.to_owned())),
+        None => (Some(family), None),
+    }
+}
+
+/// Extract the canonical [`AnalysisDesignKey`] for an external `.prism` analysis from its
+/// `analysisClass` and `parameters.json`, normalizing known corpus aliases.
+#[must_use]
+pub fn extract_analysis_design_key(foreign_class: &str, params_json: &serde_json::Value) -> AnalysisDesignKey {
+    let class = foreign_class.trim().to_ascii_uppercase();
+    let content = params_json.get("content").and_then(serde_json::Value::as_object).or_else(|| params_json.as_object());
+    let experimental_design =
+        get_str(content, "experimentalDesign").map(str::trim).filter(|s| !s.is_empty()).map(normalize_experimental_design_alias);
+    let tail = if class == TT {
+        match get_str(get_obj(content, "options"), "pValueTailType").map(|s| s.trim().to_ascii_uppercase()).as_deref() {
+            Some("P_VALUE_ONE_TAILED") => DesignTail::OneTailed,
+            None | Some("P_VALUE_TWO_TAILED") => DesignTail::TwoTailed,
+            Some(_) => DesignTail::NotApplicable,
+        }
+    } else {
+        DesignTail::NotApplicable
+    };
+    let (post_test_family, post_test) = extract_post_test_key(content);
+    AnalysisDesignKey { foreign_class: class, experimental_design, tail, post_test_family, post_test }
+}
+
+/// Look up a corpus-verified promotion entry matching `key`.
+#[must_use]
+pub fn find_verified_analysis_design(key: &AnalysisDesignKey) -> Option<&'static VerifiedAnalysisDesign> {
+    VERIFIED_ANALYSIS_DESIGNS.iter().find(|row| {
+        row.foreign_class.eq_ignore_ascii_case(&key.foreign_class)
+            && match (row.experimental_design, key.experimental_design.as_deref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                (None, None) => true,
+                _ => false,
+            }
+            && row.tail == key.tail
+            && match (row.post_test_family, key.post_test_family.as_deref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                (None, None) => true,
+                _ => false,
+            }
+            && match (row.post_test, key.post_test.as_deref()) {
+                (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
+                (None, None) => true,
+                _ => false,
+            }
+    })
+}
+
 /// Outcome of translating an external `.prism` analysis `parameters.json` into a CurveBook
 /// [`AnalysisKind`].
 #[derive(Debug, Clone, PartialEq)]
@@ -174,25 +504,65 @@ pub struct TranslatedAnalysis {
     pub blocking_options: Vec<String>,
 }
 
-/// Single numeric disagreement observed between a recomputed CurveBook scalar and a cached
-/// `.prism` scalar (§5.2).
+/// Bound relation carried by a cached external `.prism` value (for example `pValue.state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CachedBound {
+    /// Cached value is an exact numeric point (`P_VALUE_EQUAL` or absent `state`).
+    Equal,
+    /// Cached value is an upper bound (`P_VALUE_LESS`, e.g. `p < 1e-15`).
+    LessThan,
+    /// Cached value is a lower bound (`P_VALUE_GREATER`, e.g. `p > 0.1`).
+    GreaterThan,
+}
+
+impl CachedBound {
+    /// Check whether `recomputed` agrees with `cached` under this bound and tolerances.
+    #[must_use]
+    pub fn agrees(self, recomputed: f64, cached: f64, abs_tol: f64, rel_tol: f64) -> bool {
+        let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
+        let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
+        match self {
+            Self::Equal => {
+                let abs_diff = (recomputed - cached).abs();
+                let scale = recomputed.abs().max(cached.abs());
+                abs_diff <= abs_t.max(rel_t * scale)
+            }
+            Self::LessThan => recomputed <= cached + abs_t,
+            Self::GreaterThan => recomputed + abs_t >= cached,
+        }
+    }
+}
+
+/// Single numeric disagreement observed between a recomputed CurveBook scalar or pairwise quantity
+/// and a cached `.prism` value (§5.2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CachedScalarDiff {
+    /// Canonical CurveBook scalar or pairwise key (never contains user titles; safe for aggregate diagnostics).
     pub key: String,
+    /// Concise mathematical symbol for user-facing warnings (for example `"p"`, `"q"`, `"t"`, `"F"`).
+    pub symbol: String,
+    /// Human-readable quantity label for user-facing warnings (may include the group or pair label).
+    pub quantity_label: String,
     pub data_set_index: Option<usize>,
     pub recomputed: f64,
     pub cached: f64,
+    pub bound: CachedBound,
     pub abs_diff: f64,
     pub rel_diff: f64,
 }
 
-/// Summary of comparing a recomputed [`ResultSheet`] against cached external scalars (§5.2).
+/// Summary of comparing a recomputed [`ResultSheet`] against cached external scalars and pairwise
+/// post-test results (§5.2).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct CachedResultDiagnostic {
+    /// Total scalar + pairwise quantities compared.
     pub compared_count: usize,
+    /// Number of pairwise comparison quantities (adjusted *p*/*q* and mean differences) compared.
+    pub pairwise_compared_count: usize,
+    /// Number of pairwise comparison quantities that disagreed beyond tolerance.
+    pub pairwise_disagreements: usize,
     pub disagreements: Vec<CachedScalarDiff>,
-    /// Number of compared values per CurveBook scalar key (filled by
-    /// [`compare_recomputed_against_cached_results`]).
+    /// Number of compared values per canonical CurveBook scalar/pairwise key.
     pub compared_by_key: BTreeMap<String, usize>,
 }
 
@@ -222,6 +592,80 @@ pub struct CachedScalarLink {
     pub comparison: CrosswalkComparison,
 }
 
+/// Declarative link from a cached `.prism` `multipleComparisons.tests` object to
+/// [`ResultSheet::pairwise_comparisons`] (§5.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CachedPairwiseLink {
+    /// External `analysisClass` identifier the link applies to.
+    pub foreign_class: &'static str,
+    /// Dotted path below `results.json` `content` pointing to the `multipleComparisons.tests` object.
+    pub tests_path: &'static str,
+    /// Field name for contrast magnitude (for example `"meansDifference"`), or `None` for rank tests.
+    pub diff_field: Option<&'static str>,
+    /// Optional absolute tolerance override used solely for cached pairwise *p*/*q* comparisons
+    /// (keeping omnibus scalars and pairwise `|meansDifference|` at `abs_tol`/`rel_tol`).
+    ///
+    /// Set to `Some(1e-5)` for `ordinaryAnovaModel.multipleComparisons.tests` because external
+    /// `.prism` Studentized-range tail quadrature (AS-190/Copenhaver-Holland) exhibits up to
+    /// `4.8e-6` absolute error at small `df` (`5..8`) and large `q` (`10..33`), while CurveBook's
+    /// exact quadrature remains unchanged (`1e-13..1e-15`).
+    pub p_abs_tol: Option<f64>,
+}
+
+/// Single pre-extracted cached scalar reference from a `.prism` `results.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedScalarRef {
+    pub key: String,
+    pub data_set_index: Option<usize>,
+    pub value: f64,
+    pub bound: CachedBound,
+    pub comparison: CrosswalkComparison,
+}
+
+/// Single pre-extracted cached pairwise post-test reference from a `.prism` `results.json`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedPairwiseRef {
+    pub col_a: usize,
+    pub col_b: usize,
+    /// `(value, bound, is_fdr_q)` extracted from `pValueAdjusted`, `qValue`, or `pValueIndividual`.
+    pub p_or_q: Option<(f64, CachedBound, bool)>,
+    pub means_diff: Option<f64>,
+    /// Optional absolute tolerance override applied solely to `p_or_q` comparisons.
+    pub p_abs_tol: Option<f64>,
+}
+
+/// Transient cached scalar and pairwise reference extracted from a `.prism` `results.json`
+/// for post-recompute agreement checks (never persisted to `.curvebook`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct CachedAnalysisReference {
+    pub scalars: Vec<CachedScalarRef>,
+    pub pairwise: Vec<CachedPairwiseRef>,
+}
+
+/// Transient 3-hop cached snapshot payload preserved alongside a promoted live `.prism` analysis
+/// so `curvebook-engine` can fall back cleanly if first recalculation fails on degenerate input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportedAnalysisFallback {
+    pub original_kind_label: String,
+    pub tabs: Vec<ResultTab>,
+    pub scalars: Vec<ResultScalarEntry>,
+}
+
+/// Transient metadata emitted in [`crate::ImportReport::promoted_analyses`] for each promoted
+/// live `.prism` analysis; consumed by `curvebook-engine` after first recalculation and never
+/// serialized into `.curvebook` files.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromotedAnalysisRef {
+    pub sheet_id: SheetId,
+    pub analysis_uid: String,
+    pub title: String,
+    pub foreign_class: String,
+    pub abs_tol: f64,
+    pub rel_tol: f64,
+    pub reference: CachedAnalysisReference,
+    pub fallback: ImportedAnalysisFallback,
+}
+
 /// Maximum number of cached values one link may yield from a single `results.json`.
 const MAX_VALUES_PER_LINK: usize = 1024;
 
@@ -240,8 +684,8 @@ const DS: &str = "DESCRIPTIVE_STATISTICS";
 const SV: &str = "SURVIVAL";
 const NL: &str = "NONLINEAR_REGRESSION";
 
-/// Cached-result crosswalk. Every link names one quantity with the same textbook definition on
-/// both sides; quantities whose definitions differ (for example hazard-ratio estimators that use
+/// Cached-result scalar crosswalk. Every link names one quantity with the same textbook definition
+/// on both sides; quantities whose definitions differ (for example hazard-ratio estimators that use
 /// different names for different methods) are deliberately left out rather than adjusted.
 pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
     // Two-group tests (Student 1908, Welch 1947, Mann & Whitney 1947, Wilcoxon 1945). The sign of
@@ -302,18 +746,56 @@ pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
     link("IDENTIFY_OUTLIERS", "samples.*.value.outlierCount", "OutlierCount"),
 ];
 
+/// Declarative pairwise post-test crosswalk covering one-way ANOVA models.
+pub const CACHED_PAIRWISE_LINKS: &[CachedPairwiseLink] = &[
+    CachedPairwiseLink {
+        foreign_class: OW,
+        tests_path: "ordinaryAnovaModel.multipleComparisons.tests",
+        diff_field: Some("meansDifference"),
+        // External `.prism` AS-190/Copenhaver-Holland Studentized-range tail quadrature has up to
+        // 4.8e-6 absolute error at small df (5..8) and large q (10..33); CurveBook keeps its own
+        // exact (1e-13..1e-15) quadrature and keeps omnibus/mean-diff checks at 1e-9/1e-6.
+        p_abs_tol: Some(1e-5),
+    },
+    CachedPairwiseLink {
+        foreign_class: OW,
+        tests_path: "repeatedMeasuresGlmAnovaModel.multipleComparisons.tests",
+        diff_field: Some("meansDifference"),
+        p_abs_tol: None,
+    },
+    CachedPairwiseLink {
+        foreign_class: OW,
+        tests_path: "brownForsytheAnovaModel.multipleComparisons.tests",
+        diff_field: Some("meansDifference"),
+        p_abs_tol: None,
+    },
+    CachedPairwiseLink { foreign_class: OW, tests_path: "kruskalWallisTestModel.multipleComparisons.tests", diff_field: None, p_abs_tol: None },
+];
+
+fn parse_cached_bound(enclosing: &serde_json::Value) -> CachedBound {
+    match enclosing.get("state").and_then(serde_json::Value::as_str).map(str::trim) {
+        Some(s) if s.eq_ignore_ascii_case("P_VALUE_LESS") => CachedBound::LessThan,
+        Some(s) if s.eq_ignore_ascii_case("P_VALUE_GREATER") => CachedBound::GreaterThan,
+        _ => CachedBound::Equal,
+    }
+}
+
 /// Read every cached value that `link` selects from a `results.json` document, paired with the
 /// data-set index of its nearest `id.col.idx` ancestor.
 #[must_use]
 pub fn cached_values_for_link(link: &CachedScalarLink, results_val: &serde_json::Value) -> Vec<(Option<usize>, f64)> {
+    cached_values_with_bounds_for_link(link, results_val).into_iter().map(|(col, v, _)| (col, v)).collect()
+}
+
+fn cached_values_with_bounds_for_link(link: &CachedScalarLink, results_val: &serde_json::Value) -> Vec<(Option<usize>, f64, CachedBound)> {
     let root = results_val.get("content").unwrap_or(results_val);
     let segments: Vec<&str> = link.cached_path.split('.').filter(|s| !s.is_empty()).collect();
     let mut out = Vec::new();
-    collect_link_values(root, &segments, None, &mut out);
+    collect_link_values_with_bounds(root, &segments, None, &mut out);
     out
 }
 
-fn collect_link_values(val: &serde_json::Value, segments: &[&str], col: Option<usize>, out: &mut Vec<(Option<usize>, f64)>) {
+fn collect_link_values_with_bounds(val: &serde_json::Value, segments: &[&str], col: Option<usize>, out: &mut Vec<(Option<usize>, f64, CachedBound)>) {
     if out.len() >= MAX_VALUES_PER_LINK {
         return;
     }
@@ -327,30 +809,302 @@ fn collect_link_values(val: &serde_json::Value, segments: &[&str], col: Option<u
     match segments.split_first() {
         None => {
             if let Some(v) = val.as_f64().filter(|v| v.is_finite()) {
-                out.push((col, v));
+                out.push((col, v, CachedBound::Equal));
+            }
+        }
+        Some((&"value", [])) => {
+            if let Some(child) = val.get("value")
+                && let Some(v) = child.as_f64().filter(|v| v.is_finite())
+            {
+                out.push((col, v, parse_cached_bound(val)));
             }
         }
         Some((&"*", rest)) => {
             if let Some(map) = val.as_object() {
                 for child in map.values() {
-                    collect_link_values(child, rest, col, out);
+                    collect_link_values_with_bounds(child, rest, col, out);
                 }
             }
         }
         Some((segment, rest)) => {
             if let Some(child) = val.get(*segment) {
-                collect_link_values(child, rest, col, out);
+                collect_link_values_with_bounds(child, rest, col, out);
             }
         }
     }
 }
 
-/// Compare a recomputed [`ResultSheet`] against a cached `results.json` through
-/// [`CACHED_SCALAR_LINKS`], within `max(abs_tol, rel_tol * max(|recomputed|, |cached|))`.
+fn extract_column_only_idx(entry: &serde_json::Value) -> Option<usize> {
+    let id = entry.get("id")?.as_object()?;
+    if id.contains_key("row") {
+        return None;
+    }
+    id.get("col").and_then(|c| c.get("idx")).and_then(serde_json::Value::as_u64).and_then(|i| usize::try_from(i).ok())
+}
+
+fn extract_bounded_number(val: &serde_json::Value) -> Option<(f64, CachedBound)> {
+    if let Some(n) = val.as_f64().filter(|v| v.is_finite()) {
+        return Some((n, CachedBound::Equal));
+    }
+    let n = val.get("value").and_then(serde_json::Value::as_f64).filter(|v| v.is_finite())?;
+    Some((n, parse_cached_bound(val)))
+}
+
+fn collect_pairwise_refs_for_link(link: &CachedPairwiseLink, results_val: &serde_json::Value, out: &mut Vec<CachedPairwiseRef>) {
+    let mut cur = results_val.get("content").unwrap_or(results_val);
+    for seg in link.tests_path.split('.').filter(|s| !s.is_empty()) {
+        let Some(next) = cur.get(seg) else {
+            return;
+        };
+        cur = next;
+    }
+    let Some(tests_map) = cur.as_object() else {
+        return;
+    };
+    let mut emitted_for_link = 0usize;
+    let mut seen_pairs: HashSet<(usize, usize)> = HashSet::new();
+    for outer in tests_map.values() {
+        let Some(col_a) = extract_column_only_idx(outer) else {
+            continue;
+        };
+        let Some(inner_map) = outer.get("value").and_then(serde_json::Value::as_object) else {
+            continue;
+        };
+        for inner in inner_map.values() {
+            if emitted_for_link >= MAX_VALUES_PER_LINK {
+                return;
+            }
+            let Some(col_b) = extract_column_only_idx(inner) else {
+                continue;
+            };
+            if col_a == col_b {
+                continue;
+            }
+            let Some(val_obj) = inner.get("value").and_then(serde_json::Value::as_object) else {
+                continue;
+            };
+            if let Some(status) = val_obj.get("status").and_then(serde_json::Value::as_str)
+                && !status.eq_ignore_ascii_case("VALID")
+            {
+                continue;
+            }
+            let p_or_q = val_obj
+                .get("pValueAdjusted")
+                .and_then(extract_bounded_number)
+                .map(|(v, b)| (v, b, false))
+                .or_else(|| val_obj.get("qValue").and_then(extract_bounded_number).map(|(v, b)| (v, b, true)))
+                .or_else(|| val_obj.get("pValueIndividual").and_then(extract_bounded_number).map(|(v, b)| (v, b, false)));
+            let means_diff = link
+                .diff_field
+                .and_then(|field| val_obj.get(field))
+                .and_then(|v| v.as_f64().or_else(|| v.get("value").and_then(serde_json::Value::as_f64)))
+                .filter(|v| v.is_finite());
+            if p_or_q.is_none() && means_diff.is_none() {
+                continue;
+            }
+            let pair_key = (col_a.min(col_b), col_a.max(col_b));
+            if !seen_pairs.insert(pair_key) {
+                continue;
+            }
+            out.push(CachedPairwiseRef { col_a, col_b, p_or_q, means_diff, p_abs_tol: link.p_abs_tol });
+            emitted_for_link += 1;
+        }
+    }
+}
+
+/// Extract all crosswalked scalar and pairwise references from a `.prism` `results.json` document
+/// in one bounded pass.
+#[must_use]
+pub fn extract_cached_analysis_reference(foreign_class: &str, results_val: &serde_json::Value) -> CachedAnalysisReference {
+    let class = foreign_class.trim();
+    let mut reference = CachedAnalysisReference::default();
+    for scalar_link in CACHED_SCALAR_LINKS.iter().filter(|l| l.foreign_class.eq_ignore_ascii_case(class)) {
+        for (data_set_index, value, bound) in cached_values_with_bounds_for_link(scalar_link, results_val) {
+            reference.scalars.push(CachedScalarRef {
+                key: scalar_link.curvebook_key.to_owned(),
+                data_set_index,
+                value,
+                bound,
+                comparison: scalar_link.comparison,
+            });
+        }
+    }
+    for pw_link in CACHED_PAIRWISE_LINKS.iter().filter(|l| l.foreign_class.eq_ignore_ascii_case(class)) {
+        collect_pairwise_refs_for_link(pw_link, results_val, &mut reference.pairwise);
+    }
+    reference
+}
+
+fn scalar_display_meta(curvebook_key: &str, data_set_index: Option<usize>) -> (String, String) {
+    let (sym, base) = match curvebook_key {
+        "PValue" | "P value" => ("p", "P value"),
+        "Row Factor: P" => ("p", "Row Factor P value"),
+        "Column Factor: P" => ("p", "Column Factor P value"),
+        "Row Factor × Column Factor: P" => ("p", "Row Factor × Column Factor P value"),
+        "Log-rank P value" => ("p", "Log-rank P value"),
+        "Gehan-Breslow-Wilcoxon P" => ("p", "Gehan-Breslow-Wilcoxon P value"),
+        "t" => ("t", "t statistic"),
+        "F" => ("F", "F statistic"),
+        "Row Factor: F" => ("F", "Row Factor F statistic"),
+        "Column Factor: F" => ("F", "Column Factor F statistic"),
+        "Row Factor × Column Factor: F" => ("F", "Row Factor × Column Factor F statistic"),
+        "R squared" => ("R²", "R squared"),
+        "MS residual" => ("MS", "MS residual"),
+        "N" => ("n", "N"),
+        "Mean" => ("mean", "Mean"),
+        "SD" => ("SD", "SD"),
+        "SEM" => ("SEM", "SEM"),
+        "Median" => ("median", "Median"),
+        "Log-rank chi-square" => ("χ²", "Log-rank chi-square"),
+        "Gehan-Breslow-Wilcoxon chi-square" => ("χ²", "Gehan-Breslow-Wilcoxon chi-square"),
+        "TotalArea" => ("AUC", "Total area"),
+        "OutlierCount" => ("outliers", "Outlier count"),
+        other => (other, other),
+    };
+    let label = match data_set_index {
+        Some(idx) => format!("{base} (column {})", idx + 1),
+        None => base.to_owned(),
+    };
+    (sym.to_owned(), label)
+}
+
+fn compare_scalar_ref(recomputed: &ResultSheet, scalar_ref: &CachedScalarRef, abs_t: f64, rel_t: f64, diag: &mut CachedResultDiagnostic) {
+    let Some(rec) = recomputed
+        .scalars
+        .iter()
+        .find(|e| e.key.eq_ignore_ascii_case(&scalar_ref.key) && e.data_set_index == scalar_ref.data_set_index && e.value.is_finite())
+    else {
+        return;
+    };
+    let (a, b) = match scalar_ref.comparison {
+        CrosswalkComparison::Signed => (rec.value, scalar_ref.value),
+        CrosswalkComparison::Magnitude => (rec.value.abs(), scalar_ref.value.abs()),
+    };
+    diag.compared_count += 1;
+    *diag.compared_by_key.entry(scalar_ref.key.clone()).or_insert(0) += 1;
+    if !scalar_ref.bound.agrees(a, b, abs_t, rel_t) {
+        let abs_diff = (a - b).abs();
+        let scale = a.abs().max(b.abs());
+        let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
+        let (symbol, quantity_label) = scalar_display_meta(&scalar_ref.key, scalar_ref.data_set_index);
+        diag.disagreements.push(CachedScalarDiff {
+            key: scalar_ref.key.clone(),
+            symbol,
+            quantity_label,
+            data_set_index: scalar_ref.data_set_index,
+            recomputed: rec.value,
+            cached: scalar_ref.value,
+            bound: scalar_ref.bound,
+            abs_diff,
+            rel_diff,
+        });
+    }
+}
+
+fn pairwise_display_label(cmp: &PairwiseComparisonRecord) -> String {
+    let a = if cmp.label_a.trim().is_empty() { default_column_label(cmp.group_a) } else { cmp.label_a.clone() };
+    let b = if cmp.label_b.trim().is_empty() { default_column_label(cmp.group_b) } else { cmp.label_b.clone() };
+    format!("{a} vs {b}")
+}
+
+fn compare_pairwise_ref(recomputed: &ResultSheet, pw: &CachedPairwiseRef, abs_t: f64, rel_t: f64, diag: &mut CachedResultDiagnostic) {
+    let target_pair = (pw.col_a.min(pw.col_b), pw.col_a.max(pw.col_b));
+    let matched = match pw.p_or_q {
+        Some((_, _, is_fdr_q)) => recomputed
+            .pairwise_comparisons
+            .iter()
+            .find(|cmp| (cmp.group_a.min(cmp.group_b), cmp.group_a.max(cmp.group_b)) == target_pair && cmp.is_fdr_q == is_fdr_q),
+        None => recomputed.pairwise_comparisons.iter().find(|cmp| (cmp.group_a.min(cmp.group_b), cmp.group_a.max(cmp.group_b)) == target_pair),
+    };
+    let Some(cmp) = matched else {
+        return;
+    };
+    let pair_label = pairwise_display_label(cmp);
+
+    if let Some((cached_p, bound, is_fdr_q)) = pw.p_or_q
+        && cmp.raw_p_or_q.is_finite()
+    {
+        let (key, symbol, qty_suffix) =
+            if is_fdr_q { ("Pairwise FDR q", "q", "FDR q-value") } else { ("Pairwise adjusted P", "p", "adjusted p-value") };
+        let p_abs = pw.p_abs_tol.filter(|t| t.is_finite() && *t >= 0.0).map_or(abs_t, |override_tol| abs_t.max(override_tol));
+        diag.compared_count += 1;
+        diag.pairwise_compared_count += 1;
+        *diag.compared_by_key.entry(key.to_owned()).or_insert(0) += 1;
+        if !bound.agrees(cmp.raw_p_or_q, cached_p, p_abs, rel_t) {
+            let abs_diff = (cmp.raw_p_or_q - cached_p).abs();
+            let scale = cmp.raw_p_or_q.abs().max(cached_p.abs());
+            let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
+            diag.pairwise_disagreements += 1;
+            diag.disagreements.push(CachedScalarDiff {
+                key: key.to_owned(),
+                symbol: symbol.to_owned(),
+                quantity_label: format!("{pair_label} {qty_suffix}"),
+                data_set_index: None,
+                recomputed: cmp.raw_p_or_q,
+                cached: cached_p,
+                bound,
+                abs_diff,
+                rel_diff,
+            });
+        }
+    }
+
+    if let Some(cached_diff) = pw.means_diff
+        && let Some(rec_diff) = cmp.estimate_diff.filter(|v| v.is_finite())
+    {
+        let key = "Pairwise mean difference";
+        let a = rec_diff.abs();
+        let b = cached_diff.abs();
+        diag.compared_count += 1;
+        diag.pairwise_compared_count += 1;
+        *diag.compared_by_key.entry(key.to_owned()).or_insert(0) += 1;
+        if !CachedBound::Equal.agrees(a, b, abs_t, rel_t) {
+            let abs_diff = (a - b).abs();
+            let scale = a.max(b);
+            let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
+            diag.pairwise_disagreements += 1;
+            diag.disagreements.push(CachedScalarDiff {
+                key: key.to_owned(),
+                symbol: String::from("|mean diff|"),
+                quantity_label: format!("{pair_label} mean difference"),
+                data_set_index: None,
+                recomputed: a,
+                cached: b,
+                bound: CachedBound::Equal,
+                abs_diff,
+                rel_diff,
+            });
+        }
+    }
+}
+
+/// Compare a recomputed [`ResultSheet`] against a pre-extracted [`CachedAnalysisReference`]
+/// (both scalars and pairwise post-test comparisons) within
+/// `max(abs_tol, rel_tol * max(|recomputed|, |cached|))`, respecting [`CachedBound`] inequalities.
 ///
-/// A cached value is compared only when CurveBook emitted a scalar with the linked key and the same
-/// data-set scope; unmatched values are skipped rather than counted as agreement. CurveBook never
-/// adjusts its own outputs to match cached values.
+/// Unmatched cached entries are skipped rather than counted as agreement. CurveBook never adjusts
+/// its own outputs to match cached values.
+#[must_use]
+pub fn compare_recomputed_against_reference(
+    recomputed: &ResultSheet,
+    reference: &CachedAnalysisReference,
+    abs_tol: f64,
+    rel_tol: f64,
+) -> CachedResultDiagnostic {
+    let mut diag = CachedResultDiagnostic::default();
+    let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
+    let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
+    for scalar_ref in &reference.scalars {
+        compare_scalar_ref(recomputed, scalar_ref, abs_t, rel_t, &mut diag);
+    }
+    for pw in &reference.pairwise {
+        compare_pairwise_ref(recomputed, pw, abs_t, rel_t, &mut diag);
+    }
+    diag
+}
+
+/// Compare a recomputed [`ResultSheet`] against a cached `results.json` through
+/// [`CACHED_SCALAR_LINKS`] and [`CACHED_PAIRWISE_LINKS`].
 #[must_use]
 pub fn compare_recomputed_against_cached_results(
     recomputed: &ResultSheet,
@@ -359,65 +1113,8 @@ pub fn compare_recomputed_against_cached_results(
     abs_tol: f64,
     rel_tol: f64,
 ) -> CachedResultDiagnostic {
-    let mut diag = CachedResultDiagnostic::default();
-    let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
-    let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
-    let class = foreign_class.trim();
-    for link in CACHED_SCALAR_LINKS.iter().filter(|l| l.foreign_class.eq_ignore_ascii_case(class)) {
-        for (col, cached) in cached_values_for_link(link, results_val) {
-            let Some(rec) =
-                recomputed.scalars.iter().find(|e| e.key.eq_ignore_ascii_case(link.curvebook_key) && e.data_set_index == col && e.value.is_finite())
-            else {
-                continue;
-            };
-            let (a, b) = match link.comparison {
-                CrosswalkComparison::Signed => (rec.value, cached),
-                CrosswalkComparison::Magnitude => (rec.value.abs(), cached.abs()),
-            };
-            diag.compared_count += 1;
-            *diag.compared_by_key.entry(link.curvebook_key.to_owned()).or_insert(0) += 1;
-            let abs_diff = (a - b).abs();
-            let scale = a.abs().max(b.abs());
-            let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
-            if abs_diff > abs_t.max(rel_t * scale) {
-                diag.disagreements.push(CachedScalarDiff {
-                    key: link.curvebook_key.to_owned(),
-                    data_set_index: col,
-                    recomputed: rec.value,
-                    cached,
-                    abs_diff,
-                    rel_diff,
-                });
-            }
-        }
-    }
-    diag
-}
-
-/// Build a caution [`ChecklistItem`] disclosing disagreements between CurveBook's recomputed
-/// output and cached external values (§5.2). Returns `None` when no disagreements occurred.
-#[must_use]
-pub fn build_disagreement_checklist_item(foreign_class: &str, diagnostic: &CachedResultDiagnostic) -> Option<ChecklistItem> {
-    let first = diagnostic.disagreements.first()?;
-    let metric = format!(
-        "{}: CurveBook = {:.6}, cached = {:.6} (abs diff = {:.3e}, {} of {} differed)",
-        first.key,
-        first.recomputed,
-        first.cached,
-        first.abs_diff,
-        diagnostic.disagreements.len(),
-        diagnostic.compared_count
-    );
-    let explanation = format!(
-        "CurveBook kept its own live recomputation for `{foreign_class}` rather than adjusting to cached values. Inspect the difference against the cited statistical definition."
-    );
-    Some(ChecklistItem {
-        assumption: String::from("Cached external result comparison"),
-        status: ChecklistStatus::Warn,
-        diagnostic_metric: Some(metric),
-        explanation,
-        remediation: None,
-    })
+    let reference = extract_cached_analysis_reference(foreign_class, results_val);
+    compare_recomputed_against_reference(recomputed, &reference, abs_tol, rel_tol)
 }
 
 /// Translate an external `.prism` `parameters.json` document into a CurveBook [`AnalysisKind`]
@@ -426,6 +1123,7 @@ pub fn build_disagreement_checklist_item(foreign_class: &str, diagnostic: &Cache
 pub fn translate_analysis_parameters(foreign_class: &str, params_json: &serde_json::Value) -> Option<TranslatedAnalysis> {
     let row = find_analysis_mapping(foreign_class)?;
     let content = params_json.get("content").and_then(serde_json::Value::as_object).or_else(|| params_json.as_object());
+    let design_key = extract_analysis_design_key(row.foreign_class, params_json);
     let mut blocking = Vec::new();
     let kind = match row.foreign_class {
         "T_TESTS_AND_NONPARAMETRIC" => translate_two_group(content, &mut blocking),
@@ -441,7 +1139,12 @@ pub fn translate_analysis_parameters(foreign_class: &str, params_json: &serde_js
         "SURVIVAL" => translate_survival(content, &mut blocking),
         _ => return None,
     };
-    Some(TranslatedAnalysis { kind, verification: row.verification, blocking_options: blocking })
+    let verification = if blocking.is_empty() && find_verified_analysis_design(&design_key).is_some() {
+        AnalysisVerificationStatus::CorpusVerified
+    } else {
+        AnalysisVerificationStatus::Unverified
+    };
+    Some(TranslatedAnalysis { kind, verification, blocking_options: blocking })
 }
 
 type JsonMap = serde_json::Map<String, serde_json::Value>;
@@ -615,6 +1318,9 @@ fn translate_two_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
     };
     let rm = get_obj(content, "repeatedMeasures");
     let mixed_effects_reml = get_str(rm, "method").is_some_and(|m| m.eq_ignore_ascii_case("MIXED_EFFECTS") || m.eq_ignore_ascii_case("REML"));
+    if get_bool(get_obj(content, "options"), "includeInteractionTerm") == Some(false) {
+        blocking.push(String::from("additive two-way ANOVA without interaction term is not yet translated"));
+    }
     // Two-way Dunnett controls name a level of one factor; that mapping is not yet verified.
     let multiplicity = parse_multiplicity(get_obj(content, "postTests"), false, blocking);
     AnalysisKind::FactorialAnova(FactorialAnovaSpec {
@@ -865,6 +1571,15 @@ fn translate_auc(content: Option<&JsonMap>, _blocking: &mut Vec<String>) -> Anal
 }
 
 fn translate_outliers(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {
+    match get_str(get_obj(content, "data"), "handleReplicatesAs") {
+        None | Some("AVERAGE") | Some("COLUMN") => {}
+        Some("SUB_COLUMN") => {
+            blocking.push(String::from("per-subcolumn replicate handling `SUB_COLUMN` is not yet corpus-verified"));
+        }
+        Some(other) => {
+            blocking.push(format!("unmapped handleReplicatesAs `{other}`"));
+        }
+    }
     let calc = get_obj(content, "calc");
     let method = get_str(calc, "method").unwrap_or("ROUT");
     let spec = match method.to_ascii_uppercase().as_str() {
@@ -881,6 +1596,29 @@ fn translate_outliers(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> 
         }
     };
     AnalysisKind::OutlierDetection(spec)
+}
+
+fn source_sheet_max_y_subcolumns(source_ds: &DataSheet) -> usize {
+    match &source_ds.archetype {
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Nested(t) => t.groups.iter().map(|g| g.subcolumn_titles.len()).max().unwrap_or(1),
+        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => 1,
+    }
+}
+
+/// Validate analysis options whose translation depends on the resolved source [`DataSheet`] layout
+/// (for example, replicate aggregation modes on multi-subcolumn tables).
+pub fn check_source_sheet_option_compatibility(foreign_class: &str, params_json: &serde_json::Value, source_ds: &DataSheet) -> Result<(), String> {
+    if foreign_class.trim().eq_ignore_ascii_case("IDENTIFY_OUTLIERS") {
+        let content = params_json.get("content").and_then(serde_json::Value::as_object).or_else(|| params_json.as_object());
+        let handle_reps = get_str(get_obj(content, "data"), "handleReplicatesAs");
+        if matches!(handle_reps, None | Some("AVERAGE")) && source_sheet_max_y_subcolumns(source_ds) > 1 {
+            return Err(String::from("outlier detection with row-averaged replicates on a multi-subcolumn table is not yet translated"));
+        }
+    }
+    Ok(())
 }
 
 fn translate_survival(content: Option<&JsonMap>, _blocking: &mut Vec<String>) -> AnalysisKind {
@@ -917,10 +1655,57 @@ pub(crate) struct AnalysisImportContext<'a> {
     pub uid_to_sheet_id: &'a mut BTreeMap<String, SheetId>,
     pub used_ids: &'a mut HashSet<String>,
     pub warnings: &'a mut Vec<ImportWarning>,
+    pub promoted_analyses: &'a mut Vec<PromotedAnalysisRef>,
 }
 
-/// Import all listed `.prism` analyses via the 3-hop `preferredResultSheet` chain into v9
-/// `ResultSheet`s (`ResultProvenance::Imported` by default until mapping rows are `CorpusVerified`).
+struct LivePromotionRequest<'a> {
+    sid: &'a SheetId,
+    src_id: &'a SheetId,
+    analysis_uid: &'a str,
+    analysis_class: &'a str,
+    clamped_title: &'a str,
+    kind: &'a AnalysisKind,
+    selected_data_sets: Vec<usize>,
+    sheet_obj: &'a JsonMap,
+}
+
+fn build_promoted_live_analysis(
+    zip_index: &mut ZipIndex<'_>,
+    id_index: &ArchiveIdIndex,
+    req: LivePromotionRequest<'_>,
+    warnings: &mut Vec<ImportWarning>,
+) -> Result<(ResultSheet, PromotedAnalysisRef), FormatError> {
+    let mut spec = AnalysisSpec::new(req.sid.clone(), req.src_id.clone(), req.kind.clone())?;
+    spec.selected_data_sets = req.selected_data_sets;
+    spec.set_custom_title(Some(req.clamped_title.to_owned()))?;
+    let rs = ResultSheet::new(spec)?;
+
+    let results_val = load_analysis_json(zip_index, id_index, req.analysis_uid, "results.json", warnings)?;
+    let reference = results_val.as_ref().map(|rv| extract_cached_analysis_reference(req.analysis_class, rv)).unwrap_or_default();
+    let fallback_tabs = import_result_tabs_3hop(zip_index, id_index, req.analysis_uid, req.sheet_obj, warnings)?;
+    let fallback_scalars = results_val.as_ref().map(extract_cached_scalars).unwrap_or_default();
+    let (abs_tol, rel_tol) =
+        find_analysis_mapping(req.analysis_class).map(|row| (row.absolute_tolerance, row.relative_tolerance)).unwrap_or((1e-9, 1e-6));
+    let original_kind_label =
+        clamp_title(if req.analysis_class.is_empty() { "External analysis" } else { req.analysis_class }, req.sid.as_str(), warnings);
+
+    let promoted = PromotedAnalysisRef {
+        sheet_id: rs.id.clone(),
+        analysis_uid: req.analysis_uid.to_owned(),
+        title: req.clamped_title.to_owned(),
+        foreign_class: req.analysis_class.to_owned(),
+        abs_tol,
+        rel_tol,
+        reference,
+        fallback: ImportedAnalysisFallback { original_kind_label, tabs: fallback_tabs, scalars: fallback_scalars },
+    };
+    Ok((rs, promoted))
+}
+
+/// Import all listed `.prism` analyses: corpus-verified designs without blocking options become
+/// live `ResultSheet`s (`ResultProvenance::Computed`) with transient [`PromotedAnalysisRef`]
+/// entries; all other analyses import via the 3-hop `preferredResultSheet` chain as read-only
+/// `ResultProvenance::Imported` snapshots.
 pub(crate) fn import_external_analyses(
     zip_index: &mut ZipIndex<'_>,
     doc: &mut ProjectDocument,
@@ -965,6 +1750,14 @@ pub(crate) fn import_external_analyses(
         {
             tr.blocking_options.push(reason);
         }
+        if let Some(tr) = translation.as_mut()
+            && let Some(ref params) = params_val
+            && let Some(ref src_id) = source_sheet_id
+            && let Some(src_ds) = doc.data_sheet(src_id)
+            && let Err(reason) = check_source_sheet_option_compatibility(analysis_class, params, src_ds)
+        {
+            tr.blocking_options.push(reason);
+        }
 
         let sid = allocate_valid_unique_sheet_id(Some(analysis_uid), "result", idx + 1, ctx.used_ids, ctx.warnings);
         let clamped_title = clamp_title(&raw_title, sid.as_str(), ctx.warnings);
@@ -979,10 +1772,23 @@ pub(crate) fn import_external_analyses(
             && let Some(ref tr) = translation
             && let Some(ref src_id) = source_sheet_id
         {
-            let mut spec = AnalysisSpec::new(sid.clone(), src_id.clone(), tr.kind.clone())?;
-            spec.selected_data_sets = selected_data_sets;
-            spec.set_custom_title(Some(clamped_title.clone()))?;
-            ResultSheet::new(spec)?
+            let (rs, promoted) = build_promoted_live_analysis(
+                zip_index,
+                ctx.id_index,
+                LivePromotionRequest {
+                    sid: &sid,
+                    src_id,
+                    analysis_uid,
+                    analysis_class,
+                    clamped_title: &clamped_title,
+                    kind: &tr.kind,
+                    selected_data_sets,
+                    sheet_obj,
+                },
+                ctx.warnings,
+            )?;
+            ctx.promoted_analyses.push(promoted);
+            rs
         } else {
             let reason = build_snapshot_reason(analysis_class, translation.as_ref());
             let clamped_kind = clamp_title(if analysis_class.is_empty() { "External analysis" } else { analysis_class }, sid.as_str(), ctx.warnings);
@@ -1017,6 +1823,9 @@ fn build_snapshot_reason(analysis_class: &str, translation: Option<&TranslatedAn
     match translation {
         Some(tr) if !tr.blocking_options.is_empty() => {
             format!("untranslated options for `{analysis_class}`: {}", tr.blocking_options.join("; "))
+        }
+        Some(tr) if tr.verification == AnalysisVerificationStatus::CorpusVerified => {
+            format!("input data sheet for `{analysis_class}` is missing or incompatible for live recompute; preserved cached result")
         }
         Some(_) => {
             format!("mapping for `{analysis_class}` is unverified against corpus recomputation; preserved cached result")
@@ -1384,5 +2193,130 @@ fn collect_scalars_recursive(val: &serde_json::Value, prefix: &str, depth: usize
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+    use crate::zip::{ZipLimits, ZipReadOptions, ZipWriter};
+    use curvebook_doc::{ResultProvenance, ResultStatus};
+    use serde_json::json;
+
+    #[test]
+    fn build_promoted_live_analysis_captures_reference_and_3hop_fallback() {
+        let mut writer = ZipWriter::new();
+        writer
+            .add_file(
+                "analyses/an-1/results.json",
+                serde_json::to_vec(&json!({
+                    "content": {
+                        "ordinaryAnovaModel": {
+                            "anovaTable": {
+                                "colFactor": { "fTest": { "f": 9.5, "pValue": { "state": "P_VALUE_LESS", "value": 1e-15 } } }
+                            },
+                            "multipleComparisons": {
+                                "tests": {
+                                    "uA": {
+                                        "id": { "col": { "idx": 2 } },
+                                        "value": {
+                                            "uB": {
+                                                "id": { "col": { "idx": 0 } },
+                                                "value": {
+                                                    "status": "VALID",
+                                                    "meansDifference": -6.25,
+                                                    "pValueAdjusted": { "state": "P_VALUE_EQUAL", "value": 0.004 }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        writer
+            .add_file(
+                "analyses/an-1/result_sheets/rs-main.json",
+                serde_json::to_vec(&json!({"uid": "rs-main", "name": "ANOVA table", "dataSheet": "view-1"})).unwrap(),
+            )
+            .unwrap();
+        writer
+            .add_file(
+                "data/sheets/view-1/sheet.json",
+                serde_json::to_vec(&json!({
+                    "uid": "view-1",
+                    "flags": ["ANALYSIS_VIEW"],
+                    "table": { "uid": "t-view", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-rt", "dataSets": ["ds-val"] }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        writer
+            .add_file("data/sets/ds-rt.json", serde_json::to_vec(&json!({"title": "Row", "replicates": [{"valueType": "string"}]})).unwrap())
+            .unwrap();
+        writer
+            .add_file("data/sets/ds-val.json", serde_json::to_vec(&json!({"title": "Value", "replicates": [{"valueType": "string"}]})).unwrap())
+            .unwrap();
+        writer.add_file("data/tables/t-view/data.csv", b"F,9.5\n".to_vec()).unwrap();
+        let bytes = writer.finish().unwrap();
+
+        let mut zip_index = ZipIndex::from_bytes_with_options(&bytes, ZipLimits::default(), ZipReadOptions::external_interop()).unwrap();
+        let id_index = ArchiveIdIndex::from_zip_index(&zip_index);
+        let sheet_val = json!({
+            "uid": "an-1",
+            "analysisClass": "ONE_WAY_ANOVA",
+            "preferredResultSheet": "rs-main",
+            "resultSheets": [{ "uid": "rs-main", "title": "ANOVA table" }]
+        });
+        let kind = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            method: OneWayMethod::OrdinaryAnova,
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, ..MultiplicitySpec::default() },
+            ..OneWayAnovaSpec::default()
+        });
+        let mut warnings = Vec::new();
+        let (rs, promoted) = build_promoted_live_analysis(
+            &mut zip_index,
+            &id_index,
+            LivePromotionRequest {
+                sid: &SheetId::new("res-an-1"),
+                src_id: &SheetId::new("data-1"),
+                analysis_uid: "an-1",
+                analysis_class: "ONE_WAY_ANOVA",
+                clamped_title: "One-way ANOVA",
+                kind: &kind,
+                selected_data_sets: vec![0, 2],
+                sheet_obj: sheet_val.as_object().unwrap(),
+            },
+            &mut warnings,
+        )
+        .unwrap();
+
+        assert!(warnings.is_empty());
+        assert_eq!(rs.status, ResultStatus::Dirty);
+        assert_eq!(rs.provenance, ResultProvenance::Computed);
+        assert_eq!(rs.analysis.selected_data_sets, vec![0, 2]);
+        assert_eq!(rs.analysis.custom_title.as_deref(), Some("One-way ANOVA"));
+        assert_eq!(promoted.sheet_id, SheetId::new("res-an-1"));
+        assert_eq!(promoted.analysis_uid, "an-1");
+        assert_eq!(promoted.foreign_class, "ONE_WAY_ANOVA");
+        assert!((promoted.abs_tol - 1e-9).abs() < 1e-15);
+        assert!((promoted.rel_tol - 1e-6).abs() < 1e-15);
+        assert_eq!(promoted.reference.scalars.len(), 2);
+        assert!(promoted.reference.scalars.iter().any(|s| s.key == "P value" && s.bound == CachedBound::LessThan));
+        assert_eq!(promoted.reference.pairwise.len(), 1);
+        assert_eq!(promoted.reference.pairwise[0].col_a, 2);
+        assert_eq!(promoted.reference.pairwise[0].col_b, 0);
+        assert_eq!(promoted.reference.pairwise[0].p_or_q, Some((0.004, CachedBound::Equal, false)));
+        assert_eq!(promoted.reference.pairwise[0].means_diff, Some(-6.25));
+        assert_eq!(promoted.reference.pairwise[0].p_abs_tol, Some(1e-5));
+        assert_eq!(promoted.fallback.original_kind_label, "ONE_WAY_ANOVA");
+        assert_eq!(promoted.fallback.tabs.len(), 1);
+        assert_eq!(promoted.fallback.tabs[0].title, "ANOVA table");
+        assert!(!promoted.fallback.scalars.is_empty());
     }
 }

@@ -5,15 +5,18 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DescriptiveSpec,
-    GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, MultiplicitySpec, NestedTable, PartsOfWholeTable, ProjectDocument,
-    ResultCell, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, XColumnMode, XyTable,
+    GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, MultiplicitySpec, NestedTable, PairwiseComparisonRecord,
+    PartsOfWholeTable, ProjectDocument, ResultCell, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId,
+    SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_format::{
-    ANALYSIS_MAPPINGS, AnalysisVerificationStatus, ArchiveExportOptions, CACHED_SCALAR_LINKS, ExternalDataSetPositions, FormatError,
-    ImportWarningKind, ZipArchive, build_disagreement_checklist_item, cached_values_for_link, check_control_in_selection,
-    compare_recomputed_against_cached_results, export_prism_bytes_experimental, export_prism_bytes_with_options, find_analysis_mapping,
-    import_prism_bytes, resolve_selected_data_sets, translate_analysis_parameters, try_export_result_sheet_tidy_csv,
+    ANALYSIS_MAPPINGS, AnalysisDesignKey, AnalysisVerificationStatus, ArchiveExportOptions, CACHED_PAIRWISE_LINKS, CACHED_SCALAR_LINKS, CachedBound,
+    CorpusDesignEvidence, DesignTail, ExternalDataSetPositions, FormatError, ImportWarningKind, MIN_VERIFIED_DESIGN_AGREEMENT_DEN,
+    MIN_VERIFIED_DESIGN_AGREEMENT_NUM, MIN_VERIFIED_DESIGN_ANALYSES, MIN_VERIFIED_DESIGN_SOURCES, VERIFIED_ANALYSIS_DESIGNS, ZipArchive,
+    cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility, compare_recomputed_against_cached_results,
+    compare_recomputed_against_reference, export_prism_bytes_experimental, export_prism_bytes_with_options, extract_analysis_design_key,
+    extract_cached_analysis_reference, find_analysis_mapping, find_verified_analysis_design, import_prism_bytes, resolve_selected_data_sets,
+    translate_analysis_parameters, try_export_result_sheet_tidy_csv,
 };
 use curvebook_palette::Rgba8;
 use serde_json::json;
@@ -578,12 +581,24 @@ fn external_archive_whole_segment_id_matching_prevents_prefix_collision_and_skip
 
 #[test]
 fn external_archive_analysis_mappings_translation_and_disagreement_diagnostics() {
-    // 1. Verify all 11 corpus-observed mapping rows exist, have citations, and default to Unverified.
+    // 1. Verify all 11 corpus-observed mapping rows exist, have citations, and valid tolerances.
     assert_eq!(ANALYSIS_MAPPINGS.len(), 11);
     for row in ANALYSIS_MAPPINGS {
-        assert_eq!(row.verification, AnalysisVerificationStatus::Unverified, "{}", row.foreign_class);
         assert!(!row.justification.trim().is_empty(), "{}", row.foreign_class);
+        assert!(row.relative_tolerance > 0.0 && row.absolute_tolerance > 0.0, "{}", row.foreign_class);
         assert!(find_analysis_mapping(row.foreign_class).is_some());
+    }
+    // Every declared verified design must name a valid mapping class, satisfy the promotion bar,
+    // carry a non-empty verification date & note, and have a unique canonical key.
+    assert_eq!(VERIFIED_ANALYSIS_DESIGNS.len(), 10);
+    let mut seen_keys = std::collections::HashSet::new();
+    for design in VERIFIED_ANALYSIS_DESIGNS {
+        assert!(find_analysis_mapping(design.foreign_class).is_some(), "{}", design.foreign_class);
+        assert!(design.evidence.meets_bar(), "verified design fails promotion bar: {}", design.design_key());
+        assert!(!design.evidence.verified_on.trim().is_empty(), "{}", design.design_key());
+        assert!(!design.notes.trim().is_empty(), "{}", design.design_key());
+        assert!(find_verified_analysis_design(&design.design_key()).is_some());
+        assert!(seen_keys.insert(design.design_key()), "duplicate verified design key: {}", design.design_key());
     }
 
     // 2. Verify parameter translation across corpus spellings (`TRNSFORM`, `shaproWilks`, nonlinear equations).
@@ -605,11 +620,308 @@ fn external_archive_analysis_mappings_translation_and_disagreement_diagnostics()
         translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({"content": {"model": {"equation": {"name": "Custom Proprietary Model"}}}}))
             .unwrap();
     assert!(!tr_nl_unmapped.blocking_options.is_empty());
+    assert_eq!(tr_nl_unmapped.verification, AnalysisVerificationStatus::Unverified);
 
     // The straight-line equation maps onto CurveBook's built-in `straight_line` model.
     let tr_line =
         translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({"content": {"model": {"equation": {"name": "Straight line"}}}})).unwrap();
     assert!(matches!(&tr_line.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "straight_line"), "{:?}", tr_line.kind);
+}
+
+#[test]
+fn external_archive_design_key_normalization_and_evidence_bar() {
+    // 1. Experimental design aliases normalize to a single canonical key.
+    let alias_cases = [
+        ("T_TESTS_AND_NONPARAMETRIC", "UNPAIRED_WELCH_T_TEST", "WELCH_T_TEST"),
+        ("T_TESTS_AND_NONPARAMETRIC", "WELCH_T_TEST", "WELCH_T_TEST"),
+        ("T_TESTS_AND_NONPARAMETRIC", "MANN_WHITNEY", "MANN_WHITNEY_TEST"),
+        ("T_TESTS_AND_NONPARAMETRIC", "MANN_WHITNEY_TEST", "MANN_WHITNEY_TEST"),
+        ("T_TESTS_AND_NONPARAMETRIC", "WILCOXON", "WILCOXON_TEST"),
+        ("T_TESTS_AND_NONPARAMETRIC", "WILCOXON_MATCHED_PAIRS", "WILCOXON_TEST"),
+        ("ONE_WAY_ANOVA", "BROWN_FORSYTHE_AND_WELCH", "BROWN_FORSYTHE_ANOVA"),
+        ("ONE_WAY_ANOVA", "BROWN_FORSYTHE_WELCH", "BROWN_FORSYTHE_ANOVA"),
+        ("ONE_WAY_ANOVA", "WELCH_ANOVA", "BROWN_FORSYTHE_ANOVA"),
+        ("ONE_WAY_ANOVA", "KRUSKAL_WALLIS", "KRUSKAL_WALLIS_TEST"),
+        ("ONE_WAY_ANOVA", "FRIEDMAN", "FRIEDMAN_TEST"),
+        ("TWO_WAY_ANOVA", "REPEATED_MEASURES_BY_BOTH", "REPEATED_MEASURES_BY_BOTH_FACTORS"),
+    ];
+    for (class, raw_design, expected) in alias_cases {
+        let key = extract_analysis_design_key(class, &json!({"content": {"experimentalDesign": raw_design}}));
+        assert_eq!(key.experimental_design.as_deref(), Some(expected), "{class}/{raw_design}");
+    }
+
+    // 2. Tail normalization applies only to T_TESTS_AND_NONPARAMETRIC.
+    let tt_default = extract_analysis_design_key("T_TESTS_AND_NONPARAMETRIC", &json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST"}}));
+    let tt_two = extract_analysis_design_key(
+        "T_TESTS_AND_NONPARAMETRIC",
+        &json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}}),
+    );
+    let tt_one = extract_analysis_design_key(
+        "T_TESTS_AND_NONPARAMETRIC",
+        &json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_ONE_TAILED"}}}),
+    );
+    assert_eq!(tt_default.tail, DesignTail::TwoTailed);
+    assert_eq!(tt_default, tt_two);
+    assert_eq!(tt_one.tail, DesignTail::OneTailed);
+    assert_ne!(tt_two.canonical_label(), tt_one.canonical_label());
+    let anova_tail = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "options": {"pValueTailType": "P_VALUE_ONE_TAILED"}}}),
+    );
+    assert_eq!(anova_tail.tail, DesignTail::NotApplicable);
+
+    // 3. Post-test normalization: NO_TESTS / NO_TEST / NONE -> (None, None); NO_CORRECTION stays distinct!
+    let mk_post = |pt: serde_json::Value| json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "postTests": pt}});
+    let no_post_absent = extract_analysis_design_key("ONE_WAY_ANOVA", &json!({"content": {"experimentalDesign": "ORDINARY_ANOVA"}}));
+    let no_post_explicit = extract_analysis_design_key("ONE_WAY_ANOVA", &mk_post(json!({"type": "NO_TESTS"})));
+    let no_post_stat_none = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &mk_post(json!({
+            "type": "PAIRWISE_TESTS",
+            "pairwiseTests": {
+                "pairwiseDesign": {"type": "ALL_VS_ALL"},
+                "multipleComparisons": {"type": "STATISTICAL", "statistical": {"test": "NO_TEST"}}
+            }
+        })),
+    );
+    let no_post_fdr_none = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &mk_post(json!({
+            "type": "PAIRWISE_TESTS",
+            "pairwiseTests": {
+                "pairwiseDesign": {"type": "ALL_VS_ALL"},
+                "multipleComparisons": {"type": "FDR", "fdr": {"test": "NONE"}}
+            }
+        })),
+    );
+    assert_eq!((no_post_absent.post_test_family.as_deref(), no_post_absent.post_test.as_deref()), (None, None));
+    assert_eq!(no_post_absent, no_post_explicit);
+    assert_eq!(no_post_absent, no_post_stat_none);
+    assert_eq!(no_post_absent, no_post_fdr_none);
+
+    let uncorrected = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &mk_post(json!({
+            "type": "PAIRWISE_TESTS",
+            "pairwiseTests": {
+                "pairwiseDesign": {"type": "ALL_VS_ALL"},
+                "multipleComparisons": {"type": "NO_CORRECTION", "statistical": {"test": "TUKEY"}}
+            }
+        })),
+    );
+    assert_eq!((uncorrected.post_test_family.as_deref(), uncorrected.post_test.as_deref()), (Some("ALL_VS_ALL"), Some("NO_CORRECTION")));
+    assert_ne!(uncorrected, no_post_absent);
+    assert_ne!(uncorrected.canonical_label(), no_post_absent.canonical_label());
+
+    let tukey = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &mk_post(json!({
+            "type": "PAIRWISE_TESTS",
+            "pairwiseTests": {
+                "pairwiseDesign": {"type": "ALL_VS_ALL"},
+                "multipleComparisons": {"type": "STATISTICAL", "statistical": {"test": "TUKEY_HSD"}}
+            }
+        })),
+    );
+    assert_eq!((tukey.post_test_family.as_deref(), tukey.post_test.as_deref()), (Some("ALL_VS_ALL"), Some("TUKEY")));
+    assert_eq!(tukey.canonical_label(), format!("{tukey}"));
+
+    let dunnett = extract_analysis_design_key(
+        "ONE_WAY_ANOVA",
+        &mk_post(json!({
+            "type": "PAIRWISE_TESTS",
+            "pairwiseTests": {
+                "pairwiseDesign": {"type": "CONTROL_VS_ALL", "controlID": {"col": {"idx": 0}}},
+                "multipleComparisons": {"type": "STATISTICAL", "statistical": {"test": "DUNNET"}}
+            }
+        })),
+    );
+    assert_eq!((dunnett.post_test_family.as_deref(), dunnett.post_test.as_deref()), (Some("CONTROL_VS_ALL"), Some("DUNNETT")));
+
+    // 4. Promotion bar constants and `CorpusDesignEvidence::meets_bar` boundary checks.
+    assert_eq!(
+        (MIN_VERIFIED_DESIGN_ANALYSES, MIN_VERIFIED_DESIGN_SOURCES, MIN_VERIFIED_DESIGN_AGREEMENT_NUM, MIN_VERIFIED_DESIGN_AGREEMENT_DEN),
+        (20, 2, 99, 100)
+    );
+    let ev = |compared, sources, agreed, date: &'static str| CorpusDesignEvidence {
+        analyses_compared: compared,
+        distinct_source_records: sources,
+        analyses_fully_agreed: agreed,
+        verified_on: date,
+    };
+    assert!(ev(20, 2, 20, "2026-11-27").meets_bar());
+    assert!(ev(100, 2, 99, "2026-11-27").meets_bar());
+    assert!(!ev(100, 2, 98, "2026-11-27").meets_bar());
+    assert!(!ev(19, 2, 19, "2026-11-27").meets_bar());
+    assert!(!ev(20, 1, 20, "2026-11-27").meets_bar());
+    assert!(!ev(20, 2, 21, "2026-11-27").meets_bar());
+    assert!(!ev(20, 2, 20, "").meets_bar());
+
+    let probe = AnalysisDesignKey {
+        foreign_class: String::from("DESCRIPTIVE_STATISTICS"),
+        experimental_design: None,
+        tail: DesignTail::NotApplicable,
+        post_test_family: None,
+        post_test: None,
+    };
+    assert_eq!(probe.canonical_label(), "DESCRIPTIVE_STATISTICS");
+    assert!(find_verified_analysis_design(&probe).is_some());
+}
+
+#[test]
+fn external_archive_verified_designs_promote_clean_and_block_unverified() {
+    let mk_post = |family: &str, mc_type: &str, test: &str| {
+        json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "postTests": {"type": "PAIRWISE_TESTS", "pairwiseTests": {
+            "pairwiseDesign": {"type": family, "controlID": {"col": {"idx": 0}}},
+            "multipleComparisons": {"type": mc_type, "statistical": {"test": test}},
+        }}}})
+    };
+
+    // 1. All 10 promoted designs return CorpusVerified with zero blocking options when clean.
+    let promoted_cases = [
+        (
+            "T_TESTS_AND_NONPARAMETRIC",
+            json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}}),
+        ),
+        ("T_TESTS_AND_NONPARAMETRIC", json!({"content": {"experimentalDesign": "PAIRED_T_TEST"}})),
+        ("T_TESTS_AND_NONPARAMETRIC", json!({"content": {"experimentalDesign": "UNPAIRED_WELCH_T_TEST"}})),
+        ("ONE_WAY_ANOVA", json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "postTests": {"type": "NO_TESTS"}}})),
+        ("ONE_WAY_ANOVA", mk_post("ALL_VS_ALL", "STATISTICAL", "TUKEY_HSD")),
+        ("ONE_WAY_ANOVA", mk_post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET")),
+        ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "options": {"includeInteractionTerm": true}}})),
+        ("DESCRIPTIVE_STATISTICS", json!({"content": {"data": {"handleReplicatesAs": "AVERAGE"}}})),
+        ("AREA_UNDER_CURVE", json!({"content": {"calc": {"baseline": {"useSpecificValue": true, "value": 0.0}}}})),
+        ("IDENTIFY_OUTLIERS", json!({"content": {"calc": {"method": "ROUT", "q": 1.0}, "data": {"handleReplicatesAs": "COLUMN"}}})),
+    ];
+    for (class, params) in promoted_cases {
+        let tr = translate_analysis_parameters(class, &params).unwrap();
+        assert!(tr.blocking_options.is_empty(), "{class}: {:?}", tr.blocking_options);
+        assert_eq!(tr.verification, AnalysisVerificationStatus::CorpusVerified, "{class}: {params}");
+    }
+
+    // 2. Unpromoted or blocked designs stay Unverified.
+    let blocked_or_unverified = [
+        (
+            "T_TESTS_AND_NONPARAMETRIC",
+            json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_ONE_TAILED"}}}),
+            false,
+        ),
+        ("T_TESTS_AND_NONPARAMETRIC", json!({"content": {"experimentalDesign": "MANN_WHITNEY"}}), false),
+        ("ONE_WAY_ANOVA", json!({"content": {"experimentalDesign": "KRUSKAL_WALLIS"}}), false),
+        ("ONE_WAY_ANOVA", mk_post("ALL_VS_ALL", "STATISTICAL", "HOLM_SIDAK"), false),
+        ("ONE_WAY_ANOVA", mk_post("ALL_VS_ALL", "NO_CORRECTION", "TUKEY"), false),
+        ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "REPEATED_MEASURES_BY_ROWS"}}), false),
+        ("TWO_WAY_ANOVA", mk_post("ALL_VS_ALL", "STATISTICAL", "TUKEY"), false),
+        ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "options": {"includeInteractionTerm": false}}}), true),
+        ("NONLINEAR_REGRESSION", json!({"content": {"model": {"equation": {"name": "Straight line"}}}}), false),
+        ("NORMALITY_TESTS", json!({"content": {"calc": {"tests": {"shaproWilks": true}}}}), false),
+        ("SURVIVAL", json!({"content": {"calc": {"logrankTest": true}}}), false),
+        ("DESCRIPTIVE_STATISTICS", json!({"content": {"data": {"handleReplicatesAs": "SUB_COLUMN"}}}), true),
+        ("IDENTIFY_OUTLIERS", json!({"content": {"calc": {"method": "ROUT"}, "data": {"handleReplicatesAs": "SUB_COLUMN"}}}), true),
+        ("IDENTIFY_OUTLIERS", json!({"content": {"calc": {"method": "ROUT"}, "data": {"handleReplicatesAs": "EXOTIC"}}}), true),
+    ];
+    for (class, params, expect_blocking) in blocked_or_unverified {
+        let tr = translate_analysis_parameters(class, &params).unwrap();
+        assert_eq!(tr.verification, AnalysisVerificationStatus::Unverified, "{class}: {params}");
+        if expect_blocking {
+            assert!(!tr.blocking_options.is_empty(), "{class}: expected blocking option for {params}");
+        }
+    }
+}
+
+#[test]
+fn external_archive_source_sheet_option_compatibility_blocks_multi_subcolumn_average_outliers() {
+    let avg_params = json!({"content": {"calc": {"method": "ROUT"}, "data": {"handleReplicatesAs": "AVERAGE"}}});
+    let default_params = json!({"content": {"calc": {"method": "ROUT"}}});
+    let col_params = json!({"content": {"calc": {"method": "ROUT"}, "data": {"handleReplicatesAs": "COLUMN"}}});
+
+    let xy_multi = DataSheet::new("xy-m", "XY Multi", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(5), 2, 4).unwrap())).unwrap();
+    let grp_multi =
+        DataSheet::new("grp-m", "Grp Multi", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).unwrap())).unwrap();
+    let col_multi = DataSheet::new(
+        "col-m",
+        "Col Multi",
+        TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 2, 3).unwrap()),
+    )
+    .unwrap();
+    let nest_multi = DataSheet::new("nest-m", "Nest Multi", TableArchetype::Nested(NestedTable::new(2, 2, 3).unwrap())).unwrap();
+    for ds in [&xy_multi, &grp_multi, &col_multi, &nest_multi] {
+        assert!(check_source_sheet_option_compatibility("IDENTIFY_OUTLIERS", &avg_params, ds).is_err(), "{}", ds.id);
+        assert!(check_source_sheet_option_compatibility("IDENTIFY_OUTLIERS", &default_params, ds).is_err(), "{}", ds.id);
+        assert!(check_source_sheet_option_compatibility("IDENTIFY_OUTLIERS", &col_params, ds).is_ok(), "{}", ds.id);
+    }
+
+    let col_single =
+        DataSheet::new("col-s", "Col Single", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::default(), 2, 4).unwrap())).unwrap();
+    let xy_single = DataSheet::new("xy-s", "XY Single", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 2, 4).unwrap())).unwrap();
+    for ds in [&col_single, &xy_single] {
+        assert!(check_source_sheet_option_compatibility("IDENTIFY_OUTLIERS", &avg_params, ds).is_ok(), "{}", ds.id);
+        assert!(check_source_sheet_option_compatibility("IDENTIFY_OUTLIERS", &default_params, ds).is_ok(), "{}", ds.id);
+    }
+}
+
+#[test]
+fn external_archive_pairwise_p_abs_tol_accepts_as190_tail_noise_and_keeps_mean_diff_strict() {
+    let results = json!({"content": {
+        "ordinaryAnovaModel": {
+            "anovaTable": { "colFactor": { "fTest": { "pValue": { "state": "P_VALUE_EQUAL", "value": 0.001 } } } },
+            "multipleComparisons": {
+                "tests": {
+                    "u0": {
+                        "id": { "col": { "idx": 0 } },
+                        "value": {
+                            "u1": {
+                                "id": { "col": { "idx": 1 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "meansDifference": 1.0,
+                                    "pValueAdjusted": { "state": "P_VALUE_EQUAL", "value": 0.001 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }});
+    let reference = extract_cached_analysis_reference("ONE_WAY_ANOVA", &results);
+    assert_eq!(reference.pairwise.len(), 1);
+    assert_eq!(reference.pairwise[0].p_abs_tol, Some(1e-5));
+
+    let mk_pw = |p: f64, diff: f64| {
+        vec![PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("Drug"),
+            estimate_diff: Some(diff),
+            raw_p_or_q: p,
+            is_fdr_q: false,
+            significant: true,
+        }]
+    };
+    let omnibus_ok = vec![ResultScalarEntry { key: String::from("P value"), data_set_index: None, value: 0.001, units: None }];
+
+    // 4e-6 diff on pairwise adjusted p is accepted under 1e-5 external tail tolerance.
+    let diag_tail = compare_recomputed_against_reference(&make_test_result_sheet(omnibus_ok.clone(), mk_pw(0.001_004, 1.0)), &reference, 1e-9, 1e-6);
+    assert_eq!((diag_tail.pairwise_compared_count, diag_tail.pairwise_disagreements), (2, 0));
+    assert!(diag_tail.disagreements.is_empty());
+
+    // 2e-5 diff on pairwise adjusted p is flagged.
+    let diag_p_bad = compare_recomputed_against_reference(&make_test_result_sheet(omnibus_ok.clone(), mk_pw(0.001_020, 1.0)), &reference, 1e-9, 1e-6);
+    assert_eq!(diag_p_bad.pairwise_disagreements, 1);
+    assert_eq!(diag_p_bad.disagreements[0].key, "Pairwise adjusted P");
+
+    // 4e-6 diff on |meansDifference| stays strict at 1e-9/1e-6 and is flagged.
+    let diag_diff_bad = compare_recomputed_against_reference(&make_test_result_sheet(omnibus_ok, mk_pw(0.001, 1.000_004)), &reference, 1e-9, 1e-6);
+    assert_eq!(diag_diff_bad.pairwise_disagreements, 1);
+    assert_eq!(diag_diff_bad.disagreements[0].key, "Pairwise mean difference");
+
+    // 4e-6 diff on omnibus P value also stays strict at 1e-9/1e-6 and is flagged.
+    let omnibus_bad = vec![ResultScalarEntry { key: String::from("P value"), data_set_index: None, value: 0.001_004, units: None }];
+    let diag_omni_bad = compare_recomputed_against_reference(&make_test_result_sheet(omnibus_bad, mk_pw(0.001, 1.0)), &reference, 1e-9, 1e-6);
+    assert_eq!((diag_omni_bad.pairwise_disagreements, diag_omni_bad.disagreements.len()), (0, 1));
+    assert_eq!(diag_omni_bad.disagreements[0].key, "P value");
 }
 
 #[test]
@@ -756,11 +1068,263 @@ fn external_archive_cached_result_crosswalk_scopes_signs_and_skips_unmatched() {
     let rs = sheet(vec![scalar("PValue", None, 0.08)]);
     let diag = compare_recomputed_against_cached_results(&rs, "T_TESTS_AND_NONPARAMETRIC", &results, 1e-9, 1e-6);
     assert_eq!(diag.disagreements.len(), 1);
-    assert!(build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag).is_some());
+    assert_eq!(diag.disagreements[0].symbol, "p");
+    assert_eq!(diag.disagreements[0].quantity_label, "P value");
+    assert_eq!(diag.disagreements[0].bound, CachedBound::Equal);
+}
+
+fn make_test_result_sheet(scalars: Vec<ResultScalarEntry>, pairwise: Vec<PairwiseComparisonRecord>) -> ResultSheet {
+    let spec = AnalysisSpec::new("res-pw", "src", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+    let mut rs = ResultSheet::new(spec).unwrap();
+    rs.scalars = scalars;
+    rs.pairwise_comparisons = pairwise;
+    rs
+}
+
+#[test]
+fn external_archive_cached_bounds_handle_less_and_greater_inequalities() {
+    let scalar = |key: &str, value: f64| ResultScalarEntry { key: key.to_owned(), data_set_index: None, value, units: None };
+
+    let less_json = json!({"content": {
+        "ordinaryAnovaModel": {
+            "anovaTable": { "colFactor": { "fTest": { "pValue": { "state": "P_VALUE_LESS", "value": 1e-15 } } } }
+        }
+    }});
+    let less_ref = extract_cached_analysis_reference("ONE_WAY_ANOVA", &less_json);
+    assert_eq!(less_ref.scalars.len(), 1);
+    assert_eq!(less_ref.scalars[0].bound, CachedBound::LessThan);
+    assert!(
+        compare_recomputed_against_reference(&make_test_result_sheet(vec![scalar("P value", 2e-18)], vec![]), &less_ref, 1e-9, 1e-6)
+            .disagreements
+            .is_empty()
+    );
+    let less_bad = compare_recomputed_against_reference(&make_test_result_sheet(vec![scalar("P value", 0.005)], vec![]), &less_ref, 1e-9, 1e-6);
+    assert_eq!(less_bad.disagreements.len(), 1);
+    assert_eq!(less_bad.disagreements[0].bound, CachedBound::LessThan);
+
+    let greater_json = json!({"content": {
+        "ordinaryAnovaModel": {
+            "anovaTable": { "colFactor": { "fTest": { "pValue": { "state": "P_VALUE_GREATER", "value": 0.1 } } } }
+        }
+    }});
+    let greater_ref = extract_cached_analysis_reference("ONE_WAY_ANOVA", &greater_json);
+    assert_eq!(greater_ref.scalars[0].bound, CachedBound::GreaterThan);
+    assert!(
+        compare_recomputed_against_reference(&make_test_result_sheet(vec![scalar("P value", 0.42)], vec![]), &greater_ref, 1e-9, 1e-6)
+            .disagreements
+            .is_empty()
+    );
+    assert_eq!(
+        compare_recomputed_against_reference(&make_test_result_sheet(vec![scalar("P value", 0.02)], vec![]), &greater_ref, 1e-9, 1e-6)
+            .disagreements
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn external_archive_pairwise_crosswalk_matches_unordered_pairs_and_skips_invalid() {
+    assert_eq!(CACHED_PAIRWISE_LINKS.len(), 4);
+    for link in CACHED_PAIRWISE_LINKS {
+        assert!(find_analysis_mapping(link.foreign_class).is_some(), "{}", link.tests_path);
+        assert!(!link.tests_path.is_empty());
+    }
+
+    let pw_json = json!({"content": {
+        "ordinaryAnovaModel": {
+            "multipleComparisons": {
+                "tests": {
+                    "outer-3": {
+                        "id": { "col": { "idx": 3 } },
+                        "value": {
+                            "inner-1": {
+                                "id": { "col": { "idx": 1 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "meansDifference": -4.25,
+                                    "pValueAdjusted": { "state": "P_VALUE_LESS", "value": 1e-15 },
+                                    "pValueIndividual": { "state": "P_VALUE_EQUAL", "value": 0.5 }
+                                }
+                            },
+                            "inner-invalid": {
+                                "id": { "col": { "idx": 2 } },
+                                "value": {
+                                    "status": "INVALID",
+                                    "meansDifference": "NaN",
+                                    "pValueAdjusted": { "state": "P_VALUE_EQUAL", "value": 0.99 }
+                                }
+                            },
+                            "inner-2way": {
+                                "id": { "col": { "idx": 4 }, "row": { "idx": 0 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "meansDifference": 99.0,
+                                    "pValueAdjusted": { "state": "P_VALUE_EQUAL", "value": 0.5 }
+                                }
+                            }
+                        }
+                    },
+                    "outer-2way": {
+                        "id": { "col": { "idx": 0 }, "row": { "idx": 1 } },
+                        "value": {
+                            "inner-5": {
+                                "id": { "col": { "idx": 5 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "pValueAdjusted": { "state": "P_VALUE_EQUAL", "value": 0.5 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }});
+    let pw_ref = extract_cached_analysis_reference("ONE_WAY_ANOVA", &pw_json);
+    assert_eq!(pw_ref.pairwise.len(), 1, "INVALID and (col, row) entries must be skipped");
+    assert_eq!((pw_ref.pairwise[0].col_a, pw_ref.pairwise[0].col_b), (3, 1));
+    assert_eq!(pw_ref.pairwise[0].p_or_q, Some((1e-15, CachedBound::LessThan, false)));
+    assert_eq!(pw_ref.pairwise[0].means_diff, Some(-4.25));
+
+    let matching_sheet = make_test_result_sheet(
+        vec![],
+        vec![
+            PairwiseComparisonRecord {
+                group_a: 1,
+                group_b: 3,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("Drug"),
+                estimate_diff: Some(4.25),
+                raw_p_or_q: 3e-18,
+                is_fdr_q: false,
+                significant: true,
+            },
+            PairwiseComparisonRecord {
+                group_a: 1,
+                group_b: 2,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("Low"),
+                estimate_diff: Some(1.0),
+                raw_p_or_q: 0.01,
+                is_fdr_q: false,
+                significant: true,
+            },
+        ],
+    );
+    let diag_ok = compare_recomputed_against_reference(&matching_sheet, &pw_ref, 1e-9, 1e-6);
+    assert_eq!((diag_ok.compared_count, diag_ok.pairwise_compared_count, diag_ok.pairwise_disagreements), (2, 2, 0));
+    assert!(diag_ok.disagreements.is_empty());
+    assert_eq!(diag_ok, compare_recomputed_against_cached_results(&matching_sheet, "ONE_WAY_ANOVA", &pw_json, 1e-9, 1e-6));
+
+    let mismatch_sheet = make_test_result_sheet(
+        vec![],
+        vec![PairwiseComparisonRecord {
+            group_a: 1,
+            group_b: 3,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("Drug"),
+            estimate_diff: Some(9.5),
+            raw_p_or_q: 0.156,
+            is_fdr_q: false,
+            significant: false,
+        }],
+    );
+    let diag_bad = compare_recomputed_against_reference(&mismatch_sheet, &pw_ref, 1e-9, 1e-6);
+    assert_eq!((diag_bad.pairwise_compared_count, diag_bad.pairwise_disagreements, diag_bad.disagreements.len()), (2, 2, 2));
+    assert_eq!((diag_bad.disagreements[0].key.as_str(), diag_bad.disagreements[0].symbol.as_str()), ("Pairwise adjusted P", "p"));
+    assert_eq!(diag_bad.disagreements[0].quantity_label, "Ctrl vs Drug adjusted p-value");
+    assert_eq!((diag_bad.disagreements[1].key.as_str(), diag_bad.disagreements[1].symbol.as_str()), ("Pairwise mean difference", "|mean diff|"));
+    assert_eq!(diag_bad.disagreements[1].quantity_label, "Ctrl vs Drug mean difference");
+}
+
+#[test]
+fn external_archive_pairwise_crosswalk_fdr_q_and_individual_p() {
+    let fdr_kw_json = json!({"content": {
+        "kruskalWallisTestModel": {
+            "multipleComparisons": {
+                "tests": {
+                    "u0": {
+                        "id": { "col": { "idx": 0 } },
+                        "value": {
+                            "u1": {
+                                "id": { "col": { "idx": 1 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "meansDifference": 123.0,
+                                    "qValue": { "state": "P_VALUE_EQUAL", "value": 0.03 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }});
+    let fdr_ref = extract_cached_analysis_reference("ONE_WAY_ANOVA", &fdr_kw_json);
+    assert_eq!(fdr_ref.pairwise.len(), 1);
+    assert_eq!(fdr_ref.pairwise[0].p_or_q, Some((0.03, CachedBound::Equal, true)));
+    assert_eq!(fdr_ref.pairwise[0].means_diff, None);
+
+    let fwer_sheet = make_test_result_sheet(
+        vec![],
+        vec![PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("A"),
+            label_b: String::from("B"),
+            estimate_diff: None,
+            raw_p_or_q: 0.5,
+            is_fdr_q: false,
+            significant: false,
+        }],
+    );
+    assert_eq!(compare_recomputed_against_reference(&fwer_sheet, &fdr_ref, 1e-9, 1e-6).pairwise_compared_count, 0);
+
+    let fdr_sheet = make_test_result_sheet(
+        vec![],
+        vec![PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("A"),
+            label_b: String::from("B"),
+            estimate_diff: None,
+            raw_p_or_q: 0.25,
+            is_fdr_q: true,
+            significant: false,
+        }],
+    );
+    let fdr_diag = compare_recomputed_against_reference(&fdr_sheet, &fdr_ref, 1e-9, 1e-6);
+    assert_eq!((fdr_diag.pairwise_compared_count, fdr_diag.pairwise_disagreements), (1, 1));
+    assert_eq!((fdr_diag.disagreements[0].key.as_str(), fdr_diag.disagreements[0].symbol.as_str()), ("Pairwise FDR q", "q"));
+
+    let indiv_json = json!({"content": {
+        "brownForsytheAnovaModel": {
+            "multipleComparisons": {
+                "tests": {
+                    "u0": {
+                        "id": { "col": { "idx": 0 } },
+                        "value": {
+                            "u1": {
+                                "id": { "col": { "idx": 2 } },
+                                "value": {
+                                    "status": "VALID",
+                                    "pValueIndividual": { "state": "P_VALUE_EQUAL", "value": 0.015 }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }});
+    let indiv_ref = extract_cached_analysis_reference("ONE_WAY_ANOVA", &indiv_json);
+    assert_eq!(indiv_ref.pairwise.len(), 1);
+    assert_eq!(indiv_ref.pairwise[0].p_or_q, Some((0.015, CachedBound::Equal, false)));
 }
 
 #[test]
 fn external_archive_analyses_3hop_preferred_result_snapshot() {
+    // Unpromoted design (`MANN_WHITNEY`) stays an imported read-only 3-hop snapshot.
     let zip = build_zip_owned(vec![
         (
             "document.json".into(),
@@ -769,7 +1333,7 @@ fn external_archive_analyses_3hop_preferred_result_snapshot() {
                 "sheets": { "data": ["d-src"], "analyses": ["an-1"] },
                 "sheetAttributesMap": {
                     "d-src": { "title": "Groups" },
-                    "an-1": { "title": "Unpaired t test of Groups", "highlightColor": "#228844" }
+                    "an-1": { "title": "Mann-Whitney test of Groups", "highlightColor": "#228844" }
                 }
             })),
         ),
@@ -787,7 +1351,7 @@ fn external_archive_analyses_3hop_preferred_result_snapshot() {
             "analyses/an-1/sheet.json".into(),
             json_bytes(json!({
                 "uid": "an-1",
-                "title": "Unpaired t test of Groups",
+                "title": "Mann-Whitney test of Groups",
                 "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
                 "preferredResultSheet": "rs-main",
                 "inputSheets": [{ "uid": "d-src", "title": "Groups" }],
@@ -796,7 +1360,7 @@ fn external_archive_analyses_3hop_preferred_result_snapshot() {
         ),
         (
             "analyses/an-1/parameters.json".into(),
-            json_bytes(json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}})),
+            json_bytes(json!({"content": {"experimentalDesign": "MANN_WHITNEY", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}})),
         ),
         (
             "analyses/an-1/results.json".into(),
@@ -821,6 +1385,7 @@ fn external_archive_analyses_3hop_preferred_result_snapshot() {
     let report = import_prism_bytes(&zip).unwrap();
     assert_eq!(report.document.data_sheets.len(), 1);
     assert_eq!(report.document.result_sheets.len(), 1);
+    assert!(report.promoted_analyses.is_empty());
     let rs = &report.document.result_sheets[0];
     assert_eq!(rs.status, ResultStatus::Imported);
     let expected_fmt = ".prism".trim_start_matches('.');
@@ -837,6 +1402,126 @@ fn external_archive_analyses_3hop_preferred_result_snapshot() {
     assert_eq!(rs.tabs[0].rows[0][0], ResultCell::Number { value: 0.00025, prefix: None, units: None });
     assert!(rs.scalars.iter().any(|s| s.key == "tStatistic" && (s.value - 12.2474).abs() < 1e-9));
     assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedAnalysis && w.source == "analyses/an-1"));
+}
+
+#[test]
+fn external_archive_promoted_analysis_imports_live_with_reference_and_3hop_fallback() {
+    let zip = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Promoted Live Project",
+                "sheets": { "data": ["d-src", "d-xy-rep"], "analyses": ["an-live", "an-blocked-out"] },
+                "sheetAttributesMap": {
+                    "d-src": { "title": "Groups" },
+                    "d-xy-rep": { "title": "Replicated XY" },
+                    "an-live": { "title": "Unpaired t test of Groups", "highlightColor": "#228844" },
+                    "an-blocked-out": { "title": "Outliers on Replicated XY" }
+                }
+            })),
+        ),
+        (
+            "data/sheets/d-src/sheet.json".into(),
+            json_bytes(
+                json!({"title": "Groups", "table": {"uid": "t-src", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-a", "ds-b", "ds-c"]}}),
+            ),
+        ),
+        ("data/sets/ds-a.json".into(), json_bytes(json!({"title": "Ctrl", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-b.json".into(), json_bytes(json!({"title": "Drug", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-c.json".into(), json_bytes(json!({"title": "Extra", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-src/data.csv".into(), b"10,20,30\n12,22,32\n11,21,31\n".to_vec()),
+        (
+            "data/sheets/d-xy-rep/sheet.json".into(),
+            json_bytes(
+                json!({"title": "Replicated XY", "table": {"uid": "t-xy", "format": "xy", "dataFormat": "y_replicates", "replicatesCount": 2, "xDataSet": "ds-x", "dataSets": ["ds-y"]}}),
+            ),
+        ),
+        ("data/sets/ds-x.json".into(), json_bytes(json!({"title": "X", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-y.json".into(), json_bytes(json!({"title": "Y", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-xy/data.csv".into(), b"1,10,12\n2,20,22\n3,30,32\n".to_vec()),
+        (
+            "analyses/an-live/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-live",
+                "title": "Unpaired t test of Groups",
+                "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+                "isAllDataAnalyzed": false,
+                "inputSheets": [{ "uid": "d-src" }],
+                "inputDataSets": [{ "uid": "ds-b" }, { "uid": "ds-a" }],
+                "preferredResultSheet": "rs-main",
+                "resultSheets": [{ "uid": "rs-main", "title": "Tabular results" }]
+            })),
+        ),
+        (
+            "analyses/an-live/parameters.json".into(),
+            json_bytes(json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}})),
+        ),
+        (
+            "analyses/an-live/results.json".into(),
+            json_bytes(
+                json!({"content": {"unpairedTTestModel": {"unpairedTTest": {"t": -12.2474487139, "pValue": {"state": "P_VALUE_EQUAL", "value": 0.0002546}}}}}),
+            ),
+        ),
+        (
+            "analyses/an-live/result_sheets/rs-main.json".into(),
+            json_bytes(json!({"uid": "rs-main", "name": "Tabular results", "dataSheet": "view-1"})),
+        ),
+        (
+            "data/sheets/view-1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "view-1",
+                "flags": ["ANALYSIS_VIEW"],
+                "table": {"uid": "t-view-1", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-vrt", "dataSets": ["ds-vcol"]}
+            })),
+        ),
+        ("data/sets/ds-vrt.json".into(), json_bytes(json!({"title": "Metric", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/ds-vcol.json".into(), json_bytes(json!({"title": "Value", "replicates": [{"valueType": "string"}]}))),
+        ("data/tables/t-view-1/data.csv".into(), b"P value,0.0002546\n".to_vec()),
+        // IDENTIFY_OUTLIERS with AVERAGE on a multi-subcolumn XY table MUST stay read-only snapshot.
+        (
+            "analyses/an-blocked-out/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-blocked-out",
+                "title": "Outliers on Replicated XY",
+                "analysisClass": "IDENTIFY_OUTLIERS",
+                "inputSheets": [{ "uid": "d-xy-rep" }]
+            })),
+        ),
+        (
+            "analyses/an-blocked-out/parameters.json".into(),
+            json_bytes(json!({"content": {"calc": {"method": "ROUT", "q": 1.0}, "data": {"handleReplicatesAs": "AVERAGE"}}})),
+        ),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    assert_eq!(report.document.result_sheets.len(), 2);
+    assert_eq!(report.promoted_analyses.len(), 1);
+
+    let live = &report.document.result_sheets[0];
+    assert_eq!(live.status, ResultStatus::Dirty);
+    assert_eq!(live.provenance, ResultProvenance::Computed);
+    assert!(matches!(live.analysis.kind, AnalysisKind::TwoGroupComparison(_)));
+    assert_eq!(live.analysis.selected_data_sets, vec![1, 0]);
+    assert_eq!(live.color_tag, Some(Rgba8::rgb(0x22, 0x88, 0x44)));
+    assert_eq!(live.analysis.custom_title.as_deref(), Some("Unpaired t test of Groups"));
+    assert!(!report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedAnalysis && w.source == "analyses/an-live"));
+
+    let pref = &report.promoted_analyses[0];
+    assert_eq!(pref.sheet_id, live.id);
+    assert_eq!(pref.analysis_uid, "an-live");
+    assert_eq!(pref.foreign_class, "T_TESTS_AND_NONPARAMETRIC");
+    assert_eq!(pref.reference.scalars.len(), 2);
+    assert_eq!(pref.fallback.original_kind_label, "T_TESTS_AND_NONPARAMETRIC");
+    assert_eq!(pref.fallback.tabs.len(), 1);
+    assert_eq!(pref.fallback.tabs[0].title, "Tabular results");
+    assert!(!pref.fallback.scalars.is_empty());
+
+    let blocked = &report.document.result_sheets[1];
+    assert_eq!(blocked.status, ResultStatus::Imported);
+    assert!(matches!(blocked.provenance, ResultProvenance::Imported { .. }));
+    assert!(report.warnings.iter().any(|w| {
+        w.kind == ImportWarningKind::UnsupportedAnalysis && w.source == "analyses/an-blocked-out" && w.message.contains("multi-subcolumn")
+    }));
 }
 
 #[test]

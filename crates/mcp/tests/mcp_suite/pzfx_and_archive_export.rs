@@ -10,13 +10,13 @@ use std::fs;
 use std::sync::Arc;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ConstantValue, DataSheet, GraphSheet, InfoSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode,
-    TableArchetype, XyTable,
+    AnalysisKind, AnalysisSpec, Cell, ConstantValue, DataSheet, GraphSheet, InfoSheet, ProjectDocument, ResultProvenance, ResultSheet, ResultStatus,
+    SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_engine::Caller;
 use curvebook_format::registry::DESC_PRISM;
-use curvebook_format::{compare_pzfx_data_layer, import_pzfx_bytes, save_project_file};
+use curvebook_format::{ZipWriter, compare_pzfx_data_layer, import_pzfx_bytes, save_project_file};
 use curvebook_mcp::{McpServerState, ToolCallError, call_tool, list_tools};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::sync::Mutex;
@@ -239,4 +239,192 @@ fn mcp_live_attach_experimental_archive_export_unwraps_payload() {
     let guard = desktop.lock_or_recover().unwrap();
     assert_eq!(guard.file_path(), Some(cb_path.as_path()));
     assert!(guard.is_dirty());
+}
+
+fn build_promoted_archive_fixture_bytes() -> Vec<u8> {
+    let mut zip = ZipWriter::new();
+    let add_json = |zw: &mut ZipWriter, path: &str, value: Value| {
+        zw.add_file(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    };
+    add_json(
+        &mut zip,
+        "document.json",
+        json!({
+            "formatVersion": "1-6-0",
+            "title": "MCP Promoted Archive",
+            "sheets": { "data": ["d-groups", "d-single"], "analyses": ["an-ttest", "an-stale", "an-fallback"] },
+            "sheetAttributesMap": {
+                "d-groups": { "title": "Groups" },
+                "d-single": { "title": "Single" },
+                "an-ttest": { "title": "Agreeing T-Test" },
+                "an-stale": { "title": "Stale T-Test" },
+                "an-fallback": { "title": "Degenerate T-Test" }
+            }
+        }),
+    );
+    add_json(
+        &mut zip,
+        "data/sheets/d-groups/sheet.json",
+        json!({"uid": "d-groups", "title": "Groups", "table": {"uid": "t-groups", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-a", "ds-b"]}}),
+    );
+    add_json(&mut zip, "data/sets/ds-a.json", json!({"title": "Control", "replicates": [{"valueType": "real"}]}));
+    add_json(&mut zip, "data/sets/ds-b.json", json!({"title": "Treated", "replicates": [{"valueType": "real"}]}));
+    zip.add_file("data/tables/t-groups/data.csv", b"10,20\n12,22\n14,24\n".to_vec()).unwrap();
+
+    add_json(
+        &mut zip,
+        "data/sheets/d-single/sheet.json",
+        json!({"uid": "d-single", "title": "Single", "table": {"uid": "t-single", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-only"]}}),
+    );
+    add_json(&mut zip, "data/sets/ds-only.json", json!({"title": "Only", "replicates": [{"valueType": "real"}]}));
+    zip.add_file("data/tables/t-single/data.csv", b"1\n2\n3\n".to_vec()).unwrap();
+
+    let ttest_params = json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}});
+    add_json(
+        &mut zip,
+        "analyses/an-ttest/sheet.json",
+        json!({"uid": "an-ttest", "title": "Agreeing T-Test", "analysisClass": "T_TESTS_AND_NONPARAMETRIC", "inputSheets": [{"uid": "d-groups"}]}),
+    );
+    add_json(&mut zip, "analyses/an-ttest/parameters.json", ttest_params.clone());
+    add_json(
+        &mut zip,
+        "analyses/an-ttest/results.json",
+        json!({"content": {"unpairedTTestModel": {"unpairedTTest": {"t": -6.123_724_356_957_945, "pValue": {"state": "P_VALUE_EQUAL", "value": 0.003_602_232_609_1}}}}}),
+    );
+
+    add_json(
+        &mut zip,
+        "analyses/an-stale/sheet.json",
+        json!({"uid": "an-stale", "title": "Stale T-Test", "analysisClass": "T_TESTS_AND_NONPARAMETRIC", "inputSheets": [{"uid": "d-groups"}]}),
+    );
+    add_json(&mut zip, "analyses/an-stale/parameters.json", ttest_params.clone());
+    add_json(
+        &mut zip,
+        "analyses/an-stale/results.json",
+        json!({"content": {"unpairedTTestModel": {"unpairedTTest": {"t": -6.123_724_356_957_945, "pValue": {"state": "P_VALUE_EQUAL", "value": 0.156}}}}}),
+    );
+
+    add_json(
+        &mut zip,
+        "analyses/an-fallback/sheet.json",
+        json!({
+            "uid": "an-fallback",
+            "title": "Degenerate T-Test",
+            "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+            "inputSheets": [{"uid": "d-single"}],
+            "preferredResultSheet": "rs-fb",
+            "resultSheets": [{"uid": "rs-fb", "title": "Cached Fallback"}]
+        }),
+    );
+    add_json(&mut zip, "analyses/an-fallback/parameters.json", ttest_params);
+    add_json(&mut zip, "analyses/an-fallback/result_sheets/rs-fb.json", json!({"uid": "rs-fb", "name": "Cached Fallback", "dataSheet": "view-fb"}));
+    add_json(
+        &mut zip,
+        "data/sheets/view-fb/sheet.json",
+        json!({"uid": "view-fb", "flags": ["ANALYSIS_VIEW"], "table": {"uid": "t-view-fb", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-fb-rt", "dataSets": ["ds-fb-v"]}}),
+    );
+    add_json(&mut zip, "data/sets/ds-fb-rt.json", json!({"title": "Metric", "replicates": [{"valueType": "string"}]}));
+    add_json(&mut zip, "data/sets/ds-fb-v.json", json!({"title": "Value", "replicates": [{"valueType": "string"}]}));
+    zip.add_file("data/tables/t-view-fb/data.csv", b"P value,0.042\n".to_vec()).unwrap();
+
+    zip.finish().unwrap()
+}
+
+#[test]
+fn mcp_open_file_and_import_archive_recompute_promoted_analyses_and_surface_warnings() {
+    let dir = TempDir::new_canonical("mcp-promoted-archive").unwrap();
+    let archive_path = dir.child("promoted.prism");
+    fs::write(&archive_path, build_promoted_archive_fixture_bytes()).unwrap();
+
+    // 1. Standalone `open_file`: finalizes promoted analyses and returns typed warnings.
+    let mut state = McpServerState::with_workdir(dir.path()).unwrap();
+    let opened = call_tool(&mut state, "open_file", json!({ "path": "promoted.prism" })).unwrap();
+    assert!(!opened.is_error, "open_file failed: {:?}", opened.structured_content);
+    let opened_json = parse_result_json(&opened).unwrap();
+    let open_warns = opened_json["warnings"].as_array().unwrap();
+    assert!(
+        open_warns.iter().any(|w| w["kind"] == json!("RecomputedResultDisagreement") && w["message"].as_str().unwrap_or("").contains("0.156")),
+        "missing disagreement warning on standalone open_file: {open_warns:?}"
+    );
+    assert!(
+        open_warns
+            .iter()
+            .any(|w| w["kind"] == json!("AnalysisRecomputeFallback") && w["message"].as_str().unwrap_or("").contains("Degenerate T-Test")),
+        "missing fallback warning on standalone open_file: {open_warns:?}"
+    );
+    assert!(!open_warns.iter().any(|w| w["source"] == json!("analyses/an-ttest")));
+
+    let doc = state.session().document();
+    assert_eq!(doc.result_sheet(&SheetId::new("an-ttest")).unwrap().status, ResultStatus::UpToDate);
+    let stale = doc.result_sheet(&SheetId::new("an-stale")).unwrap();
+    assert_eq!(stale.status, ResultStatus::UpToDate);
+    assert_eq!(stale.provenance, ResultProvenance::Computed);
+    assert!((stale.lookup_scalar("PValue", None).unwrap() - 0.003_602_232_609_1).abs() < 1e-9);
+    let fb = doc.result_sheet(&SheetId::new("an-fallback")).unwrap();
+    assert_eq!(fb.status, ResultStatus::Imported);
+    assert!(matches!(fb.analysis.kind, AnalysisKind::ImportedSnapshot(_)));
+    assert_eq!(fb.tabs.len(), 1);
+
+    // 2. Direct `command_run` -> `table.importPrism`: same post-recompute warnings & live state.
+    let mut cmd_state = McpServerState::with_workdir(dir.path()).unwrap();
+    let imported =
+        call_tool(&mut cmd_state, "command_run", json!({ "command_id": "table.importPrism", "params": { "path": "promoted.prism" } })).unwrap();
+    assert!(!imported.is_error, "table.importPrism failed: {:?}", imported.structured_content);
+    let imp_json = parse_result_json(&imported).unwrap();
+    let imp_warns = imp_json.pointer("/payload/warnings").and_then(Value::as_array).unwrap();
+    assert!(imp_warns.iter().any(|w| w["kind"] == json!("RecomputedResultDisagreement")));
+    assert!(imp_warns.iter().any(|w| w["kind"] == json!("AnalysisRecomputeFallback")));
+    assert_eq!(imp_json.pointer("/payload/failed_count"), Some(&json!(0)));
+    assert_eq!(cmd_state.session().document().result_sheet(&SheetId::new("an-ttest")).unwrap().status, ResultStatus::UpToDate);
+    assert_eq!(cmd_state.session().document().result_sheet(&SheetId::new("an-fallback")).unwrap().status, ResultStatus::Imported);
+
+    // 3. Live-attach `open_file` (replace via `command.batch` and append via `engine.execute`)
+    //    must surface post-recompute warnings returned by `table.importPrism`.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let desktop = Arc::new(Mutex::named("test.live_promoted.session", curvebook_engine::Session::new()));
+        let desktop_handler = Arc::clone(&desktop);
+        let mut live = McpServerState::with_control_port(49342).unwrap().with_control_handler(move |method, params| match method {
+            "engine.execute" => {
+                let cmd_id = params.get("command_id").and_then(Value::as_str).ok_or_else(|| String::from("missing command_id"))?;
+                let cmd_params = params.get("params").cloned().unwrap_or_else(|| json!({}));
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let mut guard = desktop_handler.lock_or_recover().map_err(|e| format!("lock: {e}"))?;
+                let outcome = guard.execute_with_caller(cmd_id, cmd_params, Caller::Control, &cancel).map_err(|e| e.message().to_owned())?;
+                serde_json::to_value(outcome).map_err(|e| e.to_string())
+            }
+            "command.batch" => {
+                let cmds = params.get("commands").and_then(Value::as_array).ok_or_else(|| String::from("missing commands"))?;
+                let cancel = std::sync::atomic::AtomicBool::new(false);
+                let mut guard = desktop_handler.lock_or_recover().map_err(|e| format!("lock: {e}"))?;
+                let mut results = Vec::new();
+                for (idx, item) in cmds.iter().enumerate() {
+                    let cmd_id = item.get("command").and_then(Value::as_str).ok_or_else(|| String::from("missing command"))?;
+                    let cmd_params = item.get("params").cloned().unwrap_or_else(|| json!({}));
+                    let outcome = guard.execute_with_caller(cmd_id, cmd_params, Caller::Control, &cancel).map_err(|e| e.message().to_owned())?;
+                    results.push(json!({ "index": idx, "command": cmd_id, "result": serde_json::to_value(outcome).map_err(|e| e.to_string())? }));
+                }
+                Ok(json!({ "atomic": true, "count": results.len(), "results": results }))
+            }
+            "doc.inspect" => {
+                let guard = desktop_handler.lock_or_recover().map_err(|e| format!("lock: {e}"))?;
+                Ok(json!({ "title": guard.document().title, "counts": { "total": guard.document().total_sheet_count() } }))
+            }
+            other => Err(format!("unexpected live method {other}")),
+        });
+
+        let live_replace = call_tool(&mut live, "open_file", json!({ "path": archive_path.display().to_string() })).unwrap();
+        assert!(!live_replace.is_error, "live open_file replace failed: {:?}", live_replace.structured_content);
+        let lr_json = parse_result_json(&live_replace).unwrap();
+        let lr_warns = lr_json["warnings"].as_array().unwrap();
+        assert!(lr_warns.iter().any(|w| w["kind"] == json!("RecomputedResultDisagreement")), "live replace warnings: {lr_warns:?}");
+        assert!(lr_warns.iter().any(|w| w["kind"] == json!("AnalysisRecomputeFallback")), "live replace warnings: {lr_warns:?}");
+
+        let live_append = call_tool(&mut live, "open_file", json!({ "path": archive_path.display().to_string(), "append": true })).unwrap();
+        assert!(!live_append.is_error, "live open_file append failed: {:?}", live_append.structured_content);
+        let la_json = parse_result_json(&live_append).unwrap();
+        let la_warns = la_json["warnings"].as_array().unwrap();
+        assert!(la_warns.iter().any(|w| w["kind"] == json!("RecomputedResultDisagreement")), "live append warnings: {la_warns:?}");
+        assert!(la_warns.iter().any(|w| w["kind"] == json!("AnalysisRecomputeFallback")), "live append warnings: {la_warns:?}");
+    }
 }

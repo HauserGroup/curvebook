@@ -12,8 +12,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use curvebook::desktop_host::{
-    DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput,
-    allocate_fresh_isolated_journal_dir, dir_has_unrecovered_crash, open_dir_with_policy_safe_recovery, open_document_from_files,
+    DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput, StartupImportWarnings,
+    allocate_fresh_isolated_journal_dir, dir_has_unrecovered_crash, open_dir_with_policy_safe_recovery, open_document_from_files_with_warnings,
     open_fresh_journal_for_seeded_session,
 };
 use curvebook::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
@@ -486,19 +486,24 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         });
     }
 
-    let initial_win_id = if cfg.new_instance {
-        let session = load_startup_session(&cfg.files)?;
+    let (initial_win_id, startup_warnings) = if cfg.new_instance {
+        let (session, warnings) = open_document_from_files_with_warnings(&cfg.files)?;
         let attach_recovery = recovery_root.is_some();
-        runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?
+        let win_id = runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?;
+        (win_id, warnings)
     } else {
         let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
         let recovery_dir = startup.recovery_dir.unwrap_or_else(|| app_paths.recovery_dir.clone());
-        if let Some(journal) = startup.journal {
+        let win_id = if let Some(journal) = startup.journal {
             runtime_guard.get_mut()?.open_window_with_recovery(startup.session, initial_viewport, recovery_dir, journal, startup.report)?
         } else {
             runtime_guard.get_mut()?.open_window_with_session(startup.session, initial_viewport, false)?
-        }
+        };
+        (win_id, startup.startup_warnings)
     };
+    if let Some(ref warnings) = startup_warnings {
+        runtime_guard.get_mut()?.record_startup_import_warnings(initial_win_id, warnings);
+    }
     if enable_recovery && !cfg.headless_once {
         let _ = runtime_guard.get_mut()?.recover_stale_journals(initial_viewport, now_epoch_ms())?;
         if !cfg.files.is_empty() {
@@ -939,6 +944,7 @@ struct StartupRecoveryState {
     journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>>,
     report: Option<RecoveryReport>,
     recovery_dir: Option<PathBuf>,
+    startup_warnings: Option<StartupImportWarnings>,
 }
 
 fn now_epoch_ms() -> u64 {
@@ -967,13 +973,13 @@ fn open_startup_session_with_recovery(
     now_ms: u64,
 ) -> Result<StartupRecoveryState, String> {
     if !enable_recovery {
-        let session = load_startup_session(files)?;
-        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None });
+        let (session, startup_warnings) = open_document_from_files_with_warnings(files)?;
+        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None, startup_warnings });
     }
 
-    let session = load_startup_session(files)?;
+    let (session, startup_warnings) = open_document_from_files_with_warnings(files)?;
     if !ensure_primary_recovery_dir(app_paths)? {
-        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None });
+        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None, startup_warnings });
     }
 
     if files.is_empty() {
@@ -990,6 +996,7 @@ fn open_startup_session_with_recovery(
             journal: Some(journal),
             report: Some(report),
             recovery_dir: Some(app_paths.recovery_dir.clone()),
+            startup_warnings: None,
         });
     }
 
@@ -1020,7 +1027,7 @@ fn open_startup_session_with_recovery(
         now_ms,
         &session,
     )?;
-    Ok(StartupRecoveryState { session, journal: Some(journal), report: None, recovery_dir: Some(target_dir) })
+    Ok(StartupRecoveryState { session, journal: Some(journal), report: None, recovery_dir: Some(target_dir), startup_warnings })
 }
 
 fn log_recovery_warnings(dir: &Path, report: &RecoveryReport) {
@@ -1320,8 +1327,9 @@ fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String
         .map_err(|err| format!("failed to write preferences `{}`: {err}", paths.preferences_file.display()))
 }
 
+#[cfg(test)]
 fn load_startup_session(files: &[PathBuf]) -> Result<Session, String> {
-    open_document_from_files(files)
+    curvebook::desktop_host::open_document_from_files(files)
 }
 
 fn parse_port(raw: &str) -> Result<u16, String> {

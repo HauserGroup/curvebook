@@ -143,7 +143,7 @@ fn import_parsed_pzfx(parsed: ParsedXml, used_cells: &mut usize) -> Result<Impor
     warn_ignored_sections(root, &mut warnings);
 
     validate_project_document(&doc)?;
-    Ok(ImportReport { document: doc, warnings })
+    Ok(ImportReport::new(doc, warnings))
 }
 
 fn emit_opaque_and_trailing_warning(parsed: &ParsedXml, warnings: &mut Vec<ImportWarning>) {

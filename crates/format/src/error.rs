@@ -119,6 +119,10 @@ pub enum ImportWarningKind {
     MissingMetadata,
     /// A spreadsheet formula cell had no stored result, so it was imported as an empty cell.
     MissingCachedValue,
+    /// A promoted live-recomputed imported analysis differed from the file's cached result.
+    RecomputedResultDisagreement,
+    /// A promoted live-recomputed imported analysis failed on import and fell back to its cached snapshot.
+    AnalysisRecomputeFallback,
 }
 
 /// Non-fatal compatibility note emitted during `.pzfx` or `.prism` project import.
@@ -136,9 +140,20 @@ impl ImportWarning {
     }
 }
 
-/// Result of importing an external project container (`.pzfx` or `.prism`).
+/// Result of importing an external project container (`.pzfx`, `.prism`, or `.xlsx`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImportReport {
     pub document: ProjectDocument,
     pub warnings: Vec<ImportWarning>,
+    /// Transient cached-result references and snapshot fallbacks for promoted live `.prism`
+    /// analyses, consumed by `curvebook-engine` after first recalculation and never persisted.
+    pub promoted_analyses: Vec<crate::prism::PromotedAnalysisRef>,
+}
+
+impl ImportReport {
+    /// Construct an [`ImportReport`] with no promoted live `.prism` analyses.
+    #[must_use]
+    pub fn new(document: ProjectDocument, warnings: Vec<ImportWarning>) -> Self {
+        Self { document, warnings, promoted_analyses: Vec::new() }
+    }
 }
