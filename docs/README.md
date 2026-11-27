@@ -4,7 +4,7 @@ Start with the [README](../README.md). People using CurveBook should read the [o
 
 ## Using CurveBook
 
-These pages are published on the documentation site by `cargo xtask docs-site`. Edit the Markdown or landing-page HTML here, not the generated HTML. Published pages follow the two-tier audience split defined in [`AGENTS.md`](../AGENTS.md#documentation-audience-tiers-docs-site---check) and [`release/github-pages.md`](release/github-pages.md#audience-tiers-scientist-guides-vs-technical-references): **Tier 1 scientist guides** stay short and plain-language (enforced by `docs-site --check`), while **Tier 2 technical references** hold exhaustive flags, schemas, equations, and format specifications. Read each file's top-of-file `Audience:` comment before editing.
+These pages are published on the documentation site by `cargo xtask docs-site`. Edit the Markdown or landing-page HTML here, not the generated HTML. Published pages follow the two-tier audience split defined in [`release/github-pages.md`](release/github-pages.md#audience-tiers-scientist-guides-vs-technical-references) (summarized in [`AGENTS.md`](../AGENTS.md)): **Tier 1 scientist guides** stay short and plain-language (enforced by `docs-site --check`), while **Tier 2 technical references** hold exhaustive flags, schemas, equations, and format specifications. Read each file's top-of-file `Audience:` comment before editing.
 
 | Guide | Contents |
 |---|---|
@@ -23,6 +23,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Guide | Contents |
 |---|---|
 | [Known pitfalls](pitfalls.md) and [engineering pitfalls](pitfalls-engineering.md) | Documented CurveBook incidents and general Rust/tooling rules adopted across the codebase |
+| [Clean-room & branding policy](clean-room.md) | Independent implementation rules, `.pzfx`/`.prism` naming, attributed upstream GUI reuse, and local reference frame policy |
 | [Development](development.md) | Prerequisites, building from source, everyday commands, tests, coverage, and local configuration |
 | [Continuous integration](ci.md) | CI stages, shared test binaries, deadlines, and local verification |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |

@@ -148,8 +148,15 @@ pub(crate) fn is_crates_or_apps_path(path: &str) -> bool {
 }
 pub(crate) fn is_legal_policy_doc_path(path: &str) -> bool {
     let t = norm_rel(path);
-    matches!(t.as_str(), "AGENTS.md" | "docs/ROADMAP.md" | "docs/planning/gui-layout-spec.md" | "plan/curvebook-rename.md" | "contribute/agents.html")
-        || t.ends_with("/contribute/agents.html")
+    matches!(
+        t.as_str(),
+        "AGENTS.md"
+            | "docs/clean-room.md"
+            | "docs/ROADMAP.md"
+            | "docs/planning/gui-layout-spec.md"
+            | "plan/curvebook-rename.md"
+            | "contribute/agents.html"
+    ) || t.ends_with("/contribute/agents.html")
 }
 fn matches_root_or_packaged(path: &str, allow_packaged: bool, names: &[&str]) -> bool {
     let t = norm_rel(path);
@@ -490,7 +497,7 @@ fn scan_text_lines(path: &str, text: &str, allow_packaged: bool, is_md: bool, ou
             if work.contains(ROADMAP_R24_ANCHOR) {
                 work = Cow::Owned(work.replace(ROADMAP_R24_ANCHOR, "r24-clean-room-interchange"));
             }
-            if path == "AGENTS.md" && line.contains("Scope:") && line.contains(PLAN_PRISM_SCOPE) {
+            if matches!(path, "AGENTS.md" | "docs/clean-room.md") && line.contains("Scope:") && line.contains(PLAN_PRISM_SCOPE) {
                 work = Cow::Owned(work.replace(PLAN_PRISM_SCOPE, "plan/ref_frames"));
             }
             if is_dev && work.contains("crates/format/src/prism/") {
@@ -1394,6 +1401,7 @@ mod tests {
             ("ATTRIBUTION.md", format!("## Attributed Source Code\nFrom {vc_title} (`{url}`).\n")),
             ("NOTICE", format!("## Attributed Source Code\nCopyright {vc_title} ({url}).\n")),
             ("AGENTS.md", format!("Attributed {vc_title}.\n")),
+            ("docs/clean-room.md", format!("Attributed {vc_title}.\n")),
         ] {
             assert!(scan(p, &b).is_empty(), "{p}");
         }

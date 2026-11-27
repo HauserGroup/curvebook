@@ -672,7 +672,7 @@ All three shipped themes (`Light`, `Dark`, `HighContrast`) derive from `ThemeSee
 
 ### 9.3 Attributed Upstream UI Adaptation & Clean-Room Rewrite Boundaries
 
-Per [`../../AGENTS.md`](../../AGENTS.md) (*Attributed VectorCraft GUI source reuse*), permissions and clean-room boundaries split cleanly between pure-`egui` adaptations and engine-coupled CurveBook rewrites (recording exact upstream commit, source paths, and affected CurveBook files strictly inside [`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) and [`../../NOTICE`](../../NOTICE), and omitting external suite branding or identifiers banned by `cargo xtask brands`):
+Per [`../clean-room.md`](../clean-room.md#attributed-vectorcraft-gui-source-reuse) (*Attributed VectorCraft GUI source reuse*), permissions and clean-room boundaries split cleanly between pure-`egui` adaptations and engine-coupled CurveBook rewrites (recording exact upstream commit, source paths, and affected CurveBook files strictly inside [`../../ATTRIBUTION.md`](../../ATTRIBUTION.md) and [`../../NOTICE`](../../NOTICE), and omitting external suite branding or identifiers banned by `cargo xtask brands`):
 
 - **Direct Pure-`egui` Adaptations (`ATTRIBUTION.md` + `NOTICE`):**
   1. Standalone `egui 0.37` widget primitives (`toggles`, `buttons`, `labels`, `panel_chrome`, `wheel_stream`).

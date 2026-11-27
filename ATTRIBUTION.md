@@ -14,7 +14,7 @@ The complete asset manifest is [ASSETS.md](ASSETS.md). Every non-code asset in t
 
 ## Attributed Source Code
 
-Per `AGENTS.md` (*Attributed VectorCraft GUI source reuse*), CurveBook adapts permissively licensed (`MIT OR Apache-2.0`) pure-`egui` widget helpers and top-bar width-fitting logic from upstream repository `https://github.com/storytold/vectorcraft` at commit `644f5bc8e377730d093ac5af8967dcd055051a16`:
+Per [`docs/clean-room.md`](docs/clean-room.md#attributed-vectorcraft-gui-source-reuse) (*Attributed VectorCraft GUI source reuse*), CurveBook adapts permissively licensed (`MIT OR Apache-2.0`) pure-`egui` widget helpers and top-bar width-fitting logic from upstream repository `https://github.com/storytold/vectorcraft` at commit `644f5bc8e377730d093ac5af8967dcd055051a16`:
 
 - `crates/ui-egui/src/widgets/toggles.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
 - `crates/ui-egui/src/widgets/buttons.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)

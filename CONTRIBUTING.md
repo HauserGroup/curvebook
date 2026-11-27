@@ -22,7 +22,7 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
 
 ## 2. Rules Every PR Must Respect
 
-1. **Independent implementation and original design:** Never inspect the binaries, memory, or bundled assets of proprietary commercial statistical or curve-fitting applications or copy their code, wording, assets, or distinctive visual design. The [limited local JPG reference policy](AGENTS.md#limited-local-jpg-reference-policy) permits only high-level workflow, information-hierarchy, and generic functional-organization observations from the designated existing frames; its provenance, handling, and verification restrictions apply. Never depend on or translate copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) code. Write everything in CurveBook's own words (`cargo xtask cleanroom` and `cargo xtask brands` verify this). Lowercase `.pzfx files` and `.prism files` naming is specifically allowed over clean-room and branding principles and should be preferred across user-facing documentation and GUI labels where appropriate, while bare or capitalised competitor product names and vendor-authored prose or sample files stay forbidden.
+1. **Independent implementation and original design:** Never inspect the binaries, memory, or bundled assets of proprietary commercial statistical or curve-fitting applications or copy their code, wording, assets, or distinctive visual design. The [limited local JPG reference policy](docs/clean-room.md#limited-local-jpg-reference-policy) permits only high-level workflow, information-hierarchy, and generic functional-organization observations from the designated existing frames; its provenance, handling, and verification restrictions apply. Never depend on or translate copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) code. Write everything in CurveBook's own words (`cargo xtask cleanroom` and `cargo xtask brands` verify this). Lowercase `.pzfx files` and `.prism files` naming is specifically allowed over clean-room and branding principles and should be preferred across user-facing documentation and GUI labels where appropriate, while bare or capitalised competitor product names and vendor-authored prose or sample files stay forbidden. See [docs/clean-room.md](docs/clean-room.md) for the full policy.
 2. **Never crash:** Workspace clippy lints deny `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`, and `unsafe_code`. Handle malformed files, empty selections, degenerate numerical inputs, and RPC/MCP calls via typed `Result` / `Option` errors and bounds-checked slices.
 3. **Statistical rigor & `D1` oracles:** Every routine in `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform` must cite a peer-reviewed reference, document degenerate/edge cases, and validate against verified published/oracle datasets (such as NIST StRD) rather than unverified approximations.
 4. **Assets & zero bundled fonts:** Every asset added to the repository needs a row in [ASSETS.md](ASSETS.md) (and [ATTRIBUTION.md](ATTRIBUTION.md) if third-party). Never commit `.ttf`, `.otf`, `.woff`, or `.woff2` files (`cargo xtask assets`).
@@ -33,17 +33,17 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
 
 ## 3. Claiming Work in `docs/ROADMAP.md`
 
-1. Browse [docs/ROADMAP.md](docs/ROADMAP.md) for an unclaimed `Owner: open` task (`R<m>.<n>`), and check open PRs/issues so nobody duplicates work.
+1. Browse [docs/ROADMAP.md](docs/ROADMAP.md) for an unclaimed `Owner: open` task (`R<m>.<n>`), and check open PRs/issues so nobody duplicates work. Items marked `Owner: maintainers` are maintainer-steered foundation, security, or release tasks; ownership is never assigned to an individual handle as a permanent lock.
 2. Claim the item first in `docs/ROADMAP.md` (and/or an issue referencing its `R<m>.<n>` ID) before branching.
-3. Keep each PR focused on a single `R<m>.<n>` task whenever practical.
-4. If you step away before finishing, unclaim the task in `docs/ROADMAP.md` or on the issue so others can pick it up cleanly.
+3. Keep each PR focused on a single `R<m>.<n>` task unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.
+4. If you step away before finishing, unclaim the task in `docs/ROADMAP.md` or on the issue and note partial findings cleanly.
 
 ---
 
 ## 4. Branching, Editing & Pull Requests
 
-1. **Read first:** [AGENTS.md](AGENTS.md), [docs/pitfalls.md](docs/pitfalls.md), [docs/extending.md](docs/extending.md), and the relevant guide ([docs/command-ids.md](docs/command-ids.md), [docs/file-formats.md](docs/file-formats.md), [docs/licences.md](docs/licences.md)).
-2. **Branch name:** Prefix with one of `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, or `audit/` and include the roadmap ID (`R<m>.<n>`):
+1. **Read first:** [AGENTS.md](AGENTS.md), [docs/pitfalls.md](docs/pitfalls.md), [docs/pitfalls-engineering.md](docs/pitfalls-engineering.md), [docs/extending.md](docs/extending.md), and the relevant task guide listed in `AGENTS.md`.
+2. **Branch & worktree isolation:** Never make code changes directly on `main` unless explicitly directed. Create a dedicated branch and sibling `git worktree` (e.g. `../.cb-worktrees/<task-name>`), or continue working in the current checkout if it is already a task-specific feature branch/worktree, and remove the worktree once integrated. Only the user or a designated integrator merges into `main`. Prefix branch names with one of `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, or `audit/` and include the roadmap ID (`R<m>.<n>`):
    ```sh
    git checkout -b feature/R0.10-atomic-platform-writes
    ```
@@ -52,8 +52,9 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    - Engine / UI command catalog -> `cargo xtask commands`
    - Persisted schemas -> `cargo xtask schemas`
    - Windows icons -> `cargo xtask ico`
-4. **Pull request title & merge policy:** PRs are **squash-merged**. Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
+4. **Pull request title & merge policy:** **All merges into `main` must be squash merges** (GitHub squash PRs or local integrator `git merge --squash`; no merge commits on `main`). Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
    `Use atomic temp-and-rename saves via curvebook-platform (R0.10)`
+   *(Replaces the legacy `M1.1: ...` title-prefix convention.)*
 5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass `cargo xtask ci quick` (which runs every policy gate below, Clippy across changed packages and their workspace reverse dependents, and tests for directly modified packages; pass `--transitive` when verifying cross-crate API/wire changes locally):
    ```sh
    cargo fmt --all -- --check
@@ -83,9 +84,9 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
 Bug reports arrive through the **Bug report** and **Wrong numerical result** issue templates, labelled `bug` (and `numerical` for wrong results).
 
 1. **Triage:** a maintainer tries the reported steps. If the bug reproduces, add `confirmed`; if the steps are missing or do not reproduce it, add `needs-repro` and ask the reporter. Apply both labels by hand after reading the report, never on submission.
-2. **Claim:** comment on the issue before branching. A fix that is not planned roadmap work needs no `R<m>.<n>` ID: branch as `bugfix/issue-<N>-short-slug`.
-3. **Test first:** add a regression test named `issue_<N>_*` that fails before the fix. For a wrong numerical result, make it a `D1` oracle test that cites a published reference and documents its tolerance.
-4. **Fix and verify:** fix the cause, then run `cargo xtask ci quick`.
+2. **Claim:** comment on the issue before branching. A fix that is not planned roadmap work needs no `R<m>.<n>` ID: branch as `bugfix/issue-<N>-short-slug` (or `hotfix/issue-<N>-short-slug`) and keep the PR to that one issue.
+3. **Test first:** add a regression test named `issue_<N>_*` that fails before the fix. For a wrong numerical result, make it a `D1` oracle test that cites a published reference and documents its tolerance. Never loosen an existing oracle tolerance or reference value in a bug fix without explaining why under **Not verified** in the PR.
+4. **Fix and verify:** fix the cause, then run `cargo xtask ci quick`. (Coding agents can follow [`.claude/skills/fix-issue/SKILL.md`](.claude/skills/fix-issue/SKILL.md).)
 5. **Link:** put `Fixes #<N>` in the PR body and as a commit-message trailer; leave the issue number out of the PR title. Merging to `main` closes the issue and links the fixing commit.
 6. **Tell the reporter:** when a release ships, the release checklist ([releasing.md](docs/release/releasing.md#4-closing-roadmap-items-after-release)) comments on each issue closed since the previous release.
 

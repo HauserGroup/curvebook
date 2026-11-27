@@ -154,7 +154,12 @@ const BETA_SECTIONS: &[SectionDef] = &[
 ];
 
 const CONTRIBUTOR_GITHUB_GUIDES: &[(&str, &str, &str)] = &[
-    ("AGENTS Rules & Workspace Policy", "AGENTS.md", "Repository contributor rules, clean-room engineering policy, and module boundaries."),
+    ("AGENTS Rules & Workspace Policy", "AGENTS.md", "Repository contributor rules, task reading guide, and core engineering invariants."),
+    (
+        "Clean-Room & Branding Policy",
+        "docs/clean-room.md",
+        "Clean-room boundaries, neutral naming, .pzfx/.prism rules, upstream GUI reuse, and local reference policy.",
+    ),
     ("Workspace Architecture", "docs/architecture.md", "Crate dependency layers (L0–L7), rendering pipeline, and headless/GUI separation."),
     ("Developer Setup & Commands", "docs/development.md", "Building, testing, coverage reporting, font env vars, and verification workflows."),
     ("Extending CurveBook", "docs/extending.md", "How to add new engine commands, statistical analyses, equations, and UI menus."),

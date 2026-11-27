@@ -8,7 +8,7 @@ Authoritative clean-room capability assessment for CurveBook. Active task queue 
 
 Every score in this document is graded strictly from shipped, tested code in `crates/*` and `apps/*` against peer-reviewed biostatistical and numerical methods, primary literature specifications (Motulsky & Christopoulos, *Fitting Models to Biological Data*; Zar, *Biostatistical Analysis*; Klein & Moeschberger, *Survival Analysis*; Wilkinson, *The Grammar of Graphics*), and certified reference benchmarks (NIST StRD and R `4.5.2` independent oracles). In accordance with [`AGENTS.md`](../../AGENTS.md), no proprietary binary, installation directory, or vendor-created sample file is ever inspected or run.
 
-The [limited local JPG reference policy](../../AGENTS.md#limited-local-jpg-reference-policy) allows the designated existing frames to inform high-level workflows, information hierarchy, and generic functional organization while requiring independent implementation and original visual design. Frames provide no numerical reference answers, visual matching targets, acceptance baselines, or evidence of workflow completion. Scores and completion claims still require the shipped-code and test evidence described here.
+The [limited local JPG reference policy](../clean-room.md#limited-local-jpg-reference-policy) allows the designated existing frames to inform high-level workflows, information hierarchy, and generic functional organization while requiring independent implementation and original visual design. Frames provide no numerical reference answers, visual matching targets, acceptance baselines, or evidence of workflow completion. Scores and completion claims still require the shipped-code and test evidence described here.
 
 ### Scoring rubric (per feature area)
 

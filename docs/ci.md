@@ -98,3 +98,60 @@ Linux can reset a rejected HTTP connection when unread request data remains.
 The HTTP rejection test accepts that close only if it already received the exact,
 complete forbidden response. It still verifies that the attack creates no file
 and performs no document mutation.
+
+## Zero-egress, workflow permissions & web headers
+
+`cargo xtask telemetry` (part of `cargo xtask ci policy`) enforces all five privacy and supply-chain boundaries:
+
+1. **Strict zero-telemetry & zero-egress architecture:** Never add analytics, crash reporters, telemetry SDKs, auto-updaters, or HTTP client crates anywhere in Cargo manifests or `Cargo.lock`, and never introduce `fetch(`, `XMLHttpRequest`, `navigator.sendBeacon`, `WebSocket`, or external origins in `apps/curvebook-web/` or `packaging/web/`.
+2. **Loopback-only local sockets:** Non-test production Rust code may bind TCP sockets only for explicit user-initiated local loopback IPC (`127.0.0.1` / `::1` via `validate_loopback_addr` in `--control` / MCP modes).
+3. **Pinned GitHub Actions workflow permissions & injection guard:** Every workflow in `.github/workflows/` must pin top-level `permissions: contents: read` and avoid unvalidated `${{ github.event.* }}` script injection. The sole permitted job-scoped write exceptions are:
+   - `.github/workflows/release.yml` job `publish`: `contents: write`, `id-token: write`, `attestations: write` (tag-triggered release publishing and keyless Sigstore artifact attestations);
+   - `.github/workflows/ci.yml` job `prune-caches`: `actions: write` (deleting superseded rolling CI cache entries on `main`);
+   - `.github/workflows/pages.yml` job `deploy`: `pages: write`, `id-token: write` (deploying the staged documentation site).
+4. **Web security headers:** Keep strict `Content-Security-Policy` (`default-src 'self'`, `connect-src 'self'` for same-origin `.wasm` streaming only and zero external origins), `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and `X-Content-Type-Options: nosniff` in `packaging/web/_headers` and `packaging/web/.htaccess`.
+
+## Local verification policy
+
+1. **Use scoped checks while iterating.** Run the tests, lints, oracle assertions, and generated-file or policy checks affected by the change; for inner-loop iteration on foundational crates, `cargo xtask ci quick --direct` runs `policy`, Clippy, and tests for only the directly modified packages without expanding to transitive reverse dependents. Documentation and workflow edits normally need their corresponding checks, not a workspace rebuild.
+2. **Run `cargo xtask ci quick` before opening a PR; hosted CI is the full gate.** Pass `--transitive` when changing a shared wire, schema, or cross-crate API contract and wanting local reverse-dependent test execution. Hosted CI runs every full stage on every non-docs-only pull request, and a PR merges only when that passes. Run the full local `cargo xtask ci` only when hosted CI cannot provide the evidence you need—broad changes such as workspace renames, dependency or toolchain updates, or architecture changes; once per multi-agent integration wave; or to reproduce a hosted failure—writing its output to a shared log file so independent reviewers and verifiers inspect and cite that shared evidence instead of launching duplicate runs. Do not restart the full suite after every edit or have multiple workers repeat the same full run with identical inputs.
+3. **Reuse passing results and drop covered standalone checks when inputs are unchanged.** Record the commands, source revision (including any uncommitted changes), and relevant configuration with the results. Reuse them—and skip standalone `xtask`, `clippy`, or test invocations already covered by that `cargo xtask ci` run—while the checked source, dependencies/lockfile, toolchain, target, features, flags, environment, and fixtures remain unchanged. Preserve checks that provide distinct coverage outside `cargo xtask ci` (such as live stdio/subprocess MCP smoke runs, `CURVEBOOK_REQUIRE_CORPUS=1` corpus verification, packaging scripts, and independent source reviews). A new worktree, agent handoff, or documentation-only commit does not by itself invalidate unrelated passing checks.
+4. **Rerun what a fix invalidates.** After a failure, rerun the failed checks and checks affected by the fix first. Repeat full CI when subsequent changes could invalidate broader results; explain why another full run is needed. Never report a failed or partial full run as a complete pass.
+
+### Verification check catalogue
+
+Select the applicable checks before opening a PR or reporting completion (this is a catalogue, not a requirement to rerun every command for every change):
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings   # or `-p <touched-crate>` while iterating
+cargo xtask test
+cargo xtask layers
+cargo xtask assets
+cargo xtask brands
+cargo xtask cleanroom
+cargo xtask design-tokens
+cargo xtask ui-commands --check
+cargo xtask secrets
+cargo xtask licenses
+cargo xtask telemetry
+cargo xtask workflows
+cargo xtask screenshots --check
+cargo xtask commands --check
+cargo xtask schemas --check
+cargo xtask citations
+cargo xtask status
+cargo xtask pending
+cargo xtask wasm
+```
+
+For interactive MCP/control/UI workflow checks, run integration targets `human_wf_suite` in `curvebook-ui-egui`, `mcp_suite` in `curvebook-mcp`, `cli_suite` in `curvebook-cli`, and `desktop_suite` in `curvebook`.
+
+## Parallel agents
+
+When multiple agents work concurrently on the repository:
+
+1. **Bound `CARGO_TARGET_DIR` to fixed slots and clean up after landing:** Never share a `CARGO_TARGET_DIR` between concurrent agents (Cargo locks and `xtask`'s baked-in `CARGO_MANIFEST_DIR` would collide), and keep each worker's verification worktree and slot stable across retries during a task or wave to retain build caches unless a clean build is specifically needed. Do not invent unbounded per-task `/tmp/cb-<slug>` directories: assign each active concurrent worker a slot from a small fixed pool (`CARGO_TARGET_DIR=/tmp/cb-slot-1` .. `/tmp/cb-slot-3`), rebuild `xtask` when switching a slot to a different worktree (see [docs/pitfalls-engineering.md](pitfalls-engineering.md)), pass `CARGO_INCREMENTAL=0` on one-shot verifier/audit/gate runs so throwaway builds do not accumulate multi-GB incremental caches, and delete or prune unused `/tmp/cb-*` target directories once a wave lands so `/tmp` does not exhaust disk space.
+2. **Strictly non-overlapping crate/file ownership:** Assign disjoint crates or files before starting. Two agents must never edit the same file simultaneously.
+3. **No shared-tree git mutations:** Never run `git add`, `git commit`, `git reset`, `git checkout`, or `git config` inside a shared working copy unless you are working in your own isolated git worktree/share.
+4. **Never use `/private/tmp` (or `/tmp` worktrees/file-tool paths):** On macOS `/tmp` resolves to `/private/tmp` outside the workspace, causing permission prompts and sandbox-locked leftovers. Keep `git worktree` checkouts and scratch files inside the workspace (e.g. `../.cb-worktrees/<agent-name>`), never pass `/tmp` or `/private/tmp` to `read_file`/`edit_file`/`write_file`, and limit `/tmp` to `run_command` env vars (`CARGO_TARGET_DIR`, `CARGO_HOME`, `RUSTUP_HOME`).

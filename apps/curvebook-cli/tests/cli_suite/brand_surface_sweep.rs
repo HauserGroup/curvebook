@@ -1320,7 +1320,7 @@ fn r021_asset_provenance_png_ico_crc_and_edited_docs_links_valid() -> Result<(),
     let dot_ext = join(&[".pr", "ism"]);
     let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
     let parity_doc = fs::read_to_string(root.join("docs/evidence/overview.md")).map_err(|e| e.to_string())?;
-    if !parity_doc.contains("../../AGENTS.md#limited-local-jpg-reference-policy") || !parity_doc.contains("### Calibration") {
+    if !parity_doc.contains("../clean-room.md#limited-local-jpg-reference-policy") || !parity_doc.contains("### Calibration") {
         return Err(String::from("docs/evidence/overview.md missing required policy link or Calibration heading"));
     }
     for doc_rel in [
