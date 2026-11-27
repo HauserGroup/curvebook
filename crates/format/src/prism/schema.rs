@@ -204,6 +204,22 @@ impl ArchiveIdIndex {
         self.resolve_from_indices(indices, |p| has_basename_ci(p, filename))
     }
 
+    /// Resolve a graph floating-note JSON (`graphs/<graph_uid>/floating_notes/<note_uid>.json`)
+    /// matching `note_uid` as an exact file stem scoped to `graph_uid`.
+    #[must_use]
+    pub fn find_graph_floating_note_json(&self, graph_uid: &str, note_uid: &str) -> IdLookup {
+        let Some(indices) = self.by_stem.get(note_uid) else {
+            return IdLookup::Missing;
+        };
+        let scoped = self.resolve_from_indices(indices, |p| {
+            has_ext_ci(p, ".json") && has_segment_ci(p, "graphs") && has_segment_ci(p, graph_uid) && has_segment_ci(p, "floating_notes")
+        });
+        if !matches!(scoped, IdLookup::Missing) {
+            return scoped;
+        }
+        self.resolve_from_indices(indices, |p| has_ext_ci(p, ".json") && has_segment_ci(p, "graphs") && has_segment_ci(p, graph_uid))
+    }
+
     /// Resolve an entry (`sheet.json`, `preview.png`, `data.bin`) under `layouts/<layout_uid>/`.
     #[must_use]
     pub fn find_layout_entry(&self, layout_uid: &str, filename: &str) -> IdLookup {

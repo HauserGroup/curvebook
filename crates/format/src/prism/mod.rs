@@ -10,8 +10,9 @@
 //! - [`analyses`]: 3-hop `preferredResultSheet` imported-result ingestion, data-driven
 //!   [`ANALYSIS_MAPPINGS`] table with textbook justifications and verification status, and
 //!   cached-vs-recomputed diagnostic comparison helpers.
-//! - [`graphs`] & [`layouts`]: raster `preview.png` / `media/*` asset ingestion and structured
-//!   `UnsupportedGraphOrLayout` warnings for opaque binary graph/layout entries.
+//! - [`graphs`] & [`layouts`]: basic editable graph reconstruction from `inputDataSets` +
+//!   `floatingNotes` text annotations (without decoding `data.bin`), raster `preview.png` /
+//!   `media/*` asset ingestion, and structured `UnsupportedGraphOrLayout` warnings.
 //! - [`export`]: experimental `.prism` structural writer gated behind
 //!   [`ArchiveExportOptions::experimental`] (import-only for Beta because external archives
 //!   require undocumented `.dt` digest tokens and opaque binary `.bin` blobs).
@@ -34,6 +35,7 @@ pub use analyses::{
     primary_input_data_sheet_uid, resolve_selected_data_sets, translate_analysis_parameters,
 };
 pub use export::{ArchiveExportOptions, ArchiveExportReport, export_prism_bytes_experimental, export_prism_bytes_with_options};
+pub use graphs::REBUILT_GRAPH_WARNING_LABEL;
 pub use import::{MAX_PROJECT_CELLS, import_prism_bytes, import_prism_bytes_with_limits};
 pub use schema::{
     ArchiveIdIndex, ExternalDocumentDialect, IdLookup, parse_archive_color, parse_rich_text_value, parse_row_index_ranges, parse_strict_iso8601_date,

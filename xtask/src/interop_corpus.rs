@@ -3048,6 +3048,13 @@ pub struct EnginePipelineSummary {
     pub archive_fidelity_diff_files: usize,
     pub archive_fidelity_diffs_total: usize,
     pub archive_fidelity_diff_classes: BTreeMap<String, usize>,
+    pub archive_graphs_rebuilt: usize,
+    pub archive_graphs_rebuilt_files: usize,
+    pub archive_graphs_rebuilt_by_kind: BTreeMap<String, usize>,
+    pub archive_graph_annotations_imported: usize,
+    pub archive_graphs_preflight_ok: usize,
+    pub archive_graphs_preflight_err: usize,
+    pub archive_graphs_preflight_panics: usize,
     pub pzfx_conformance: PzfxConformanceSummary,
     pub archive_analysis_diagnostics: BTreeMap<String, AnalysisClassDiagnosticSummary>,
     pub import_ms_dist: SizeDistribution,
@@ -3133,6 +3140,18 @@ impl EnginePipelineSummary {
                 "diff_files": self.archive_fidelity_diff_files,
                 "diffs_total": self.archive_fidelity_diffs_total,
                 "diff_classes": self.archive_fidelity_diff_classes,
+            }),
+        );
+        map.insert(
+            String::from("archive_rebuilt_graphs"),
+            json!({
+                "graphs_rebuilt": self.archive_graphs_rebuilt,
+                "files_with_rebuilt_graphs": self.archive_graphs_rebuilt_files,
+                "by_kind": self.archive_graphs_rebuilt_by_kind,
+                "annotations_imported": self.archive_graph_annotations_imported,
+                "preflight_ok": self.archive_graphs_preflight_ok,
+                "preflight_err": self.archive_graphs_preflight_err,
+                "preflight_panics": self.archive_graphs_preflight_panics,
             }),
         );
         map.insert(String::from("pzfx_conformance"), self.pzfx_conformance.to_json());
@@ -4021,21 +4040,30 @@ fn run_engine_pipeline_for_file(
         verify_archive_data_layer_and_analyses(bytes, record_id, &report, pipeline);
     }
 
-    // Step 5: Engine recalculation.
+    // Step 5: Engine recalculation + rebuilt `.prism` graph scene compilation/preflight check.
+    let mut session_for_graphs: Option<curvebook_engine::Session> = None;
     let recalc_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut session = curvebook_engine::Session::from_document(report.document.clone());
-        session.recalculate_all()
+        let res = session.recalculate_all();
+        (res, session)
     }));
     match recalc_res {
-        Ok(Ok(())) => pipeline.engine_recalc_ok += 1,
-        Ok(Err(_)) | Err(_) => pipeline.engine_recalc_err += 1,
+        Ok((Ok(()), session)) => {
+            pipeline.engine_recalc_ok += 1;
+            session_for_graphs = Some(session);
+        }
+        Ok((Err(_), _)) | Err(_) => pipeline.engine_recalc_err += 1,
+    }
+
+    if fmt == InteropFormat::ZipArchive && !report.document.graph_sheets.is_empty() {
+        check_rebuilt_archive_graphs(&report.document, session_for_graphs.as_mut(), pipeline);
     }
 
     // Step 6: Native `.curvebook` round-trip.
     match save_project_bytes(&report.document) {
         Ok(saved) => match open_project_bytes(&saved) {
             Ok(reopened) => {
-                if reopened.data_sheets == report.document.data_sheets {
+                if reopened.data_sheets == report.document.data_sheets && reopened.graph_sheets == report.document.graph_sheets {
                     pipeline.curvebook_roundtrip_ok += 1;
                 } else {
                     pipeline.curvebook_roundtrip_diffs += 1;
@@ -4062,6 +4090,31 @@ fn run_engine_pipeline_for_file(
                 *pipeline.safety_cap_refusal_classes.entry(format!(".curvebook:{cls}")).or_insert(0) += 1;
             } else {
                 pipeline.curvebook_roundtrip_unexpected_err += 1;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "docs-site")]
+fn check_rebuilt_archive_graphs(
+    doc: &curvebook_doc::ProjectDocument,
+    mut session: Option<&mut curvebook_engine::Session>,
+    pipeline: &mut EnginePipelineSummary,
+) {
+    pipeline.archive_graphs_rebuilt_files += 1;
+    for gs in &doc.graph_sheets {
+        pipeline.archive_graphs_rebuilt += 1;
+        *pipeline.archive_graphs_rebuilt_by_kind.entry(format!("{:?}", gs.spec.kind)).or_insert(0) += 1;
+        pipeline.archive_graph_annotations_imported = pipeline.archive_graph_annotations_imported.saturating_add(gs.spec.annotations.len());
+        if let Some(ref mut active_session) = session {
+            let sheet_id = gs.id.as_str().to_owned();
+            let pf = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                active_session.execute("graph.preflightCheck", json!({ "sheet_id": sheet_id }))
+            }));
+            match pf {
+                Ok(Ok(_)) => pipeline.archive_graphs_preflight_ok += 1,
+                Ok(Err(_)) => pipeline.archive_graphs_preflight_err += 1,
+                Err(_) => pipeline.archive_graphs_preflight_panics += 1,
             }
         }
     }
@@ -5750,6 +5803,16 @@ fn print_aggregate_summary(s: &CorpusRunSummary) {
         println!("  pipeline dropped_sections: {}", format_map(&p.dropped_sections));
         println!("  pipeline archetypes: {}", format_map(&p.archetypes));
         println!("  pipeline subcolumn_modes: {}", format_map(&p.subcolumn_modes));
+        println!(
+            "  .prism rebuilt graphs: graphs={}, files={}, annotations={}, preflight_ok={}, preflight_err={}, preflight_panics={}, by_kind={}",
+            p.archive_graphs_rebuilt,
+            p.archive_graphs_rebuilt_files,
+            p.archive_graph_annotations_imported,
+            p.archive_graphs_preflight_ok,
+            p.archive_graphs_preflight_err,
+            p.archive_graphs_preflight_panics,
+            format_map(&p.archive_graphs_rebuilt_by_kind)
+        );
         println!(
             "  .pzfx re-export fidelity (§6.2): export_ok={}, export_err={}, export_panics={}, reimport_ok={}, reimport_err={}, reimport_panics={}, identical={}, diff_files={}, diffs_total={}, tables={}, cells={}, info_sheets={}, diff_classes={}",
             p.pzfx_export_ok,

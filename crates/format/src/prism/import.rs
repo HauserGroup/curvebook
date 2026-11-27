@@ -19,7 +19,7 @@ use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_cell_tok
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::image_asset::validate_image_asset_parts;
 use crate::prism::analyses::{AnalysisImportContext, ExternalDataSetPositions, import_external_analyses};
-use crate::prism::graphs::import_external_graphs;
+use crate::prism::graphs::{GraphImportContext, import_external_graphs};
 use crate::prism::layouts::import_external_layouts;
 use crate::prism::schema::{
     ArchiveIdIndex, ExternalDataSetJson, ExternalDataSheetJson, ExternalDocumentIndex, ExternalInfoSheetJson, ExternalSubColumnTitlesJson, IdLookup,
@@ -243,12 +243,22 @@ fn import_external_indexed_archive(
     };
     import_external_analyses(zip_index, &mut doc, &mut analysis_ctx)?;
 
-    // 4. Graphs & layouts (raster preview/media ingestion + opaque binary warnings).
-    import_external_graphs(zip_index, &id_index, &doc_index, &mut doc, &mut warnings)?;
+    // 4. Graphs & layouts (basic editable graph reconstruction from `inputDataSets` +
+    // `floatingNotes` text annotations, raster preview/media ingestion, and opaque binary warnings).
+    let mut graph_ctx = GraphImportContext {
+        id_index: &id_index,
+        doc_index: &doc_index,
+        data_uid_to_sheet_id: &data_uid_to_sheet_id,
+        data_set_positions: &data_set_positions,
+        uid_to_sheet_id: &mut uid_to_sheet_id,
+        used_ids: &mut used_ids,
+        warnings: &mut warnings,
+    };
+    import_external_graphs(zip_index, &mut doc, &mut graph_ctx)?;
     import_external_layouts(zip_index, &id_index, &doc_index, &mut doc, &mut uid_to_sheet_id, &mut used_ids, &mut warnings)?;
 
     // 5. Restore navigator selection if `uiSettings.currentSheets` resolves to an imported sheet,
-    // otherwise fall back to the first imported sheet across data/info/result/layout folders.
+    // otherwise fall back to the first imported sheet across data/info/result/graph/layout folders.
     if let Some(ref selected_uid) = doc_index.selected_sheet_uid
         && let Some(mapped_id) = uid_to_sheet_id.get(selected_uid)
     {
@@ -261,6 +271,7 @@ fn import_external_indexed_archive(
             .map(|s| s.id.clone())
             .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
             .or_else(|| doc.result_sheets.first().map(|s| s.id.clone()))
+            .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
             .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()));
         if let Some(id) = fallback_id {
             let _ = doc.select_in_navigator(&id);

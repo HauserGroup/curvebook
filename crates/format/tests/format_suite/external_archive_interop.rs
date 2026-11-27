@@ -2739,3 +2739,473 @@ fn issue_73_two_way_rm_anova_translates_sphericity_method_vc_policy_and_interact
     assert_eq!(spec_ord.sphericity_correction, RmSphericityCorrection::None);
     assert_eq!(spec_ord.max_interaction_order, 1);
 }
+
+#[test]
+fn issue_81_rebuilds_editable_graphs_across_all_eight_archetypes_and_round_trips() {
+    use curvebook_doc::GraphKind;
+    use curvebook_format::{REBUILT_GRAPH_WARNING_LABEL, open_project_bytes, save_project_bytes};
+
+    let doc_json = json_bytes(json!({
+        "formatVersion": "1-6-1",
+        "title": "All Archetypes Rebuilt Graphs",
+        "sheets": {
+            "data": ["s-xy", "s-xy2", "s-col", "s-grp", "s-surv", "s-cont", "s-pow", "s-nest", "s-mv"],
+            "info": [],
+            "analyses": [],
+            "graphs": [
+                "g-xy", "g-xy-subset", "g-xy-multi", "g-col", "g-grp", "g-surv", "g-cont", "g-pow", "g-nest", "g-mv"
+            ],
+            "layouts": []
+        },
+        "sheetAttributesMap": {
+            "g-xy": { "title": "Dose Curve", "highlightColor": "#2255AAFF" },
+            "g-xy-subset": { "title": "Subset Reordered XY" },
+            "g-xy-multi": { "title": "Overlay Multi-Sheet XY" },
+            "g-col": { "title": "Column Bars" },
+            "g-grp": { "title": "Grouped Response" },
+            "g-surv": { "title": "Kaplan-Meier Cohort" },
+            "g-cont": { "title": "Contingency Counts" },
+            "g-pow": { "title": "Parts Composition" },
+            "g-nest": { "title": "Nested Hierarchy" },
+            "g-mv": { "title": "Multivariate Scatter" }
+        },
+        "uiSettings": { "currentSheets": ["g-xy-multi"] }
+    }));
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        // 1. XY (2 datasets)
+        (
+            "data/sheets/s-xy/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-xy", "format": "xy", "dataFormat": "y_single", "xDataSet": "dx-xy", "dataSets": ["dy-xy1", "dy-xy2"]}}),
+            ),
+        ),
+        ("data/sets/dx-xy.json".into(), json_bytes(json!({"title": "Conc", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-xy1.json".into(), json_bytes(json!({"title": "Ctrl", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-xy2.json".into(), json_bytes(json!({"title": "Drug", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-xy/data.csv".into(), b"1,10,12\n2,20,25\n".to_vec()),
+        // 1b. Second XY sheet for multi-sheet graph overlay
+        (
+            "data/sheets/s-xy2/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-xy2", "format": "xy", "dataFormat": "y_single", "xDataSet": "dx-xy2", "dataSets": ["dy-xy3"]}})),
+        ),
+        ("data/sets/dx-xy2.json".into(), json_bytes(json!({"title": "Conc", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-xy3.json".into(), json_bytes(json!({"title": "Batch 2", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-xy2/data.csv".into(), b"1,11\n2,22\n".to_vec()),
+        // 2. Column
+        (
+            "data/sheets/s-col/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-col", "format": "column", "dataFormat": "y_single", "dataSets": ["dy-c1", "dy-c2"]}})),
+        ),
+        ("data/sets/dy-c1.json".into(), json_bytes(json!({"title": "Arm A", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-c2.json".into(), json_bytes(json!({"title": "Arm B", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-col/data.csv".into(), b"5,7\n6,8\n".to_vec()),
+        // 3. Grouped
+        (
+            "data/sheets/s-grp/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-grp", "format": "grouped", "dataFormat": "y_replicates", "replicatesCount": 2, "rowTitlesDataSet": "rt-grp", "dataSets": ["dy-g1"]}}),
+            ),
+        ),
+        ("data/sets/rt-grp.json".into(), json_bytes(json!({"title": "Time", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-g1.json".into(), json_bytes(json!({"title": "Treated", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-grp/data.csv".into(), b"Day 1,10,12\nDay 2,20,22\n".to_vec()),
+        // 4. Survival
+        (
+            "data/sheets/s-surv/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-surv", "format": "survival", "dataFormat": "y_single", "xDataSet": "dx-surv", "dataSets": ["dy-s1", "dy-s2"]}}),
+            ),
+        ),
+        ("data/sets/dx-surv.json".into(), json_bytes(json!({"title": "Days", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-s1.json".into(), json_bytes(json!({"title": "Cohort A", "replicates": [{"valueType": "int"}]}))),
+        ("data/sets/dy-s2.json".into(), json_bytes(json!({"title": "Cohort B", "replicates": [{"valueType": "int"}]}))),
+        ("data/tables/t-surv/data.csv".into(), b"5,1,\n12,,1\n".to_vec()),
+        // 5. Contingency
+        (
+            "data/sheets/s-cont/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-cont", "format": "contingency", "dataFormat": "y_single", "rowTitlesDataSet": "rt-cont", "dataSets": ["dy-k1", "dy-k2"]}}),
+            ),
+        ),
+        ("data/sets/rt-cont.json".into(), json_bytes(json!({"title": "Outcome", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-k1.json".into(), json_bytes(json!({"title": "Yes", "replicates": [{"valueType": "int"}]}))),
+        ("data/sets/dy-k2.json".into(), json_bytes(json!({"title": "No", "replicates": [{"valueType": "int"}]}))),
+        ("data/tables/t-cont/data.csv".into(), b"Drug,15,5\nPlacebo,4,16\n".to_vec()),
+        // 6. PartsOfWhole
+        (
+            "data/sheets/s-pow/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-pow", "format": "parts_of_whole", "dataFormat": "y_single", "rowTitlesDataSet": "rt-pow", "dataSets": ["dy-p1", "dy-p2"]}}),
+            ),
+        ),
+        ("data/sets/rt-pow.json".into(), json_bytes(json!({"title": "Slice", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-p1.json".into(), json_bytes(json!({"title": "Exp 1", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-p2.json".into(), json_bytes(json!({"title": "Exp 2", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-pow/data.csv".into(), b"Alpha,30,40\nBeta,70,60\n".to_vec()),
+        // 7. Nested
+        (
+            "data/sheets/s-nest/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-nest", "format": "nested", "dataFormat": "y_replicates", "replicatesCount": 2, "dataSets": ["dy-n1"]}}),
+            ),
+        ),
+        ("data/sets/dy-n1.json".into(), json_bytes(json!({"title": "Group 1", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-nest/data.csv".into(), b"1.1,1.3\n1.2,1.4\n".to_vec()),
+        // 8. MultipleVariables
+        (
+            "data/sheets/s-mv/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-mv", "format": "multivariable", "dataFormat": "y_single", "dataSets": ["dy-mv1", "dy-mv2"]}})),
+        ),
+        ("data/sets/dy-mv1.json".into(), json_bytes(json!({"title": "Age", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-mv2.json".into(), json_bytes(json!({"title": "Marker", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-mv/data.csv".into(), b"25,1.5\n42,2.8\n".to_vec()),
+        // Graphs (each carries opaque binary data.bin that must NEVER be decoded or decompressed)
+        ("graphs/g-xy/sheet.json".into(), json_bytes(json!({"uid": "g-xy", "title": "Fallback", "inputDataSets": ["dy-xy1", "dy-xy2"]}))),
+        ("graphs/g-xy/data.bin".into(), b"PCFFGRA4opaque_xy".to_vec()),
+        (
+            "graphs/g-xy-subset/sheet.json".into(),
+            json_bytes(json!({"uid": "g-xy-subset", "title": "Subset Reordered XY", "inputDataSets": ["dy-xy2", "dy-xy2"]})),
+        ),
+        ("graphs/g-xy-subset/data.bin".into(), b"PCFFGRA4opaque_sub".to_vec()),
+        (
+            "graphs/g-xy-multi/sheet.json".into(),
+            json_bytes(
+                json!({"uid": "g-xy-multi", "title": "Overlay Multi-Sheet XY", "highlightColor": "#008844", "inputDataSets": ["dy-xy2", "dy-xy3"]}),
+            ),
+        ),
+        ("graphs/g-xy-multi/data.bin".into(), b"PCFFGRA4opaque_multi".to_vec()),
+        ("graphs/g-col/sheet.json".into(), json_bytes(json!({"uid": "g-col", "title": "Column Bars", "inputDataSets": ["dy-c1", "dy-c2"]}))),
+        ("graphs/g-col/data.bin".into(), b"PCFFGRA4opaque_col".to_vec()),
+        ("graphs/g-grp/sheet.json".into(), json_bytes(json!({"uid": "g-grp", "title": "Grouped Response", "inputDataSets": ["dy-g1"]}))),
+        ("graphs/g-grp/data.bin".into(), b"PCFFGRA4opaque_grp".to_vec()),
+        (
+            "graphs/g-surv/sheet.json".into(),
+            json_bytes(json!({"uid": "g-surv", "title": "Kaplan-Meier Cohort", "inputDataSets": ["dy-s2", "dy-s1"]})),
+        ),
+        ("graphs/g-surv/data.bin".into(), b"PCFFGRA4opaque_surv".to_vec()),
+        ("graphs/g-cont/sheet.json".into(), json_bytes(json!({"uid": "g-cont", "title": "Contingency Counts", "inputDataSets": ["dy-k1", "dy-k2"]}))),
+        ("graphs/g-cont/data.bin".into(), b"PCFFGRA4opaque_cont".to_vec()),
+        ("graphs/g-pow/sheet.json".into(), json_bytes(json!({"uid": "g-pow", "title": "Parts Composition", "inputDataSets": ["dy-p2"]}))),
+        ("graphs/g-pow/data.bin".into(), b"PCFFGRA4opaque_pow".to_vec()),
+        ("graphs/g-nest/sheet.json".into(), json_bytes(json!({"uid": "g-nest", "title": "Nested Hierarchy", "inputDataSets": ["dy-n1"]}))),
+        ("graphs/g-nest/data.bin".into(), b"PCFFGRA4opaque_nest".to_vec()),
+        ("graphs/g-mv/sheet.json".into(), json_bytes(json!({"uid": "g-mv", "title": "Multivariate Scatter", "inputDataSets": ["dy-mv1", "dy-mv2"]}))),
+        ("graphs/g-mv/data.bin".into(), b"PCFFGRA4opaque_mv".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+    assert_eq!(doc.graph_sheets.len(), 10);
+    assert_eq!(doc.active_sheet_id, Some(SheetId::new("g-xy-multi")));
+
+    let expected_kinds = [
+        ("g-xy", GraphKind::Xy, "s-xy", vec![("s-xy", 0_usize), ("s-xy", 1)]),
+        ("g-xy-subset", GraphKind::Xy, "s-xy", vec![("s-xy", 1)]),
+        ("g-xy-multi", GraphKind::Xy, "s-xy", vec![("s-xy", 1), ("s-xy2", 0)]),
+        ("g-col", GraphKind::Column, "s-col", vec![("s-col", 0), ("s-col", 1)]),
+        ("g-grp", GraphKind::Grouped, "s-grp", vec![("s-grp", 0)]),
+        ("g-surv", GraphKind::Survival, "s-surv", vec![("s-surv", 1), ("s-surv", 0)]),
+        ("g-cont", GraphKind::Contingency, "s-cont", vec![("s-cont", 0), ("s-cont", 1)]),
+        ("g-pow", GraphKind::PartsOfWhole, "s-pow", vec![("s-pow", 1)]),
+        ("g-nest", GraphKind::Column, "s-nest", vec![("s-nest", 0)]),
+        ("g-mv", GraphKind::MultipleVariables, "s-mv", vec![("s-mv", 0), ("s-mv", 1)]),
+    ];
+    for (gid, kind, primary, bindings) in expected_kinds {
+        let gs = doc.graph_sheet(&SheetId::new(gid)).unwrap_or_else(|| panic!("missing rebuilt graph {gid}"));
+        assert!(gs.initialized, "rebuilt graph {gid} must be initialized");
+        assert_eq!(gs.spec.kind, kind, "wrong GraphKind for {gid}");
+        assert_eq!(gs.spec.primary_source_sheet_id, SheetId::new(primary), "wrong primary source for {gid}");
+        let actual: Vec<(&str, usize)> = gs.spec.series.iter().map(|s| (s.source_sheet_id.as_str(), s.data_set_index)).collect();
+        assert_eq!(actual, bindings, "wrong bound series for {gid}");
+        assert!(
+            report.warnings.iter().any(|w| {
+                w.kind == ImportWarningKind::UnsupportedGraphOrLayout
+                    && w.source == format!("graphs/{gid}")
+                    && w.message.contains(REBUILT_GRAPH_WARNING_LABEL)
+            }),
+            "missing rebuilt label warning for {gid}: {:?}",
+            report.warnings
+        );
+    }
+
+    let g_xy = doc.graph_sheet(&SheetId::new("g-xy")).unwrap();
+    assert_eq!(g_xy.title, "Dose Curve");
+    assert_eq!(g_xy.spec.title, "Dose Curve");
+    assert_eq!(g_xy.color_tag, Some(Rgba8::rgba(0x22, 0x55, 0xAA, 0xFF)));
+    let g_multi = doc.graph_sheet(&SheetId::new("g-xy-multi")).unwrap();
+    assert_eq!(g_multi.color_tag, Some(Rgba8::rgb(0x00, 0x88, 0x44)));
+
+    // All 10 `data.bin` entries must remain unread (never decoded or decompressed).
+    assert!(
+        report.warnings.iter().any(|w| {
+            w.kind == ImportWarningKind::UnsupportedChunk && w.source == "archive/opaque/auxiliary" && w.message.contains("skipped 10 unread")
+        }),
+        "expected 10 unread data.bin entries, got warnings: {:?}",
+        report.warnings
+    );
+
+    // Full `.curvebook` save/reopen round-trip preserves every rebuilt graph sheet identically.
+    let saved = save_project_bytes(doc).unwrap();
+    let reopened = open_project_bytes(&saved).unwrap();
+    assert_eq!(reopened.graph_sheets, doc.graph_sheets);
+    assert_eq!(reopened.active_sheet_id, doc.active_sheet_id);
+}
+
+#[test]
+fn issue_81_imports_floating_notes_preserves_previews_and_warns_on_unresolvable_inputs() {
+    use curvebook_doc::GraphAnnotation;
+    use curvebook_format::{REBUILT_GRAPH_WARNING_LABEL, open_project_bytes, save_project_bytes};
+
+    let png_rebuilt = encode_rgba_png(4, 3);
+    let png_media = encode_rgba_png(3, 3);
+    let png_fallback = encode_rgba_png(5, 2);
+
+    let zip = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Notes Previews and Fallbacks",
+                "sheets": {
+                    "data": ["s-xy", "s-view"],
+                    "graphs": ["g-notes", "g-mixed", "g-view-only", "g-empty"],
+                    "layouts": []
+                },
+                "sheetAttributesMap": {
+                    "g-notes": { "title": "Annotated Plot" },
+                    "g-mixed": { "title": "Partial Match Plot" },
+                    "g-view-only": { "title": "Analysis View Only Plot" },
+                    "g-empty": { "title": "No Inputs Plot" }
+                }
+            })),
+        ),
+        (
+            "data/sheets/s-xy/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-xy", "format": "xy", "dataFormat": "y_single", "xDataSet": "dx-1", "dataSets": ["dy-1"]}})),
+        ),
+        ("data/sets/dx-1.json".into(), json_bytes(json!({"title": "Time", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-1.json".into(), json_bytes(json!({"title": "Signal", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-xy/data.csv".into(), b"0,1\n1,4\n2,9\n".to_vec()),
+        // Analysis view table (skipped by data importer, so graphs referencing only its dataset cannot rebuild)
+        (
+            "data/sheets/s-view/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-view", "format": "view", "dataFormat": "text", "dataSets": ["ds-view-only"]}})),
+        ),
+        // 1. Rebuilt graph with floatingNotes + preview.png + mediaCollection PNG
+        (
+            "graphs/g-notes/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "g-notes",
+                "title": "Annotated Plot",
+                "inputDataSets": ["dy-1"],
+                "floatingNotes": ["n-rich", "n-plain", "n-empty", "n-missing"],
+                "mediaCollection": [{ "representations": [{ "type": "bitmap", "format": "png", "uid": "m-extra" }] }]
+            })),
+        ),
+        ("graphs/g-notes/preview.png".into(), png_rebuilt),
+        ("graphs/g-notes/data.bin".into(), b"PCFFGRA4opaque".to_vec()),
+        ("media/m-extra.png".into(), png_media),
+        (
+            "graphs/g-notes/floating_notes/n-rich.json".into(),
+            json_bytes(json!({
+                "uid": "n-rich",
+                "isAuto": false,
+                "position": "384;216",
+                "screenWidth": { "width": 1920.0, "height": 1080.0 },
+                "size": { "width": 320.0, "height": 80.0 },
+                "text": {
+                    "string": "Peak Ca2+ at 37C\rNormalized baseline",
+                    "version": 1,
+                    "formatting": [{ "range": "7~8", "attributes": { "baseline": "superscript" } }]
+                }
+            })),
+        ),
+        (
+            "graphs/g-notes/floating_notes/n-plain.json".into(),
+            json_bytes(json!({
+                "uid": "n-plain",
+                "isAuto": true,
+                "position": "-1;-1",
+                "size": { "width": 1000.0, "height": 1000.0 },
+                "text": "2 error bars are clipped at the axis limit."
+            })),
+        ),
+        ("graphs/g-notes/floating_notes/n-empty.json".into(), json_bytes(json!({ "uid": "n-empty", "position": "-1;-1", "text": "   \r\n  " }))),
+        // 2. Mixed: 1 resolvable dataset + 1 view/unresolved dataset
+        (
+            "graphs/g-mixed/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "g-mixed",
+                "title": "Partial Match Plot",
+                "inputDataSets": ["dy-1", "ds-view-only", "ds-unknown"]
+            })),
+        ),
+        // 3. View-only / unresolvable inputDataSets + preview.png
+        (
+            "graphs/g-view-only/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "g-view-only",
+                "title": "Analysis View Only Plot",
+                "inputDataSets": ["ds-view-only", "ds-dangling"]
+            })),
+        ),
+        ("graphs/g-view-only/preview.png".into(), png_fallback),
+        ("graphs/g-view-only/data.bin".into(), b"PCFFGRA4viewonly".to_vec()),
+        // 4. Empty inputDataSets
+        ("graphs/g-empty/sheet.json".into(), json_bytes(json!({ "uid": "g-empty", "title": "No Inputs Plot", "inputDataSets": [] }))),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+
+    // Preview + media ingestion preserved for both rebuilt and fallback graphs (3 distinct PNGs).
+    assert_eq!(doc.image_assets.len(), 3);
+
+    // Exactly 2 graphs rebuilt (`g-notes`, `g-mixed`); view-only & empty graphs fall back to warnings only.
+    assert_eq!(doc.graph_sheets.len(), 2);
+    let g_notes = doc.graph_sheet(&SheetId::new("g-notes")).unwrap();
+    assert!(g_notes.initialized);
+    assert_eq!(g_notes.spec.annotations.len(), 2);
+
+    let GraphAnnotation::TextBox { bounds_pt: b0, markdown: m0, bordered: border0 } = &g_notes.spec.annotations[0] else {
+        panic!("expected TextBox annotation 0");
+    };
+    assert!(*border0);
+    assert!(m0.contains("<sup>2+</sup>"), "expected rich-text markup in note 0, got {m0:?}");
+    assert!(m0.contains('\n') && !m0.contains('\r'), "expected LF-normalized newline in note 0, got {m0:?}");
+    assert!(b0.x >= 0.0 && b0.y >= 0.0 && b0.width > 0.0 && b0.height > 0.0);
+    assert!(b0.x + b0.width <= g_notes.spec.canvas_size_pt.width + 1e-6);
+    assert!(b0.y + b0.height <= g_notes.spec.canvas_size_pt.height + 1e-6);
+
+    let GraphAnnotation::TextBox { bounds_pt: b1, markdown: m1, bordered: border1 } = &g_notes.spec.annotations[1] else {
+        panic!("expected TextBox annotation 1");
+    };
+    assert!(*border1);
+    assert_eq!(m1, "2 error bars are clipped at the axis limit.");
+    assert!(b1.x >= 0.0 && b1.y >= 0.0 && b1.width > 0.0 && b1.height > 0.0);
+    assert!(b1.width <= 220.0 && b1.height <= 96.0, "oversized note size must be clamped: {b1:?}");
+    assert!(b1.x + b1.width <= g_notes.spec.canvas_size_pt.width + 1e-6);
+    assert!(b1.y + b1.height <= g_notes.spec.canvas_size_pt.height + 1e-6);
+
+    // Missing floating note recorded non-fatally.
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::MissingMetadata && w.source.contains("n-missing")));
+
+    // Warning labels: rebuilt graphs carry REBUILT_GRAPH_WARNING_LABEL; fallback graphs do not.
+    let warn_for = |src: &str| {
+        report
+            .warnings
+            .iter()
+            .find(|w| w.kind == ImportWarningKind::UnsupportedGraphOrLayout && w.source == src)
+            .unwrap_or_else(|| panic!("missing graph warning for {src}"))
+    };
+    let w_notes = warn_for("graphs/g-notes");
+    assert!(w_notes.message.contains(REBUILT_GRAPH_WARNING_LABEL));
+    assert!(w_notes.message.contains("ingested 2 raster preview/media asset(s)"));
+
+    let w_mixed = warn_for("graphs/g-mixed");
+    assert!(w_mixed.message.contains(REBUILT_GRAPH_WARNING_LABEL));
+    assert!(w_mixed.message.contains("2 unresolved/non-table input dataset(s) omitted"));
+
+    let w_view = warn_for("graphs/g-view-only");
+    assert!(!w_view.message.contains(REBUILT_GRAPH_WARNING_LABEL));
+    assert!(w_view.message.contains("did not resolve to imported data tables"));
+    assert!(w_view.message.contains("ingested 1 raster preview/media asset(s)"));
+
+    let w_empty = warn_for("graphs/g-empty");
+    assert!(!w_empty.message.contains(REBUILT_GRAPH_WARNING_LABEL));
+    assert!(w_empty.message.contains("no input data sets"));
+
+    // `.curvebook` round-trip preserves rebuilt graphs, TextBox annotations, and ingested preview assets.
+    let saved = save_project_bytes(doc).unwrap();
+    let reopened = open_project_bytes(&saved).unwrap();
+    assert_eq!(reopened.graph_sheets, doc.graph_sheets);
+    assert_eq!(reopened.image_assets.len(), 3);
+}
+
+#[test]
+fn issue_81_respects_max_annotations_and_max_sheets_caps_non_fatally() {
+    use curvebook_doc::MAX_SHEETS_PER_PROJECT;
+    use curvebook_doc::graph::MAX_GRAPH_ANNOTATIONS;
+    use curvebook_format::REBUILT_GRAPH_WARNING_LABEL;
+
+    // 1. More than MAX_GRAPH_ANNOTATIONS floating notes on one graph are bounded cleanly at MAX_GRAPH_ANNOTATIONS.
+    let note_count = MAX_GRAPH_ANNOTATIONS + 4;
+    let note_uids: Vec<String> = (0..note_count).map(|i| format!("n-{i:03}")).collect();
+    let mut entries = vec![
+        (
+            String::from("document.json"),
+            json_bytes(json!({
+                "title": "Bounded Notes",
+                "sheets": { "data": ["s-1"], "graphs": ["g-1"] }
+            })),
+        ),
+        (
+            String::from("data/sheets/s-1/sheet.json"),
+            json_bytes(json!({"table": {"uid": "t-1", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-1"]}})),
+        ),
+        (String::from("data/sets/ds-1.json"), json_bytes(json!({"title": "Arm", "replicates": [{"valueType": "real"}]}))),
+        (String::from("data/tables/t-1/data.csv"), b"1.0\n2.0\n".to_vec()),
+        (
+            String::from("graphs/g-1/sheet.json"),
+            json_bytes(json!({
+                "uid": "g-1",
+                "title": "Many Notes",
+                "inputDataSets": ["ds-1"],
+                "floatingNotes": note_uids
+            })),
+        ),
+    ];
+    for i in 0..note_count {
+        entries.push((
+            format!("graphs/g-1/floating_notes/n-{i:03}.json"),
+            json_bytes(json!({ "uid": format!("n-{i:03}"), "position": "-1;-1", "text": format!("Note #{i}") })),
+        ));
+    }
+    let notes_zip = build_zip_owned(entries);
+    let notes_rep = import_prism_bytes(&notes_zip).unwrap();
+    assert_eq!(notes_rep.document.graph_sheets.len(), 1);
+    assert_eq!(notes_rep.document.graph_sheets[0].spec.annotations.len(), MAX_GRAPH_ANNOTATIONS);
+    assert!(notes_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::MissingMetadata && w.message.contains("more than")));
+
+    // 2. Exceeding MAX_SHEETS_PER_PROJECT while rebuilding graphs degrades cleanly with a warning instead of failing import.
+    let graph_total = MAX_SHEETS_PER_PROJECT + 2;
+    let graph_uids: Vec<String> = (0..graph_total).map(|i| format!("g-{i:04}")).collect();
+    let mut cap_entries = vec![
+        (
+            String::from("document.json"),
+            json_bytes(json!({
+                "title": "Sheet Cap Graphs",
+                "sheets": { "data": ["s-1"], "graphs": graph_uids }
+            })),
+        ),
+        (
+            String::from("data/sheets/s-1/sheet.json"),
+            json_bytes(json!({"table": {"uid": "t-1", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-1"]}})),
+        ),
+        (String::from("data/sets/ds-1.json"), json_bytes(json!({"title": "Arm", "replicates": [{"valueType": "real"}]}))),
+        (String::from("data/tables/t-1/data.csv"), b"3.0\n4.0\n".to_vec()),
+    ];
+    for i in 0..graph_total {
+        cap_entries.push((
+            format!("graphs/g-{i:04}/sheet.json"),
+            json_bytes(json!({ "uid": format!("g-{i:04}"), "title": format!("Plot {i}"), "inputDataSets": ["ds-1"] })),
+        ));
+    }
+    let cap_zip = build_zip_owned(cap_entries);
+    let cap_rep = import_prism_bytes(&cap_zip).unwrap();
+    assert_eq!(cap_rep.document.total_sheet_count(), MAX_SHEETS_PER_PROJECT);
+    assert_eq!(cap_rep.document.graph_sheets.len(), MAX_SHEETS_PER_PROJECT - 1);
+    let rebuilt_warn_count = cap_rep
+        .warnings
+        .iter()
+        .filter(|w| w.kind == ImportWarningKind::UnsupportedGraphOrLayout && w.message.contains(REBUILT_GRAPH_WARNING_LABEL))
+        .count();
+    let refused_warn_count = cap_rep
+        .warnings
+        .iter()
+        .filter(|w| w.kind == ImportWarningKind::UnsupportedGraphOrLayout && w.message.contains("could not be rebuilt"))
+        .count();
+    assert_eq!(rebuilt_warn_count, MAX_SHEETS_PER_PROJECT - 1);
+    assert_eq!(refused_warn_count, 3);
+}
