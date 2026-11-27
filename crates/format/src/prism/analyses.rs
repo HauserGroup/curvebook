@@ -1223,9 +1223,12 @@ fn translate_two_group(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
 ///
 /// `multipleComparisons.type` selects the branch (`STATISTICAL` → `statistical.test`, `FDR` →
 /// `fdr.test`, `NO_CORRECTION` → unadjusted), and `pairwiseTests.pairwiseDesign.type` selects the
-/// comparison family. Only all-pairs families and Dunnett's many-to-one test translate; a Dunnett
-/// control keeps its sheet data-set index and must lie in the analysed selection
-/// ([`check_control_in_selection`]). Ambiguous test names and selected-pair families block.
+/// comparison family. `BONFERRONI_DUNN` denotes single-step Bonferroni (Dunn 1961) and
+/// `BONFERRONI_SIDAK` denotes single-step Šidák (1967), with no distinguishing sub-field in
+/// `parameters.json` (see `docs/evidence/interop-format-notes.md`). Only all-pairs families and
+/// one-way Dunnett many-to-one tests translate; a Dunnett control keeps its sheet data-set index
+/// and must lie in the analysed selection ([`check_control_in_selection`]). Unknown test names and
+/// unmapped comparison families block.
 fn parse_multiplicity(post_tests: Option<&JsonMap>, allow_dunnett: bool, blocking: &mut Vec<String>) -> MultiplicitySpec {
     let mut spec = MultiplicitySpec::default();
     let Some(pt) = post_tests else {
@@ -1273,7 +1276,7 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, allow_dunnett: bool, blockin
             "TUKEY" | "TUKEY_HSD" => MultiplicityMethod::TukeyHsd,
             "HOLM_SIDAK" => MultiplicityMethod::HolmSidak,
             "BONFERRONI_DUNN" | "BONFERRONI" => MultiplicityMethod::Bonferroni,
-            "SIDAK" => MultiplicityMethod::Sidak,
+            "BONFERRONI_SIDAK" | "SIDAK" => MultiplicityMethod::Sidak,
             "DUNNET_T3" | "DUNNETT_T3" => MultiplicityMethod::DunnettT3,
             "GAMES_HOWELL" => MultiplicityMethod::GamesHowell,
             "TAMHANE_T2" => MultiplicityMethod::TamhaneT2,

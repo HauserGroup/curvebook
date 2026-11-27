@@ -967,11 +967,12 @@ fn external_archive_post_tests_and_replicate_handling_translate_or_block() {
         ("Tukey all pairs", post("ALL_VS_ALL", "STATISTICAL", "TUKEY"), Some(MultiplicityMethod::TukeyHsd)),
         ("Dunn all pairs", post("ALL_VS_ALL", "STATISTICAL", "DUNN"), Some(MultiplicityMethod::DunnRankSum)),
         ("Bonferroni-Dunn is Bonferroni", post("ALL_VS_ALL", "STATISTICAL", "BONFERRONI_DUNN"), Some(MultiplicityMethod::Bonferroni)),
+        ("Bonferroni-Sidak is Sidak", post("ALL_VS_ALL", "STATISTICAL", "BONFERRONI_SIDAK"), Some(MultiplicityMethod::Sidak)),
         ("two-stage FDR", post("ALL_VS_ALL", "FDR", "BENJAMINI_KRIEGER_YEKUTIELI"), Some(MultiplicityMethod::TwoStageBkyFdr)),
         ("no correction", post("ALL_VS_ALL", "NO_CORRECTION", "TUKEY"), Some(MultiplicityMethod::None)),
         ("no test", post("ALL_VS_ALL", "STATISTICAL", "NO_TEST"), Some(MultiplicityMethod::None)),
         ("Dunnett keeps sheet control", post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET"), Some(MultiplicityMethod::Dunnett { control_column: 2 })),
-        ("ambiguous name blocks", post("ALL_VS_ALL", "STATISTICAL", "BONFERRONI_SIDAK"), None),
+        ("unknown test name blocks", post("ALL_VS_ALL", "STATISTICAL", "UNKNOWN_POST_TEST"), None),
         ("selected pairs block", post("SELECTED_VS_SELECTED", "STATISTICAL", "HOLM_SIDAK"), None),
         ("Tukey against control blocks", post("CONTROL_VS_ALL", "STATISTICAL", "TUKEY"), None),
         ("unadjusted selected pairs block", post("SELECTED_VS_SELECTED", "NO_CORRECTION", "TUKEY"), None),
@@ -1018,6 +1019,145 @@ fn external_archive_post_tests_and_replicate_handling_translate_or_block() {
         let tr = descriptive(mode);
         assert!(matches!(&tr.kind, AnalysisKind::DescriptiveStats(d) if d.aggregation == agg), "{mode}");
         assert_eq!(!tr.blocking_options.is_empty(), blocks, "{mode}");
+    }
+}
+
+#[test]
+fn issue_77_bonferroni_sidak_maps_to_sidak_across_anova_designs() {
+    use curvebook_doc::{FactorialAnovaSpec, MultiplicityMethod, OneWayAnovaSpec};
+
+    let make_params = |design: &str, family: &str, test: &str, adjusted_p: bool| {
+        json!({"content": {
+            "experimentalDesign": design,
+            "postTests": {
+                "type": "PAIRWISE_TESTS",
+                "pairwiseTests": {
+                    "pairwiseDesign": {"type": family, "controlID": {"col": {"idx": 0}}},
+                    "multipleComparisons": {
+                        "type": "STATISTICAL",
+                        "statistical": {
+                            "options": {"significanceLevel": 0.05},
+                            "report": {"adjustedPValues": adjusted_p},
+                            "test": test,
+                        }
+                    }
+                }
+            }
+        }})
+    };
+
+    type Case = (&'static str, &'static str, &'static str, &'static str, &'static str, bool, Option<MultiplicityMethod>);
+    let cases: &[Case] = &[
+        // Corpus-verified Šidák (1967) mapping for BONFERRONI_SIDAK across one-way & two-way designs.
+        (
+            "one-way ordinary BONFERRONI_SIDAK",
+            "ONE_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "one-way RM BONFERRONI_SIDAK (adjustedPValues=false)",
+            "ONE_WAY_ANOVA",
+            "REPEATED_MEASURES_ANOVA",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            false,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "one-way ordinary case-insensitive bonferroni_sidak",
+            "ONE_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "ALL_VS_ALL",
+            "bonferroni_sidak",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "two-way ordinary BONFERRONI_SIDAK",
+            "TWO_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "two-way RM-rows BONFERRONI_SIDAK",
+            "TWO_WAY_ANOVA",
+            "REPEATED_MEASURES_BY_ROWS",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "two-way RM-cols BONFERRONI_SIDAK",
+            "TWO_WAY_ANOVA",
+            "REPEATED_MEASURES_BY_COLS",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            false,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        (
+            "two-way RM-both BONFERRONI_SIDAK",
+            "TWO_WAY_ANOVA",
+            "REPEATED_MEASURES_BY_BOTH_FACTORS",
+            "ALL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
+        // Contrast: BONFERRONI_DUNN / BONFERRONI remain Bonferroni (Dunn 1961); SIDAK & HOLM_SIDAK stay distinct.
+        (
+            "one-way BONFERRONI_DUNN is Bonferroni",
+            "ONE_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "ALL_VS_ALL",
+            "BONFERRONI_DUNN",
+            true,
+            Some(MultiplicityMethod::Bonferroni),
+        ),
+        (
+            "two-way BONFERRONI_DUNN is Bonferroni",
+            "TWO_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "ALL_VS_ALL",
+            "BONFERRONI_DUNN",
+            true,
+            Some(MultiplicityMethod::Bonferroni),
+        ),
+        ("one-way SIDAK is Sidak", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "SIDAK", true, Some(MultiplicityMethod::Sidak)),
+        ("two-way HOLM_SIDAK is HolmSidak", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "HOLM_SIDAK", true, Some(MultiplicityMethod::HolmSidak)),
+        // Unmapped comparison families and unknown test names continue to block cleanly.
+        ("one-way selected-pairs BONFERRONI_SIDAK blocks", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
+        ("one-way control-vs-all BONFERRONI_SIDAK blocks", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "CONTROL_VS_ALL", "BONFERRONI_SIDAK", true, None),
+        ("two-way selected-pairs BONFERRONI_SIDAK blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
+        ("two-way control-vs-all BONFERRONI_SIDAK blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "CONTROL_VS_ALL", "BONFERRONI_SIDAK", true, None),
+        ("two-way unknown test blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "UNKNOWN_CORRECTION", true, None),
+    ];
+
+    for &(label, class, design, family, test, adjusted_p, expected) in cases {
+        let tr = translate_analysis_parameters(class, &make_params(design, family, test, adjusted_p)).unwrap();
+        let method = match &tr.kind {
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { multiplicity, .. })
+            | AnalysisKind::FactorialAnova(FactorialAnovaSpec { multiplicity, .. }) => multiplicity.method,
+            other => panic!("{label}: unexpected kind {other:?}"),
+        };
+        match expected {
+            Some(want) => {
+                assert_eq!(method, want, "{label}");
+                assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+            }
+            None => {
+                assert!(!tr.blocking_options.is_empty(), "{label}: expected blocking option");
+                assert_eq!(method, MultiplicityMethod::None, "{label}");
+            }
+        }
     }
 }
 
