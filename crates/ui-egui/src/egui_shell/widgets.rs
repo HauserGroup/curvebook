@@ -1145,6 +1145,8 @@ const DEFAULT_DROPDOWN_MAX_HEIGHT: f32 = 260.0;
 pub struct DropdownOutput<R> {
     /// Trigger button [`Response`] exposing `egui::Role::ComboBox` metadata.
     pub response: Response,
+    /// Open popup area [`Response`] when the dropdown list is currently open.
+    pub popup_response: Option<Response>,
     /// Inner closure output when the dropdown popup is open.
     pub inner: Option<R>,
     /// Whether the selected label was ellipsized to fit the trigger button width.
@@ -1265,9 +1267,16 @@ fn show_dropdown_inner<R>(
         resp = resp.on_hover_text(full_text);
     }
 
-    let inner = if row_enabled { show_dropdown_popup(ui, &t, &resp, popup_id, button_w, max_popup_height, add_contents) } else { None };
+    let (popup_response, inner) = if row_enabled {
+        match show_dropdown_popup(ui, &t, &resp, popup_id, button_w, max_popup_height, add_contents) {
+            Some((p_resp, out)) => (Some(p_resp), Some(out)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
 
-    DropdownOutput { response: resp, inner, ellipsized }
+    DropdownOutput { response: resp, popup_response, inner, ellipsized }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1329,7 +1338,7 @@ fn show_dropdown_popup<R>(
     button_w: f32,
     max_popup_height: f32,
     add_contents: impl FnOnce(&mut Ui) -> R,
-) -> Option<R> {
+) -> Option<(Response, R)> {
     let screen = ui.ctx().content_rect();
     let max_popup_h = max_popup_height.min((screen.height() - 24.0).max(80.0)).max(48.0);
     let max_popup_w = (screen.width() - 24.0).max(button_w);
@@ -1366,7 +1375,7 @@ fn show_dropdown_popup<R>(
             })
             .inner
         })
-        .map(|res| res.inner)
+        .map(|res| (res.response, res.inner))
 }
 
 // ============================================================================

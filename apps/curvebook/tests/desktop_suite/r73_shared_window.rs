@@ -29,7 +29,8 @@ fn connect_rw(addr: SocketAddr) -> Result<(BufReader<TcpStream>, BufWriter<TcpSt
 }
 
 fn step_window_frame(app: &mut CurveBookNativeApp, ctx: &egui::Context) {
-    let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+    let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+    app.drain_synthetic_events_into(&mut raw);
     let mut out = ctx.run_ui(raw, |ui| app.step_ui(ui));
     out.textures_delta.clear();
 }

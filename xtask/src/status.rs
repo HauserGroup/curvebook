@@ -1052,7 +1052,16 @@ mod tests {
         );
 
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        assert!(check_live_status_metrics(root, &std::fs::read_to_string(root.join(STATUS_REL)).unwrap()).is_empty());
+        let live_violations = check_live_status_metrics(root, &std::fs::read_to_string(root.join(STATUS_REL)).unwrap());
+        #[cfg(not(feature = "docs-site"))]
+        if crate::workflows::is_ci_env() {
+            assert_eq!(live_violations.len(), 1, "expected only the CI docs-site guard violation: {live_violations:?}");
+            assert!(live_violations[0].reason.contains("--features docs-site"), "{live_violations:?}");
+        } else {
+            assert!(live_violations.is_empty(), "{live_violations:?}");
+        }
+        #[cfg(feature = "docs-site")]
+        assert!(live_violations.is_empty(), "{live_violations:?}");
         assert_eq!(count_ui_command_specs_in_source("pub const UI_COMMANDS: &[UiCommandSpec] = &[UiCommandSpec\n{ id: \"a\" }];\n"), Some(1));
     }
 }

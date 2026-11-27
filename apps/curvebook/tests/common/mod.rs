@@ -641,8 +641,9 @@ pub fn drive_live_window_until_quit(app: &mut CurveBookNativeApp, ctx: &egui::Co
     let mut saw_close_cmd = false;
     let deadline = Instant::now() + timeout;
     while !app.close_confirmed() && Instant::now() < deadline {
-        let raw_input =
+        let mut raw_input =
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0))), ..Default::default() };
+        app.drain_synthetic_events_into(&mut raw_input);
         let mut output = ctx.run_ui(raw_input, |ui| app.step_ui(ui));
         output.textures_delta.clear();
         if output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::Close)) {

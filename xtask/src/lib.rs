@@ -177,7 +177,7 @@ pub(crate) fn resolve_target_dir_from_env(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn run_workspace_example(root: &Path, package: &str, example: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let target_dir = resolve_target_dir_from_env(root).join("xtask-examples");
+    let target_dir = resolve_target_dir_from_env(root);
     let target_str = target_dir.to_str().ok_or_else(|| format!("non-UTF-8 target dir {}", target_dir.display()))?;
     let mut cmd_args = vec!["run", "--locked", "-p", package, "--example", example];
     if !args.is_empty() {
