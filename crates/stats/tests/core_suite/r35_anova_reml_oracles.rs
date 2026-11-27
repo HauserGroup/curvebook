@@ -18,8 +18,8 @@ use curvebook_doc::{
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_stats::anova::{
     FactorialObservations, RmSphericityCorrection, compute_anova_effect_sizes, compute_anova_effect_sizes_for_n, fit_factorial_anova,
-    fit_multi_vc_reml, fit_random_intercept_reml, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity, kruskal_wallis_test,
-    run_factorial_anova, run_nested_analysis, variance_homogeneity_tests,
+    fit_multi_vc_reml, fit_random_intercept_reml, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity, fit_rm_two_way_split_plot_anova,
+    kruskal_wallis_test, run_factorial_anova, run_nested_analysis, variance_homogeneity_tests,
 };
 use curvebook_testkit::assert_approx_eq;
 
@@ -752,4 +752,294 @@ fn r35_8_minor_bartlett_kw_all_tied_and_aliased_factorial_df0() {
     let t1_ab = find_term(&r23_t1.terms, "A × B");
     assert_eq!(t1_ab.df, 1.0);
     assert_approx_eq(t1_ab.ss, 9.0, 1e-8, 1e-8, "2x3 T1 A×B ss");
+}
+
+// ============================================================================
+// Issue #73: Unbalanced-Group-Size Split-Plot RM Two-Way ANOVA & Additive Model
+// ============================================================================
+
+#[test]
+fn issue_73_unbalanced_split_plot_rm_two_way_type3_sphericity_and_additive_oracle() {
+    // D1 Provenance: R 4.5.2 multivariate Type III linear model (`lm(Y ~ G)` with `contr.sum`
+    // and orthonormal Helmert within-subject contrasts; Maxwell, Delaney & Kelley 2017, Ch. 12;
+    // Greenhouse & Geisser 1959; Huynh & Feldt 1976; Lecoutre 1991) on G = 3 unequal between-subject
+    // groups n = [4, 6, 5] (N = 15, df_subj = 12) x W = 4 complete within-subject levels (df_err = 36).
+    let g0: Vec<Vec<f64>> =
+        vec![vec![10.2, 12.8, 16.5, 22.1], vec![11.4, 13.5, 15.9, 25.0], vec![9.1, 11.2, 17.4, 19.3], vec![12.7, 14.9, 16.2, 26.4]];
+    let g1: Vec<Vec<f64>> = vec![
+        vec![14.1, 17.5, 22.0, 31.2],
+        vec![15.3, 18.2, 23.1, 29.4],
+        vec![13.0, 16.1, 20.8, 34.5],
+        vec![16.4, 19.3, 24.0, 30.1],
+        vec![14.6, 17.8, 22.5, 35.8],
+        vec![17.2, 20.4, 24.9, 32.0],
+    ];
+    let g2: Vec<Vec<f64>> = vec![
+        vec![18.5, 20.1, 22.4, 26.8],
+        vec![19.2, 21.3, 23.0, 27.5],
+        vec![17.6, 19.4, 21.8, 25.2],
+        vec![20.1, 22.0, 24.5, 29.1],
+        vec![18.9, 20.8, 22.9, 26.4],
+    ];
+    let groups = vec![g0, g1, g2];
+
+    let unc = fit_rm_two_way_split_plot_anova(
+        &groups,
+        ["Group", "Time"],
+        RepeatedMeasuresDesign::ColumnFactorMatched,
+        SumOfSquaresType::TypeIII,
+        true,
+        RmSphericityCorrection::None,
+    )
+    .unwrap();
+    let gg = fit_rm_two_way_split_plot_anova(
+        &groups,
+        ["Group", "Time"],
+        RepeatedMeasuresDesign::ColumnFactorMatched,
+        SumOfSquaresType::TypeIII,
+        true,
+        RmSphericityCorrection::GreenhouseGeisser,
+    )
+    .unwrap();
+    let hf = fit_rm_two_way_split_plot_anova(
+        &groups,
+        ["Group", "Time"],
+        RepeatedMeasuresDesign::ColumnFactorMatched,
+        SumOfSquaresType::TypeIII,
+        true,
+        RmSphericityCorrection::HuynhFeldt,
+    )
+    .unwrap();
+
+    // Verify exact Type III SS, F, residual MS, and sphericity (Mauchly, GG, Lecoutre HF).
+    assert!(unc.anova.unbalanced);
+    assert_approx_eq(unc.anova.terms[0].ss, 467.748_5, 1e-9, 1e-9, "split-plot SS_G");
+    assert_approx_eq(unc.anova.terms[0].f_statistic.unwrap(), 45.047_407_070_532, 1e-8, 1e-8, "split-plot F_G");
+    assert_approx_eq(unc.anova.terms[0].p_value.unwrap(), 2.636_728_291_682e-6, 1e-11, 1e-5, "split-plot P_G");
+    assert_approx_eq(gg.anova.terms[0].p_value.unwrap(), 2.636_728_291_682e-6, 1e-11, 1e-5, "between-subject P unchanged by GG");
+
+    assert_approx_eq(unc.anova.terms[1].ss, 1_295.917_022_522_523, 1e-8, 1e-9, "split-plot Type III SS_W");
+    assert_approx_eq(unc.anova.terms[1].f_statistic.unwrap(), 228.532_722_698_769, 1e-7, 1e-8, "split-plot F_W");
+    assert_approx_eq(unc.anova.terms[1].p_value.unwrap(), 1.748_189_210_414e-23, 1e-25, 1e-4, "split-plot P_W_unc");
+    assert_approx_eq(gg.anova.terms[1].p_value.unwrap(), 6.390_554_042_650e-11, 1e-13, 1e-4, "split-plot P_W_gg");
+    assert_approx_eq(hf.anova.terms[1].p_value.unwrap(), 1.907_593_573_645e-11, 1e-13, 1e-4, "split-plot P_W_hf");
+
+    assert_approx_eq(unc.anova.terms[2].ss, 128.251_5, 1e-9, 1e-9, "split-plot SS_GW");
+    assert_approx_eq(unc.anova.terms[2].f_statistic.unwrap(), 11.308_464_961_803, 1e-8, 1e-8, "split-plot F_GW");
+    assert_approx_eq(unc.anova.terms[2].p_value.unwrap(), 4.480_470_539_554e-7, 1e-11, 1e-4, "split-plot P_GW_unc");
+    assert_approx_eq(gg.anova.terms[2].p_value.unwrap(), 6.216_876_351_287e-4, 1e-8, 1e-4, "split-plot P_GW_gg");
+    assert_approx_eq(hf.anova.terms[2].p_value.unwrap(), 4.572_593_004_597e-4, 1e-8, 1e-4, "split-plot P_GW_hf");
+
+    assert_approx_eq(unc.anova.ss_residual, 68.047_166_666_667, 1e-8, 1e-9, "split-plot SS_err");
+    assert_approx_eq(unc.anova.df_residual, 36.0, 1e-12, 0.0, "split-plot df_err");
+    assert_approx_eq(unc.anova.ms_residual, 1.890_199_074_074, 1e-9, 1e-9, "split-plot MS_err");
+
+    let sph = unc.sphericities.column.as_ref().unwrap();
+    assert_approx_eq(sph.mauchly_w, 0.008_782_328_980, 1e-8, 1e-8, "split-plot Mauchly W");
+    assert_approx_eq(sph.mauchly_chi2, 50.769_868_546_983, 1e-6, 1e-6, "split-plot Mauchly chi2");
+    assert_approx_eq(sph.mauchly_p, 9.640_333_157_903e-10, 1e-13, 1e-4, "split-plot Mauchly p");
+    assert_approx_eq(sph.greenhouse_geisser_eps, 0.414_128_339_749, 1e-9, 1e-9, "split-plot GG eps");
+    assert_approx_eq(sph.huynh_feldt_eps, 0.438_480_254_082, 1e-9, 1e-9, "split-plot HF Lecoutre eps");
+
+    // Scale invariance at 1e-8.
+    let scaled: Vec<Vec<Vec<f64>>> = groups.iter().map(|g| g.iter().map(|s| s.iter().map(|&v| v * 1e-8).collect()).collect()).collect();
+    let gg_sc = fit_rm_two_way_split_plot_anova(
+        &scaled,
+        ["Group", "Time"],
+        RepeatedMeasuresDesign::ColumnFactorMatched,
+        SumOfSquaresType::TypeIII,
+        true,
+        RmSphericityCorrection::GreenhouseGeisser,
+    )
+    .unwrap();
+    assert_approx_eq(gg_sc.anova.terms[1].f_statistic.unwrap(), gg.anova.terms[1].f_statistic.unwrap(), 1e-7, 1e-7, "1e-8 scale F_W");
+    assert_approx_eq(gg_sc.sphericities.column.as_ref().unwrap().greenhouse_geisser_eps, sph.greenhouse_geisser_eps, 1e-9, 1e-9, "1e-8 scale GG");
+    assert_approx_eq(gg_sc.anova.terms[2].p_value.unwrap(), gg.anova.terms[2].p_value.unwrap(), 1e-8, 1e-4, "1e-8 scale P_GW_gg");
+
+    // Additive model (include_interaction = false) pools SS_GW into residual: df_err = (N-1)*(W-1) = 42.
+    let add = fit_rm_two_way_split_plot_anova(
+        &groups,
+        ["Group", "Time"],
+        RepeatedMeasuresDesign::ColumnFactorMatched,
+        SumOfSquaresType::TypeIII,
+        false,
+        RmSphericityCorrection::None,
+    )
+    .unwrap();
+    assert_eq!(add.anova.terms.len(), 2);
+    assert_approx_eq(add.anova.terms[1].ss, 1_399.813_833_333_333, 1e-8, 1e-9, "additive SS_W");
+    assert_approx_eq(add.anova.ss_residual, 196.298_666_666_667, 1e-8, 1e-9, "additive SS_err");
+    assert_approx_eq(add.anova.df_residual, 42.0, 1e-12, 0.0, "additive df_err");
+    assert_approx_eq(add.anova.terms[1].f_statistic.unwrap(), 99.834_573_507_037, 1e-7, 1e-8, "additive F_W");
+
+    // Sheet-level GroupedTable dispatch with unequal subcolumns (6 subcolumns, blank slots in G1 & G3)
+    // must take the classical split-plot path (NOT REML), emit rm-sphericity, and verify post-hoc SE/df
+    // plus RowFactorMatched transpose symmetry.
+    let mut grp_col = GroupedTable::new(SubcolumnMode::RawReplicates(6), 4, 3).unwrap();
+    grp_col.row_factor_title = String::from("Group");
+    grp_col.column_factor_title = String::from("Time");
+    grp_col.row_titles = vec![String::from("G1"), String::from("G2"), String::from("G3")];
+    for w in 0..4 {
+        grp_col.data_sets[w].title = format!("T{}", w + 1);
+        for (g_i, grp) in groups.iter().enumerate() {
+            for (s_i, subj) in grp.iter().enumerate() {
+                grp_col.data_sets[w].cells[g_i][s_i] = Cell::number(subj[w]);
+            }
+        }
+    }
+    let sh_col = DataSheet::new(SheetId::new("g-sp-col"), "SplitPlot ColMatched", TableArchetype::Grouped(grp_col)).unwrap();
+    let fac_col = FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
+        sphericity_correction: RmSphericityCorrection::GreenhouseGeisser,
+        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        ..FactorialAnovaSpec::default()
+    };
+    let res_col = run_factorial_anova(
+        &sh_col,
+        &AnalysisSpec::new("an-sp-col", SheetId::new("g-sp-col"), AnalysisKind::FactorialAnova(fac_col.clone())).unwrap(),
+        &fac_col,
+    )
+    .unwrap();
+    let scalar_col = |k: &str| res_col.scalars.iter().find(|s| s.key == k).unwrap().value;
+    assert!(res_col.tabs.iter().any(|t| t.id == "rm-sphericity"), "classical split-plot must emit rm-sphericity tab");
+    assert!(
+        res_col
+            .checklist
+            .iter()
+            .any(|c| c.assumption == "Repeated-measures estimator"
+                && c.diagnostic_metric.as_deref().is_some_and(|m| m.contains("Classical split-plot"))),
+        "unequal-group complete split-plot must not fall back to REML"
+    );
+    assert_approx_eq(scalar_col("Group: F"), 45.047_407_070_532, 1e-8, 1e-8, "sheet ColMatched F_G");
+    assert_approx_eq(scalar_col("Time: F"), 228.532_722_698_769, 1e-7, 1e-8, "sheet ColMatched F_W");
+    assert_approx_eq(scalar_col("Time: P"), 6.390_554_042_650e-11, 1e-13, 1e-4, "sheet ColMatched P_W_gg");
+    assert_approx_eq(scalar_col("Group × Time: P"), 6.216_876_351_287e-4, 1e-8, 1e-4, "sheet ColMatched P_GW_gg");
+    assert_approx_eq(scalar_col("MS residual"), 1.890_199_074_074, 1e-9, 1e-9, "sheet ColMatched MS_err");
+
+    // Verify exact post-hoc SE and Satterthwaite df for unequal-n contrasts (Maxwell, Delaney & Kelley 2017, Ch. 12).
+    let cell_num = |c: &ResultCell| match c {
+        ResultCell::Number { value, .. } => *value,
+        other => panic!("expected number, got {other:?}"),
+    };
+    let find_mc = |tab_id: &str, a: &str, b: &str| {
+        let tab = res_col.tabs.iter().find(|t| t.id == tab_id).unwrap_or_else(|| panic!("missing tab `{tab_id}`"));
+        let idx = tab
+            .row_labels
+            .iter()
+            .position(|l| l.contains(a) && l.contains(b))
+            .unwrap_or_else(|| panic!("missing `{a}` vs `{b}` in {tab_id}: {:?}", tab.row_labels));
+        (cell_num(&tab.rows[idx][0]), cell_num(&tab.rows[idx][1]), cell_num(&tab.rows[idx][3]))
+    };
+    let (d_g, se_g, df_g) = find_mc("multiple-comparisons-factor-a", "G1", "G2");
+    assert_approx_eq(d_g, -6.179_166_666_667, 1e-9, 1e-9, "G1-G2 marginal diff");
+    assert_approx_eq(se_g, 0.735_395_026_436, 1e-9, 1e-9, "G1-G2 marginal SE");
+    assert_approx_eq(df_g, 12.0, 1e-12, 0.0, "G1-G2 marginal df");
+
+    let (d_w, se_w, df_w) = find_mc("multiple-comparisons-factor-b", "T1", "T4");
+    assert_approx_eq(d_w, -12.518_888_888_889, 1e-9, 1e-9, "T1-T4 marginal diff");
+    assert_approx_eq(se_w, 0.508_947_227_639, 1e-9, 1e-9, "T1-T4 marginal SE (harmonic n_h)");
+    assert_approx_eq(df_w, 36.0, 1e-12, 0.0, "T1-T4 marginal df");
+
+    let (d_sw, se_sw, df_sw) = find_mc("multiple-comparisons-simple-b-within-a", "G1 | T1", "G1 | T4");
+    assert_approx_eq(d_sw, -12.35, 1e-9, 1e-9, "T1-T4 @ G1 diff");
+    assert_approx_eq(se_sw, 0.972_162_299_741, 1e-9, 1e-9, "T1-T4 @ G1 SE");
+    assert_approx_eq(df_sw, 36.0, 1e-12, 0.0, "T1-T4 @ G1 df");
+
+    let (d_sb, se_sb, df_sb) = find_mc("multiple-comparisons-simple-a-within-b", "T1 | G1", "T1 | G2");
+    assert_approx_eq(d_sb, -4.25, 1e-9, 1e-9, "G1-G2 @ T1 diff");
+    assert_approx_eq(se_sb, 1.063_716_623_709, 1e-9, 1e-9, "G1-G2 @ T1 SE");
+    assert_approx_eq(df_sb, 37.583_823_880_433, 1e-8, 1e-8, "G1-G2 @ T1 Satterthwaite df");
+
+    // Transpose symmetry: RowFactorMatched on transposed GroupedTable (4 rows x 3 columns x 6 subcolumns).
+    let mut grp_row = GroupedTable::new(SubcolumnMode::RawReplicates(6), 3, 4).unwrap();
+    grp_row.row_factor_title = String::from("Time");
+    grp_row.column_factor_title = String::from("Group");
+    grp_row.row_titles = (1..=4).map(|w| format!("T{w}")).collect();
+    for (g_i, grp) in groups.iter().enumerate() {
+        grp_row.data_sets[g_i].title = format!("G{}", g_i + 1);
+        for (s_i, subj) in grp.iter().enumerate() {
+            for (w, &v) in subj.iter().enumerate() {
+                grp_row.data_sets[g_i].cells[w][s_i] = Cell::number(v);
+            }
+        }
+    }
+    let sh_row = DataSheet::new(SheetId::new("g-sp-row"), "SplitPlot RowMatched", TableArchetype::Grouped(grp_row)).unwrap();
+    let fac_row = FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::RowFactorMatched,
+        sphericity_correction: RmSphericityCorrection::GreenhouseGeisser,
+        ..FactorialAnovaSpec::default()
+    };
+    let res_row = run_factorial_anova(
+        &sh_row,
+        &AnalysisSpec::new("an-sp-row", SheetId::new("g-sp-row"), AnalysisKind::FactorialAnova(fac_row.clone())).unwrap(),
+        &fac_row,
+    )
+    .unwrap();
+    let scalar_row = |k: &str| res_row.scalars.iter().find(|s| s.key == k).unwrap().value;
+    assert_approx_eq(scalar_row("Time: F"), scalar_col("Time: F"), 1e-10, 1e-10, "RowMatched transpose F_W");
+    assert_approx_eq(scalar_row("Group: F"), scalar_col("Group: F"), 1e-10, 1e-10, "RowMatched transpose F_G");
+    assert_approx_eq(scalar_row("Time: P"), scalar_col("Time: P"), 1e-12, 1e-6, "RowMatched transpose P_W_gg");
+    assert_approx_eq(scalar_row("Time × Group: P"), scalar_col("Group × Time: P"), 1e-10, 1e-6, "RowMatched transpose P_GW_gg");
+}
+
+#[test]
+fn issue_73_negative_icc_unequal_split_plot_keeps_separate_strata_and_partial_subject_uses_reml() {
+    // D1 Provenance: R 4.5.2 exact split-plot Type III GLM on negative-ICC unequal group sizes
+    // n = [6, 4], W = 2 (MS_Subj(G) = 0.0059375 << MS_err_within = 1794.7853125). Classical
+    // split-plot ANOVA keeps the two error strata separate rather than clamping sigma^2_subj = 0.
+    let g0: [[f64; 2]; 6] = [[30.0, 70.2], [69.8, 30.1], [25.2, 74.9], [75.1, 24.8], [40.0, 60.1], [60.2, 39.9]];
+    let g1: [[f64; 2]; 4] = [[20.1, 84.9], [85.0, 20.2], [15.0, 90.1], [90.2, 14.9]];
+
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(6), 2, 2).unwrap();
+    grp.row_factor_title = String::from("Group");
+    grp.column_factor_title = String::from("Condition");
+    for (s, row) in g0.iter().enumerate() {
+        grp.data_sets[0].cells[0][s] = Cell::number(row[0]);
+        grp.data_sets[1].cells[0][s] = Cell::number(row[1]);
+    }
+    for (s, row) in g1.iter().enumerate() {
+        grp.data_sets[0].cells[1][s] = Cell::number(row[0]);
+        grp.data_sets[1].cells[1][s] = Cell::number(row[1]);
+    }
+    let sheet = DataSheet::new(SheetId::new("g-neg-icc"), "NegICC SplitPlot", TableArchetype::Grouped(grp.clone())).unwrap();
+    let fac = FactorialAnovaSpec {
+        repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
+        fit_reml_on_missing: true,
+        ..FactorialAnovaSpec::default()
+    };
+    let res = run_factorial_anova(
+        &sheet,
+        &AnalysisSpec::new("an-neg-icc", SheetId::new("g-neg-icc"), AnalysisKind::FactorialAnova(fac.clone())).unwrap(),
+        &fac,
+    )
+    .unwrap();
+    let scalar = |k: &str| res.scalars.iter().find(|s| s.key == k).unwrap().value;
+    assert_approx_eq(scalar("Group: F"), 5_154.189_473_683_564, 1e-6, 1e-8, "neg-ICC separate-strata F_G");
+    assert_approx_eq(scalar("Group: P"), 1.578_162_255_336e-12, 1e-15, 1e-4, "neg-ICC separate-strata P_G");
+    assert_approx_eq(scalar("Condition: F"), 0.000_006_686_036, 1e-8, 1e-5, "neg-ICC F_W");
+    assert_approx_eq(scalar("MS residual"), 1_794.785_312_5, 1e-7, 1e-9, "neg-ICC MS_err_within");
+
+    // Dropping a single within-subject cell creates a genuinely partial subject, which must
+    // upgrade to mixed-effects REML when fit_reml_on_missing is true and error when false.
+    let mut grp_partial = grp;
+    grp_partial.data_sets[1].cells[0][5] = Cell::empty();
+    let sh_partial = DataSheet::new(SheetId::new("g-neg-part"), "NegICC Partial", TableArchetype::Grouped(grp_partial)).unwrap();
+    let res_reml = run_factorial_anova(
+        &sh_partial,
+        &AnalysisSpec::new("an-neg-reml", SheetId::new("g-neg-part"), AnalysisKind::FactorialAnova(fac.clone())).unwrap(),
+        &fac,
+    )
+    .unwrap();
+    assert!(
+        res_reml.checklist.iter().any(|c| c.assumption == "Missing-value mixed-effects REML"),
+        "genuinely partial subject must still dispatch to mixed-effects REML"
+    );
+    let fac_no_reml = FactorialAnovaSpec { fit_reml_on_missing: false, ..fac };
+    let err = run_factorial_anova(
+        &sh_partial,
+        &AnalysisSpec::new("an-neg-err", SheetId::new("g-neg-part"), AnalysisKind::FactorialAnova(fac_no_reml.clone())).unwrap(),
+        &fac_no_reml,
+    )
+    .unwrap_err();
+    assert!(matches!(err, curvebook_stats::StatsError::InsufficientSampleSize { .. }), "expected InsufficientSampleSize, got {err:?}");
 }

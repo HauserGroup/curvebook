@@ -244,10 +244,11 @@ This analysis fits fixed-effects or repeated-measures factorial linear models, a
 - **Edge cases and limits:**
   - Pre-summarized subcolumns on Grouped tables are always rejected, because the analysis needs raw observations.
   - Empty or fully excluded levels are removed before Type III coding.
+  - Split-plot two-way repeated-measures designs (`row_factor_matched` or `column_factor_matched`) with unequal between-subject group sizes and complete within-subject observations use classical split-plot RM ANOVA. They run separate between- and within-subject error strata with pooled within-group sphericity, upgrading to mixed-effects REML only when within-subject observations are missing (`fit_reml_on_missing: true`) or when REML or unstructured covariance is requested.
   - When the covariance is under-observed or not positive definite, the `unstructured` model falls back to `compound_symmetry` and records the reason.
   - With `fit_reml_on_missing: false`, missing repeated-measures cells cause an error.
 - **References and verification:**
-  - References: Searle (1987); Maxwell & Delaney (2004); Zar (2010); Lindstrom & Bates (1988); Pinheiro & Bates (1996); Kenward & Roger (1997); Fai & Cornelius (1996).
+  - References: Searle (1987); Maxwell, Delaney, & Kelley (2017); Greenhouse & Geisser (1959); Huynh & Feldt (1976); Lecoutre (1991); Zar (2010); Lindstrom & Bates (1988); Pinheiro & Bates (1996); Kenward & Roger (1997); Fai & Cornelius (1996).
   - Verified against: `R 4.5.2` (`aov`, `lm`, `nlme::lme`, `nlme::gls`) ([statistics evidence](../evidence/statistics.md)).
 
 ---

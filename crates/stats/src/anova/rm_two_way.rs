@@ -122,6 +122,7 @@ pub(in crate::anova) struct RmBalancedPostHocModel {
     pub(in crate::anova) s_count: usize,
     pub(in crate::anova) a_count: usize,
     pub(in crate::anova) b_count: usize,
+    pub(in crate::anova) group_counts: Vec<usize>,
     pub(in crate::anova) row_means: Vec<f64>,
     pub(in crate::anova) col_means: Vec<f64>,
     pub(in crate::anova) cell_means: Vec<Vec<f64>>,
@@ -131,7 +132,7 @@ pub(in crate::anova) struct RmBalancedPostHocModel {
     pub(in crate::anova) err_b_df: f64,
     pub(in crate::anova) err_ab_ms: f64,
     pub(in crate::anova) err_ab_df: f64,
-    pub(in crate::anova) subject_data: Vec<Vec<Vec<f64>>>,
+    pub(in crate::anova) cell_samples: Vec<Vec<Vec<f64>>>,
 }
 
 /// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or
@@ -152,7 +153,7 @@ pub fn fit_rm_two_way_anova_with_sphericity(
     rm_design: RepeatedMeasuresDesign,
     correction: RmSphericityCorrection,
 ) -> Result<RmTwoWayAnovaResult, StatsError> {
-    let (res, _) = fit_rm_two_way_anova_with_posthoc(subject_data, row_name, col_name, rm_design, correction)?;
+    let (res, _) = fit_rm_two_way_anova_with_posthoc(subject_data, row_name, col_name, rm_design, correction, true)?;
     Ok(res)
 }
 
@@ -162,6 +163,7 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
     col_name: &str,
     rm_design: RepeatedMeasuresDesign,
     correction: RmSphericityCorrection,
+    include_interaction: bool,
 ) -> Result<(RmTwoWayAnovaResult, RmBalancedPostHocModel), StatsError> {
     let s_count = subject_data.len();
     if s_count < 2 {
@@ -258,20 +260,23 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
 
     let sphericities = compute_rm_two_way_sphericities(subject_data, a, b, rm_design)?;
     let (err_a_ss, err_a_df, err_b_ss, err_b_df, err_ab_ss, err_ab_df, term_sphs) = match rm_design {
-        RepeatedMeasuresDesign::BothFactorsMatched => (
-            ss_sa,
-            (sf - 1.0) * dfa,
-            ss_sb,
-            (sf - 1.0) * dfb,
-            ss_sab,
-            (sf - 1.0) * dfab,
-            [sphericities.row.as_ref(), sphericities.column.as_ref(), sphericities.interaction.as_ref()],
-        ),
+        RepeatedMeasuresDesign::BothFactorsMatched => {
+            let (e_ab_ss, e_ab_df) = if include_interaction { (ss_sab, (sf - 1.0) * dfab) } else { (ss_sab + ss_ab, sf * dfab) };
+            (
+                ss_sa,
+                (sf - 1.0) * dfa,
+                ss_sb,
+                (sf - 1.0) * dfb,
+                e_ab_ss,
+                e_ab_df,
+                [sphericities.row.as_ref(), sphericities.column.as_ref(), sphericities.interaction.as_ref()],
+            )
+        }
         RepeatedMeasuresDesign::ColumnFactorMatched => {
             let ss_subj_within_a = ss_s + ss_sa;
             let df_subj_within_a = af * (sf - 1.0);
-            let ss_err_within = ss_sb + ss_sab;
-            let df_err_within = af * (sf - 1.0) * dfb;
+            let ss_err_within = if include_interaction { ss_sb + ss_sab } else { ss_sb + ss_sab + ss_ab };
+            let df_err_within = if include_interaction { af * (sf - 1.0) * dfb } else { (af * sf - 1.0) * dfb };
             (
                 ss_subj_within_a,
                 df_subj_within_a,
@@ -285,8 +290,8 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
         RepeatedMeasuresDesign::RowFactorMatched => {
             let ss_subj_within_b = ss_s + ss_sb;
             let df_subj_within_b = bf * (sf - 1.0);
-            let ss_err_within = ss_sa + ss_sab;
-            let df_err_within = bf * (sf - 1.0) * dfa;
+            let ss_err_within = if include_interaction { ss_sa + ss_sab } else { ss_sa + ss_sab + ss_ab };
+            let df_err_within = if include_interaction { bf * (sf - 1.0) * dfa } else { (bf * sf - 1.0) * dfa };
             (
                 ss_err_within,
                 df_err_within,
@@ -298,8 +303,8 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
             )
         }
         RepeatedMeasuresDesign::None => {
-            let df_res = (total_n as f64) - af * bf;
-            let ss_res = ss_s + ss_sa + ss_sb + ss_sab;
+            let df_res = if include_interaction { (total_n as f64) - af * bf } else { (total_n as f64) - af - bf + 1.0 };
+            let ss_res = if include_interaction { ss_s + ss_sa + ss_sb + ss_sab } else { ss_s + ss_sa + ss_sb + ss_sab + ss_ab };
             (ss_res, df_res, ss_res, df_res, ss_res, df_res, [None, None, None])
         }
     };
@@ -322,11 +327,13 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
             })
         };
 
-    let terms = vec![
+    let mut terms = vec![
         make_term(row_name.to_owned(), ss_a, dfa, err_a_ss, err_a_df, term_sphs[0])?,
         make_term(col_name.to_owned(), ss_b, dfb, err_b_ss, err_b_df, term_sphs[1])?,
-        make_term(format!("{row_name} × {col_name}"), ss_ab, dfab, err_ab_ss, err_ab_df, term_sphs[2])?,
     ];
+    if include_interaction {
+        terms.push(make_term(format!("{row_name} × {col_name}"), ss_ab, dfab, err_ab_ss, err_ab_df, term_sphs[2])?);
+    }
 
     let df_resid = err_ab_df;
     let ms_resid = err_ab_ss / df_resid.max(1.0);
@@ -342,11 +349,25 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
         ss_type: SumOfSquaresType::TypeIII,
     };
     let rm_res = RmTwoWayAnovaResult { anova, design: rm_design, sphericities, correction, term_error_dfs: [err_a_df, err_b_df, err_ab_df] };
+    let mut cell_samples = vec![vec![Vec::with_capacity(s_count); b]; a];
+    for mat in subject_data {
+        for (i, r_vec) in mat.iter().enumerate() {
+            for (j, &v) in r_vec.iter().enumerate() {
+                cell_samples[i][j].push(v);
+            }
+        }
+    }
+    let group_counts = match rm_design {
+        RepeatedMeasuresDesign::ColumnFactorMatched => vec![s_count; a],
+        RepeatedMeasuresDesign::RowFactorMatched => vec![s_count; b],
+        RepeatedMeasuresDesign::BothFactorsMatched | RepeatedMeasuresDesign::None => vec![s_count],
+    };
     let post_hoc = RmBalancedPostHocModel {
         design: rm_design,
         s_count,
         a_count: a,
         b_count: b,
+        group_counts,
         row_means,
         col_means,
         cell_means,
@@ -356,8 +377,347 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
         err_b_df,
         err_ab_ms: ms_resid,
         err_ab_df,
-        subject_data: subject_data.to_vec(),
+        cell_samples,
     };
+    Ok((rm_res, post_hoc))
+}
+
+struct SplitPlotStats {
+    g_count: usize,
+    w_count: usize,
+    n_total: usize,
+    total_n: usize,
+    data_max_abs: f64,
+    group_counts: Vec<usize>,
+    subj_means: Vec<Vec<f64>>,
+    cell_means_gw: Vec<Vec<f64>>,
+    grp_means: Vec<f64>,
+    grand_wt: f64,
+    wt_w_means: Vec<f64>,
+    unw_w_means: Vec<f64>,
+    unw_grand: f64,
+}
+
+fn validate_and_summarize_split_plot(groups: &[Vec<Vec<f64>>]) -> Result<SplitPlotStats, StatsError> {
+    let g_count = groups.len();
+    if g_count < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "RM two-way factor levels", required: 2, actual: g_count });
+    }
+    let w_count = groups.iter().find_map(|g| g.first().map(Vec::len)).unwrap_or(0);
+    if w_count < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "RM two-way factor levels", required: 2, actual: w_count });
+    }
+    let mut group_counts = Vec::with_capacity(g_count);
+    let mut n_total = 0_usize;
+    let mut data_max_abs = 0.0_f64;
+    let mut subj_means = Vec::with_capacity(g_count);
+    let mut cell_means_gw: Vec<Vec<f64>> = Vec::with_capacity(g_count);
+    let mut grp_means = Vec::with_capacity(g_count);
+    let mut grand_sum = NeumaierSum::new();
+    let wf = w_count as f64;
+
+    for grp in groups {
+        let n_g = grp.len();
+        if n_g == 0 {
+            return Err(StatsError::InsufficientSampleSize { context: "RM split-plot group subjects", required: 1, actual: 0 });
+        }
+        group_counts.push(n_g);
+        n_total += n_g;
+        let ng_f = n_g as f64;
+        let mut s_means = Vec::with_capacity(n_g);
+        let mut c_sums = vec![NeumaierSum::new(); w_count];
+        let mut g_sum = NeumaierSum::new();
+        for subj in grp {
+            if subj.len() != w_count {
+                return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: w_count, actual: subj.len() }));
+            }
+            let mut s_sum = NeumaierSum::new();
+            for (w, &v) in subj.iter().enumerate() {
+                if !v.is_finite() {
+                    return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "y", value: v }));
+                }
+                data_max_abs = data_max_abs.max(v.abs());
+                s_sum.add(v);
+                c_sums[w].add(v);
+                g_sum.add(v);
+                grand_sum.add(v);
+            }
+            s_means.push(s_sum.total() / wf);
+        }
+        subj_means.push(s_means);
+        cell_means_gw.push(c_sums.into_iter().map(|s| s.total() / ng_f).collect());
+        grp_means.push(g_sum.total() / (ng_f * wf));
+    }
+    if n_total <= g_count {
+        return Err(StatsError::InsufficientSampleSize { context: "RM two-way subjects", required: g_count + 1, actual: n_total });
+    }
+    let total_n = n_total * w_count;
+    let nf = n_total as f64;
+    let gf = g_count as f64;
+    let grand_wt = grand_sum.total() / (total_n as f64);
+    let mut wt_w_means = vec![0.0_f64; w_count];
+    let mut unw_w_means = vec![0.0_f64; w_count];
+    for w in 0..w_count {
+        let mut wt_acc = NeumaierSum::new();
+        let mut unw_acc = NeumaierSum::new();
+        for g in 0..g_count {
+            wt_acc.add((group_counts[g] as f64) * cell_means_gw[g][w]);
+            unw_acc.add(cell_means_gw[g][w]);
+        }
+        wt_w_means[w] = wt_acc.total() / nf;
+        unw_w_means[w] = unw_acc.total() / gf;
+    }
+    let unw_grand = unw_w_means.iter().sum::<f64>() / wf;
+    Ok(SplitPlotStats {
+        g_count,
+        w_count,
+        n_total,
+        total_n,
+        data_max_abs,
+        group_counts,
+        subj_means,
+        cell_means_gw,
+        grp_means,
+        grand_wt,
+        wt_w_means,
+        unw_w_means,
+        unw_grand,
+    })
+}
+
+fn compute_split_plot_sphericity(
+    groups: &[Vec<Vec<f64>>],
+    stats: &SplitPlotStats,
+    include_interaction: bool,
+) -> Result<SphericityResult, StatsError> {
+    let m_w = helmert_contrast_matrix(stats.w_count)?;
+    if include_interaction {
+        let s_pool = pooled_within_group_cov(groups)?;
+        let n_subj = stats.n_total as f64;
+        let g_f = stats.g_count as f64;
+        compute_sphericity_from_cov_contrast(&s_pool, &m_w, n_subj - g_f, n_subj, g_f)
+    } else {
+        let all_subjs: Vec<Vec<f64>> = groups.iter().flat_map(|g| g.iter().cloned()).collect();
+        let s_pool = pooled_within_group_cov(&[all_subjs])?;
+        let n_subj = stats.n_total as f64;
+        compute_sphericity_from_cov_contrast(&s_pool, &m_w, n_subj - 1.0, n_subj, 1.0)
+    }
+}
+
+fn build_split_plot_posthoc(
+    groups: &[Vec<Vec<f64>>],
+    stats: &SplitPlotStats,
+    rm_design: RepeatedMeasuresDesign,
+    ms_subj: f64,
+    df_subj: f64,
+    ms_err_w: f64,
+    df_err_w: f64,
+) -> RmBalancedPostHocModel {
+    let g_count = stats.g_count;
+    let w_count = stats.w_count;
+    let s_count = stats.group_counts.first().copied().unwrap_or(0);
+    if rm_design == RepeatedMeasuresDesign::ColumnFactorMatched {
+        let mut cell_samples = vec![vec![Vec::new(); w_count]; g_count];
+        for (g, grp) in groups.iter().enumerate() {
+            for w in 0..w_count {
+                cell_samples[g][w] = grp.iter().map(|subj| subj[w]).collect();
+            }
+        }
+        RmBalancedPostHocModel {
+            design: rm_design,
+            s_count,
+            a_count: g_count,
+            b_count: w_count,
+            group_counts: stats.group_counts.clone(),
+            row_means: stats.grp_means.clone(),
+            col_means: stats.unw_w_means.clone(),
+            cell_means: stats.cell_means_gw.clone(),
+            err_a_ms: ms_subj,
+            err_a_df: df_subj,
+            err_b_ms: ms_err_w,
+            err_b_df: df_err_w,
+            err_ab_ms: ms_err_w,
+            err_ab_df: df_err_w,
+            cell_samples,
+        }
+    } else {
+        let mut cell_means = vec![vec![0.0_f64; g_count]; w_count];
+        let mut cell_samples = vec![vec![Vec::new(); g_count]; w_count];
+        for (g, grp) in groups.iter().enumerate() {
+            for w in 0..w_count {
+                cell_means[w][g] = stats.cell_means_gw[g][w];
+                cell_samples[w][g] = grp.iter().map(|subj| subj[w]).collect();
+            }
+        }
+        RmBalancedPostHocModel {
+            design: rm_design,
+            s_count,
+            a_count: w_count,
+            b_count: g_count,
+            group_counts: stats.group_counts.clone(),
+            row_means: stats.unw_w_means.clone(),
+            col_means: stats.grp_means.clone(),
+            cell_means,
+            err_a_ms: ms_err_w,
+            err_a_df: df_err_w,
+            err_b_ms: ms_subj,
+            err_b_df: df_subj,
+            err_ab_ms: ms_err_w,
+            err_ab_df: df_err_w,
+            cell_samples,
+        }
+    }
+}
+
+/// Split-plot repeated-measures two-way ANOVA (`RowFactorMatched` or `ColumnFactorMatched`) on
+/// complete within-subject observations with arbitrary between-subject group sizes
+/// `groups[group][subject][within_level]`.
+///
+/// Implements exact classical Type III (unweighted marginal means scaled by harmonic mean group
+/// size `n_h = G / sum(1/n_g)`) or Type I (sequential) sums of squares with separate
+/// between-subject (`df = N - G`) and within-subject (`df = (N - G)(W - 1)`) error strata
+/// (Maxwell, Delaney, & Kelley 2017, Ch. 12; Winer, Brown, & Michels 1991, §7.5), pooled
+/// within-group covariance sphericity (Greenhouse & Geisser 1959; Huynh & Feldt 1976;
+/// Lecoutre 1991), and optional additive (main-effects-only) reduction when
+/// `include_interaction` is `false`.
+pub fn fit_rm_two_way_split_plot_anova(
+    groups: &[Vec<Vec<f64>>],
+    factor_names: [&str; 2],
+    rm_design: RepeatedMeasuresDesign,
+    ss_type: SumOfSquaresType,
+    include_interaction: bool,
+    correction: RmSphericityCorrection,
+) -> Result<RmTwoWayAnovaResult, StatsError> {
+    let (res, _) = fit_rm_two_way_split_plot_with_posthoc(groups, factor_names, rm_design, ss_type, include_interaction, correction)?;
+    Ok(res)
+}
+
+pub(in crate::anova) fn fit_rm_two_way_split_plot_with_posthoc(
+    groups: &[Vec<Vec<f64>>],
+    factor_names: [&str; 2],
+    rm_design: RepeatedMeasuresDesign,
+    ss_type: SumOfSquaresType,
+    include_interaction: bool,
+    correction: RmSphericityCorrection,
+) -> Result<(RmTwoWayAnovaResult, RmBalancedPostHocModel), StatsError> {
+    if !matches!(rm_design, RepeatedMeasuresDesign::RowFactorMatched | RepeatedMeasuresDesign::ColumnFactorMatched) {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "split-plot repeated-measures design (RowFactorMatched or ColumnFactorMatched)",
+        });
+    }
+    let stats = validate_and_summarize_split_plot(groups)?;
+    let gf = stats.g_count as f64;
+    let wf = stats.w_count as f64;
+    let nf = stats.n_total as f64;
+    let df_between = gf - 1.0;
+    let df_within = wf - 1.0;
+    let df_inter = df_between * df_within;
+    let df_subj = nf - gf;
+
+    let mut ss_between_raw = NeumaierSum::new();
+    let mut ss_subj_raw = NeumaierSum::new();
+    let mut ss_err_raw = NeumaierSum::new();
+    let mut ss_inter_raw = NeumaierSum::new();
+    let mut ss_total_raw = NeumaierSum::new();
+
+    for (g, grp) in groups.iter().enumerate() {
+        let ng_f = stats.group_counts[g] as f64;
+        ss_between_raw.add(wf * ng_f * (stats.grp_means[g] - stats.grand_wt).powi(2));
+        for (s, subj) in grp.iter().enumerate() {
+            let sm = stats.subj_means[g][s];
+            ss_subj_raw.add(wf * (sm - stats.grp_means[g]).powi(2));
+            for (w, &v) in subj.iter().enumerate() {
+                let resid = v - sm - stats.cell_means_gw[g][w] + stats.grp_means[g];
+                ss_err_raw.add(resid * resid);
+                ss_total_raw.add((v - stats.grand_wt).powi(2));
+            }
+        }
+        for w in 0..stats.w_count {
+            let dev = (stats.cell_means_gw[g][w] - stats.grp_means[g]) - (stats.wt_w_means[w] - stats.grand_wt);
+            ss_inter_raw.add(ng_f * dev * dev);
+        }
+    }
+
+    let inv_n_sum: f64 = stats.group_counts.iter().map(|&n| 1.0 / (n as f64)).sum();
+    let n_h = gf / inv_n_sum;
+    let ss_within_t3_raw: f64 = gf * n_h * stats.unw_w_means.iter().map(|&m| (m - stats.unw_grand).powi(2)).sum::<f64>();
+    let ss_within_wt_raw: f64 = nf * stats.wt_w_means.iter().map(|&m| (m - stats.grand_wt).powi(2)).sum::<f64>();
+
+    let ss_between = clamp_ss_roundoff(ss_between_raw.total(), stats.data_max_abs, stats.total_n);
+    let ss_subj = clamp_ss_roundoff(ss_subj_raw.total(), stats.data_max_abs, stats.total_n);
+    let ss_err_w_full = clamp_ss_roundoff(ss_err_raw.total(), stats.data_max_abs, stats.total_n);
+    let ss_inter = clamp_ss_roundoff(ss_inter_raw.total(), stats.data_max_abs, stats.total_n);
+    let ss_total = clamp_ss_roundoff(ss_total_raw.total(), stats.data_max_abs, stats.total_n);
+
+    let (ss_within, err_w_ss, err_w_df) = if include_interaction {
+        let ss_w = match ss_type {
+            SumOfSquaresType::TypeIII => clamp_ss_roundoff(ss_within_t3_raw, stats.data_max_abs, stats.total_n),
+            SumOfSquaresType::TypeI => clamp_ss_roundoff(ss_within_wt_raw, stats.data_max_abs, stats.total_n),
+        };
+        (ss_w, ss_err_w_full, df_subj * df_within)
+    } else {
+        (clamp_ss_roundoff(ss_within_wt_raw, stats.data_max_abs, stats.total_n), ss_err_w_full + ss_inter, (nf - 1.0) * df_within)
+    };
+
+    let sph_w = compute_split_plot_sphericity(groups, &stats, include_interaction)?;
+    let make_term =
+        |name: String, ss: f64, df: f64, e_ss: f64, e_df: f64, sph: Option<&SphericityResult>| -> Result<FactorialAnovaTerm, StatsError> {
+            let ms = ss / df.max(1.0);
+            let ms_e = e_ss / e_df.max(1.0);
+            let (f, _) = f_ratio_p(ms, ms_e, df.max(1.0), e_df.max(1.0))?;
+            let p = apply_rm_sphericity_p(f, df.max(1.0), e_df.max(1.0), sph, correction)?;
+            Ok(FactorialAnovaTerm {
+                name,
+                ss,
+                df,
+                ms,
+                f_statistic: Some(f),
+                p_value: Some(p),
+                partial_eta_squared: Some(if ss + e_ss > 0.0 { ss / (ss + e_ss) } else { 0.0 }),
+                eta_squared: Some(if ss_total > 0.0 { ss / ss_total } else { 0.0 }),
+            })
+        };
+
+    let [row_name, col_name] = factor_names;
+    let (mut terms, sphericities, term_error_dfs) = if rm_design == RepeatedMeasuresDesign::ColumnFactorMatched {
+        (
+            vec![
+                make_term(row_name.to_owned(), ss_between, df_between, ss_subj, df_subj, None)?,
+                make_term(col_name.to_owned(), ss_within, df_within, err_w_ss, err_w_df, Some(&sph_w))?,
+            ],
+            RmTwoWaySphericities { row: None, column: Some(sph_w.clone()), interaction: None },
+            [df_subj, err_w_df, err_w_df],
+        )
+    } else {
+        (
+            vec![
+                make_term(row_name.to_owned(), ss_within, df_within, err_w_ss, err_w_df, Some(&sph_w))?,
+                make_term(col_name.to_owned(), ss_between, df_between, ss_subj, df_subj, None)?,
+            ],
+            RmTwoWaySphericities { row: Some(sph_w.clone()), column: None, interaction: None },
+            [err_w_df, df_subj, err_w_df],
+        )
+    };
+    if include_interaction {
+        terms.push(make_term(format!("{row_name} × {col_name}"), ss_inter, df_inter, err_w_ss, err_w_df, Some(&sph_w))?);
+    }
+
+    let ms_subj = ss_subj / df_subj.max(1.0);
+    let ms_err_w = err_w_ss / err_w_df.max(1.0);
+    let unbalanced = stats.group_counts.iter().any(|&n| n != stats.group_counts[0]);
+    let anova = FactorialAnovaResult {
+        terms,
+        ss_residual: err_w_ss,
+        df_residual: err_w_df,
+        ms_residual: ms_err_w,
+        ss_total,
+        df_total: (stats.total_n - 1) as f64,
+        total_n: stats.total_n,
+        unbalanced,
+        ss_type,
+    };
+    let rm_res = RmTwoWayAnovaResult { anova, design: rm_design, sphericities, correction, term_error_dfs };
+    let post_hoc = build_split_plot_posthoc(groups, &stats, rm_design, ms_subj, df_subj, ms_err_w, err_w_df);
     Ok((rm_res, post_hoc))
 }
 

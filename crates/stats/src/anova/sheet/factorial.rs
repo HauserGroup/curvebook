@@ -22,7 +22,9 @@ use crate::anova::reml::RemlContrastCore;
 use crate::anova::results::{
     FactorialAnovaResult, FactorialAnovaTerm, RmSphericityCorrection, RmThreeWayAnovaResult, RmTwoWayAnovaResult, SphericityResult,
 };
-use crate::anova::rm_two_way::{apply_rm_sphericity_p, fit_rm_three_way_anova, fit_rm_two_way_anova_with_posthoc};
+use crate::anova::rm_two_way::{
+    apply_rm_sphericity_p, fit_rm_three_way_anova, fit_rm_two_way_anova_with_posthoc, fit_rm_two_way_split_plot_with_posthoc,
+};
 use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml_with_policy, emit_random_intercept_reml_with_policy, emit_unstructured_rm_reml,
 };
@@ -472,6 +474,72 @@ fn grouped_row_levels_for(grouped: &curvebook_doc::GroupedTable, active_rows: &[
     active_rows.iter().map(|&r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
 }
 
+/// Extract split-plot subject vectors `groups[group][subject][within_level]` for `RowFactorMatched`
+/// or `ColumnFactorMatched`, distinguishing genuinely partial subjects (missing repeated measures)
+/// from empty subcolumn slots caused by unequal between-subject group sizes.
+fn extract_split_plot_groups(
+    grouped: &curvebook_doc::GroupedTable,
+    active_rows: &[usize],
+    active_cols: &[usize],
+    n_subs: usize,
+    design: RepeatedMeasuresDesign,
+) -> (Vec<Vec<Vec<f64>>>, bool, usize, usize) {
+    let mut groups = Vec::new();
+    let mut has_partial_subject = false;
+    let mut observed_in_nonempty = 0_usize;
+    let mut required_in_nonempty = 0_usize;
+    if design == RepeatedMeasuresDesign::RowFactorMatched {
+        let w_len = active_rows.len();
+        for &orig_c in active_cols {
+            let mut grp_subjs = Vec::new();
+            for orig_s in 0..n_subs {
+                let mut vals = Vec::with_capacity(w_len);
+                for &orig_r in active_rows {
+                    if let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) {
+                        vals.push(v);
+                    }
+                }
+                if vals.is_empty() {
+                    continue;
+                }
+                observed_in_nonempty += vals.len();
+                required_in_nonempty += w_len;
+                if vals.len() == w_len {
+                    grp_subjs.push(vals);
+                } else {
+                    has_partial_subject = true;
+                }
+            }
+            groups.push(grp_subjs);
+        }
+    } else {
+        let w_len = active_cols.len();
+        for &orig_r in active_rows {
+            let mut grp_subjs = Vec::new();
+            for orig_s in 0..n_subs {
+                let mut vals = Vec::with_capacity(w_len);
+                for &orig_c in active_cols {
+                    if let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) {
+                        vals.push(v);
+                    }
+                }
+                if vals.is_empty() {
+                    continue;
+                }
+                observed_in_nonempty += vals.len();
+                required_in_nonempty += w_len;
+                if vals.len() == w_len {
+                    grp_subjs.push(vals);
+                } else {
+                    has_partial_subject = true;
+                }
+            }
+            groups.push(grp_subjs);
+        }
+    }
+    (groups, has_partial_subject, observed_in_nonempty, required_in_nonempty)
+}
+
 fn count_rm_active_cells(
     grouped: &curvebook_doc::GroupedTable,
     active_rows: &[usize],
@@ -659,14 +727,25 @@ pub(in crate::anova) fn run_grouped_factorial(
         return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: active_cols.len() });
     }
 
-    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
+    // Repeated-measures 2-way path: classical split-plot / balanced RM ANOVA when every subject has
+    // complete within-subject observations (including unequal between-subject group sizes in
+    // split-plot designs), or REML mixed-effects on partial subjects, unstructured covariance, or
+    // explicit REML mode.
     if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
         let active_subs = active_grouped_subs(grouped, &active_rows, &active_cols, n_subs);
         if active_subs.is_empty() {
             return Err(StatsError::EmptyInput);
         }
-        let (observed_cells, total_cells) = count_rm_active_cells(grouped, &active_rows, &active_cols, &active_subs);
-        let has_missing_selected = observed_cells < total_cells;
+        let is_split_plot =
+            matches!(fac_spec.repeated_measures, RepeatedMeasuresDesign::RowFactorMatched | RepeatedMeasuresDesign::ColumnFactorMatched);
+        let (split_groups, has_missing_selected, observed_cells, total_cells) = if is_split_plot {
+            let (groups, has_partial, obs_cnt, req_cnt) =
+                extract_split_plot_groups(grouped, &active_rows, &active_cols, n_subs, fac_spec.repeated_measures);
+            (Some(groups), has_partial, obs_cnt, req_cnt)
+        } else {
+            let (obs_cnt, tot_cnt) = count_rm_active_cells(grouped, &active_rows, &active_cols, &active_subs);
+            (None, obs_cnt < tot_cnt, obs_cnt, tot_cnt)
+        };
         if has_missing_selected
             && !fac_spec.fit_reml_on_missing
             && fac_spec.residual_covariance != ResidualCovariance::Unstructured
@@ -728,47 +807,81 @@ pub(in crate::anova) fn run_grouped_factorial(
             );
         }
 
-        let n_eff_rows = active_rows.len();
-        let n_eff_cols = active_cols.len();
-        let n_eff_subs = active_subs.len();
-        let mut subject_data = vec![vec![vec![0.0_f64; n_eff_cols]; n_eff_rows]; n_eff_subs];
-        let mut obs = Vec::with_capacity(n_eff_subs * n_eff_rows * n_eff_cols);
-        for (s_pos, (&orig_s, subj)) in active_subs.iter().zip(subject_data.iter_mut()).enumerate() {
-            let _ = s_pos;
-            for (&orig_r, (r_pos, row_vec)) in active_rows.iter().zip(subj.iter_mut().enumerate()) {
-                for (&orig_c, (c_pos, slot)) in active_cols.iter().zip(row_vec.iter_mut().enumerate()) {
-                    let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
-                        return Err(StatsError::InsufficientSampleSize {
-                            context: "complete repeated-measures cells (fit_reml_on_missing is false)",
-                            required: total_cells,
-                            actual: observed_cells,
-                        });
-                    };
-                    *slot = v;
-                    obs.push((vec![r_pos, c_pos], v));
+        let include_interaction = fac_spec.max_interaction_order >= 2;
+        let (rm_res, rm_post_hoc, obs) = if let Some(groups) = split_groups {
+            let mut obs = Vec::new();
+            for (g_pos, grp) in groups.iter().enumerate() {
+                for subj in grp {
+                    for (w_pos, &v) in subj.iter().enumerate() {
+                        let cell = if fac_spec.repeated_measures == RepeatedMeasuresDesign::RowFactorMatched {
+                            vec![w_pos, g_pos]
+                        } else {
+                            vec![g_pos, w_pos]
+                        };
+                        obs.push((cell, v));
+                    }
                 }
             }
-        }
-        let (rm_res, rm_post_hoc) = fit_rm_two_way_anova_with_posthoc(
-            &subject_data,
-            &grouped.row_factor_title,
-            &grouped.column_factor_title,
-            fac_spec.repeated_measures,
-            fac_spec.sphericity_correction,
-        )?;
+            let (rm_res, rm_post_hoc) = fit_rm_two_way_split_plot_with_posthoc(
+                &groups,
+                [grouped.row_factor_title.as_str(), grouped.column_factor_title.as_str()],
+                fac_spec.repeated_measures,
+                fac_spec.ss_type,
+                include_interaction,
+                fac_spec.sphericity_correction,
+            )?;
+            (rm_res, rm_post_hoc, obs)
+        } else {
+            let n_eff_rows = active_rows.len();
+            let n_eff_cols = active_cols.len();
+            let n_eff_subs = active_subs.len();
+            let mut subject_data = vec![vec![vec![0.0_f64; n_eff_cols]; n_eff_rows]; n_eff_subs];
+            let mut obs = Vec::with_capacity(n_eff_subs * n_eff_rows * n_eff_cols);
+            for (&orig_s, subj) in active_subs.iter().zip(subject_data.iter_mut()) {
+                for (&orig_r, (r_pos, row_vec)) in active_rows.iter().zip(subj.iter_mut().enumerate()) {
+                    for (&orig_c, (c_pos, slot)) in active_cols.iter().zip(row_vec.iter_mut().enumerate()) {
+                        let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
+                            return Err(StatsError::InsufficientSampleSize {
+                                context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                                required: total_cells,
+                                actual: observed_cells,
+                            });
+                        };
+                        *slot = v;
+                        obs.push((vec![r_pos, c_pos], v));
+                    }
+                }
+            }
+            let (rm_res, rm_post_hoc) = fit_rm_two_way_anova_with_posthoc(
+                &subject_data,
+                &grouped.row_factor_title,
+                &grouped.column_factor_title,
+                fac_spec.repeated_measures,
+                fac_spec.sphericity_correction,
+                include_interaction,
+            )?;
+            (rm_res, rm_post_hoc, obs)
+        };
         let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt, alpha)?;
         let corr_lbl = match fac_spec.sphericity_correction {
             RmSphericityCorrection::None => "uncorrected",
             RmSphericityCorrection::GreenhouseGeisser => "Greenhouse-Geisser corrected",
             RmSphericityCorrection::HuynhFeldt => "Huynh-Feldt corrected",
         };
-        let estimator_desc = format!("Classical balanced repeated-measures ANOVA (OLS, {corr_lbl})");
-        out.checklist.push(checklist_item(
-            "Repeated-measures estimator",
-            ChecklistStatus::Info,
-            Some(estimator_desc.clone()),
-            format!("All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA ({corr_lbl})."),
-        ));
+        let (estimator_desc, estimator_expl) = if rm_res.anova.unbalanced {
+            (
+                format!("Classical split-plot repeated-measures ANOVA (OLS, {corr_lbl})"),
+                format!(
+                    "All subjects have complete within-subject observations with unequal between-subject group sizes; fitted classical split-plot repeated-measures ANOVA ({corr_lbl})."
+                ),
+            )
+        } else {
+            (
+                format!("Classical balanced repeated-measures ANOVA (OLS, {corr_lbl})"),
+                format!("All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA ({corr_lbl})."),
+            )
+        };
+        out.checklist.push(checklist_item("Repeated-measures estimator", ChecklistStatus::Info, Some(estimator_desc.clone()), estimator_expl));
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
             factor_levels: vec![

@@ -415,13 +415,14 @@ impl OlsPostHocModel {
 
 impl RmBalancedPostHocModel {
     pub(in crate::anova) fn subject_marginal_values(&self, factor_idx: usize, lvl: usize) -> Vec<f64> {
-        let s = self.s_count;
         if factor_idx == 0 {
+            let n = self.cell_samples[lvl][0].len();
             let inv_b = 1.0 / (self.b_count as f64);
-            (0..s).map(|si| self.subject_data[si][lvl].iter().sum::<f64>() * inv_b).collect()
+            (0..n).map(|si| (0..self.b_count).map(|bi| self.cell_samples[lvl][bi][si]).sum::<f64>() * inv_b).collect()
         } else {
+            let n = self.cell_samples[0][lvl].len();
             let inv_a = 1.0 / (self.a_count as f64);
-            (0..s).map(|si| (0..self.a_count).map(|ai| self.subject_data[si][ai][lvl]).sum::<f64>() * inv_a).collect()
+            (0..n).map(|si| (0..self.a_count).map(|ai| self.cell_samples[ai][lvl][si]).sum::<f64>() * inv_a).collect()
         }
     }
 
@@ -432,20 +433,34 @@ impl RmBalancedPostHocModel {
         lvl_b: usize,
         unequal_var: bool,
     ) -> Result<Option<ContrastEstimate>, StatsError> {
-        let sf = self.s_count as f64;
         let diff = if f_idx == 0 { self.row_means[lvl_a] - self.row_means[lvl_b] } else { self.col_means[lvl_a] - self.col_means[lvl_b] };
+        let is_between =
+            matches!((self.design, f_idx), (RepeatedMeasuresDesign::ColumnFactorMatched, 0) | (RepeatedMeasuresDesign::RowFactorMatched, 1));
+        let is_split_plot_within =
+            matches!((self.design, f_idx), (RepeatedMeasuresDesign::ColumnFactorMatched, 1) | (RepeatedMeasuresDesign::RowFactorMatched, 0));
+
         if !unequal_var {
-            let (ms, df, n_eff) = if f_idx == 0 {
-                (self.err_a_ms, self.err_a_df, sf * (self.b_count as f64))
-            } else {
-                (self.err_b_ms, self.err_b_df, sf * (self.a_count as f64))
-            };
+            let (ms, df) = if f_idx == 0 { (self.err_a_ms, self.err_a_df) } else { (self.err_b_ms, self.err_b_df) };
+            let other = if f_idx == 0 { self.b_count as f64 } else { self.a_count as f64 };
+            if is_between {
+                let n_a = self.group_counts[lvl_a] as f64;
+                let n_b = self.group_counts[lvl_b] as f64;
+                let v_a = (ms / (n_a * other)).max(0.0);
+                let v_b = (ms / (n_b * other)).max(0.0);
+                return Ok(Some(ContrastEstimate { diff, se: (v_a + v_b).sqrt(), df, ctrl_var_pair: Some((v_a, v_b)), cov_vectors: None }));
+            }
+            if is_split_plot_within {
+                let g_f = self.group_counts.len() as f64;
+                let inv_sum: f64 = self.group_counts.iter().map(|&n| 1.0 / (n as f64)).sum();
+                let n_h = g_f / inv_sum;
+                let v_lvl = (ms / (g_f * n_h)).max(0.0);
+                return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)), cov_vectors: None }));
+            }
+            let n_eff = (self.s_count as f64) * other;
             let v_lvl = (ms / n_eff).max(0.0);
             return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)), cov_vectors: None }));
         }
 
-        let is_between =
-            matches!((self.design, f_idx), (RepeatedMeasuresDesign::ColumnFactorMatched, 0) | (RepeatedMeasuresDesign::RowFactorMatched, 1));
         if is_between {
             let va = self.subject_marginal_values(f_idx, lvl_a);
             let vb = self.subject_marginal_values(f_idx, lvl_b);
@@ -467,17 +482,18 @@ impl RmBalancedPostHocModel {
         let w2 = inv_g * inv_g;
         let mut terms = Vec::with_capacity(n_between);
         for g in 0..n_between {
-            let diffs: Vec<f64> = (0..self.s_count)
-                .map(|si| {
-                    if f_idx == 1 {
-                        self.subject_data[si][g][lvl_a] - self.subject_data[si][g][lvl_b]
-                    } else {
-                        self.subject_data[si][lvl_a][g] - self.subject_data[si][lvl_b][g]
-                    }
-                })
-                .collect();
-            let (_, g_se, g_df) = paired_diff_stats(&diffs)?;
-            terms.push((w2 * g_se * g_se, g_df));
+            let (sa, sb) = if f_idx == 1 {
+                (&self.cell_samples[g][lvl_a], &self.cell_samples[g][lvl_b])
+            } else {
+                (&self.cell_samples[lvl_a][g], &self.cell_samples[lvl_b][g])
+            };
+            let diffs: Vec<f64> = sa.iter().zip(sb.iter()).map(|(&x, &y)| x - y).collect();
+            if diffs.len() >= 2 {
+                let (_, g_se, g_df) = paired_diff_stats(&diffs)?;
+                terms.push((w2 * g_se * g_se, g_df));
+            } else {
+                terms.push((w2 * 2.0 * self.err_ab_ms, self.err_ab_df));
+            }
         }
         let (se, df) = welch_stats_from_weighted_terms(&terms);
         Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None, cov_vectors: None }))
@@ -497,7 +513,10 @@ impl RmBalancedPostHocModel {
         let (ra, ca) = cell(t_a);
         let (rb, cb) = cell(t_b);
         let diff = self.cell_means[ra][ca] - self.cell_means[rb][cb];
-        let sf = self.s_count as f64;
+        let va = &self.cell_samples[ra][ca];
+        let vb = &self.cell_samples[rb][cb];
+        let n_a = va.len() as f64;
+        let n_b = vb.len() as f64;
 
         if !unequal_var {
             let is_pure_within =
@@ -514,25 +533,18 @@ impl RmBalancedPostHocModel {
                 let df = satterthwaite_two_term_df(err_t_ms, err_t_df, (n_other - 1.0) * self.err_ab_ms, self.err_ab_df);
                 (ms_num / n_other, df)
             };
-            let v_lvl = (ms_pool / sf).max(0.0);
-            return Ok(Some(ContrastEstimate {
-                diff,
-                se: (2.0 * v_lvl).sqrt(),
-                df: df_pool,
-                ctrl_var_pair: Some((v_lvl, v_lvl)),
-                cov_vectors: None,
-            }));
+            let v_a = (ms_pool / n_a).max(0.0);
+            let v_b = (ms_pool / n_b).max(0.0);
+            return Ok(Some(ContrastEstimate { diff, se: (v_a + v_b).sqrt(), df: df_pool, ctrl_var_pair: Some((v_a, v_b)), cov_vectors: None }));
         }
 
         let is_between =
             matches!((self.design, tgt_f), (RepeatedMeasuresDesign::ColumnFactorMatched, 0) | (RepeatedMeasuresDesign::RowFactorMatched, 1));
-        let va: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][ra][ca]).collect();
-        let vb: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][rb][cb]).collect();
         if is_between {
-            let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
+            let (d, se, df) = welch_two_slice_stats(va, vb)?;
             Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         } else {
-            let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
+            let diffs: Vec<f64> = va.iter().zip(vb.iter()).map(|(&x, &y)| x - y).collect();
             let (d, se, df) = paired_diff_stats(&diffs)?;
             Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         }
@@ -556,7 +568,10 @@ impl RmBalancedPostHocModel {
             return self.eval_simple_pair(1, ca, 0, ra, rb, unequal_var);
         }
         let diff = self.cell_means[ra][ca] - self.cell_means[rb][cb];
-        let sf = self.s_count as f64;
+        let va = &self.cell_samples[ra][ca];
+        let vb = &self.cell_samples[rb][cb];
+        let n_a = va.len() as f64;
+        let n_b = vb.len() as f64;
         if !unequal_var {
             let af = self.a_count as f64;
             let bf = self.b_count as f64;
@@ -580,17 +595,16 @@ impl RmBalancedPostHocModel {
                     (w_a + w_b + w_ab, df_sat)
                 }
             };
-            let v_lvl = (ms_pooled / sf).max(0.0);
-            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)), cov_vectors: None }));
+            let v_a = (ms_pooled / n_a).max(0.0);
+            let v_b = (ms_pooled / n_b).max(0.0);
+            return Ok(Some(ContrastEstimate { diff, se: (v_a + v_b).sqrt(), df, ctrl_var_pair: Some((v_a, v_b)), cov_vectors: None }));
         }
-        let va: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][ra][ca]).collect();
-        let vb: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][rb][cb]).collect();
         if self.design == RepeatedMeasuresDesign::BothFactorsMatched {
-            let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
+            let diffs: Vec<f64> = va.iter().zip(vb.iter()).map(|(&x, &y)| x - y).collect();
             let (d, se, df) = paired_diff_stats(&diffs)?;
             Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         } else {
-            let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
+            let (d, se, df) = welch_two_slice_stats(va, vb)?;
             Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         }
     }

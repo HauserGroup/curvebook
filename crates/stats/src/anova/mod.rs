@@ -123,7 +123,7 @@ pub use results::{
     RmTwoWaySphericities, SphericityResult, UnequalVarianceAnovaResult, UnstructuredFallbackReason, UnstructuredRemlResult,
     VarianceHomogeneityResult,
 };
-pub use rm_two_way::{fit_rm_three_way_anova, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity};
+pub use rm_two_way::{fit_rm_three_way_anova, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity, fit_rm_two_way_split_plot_anova};
 pub use sheet::factorial::run_factorial_anova;
 pub use sheet::nested::run_nested_analysis;
 pub use sheet::one_way::run_one_way_anova;

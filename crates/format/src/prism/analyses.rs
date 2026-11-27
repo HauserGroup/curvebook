@@ -7,8 +7,9 @@ use std::fmt;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
     FactorialComparisonFamilyMode, FitMethod, MathTransformPreset, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode,
-    ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype,
+    OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ProjectDocument, RemlZeroVariancePolicy,
+    RepeatedMeasuresDesign, ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, RmSphericityCorrection, SheetId,
+    SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype,
     TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme, default_column_label,
 };
 
@@ -346,7 +347,7 @@ pub const VERIFIED_ANALYSIS_DESIGNS: &[VerifiedAnalysisDesign] = &[
         post_test: None,
         requires_pairwise_check: false,
         evidence: CorpusDesignEvidence { analyses_compared: 71, distinct_source_records: 13, analyses_fully_agreed: 71, verified_on: "2026-11-27" },
-        notes: "100% agreement across all 7 omnibus Type III ANOVA scalars; additive models with includeInteractionTerm == false remain blocked.",
+        notes: "100% agreement across all 7 omnibus Type III ANOVA scalars; additive models with includeInteractionTerm == false translate to max_interaction_order = 1 and stay unpromoted.",
     },
     VerifiedAnalysisDesign {
         foreign_class: DS,
@@ -1165,7 +1166,10 @@ pub fn translate_analysis_parameters(foreign_class: &str, params_json: &serde_js
         "SURVIVAL" => translate_survival(content, &mut blocking),
         _ => return None,
     };
-    let verification = if blocking.is_empty() && find_verified_analysis_design(&design_key).is_some() {
+    // Additive (no-interaction) two-way ANOVA (`max_interaction_order < 2`) is translated cleanly,
+    // but the corpus-verified `ORDINARY_ANOVA` promotion row covers interaction models only.
+    let unpromoted_additive_two_way = matches!(&kind, AnalysisKind::FactorialAnova(f) if f.max_interaction_order < 2);
+    let verification = if blocking.is_empty() && !unpromoted_additive_two_way && find_verified_analysis_design(&design_key).is_some() {
         AnalysisVerificationStatus::CorpusVerified
     } else {
         AnalysisVerificationStatus::Unverified
@@ -1633,14 +1637,37 @@ fn translate_two_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
         }
     };
     let rm = get_obj(content, "repeatedMeasures");
-    let mixed_effects_reml = get_str(rm, "method").is_some_and(|m| m.eq_ignore_ascii_case("MIXED_EFFECTS") || m.eq_ignore_ascii_case("REML"));
-    if get_bool(get_obj(content, "options"), "includeInteractionTerm") == Some(false) {
-        blocking.push(String::from("additive two-way ANOVA without interaction term is not yet translated"));
-    }
+    let is_rm = repeated_measures != RepeatedMeasuresDesign::None;
+    let (mixed_effects_reml, fit_reml_on_missing) = if is_rm {
+        match get_str(rm, "method") {
+            None | Some("OPTIONAL") => (false, true),
+            Some(m) if m.eq_ignore_ascii_case("GLM") => (false, false),
+            Some(m) if m.eq_ignore_ascii_case("MIXED_EFFECTS") || m.eq_ignore_ascii_case("REML") => (true, true),
+            Some(other) => {
+                blocking.push(format!("unmapped repeatedMeasures method `{other}`"));
+                (false, true)
+            }
+        }
+    } else {
+        (false, true)
+    };
+    let assume_sphericity = get_bool(rm, "assumeSphericity").unwrap_or(false);
+    let sphericity_correction = if is_rm && !assume_sphericity { RmSphericityCorrection::GreenhouseGeisser } else { RmSphericityCorrection::None };
+    let reml_zero_variance_policy = if is_rm && get_bool(rm, "removeNonPositiveRandomEffects") == Some(false) {
+        RemlZeroVariancePolicy::Unbounded
+    } else {
+        RemlZeroVariancePolicy::BoundAtZero
+    };
+    let include_interaction = get_bool(get_obj(content, "options"), "includeInteractionTerm").unwrap_or(true);
+    let max_interaction_order = if include_interaction { 2 } else { 1 };
     let parsed = parse_multiplicity(get_obj(content, "postTests"), true, blocking);
     AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+        max_interaction_order,
         repeated_measures,
         mixed_effects_reml,
+        fit_reml_on_missing,
+        sphericity_correction,
+        reml_zero_variance_policy,
         compute_effect_sizes: true,
         multiplicity: parsed.multiplicity,
         control_factor: parsed.control_factor,

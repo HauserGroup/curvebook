@@ -812,7 +812,7 @@ fn external_archive_verified_designs_promote_clean_and_block_unverified() {
         ("ONE_WAY_ANOVA", mk_post("ALL_VS_ALL", "NO_CORRECTION", "TUKEY"), false),
         ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "REPEATED_MEASURES_BY_ROWS"}}), false),
         ("TWO_WAY_ANOVA", mk_post("ALL_VS_ALL", "STATISTICAL", "TUKEY"), false),
-        ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "options": {"includeInteractionTerm": false}}}), true),
+        ("TWO_WAY_ANOVA", json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "options": {"includeInteractionTerm": false}}}), false),
         ("NONLINEAR_REGRESSION", json!({"content": {"model": {"equation": {"name": "Straight line"}}}}), false),
         ("NORMALITY_TESTS", json!({"content": {"calc": {"tests": {"shaproWilks": true}}}}), false),
         ("SURVIVAL", json!({"content": {"calc": {"logrankTest": true}}}), false),
@@ -2666,4 +2666,76 @@ fn issue_72_kruskal_wallis_crosswalk_links_statistic_and_pvalue() {
     let diag = compare_recomputed_against_cached_results(&rs, "ONE_WAY_ANOVA", &results, 1e-6, 1e-4);
     assert_eq!(diag.compared_count, 2);
     assert!(diag.disagreements.is_empty(), "exact H and P should agree: {:?}", diag.disagreements);
+}
+
+#[test]
+fn issue_73_two_way_rm_anova_translates_sphericity_method_vc_policy_and_interaction() {
+    use curvebook_doc::{FactorialAnovaSpec, RemlZeroVariancePolicy, RepeatedMeasuresDesign, RmSphericityCorrection};
+
+    let translate = |content: serde_json::Value| -> (FactorialAnovaSpec, Vec<String>) {
+        let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &json!({ "content": content })).unwrap();
+        let AnalysisKind::FactorialAnova(spec) = tr.kind else {
+            panic!("expected FactorialAnova, got {:?}", tr.kind);
+        };
+        (spec, tr.blocking_options)
+    };
+
+    // 1. RM designs + assumeSphericity: false -> Greenhouse-Geisser (Greenhouse & Geisser 1959).
+    for (wire, expected_rm) in [
+        ("REPEATED_MEASURES_BY_ROWS", RepeatedMeasuresDesign::RowFactorMatched),
+        ("REPEATED_MEASURES_BY_COLS", RepeatedMeasuresDesign::ColumnFactorMatched),
+        ("REPEATED_MEASURES_BY_BOTH_FACTORS", RepeatedMeasuresDesign::BothFactorsMatched),
+    ] {
+        let (spec_gg, blk) = translate(json!({
+            "experimentalDesign": wire,
+            "repeatedMeasures": { "method": "OPTIONAL", "assumeSphericity": false, "removeNonPositiveRandomEffects": true },
+            "options": { "includeInteractionTerm": true }
+        }));
+        assert!(blk.is_empty(), "{wire}: {blk:?}");
+        assert_eq!(spec_gg.repeated_measures, expected_rm);
+        assert_eq!(spec_gg.sphericity_correction, RmSphericityCorrection::GreenhouseGeisser);
+        assert!(!spec_gg.mixed_effects_reml);
+        assert!(spec_gg.fit_reml_on_missing);
+        assert_eq!(spec_gg.reml_zero_variance_policy, RemlZeroVariancePolicy::BoundAtZero);
+        assert_eq!(spec_gg.max_interaction_order, 2);
+
+        let (spec_sph, blk_sph) = translate(json!({
+            "experimentalDesign": wire,
+            "repeatedMeasures": { "method": "GLM", "assumeSphericity": true, "removeNonPositiveRandomEffects": false },
+            "options": { "includeInteractionTerm": false }
+        }));
+        assert!(blk_sph.is_empty(), "{wire} GLM: {blk_sph:?}");
+        assert_eq!(spec_sph.sphericity_correction, RmSphericityCorrection::None);
+        assert!(!spec_sph.mixed_effects_reml);
+        assert!(!spec_sph.fit_reml_on_missing);
+        assert_eq!(spec_sph.reml_zero_variance_policy, RemlZeroVariancePolicy::Unbounded);
+        assert_eq!(spec_sph.max_interaction_order, 1);
+    }
+
+    // 2. Explicit REML mode sets mixed_effects_reml = true; unknown method blocks cleanly.
+    let (spec_reml, blk_reml) = translate(json!({
+        "experimentalDesign": "REPEATED_MEASURES_BY_ROWS",
+        "repeatedMeasures": { "method": "REML", "assumeSphericity": false }
+    }));
+    assert!(blk_reml.is_empty());
+    assert!(spec_reml.mixed_effects_reml);
+    assert!(spec_reml.fit_reml_on_missing);
+    assert_eq!(spec_reml.sphericity_correction, RmSphericityCorrection::GreenhouseGeisser);
+
+    let (_, blk_unknown) = translate(json!({
+        "experimentalDesign": "REPEATED_MEASURES_BY_COLS",
+        "repeatedMeasures": { "method": "CUSTOM_UNKNOWN", "assumeSphericity": true }
+    }));
+    assert!(!blk_unknown.is_empty(), "unknown repeatedMeasures.method must block");
+
+    // 3. Ordinary two-way ANOVA ignores RM sphericity/method settings while honoring includeInteractionTerm.
+    let (spec_ord, blk_ord) = translate(json!({
+        "experimentalDesign": "ORDINARY_ANOVA",
+        "repeatedMeasures": { "method": "OPTIONAL", "assumeSphericity": false },
+        "options": { "includeInteractionTerm": false }
+    }));
+    assert!(blk_ord.is_empty());
+    assert_eq!(spec_ord.repeated_measures, RepeatedMeasuresDesign::None);
+    assert_eq!(spec_ord.sphericity_correction, RmSphericityCorrection::None);
+    assert_eq!(spec_ord.max_interaction_order, 1);
 }
