@@ -18,7 +18,7 @@ use crate::archive::{
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_cell_token, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::image_asset::validate_image_asset_parts;
-use crate::prism::analyses::{AnalysisImportContext, import_external_analyses};
+use crate::prism::analyses::{AnalysisImportContext, ExternalDataSetPositions, import_external_analyses};
 use crate::prism::graphs::import_external_graphs;
 use crate::prism::layouts::import_external_layouts;
 use crate::prism::schema::{
@@ -190,14 +190,19 @@ fn import_external_indexed_archive(
     let mut used_ids: HashSet<String> = HashSet::new();
     let mut used_cells: usize = 0;
     let mut data_uid_to_sheet_id: BTreeMap<String, SheetId> = BTreeMap::new();
+    let mut data_set_positions = ExternalDataSetPositions::new();
     let mut uid_to_sheet_id: BTreeMap<String, SheetId> = BTreeMap::new();
 
     // 1. Data sheets (listed in `sheets.data`, skipping `view` / `ANALYSIS_VIEW` sheets).
     for (idx, sheet_uid) in doc_index.data_sheet_ids.iter().enumerate() {
-        let Some(ds) = import_external_data_sheet(zip_index, &id_index, &doc_index, sheet_uid, idx, &mut used_ids, &mut used_cells, &mut warnings)?
+        let Some((ds, data_set_uids)) =
+            import_external_data_sheet(zip_index, &id_index, &doc_index, sheet_uid, idx, &mut used_ids, &mut used_cells, &mut warnings)?
         else {
             continue;
         };
+        for (pos, ds_uid) in data_set_uids.into_iter().enumerate() {
+            data_set_positions.insert(ds_uid, (sheet_uid.clone(), pos));
+        }
         data_uid_to_sheet_id.insert(sheet_uid.clone(), ds.id.clone());
         uid_to_sheet_id.insert(sheet_uid.clone(), ds.id.clone());
         doc.add_data_sheet(ds)?;
@@ -220,6 +225,7 @@ fn import_external_indexed_archive(
         id_index: &id_index,
         doc_index: &doc_index,
         data_uid_to_sheet_id: &data_uid_to_sheet_id,
+        data_set_positions: &data_set_positions,
         uid_to_sheet_id: &mut uid_to_sheet_id,
         used_ids: &mut used_ids,
         warnings: &mut warnings,
@@ -314,7 +320,7 @@ fn import_external_data_sheet(
     used_ids: &mut HashSet<String>,
     used_cells: &mut usize,
     warnings: &mut Vec<ImportWarning>,
-) -> Result<Option<DataSheet>, FormatError> {
+) -> Result<Option<(DataSheet, Vec<String>)>, FormatError> {
     let sheet_path = match id_index.find_data_sheet_json(sheet_uid) {
         IdLookup::Found(p) => p,
         IdLookup::Missing => {
@@ -485,7 +491,7 @@ fn import_external_data_sheet(
     ds.color_tag = attr.and_then(|a| a.highlight_color).or(sheet_meta.highlight_color);
 
     *used_cells = accumulate_project_cells(*used_cells, &ds)?;
-    Ok(Some(ds))
+    Ok(Some((ds, sheet_meta.table.data_sets)))
 }
 
 fn load_required_dataset(

@@ -191,52 +191,204 @@ pub struct CachedScalarDiff {
 pub struct CachedResultDiagnostic {
     pub compared_count: usize,
     pub disagreements: Vec<CachedScalarDiff>,
+    /// Number of compared values per CurveBook scalar key (filled by
+    /// [`compare_recomputed_against_cached_results`]).
+    pub compared_by_key: BTreeMap<String, usize>,
 }
 
-/// Compare recomputed scalar entries on `recomputed` against `cached_scalars` within
-/// `max(abs_tol, rel_tol * max(|recomputed|, |cached|))`.
-///
-/// CurveBook never adjusts its own statistical outputs to match cached values; callers record
-/// disagreements in the import report and attach a caution checklist item via
-/// [`build_disagreement_checklist_item`].
+/// How a crosswalked cached scalar is compared with CurveBook's recomputed value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrosswalkComparison {
+    /// Signed values must agree.
+    Signed,
+    /// Only magnitudes are compared. Used for quantities whose sign depends on which group is
+    /// subtracted from which (a mean difference or a *t* statistic), where CurveBook keeps its own
+    /// documented subtraction order.
+    Magnitude,
+}
+
+/// Declarative link from one field of a cached `.prism` `results.json` to one CurveBook result
+/// scalar, used only to verify a mapping row against the corpus (§5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedScalarLink {
+    /// External `analysisClass` identifier the link applies to.
+    pub foreign_class: &'static str,
+    /// Dotted path below the `results.json` `content` object. A `*` segment matches every key of
+    /// an object. The data-set index is read from `id.col.idx` on the nearest enclosing object;
+    /// fields with no such ancestor compare against whole-analysis (`data_set_index: None`) scalars.
+    pub cached_path: &'static str,
+    /// [`ResultScalarEntry::key`] emitted by CurveBook for the same quantity.
+    pub curvebook_key: &'static str,
+    pub comparison: CrosswalkComparison,
+}
+
+/// Maximum number of cached values one link may yield from a single `results.json`.
+const MAX_VALUES_PER_LINK: usize = 1024;
+
+const fn link(foreign_class: &'static str, cached_path: &'static str, curvebook_key: &'static str) -> CachedScalarLink {
+    CachedScalarLink { foreign_class, cached_path, curvebook_key, comparison: CrosswalkComparison::Signed }
+}
+
+const fn link_magnitude(foreign_class: &'static str, cached_path: &'static str, curvebook_key: &'static str) -> CachedScalarLink {
+    CachedScalarLink { foreign_class, cached_path, curvebook_key, comparison: CrosswalkComparison::Magnitude }
+}
+
+const TT: &str = "T_TESTS_AND_NONPARAMETRIC";
+const OW: &str = "ONE_WAY_ANOVA";
+const TW: &str = "TWO_WAY_ANOVA";
+const DS: &str = "DESCRIPTIVE_STATISTICS";
+const SV: &str = "SURVIVAL";
+const NL: &str = "NONLINEAR_REGRESSION";
+
+/// Cached-result crosswalk. Every link names one quantity with the same textbook definition on
+/// both sides; quantities whose definitions differ (for example hazard-ratio estimators that use
+/// different names for different methods) are deliberately left out rather than adjusted.
+pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
+    // Two-group tests (Student 1908, Welch 1947, Mann & Whitney 1947, Wilcoxon 1945). The sign of
+    // `t` follows the group subtraction order, so only its magnitude is compared.
+    link(TT, "unpairedTTestModel.unpairedTTest.pValue.value", "PValue"),
+    link_magnitude(TT, "unpairedTTestModel.unpairedTTest.t", "t"),
+    link(TT, "welchTTestModel.welchTTest.pValue.value", "PValue"),
+    link_magnitude(TT, "welchTTestModel.welchTTest.t", "t"),
+    link(TT, "pairedTTestModel.pairedTTest.pValue.value", "PValue"),
+    link_magnitude(TT, "pairedTTestModel.pairedTTest.t", "t"),
+    link(TT, "mannWhitneyTestModel.mannWhitneyTest.pValue.value", "PValue"),
+    link(TT, "wilcoxonTestModel.wilcoxonTest.pValue.value", "PValue"),
+    // One-way designs (Fisher 1925; Kruskal & Wallis 1952; Friedman 1937).
+    link(OW, "ordinaryAnovaModel.anovaTable.colFactor.fTest.f", "F"),
+    link(OW, "ordinaryAnovaModel.anovaTable.colFactor.fTest.pValue.value", "P value"),
+    link(OW, "ordinaryAnovaModel.anovaTable.colFactor.r2", "R squared"),
+    link(OW, "ordinaryAnovaModel.anovaTable.residual.ms", "MS residual"),
+    link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.f", "F"),
+    link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.pValue.value", "P value"),
+    link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.residual.ms", "MS residual"),
+    link(OW, "kruskalWallisTestModel.kruskalWallisTest.pValue.value", "P value"),
+    link(OW, "friedmanTestModel.friedmanTest.pValue.value", "P value"),
+    // Two-way factorial designs (Maxwell, Delaney & Kelley 2017), ordinary and repeated measures.
+    link(TW, "ordinaryAnovaModel.anovaTable.rowFactor.fTest.f", "Row Factor: F"),
+    link(TW, "ordinaryAnovaModel.anovaTable.rowFactor.fTest.pValue.value", "Row Factor: P"),
+    link(TW, "ordinaryAnovaModel.anovaTable.colFactor.fTest.f", "Column Factor: F"),
+    link(TW, "ordinaryAnovaModel.anovaTable.colFactor.fTest.pValue.value", "Column Factor: P"),
+    link(TW, "ordinaryAnovaModel.anovaTable.rowFactorVsColFactor.fTest.f", "Row Factor × Column Factor: F"),
+    link(TW, "ordinaryAnovaModel.anovaTable.rowFactorVsColFactor.fTest.pValue.value", "Row Factor × Column Factor: P"),
+    link(TW, "ordinaryAnovaModel.anovaTable.residual.ms", "MS residual"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.rowFactor.fTest.f", "Row Factor: F"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.rowFactor.fTest.pValue.value", "Row Factor: P"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.f", "Column Factor: F"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.pValue.value", "Column Factor: P"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.rowFactorVsColFactor.fTest.f", "Row Factor × Column Factor: F"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.rowFactorVsColFactor.fTest.pValue.value", "Row Factor × Column Factor: P"),
+    link(TW, "repeatedMeasuresGlmAnovaModel.anovaTable.residual.ms", "MS residual"),
+    // Per-data-set descriptive statistics (sample moments; Type-7 median).
+    link(DS, "samples.*.value.n", "N"),
+    link(DS, "samples.*.value.mean", "Mean"),
+    link(DS, "samples.*.value.sd", "SD"),
+    link(DS, "samples.*.value.meanSE", "SEM"),
+    link(DS, "samples.*.value.median", "Median"),
+    // Survival curve comparison (Mantel 1966 log-rank; Gehan 1965 / Breslow 1970).
+    link(SV, "curveComparison.logrankMantelCoxTest.chiSquared", "Log-rank chi-square"),
+    link(SV, "curveComparison.logrankMantelCoxTest.pValue.value", "Log-rank P value"),
+    link(SV, "curveComparison.gehanBreslowWilcoxonTest.chiSquared", "Gehan-Breslow-Wilcoxon chi-square"),
+    link(SV, "curveComparison.gehanBreslowWilcoxonTest.pValue.value", "Gehan-Breslow-Wilcoxon P"),
+    // Per-data-set dose-response parameter estimates (More 1978 Levenberg-Marquardt).
+    link(NL, "models.*.value.parameters.Top.*.value.estimate", "Top"),
+    link(NL, "models.*.value.parameters.Bottom.*.value.estimate", "Bottom"),
+    link(NL, "models.*.value.parameters.Span.*.value.estimate", "Span"),
+    link(NL, "models.*.value.parameters.LogIC50.*.value.estimate", "LogIC50"),
+    link(NL, "models.*.value.parameters.LogEC50.*.value.estimate", "LogEC50"),
+    link(NL, "models.*.value.parameters.HillSlope.*.value.estimate", "HillSlope"),
+    // Per-data-set total area (composite trapezoidal rule) and outlier counts (Motulsky & Brown 2006).
+    link("AREA_UNDER_CURVE", "samples.*.value.summary.totalArea", "TotalArea"),
+    link("IDENTIFY_OUTLIERS", "samples.*.value.outlierCount", "OutlierCount"),
+];
+
+/// Read every cached value that `link` selects from a `results.json` document, paired with the
+/// data-set index of its nearest `id.col.idx` ancestor.
 #[must_use]
-pub fn compare_recomputed_against_cached_result(
+pub fn cached_values_for_link(link: &CachedScalarLink, results_val: &serde_json::Value) -> Vec<(Option<usize>, f64)> {
+    let root = results_val.get("content").unwrap_or(results_val);
+    let segments: Vec<&str> = link.cached_path.split('.').filter(|s| !s.is_empty()).collect();
+    let mut out = Vec::new();
+    collect_link_values(root, &segments, None, &mut out);
+    out
+}
+
+fn collect_link_values(val: &serde_json::Value, segments: &[&str], col: Option<usize>, out: &mut Vec<(Option<usize>, f64)>) {
+    if out.len() >= MAX_VALUES_PER_LINK {
+        return;
+    }
+    let col = val
+        .get("id")
+        .and_then(|id| id.get("col"))
+        .and_then(|c| c.get("idx"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|i| usize::try_from(i).ok())
+        .or(col);
+    match segments.split_first() {
+        None => {
+            if let Some(v) = val.as_f64().filter(|v| v.is_finite()) {
+                out.push((col, v));
+            }
+        }
+        Some((&"*", rest)) => {
+            if let Some(map) = val.as_object() {
+                for child in map.values() {
+                    collect_link_values(child, rest, col, out);
+                }
+            }
+        }
+        Some((segment, rest)) => {
+            if let Some(child) = val.get(*segment) {
+                collect_link_values(child, rest, col, out);
+            }
+        }
+    }
+}
+
+/// Compare a recomputed [`ResultSheet`] against a cached `results.json` through
+/// [`CACHED_SCALAR_LINKS`], within `max(abs_tol, rel_tol * max(|recomputed|, |cached|))`.
+///
+/// A cached value is compared only when CurveBook emitted a scalar with the linked key and the same
+/// data-set scope; unmatched values are skipped rather than counted as agreement. CurveBook never
+/// adjusts its own outputs to match cached values.
+#[must_use]
+pub fn compare_recomputed_against_cached_results(
     recomputed: &ResultSheet,
-    cached_scalars: &[ResultScalarEntry],
+    foreign_class: &str,
+    results_val: &serde_json::Value,
     abs_tol: f64,
     rel_tol: f64,
 ) -> CachedResultDiagnostic {
     let mut diag = CachedResultDiagnostic::default();
     let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
     let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
-
-    for cached in cached_scalars {
-        if !cached.value.is_finite() {
-            continue;
-        }
-        let matched = recomputed.scalars.iter().find(|entry| {
-            entry.key.eq_ignore_ascii_case(&cached.key) && (entry.data_set_index == cached.data_set_index || cached.data_set_index.is_none())
-        });
-        let Some(rec) = matched else {
-            continue;
-        };
-        if !rec.value.is_finite() {
-            continue;
-        }
-        diag.compared_count += 1;
-        let abs_diff = (rec.value - cached.value).abs();
-        let scale = rec.value.abs().max(cached.value.abs());
-        let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
-        let allowed = abs_t.max(rel_t * scale);
-        if abs_diff > allowed {
-            diag.disagreements.push(CachedScalarDiff {
-                key: cached.key.clone(),
-                data_set_index: rec.data_set_index,
-                recomputed: rec.value,
-                cached: cached.value,
-                abs_diff,
-                rel_diff,
-            });
+    let class = foreign_class.trim();
+    for link in CACHED_SCALAR_LINKS.iter().filter(|l| l.foreign_class.eq_ignore_ascii_case(class)) {
+        for (col, cached) in cached_values_for_link(link, results_val) {
+            let Some(rec) =
+                recomputed.scalars.iter().find(|e| e.key.eq_ignore_ascii_case(link.curvebook_key) && e.data_set_index == col && e.value.is_finite())
+            else {
+                continue;
+            };
+            let (a, b) = match link.comparison {
+                CrosswalkComparison::Signed => (rec.value, cached),
+                CrosswalkComparison::Magnitude => (rec.value.abs(), cached.abs()),
+            };
+            diag.compared_count += 1;
+            *diag.compared_by_key.entry(link.curvebook_key.to_owned()).or_insert(0) += 1;
+            let abs_diff = (a - b).abs();
+            let scale = a.abs().max(b.abs());
+            let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
+            if abs_diff > abs_t.max(rel_t * scale) {
+                diag.disagreements.push(CachedScalarDiff {
+                    key: link.curvebook_key.to_owned(),
+                    data_set_index: col,
+                    recomputed: rec.value,
+                    cached,
+                    abs_diff,
+                    rel_diff,
+                });
+            }
         }
     }
     diag
@@ -319,7 +471,7 @@ fn translate_two_group(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
         "RATIO_PAIRED_T_TEST" => TwoGroupMethod::RatioPairedT,
         "LOGNORMAL_UNPAIRED_T_TEST" => TwoGroupMethod::LognormalUnpairedT,
         "MANN_WHITNEY" | "MANN_WHITNEY_TEST" => TwoGroupMethod::MannWhitneyU,
-        "WILCOXON" | "WILCOXON_MATCHED_PAIRS" => TwoGroupMethod::WilcoxonSignedRank,
+        "WILCOXON" | "WILCOXON_TEST" | "WILCOXON_MATCHED_PAIRS" => TwoGroupMethod::WilcoxonSignedRank,
         "KOLMOGOROV_SMIRNOV" | "KOLMOGOROV_SMIRNOV_TEST" => TwoGroupMethod::KolmogorovSmirnov,
         other => {
             blocking.push(format!("unmapped experimentalDesign `{other}`"));
@@ -338,7 +490,14 @@ fn translate_two_group(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
     AnalysisKind::TwoGroupComparison(TwoGroupSpec { method, two_tailed, compute_effect_sizes: true, ..TwoGroupSpec::default() })
 }
 
-fn parse_multiplicity(post_tests: Option<&JsonMap>, blocking: &mut Vec<String>) -> MultiplicitySpec {
+/// Translate `postTests` into a [`MultiplicitySpec`].
+///
+/// `multipleComparisons.type` selects the branch (`STATISTICAL` → `statistical.test`, `FDR` →
+/// `fdr.test`, `NO_CORRECTION` → unadjusted), and `pairwiseTests.pairwiseDesign.type` selects the
+/// comparison family. Only all-pairs families and Dunnett's many-to-one test translate; a Dunnett
+/// control keeps its sheet data-set index and must lie in the analysed selection
+/// ([`check_control_in_selection`]). Ambiguous test names and selected-pair families block.
+fn parse_multiplicity(post_tests: Option<&JsonMap>, allow_dunnett: bool, blocking: &mut Vec<String>) -> MultiplicitySpec {
     let mut spec = MultiplicitySpec::default();
     let Some(pt) = post_tests else {
         return spec;
@@ -348,16 +507,45 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, blocking: &mut Vec<String>) 
     }
     let pairwise = get_obj(Some(pt), "pairwiseTests");
     let mc = get_obj(pairwise, "multipleComparisons");
-    let method_str = get_str(mc, "statistical").or_else(|| get_str(mc, "fdr")).or_else(|| get_str(mc, "type"));
-    if let Some(m) = method_str {
-        spec.method = match m.to_ascii_uppercase().as_str() {
-            "NONE" | "NO_CORRECTION" => MultiplicityMethod::None,
+    let test = match get_str(mc, "type") {
+        None | Some("NO_CORRECTION") => None,
+        Some("STATISTICAL") => get_str(get_obj(mc, "statistical"), "test").or_else(|| get_str(mc, "statistical")),
+        Some("FDR") => get_str(get_obj(mc, "fdr"), "test").or_else(|| get_str(mc, "fdr")),
+        Some(other) => {
+            blocking.push(format!("unmapped multipleComparisons type `{other}`"));
+            None
+        }
+    };
+    let design_obj = get_obj(pairwise, "pairwiseDesign");
+    let family = get_str(design_obj, "type").unwrap_or("ALL_VS_ALL");
+    let Some(test) = test.map(str::to_ascii_uppercase).filter(|t| t != "NO_TEST" && t != "NONE" && t != "NO_CORRECTION") else {
+        // Unadjusted comparisons over a control or selected-pairs family would otherwise be
+        // reported for every pair.
+        if family != "ALL_VS_ALL" {
+            blocking.push(format!("unadjusted pairwise comparison family `{family}`"));
+        }
+        return spec;
+    };
+    spec.method = match (family, test.as_str()) {
+        ("CONTROL_VS_ALL", "DUNNET" | "DUNNETT") if allow_dunnett => {
+            let control = get_obj(get_obj(design_obj, "controlID"), "col")
+                .and_then(|c| c.get("idx"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|i| usize::try_from(i).ok());
+            match control {
+                Some(control_column) => MultiplicityMethod::Dunnett { control_column },
+                None => {
+                    blocking.push(String::from("Dunnett control group is missing"));
+                    MultiplicityMethod::None
+                }
+            }
+        }
+        ("ALL_VS_ALL", t) => match t {
             "TUKEY" | "TUKEY_HSD" => MultiplicityMethod::TukeyHsd,
-            "DUNNETT" => MultiplicityMethod::Dunnett { control_column: 0 },
-            "SIDAK" => MultiplicityMethod::Sidak,
-            "BONFERRONI" => MultiplicityMethod::Bonferroni,
             "HOLM_SIDAK" => MultiplicityMethod::HolmSidak,
-            "DUNNETT_T3" => MultiplicityMethod::DunnettT3,
+            "BONFERRONI_DUNN" | "BONFERRONI" => MultiplicityMethod::Bonferroni,
+            "SIDAK" => MultiplicityMethod::Sidak,
+            "DUNNET_T3" | "DUNNETT_T3" => MultiplicityMethod::DunnettT3,
             "GAMES_HOWELL" => MultiplicityMethod::GamesHowell,
             "TAMHANE_T2" => MultiplicityMethod::TamhaneT2,
             "DUNN" => MultiplicityMethod::DunnRankSum,
@@ -366,12 +554,32 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, blocking: &mut Vec<String>) 
             "TWO_STAGE_BKY" | "BENJAMINI_KRIEGER_YEKUTIELI" => MultiplicityMethod::TwoStageBkyFdr,
             "FISHER_LSD" | "UNCORRECTED_FISHER_LSD" => MultiplicityMethod::FisherLsd,
             other => {
-                blocking.push(format!("unmapped multipleComparisons `{other}`"));
+                blocking.push(format!("unmapped multipleComparisons test `{other}`"));
                 MultiplicityMethod::None
             }
-        };
-    }
+        },
+        (family, t) => {
+            blocking.push(format!("unmapped pairwise comparison family `{family}` with `{t}`"));
+            MultiplicityMethod::None
+        }
+    };
     spec
+}
+
+/// Check that a Dunnett control (a sheet data-set index, which is how CurveBook identifies the
+/// control group) is among the analysed data sets. An empty selection analyses every data set.
+pub fn check_control_in_selection(kind: &AnalysisKind, selected: &[usize]) -> Result<(), String> {
+    let AnalysisKind::OneWayAnova(spec) = kind else {
+        return Ok(());
+    };
+    let MultiplicityMethod::Dunnett { control_column } = spec.multiplicity.method else {
+        return Ok(());
+    };
+    if selected.is_empty() || selected.contains(&control_column) {
+        Ok(())
+    } else {
+        Err(String::from("Dunnett control group is not among the analysed data sets"))
+    }
 }
 
 fn translate_one_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {
@@ -380,7 +588,7 @@ fn translate_one_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
     let design = get_str(content, "experimentalDesign").unwrap_or("ORDINARY_ANOVA");
     let method = match design {
         "ORDINARY_ANOVA" => OneWayMethod::OrdinaryAnova,
-        "BROWN_FORSYTHE_AND_WELCH" | "BROWN_FORSYTHE_WELCH" | "WELCH_ANOVA" => OneWayMethod::BrownForsytheAndWelch,
+        "BROWN_FORSYTHE_ANOVA" | "BROWN_FORSYTHE_AND_WELCH" | "BROWN_FORSYTHE_WELCH" | "WELCH_ANOVA" => OneWayMethod::BrownForsytheAndWelch,
         "REPEATED_MEASURES_ANOVA" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: !assume_sphericity },
         "KRUSKAL_WALLIS" | "KRUSKAL_WALLIS_TEST" => OneWayMethod::KruskalWallis,
         "FRIEDMAN_TEST" | "FRIEDMAN" => OneWayMethod::Friedman,
@@ -389,7 +597,7 @@ fn translate_one_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
             OneWayMethod::OrdinaryAnova
         }
     };
-    let multiplicity = parse_multiplicity(get_obj(content, "postTests"), blocking);
+    let multiplicity = parse_multiplicity(get_obj(content, "postTests"), true, blocking);
     AnalysisKind::OneWayAnova(OneWayAnovaSpec { method, compute_effect_sizes: true, multiplicity, ..OneWayAnovaSpec::default() })
 }
 
@@ -399,7 +607,7 @@ fn translate_two_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
         "ORDINARY_ANOVA" => RepeatedMeasuresDesign::None,
         "REPEATED_MEASURES_BY_ROWS" => RepeatedMeasuresDesign::RowFactorMatched,
         "REPEATED_MEASURES_BY_COLS" => RepeatedMeasuresDesign::ColumnFactorMatched,
-        "REPEATED_MEASURES_BY_BOTH" => RepeatedMeasuresDesign::BothFactorsMatched,
+        "REPEATED_MEASURES_BY_BOTH" | "REPEATED_MEASURES_BY_BOTH_FACTORS" => RepeatedMeasuresDesign::BothFactorsMatched,
         other => {
             blocking.push(format!("unmapped experimentalDesign `{other}`"));
             RepeatedMeasuresDesign::None
@@ -407,7 +615,8 @@ fn translate_two_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
     };
     let rm = get_obj(content, "repeatedMeasures");
     let mixed_effects_reml = get_str(rm, "method").is_some_and(|m| m.eq_ignore_ascii_case("MIXED_EFFECTS") || m.eq_ignore_ascii_case("REML"));
-    let multiplicity = parse_multiplicity(get_obj(content, "postTests"), blocking);
+    // Two-way Dunnett controls name a level of one factor; that mapping is not yet verified.
+    let multiplicity = parse_multiplicity(get_obj(content, "postTests"), false, blocking);
     AnalysisKind::FactorialAnova(FactorialAnovaSpec {
         repeated_measures,
         mixed_effects_reml,
@@ -429,7 +638,7 @@ fn map_nonlinear_equation_alias(name: &str) -> Option<&'static str> {
         "one phase decay" | "one_phase_decay" => Some("one_phase_decay"),
         "one phase association" | "one_phase_association" => Some("one_phase_association"),
         "michaelis-menten" | "michaelis_menten" => Some("michaelis_menten"),
-        "straight line" | "linear" => Some("linear"),
+        "straight line" | "linear" | "straight_line" => Some("straight_line"),
         _ => None,
     }
 }
@@ -504,11 +713,22 @@ fn translate_nonlinear(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
     AnalysisKind::NonlinearRegression(spec)
 }
 
-fn parse_subcolumn_agg(content: Option<&JsonMap>) -> SubcolumnAggregation {
+/// Map `data.handleReplicatesAs` onto CurveBook replicate aggregation. Corpus spellings are
+/// `AVERAGE` (row means) and `COLUMN` (all replicate values pooled per data set). `SUB_COLUMN`
+/// (one summary per subcolumn) blocks live translation until its per-subcolumn result scope is
+/// verified, and any other value blocks rather than silently defaulting to row means.
+fn parse_subcolumn_agg(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> SubcolumnAggregation {
     match get_str(get_obj(content, "data"), "handleReplicatesAs") {
-        Some("AVERAGE") => SubcolumnAggregation::RowMeans,
-        Some("STACK") | Some("INDIVIDUAL") => SubcolumnAggregation::PooledGrandSample,
-        _ => SubcolumnAggregation::RowMeans,
+        None | Some("AVERAGE") => SubcolumnAggregation::RowMeans,
+        Some("COLUMN") => SubcolumnAggregation::PooledGrandSample,
+        Some("SUB_COLUMN") => {
+            blocking.push(String::from("per-subcolumn replicate handling `SUB_COLUMN` is not yet corpus-verified"));
+            SubcolumnAggregation::PerSubcolumn
+        }
+        Some(other) => {
+            blocking.push(format!("unmapped handleReplicatesAs `{other}`"));
+            SubcolumnAggregation::RowMeans
+        }
     }
 }
 
@@ -525,7 +745,7 @@ fn translate_normality_tests(content: Option<&JsonMap>, blocking: &mut Vec<Strin
         blocking.push(String::from("no recognized normality test enabled in calc.tests"));
     }
     AnalysisKind::DescriptiveStats(DescriptiveSpec {
-        aggregation: parse_subcolumn_agg(content),
+        aggregation: parse_subcolumn_agg(content, blocking),
         custom_upper_percentile: None,
         run_normality_battery: true,
         hypothetical_value: None,
@@ -618,10 +838,10 @@ fn translate_normalize(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
     AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set: true })
 }
 
-fn translate_descriptive(content: Option<&JsonMap>, _blocking: &mut Vec<String>) -> AnalysisKind {
+fn translate_descriptive(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {
     let pct = get_f64(get_obj(content, "options"), "percentileLevel").filter(|&p| (50.0..100.0).contains(&p));
     AnalysisKind::DescriptiveStats(DescriptiveSpec {
-        aggregation: parse_subcolumn_agg(content),
+        aggregation: parse_subcolumn_agg(content, blocking),
         custom_upper_percentile: pct,
         run_normality_battery: false,
         hypothetical_value: None,
@@ -693,6 +913,7 @@ pub(crate) struct AnalysisImportContext<'a> {
     pub id_index: &'a ArchiveIdIndex,
     pub doc_index: &'a ExternalDocumentIndex,
     pub data_uid_to_sheet_id: &'a BTreeMap<String, SheetId>,
+    pub data_set_positions: &'a ExternalDataSetPositions,
     pub uid_to_sheet_id: &'a mut BTreeMap<String, SheetId>,
     pub used_ids: &'a mut HashSet<String>,
     pub warnings: &'a mut Vec<ImportWarning>,
@@ -727,7 +948,23 @@ pub(crate) fn import_external_analyses(
 
         let source_sheet_id = resolve_primary_input_sheet(sheet_obj, analysis_uid, ctx.data_uid_to_sheet_id, ctx.uid_to_sheet_id);
         let params_val = load_analysis_json(zip_index, ctx.id_index, analysis_uid, "parameters.json", ctx.warnings)?;
-        let translation = params_val.as_ref().and_then(|p| translate_analysis_parameters(analysis_class, p));
+        let mut translation = params_val.as_ref().and_then(|p| translate_analysis_parameters(analysis_class, p));
+        let selection =
+            resolve_selected_data_sets(sheet_obj, primary_input_data_sheet_uid(sheet_obj, ctx.data_uid_to_sheet_id), ctx.data_set_positions);
+        let selected_data_sets = match selection {
+            Ok(sel) => sel,
+            Err(reason) => {
+                if let Some(tr) = translation.as_mut() {
+                    tr.blocking_options.push(reason);
+                }
+                Vec::new()
+            }
+        };
+        if let Some(tr) = translation.as_mut()
+            && let Err(reason) = check_control_in_selection(&tr.kind, &selected_data_sets)
+        {
+            tr.blocking_options.push(reason);
+        }
 
         let sid = allocate_valid_unique_sheet_id(Some(analysis_uid), "result", idx + 1, ctx.used_ids, ctx.warnings);
         let clamped_title = clamp_title(&raw_title, sid.as_str(), ctx.warnings);
@@ -743,6 +980,7 @@ pub(crate) fn import_external_analyses(
             && let Some(ref src_id) = source_sheet_id
         {
             let mut spec = AnalysisSpec::new(sid.clone(), src_id.clone(), tr.kind.clone())?;
+            spec.selected_data_sets = selected_data_sets;
             spec.set_custom_title(Some(clamped_title.clone()))?;
             ResultSheet::new(spec)?
         } else {
@@ -785,6 +1023,58 @@ fn build_snapshot_reason(analysis_class: &str, translation: Option<&TranslatedAn
         }
         None => format!("analysis class `{analysis_class}` has no live CurveBook mapping; preserved cached result"),
     }
+}
+
+/// External data-set UID → (owning data-sheet UID, zero-based position in that sheet's
+/// `table.dataSets` list). The position equals the imported CurveBook data-set index because the
+/// importer appends Y data sets in `table.dataSets` order.
+pub type ExternalDataSetPositions = BTreeMap<String, (String, usize)>;
+
+/// UID of the first `inputSheets` entry that names an imported data sheet.
+#[must_use]
+pub fn primary_input_data_sheet_uid<'a>(sheet_obj: &'a JsonMap, data_uid_to_sheet_id: &BTreeMap<String, SheetId>) -> Option<&'a str> {
+    sheet_obj.get("inputSheets")?.as_array()?.iter().find_map(|item| {
+        let uid = item.as_str().or_else(|| item.get("uid").and_then(serde_json::Value::as_str))?;
+        data_uid_to_sheet_id.contains_key(uid).then_some(uid)
+    })
+}
+
+/// Resolve the analysed data-set subset of an external analysis `sheet.json` into CurveBook
+/// [`AnalysisSpec::selected_data_sets`] indices, preserving the listed order.
+///
+/// Returns an empty selection (analyse every data set) unless `isAllDataAnalyzed` is `false`.
+/// Otherwise every `inputDataSets[].uid` must resolve to a Y data set of `source_sheet_uid`;
+/// any unresolved, foreign-sheet, or duplicate entry yields `Err` with a blocking reason, so the
+/// analysis stays a read-only snapshot rather than silently running on different columns.
+pub fn resolve_selected_data_sets(
+    sheet_obj: &JsonMap,
+    source_sheet_uid: Option<&str>,
+    positions: &ExternalDataSetPositions,
+) -> Result<Vec<usize>, String> {
+    if sheet_obj.get("isAllDataAnalyzed").and_then(serde_json::Value::as_bool) != Some(false) {
+        return Ok(Vec::new());
+    }
+    let Some(source_uid) = source_sheet_uid else {
+        return Err(String::from("unresolved input data sheet for selected data sets"));
+    };
+    let Some(items) = sheet_obj.get("inputDataSets").and_then(serde_json::Value::as_array).filter(|a| !a.is_empty()) else {
+        return Err(String::from("`isAllDataAnalyzed` is false but `inputDataSets` is empty"));
+    };
+    let mut selected = Vec::with_capacity(items.len());
+    for item in items {
+        let uid = item.as_str().or_else(|| item.get("uid").and_then(serde_json::Value::as_str));
+        let Some((owner, pos)) = uid.and_then(|u| positions.get(u)) else {
+            return Err(String::from("unresolved input data set"));
+        };
+        if owner != source_uid {
+            return Err(String::from("input data set belongs to another data sheet"));
+        }
+        if selected.contains(pos) {
+            return Err(String::from("duplicate input data set"));
+        }
+        selected.push(*pos);
+    }
+    Ok(selected)
 }
 
 fn resolve_primary_input_sheet(
