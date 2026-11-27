@@ -48,12 +48,13 @@
 //!   University (reprinted in *The Collected Works of John W. Tukey*, Vol. VIII, 1994).
 //! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall.
 
-use std::collections::BTreeSet;
+use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
 use curvebook_math::dist::{
-    dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, max_studentized_range_isf, max_studentized_range_sf,
-    norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
+    StudentizedRangeCache, dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, norm_two_sided_p, student_t_two_sided_isf,
+    student_t_two_sided_p, studentized_range_sf,
 };
 use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
@@ -890,8 +891,12 @@ fn compare_tukey_kramer(
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
-    let q_crit = if report_ci { Some(studentized_range_isf(ci_alpha, k, df_error)?) } else { None };
-    let mut out = Vec::with_capacity(k * (k - 1) / 2);
+    let n_pairs = k * (k - 1) / 2;
+    let mut cache = StudentizedRangeCache::new();
+    let q_crit = if report_ci { Some(cache.isf(ci_alpha, k, df_error)?) } else { None };
+    let mut active_indices = Vec::with_capacity(n_pairs);
+    let mut qs = Vec::with_capacity(n_pairs);
+    let mut staged = Vec::with_capacity(n_pairs);
     for i in 0..k {
         for j in (i + 1)..k {
             let ga = &groups[i];
@@ -899,31 +904,41 @@ fn compare_tukey_kramer(
             let diff = ga.mean - gb.mean;
             let se_tukey = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
             let se_diff = se_tukey * std::f64::consts::SQRT_2;
-            let (q_stat, raw_p, adj_p) = if se_tukey > 0.0 {
+            let (q_stat, raw_p, fallback_p) = if se_tukey > 0.0 {
                 let q = diff.abs() / se_tukey;
                 let rp = student_t_two_sided_p(diff / se_diff, df_error)?;
-                (q, rp, studentized_range_sf(q, k, df_error)?)
+                active_indices.push(staged.len());
+                qs.push(q);
+                (q, rp, rp)
             } else {
                 let (stat, p) = zero_se_stat_p(diff, false);
                 (stat, p, p)
             };
-            let ci = q_crit.map(|qc| (diff - qc * se_tukey, diff + qc * se_tukey));
-            out.push(PairwiseComparisonDetail {
-                group_a: ga.index,
-                group_b: gb.index,
-                label_a: ga.label.clone(),
-                label_b: gb.label.clone(),
-                mean_diff: diff,
-                se_diff,
-                statistic: q_stat,
-                df: df_error,
-                raw_p,
-                adjusted_p_or_q: adj_p,
-                is_fdr_q: false,
-                ci,
-                significant: adj_p.is_finite() && adj_p <= threshold,
-            });
+            staged.push((ga, gb, diff, se_tukey, se_diff, q_stat, raw_p, fallback_p));
         }
+    }
+    let batched_p = cache.sf_batch(&qs, k, df_error)?;
+    for (&idx, &ap) in active_indices.iter().zip(batched_p.iter()) {
+        staged[idx].7 = ap;
+    }
+    let mut out = Vec::with_capacity(n_pairs);
+    for (ga, gb, diff, se_tukey, se_diff, q_stat, raw_p, adj_p) in staged {
+        let ci = q_crit.map(|qc| (diff - qc * se_tukey, diff + qc * se_tukey));
+        out.push(PairwiseComparisonDetail {
+            group_a: ga.index,
+            group_b: gb.index,
+            label_a: ga.label.clone(),
+            label_b: gb.label.clone(),
+            mean_diff: diff,
+            se_diff,
+            statistic: q_stat,
+            df: df_error,
+            raw_p,
+            adjusted_p_or_q: adj_p,
+            is_fdr_q: false,
+            ci,
+            significant: adj_p.is_finite() && adj_p <= threshold,
+        });
     }
     Ok(out)
 }
@@ -948,21 +963,33 @@ fn compare_newman_keuls(
 
     // Compute p-values in sorted-mean matrix `[p_lo][p_hi]` for `p_lo < p_hi`, enforcing superset
     // step-down monotonicity: `adj_p[i][j] = max(raw_p[i][j], adj_p[i-1][j], adj_p[i][j+1])`.
+    let mut cache = StudentizedRangeCache::new();
     let mut p_mat = vec![vec![1.0_f64; k]; k];
     for span in (2..=k).rev() {
-        for lo in 0..=(k - span) {
+        let count = k - span + 1;
+        let mut row_raw_p = vec![0.0_f64; count];
+        let mut active_lo = Vec::with_capacity(count);
+        let mut qs = Vec::with_capacity(count);
+        for lo in 0..count {
             let hi = lo + span - 1;
             let ga = &groups[sorted_idx[lo]];
             let gb = &groups[sorted_idx[hi]];
             let diff_span = gb.mean - ga.mean;
             let se_q = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
-            let raw_p = if se_q > 0.0 {
-                let q = diff_span.abs() / se_q;
-                studentized_range_sf(q, span, df_error)?
+            if se_q > 0.0 {
+                active_lo.push(lo);
+                qs.push(diff_span.abs() / se_q);
             } else {
-                zero_se_stat_p(diff_span, false).1
-            };
-            let mut adj = raw_p;
+                row_raw_p[lo] = zero_se_stat_p(diff_span, false).1;
+            }
+        }
+        let batched_p = cache.sf_batch(&qs, span, df_error)?;
+        for (&lo, &p_val) in active_lo.iter().zip(batched_p.iter()) {
+            row_raw_p[lo] = p_val;
+        }
+        for lo in 0..count {
+            let hi = lo + span - 1;
+            let mut adj = row_raw_p[lo];
             if lo > 0 {
                 adj = adj.max(p_mat[lo - 1][hi]);
             }
@@ -1116,7 +1143,10 @@ fn compare_games_howell(
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
-    let mut out = Vec::with_capacity(k * (k - 1) / 2);
+    let n_pairs = k * (k - 1) / 2;
+    let mut cache = StudentizedRangeCache::new();
+    let mut crit_by_df: BTreeMap<u64, f64> = BTreeMap::new();
+    let mut out = Vec::with_capacity(n_pairs);
     for i in 0..k {
         for j in (i + 1)..k {
             let ga = &groups[i];
@@ -1127,13 +1157,16 @@ fn compare_games_howell(
             let (q_stat, raw_p, adj_p) = if se_q > 0.0 {
                 let q = diff.abs() / se_q;
                 let rp = student_t_two_sided_p(diff / se, df)?;
-                (q, rp, studentized_range_sf(q, k, df)?)
+                (q, rp, cache.sf(q, k, df)?)
             } else {
                 let (stat, p) = zero_se_stat_p(diff, false);
                 (stat, p, p)
             };
             let ci = if report_ci {
-                let qc = studentized_range_isf(ci_alpha, k, df)?;
+                let qc = match crit_by_df.entry(df.to_bits()) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => *e.insert(cache.isf(ci_alpha, k, df)?),
+                };
                 Some((diff - qc * se_q, diff + qc * se_q))
             } else {
                 None
@@ -1218,15 +1251,15 @@ fn compare_tamhane_t2(
 ///
 /// Uses the identity between Studentized Maximum Modulus `M(m, nu)` and the maximum of `m`
 /// independent 2-group Studentized ranges scaled by `1 / sqrt(2)`.
-fn studentized_max_modulus_sf(t_abs: f64, m: usize, df: f64) -> Result<f64, StatsError> {
+fn studentized_max_modulus_sf(cache: &mut StudentizedRangeCache, t_abs: f64, m: usize, df: f64) -> Result<f64, StatsError> {
     if t_abs <= 0.0 {
         return Ok(1.0);
     }
-    Ok(max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m.max(1), 2, df)?)
+    Ok(cache.max_sf(std::f64::consts::SQRT_2 * t_abs, m.max(1), 2, df)?)
 }
 
-fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, StatsError> {
-    Ok(max_studentized_range_isf(alpha, m.max(1), 2, df)? * std::f64::consts::FRAC_1_SQRT_2)
+fn studentized_max_modulus_crit(cache: &mut StudentizedRangeCache, alpha: f64, m: usize, df: f64) -> Result<f64, StatsError> {
+    Ok(cache.max_isf(alpha, m.max(1), 2, df)? * std::f64::consts::FRAC_1_SQRT_2)
 }
 
 /// Dunnett (1980) T3 unequal-variance pairwise comparisons: per-pair Welch *t* statistics referred
@@ -1246,6 +1279,8 @@ fn compare_dunnett_t3(
     if m == 0 {
         return Ok(Vec::new());
     }
+    let mut cache = StudentizedRangeCache::new();
+    let mut crit_by_df: BTreeMap<u64, f64> = BTreeMap::new();
     let mut out = Vec::with_capacity(m);
     for (i, j) in pair_indices {
         let ga = &groups[i];
@@ -1255,15 +1290,21 @@ fn compare_dunnett_t3(
         let (t_stat, raw_p, adj_p) = if se > 0.0 {
             let t = diff / se;
             let rp = student_t_two_sided_p(t, df)?;
-            let ap = if m == 1 { rp } else { studentized_max_modulus_sf(t.abs(), m, df)? };
+            let ap = if m == 1 { rp } else { studentized_max_modulus_sf(&mut cache, t.abs(), m, df)? };
             (t, rp, ap)
         } else {
             let (stat, p) = zero_se_stat_p(diff, true);
             (stat, p, p)
         };
         let ci = if report_ci {
-            let crit =
-                if m == 1 { student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), df)? } else { studentized_max_modulus_crit(ci_alpha, m, df)? };
+            let crit = if m == 1 {
+                student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), df)?
+            } else {
+                match crit_by_df.entry(df.to_bits()) {
+                    Entry::Occupied(e) => *e.get(),
+                    Entry::Vacant(e) => *e.insert(studentized_max_modulus_crit(&mut cache, ci_alpha, m, df)?),
+                }
+            };
             Some((diff - crit * se, diff + crit * se))
         } else {
             None

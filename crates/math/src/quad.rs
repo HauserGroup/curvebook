@@ -89,6 +89,12 @@ pub fn gauss_legendre_32<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64) -> f64 
     eval_symmetric_rule(&rule.nodes, &rule.weights, &mut f, a, b)
 }
 
+/// Positive symmetric half-nodes and weights of the 32-point Gauss-Legendre rule on `[-1, 1]`.
+pub(crate) fn gl32_nodes_weights() -> (&'static [f64; 16], &'static [f64; 16]) {
+    let rule = GL_32.get_or_init(build_even_gauss_legendre::<16>);
+    (&rule.nodes, &rule.weights)
+}
+
 /// Integrate `f` over `[a, b]` using a 64-point Gauss-Legendre rule with compensated summation.
 pub fn gauss_legendre_64<F: FnMut(f64) -> f64>(mut f: F, a: f64, b: f64) -> f64 {
     let rule = GL_64.get_or_init(build_even_gauss_legendre::<32>);

@@ -30,8 +30,8 @@ pub use dunnett::{
 pub use lilliefors::{lilliefors_d_from_sorted, lilliefors_p_value};
 pub use noncentral::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, nct_cdf, nct_sf, noncentral_chi2_ci, noncentral_f_ci, noncentral_t_ci};
 pub use studentized_range::{
-    max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf, studentized_range_cdf, studentized_range_isf,
-    studentized_range_ln_sf, studentized_range_ppf, studentized_range_sf,
+    StudentizedRangeCache, max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf, max_studentized_range_sf_batch,
+    studentized_range_cdf, studentized_range_isf, studentized_range_ln_sf, studentized_range_ppf, studentized_range_sf, studentized_range_sf_batch,
 };
 pub use survival_power::{
     freedman_logrank_detectable_hr, freedman_logrank_events, freedman_logrank_power, schoenfeld_logrank_detectable_hr, schoenfeld_logrank_events,

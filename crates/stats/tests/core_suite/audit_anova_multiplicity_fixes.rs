@@ -2098,3 +2098,67 @@ fn one_way_all_data_skips_empty_data_sets_but_explicit_empty_selection_fails() {
         }
     }
 }
+
+#[test]
+fn issue_82_posttest_families_match_scalar_studentized_range_sf() {
+    // Verify batched post-test family evaluation across one-way (Tukey, Games-Howell, Dunnett T3)
+    // and two-way (Standard marginal + simple effects, TwoFactorFamilies, PerSliceFamilies) agrees
+    // with scalar `max_studentized_range_sf` / `studentized_range_sf` within tight D1 tolerances.
+    let g = vec![
+        group_input(0, "G1", 10.0, 1.1, 6.0),
+        group_input(1, "G2", 11.4, 1.8, 7.0),
+        group_input(2, "G3", 13.9, 0.9, 5.0),
+        group_input(3, "G4", 18.2, 2.3, 8.0),
+        group_input(4, "G5", 22.5, 1.4, 6.0),
+    ];
+    let df_pool = 27.0;
+    let mse = 2.4;
+
+    let tukey = compare_groups_with_procedure(&g, mse, df_pool, MultiplicityProcedure::TukeyKramer, 0.05, true).unwrap();
+    assert_eq!(tukey.len(), 10);
+    for row in &tukey {
+        let scalar_p = curvebook_math::dist::studentized_range_sf(row.statistic, g.len(), row.df).unwrap();
+        assert_approx_eq(row.adjusted_p_or_q, scalar_p, 1e-14, 1e-11, "one-way Tukey vs scalar");
+    }
+
+    let gh = compare_groups_with_procedure(&g, 0.0, 1.0, MultiplicityProcedure::GamesHowell, 0.05, true).unwrap();
+    for row in &gh {
+        let scalar_p = curvebook_math::dist::studentized_range_sf(row.statistic, g.len(), row.df).unwrap();
+        assert_approx_eq(row.adjusted_p_or_q, scalar_p, 1e-14, 1e-11, "Games-Howell vs scalar");
+    }
+
+    let dt3 = compare_groups_with_procedure(&g, 0.0, 1.0, MultiplicityProcedure::DunnettT3, 0.05, true).unwrap();
+    let m = g.len() * (g.len() - 1) / 2;
+    for row in &dt3 {
+        let scalar_p = max_studentized_range_sf(std::f64::consts::SQRT_2 * row.statistic.abs(), m, 2, row.df).unwrap();
+        assert_approx_eq(row.adjusted_p_or_q, scalar_p, 1e-14, 1e-11, "Dunnett T3 vs scalar");
+    }
+
+    let sh_6x2 = grouped_sheet_fill("g62_i82", 2, 6, 3, |c, r, s| Some(10.0 + 1.1 * (r as f64) + 2.4 * (c as f64) + [-0.5, 0.1, 0.4][s]));
+    let res_std = run_kind(
+        &sh_6x2,
+        AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            ..Default::default()
+        }),
+    )
+    .unwrap();
+    let tab_simple = tab_by_id(&res_std, "multiple-comparisons-simple-a-within-b");
+    assert_eq!(tab_simple.rows.len(), 30);
+    for row in &tab_simple.rows {
+        let q = cell_num(&row[2]);
+        let df = cell_num(&row[3]);
+        let p = cell_p(&row[5]);
+        let scalar_p = max_studentized_range_sf(q, 2, 6, df).unwrap();
+        assert_approx_eq(p, scalar_p, 1e-14, 1e-11, "two-way simple A within B vs scalar");
+    }
+    let tab_marg = tab_by_id(&res_std, "multiple-comparisons-factor-a");
+    assert_eq!(tab_marg.rows.len(), 15);
+    for row in &tab_marg.rows {
+        let q = cell_num(&row[2]);
+        let df = cell_num(&row[3]);
+        let p = cell_p(&row[5]);
+        let scalar_p = max_studentized_range_sf(q, 1, 6, df).unwrap();
+        assert_approx_eq(p, scalar_p, 1e-14, 1e-11, "two-way marginal A vs scalar");
+    }
+}

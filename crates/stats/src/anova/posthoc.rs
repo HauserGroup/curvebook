@@ -13,7 +13,7 @@
 //! - Kenward, M. G., & Roger, J. H. (1997). Small sample inference for fixed effects from
 //!   restricted maximum likelihood. *Biometrics* 53(3):983–997. doi:10.2307/2533558
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
     FactorialComparisonFamilyMode, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, PValueFormat, PairwiseComparisonRecord,
@@ -21,8 +21,7 @@ use curvebook_doc::{
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
-    dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, max_studentized_range_isf, max_studentized_range_sf, student_t_two_sided_isf,
-    student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
+    StudentizedRangeCache, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, student_t_two_sided_isf, student_t_two_sided_p,
 };
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
@@ -847,6 +846,7 @@ pub(in crate::anova) fn compare_independent_newman_keuls(
     stats: &[f64],
     raw_p: &[f64],
     threshold: f64,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let m = entries.len();
     let mut order: Vec<usize> = (0..m).collect();
@@ -859,7 +859,7 @@ pub(in crate::anova) fn compare_independent_newman_keuls(
         let m_rem = m - rank;
         let cand = if e.se > 0.0 {
             let t_abs = (e.diff / e.se).abs();
-            max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m_rem, 2, e.df)?
+            crit_memo.max_sf(std::f64::consts::SQRT_2 * t_abs, m_rem, 2, e.df)?
         } else {
             raw_p[orig_idx]
         };
@@ -897,6 +897,17 @@ pub(in crate::anova) fn compare_independent_contrast_family(
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    compare_independent_contrast_family_with_memo(entries, proc_req, threshold, ci_alpha, report_ci, &mut CriticalValueMemo::new())
+}
+
+pub(in crate::anova) fn compare_independent_contrast_family_with_memo(
+    entries: &[NamedSliceContrast<'_>],
+    proc_req: MultiplicityProcedure,
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let m = entries.len();
     if matches!(proc_req, MultiplicityProcedure::DunnRankSum | MultiplicityProcedure::LinearTrend) {
@@ -968,22 +979,30 @@ pub(in crate::anova) fn compare_independent_contrast_family(
     }
 
     match proc_req {
-        MultiplicityProcedure::NewmanKeuls => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold),
+        MultiplicityProcedure::NewmanKeuls => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold, crit_memo),
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::Dunnett { .. } => {
-            let mut out = Vec::with_capacity(m);
-            let mut crit_memo = CriticalValueMemo::new();
+            let mut active_indices = Vec::with_capacity(m);
+            let mut queries = Vec::with_capacity(m);
             for (idx, e) in entries.iter().enumerate() {
-                let adj_p = if e.se > 0.0 {
+                if e.se > 0.0 {
                     let t_abs = (e.diff / e.se).abs();
-                    max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m, 2, e.df)?
-                } else {
-                    raw_p[idx]
-                };
+                    active_indices.push(idx);
+                    queries.push((std::f64::consts::SQRT_2 * t_abs, e.df));
+                }
+            }
+            let batched_p = crit_memo.batch_max_sf(m, 2, &queries)?;
+            let mut adj_ps = raw_p.clone();
+            for (&orig_idx, &p_val) in active_indices.iter().zip(batched_p.iter()) {
+                adj_ps[orig_idx] = p_val;
+            }
+            let mut out = Vec::with_capacity(m);
+            for (idx, e) in entries.iter().enumerate() {
+                let adj_p = adj_ps[idx];
                 let ci = if report_ci {
-                    let crit = crit_memo.get(m, 2, e.df, |df| Ok(max_studentized_range_isf(ci_alpha, m, 2, df)?))? * std::f64::consts::FRAC_1_SQRT_2;
+                    let crit = crit_memo.max_isf(ci_alpha, m, 2, e.df)? * std::f64::consts::FRAC_1_SQRT_2;
                     Some((e.diff - crit * e.se, e.diff + crit * e.se))
                 } else {
                     None
@@ -1050,22 +1069,27 @@ pub(in crate::anova) fn compare_independent_contrast_family(
     }
 }
 
-/// Memo for simultaneous Studentized-range critical values at one confidence level.
+/// Memo for simultaneous Studentized-range critical values and batched *p*-value caches at one
+/// confidence level.
 ///
-/// Inverting the Studentized-range family takes a root search over nested quadrature (hundreds of
-/// milliseconds per call), yet every pair of a family under a pooled error term, and every slice of
-/// a simple-effects family, asks for the same `(r, c, df)`. Keying on the family sizes and the exact
-/// bit pattern of `df` keeps every interval bit-identical to an uncached call. One memo must only
-/// serve a single confidence level.
+/// Inverting the Studentized-range family takes a root search over nested quadrature, and
+/// evaluating thousands of adjusted *p*-values per pair repeats outer chi-scale and inner Gaussian
+/// range integrals. Sharing both the critical-value map and [`StudentizedRangeCache`] across every
+/// pair under a pooled error term and across every slice of a simple-effects family keeps every
+/// interval sharing `(r, c, df)` bit-identical to one another (and within `1e-11` relative of
+/// uncached scalar quadrature) while reducing per-pair *p*-value work to microseconds. One memo
+/// must only serve a single confidence level.
 pub(in crate::anova) struct CriticalValueMemo {
     cached: Vec<((usize, usize, u64), f64)>,
+    range_cache: StudentizedRangeCache,
 }
 
 impl CriticalValueMemo {
-    pub(in crate::anova) const fn new() -> Self {
-        Self { cached: Vec::new() }
+    pub(in crate::anova) fn new() -> Self {
+        Self { cached: Vec::new(), range_cache: StudentizedRangeCache::new() }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn get(&mut self, r: usize, c: usize, df: f64, compute: impl FnOnce(f64) -> Result<f64, StatsError>) -> Result<f64, StatsError> {
         let key = (r, c, df.to_bits());
         if let Some(&(_, value)) = self.cached.iter().find(|(k, _)| *k == key) {
@@ -1074,6 +1098,46 @@ impl CriticalValueMemo {
         let value = compute(df)?;
         self.cached.push((key, value));
         Ok(value)
+    }
+
+    fn max_isf(&mut self, alpha: f64, r: usize, c: usize, df: f64) -> Result<f64, StatsError> {
+        let key = (r, c, df.to_bits());
+        if let Some(&(_, value)) = self.cached.iter().find(|(k, _)| *k == key) {
+            return Ok(value);
+        }
+        let value = self.range_cache.max_isf(alpha, r, c, df)?;
+        self.cached.push((key, value));
+        Ok(value)
+    }
+
+    fn max_sf(&mut self, q: f64, r: usize, c: usize, df: f64) -> Result<f64, StatsError> {
+        Ok(self.range_cache.max_sf(q, r, c, df)?)
+    }
+
+    fn batch_max_sf(&mut self, r: usize, c: usize, queries: &[(f64, f64)]) -> Result<Vec<f64>, StatsError> {
+        if queries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let first_df = queries[0].1;
+        let first_bits = first_df.to_bits();
+        if queries.iter().all(|&(_, df)| df.to_bits() == first_bits) {
+            let qs: Vec<f64> = queries.iter().map(|&(q, _)| q).collect();
+            return Ok(self.range_cache.max_sf_batch(&qs, r, c, first_df)?);
+        }
+        let mut by_df: BTreeMap<u64, Vec<(usize, f64)>> = BTreeMap::new();
+        for (idx, &(q, df)) in queries.iter().enumerate() {
+            by_df.entry(df.to_bits()).or_default().push((idx, q));
+        }
+        let mut out = vec![0.0_f64; queries.len()];
+        for (df_bits, group) in by_df {
+            let df = f64::from_bits(df_bits);
+            let qs: Vec<f64> = group.iter().map(|&(_, q)| q).collect();
+            let ps = self.range_cache.max_sf_batch(&qs, r, c, df)?;
+            for (&(orig_idx, _), &p) in group.iter().zip(ps.iter()) {
+                out[orig_idx] = p;
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -1092,8 +1156,8 @@ pub(in crate::anova) fn compare_contrast_family(eval: ContrastFamilyEval<'_>) ->
     compare_contrast_family_with_memo(eval, &mut CriticalValueMemo::new())
 }
 
-/// [`compare_contrast_family`] sharing critical values with other families at the same confidence
-/// level (the slices of one simple-effects family).
+/// [`compare_contrast_family`] sharing critical values and Studentized-range quadrature caches
+/// with other families at the same confidence level (the slices of one simple-effects family).
 pub(in crate::anova) fn compare_contrast_family_with_memo(
     eval: ContrastFamilyEval<'_>,
     crit_memo: &mut CriticalValueMemo,
@@ -1121,19 +1185,34 @@ pub(in crate::anova) fn compare_contrast_family_with_memo(
     match proc_req {
         MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, ci_alpha, report_ci, crit_memo),
         MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::GamesHowell => {
-            let mut out = Vec::with_capacity(eval.pairs.len());
-            for &(i, j, ref est) in &eval.pairs {
+            let n_pairs = eval.pairs.len();
+            let mut active_indices = Vec::with_capacity(n_pairs);
+            let mut queries = Vec::with_capacity(n_pairs);
+            let mut base_stats = Vec::with_capacity(n_pairs);
+            for (idx, (_, _, est)) in eval.pairs.iter().enumerate() {
                 let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
-                let (q_stat, raw_p, adj_p) = if se_q > 0.0 {
+                if se_q > 0.0 {
                     let q = est.diff.abs() / se_q;
                     let rp = student_t_two_sided_p(est.diff / est.se, est.df)?;
-                    (q, rp, max_studentized_range_sf(q, n_slices, k_eff, est.df)?)
+                    active_indices.push(idx);
+                    queries.push((q, est.df));
+                    base_stats.push((q, rp, rp));
                 } else {
                     let (st, rp) = zero_se_pair(est.diff, true);
-                    (st, rp, rp)
-                };
+                    base_stats.push((st, rp, rp));
+                }
+            }
+            let batched_p = crit_memo.batch_max_sf(n_slices, k_eff, &queries)?;
+            for (&orig_idx, &ap) in active_indices.iter().zip(batched_p.iter()) {
+                base_stats[orig_idx].2 = ap;
+            }
+
+            let mut out = Vec::with_capacity(n_pairs);
+            for (idx, &(i, j, ref est)) in eval.pairs.iter().enumerate() {
+                let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
+                let (q_stat, raw_p, adj_p) = base_stats[idx];
                 let ci = if report_ci {
-                    let qc = crit_memo.get(n_slices, k_eff, est.df, |df| Ok(max_studentized_range_isf(ci_alpha, n_slices, k_eff, df)?))?;
+                    let qc = crit_memo.max_isf(ci_alpha, n_slices, k_eff, est.df)?;
                     Some((est.diff - qc * se_q, est.diff + qc * se_q))
                 } else {
                     None
@@ -1159,7 +1238,7 @@ pub(in crate::anova) fn compare_contrast_family_with_memo(
             }
             Ok((out, None))
         }
-        MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold)?, None)),
+        MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo)?, None)),
         _ => {
             let entries: Vec<NamedSliceContrast<'_>> = eval
                 .pairs
@@ -1174,7 +1253,7 @@ pub(in crate::anova) fn compare_contrast_family_with_memo(
                     df: est.df,
                 })
                 .collect();
-            let details = compare_independent_contrast_family(&entries, proc_req, threshold, ci_alpha, report_ci)?;
+            let details = compare_independent_contrast_family_with_memo(&entries, proc_req, threshold, ci_alpha, report_ci, crit_memo)?;
             Ok((details, None))
         }
     }
@@ -1280,20 +1359,30 @@ pub(in crate::anova) fn compare_contrast_dunnett(
     let n_slices = eval.n_slices.max(1);
     let Some(loadings) = resolve_dunnett_loadings(&eval.pairs) else {
         let m_tot = (m * n_slices).max(1);
-        let mut out = Vec::with_capacity(m);
-        for &(i, j, ref est) in &eval.pairs {
-            let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+        let mut active_indices = Vec::with_capacity(m);
+        let mut queries = Vec::with_capacity(m);
+        let mut base_stats = Vec::with_capacity(m);
+        for (idx, (_, _, est)) in eval.pairs.iter().enumerate() {
+            if est.se > 0.0 {
                 let t = est.diff / est.se;
                 let rp = student_t_two_sided_p(t, est.df)?;
-                let ap = max_studentized_range_sf(std::f64::consts::SQRT_2 * t.abs(), m_tot, 2, est.df)?;
-                (t, rp, ap)
+                active_indices.push(idx);
+                queries.push((std::f64::consts::SQRT_2 * t.abs(), est.df));
+                base_stats.push((t, rp, rp));
             } else {
                 let (st, rp) = zero_se_pair(est.diff, false);
-                (st, rp, rp)
-            };
+                base_stats.push((st, rp, rp));
+            }
+        }
+        let batched_p = crit_memo.batch_max_sf(m_tot, 2, &queries)?;
+        for (&orig_idx, &ap) in active_indices.iter().zip(batched_p.iter()) {
+            base_stats[orig_idx].2 = ap;
+        }
+        let mut out = Vec::with_capacity(m);
+        for (idx, &(i, j, ref est)) in eval.pairs.iter().enumerate() {
+            let (t_stat, raw_p, adj_p) = base_stats[idx];
             let ci = if report_ci {
-                let crit =
-                    crit_memo.get(m_tot, 2, est.df, |df| Ok(max_studentized_range_isf(ci_alpha, m_tot, 2, df)?))? * std::f64::consts::FRAC_1_SQRT_2;
+                let crit = crit_memo.max_isf(ci_alpha, m_tot, 2, est.df)? * std::f64::consts::FRAC_1_SQRT_2;
                 Some((est.diff - crit * est.se, est.diff + crit * est.se))
             } else {
                 None
@@ -1415,6 +1504,7 @@ pub(in crate::anova) fn resolve_level_order_for_nk(k: usize, eval: &ContrastFami
 pub(in crate::anova) fn compare_contrast_newman_keuls(
     eval: &ContrastFamilyEval<'_>,
     threshold: f64,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k_total = eval.levels.len();
     let n_slices = eval.n_slices.max(1);
@@ -1423,24 +1513,38 @@ pub(in crate::anova) fn compare_contrast_newman_keuls(
     if k < 2 {
         return Ok(Vec::new());
     }
-    let mut pair_map: std::collections::BTreeMap<(usize, usize), &ContrastEstimate> = std::collections::BTreeMap::new();
+    let mut pair_map: BTreeMap<(usize, usize), &ContrastEstimate> = BTreeMap::new();
     for &(i, j, ref est) in &eval.pairs {
         pair_map.insert((i.min(j), i.max(j)), est);
     }
 
     let mut p_mat = vec![vec![1.0_f64; k]; k];
     for span in (2..=k).rev() {
-        for lo in 0..=(k - span) {
+        let count = k - span + 1;
+        let mut row_raw_p = vec![0.0_f64; count];
+        let mut active_lo = Vec::with_capacity(count);
+        let mut queries = Vec::with_capacity(count);
+        for lo in 0..count {
             let hi = lo + span - 1;
             let u = sorted_idx[lo];
             let v = sorted_idx[hi];
-            let raw_p = if let Some(&est) = pair_map.get(&(u.min(v), u.max(v))) {
+            if let Some(&est) = pair_map.get(&(u.min(v), u.max(v))) {
                 let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
-                if se_q > 0.0 { max_studentized_range_sf(est.diff.abs() / se_q, n_slices, span, est.df)? } else { zero_se_pair(est.diff, true).1 }
-            } else {
-                0.0
-            };
-            let mut adj = raw_p;
+                if se_q > 0.0 {
+                    active_lo.push(lo);
+                    queries.push((est.diff.abs() / se_q, est.df));
+                } else {
+                    row_raw_p[lo] = zero_se_pair(est.diff, true).1;
+                }
+            }
+        }
+        let batched_p = crit_memo.batch_max_sf(n_slices, span, &queries)?;
+        for (&lo, &p_val) in active_lo.iter().zip(batched_p.iter()) {
+            row_raw_p[lo] = p_val;
+        }
+        for lo in 0..count {
+            let hi = lo + span - 1;
+            let mut adj = row_raw_p[lo];
             if lo > 0 {
                 adj = adj.max(p_mat[lo - 1][hi]);
             }
@@ -1682,6 +1786,7 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
     post_hoc: &FactorialPostHocContext,
     cfg: &SimpleEffectsSpec<'_>,
     next_group_id: &mut usize,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<(), StatsError> {
     let cond_levels = &obs.factor_levels[cfg.cond_factor];
     let target_levels = &obs.factor_levels[cfg.target_factor];
@@ -1738,12 +1843,13 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
                 df: it.est.df,
             })
             .collect();
-        let combined = compare_independent_contrast_family(
+        let combined = compare_independent_contrast_family_with_memo(
             &slice_refs,
             cfg.mult_spec.method.into(),
             cfg.mult_spec.threshold,
             ci_alpha,
             cfg.mult_spec.report_confidence_intervals,
+            crit_memo,
         )?;
         let note = if combined.len() >= 2 && !matches!(cfg.mult_spec.method, MultiplicityMethod::None | MultiplicityMethod::FisherLsd) {
             Some(format!("Multiplicity adjusted across all {} simple-effect comparisons.", combined.len()))
@@ -1787,17 +1893,17 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
                 });
             }
         }
-        compare_independent_contrast_family(
+        compare_independent_contrast_family_with_memo(
             &flat_refs,
             cfg.mult_spec.method.into(),
             cfg.mult_spec.threshold,
             ci_alpha,
             cfg.mult_spec.report_confidence_intervals,
+            crit_memo,
         )?
     } else {
         let level_means: Vec<Option<f64>> = vec![None; k_t];
         let mut all_details = Vec::new();
-        let mut crit_memo = CriticalValueMemo::new();
         for (slice_levels, pairs) in slice_groups {
             let (details, note_opt) = compare_contrast_family_with_memo(
                 ContrastFamilyEval {
@@ -1808,7 +1914,7 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
                     n_slices,
                     pairs,
                 },
-                &mut crit_memo,
+                crit_memo,
             )?;
             if dunnett_fallback_note.is_none() {
                 dunnett_fallback_note = note_opt;
@@ -1875,21 +1981,27 @@ fn apply_swap_direction(details: &mut [PairwiseComparisonDetail], method: Multip
     }
 }
 
+struct CellPairFamilyOptions<'a> {
+    mult_spec: &'a MultiplicitySpec,
+    confidence: ConfidenceLevel,
+    swap_direction: bool,
+    tukey_family_hint: Option<(usize, usize)>,
+}
+
 fn evaluate_cell_pair_family(
     obs: &FactorialObservations,
     post_hoc: &FactorialPostHocContext,
     cell_pairs: &[(Vec<usize>, Vec<usize>)],
-    mult_spec: &MultiplicitySpec,
-    confidence: ConfidenceLevel,
-    swap_direction: bool,
-    tukey_family_hint: Option<(usize, usize)>,
+    opts: &CellPairFamilyOptions<'_>,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     if cell_pairs.is_empty() {
         return Ok(Vec::new());
     }
+    let mult_spec = opts.mult_spec;
     let unequal = is_unequal_variance_method(mult_spec.method);
     let radices: Vec<usize> = obs.factor_levels.iter().map(Vec::len).collect();
-    let ci_alpha = confidence.alpha();
+    let ci_alpha = opts.confidence.alpha();
 
     let mut labels_owned: Vec<(usize, usize, String, String, ContrastEstimate)> = Vec::with_capacity(cell_pairs.len());
     for (ca, cb) in cell_pairs {
@@ -1909,7 +2021,7 @@ fn evaluate_cell_pair_family(
     }
 
     let mut details = if matches!(mult_spec.method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::GamesHowell) {
-        let (n_slices, k_means) = tukey_family_hint.unwrap_or_else(|| {
+        let (n_slices, k_means) = opts.tukey_family_hint.unwrap_or_else(|| {
             let mut uniq = BTreeSet::new();
             for &(ia, ib, _, _, _) in &labels_owned {
                 uniq.insert(ia);
@@ -1917,28 +2029,32 @@ fn evaluate_cell_pair_family(
             }
             (1, uniq.len().max(2))
         });
-        let mut out_det = Vec::with_capacity(labels_owned.len());
-        let mut crit_memo = CriticalValueMemo::new();
-        for (id_a, id_b, label_a, label_b, est) in labels_owned {
-            let (q_stat, raw_p, adj_p) = if est.se > 0.0 {
+        let n_pairs = labels_owned.len();
+        let mut active_indices = Vec::with_capacity(n_pairs);
+        let mut queries = Vec::with_capacity(n_pairs);
+        let mut base_stats = Vec::with_capacity(n_pairs);
+        for (idx, (_, _, _, _, est)) in labels_owned.iter().enumerate() {
+            if est.se > 0.0 {
                 let t_abs = (est.diff / est.se).abs();
                 let q = std::f64::consts::SQRT_2 * t_abs;
                 let rp = student_t_two_sided_p(t_abs, est.df)?;
-                let ap =
-                    if n_slices > 1 { max_studentized_range_sf(q, n_slices, k_means, est.df)? } else { studentized_range_sf(q, k_means, est.df)? };
-                (q, rp, ap)
+                active_indices.push(idx);
+                queries.push((q, est.df));
+                base_stats.push((q, rp, rp));
             } else {
                 let (st, p) = zero_se_pair(est.diff, true);
-                (st, p, p)
-            };
+                base_stats.push((st, p, p));
+            }
+        }
+        let batched_p = crit_memo.batch_max_sf(n_slices, k_means, &queries)?;
+        for (&orig_idx, &ap) in active_indices.iter().zip(batched_p.iter()) {
+            base_stats[orig_idx].2 = ap;
+        }
+        let mut out_det = Vec::with_capacity(n_pairs);
+        for (idx, (id_a, id_b, label_a, label_b, est)) in labels_owned.into_iter().enumerate() {
+            let (q_stat, raw_p, adj_p) = base_stats[idx];
             let ci = if mult_spec.report_confidence_intervals {
-                let q_crit = crit_memo.get(n_slices, k_means, est.df, |df| {
-                    Ok(if n_slices > 1 {
-                        max_studentized_range_isf(ci_alpha, n_slices, k_means, df)?
-                    } else {
-                        studentized_range_isf(ci_alpha, k_means, df)?
-                    })
-                })?;
+                let q_crit = crit_memo.max_isf(ci_alpha, n_slices, k_means, est.df)?;
                 let half = (q_crit / std::f64::consts::SQRT_2) * est.se;
                 Some((est.diff - half, est.diff + half))
             } else {
@@ -1981,9 +2097,16 @@ fn evaluate_cell_pair_family(
             MultiplicityProcedure::Dunnett { .. } | MultiplicityProcedure::NewmanKeuls => MultiplicityProcedure::Sidak,
             other => other,
         };
-        compare_independent_contrast_family(&entries, proc_eff, mult_spec.threshold, ci_alpha, mult_spec.report_confidence_intervals)?
+        compare_independent_contrast_family_with_memo(
+            &entries,
+            proc_eff,
+            mult_spec.threshold,
+            ci_alpha,
+            mult_spec.report_confidence_intervals,
+            crit_memo,
+        )?
     };
-    if swap_direction {
+    if opts.swap_direction {
         apply_swap_direction(&mut details, mult_spec.method);
     }
     Ok(details)
@@ -2225,7 +2348,14 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
                 all_pairs.extend(collect_one_factor_diff_pairs_by_factor(obs, f_var)?);
             }
             let total_cells: usize = obs.factor_levels.iter().map(Vec::len).product();
-            let details = evaluate_cell_pair_family(obs, post_hoc, &all_pairs, mult_spec, confidence, swap_direction, Some((1, total_cells)))?;
+            let mut crit_memo = CriticalValueMemo::new();
+            let details = evaluate_cell_pair_family(
+                obs,
+                post_hoc,
+                &all_pairs,
+                &CellPairFamilyOptions { mult_spec, confidence, swap_direction, tukey_family_hint: Some((1, total_cells)) },
+                &mut crit_memo,
+            )?;
             let (tab_id, title, note) = if family_mode == FactorialComparisonFamilyMode::CellsDifferingByOneFactor {
                 (
                     "multiple-comparisons-one-factor-diff",
@@ -2283,6 +2413,7 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
             } else {
                 (0..n_factors).collect()
             };
+            let mut crit_memo = CriticalValueMemo::new();
             for f_var in factor_order {
                 let pairs = collect_one_factor_diff_pairs_by_factor(obs, f_var)?;
                 if pairs.is_empty() {
@@ -2291,7 +2422,13 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
                 let k_var = obs.factor_levels[f_var].len();
                 let n_slices: usize =
                     obs.factor_levels.iter().enumerate().filter(|&(f, _)| f != f_var).map(|(_, lvls)| lvls.len()).product::<usize>().max(1);
-                let details = evaluate_cell_pair_family(obs, post_hoc, &pairs, mult_spec, confidence, swap_direction, Some((n_slices, k_var)))?;
+                let details = evaluate_cell_pair_family(
+                    obs,
+                    post_hoc,
+                    &pairs,
+                    &CellPairFamilyOptions { mult_spec, confidence, swap_direction, tukey_family_hint: Some((n_slices, k_var)) },
+                    &mut crit_memo,
+                )?;
                 let f_name = obs.factor_names.get(f_var).map_or("Factor", String::as_str);
                 let tab_id = format!("multiple-comparisons-family-factor-{}", f_var + 1);
                 let title = format!("Multiple comparisons: family varying {f_name}");
@@ -2340,6 +2477,7 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
             } else {
                 (0..n_factors).collect()
             };
+            let mut crit_memo = CriticalValueMemo::new();
             for f_var in factor_order {
                 let other_factors: Vec<usize> = (0..n_factors).filter(|&f| f != f_var).collect();
                 let other_radices: Vec<usize> = other_factors.iter().map(|&f| obs.factor_levels[f].len()).collect();
@@ -2361,7 +2499,13 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
                             slice_pairs.push((ca, cb));
                         }
                     }
-                    let slice_det = evaluate_cell_pair_family(obs, post_hoc, &slice_pairs, mult_spec, confidence, swap_direction, Some((1, k_var)))?;
+                    let slice_det = evaluate_cell_pair_family(
+                        obs,
+                        post_hoc,
+                        &slice_pairs,
+                        &CellPairFamilyOptions { mult_spec, confidence, swap_direction, tukey_family_hint: Some((1, k_var)) },
+                        &mut crit_memo,
+                    )?;
                     all_slice_details.extend(slice_det);
                 }
                 if !all_slice_details.is_empty() {
@@ -2399,7 +2543,14 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
                     unflatten_cell_index(&radices, idx_b).ok_or(StatsError::InvalidParameter { name: "preselected_pairs", value: idx_b as f64 })?;
                 pairs.push((ca, cb));
             }
-            let details = evaluate_cell_pair_family(obs, post_hoc, &pairs, mult_spec, confidence, swap_direction, None)?;
+            let mut crit_memo = CriticalValueMemo::new();
+            let details = evaluate_cell_pair_family(
+                obs,
+                post_hoc,
+                &pairs,
+                &CellPairFamilyOptions { mult_spec, confidence, swap_direction, tukey_family_hint: None },
+                &mut crit_memo,
+            )?;
             let note = format!("Multiplicity adjusted across {} user-preselected cell pair(s).", details.len());
             push_pairwise_outputs_with_footnote(
                 out,
@@ -2426,6 +2577,7 @@ fn run_factorial_multiplicity_standard(
 ) -> Result<(), StatsError> {
     let unequal = is_unequal_variance_method(mult_spec.method);
     let mut next_group_id = 0_usize;
+    let mut crit_memo = CriticalValueMemo::new();
 
     for (f_idx, levels) in obs.factor_levels.iter().enumerate() {
         let k = levels.len();
@@ -2449,14 +2601,10 @@ fn run_factorial_multiplicity_standard(
         for lvl in 0..k {
             level_means.push(post_hoc.level_mean_estimate(f_idx, lvl)?);
         }
-        let (details, fam_note) = compare_contrast_family(ContrastFamilyEval {
-            levels: &numbered_levels,
-            level_means: &level_means,
-            mult_spec,
-            confidence,
-            n_slices: 1,
-            pairs,
-        })?;
+        let (details, fam_note) = compare_contrast_family_with_memo(
+            ContrastFamilyEval { levels: &numbered_levels, level_means: &level_means, mult_spec, confidence, n_slices: 1, pairs },
+            &mut crit_memo,
+        )?;
         let tab_id = match f_idx {
             0 => String::from("multiple-comparisons-factor-a"),
             1 => String::from("multiple-comparisons-factor-b"),
@@ -2509,6 +2657,7 @@ fn run_factorial_multiplicity_standard(
                     confidence,
                 },
                 &mut next_group_id,
+                &mut crit_memo,
             )?;
         }
         if family_target.is_none_or(|t| t.factor() == 1) {
@@ -2527,6 +2676,7 @@ fn run_factorial_multiplicity_standard(
                     confidence,
                 },
                 &mut next_group_id,
+                &mut crit_memo,
             )?;
         }
     }

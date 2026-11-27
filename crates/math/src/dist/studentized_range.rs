@@ -14,17 +14,36 @@
 //!   effects. *Journal of Statistical Computation and Simulation*, 30(1), 1-15.
 //!   `doi:10.1080/00949658808811082`.
 //! - Hartley, H. O. (1942). The range in random samples. *Biometrika*, 32(3/4), 334-348.
+//! - Mason, J. C., & Handscomb, D. C. (2003). *Chebyshev Polynomials*. Chapman & Hall/CRC, §4.6.
+//! - Trefethen, L. N. (2013). *Approximation Theory and Approximation Practice*. SIAM, Ch. 4 & 8.
+
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::sync::OnceLock;
 
 use crate::dist::core::{norm_cdf, norm_isf, norm_ln_pdf, norm_ln_sf, norm_pdf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
 use crate::error::MathError;
-use crate::quad::gauss_legendre_32;
+use crate::quad::{gauss_legendre_32, gl32_nodes_weights};
 use crate::roots::{RootOptions, brent_root};
 use crate::special::gamma::{deviance_bd0, ln_gamma, stirling_err};
+use crate::sum::NeumaierSum;
 
 const NORMAL_Z_MIN: f64 = -10.0;
 const NORMAL_Z_MAX: f64 = 9.5;
 const HUGE_DF_CUTOFF: f64 = 1e8;
 const MAX_BRACKET_STEPS: usize = 64;
+/// Upper cutoff `sqrt(4 * 760)` matching `0.25 * w^2 > 760` in [`gaussian_range_sf`], beyond which
+/// `1 - H_c(w)` underflows `f64` to `0.0`.
+const GAUSSIAN_RANGE_ZERO_W: f64 = 55.136_195_008_360_89;
+/// Cutoff `sqrt(4 * 560)` where [`gaussian_range_ln_sf`] switches from linear `sf.ln()` to
+/// log-sum-exp quadrature; placing a Chebyshev panel boundary here prevents straddling the switch.
+const GAUSSIAN_RANGE_LN_SWITCH_W: f64 = 47.328_638_264_796_93;
+const CHEB_DEGREE: usize = 16;
+const CHEB_POINTS: usize = CHEB_DEGREE + 1;
+const CHEB_MAX_DEPTH: usize = 6;
+const CHEB_MAX_PANELS: usize = 64;
+const CHEB_ABS_TOL: f64 = 1e-12;
+const CHEB_REL_TOL: f64 = 1e-13;
 
 fn active_z_upper_bound(km1_f: f64) -> f64 {
     let tail_floor = (1e-20_f64).powf(1.0 / km1_f.max(1.0)).min(0.999_999);
@@ -77,8 +96,14 @@ fn integrate_z_sf_panels<F: FnMut(f64) -> f64>(f: F, w: f64, k: usize) -> f64 {
     let z_min = (z_star - 9.5).min(NORMAL_Z_MIN);
     let z_mode = -norm_isf(1.0 / kf).unwrap_or(0.0).min(5.0);
     let z_max = active_z_upper_bound(km1_f).max(z_mode + 2.0).min(NORMAL_Z_MAX);
-    let knots = [z_star - 3.0, z_star, z_star + 3.0, z_mode];
-    sum_gl32_panels(f, z_min, z_max, &knots, 0.25)
+    if k > 200 {
+        let z_scale = (1.0 / z_mode.abs().max(1.0)).min(1.0);
+        let knots = [z_star - 3.0, z_star, z_star + 3.0, z_mode - 3.0 * z_scale, z_mode, z_mode + 3.0 * z_scale];
+        sum_gl32_panels(f, z_min, z_max, &knots, 0.25)
+    } else {
+        let knots = [z_star - 3.0, z_star, z_star + 3.0, z_mode];
+        sum_gl32_panels(f, z_min, z_max, &knots, 0.25)
+    }
 }
 
 fn validate_q_args(q: f64, k: usize, df: f64) -> Result<(), MathError> {
@@ -172,11 +197,20 @@ fn gaussian_range_sf(w: f64, k: usize) -> f64 {
             return 0.0;
         }
         let b = norm_sf(z + w);
-        let d = normal_interval_prob(z, z + w);
+        if b <= 0.0 {
+            return 0.0;
+        }
         let bracket_gap = if b <= 0.5 * a {
             let ratio = b / a;
             -((-ratio).ln_1p() * km1_f).exp_m1()
         } else {
+            let d = if z >= 0.0 {
+                (a - b).max(0.0)
+            } else if z + w <= 0.0 {
+                (norm_cdf(z + w) - norm_cdf(z)).max(0.0)
+            } else {
+                (1.0 - (norm_cdf(z) + b)).max(0.0)
+            };
             let da = (d / a).clamp(0.0, 1.0);
             1.0 - pow_usize(da, km1)
         };
@@ -215,16 +249,20 @@ pub(crate) fn normal_interval_prob(lo: f64, hi: f64) -> f64 {
     }
 }
 
-/// Chi-scale density `h_{df}(u)` of `U = sqrt(chi^2_{df} / df)` evaluated stably for any `df > 0`.
 #[inline]
-pub(crate) fn chi_scale_pdf(u: f64, df: f64, lg_half_df: f64) -> f64 {
+fn chi_scale_norm_const(a: f64, lg_half_df: f64) -> f64 {
+    if a >= 12.0 { 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a) } else { -lg_half_df }
+}
+
+/// Chi-scale density `h_{df}(u)` of `U = sqrt(chi^2_{df} / df)` evaluated stably using precomputed
+/// `a = df / 2` and `norm_const = chi_scale_norm_const(a, lg_half_df)`.
+#[inline]
+fn chi_scale_pdf_fast(u: f64, a: f64, norm_const: f64) -> f64 {
     if u <= 0.0 {
         return 0.0;
     }
-    let a = 0.5 * df;
     let x = a * u * u;
-    let ln_kern =
-        if a >= 12.0 { -deviance_bd0(a, x) + 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a) } else { a * x.ln() - x - lg_half_df };
+    let ln_kern = if a >= 12.0 { -deviance_bd0(a, x) + norm_const } else { a * x.ln() - x + norm_const };
     (2.0 / u) * ln_kern.exp()
 }
 
@@ -243,9 +281,11 @@ pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_
     let rt_df = df.sqrt();
     let rt_eff = rt_df.hypot(scale);
 
-    if df < 2.0 {
+    if df < 3.0 {
         // Substitute u = t^{1 / a} (a = df / 2): x = a u^2 = a t^{2 / a},
-        // f_X(x) dx = 2 * a^{a - 1} * t * exp(-x - ln Gamma(a)) dt — smooth at t = 0 with mode at t = 1.
+        // f_X(x) dx = 2 * a^{a - 1} * t * exp(-x - ln Gamma(a)) dt.
+        // Near t = 0 the leading non-polynomial term is O(t^{1 + 2/a}) vs O(u^{df - 1}) in u-space,
+        // which is strictly smoother for all df < 3 (a < 1.5, eliminating the u^{df-1} loss at df = 2.01).
         let p = 1.0 / a;
         let ratio_rt = rt_df / rt_eff;
         let t_star = ratio_rt.powf(a);
@@ -275,8 +315,9 @@ pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_
     let u_max = (u_mode + 13.5 * sigma_u).max(u_star + 11.0 * sigma_star);
     let min_gap = (0.25 * sigma_star.min(sigma_u)).max(1e-300);
 
+    let norm_const = chi_scale_norm_const(a, lg_a);
     let weighted = |u: f64| -> f64 {
-        let dens = chi_scale_pdf(u, df, lg_a);
+        let dens = chi_scale_pdf_fast(u, a, norm_const);
         if dens <= 1e-300 { 0.0 } else { dens * inner(u) }
     };
     let knots = [
@@ -585,6 +626,17 @@ pub fn max_studentized_range_sf(q: f64, r: usize, c: usize, df: f64) -> Result<f
 /// # Errors
 /// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `alpha` lies outside `[0, 1]`, or bracketing fails.
 pub fn max_studentized_range_isf(alpha: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+    if !df.is_infinite() && df < HUGE_DF_CUTOFF && c >= 3 && r >= 1 && df > 0.0 && alpha.is_finite() && (0.0..=1.0).contains(&alpha) {
+        let mut cache = StudentizedRangeCache::new();
+        return cache.max_isf(alpha, r, c, df);
+    }
+    max_studentized_range_isf_with(alpha, r, c, df, |q| max_studentized_range_sf(q, r, c, df))
+}
+
+fn max_studentized_range_isf_with<F>(alpha: f64, r: usize, c: usize, df: f64, mut eval_sf: F) -> Result<f64, MathError>
+where
+    F: FnMut(f64) -> Result<f64, MathError>,
+{
     if r < 1 {
         return Err(MathError::InvalidParameter { name: "r", value: r as f64 });
     }
@@ -618,27 +670,721 @@ pub fn max_studentized_range_isf(alpha: f64, r: usize, c: usize, df: f64) -> Res
     let mut hi = 1.02 * hi_base + 0.1;
 
     for _ in 0..MAX_BRACKET_STEPS {
-        if max_studentized_range_sf(lo, r, c, df)? >= alpha || lo == 0.0 {
+        if eval_sf(lo)? >= alpha || lo == 0.0 {
             break;
         }
         lo *= 0.5;
     }
     for _ in 0..MAX_BRACKET_STEPS {
-        if max_studentized_range_sf(hi, r, c, df)? <= alpha {
+        if eval_sf(hi)? <= alpha {
             break;
         }
         hi *= 1.5;
     }
-    if max_studentized_range_sf(lo, r, c, df)? < alpha || max_studentized_range_sf(hi, r, c, df)? > alpha {
+    if eval_sf(lo)? < alpha || eval_sf(hi)? > alpha {
         return Err(MathError::NotConverged { algorithm: "max_studentized_range_isf", iterations: MAX_BRACKET_STEPS });
     }
 
-    brent_root(
-        |q| max_studentized_range_sf(q, r, c, df).unwrap_or(f64::NAN) - alpha,
-        lo,
-        hi,
-        RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 },
-    )
+    brent_root(|q| eval_sf(q).unwrap_or(f64::NAN) - alpha, lo, hi, RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 })
+}
+
+// ============================================================================
+// Batched & Reusable Studentized-Range Survival Evaluation
+// ============================================================================
+
+struct ChebRule16 {
+    nodes: [f64; CHEB_POINTS],
+    dct_weights: [[f64; CHEB_POINTS]; CHEB_POINTS],
+}
+
+static CHEB_16: OnceLock<ChebRule16> = OnceLock::new();
+
+fn cheb_rule_16() -> &'static ChebRule16 {
+    CHEB_16.get_or_init(|| {
+        let n_f = CHEB_DEGREE as f64;
+        let mut nodes = [0.0_f64; CHEB_POINTS];
+        for (j, slot) in nodes.iter_mut().enumerate() {
+            *slot = (std::f64::consts::PI * (j as f64) / n_f).cos();
+        }
+        let mut dct_weights = [[0.0_f64; CHEB_POINTS]; CHEB_POINTS];
+        for (k, row) in dct_weights.iter_mut().enumerate() {
+            let dk = if k == 0 || k == CHEB_DEGREE { 2.0 } else { 1.0 };
+            for (j, cell) in row.iter_mut().enumerate() {
+                let dj = if j == 0 || j == CHEB_DEGREE { 2.0 } else { 1.0 };
+                *cell = (2.0 / (n_f * dk * dj)) * (std::f64::consts::PI * (j as f64) * (k as f64) / n_f).cos();
+            }
+        }
+        ChebRule16 { nodes, dct_weights }
+    })
+}
+
+/// Rigorous lower cutoff `w_lo(c)` below which `H_c(w) <= 1e-17` (hence `1 - H_c(w) = 1` and
+/// `1 - H_c(w)^r = 1` to within `1e-17 < 0.1 ULP` for every `r >= 1`).
+///
+/// Proof: `H_c(w) = c int phi(z) [Phi(z + w) - Phi(z)]^{c - 1} dz`. For every `w > 0`,
+/// `Phi(z + w) - Phi(z)` attains its global maximum at `z = -w / 2` with value
+/// `Phi(w / 2) - Phi(-w / 2) = 1 - 2 Phi(-w / 2)`. Hence `H_c(w) <= c [1 - 2 Phi(-w / 2)]^{c - 1}`.
+fn gaussian_range_saturation_lower_bound(c: usize) -> f64 {
+    if c <= 2 {
+        return 0.0;
+    }
+    let tau = 1e-17_f64;
+    let log_ratio = (tau / (c as f64)).ln() / ((c - 1) as f64);
+    let p0 = -log_ratio.exp_m1();
+    if !p0.is_finite() || p0 <= 0.0 || p0 >= 1.0 {
+        return 0.0;
+    }
+    match norm_isf(0.5 * p0) {
+        Ok(z) if z.is_finite() && z > 0.0 => {
+            let w_lo = 2.0 * z;
+            if w_lo < 1e-4 { 0.0 } else { w_lo }
+        }
+        _ => 0.0,
+    }
+}
+
+#[inline]
+fn eval_psi_sample(w: f64, c: usize) -> f64 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    if c == 2 {
+        return crate::special::erfcx(0.5 * w).ln();
+    }
+    gaussian_range_ln_sf(w, c) + 0.25 * w * w
+}
+
+#[inline]
+fn max_sf_from_ln_g(ln_g: f64, r: usize) -> f64 {
+    if ln_g >= 0.0 {
+        return 1.0;
+    }
+    if r == 1 {
+        return ln_g.exp().clamp(0.0, 1.0);
+    }
+    if ln_g < -std::f64::consts::LN_2 {
+        let s = ln_g.exp();
+        if s <= 0.0 { 0.0 } else { (-((-s).ln_1p() * (r as f64)).exp_m1()).clamp(0.0, 1.0) }
+    } else {
+        let h = (-ln_g.exp_m1()).clamp(0.0, 1.0);
+        if h <= 0.0 { 1.0 } else { (1.0 - pow_usize(h, r)).clamp(0.0, 1.0) }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum PanelKind {
+    Chebyshev { center: f64, inv_half: f64, coeffs: [f64; CHEB_POINTS] },
+    ExactFallback,
+}
+
+#[derive(Debug, Clone)]
+struct RangePanel {
+    a: f64,
+    b: f64,
+    kind: PanelKind,
+}
+
+impl RangePanel {
+    #[inline]
+    fn eval_max_sf(&self, w: f64, r: usize, c: usize) -> f64 {
+        match &self.kind {
+            PanelKind::Chebyshev { center, inv_half, coeffs } => {
+                let x = ((w - *center) * *inv_half).clamp(-1.0, 1.0);
+                let two_x = 2.0 * x;
+                let [c0, rest @ ..] = coeffs;
+                let mut b1 = 0.0_f64;
+                let mut b2 = 0.0_f64;
+                for &ck in rest.iter().rev() {
+                    let b0 = two_x * b1 - b2 + ck;
+                    b2 = b1;
+                    b1 = b0;
+                }
+                let psi = x * b1 - b2 + *c0;
+                let ln_g = (psi - 0.25 * w * w).min(0.0);
+                max_sf_from_ln_g(ln_g, r)
+            }
+            PanelKind::ExactFallback => max_gaussian_range_sf(w, r, c),
+        }
+    }
+}
+
+/// Adaptive piecewise degree-16 Chebyshev-Lobatto interpolant of the scaled log-survival
+/// `psi_c(w) = ln(1 - H_c(w)) + w^2 / 4` over `[w_lo(c), w_covered]`.
+///
+/// Extensions always advance in canonical coarse breakpoint chunks so repeated small ascending
+/// queries never create micro-panels, never drop endpoints, and never exhaust the panel budget.
+///
+/// Error bounds (Trefethen 2013, Ch. 4 & 8; Mason & Handscomb 2003, §4.6; Copenhaver & Holland 1988):
+/// - For `w <= w_lo(c)`: proven `H_c(w) <= 1e-17`, so `1 - H_c(w)^r = 1` within `1e-17`.
+/// - For `w >= GAUSSIAN_RANGE_ZERO_W` (`0.25 * w^2 > 760`): `1 - H_c(w) = 0` in `f64`.
+/// - On each accepted Chebyshev panel, `|c_13| + |c_14| + |c_15| + |c_16| <= max(1e-12, 1e-13 * ||psi_c||_inf)`,
+///   bounding `|ln_hat - ln_exact| <= 3e-12`. Any panel that cannot split to meet tolerance falls
+///   back to exact [`max_gaussian_range_sf`] rather than serving an unconverged interpolant.
+///   Because `|d ln(1 - (1 - e^L)^r) / dL| <= 1` for all `L < 0` and `r >= 1`, the relative error
+///   in `G_{r,c}(w)` (and in any non-negative outer quadrature sum over `u`) is strictly bounded
+///   by `exp(eps) - 1 <= 3e-12`.
+#[derive(Debug, Clone)]
+struct GaussianRangeTable {
+    c: usize,
+    w_lo: f64,
+    w_covered: f64,
+    breakpoints: Vec<f64>,
+    next_bp_idx: usize,
+    last_endpoint_psi: Option<f64>,
+    panels: Vec<RangePanel>,
+}
+
+impl GaussianRangeTable {
+    fn new(c: usize) -> Self {
+        let w_lo = gaussian_range_saturation_lower_bound(c);
+        let breakpoints = build_canonical_breakpoints(c, w_lo);
+        Self { c, w_lo, w_covered: w_lo, breakpoints, next_bp_idx: 1, last_endpoint_psi: None, panels: Vec::new() }
+    }
+
+    fn ensure_up_to(&mut self, w_target: f64) {
+        let target = w_target.min(GAUSSIAN_RANGE_ZERO_W);
+        if target <= self.w_covered {
+            return;
+        }
+        while let Some(&seg_end) = self.breakpoints.get(self.next_bp_idx) {
+            if self.w_covered >= target {
+                break;
+            }
+            let seg_start = self.w_covered;
+            if self.panels.len() >= CHEB_MAX_PANELS {
+                self.panels.push(RangePanel { a: seg_start, b: seg_end, kind: PanelKind::ExactFallback });
+                self.last_endpoint_psi = None;
+            } else {
+                let f_start = self.last_endpoint_psi.unwrap_or_else(|| eval_psi_sample(seg_start, self.c));
+                let f_end = eval_psi_sample(seg_end, self.c);
+                self.append_adaptive_interval(seg_start, seg_end, f_start, f_end);
+                self.last_endpoint_psi = Some(f_end);
+            }
+            self.w_covered = self.panels.last().map_or(self.w_lo, |p| p.b);
+            self.next_bp_idx += 1;
+        }
+    }
+
+    fn append_adaptive_interval(&mut self, a: f64, b: f64, fa: f64, fb: f64) {
+        let rule = cheb_rule_16();
+        let mut stack: Vec<(f64, f64, f64, f64, usize)> = Vec::with_capacity(16);
+        stack.push((a, b, fa, fb, 0));
+
+        while let Some((lo, hi, f_lo, f_hi, depth)) = stack.pop() {
+            let center = 0.5 * lo + 0.5 * hi;
+            let half = 0.5 * hi - 0.5 * lo;
+            if half <= 0.0 {
+                continue;
+            }
+            let mut vals = [0.0_f64; CHEB_POINTS];
+            let mut max_abs = f_lo.abs().max(f_hi.abs());
+            for (j, (val_slot, &xj)) in vals.iter_mut().zip(rule.nodes.iter()).enumerate() {
+                let v = if j == 0 {
+                    f_hi
+                } else if j == CHEB_DEGREE {
+                    f_lo
+                } else {
+                    eval_psi_sample(center + half * xj, self.c)
+                };
+                *val_slot = v;
+                max_abs = max_abs.max(v.abs());
+            }
+
+            let mut coeffs = [0.0_f64; CHEB_POINTS];
+            for (ck, row) in coeffs.iter_mut().zip(rule.dct_weights.iter()) {
+                let mut acc = NeumaierSum::new();
+                for (&w_kj, &fj) in row.iter().zip(vals.iter()) {
+                    acc.add(w_kj * fj);
+                }
+                *ck = acc.total();
+            }
+
+            let tail = coeffs.get(CHEB_DEGREE - 3..).map_or(0.0, |s| s.iter().map(|v| v.abs()).sum::<f64>());
+            let tol = CHEB_ABS_TOL.max(CHEB_REL_TOL * max_abs);
+            let can_split = depth < CHEB_MAX_DEPTH && (hi - lo) > 1e-5 && self.panels.len() + stack.len() + 2 <= CHEB_MAX_PANELS;
+
+            if tail <= tol {
+                self.panels.push(RangePanel { a: lo, b: hi, kind: PanelKind::Chebyshev { center, inv_half: 1.0 / half, coeffs } });
+            } else if can_split {
+                let f_mid = vals.get(CHEB_DEGREE / 2).copied().unwrap_or_else(|| eval_psi_sample(center, self.c));
+                // Push right half first so left half pops first, keeping `self.panels` sorted.
+                stack.push((center, hi, f_mid, f_hi, depth + 1));
+                stack.push((lo, center, f_lo, f_mid, depth + 1));
+            } else {
+                self.panels.push(RangePanel { a: lo, b: hi, kind: PanelKind::ExactFallback });
+            }
+        }
+    }
+
+    #[inline]
+    fn eval_max_sf_with_hint(&self, w: f64, r: usize, panel_hint: &mut usize) -> f64 {
+        if w <= self.w_lo {
+            return 1.0;
+        }
+        if w >= GAUSSIAN_RANGE_ZERO_W {
+            return 0.0;
+        }
+        if w > self.w_covered || self.panels.is_empty() {
+            return max_gaussian_range_sf(w, r, self.c);
+        }
+        let idx = match self.panels.get(*panel_hint) {
+            Some(p) if w >= p.a && w <= p.b => *panel_hint,
+            Some(p) if w > p.b => {
+                let mut i = *panel_hint + 1;
+                while let Some(next) = self.panels.get(i) {
+                    if w <= next.b {
+                        break;
+                    }
+                    i += 1;
+                }
+                i.min(self.panels.len().saturating_sub(1))
+            }
+            _ => self.panels.partition_point(|p| p.b < w).min(self.panels.len().saturating_sub(1)),
+        };
+        *panel_hint = idx;
+        match self.panels.get(idx) {
+            Some(panel) => panel.eval_max_sf(w, r, self.c),
+            None => max_gaussian_range_sf(w, r, self.c),
+        }
+    }
+
+    #[inline]
+    fn eval_max_sf(&self, w: f64, r: usize) -> f64 {
+        let mut hint = 0_usize;
+        self.eval_max_sf_with_hint(w, r, &mut hint)
+    }
+}
+
+fn build_canonical_breakpoints(c: usize, w_lo: f64) -> Vec<f64> {
+    if w_lo >= GAUSSIAN_RANGE_ZERO_W {
+        return vec![w_lo];
+    }
+    let w_mid = if c > 2 { 2.0 * norm_isf(1.0 / (c as f64)).unwrap_or(0.0).max(0.0) } else { 0.0 };
+    let mut candidates = [w_mid, w_mid + 1.5, w_mid + 3.5, w_mid + 7.0, w_mid + 14.0, 28.0, GAUSSIAN_RANGE_LN_SWITCH_W];
+    candidates.sort_by(f64::total_cmp);
+
+    let mut breaks = Vec::with_capacity(candidates.len() + 2);
+    breaks.push(w_lo);
+    let min_span = 0.25_f64;
+    for bp in candidates {
+        if bp <= w_lo + min_span || bp >= GAUSSIAN_RANGE_ZERO_W - min_span {
+            continue;
+        }
+        let prev = breaks.last().copied().unwrap_or(w_lo);
+        if bp >= prev + min_span {
+            breaks.push(bp);
+        } else if (bp - GAUSSIAN_RANGE_LN_SWITCH_W).abs() <= 1e-12 && breaks.len() > 1 {
+            // Preserve the ln_sf branch switch boundary without leaving a tiny sliver before it.
+            breaks.pop();
+            breaks.push(bp);
+        }
+    }
+    breaks.push(GAUSSIAN_RANGE_ZERO_W);
+    breaks
+}
+
+/// Precomputed sorted outer chi-scale quadrature nodes `(u_j, w_j * h_{df}(u_j))` and cumulative
+/// weight sums for `df >= 3.0`, reusable across all bulk-regime `q` values sharing `df`.
+#[derive(Debug, Clone)]
+struct ChiScaleNodes {
+    df: f64,
+    u_mode: f64,
+    sigma_u: f64,
+    u_min: f64,
+    u: Vec<f64>,
+    w: Vec<f64>,
+    prefix_w: Vec<f64>,
+}
+
+impl ChiScaleNodes {
+    fn build(df: f64) -> Result<Self, MathError> {
+        let a = 0.5 * df;
+        let lg_a = if a < 12.0 { ln_gamma(a)? } else { 0.0 };
+        let norm_const = chi_scale_norm_const(a, lg_a);
+        let rt_df = df.sqrt();
+        let rt_dm1 = (df - 1.0).sqrt();
+        let u_mode = rt_dm1 / rt_df;
+        let sigma_u = 1.0 / (2.0 * df).sqrt();
+        let u_min = (u_mode - 11.5 * sigma_u).max(0.0);
+        let u_max = u_mode + 13.5 * sigma_u;
+        let min_gap = (0.25 * sigma_u).max(1e-300);
+
+        let raw_knots = [
+            0.25 * u_mode,
+            0.5 * u_mode,
+            u_mode - 7.0 * sigma_u,
+            u_mode - 3.5 * sigma_u,
+            u_mode - 1.5 * sigma_u,
+            u_mode,
+            u_mode + 1.5 * sigma_u,
+            u_mode + 4.0 * sigma_u,
+        ];
+        let mut knots = Vec::with_capacity(raw_knots.len() + 2);
+        knots.push(u_min);
+        for &x in &raw_knots {
+            if x.is_finite() && x > u_min + min_gap && x + min_gap < u_max {
+                knots.push(x);
+            }
+        }
+        knots.push(u_max);
+        knots.sort_by(f64::total_cmp);
+
+        let mut edges = Vec::with_capacity(knots.len());
+        let hi_guard = min_gap.max(1e-12 * u_max.abs());
+        edges.push(u_min);
+        let mut cur = u_min;
+        for &x in &knots {
+            if x > cur + min_gap && x + hi_guard < u_max {
+                edges.push(x);
+                cur = x;
+            }
+        }
+        edges.push(u_max);
+
+        let (gl_nodes, gl_weights) = gl32_nodes_weights();
+        let mut pairs: Vec<(f64, f64)> = Vec::with_capacity(edges.len().saturating_sub(1) * 32);
+        for seg in edges.windows(2) {
+            let [lo, hi] = seg else { continue };
+            let center = 0.5 * lo + 0.5 * hi;
+            let half = 0.5 * hi - 0.5 * lo;
+            for (&xi, &wi) in gl_nodes.iter().zip(gl_weights.iter()) {
+                let off = half * xi;
+                for u_val in [center - off, center + off] {
+                    let dens = chi_scale_pdf_fast(u_val, a, norm_const);
+                    if dens > 1e-300 {
+                        pairs.push((u_val, half * wi * dens));
+                    }
+                }
+            }
+        }
+        pairs.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+
+        let mut u = Vec::with_capacity(pairs.len());
+        let mut w = Vec::with_capacity(pairs.len());
+        let mut prefix_w = Vec::with_capacity(pairs.len() + 1);
+        let mut pref = NeumaierSum::new();
+        prefix_w.push(0.0);
+        for (ui, wi) in pairs {
+            u.push(ui);
+            w.push(wi);
+            pref.add(wi);
+            prefix_w.push(pref.total());
+        }
+
+        Ok(Self { df, u_mode, sigma_u, u_min, u, w, prefix_w })
+    }
+
+    /// True when the joint chi-scale saddle point and its support stay inside the finely resolved
+    /// bulk panels of `self`, so reusing precomputed nodes preserves full quadrature accuracy.
+    #[inline]
+    fn is_bulk_eligible(&self, q: f64) -> bool {
+        if q * self.sigma_u > 1.5 {
+            return false;
+        }
+        let scale = q * std::f64::consts::FRAC_1_SQRT_2;
+        let rt_eff = self.df.sqrt().hypot(scale);
+        let rt_dm1 = (self.df - 1.0).sqrt();
+        let u_star = rt_dm1 / rt_eff;
+        let sigma_star = 1.0 / (std::f64::consts::SQRT_2 * rt_eff);
+        u_star >= self.u_mode - 2.5 * self.sigma_u && sigma_star >= 0.6 * self.sigma_u && (u_star - 11.0 * sigma_star).max(0.0) >= self.u_min
+    }
+
+    fn eval_with_table(&self, q: f64, r: usize, table: &GaussianRangeTable) -> f64 {
+        let u_sat = table.w_lo / q;
+        let u_zero = GAUSSIAN_RANGE_ZERO_W / q;
+        let lo_idx = self.u.partition_point(|&u| u <= u_sat);
+        let hi_idx = self.u.partition_point(|&u| u < u_zero);
+        let sat_mass = self.prefix_w.get(lo_idx).copied().unwrap_or(0.0);
+        if lo_idx >= hi_idx {
+            return sat_mass.clamp(0.0, 1.0);
+        }
+        let mut acc = NeumaierSum::new();
+        acc.add(sat_mass);
+        let mut panel_hint = 0_usize;
+        if let (Some(u_slice), Some(w_slice)) = (self.u.get(lo_idx..hi_idx), self.w.get(lo_idx..hi_idx)) {
+            for (&ui, &wi) in u_slice.iter().zip(w_slice.iter()) {
+                acc.add(wi * table.eval_max_sf_with_hint(q * ui, r, &mut panel_hint));
+            }
+        }
+        acc.total().clamp(0.0, 1.0)
+    }
+}
+
+fn outer_u_max_for_df(df: f64) -> f64 {
+    if df < 3.0 {
+        let a = 0.5 * df;
+        (65.0 / a).max(16.0).sqrt()
+    } else {
+        let u_mode = ((df - 1.0) / df).sqrt();
+        let sigma_u = 1.0 / (2.0 * df).sqrt();
+        u_mode + 13.5 * sigma_u
+    }
+}
+
+/// Reusable evaluator cache for Studentized-range and maximum-Studentized-range survival
+/// probabilities and critical values across a post-test family or across multiple slices.
+///
+/// Caches:
+/// - Adaptive piecewise degree-16 Chebyshev tables of `psi_c(w) = ln(1 - H_c(w)) + w^2 / 4` keyed
+///   by group count `c`, with documented pointwise error `<= 3e-12` in log space (hence relative
+///   error `<= 3e-12` in `1 - H_c(w)^r` for all `r >= 1`, propagated without amplification through
+///   non-negative outer quadrature weights).
+/// - Precomputed sorted outer chi-scale quadrature nodes `(u_j, w_j h_{df}(u_j))` keyed by
+///   `df.to_bits()` for bulk-regime `q` values when `df >= 3.0`, falling back automatically to
+///   saddle-point-adapted outer quadrature (still backed by the Chebyshev table) for extreme tails
+///   and `df < 3.0`.
+#[derive(Debug, Clone, Default)]
+pub struct StudentizedRangeCache {
+    tables: BTreeMap<usize, GaussianRangeTable>,
+    chi_nodes: BTreeMap<u64, ChiScaleNodes>,
+}
+
+impl StudentizedRangeCache {
+    /// Create an empty Studentized-range evaluator cache.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn ensure_chi_nodes(&mut self, df: f64) -> Result<u64, MathError> {
+        let key = df.to_bits();
+        if let Entry::Vacant(slot) = self.chi_nodes.entry(key) {
+            let built = ChiScaleNodes::build(df)?;
+            slot.insert(built);
+        }
+        Ok(key)
+    }
+
+    fn ensure_table(&mut self, c: usize, w_target: f64) {
+        let table = self.tables.entry(c).or_insert_with(|| GaussianRangeTable::new(c));
+        table.ensure_up_to(w_target);
+    }
+
+    /// Evaluate a single upper-tail *p*-value `P(max_{1 <= i <= r} Q_i > q)` reusing cached tables
+    /// and outer chi-scale nodes.
+    ///
+    /// # Errors
+    /// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `df` is `NaN`, or `q` is `NaN`.
+    pub fn max_sf(&mut self, q: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+        validate_max_q_args(q, r, c, df)?;
+        if q <= 0.0 {
+            return Ok(1.0);
+        }
+        if q.is_infinite() {
+            return Ok(0.0);
+        }
+        if r == 1 && c == 2 {
+            return student_t_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df);
+        }
+        if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+            if c == 2 {
+                return Ok(max_gaussian_range_sf(q, r, 2));
+            }
+            if let Some(table) = self.tables.get_mut(&c) {
+                table.ensure_up_to(q);
+                return Ok(table.eval_max_sf(q, r));
+            }
+            return Ok(max_gaussian_range_sf(q, r, c));
+        }
+
+        let w_needed = (q * outer_u_max_for_df(df)).min(GAUSSIAN_RANGE_ZERO_W);
+        self.ensure_table(c, w_needed);
+        if df >= 3.0 {
+            let key = self.ensure_chi_nodes(df)?;
+            if let (Some(nodes), Some(table)) = (self.chi_nodes.get(&key), self.tables.get(&c))
+                && nodes.is_bulk_eligible(q)
+            {
+                return Ok(nodes.eval_with_table(q, r, table));
+            }
+        }
+        if let Some(table) = self.tables.get(&c) {
+            return Ok(integrate_over_chi_scale_tail(df, q * std::f64::consts::FRAC_1_SQRT_2, |u| table.eval_max_sf(q * u, r))?.clamp(0.0, 1.0));
+        }
+        max_studentized_range_sf(q, r, c, df)
+    }
+
+    /// Evaluate a single Studentized-range upper-tail *p*-value `P(Q_{k, df} > q)` (`r = 1`).
+    ///
+    /// # Errors
+    /// Returns an error if `k < 2`, `df <= 0`, `df` is `NaN`, or `q` is `NaN`.
+    pub fn sf(&mut self, q: f64, k: usize, df: f64) -> Result<f64, MathError> {
+        validate_q_args(q, k, df)?;
+        self.max_sf(q, 1, k, df)
+    }
+
+    /// Evaluate a batch of upper-tail *p*-values `P(max_{1 <= i <= r} Q_i > q)` for fixed
+    /// `(r, c, df)` in one sorted pass, reusing outer chi-scale quadrature nodes and the cached
+    /// Chebyshev table of `ln(1 - H_c(w)) + w^2 / 4`.
+    ///
+    /// Output order matches `qs` exactly.
+    ///
+    /// # Errors
+    /// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `df` is `NaN`, or any element of `qs` is `NaN`.
+    pub fn max_sf_batch(&mut self, qs: &[f64], r: usize, c: usize, df: f64) -> Result<Vec<f64>, MathError> {
+        if r < 1 {
+            return Err(MathError::InvalidParameter { name: "r", value: r as f64 });
+        }
+        if c < 2 {
+            return Err(MathError::InvalidParameter { name: "c", value: c as f64 });
+        }
+        if df.is_nan() || df <= 0.0 {
+            return Err(MathError::InvalidParameter { name: "df", value: df });
+        }
+        for &q in qs {
+            if q.is_nan() {
+                return Err(MathError::DomainError { name: "q", value: q });
+            }
+        }
+        if qs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut out = vec![0.0_f64; qs.len()];
+        let mut pending: Vec<(usize, f64)> = Vec::new();
+        for (idx, (&q, slot)) in qs.iter().zip(out.iter_mut()).enumerate() {
+            if q <= 0.0 {
+                *slot = 1.0;
+            } else if q.is_infinite() {
+                *slot = 0.0;
+            } else if r == 1 && c == 2 {
+                *slot = student_t_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df)?;
+            } else {
+                pending.push((idx, q));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(out);
+        }
+
+        pending.sort_by(|lhs, rhs| lhs.1.total_cmp(&rhs.1));
+
+        if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+            self.eval_batch_inf_df(&pending, r, c, &mut out);
+            return Ok(out);
+        }
+
+        let q_max = pending.last().map_or(0.0, |&(_, q)| q);
+        let w_max_needed = (q_max * outer_u_max_for_df(df)).min(GAUSSIAN_RANGE_ZERO_W);
+        self.ensure_table(c, w_max_needed);
+        let chi_key = if df >= 3.0 { Some(self.ensure_chi_nodes(df)?) } else { None };
+        let Some(table) = self.tables.get(&c) else {
+            return Err(MathError::DomainError { name: "c", value: c as f64 });
+        };
+        let nodes_opt = chi_key.and_then(|k| self.chi_nodes.get(&k));
+
+        let mut prev_bits: Option<u64> = None;
+        let mut prev_val = 0.0_f64;
+        for &(idx, q) in &pending {
+            let bits = q.to_bits();
+            let val = if prev_bits == Some(bits) {
+                prev_val
+            } else {
+                let computed = if let Some(nodes) = nodes_opt
+                    && nodes.is_bulk_eligible(q)
+                {
+                    nodes.eval_with_table(q, r, table)
+                } else {
+                    integrate_over_chi_scale_tail(df, q * std::f64::consts::FRAC_1_SQRT_2, |u| table.eval_max_sf(q * u, r))?.clamp(0.0, 1.0)
+                };
+                prev_bits = Some(bits);
+                prev_val = computed;
+                computed
+            };
+            if let Some(slot) = out.get_mut(idx) {
+                *slot = val;
+            }
+        }
+        Ok(out)
+    }
+
+    fn eval_batch_inf_df(&mut self, pending_sorted: &[(usize, f64)], r: usize, c: usize, out: &mut [f64]) {
+        let use_table = c >= 3 && (pending_sorted.len() > 12 || self.tables.contains_key(&c));
+        if use_table {
+            let q_max = pending_sorted.last().map_or(0.0, |&(_, q)| q);
+            self.ensure_table(c, q_max);
+        }
+        let table_opt = if use_table { self.tables.get(&c) } else { None };
+        let mut panel_hint = 0_usize;
+        let mut prev_bits: Option<u64> = None;
+        let mut prev_val = 0.0_f64;
+        for &(idx, q) in pending_sorted {
+            let bits = q.to_bits();
+            let val = if prev_bits == Some(bits) {
+                prev_val
+            } else {
+                let computed = match table_opt {
+                    Some(table) => table.eval_max_sf_with_hint(q, r, &mut panel_hint),
+                    None => max_gaussian_range_sf(q, r, c),
+                };
+                prev_bits = Some(bits);
+                prev_val = computed;
+                computed
+            };
+            if let Some(slot) = out.get_mut(idx) {
+                *slot = val;
+            }
+        }
+    }
+
+    /// Evaluate a batch of Studentized-range upper-tail *p*-values `P(Q_{k, df} > q)` (`r = 1`).
+    ///
+    /// # Errors
+    /// Returns an error if `k < 2`, `df <= 0`, `df` is `NaN`, or any element of `qs` is `NaN`.
+    pub fn sf_batch(&mut self, qs: &[f64], k: usize, df: f64) -> Result<Vec<f64>, MathError> {
+        if k < 2 {
+            return Err(MathError::InvalidParameter { name: "k", value: k as f64 });
+        }
+        self.max_sf_batch(qs, 1, k, df)
+    }
+
+    /// Upper-tail critical value `q(alpha; r, c, df)` solving `P(max_{1 <= i <= r} Q_i > q) = alpha`,
+    /// reusing cached tables and outer chi-scale nodes across the root search and subsequent calls.
+    ///
+    /// # Errors
+    /// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `alpha` lies outside `[0, 1]`, or bracketing fails.
+    pub fn max_isf(&mut self, alpha: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+        max_studentized_range_isf_with(alpha, r, c, df, |q| self.max_sf(q, r, c, df))
+    }
+
+    /// Upper-tail Studentized-range critical value `q_{alpha, k, df}` (`r = 1`) reusing cached tables.
+    ///
+    /// # Errors
+    /// Returns an error if `k < 2`, `df <= 0`, `alpha` lies outside `[0, 1]`, or bracketing fails.
+    pub fn isf(&mut self, alpha: f64, k: usize, df: f64) -> Result<f64, MathError> {
+        if k < 2 {
+            return Err(MathError::InvalidParameter { name: "k", value: k as f64 });
+        }
+        self.max_isf(alpha, 1, k, df)
+    }
+}
+
+/// Evaluate a batch of maximum-Studentized-range upper-tail *p*-values `P(max_{1 <= i <= r} Q_i > q)`
+/// for fixed `(r, c, df)` in a single sorted pass, reusing outer chi-scale quadrature nodes and an
+/// adaptive piecewise degree-16 Chebyshev table of `ln(1 - H_c(w)) + w^2 / 4` (Copenhaver & Holland
+/// 1988; Trefethen 2013).
+///
+/// Guarantees relative agreement `<= 1e-11` with [`max_studentized_range_sf`] across `r >= 1`,
+/// `c >= 2`, `df > 0` (including `df = +inf`), and all representable tails. Output order matches `qs`.
+///
+/// # Errors
+/// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `df` is `NaN`, or any element of `qs` is `NaN`.
+pub fn max_studentized_range_sf_batch(qs: &[f64], r: usize, c: usize, df: f64) -> Result<Vec<f64>, MathError> {
+    let mut cache = StudentizedRangeCache::new();
+    cache.max_sf_batch(qs, r, c, df)
+}
+
+/// Evaluate a batch of Studentized-range upper-tail *p*-values `P(Q_{k, df} > q)` (`r = 1`) for
+/// fixed `(k, df)` in a single sorted pass.
+///
+/// Guarantees relative agreement `<= 1e-11` with [`studentized_range_sf`]. Output order matches `qs`.
+///
+/// # Errors
+/// Returns an error if `k < 2`, `df <= 0`, `df` is `NaN`, or any element of `qs` is `NaN`.
+pub fn studentized_range_sf_batch(qs: &[f64], k: usize, df: f64) -> Result<Vec<f64>, MathError> {
+    if k < 2 {
+        return Err(MathError::InvalidParameter { name: "k", value: k as f64 });
+    }
+    max_studentized_range_sf_batch(qs, 1, k, df)
 }
 
 #[cfg(test)]
@@ -789,5 +1535,196 @@ mod tests {
         let g_ln = gaussian_range_ln_sf(60.0, 50);
         assert_eq!(lsf_inf, g_ln);
         assert!((lsf_inf - (-896.863_421)).abs() < 1e-4, "lsf_inf = {lsf_inf}");
+    }
+
+    fn assert_batch_matches_scalar(qs: &[f64], r: usize, c: usize, df: f64) {
+        let batched = super::max_studentized_range_sf_batch(qs, r, c, df).unwrap();
+        assert_eq!(batched.len(), qs.len());
+        if r == 1 {
+            assert_eq!(super::studentized_range_sf_batch(qs, c, df).unwrap(), batched);
+        }
+        for (&q, &p_batch) in qs.iter().zip(batched.iter()) {
+            let p_scalar = max_studentized_range_sf(q, r, c, df).unwrap();
+            assert!(p_batch.is_finite() && (0.0..=1.0).contains(&p_batch), "r={r} c={c} df={df} q={q}: bad p_batch={p_batch}");
+            if q <= 0.0 {
+                assert_eq!(p_batch, 1.0, "q <= 0 must be exact 1.0");
+            } else if q.is_infinite() {
+                assert_eq!(p_batch, 0.0, "q = +inf must be exact 0.0");
+            } else if p_scalar == 0.0 {
+                assert!(p_batch <= 1e-300, "r={r} c={c} df={df} q={q}: p_scalar=0 vs p_batch={p_batch:e}");
+            } else {
+                let abs_err = (p_batch - p_scalar).abs();
+                let tol = 1e-14_f64.max(1e-11 * p_scalar);
+                assert!(
+                    abs_err <= tol,
+                    "r={r} c={c} df={df} q={q}: batch={p_batch:.16e} vs scalar={p_scalar:.16e} (abs={abs_err:.3e}, rel={:.3e})",
+                    abs_err / p_scalar
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn issue_82_batched_validation_and_cache_extension() {
+        use super::{StudentizedRangeCache, max_studentized_range_sf_batch, studentized_range_sf_batch};
+        use crate::error::MathError;
+
+        // Parameter validation errors: c = 1, r = 0, invalid df, NaN in qs.
+        assert!(matches!(max_studentized_range_sf_batch(&[2.0], 1, 1, 10.0), Err(MathError::InvalidParameter { name: "c", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[], 1, 1, 10.0), Err(MathError::InvalidParameter { name: "c", .. })));
+        assert!(matches!(studentized_range_sf_batch(&[2.0], 1, 10.0), Err(MathError::InvalidParameter { name: "k", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[2.0], 0, 3, 10.0), Err(MathError::InvalidParameter { name: "r", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[2.0], 2, 3, 0.0), Err(MathError::InvalidParameter { name: "df", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[2.0], 2, 3, -5.0), Err(MathError::InvalidParameter { name: "df", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[2.0], 2, 3, f64::NAN), Err(MathError::InvalidParameter { name: "df", .. })));
+        assert!(matches!(max_studentized_range_sf_batch(&[0.0, 3.0, f64::NAN, 5.0], 2, 4, 20.0), Err(MathError::DomainError { name: "q", .. })));
+        assert!(max_studentized_range_sf_batch(&[], 2, 4, 20.0).unwrap().is_empty());
+
+        // Small-batch df = +inf direct path (<= 12 points).
+        let qs_small_inf = [0.0, 2.5, 5.0, 12.0, f64::INFINITY];
+        let batch_small_inf = max_studentized_range_sf_batch(&qs_small_inf, 2, 12, f64::INFINITY).unwrap();
+        for (&q, &p_batch) in qs_small_inf.iter().zip(batch_small_inf.iter()) {
+            assert_eq!(p_batch.to_bits(), max_studentized_range_sf(q, 2, 12, f64::INFINITY).unwrap().to_bits(), "small df=inf q={q}");
+        }
+
+        // Incremental cache extension: query small q first, then larger q later on the same cache.
+        let mut cache = StudentizedRangeCache::new();
+        let p_lo = cache.max_sf(3.2, 2, 12, 30.0).unwrap();
+        let p_hi = cache.max_sf(18.5, 2, 12, 30.0).unwrap();
+        let s_lo = max_studentized_range_sf(3.2, 2, 12, 30.0).unwrap();
+        let s_hi = max_studentized_range_sf(18.5, 2, 12, 30.0).unwrap();
+        assert!((p_lo - s_lo).abs() <= 1e-14_f64.max(1e-11 * s_lo));
+        assert!((p_hi - s_hi).abs() <= 1e-14_f64.max(1e-11 * s_hi));
+    }
+
+    #[test]
+    fn issue_82_batched_matches_scalar_across_edge_cases_and_parameter_regimes() {
+        let qs_unsorted: &[f64] = &[
+            f64::INFINITY,
+            0.0,
+            -2.5,
+            f64::NEG_INFINITY,
+            1e-9,
+            0.15,
+            1.2,
+            2.8,
+            4.5,
+            4.5, // exact duplicate
+            6.5,
+            9.0,
+            14.0,
+            22.0,
+            40.0,
+            80.0,
+            5_000.0,
+            1e160,
+        ];
+
+        let configs: &[(usize, usize, f64)] = &[
+            (1, 2, 1.5),
+            (1, 2, 20.0),
+            (1, 2, f64::INFINITY),
+            (4, 2, 1.5),
+            (4, 2, 18.0),
+            (48, 2, 192.0),
+            (6, 2, f64::INFINITY),
+            (1, 3, 0.8),
+            (1, 3, 1.99),
+            (1, 3, 2.0),
+            (1, 3, 2.01),
+            (1, 3, 2.99),
+            (1, 3, 3.0),
+            (1, 3, 3.01),
+            (1, 3, 10.0),
+            (1, 3, 1e5),
+            (1, 3, 1e8),
+            (1, 3, f64::INFINITY),
+            (2, 5, 12.7),
+            (3, 10, 40.0),
+            (2, 48, 192.0),
+            (2, 48, f64::INFINITY),
+            (1, 200, 60.0),
+        ];
+
+        for &(r, c, df) in configs {
+            assert_batch_matches_scalar(qs_unsorted, r, c, df);
+        }
+
+        // Large group count c = 70_000 (verifying rigorous lower-saturation cutoff w_lo(c)).
+        assert_batch_matches_scalar(&[0.0, 2.0, 5.0, 8.5, 11.0, 18.0, f64::INFINITY], 1, 70_000, 10.0);
+    }
+
+    fn assert_table_contiguous_and_bounded(table: &super::GaussianRangeTable) {
+        assert!(!table.panels.is_empty(), "expected at least one panel");
+        assert!(table.panels.len() <= super::CHEB_MAX_PANELS + 8, "unbounded panel growth: {}", table.panels.len());
+        assert_eq!(table.panels.first().unwrap().a.to_bits(), table.w_lo.to_bits());
+        assert_eq!(table.panels.last().unwrap().b.to_bits(), table.w_covered.to_bits());
+        for pair in table.panels.windows(2) {
+            assert_eq!(pair[0].b.to_bits(), pair[1].a.to_bits(), "panel gap between {:?} and {:?}", pair[0].b, pair[1].a);
+        }
+    }
+
+    #[test]
+    fn issue_82_incremental_extensions_tiny_steps_and_many_ascending_queries() {
+        use super::{GAUSSIAN_RANGE_ZERO_W, GaussianRangeTable, PanelKind, RangePanel, StudentizedRangeCache, max_gaussian_range_sf};
+
+        // (a) Tiny incremental extensions (<= 1e-9 steps) must never create uncovered gaps or
+        //     drift `w_covered` past the last panel's upper bound.
+        for &c in &[3_usize, 48_usize] {
+            let mut tbl = GaussianRangeTable::new(c);
+            let mut w = tbl.w_lo;
+            for step in 1..=20 {
+                w += 5e-10;
+                tbl.ensure_up_to(w);
+                assert_table_contiguous_and_bounded(&tbl);
+                let got = tbl.eval_max_sf(w, 2);
+                let exact = max_gaussian_range_sf(w, 2, c);
+                let tol = 1e-14_f64.max(1e-11 * exact);
+                assert!((got - exact).abs() <= tol, "tiny step {step} c={c} w={w}: got={got:.16e} vs exact={exact:.16e}");
+            }
+            // Also verify tiny steps right past the first canonical breakpoint.
+            let boundary = tbl.w_covered;
+            for step in 1..=10 {
+                let w_probe = boundary + (step as f64) * 4e-10;
+                tbl.ensure_up_to(w_probe);
+                assert_table_contiguous_and_bounded(&tbl);
+                let got = tbl.eval_max_sf(w_probe, 2);
+                let exact = max_gaussian_range_sf(w_probe, 2, c);
+                let tol = 1e-14_f64.max(1e-11 * exact);
+                assert!((got - exact).abs() <= tol, "boundary step {step} c={c} w={w_probe}: got={got:.16e} vs exact={exact:.16e}");
+            }
+        }
+
+        // (b) > 64 ascending cache.sf / cache.max_sf queries (as in Games-Howell / Dunnett T3 on
+        //     ordered group means) crossing w_mid up to GAUSSIAN_RANGE_ZERO_W must neither exhaust
+        //     CHEB_MAX_PANELS nor lose accuracy against scalar `max_studentized_range_sf`.
+        for &(r, c, base_df) in &[(1_usize, 5_usize, 18.0_f64), (2, 48, 80.0), (10, 2, 15.0)] {
+            let mut cache = StudentizedRangeCache::new();
+            let n_steps = 96_usize;
+            for step in 1..=n_steps {
+                let frac = (step as f64) / (n_steps as f64);
+                let q = 0.25 + frac * (GAUSSIAN_RANGE_ZERO_W + 4.0);
+                // Vary df slightly across queries to exercise per-pair Welch-style calls too.
+                let df = base_df + 0.15 * ((step % 11) as f64);
+                let got = if r == 1 { cache.sf(q, c, df).unwrap() } else { cache.max_sf(q, r, c, df).unwrap() };
+                // Cross-check scalar on a thorough representative stride (plus endpoints).
+                if step % 8 == 0 || step == 1 || step == n_steps {
+                    let scalar = max_studentized_range_sf(q, r, c, df).unwrap();
+                    if scalar == 0.0 {
+                        assert!(got <= 1e-300, "r={r} c={c} df={df} q={q}: got={got:e} vs scalar=0");
+                    } else {
+                        let tol = 1e-14_f64.max(1e-11 * scalar);
+                        assert!((got - scalar).abs() <= tol, "r={r} c={c} df={df} q={q}: got={got:.16e} vs scalar={scalar:.16e}");
+                    }
+                }
+            }
+            let tbl = cache.tables.get(&c).unwrap();
+            assert_table_contiguous_and_bounded(tbl);
+            assert!(tbl.panels.len() <= super::CHEB_MAX_PANELS, "c={c}: unexpected panel count {}", tbl.panels.len());
+        }
+
+        // (c) Verify PanelKind::ExactFallback evaluates identically to `max_gaussian_range_sf`.
+        let fb = RangePanel { a: 1.0, b: 10.0, kind: PanelKind::ExactFallback };
+        assert_eq!(fb.eval_max_sf(4.25, 3, 8).to_bits(), max_gaussian_range_sf(4.25, 3, 8).to_bits());
     }
 }
