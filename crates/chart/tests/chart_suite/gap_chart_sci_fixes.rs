@@ -947,7 +947,12 @@ fn gap_02_11_volcano_respects_significant_flag_and_difference_units() -> TestRes
         paired: false,
         nonparametric: false,
         assume_equal_sd: false,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::BenjaminiHochbergFdr,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
         ..Default::default()
     };
     let an = AnalysisSpec::new(SheetId::new("res-mr-vol"), ds.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
@@ -1337,7 +1342,12 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
         paired: false,
         nonparametric: false,
         assume_equal_sd: false,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::BenjaminiHochbergFdr,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
         ..Default::default()
     };
     let an_v = AnalysisSpec::new(SheetId::new("res-v-dirty"), ds_v.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
@@ -1635,6 +1645,7 @@ fn delta_volcano_non_mr_pairwise_estimates_use_difference_units() -> TestResult 
                 method: MultiplicityMethod::Dunnett { control_column: 0 },
                 threshold: 0.05,
                 report_confidence_intervals: false,
+                control_column: None,
             },
             ..OneWayAnovaSpec::default()
         }),

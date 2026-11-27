@@ -317,14 +317,14 @@ pub(in crate::anova) fn append_nested_multiplicity(
     }
 
     let mut mapped_mult = nested_spec.multiplicity;
-    if let MultiplicityMethod::Dunnett { control_column } = mapped_mult.method {
+    if let Some(control_column) = crate::multiplicity::validate_multiplicity_control_spec(&mapped_mult)? {
         let ctrl_pos = selected_groups
             .iter()
             .position(|&c| c == control_column)
             .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-        mapped_mult.method = MultiplicityMethod::Dunnett { control_column: ctrl_pos };
+        mapped_mult = mapped_mult.with_control_column(ctrl_pos);
     }
-    let pairs = collect_factor_pairs(k, mapped_mult.method, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
+    let pairs = collect_factor_pairs(k, &mapped_mult, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
     if !pairs.is_empty() {
         let numbered_levels: Vec<(usize, String)> =
             selected_groups.iter().zip(res.group_labels.iter()).map(|(&orig_idx, lbl)| (orig_idx, lbl.clone())).collect();

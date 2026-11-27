@@ -140,11 +140,70 @@ pub struct MultiplicitySpec {
     pub threshold: f64,
     /// When `true`, computes simultaneous `(1 - threshold)` confidence intervals for pairwise mean differences where supported by `method`.
     pub report_confidence_intervals: bool,
+    /// Optional zero-based reference control group index restricting comparisons to the `k - 1`
+    /// treatment-versus-control family instead of all `k * (k - 1) / 2` pairs.
+    ///
+    /// Supported for `Dunnett`, `Bonferroni`, `Sidak`, `HolmSidak`, `DunnRankSum`, `FisherLsd`,
+    /// `DunnettT3`, `TamhaneT2`, and the three FDR procedures (`BenjaminiHochbergFdr`,
+    /// `BenjaminiYekutieliFdr`, `TwoStageBkyFdr`). Leave `None` for all-pairwise comparisons or
+    /// when `method` is already `MultiplicityMethod::Dunnett { control_column }`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_column: Option<usize>,
 }
 
 impl Default for MultiplicitySpec {
     fn default() -> Self {
-        Self { method: MultiplicityMethod::None, threshold: 0.05, report_confidence_intervals: true }
+        Self { method: MultiplicityMethod::None, threshold: 0.05, report_confidence_intervals: true, control_column: None }
+    }
+}
+
+impl MultiplicitySpec {
+    /// Return `true` when `method` supports restricting pairwise comparisons to a many-to-one
+    /// control-versus-all family (`k - 1` comparisons against a designated control group).
+    #[must_use]
+    pub const fn supports_control_column(method: MultiplicityMethod) -> bool {
+        matches!(
+            method,
+            MultiplicityMethod::Dunnett { .. }
+                | MultiplicityMethod::Bonferroni
+                | MultiplicityMethod::Sidak
+                | MultiplicityMethod::HolmSidak
+                | MultiplicityMethod::DunnRankSum
+                | MultiplicityMethod::FisherLsd
+                | MultiplicityMethod::DunnettT3
+                | MultiplicityMethod::TamhaneT2
+                | MultiplicityMethod::BenjaminiHochbergFdr
+                | MultiplicityMethod::BenjaminiYekutieliFdr
+                | MultiplicityMethod::TwoStageBkyFdr
+        )
+    }
+
+    /// Return the effective zero-based control index if `self` configures a many-to-one
+    /// control-versus-all family (either via [`MultiplicityMethod::Dunnett`] or
+    /// [`Self::control_column`]).
+    #[must_use]
+    pub const fn effective_control_column(&self) -> Option<usize> {
+        match self.method {
+            MultiplicityMethod::Dunnett { control_column } => Some(control_column),
+            _ => self.control_column,
+        }
+    }
+
+    /// Return a copy of `self` targeting `control_column` (updating the variant payload when
+    /// `self.method` is [`MultiplicityMethod::Dunnett`] and setting [`Self::control_column`]
+    /// otherwise).
+    #[must_use]
+    pub const fn with_control_column(mut self, control_column: usize) -> Self {
+        match &mut self.method {
+            MultiplicityMethod::Dunnett { control_column: c } => {
+                *c = control_column;
+                self.control_column = None;
+            }
+            _ => {
+                self.control_column = Some(control_column);
+            }
+        }
+        self
     }
 }
 
@@ -1420,6 +1479,12 @@ pub struct FactorialAnovaSpec {
     pub compute_effect_sizes: bool,
     /// Post-hoc cell/simple-effect/main-effect multiple-comparisons configuration.
     pub multiplicity: MultiplicitySpec,
+    /// Optional zero-based factor axis targeted by a many-to-one control-versus-all post-hoc
+    /// comparison (`Some(0)` = row factor, `Some(1)` = column factor on a two-way `GroupedTable`).
+    /// When `None`, legacy Dunnett factor resolution selects the first factor whose level count
+    /// contains `control_column`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control_factor: Option<usize>,
     /// Sphericity epsilon adjustment (`None`, `GreenhouseGeisser`, or `HuynhFeldt`) applied to RM factorial *F*-tests.
     #[serde(default, skip_serializing_if = "is_default")]
     pub sphericity_correction: RmSphericityCorrection,
@@ -1464,6 +1529,7 @@ impl Default for FactorialAnovaSpec {
             fit_reml_on_missing: true,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec::default(),
+            control_factor: None,
             sphericity_correction: RmSphericityCorrection::None,
             reml_zero_variance_policy: RemlZeroVariancePolicy::BoundAtZero,
             comparison_family_mode: FactorialComparisonFamilyMode::Standard,

@@ -114,9 +114,14 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
     let r01 = run_kind_sel(&sh0, km(MultiplicitySpec::default(), false), vec![0, 1]).unwrap();
     assert!(scalar_opt(&r01, "Log-rank chi-square", None).is_none());
     assert!(tab_by_id(&r01, "curve-comparison").rows.iter().all(|r| r.iter().all(|c| matches!(c, ResultCell::Empty))));
-    let r_all =
-        run_kind(&sh0, km(MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true }, true))
-            .unwrap();
+    let r_all = run_kind(
+        &sh0,
+        km(
+            MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true, control_column: None },
+            true,
+        ),
+    )
+    .unwrap();
     let pw = tab_by_id(&r_all, "survival-pairwise");
     assert!(matches!(pw.rows[0][0], ResultCell::Empty) && r_all.pairwise_comparisons.len() == 2);
     assert_close(cell_p(&pw.rows[1][2]), (2.0 * cell_p(&pw.rows[1][1])).min(1.0), 1e-12, "Bonferroni m=2");
@@ -172,14 +177,25 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
     let (exp_s, exp_hs) = (adjust_sidak(&raw_p), adjust_holm_sidak(&raw_p));
     assert!(exp_s.iter().zip(&exp_hs).any(|(x, y)| (x - y).abs() > 1e-4));
     let sh4 = survival_sheet("rv67", &cohorts);
-    let r_s = run_kind(&sh4, km(MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: true }, false))
-        .unwrap();
+    let r_s = run_kind(
+        &sh4,
+        km(MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: true, control_column: None }, false),
+    )
+    .unwrap();
     for (rec, &ep) in r_s.pairwise_comparisons.iter().zip(&exp_s) {
         assert_close(rec.raw_p_or_q, ep, 1e-12, "Sidak pairwise");
     }
     let r_d = run_kind(
         &sh4,
-        km(MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 0 }, threshold: 0.05, report_confidence_intervals: true }, false),
+        km(
+            MultiplicitySpec {
+                method: MultiplicityMethod::Dunnett { control_column: 0 },
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
+            false,
+        ),
     )
     .unwrap();
     assert_eq!(r_d.pairwise_comparisons.len(), 3);
@@ -188,14 +204,20 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
         run_kind(
             &sh4,
             km(
-                MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 9 }, threshold: 0.05, report_confidence_intervals: true },
+                MultiplicitySpec {
+                    method: MultiplicityMethod::Dunnett { control_column: 9 },
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                    control_column: None
+                },
                 false
             )
         ),
         Err(StatsError::InvalidParameter { name: "control_column", .. })
     ));
     for (m, name) in [(MultiplicityMethod::TukeyHsd, "Tukey-Kramer"), (MultiplicityMethod::GamesHowell, "Games-Howell")] {
-        let rf = run_kind(&sh4, km(MultiplicitySpec { method: m, threshold: 0.05, report_confidence_intervals: true }, false)).unwrap();
+        let rf = run_kind(&sh4, km(MultiplicitySpec { method: m, threshold: 0.05, report_confidence_intervals: true, control_column: None }, false))
+            .unwrap();
         assert!(tab_by_id(&rf, "survival-pairwise").footnotes.iter().any(|f| f.contains(name) && f.contains("Bonferroni")));
     }
 }

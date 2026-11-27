@@ -81,7 +81,12 @@ fn r36_1a_one_way_rm_missing_cell_cs_and_un_kr_vs_satterthwaite() {
         df_method: MixedModelDfMethod::KenwardRoger,
         residual_covariance: ResidualCovariance::CompoundSymmetry,
         compute_effect_sizes: true,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
     };
     let res_cs_kr =
         run_one_way_anova(&sheet, &AnalysisSpec::new("r-cs-kr", "col-rm-miss", AnalysisKind::OneWayAnova(cs_kr_spec.clone())).unwrap(), &cs_kr_spec)
@@ -158,7 +163,7 @@ fn r36_1b_one_way_rm_incomplete_blocks_without_complete_rows_and_dunnett_linear_
     for mult in [MultiplicityMethod::Dunnett { control_column: 0 }, MultiplicityMethod::LinearTrend, MultiplicityMethod::Sidak] {
         let ow = OneWayAnovaSpec {
             method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: false },
-            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
             ..OneWayAnovaSpec::default()
         };
         let res = run_one_way_anova(&sheet, &AnalysisSpec::new("res-bib", "bib", AnalysisKind::OneWayAnova(ow.clone())).unwrap(), &ow).unwrap();
@@ -211,7 +216,12 @@ fn r36_2a_two_way_rm_missing_cell_kr_vs_satterthwaite_oracle() {
     let kr_spec = FactorialAnovaSpec {
         repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
         df_method: MixedModelDfMethod::KenwardRoger,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..FactorialAnovaSpec::default()
     };
     let res_kr =
@@ -501,7 +511,12 @@ fn r36_3a_three_way_rm_balanced_matches_aov_and_missing_cell_reml_oracles() {
     assert!(res_c3_kr.pairwise_comparisons.is_empty()); // Default multiplicity is None -> verify post-hoc too!
 
     let fac_col3_post = FactorialAnovaSpec {
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..FactorialAnovaSpec {
             three_way: true,
             max_interaction_order: 3,

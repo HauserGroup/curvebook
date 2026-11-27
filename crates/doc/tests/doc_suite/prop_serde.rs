@@ -478,6 +478,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                 method: MultiplicityMethod::Dunnett { control_column: 0 },
                 threshold: 0.05,
                 report_confidence_intervals: true,
+                control_column: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -537,7 +538,12 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             paired: true,
             nonparametric: false,
             assume_equal_sd: false,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::NewmanKeuls,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..MultipleRowTestsSpec::default()
         }),
         AnalysisKind::PassingBablok(PassingBablokSpec::default()),
@@ -605,7 +611,12 @@ fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
             paired,
             nonparametric,
             assume_equal_sd: true,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::FisherLsd,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..MultipleRowTestsSpec::default()
         });
         assert_eq!(mrow.derive_auto_title(), expected_title);

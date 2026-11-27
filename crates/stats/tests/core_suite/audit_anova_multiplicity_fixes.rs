@@ -79,7 +79,12 @@ fn audit_30_31_unobserved_levels_and_one_way_ci_confidence() {
     };
     let fac_b = FactorialAnovaSpec {
         ss_type: SumOfSquaresType::TypeIII,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..Default::default()
     };
     let (r_t, r_p) = (
@@ -205,7 +210,7 @@ fn audit_33_34_35_n1_group_welch_rm_and_friedman_posthoc() {
             &w_sh,
             AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method: OneWayMethod::BrownForsytheAndWelch,
-                multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             }),
         )
@@ -234,7 +239,7 @@ fn audit_33_34_35_n1_group_welch_rm_and_friedman_posthoc() {
             let ow = OneWayAnovaSpec {
                 method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: !mixed_effects_reml },
                 mixed_effects_reml,
-                multiplicity: MultiplicitySpec { method: bad, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method: bad, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             };
             assert!(matches!(run_kind(&rm_sh, AnalysisKind::OneWayAnova(ow)), Err(StatsError::IncompatibleAnalysisSpec { .. })));
@@ -244,7 +249,12 @@ fn audit_33_34_35_n1_group_welch_rm_and_friedman_posthoc() {
         &rm_sh,
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -254,7 +264,12 @@ fn audit_33_34_35_n1_group_welch_rm_and_friedman_posthoc() {
         &rm_sh,
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::Friedman,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::DunnRankSum, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::DunnRankSum,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -264,7 +279,12 @@ fn audit_33_34_35_n1_group_welch_rm_and_friedman_posthoc() {
         &rm_sh,
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::Friedman,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -396,7 +416,12 @@ fn audit_fa_sec06_03_malformed_factorial_three_way_and_zero_residual_rm() {
     let r_lt = run_kind(
         &lt_sh,
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::LinearTrend, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::LinearTrend,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -427,7 +452,12 @@ fn audit_fa_sec06_03_malformed_factorial_three_way_and_zero_residual_rm() {
     let r_nt_lt = run_kind(
         &nt_lt,
         AnalysisKind::NestedComparison(NestedAnalysisSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::LinearTrend, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::LinearTrend,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -673,7 +703,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let rt = run_kind(
         &sh_u,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ss_type: SumOfSquaresType::TypeIII,
             ..Default::default()
         }),
@@ -687,7 +722,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let rgh = run_kind(
         &sh_u,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::GamesHowell, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::GamesHowell,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ss_type: SumOfSquaresType::TypeIII,
             ..Default::default()
         }),
@@ -704,7 +744,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
         &sh_sp,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
             repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -763,7 +808,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
             repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
             fit_reml_on_missing: true,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -793,7 +843,7 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
             AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method: ow_m,
                 compute_effect_sizes: true,
-                multiplicity: MultiplicitySpec { method: mult_m, threshold: thr, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method: mult_m, threshold: thr, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             })
         };
@@ -819,6 +869,7 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
             method: MultiplicityMethod::Dunnett { control_column: 2 },
             threshold: 0.05,
             report_confidence_intervals: true,
+            control_column: None,
         },
         ..Default::default()
     });
@@ -835,7 +886,8 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
                 multiplicity: MultiplicitySpec {
                     method: MultiplicityMethod::Dunnett { control_column: 5 },
                     threshold: 0.05,
-                    report_confidence_intervals: true
+                    report_confidence_intervals: true,
+                    control_column: None,
                 },
                 ..Default::default()
             })
@@ -847,7 +899,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let r_b = run_kind(
         &sh33,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -859,7 +916,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let r_tuk = run_kind(
         &sh33,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -878,7 +940,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let r_snk = run_kind(
         &sh42,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::NewmanKeuls,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -886,7 +953,12 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
     let r_t42 = run_kind(
         &sh42,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -917,6 +989,7 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
                 method: MultiplicityMethod::Dunnett { control_column: 0 },
                 threshold: 0.05,
                 report_confidence_intervals: true,
+                control_column: None,
             },
             ..Default::default()
         }),
@@ -951,6 +1024,7 @@ fn audit_ls_means_simple_effects_ci_confidence_and_dunnett_covariance() {
                 method: MultiplicityMethod::Dunnett { control_column: 0 },
                 threshold: 0.05,
                 report_confidence_intervals: true,
+                control_column: None,
             },
             ..Default::default()
         }),
@@ -1020,7 +1094,7 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
             run_kind(
                 &mr_sh,
                 AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-                    multiplicity: MultiplicitySpec { method: bad_m, threshold: 0.05, report_confidence_intervals: true },
+                    multiplicity: MultiplicitySpec { method: bad_m, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                     ..Default::default()
                 })
             ),
@@ -1041,7 +1115,7 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
             run_kind(
                 &mr_sh,
                 AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-                    multiplicity: MultiplicitySpec { method: ok_m, threshold: 0.05, report_confidence_intervals: true },
+                    multiplicity: MultiplicitySpec { method: ok_m, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                     ..Default::default()
                 })
             )
@@ -1058,7 +1132,7 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
         &[3.0, 8.0, 13.0],
         15,
         0.0,
-        &MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
+        &MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false, control_column: None },
     )
     .unwrap();
     assert!(d_tuk.iter().any(|d| d.raw_p < 0.99 && d.adjusted_p_or_q > d.raw_p));
@@ -1068,7 +1142,12 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
         &[3.0, 8.0, 13.0],
         15,
         0.0,
-        &MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 0 }, threshold: 0.05, report_confidence_intervals: false },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::Dunnett { control_column: 0 },
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
     )
     .unwrap();
     assert_eq!(d_dun.len(), 2);
@@ -1079,7 +1158,12 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
             &[3.0, 8.0, 13.0],
             15,
             0.0,
-            &MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 3 }, threshold: 0.05, report_confidence_intervals: false }
+            &MultiplicitySpec {
+                method: MultiplicityMethod::Dunnett { control_column: 3 },
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None
+            }
         ),
         Err(StatsError::InvalidParameter { .. })
     ));
@@ -1093,7 +1177,8 @@ fn audit_40_81_multiplicity_bky_anova_rejection_domains_and_nan_guards() {
                 multiplicity: MultiplicitySpec {
                     method: MultiplicityMethod::Dunnett { control_column: 2 },
                     threshold: 0.05,
-                    report_confidence_intervals: true
+                    report_confidence_intervals: true,
+                    control_column: None,
                 },
                 ..Default::default()
             }),
@@ -1212,7 +1297,12 @@ fn audit_r1_s02_07_zero_variance_posthoc_and_bky_edge() {
                 ),
                 AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                     method: OneWayMethod::KruskalWallis,
-                    multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
+                    multiplicity: MultiplicitySpec {
+                        method: MultiplicityMethod::TukeyHsd,
+                        threshold: 0.05,
+                        report_confidence_intervals: false,
+                        control_column: None
+                    },
                     ..Default::default()
                 })
             )
@@ -1542,7 +1632,7 @@ fn anova_aud05_nested_gls_posthoc_t_summary_and_lazy_p() {
     let n_sp = |two_g, method| {
         AnalysisKind::NestedComparison(NestedAnalysisSpec {
             two_group_t_test: two_g,
-            multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true, control_column: None },
             ..Default::default()
         })
     };
@@ -1656,7 +1746,7 @@ fn run_ow_rm(sh: &DataSheet, gg: bool, mult: MultiplicityMethod, cov: ResidualCo
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg },
             residual_covariance: cov,
-            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
             ..Default::default()
         }),
     )
@@ -1691,7 +1781,7 @@ fn anova_aud05_rm_posthoc_and_effect_sizes() {
             let sp = FactorialAnovaSpec {
                 repeated_measures: rm,
                 mixed_effects_reml: rm != RepeatedMeasuresDesign::None,
-                multiplicity: MultiplicitySpec { method: bad, threshold: 0.05, report_confidence_intervals: false },
+                multiplicity: MultiplicitySpec { method: bad, threshold: 0.05, report_confidence_intervals: false, control_column: None },
                 ..Default::default()
             };
             assert!(matches!(run_kind(&g33, AnalysisKind::FactorialAnova(sp)), Err(StatsError::IncompatibleAnalysisSpec { .. })));
@@ -1728,7 +1818,12 @@ fn anova_aud05_rm_posthoc_and_effect_sizes() {
     let r_nk = run_kind(
         &nk_sh,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::NewmanKeuls,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -1911,7 +2006,7 @@ fn one_way_all_data_skips_empty_data_sets_but_explicit_empty_selection_fails() {
             }
             let kind = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method,
-                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             });
             let all = run_kind(&sheet, kind.clone()).unwrap_or_else(|e| panic!("{method:?}/{mult:?} all data: {e}"));

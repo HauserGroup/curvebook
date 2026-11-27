@@ -42,17 +42,17 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs, post_hoc, aux_tabs, estimator_note) = match &sheet.archetype {
+    let (mut result, obs, post_hoc, aux_tabs, estimator_note, factor_source_indices) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => {
             let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt, confidence.alpha())?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note, outcome.factor_source_indices)
         }
         TableArchetype::MultipleVariables(mv) => {
             if !spec.selected_data_sets.is_empty() {
                 let _ = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
             }
             let outcome = run_multifactor_mv(mv, &mut out, fac_spec, p_fmt, confidence.alpha())?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note, outcome.factor_source_indices)
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -113,12 +113,29 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
         append_spearman_heteroscedasticity(&mut out, &obs, &post_hoc, p_fmt, confidence.alpha())?;
     }
 
+    let mut effective_mult = fac_spec.multiplicity;
+    if let Some(raw_ctrl) = crate::multiplicity::validate_multiplicity_control_spec(&effective_mult)?
+        && let Some(target_f) = fac_spec.control_factor
+    {
+        if target_f >= obs.factor_levels.len() {
+            return Err(StatsError::InvalidParameter { name: "control_factor", value: target_f as f64 });
+        }
+        if let Some(Some(src_indices)) = factor_source_indices.get(target_f) {
+            let pos = src_indices
+                .iter()
+                .position(|&idx| idx == raw_ctrl)
+                .ok_or(StatsError::InvalidParameter { name: "control_column", value: raw_ctrl as f64 })?;
+            effective_mult = effective_mult.with_control_column(pos);
+        }
+    }
+
     run_factorial_multiplicity_with_options(
         &mut out,
         &obs,
         &post_hoc,
         &result,
-        &fac_spec.multiplicity,
+        &effective_mult,
+        fac_spec.control_factor,
         fac_spec.comparison_family_mode,
         &fac_spec.preselected_pairs,
         fac_spec.swap_direction,
@@ -150,6 +167,7 @@ pub(in crate::anova) struct GroupedFactorialOutcome {
     pub(in crate::anova) post_hoc: FactorialPostHocContext,
     pub(in crate::anova) aux_tabs: Vec<ResultTab>,
     pub(in crate::anova) estimator_note: Option<String>,
+    pub(in crate::anova) factor_source_indices: Vec<Option<Vec<usize>>>,
 }
 
 pub(in crate::anova) fn build_rm_sphericity_tab(
@@ -574,6 +592,7 @@ pub(in crate::anova) fn run_grouped_factorial(
                     post_hoc: FactorialPostHocContext::Ols(post_model),
                     aux_tabs: sph_tab.into_iter().collect(),
                     estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+                    factor_source_indices: vec![None, None, None],
                 });
             }
             return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt, alpha);
@@ -614,6 +633,7 @@ pub(in crate::anova) fn run_grouped_factorial(
             post_hoc: FactorialPostHocContext::Ols(model),
             aux_tabs: Vec::new(),
             estimator_note: Some(String::from("Estimator: Ordinary least-squares three-way factorial ANOVA.")),
+            factor_source_indices: vec![None, None, None],
         });
     }
 
@@ -749,6 +769,7 @@ pub(in crate::anova) fn run_grouped_factorial(
             post_hoc: FactorialPostHocContext::RmBalanced(rm_post_hoc),
             aux_tabs: sph_tab.into_iter().collect(),
             estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+            factor_source_indices: vec![Some(active_rows), Some(active_cols)],
         });
     }
 
@@ -777,6 +798,7 @@ pub(in crate::anova) fn run_grouped_factorial(
         post_hoc: FactorialPostHocContext::Ols(model),
         aux_tabs: Vec::new(),
         estimator_note: Some(String::from("Estimator: Ordinary least-squares two-way factorial ANOVA.")),
+        factor_source_indices: vec![Some(active_rows), Some(active_cols)],
     })
 }
 
@@ -1200,12 +1222,14 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         df_method: reml_core.df_method,
         observed_cells,
     };
+    let factor_source_indices = if is_three_way { vec![None, None, None] } else { vec![Some(active_rows.to_vec()), Some(active_cols.to_vec())] };
     Ok(GroupedFactorialOutcome {
         result: res,
         observations: data,
         post_hoc: FactorialPostHocContext::Reml(reml_model),
         aux_tabs: Vec::new(),
         estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+        factor_source_indices,
     })
 }
 
@@ -1374,6 +1398,7 @@ pub(in crate::anova) fn run_multifactor_mv(
             post_hoc: FactorialPostHocContext::Ols(post_model),
             aux_tabs: sph_tab.into_iter().collect(),
             estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+            factor_source_indices: vec![None, None, None],
         });
     }
     let explicit_subsets = fac_spec
@@ -1382,11 +1407,13 @@ pub(in crate::anova) fn run_multifactor_mv(
         .map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &fac_spec.multifactor_columns))
         .transpose()?;
     let (res, model) = fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order, explicit_subsets, fac_spec.ss_type)?;
+    let n_fac = data.factor_levels.len();
     Ok(GroupedFactorialOutcome {
         result: res,
         observations: data,
         post_hoc: FactorialPostHocContext::Ols(model),
         aux_tabs: Vec::new(),
         estimator_note: None,
+        factor_source_indices: vec![None; n_fac],
     })
 }

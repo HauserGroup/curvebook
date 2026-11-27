@@ -52,7 +52,7 @@ fn multiplicity_newman_keuls_and_fisher_lsd_run_end_to_end() {
             AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method: OneWayMethod::OrdinaryAnova,
                 compute_effect_sizes: false,
-                multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             }),
         )
@@ -194,7 +194,12 @@ fn multiple_row_t_tests_emits_tabs_scalars_and_volcano_records() {
             paired: false,
             nonparametric: false,
             assume_equal_sd: false,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::BenjaminiHochbergFdr,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )
@@ -446,7 +451,12 @@ fn multiple_row_tests_student_nonparametric_and_mv_archetypes() {
             paired: false,
             nonparametric: false,
             assume_equal_sd: true,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TwoStageBkyFdr, threshold: 0.05, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TwoStageBkyFdr,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )

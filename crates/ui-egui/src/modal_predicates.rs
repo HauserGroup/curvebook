@@ -1135,6 +1135,7 @@ mod tests {
                 method: MultiplicityMethod::TukeyHsd,
                 threshold: 0.05,
                 report_confidence_intervals: true,
+                control_column: None,
             },
             ..OneWayAnovaSpec::default()
         });

@@ -359,7 +359,7 @@ fn audit_81_83_nested_welch_friedman_and_row_t_plans() {
             sid,
             "grp-mr",
             AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             }),
         )
@@ -375,7 +375,12 @@ fn audit_81_83_nested_welch_friedman_and_row_t_plans() {
             "mr-legacy-tuk",
             "grp-mr",
             AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-                multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec {
+                    method: MultiplicityMethod::TukeyHsd,
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                    control_column: None,
+                },
                 ..Default::default()
             }),
         )
@@ -541,7 +546,7 @@ fn audit_111_post_test_confidence_intervals() {
             "col-3",
             AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method: OneWayMethod::OrdinaryAnova,
-                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
                 ..Default::default()
             }),
         )
@@ -706,4 +711,148 @@ fn audit_113_114_mi_settings_and_nonlinear_rules_and_102_pb() {
     );
     let dem_rep = rep_txt(s_dem.document(), "dem-1");
     assert!(dem_rep.contains("X-intercept") && dem_rep.contains("25"), "{dem_rep}");
+}
+
+#[test]
+fn issue_78_engine_control_vs_all_commands_methods_report_and_conversion() {
+    let mut gt = curvebook_doc::GroupedTable::new(curvebook_doc::SubcolumnMode::RawReplicates(2), 3, 2).unwrap();
+    gt.row_titles = vec![String::from("R0"), String::from("R1")];
+    for (c, title) in ["Ctrl", "Low", "High"].iter().enumerate() {
+        gt.data_sets[c].title = (*title).to_owned();
+    }
+    let vals = [[[10.0, 10.5], [14.0, 14.5], [18.0, 18.5]], [[20.0, 20.5], [22.0, 22.5], [27.0, 27.5]]];
+    for r in 0..2 {
+        for c in 0..3 {
+            for s in 0..2 {
+                gt.data_sets[c].cells[r][s] = Cell::number(vals[r][c][s]);
+            }
+        }
+    }
+    let mut session = session_with(
+        "Issue78 ControlVsAll",
+        vec![seed_three_group_column("col-3"), DataSheet::new("grp-2w", "TwoWay", TableArchetype::Grouped(gt)).unwrap()],
+    );
+
+    // 1. One-way ANOVA with non-Dunnett control_column via command shorthands.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "aov-bonf-ctrl",
+            "source_sheet_id": "col-3",
+            "kind": "one_way_anova",
+            "multiplicity": "bonferroni",
+            "control_column": 1,
+        }),
+    );
+    let r_bonf = rs(&session, "aov-bonf-ctrl");
+    assert_eq!(r_bonf.pairwise_comparisons.len(), 2);
+    assert!(r_bonf.pairwise_comparisons.iter().all(|p| p.group_b == 1));
+    let rep_bonf = rep_txt(session.document(), "aov-bonf-ctrl");
+    assert!(rep_bonf.contains("Bonferroni") && rep_bonf.contains("Control column"), "{rep_bonf}");
+
+    // 2. Kruskal-Wallis with Dunn vs control via command shorthand.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "kw-dunn-ctrl",
+            "source_sheet_id": "col-3",
+            "kind": "kruskal_wallis",
+            "multiplicity": "dunn_rank_sum",
+            "control_column": 2,
+        }),
+    );
+    let r_kw = rs(&session, "kw-dunn-ctrl");
+    assert_eq!(r_kw.pairwise_comparisons.len(), 2);
+    assert!(r_kw.pairwise_comparisons.iter().all(|p| p.group_b == 2));
+    let rep_kw = rep_txt(session.document(), "kw-dunn-ctrl");
+    assert!(rep_kw.contains("Control column") && rep_kw.contains("against the control group"), "{rep_kw}");
+
+    // 3. Incompatible method (Tukey HSD + control_column) is rejected up front with BadInput.
+    let err = session
+        .execute(
+            "analysis.run",
+            json!({
+                "sheet_id": "aov-bad-ctrl",
+                "source_sheet_id": "col-3",
+                "kind": "one_way_anova",
+                "multiplicity": "tukey_hsd",
+                "control_column": 0,
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, curvebook_doc::ErrorCode::BadInput);
+
+    // 4. Two-way ANOVA with explicit control_factor (both column=1 and row=0) and PerSliceFamilies.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "fac-col-ctrl",
+            "source_sheet_id": "grp-2w",
+            "kind": "two_way_anova",
+            "multiplicity": "dunnett",
+            "control_column": 0,
+            "control_factor": 1,
+            "comparison_family_mode": "per_slice_families",
+        }),
+    );
+    let r_fac = rs(&session, "fac-col-ctrl");
+    assert_eq!(r_fac.pairwise_comparisons.len(), 4);
+    let rep_fac = rep_txt(session.document(), "fac-col-ctrl");
+    assert!(rep_fac.contains("Control column-factor level") && rep_fac.contains("Ctrl"), "{rep_fac}");
+
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "fac-row-ctrl",
+            "source_sheet_id": "grp-2w",
+            "kind": "two_way_anova",
+            "multiplicity": "sidak",
+            "control_column": 0,
+            "control_factor": 0,
+            "comparison_family_mode": "per_slice_families",
+        }),
+    );
+    let r_row = rs(&session, "fac-row-ctrl");
+    assert_eq!(r_row.pairwise_comparisons.len(), 3);
+    let rep_row = rep_txt(session.document(), "fac-row-ctrl");
+    assert!(rep_row.contains("Control row-factor level") && rep_row.contains("R0"), "{rep_row}");
+
+    // 5. Table conversion XY -> MultipleVariables remaps non-Dunnett MultiplicitySpec::control_column (+1 shift past X).
+    let mut conv_doc = session_with(
+        "RemapNonDunnett",
+        vec![xy_sheet("xy-cv", "XY", "X", &[1.0, 2.0, 3.0], &[("Y0", &[10.0, 20.0, 30.0]), ("Y1", &[12.0, 22.0, 32.0])])],
+    )
+    .document()
+    .clone();
+    conv_doc
+        .add_result_sheet(
+            ResultSheet::new(
+                AnalysisSpec::new(
+                    "res-mrow-ctrl",
+                    "xy-cv",
+                    AnalysisKind::MultipleRowTTests(curvebook_doc::MultipleRowTestsSpec {
+                        multiplicity: MultiplicitySpec {
+                            method: MultiplicityMethod::HolmSidak,
+                            control_column: Some(0),
+                            ..MultiplicitySpec::default()
+                        },
+                        ..curvebook_doc::MultipleRowTestsSpec::default()
+                    }),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut s_conv = Session::from_document(conv_doc);
+    ok_cmd(&mut s_conv, "table.convertArchetype", json!({ "sheet_id": "xy-cv", "target_kind": "MultipleVariables", "allow_lossy": true }));
+    if let AnalysisKind::MultipleRowTTests(spec) = &rs(&s_conv, "res-mrow-ctrl").analysis.kind {
+        assert_eq!(spec.multiplicity.control_column, Some(1), "Y[0] shifted to MV col 1 past X");
+    } else {
+        panic!("expected MultipleRowTTests");
+    }
 }

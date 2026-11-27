@@ -309,7 +309,7 @@ fn consumes_all_pairwise_multiplicity_procedures_and_alpha_override() {
     ];
 
     for method in methods {
-        let mspec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: false };
+        let mspec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: false, control_column: None };
         let details = compare_groups_pairwise(&g_inputs, ms_within, df_within, &mspec).expect("pairwise");
         let cld = compute_cld_from_details(&g_inputs, &details, CldOptions::default()).expect("cld from details");
         let cld_groups: Vec<CldGroupInput> =
@@ -326,7 +326,7 @@ fn consumes_all_pairwise_multiplicity_procedures_and_alpha_override() {
     }
 
     // Alpha override tightening (Tukey alpha=0.05 -> 0.0001 merges more groups into fewer distinct letters)
-    let tukey = MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false };
+    let tukey = MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false, control_column: None };
     let tukey_details = compare_groups_pairwise(&g_inputs, ms_within, df_within, &tukey).unwrap();
     let cld_05 = compute_cld_from_details(&g_inputs, &tukey_details, CldOptions::default()).unwrap();
     let cld_strict = compute_cld_from_details(
@@ -353,7 +353,12 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
     // 1. One-Way ANOVA + Tukey -> compute_cld_from_result_sheet WITHOUT mean overrides (reconstructs from estimate_diff!)
     let anova_tukey = OneWayAnovaSpec {
         method: OneWayMethod::OrdinaryAnova,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::TukeyHsd,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
         compute_effect_sizes: false,
         ..OneWayAnovaSpec::default()
     };
@@ -368,7 +373,12 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
     // 2. Kruskal-Wallis + Dunn -> compute_cld_from_result_sheet
     let anova_kw = OneWayAnovaSpec {
         method: OneWayMethod::KruskalWallis,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::DunnRankSum, threshold: 0.05, report_confidence_intervals: false },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::DunnRankSum,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
         compute_effect_sizes: false,
         ..OneWayAnovaSpec::default()
     };
@@ -386,6 +396,7 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
             method: MultiplicityMethod::Dunnett { control_column: 0 },
             threshold: 0.05,
             report_confidence_intervals: false,
+            control_column: None,
         },
         compute_effect_sizes: false,
         ..OneWayAnovaSpec::default()

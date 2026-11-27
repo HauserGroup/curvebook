@@ -904,10 +904,11 @@ fn ensure_no_frozen_dependent_link_mutation(doc: &ProjectDocument, target_sheet_
     Ok(())
 }
 
-fn remap_dunnett_control_column(method: &mut MultiplicityMethod, label: &str, plan: &ConversionColPlan, err: &mut Option<String>) {
-    if let MultiplicityMethod::Dunnett { control_column } = method {
+fn remap_multiplicity_control_column(mult: &mut curvebook_doc::MultiplicitySpec, label: &str, plan: &ConversionColPlan, err: &mut Option<String>) {
+    if let MultiplicityMethod::Dunnett { control_column } = &mut mult.method {
         plan.map_one_or_oob(control_column, label, err);
     }
+    plan.map_opt_or_oob(&mut mult.control_column, label, err);
 }
 
 fn remap_transform_kind_columns(spec: &mut TransformAnalysisSpec, plan: &ConversionColPlan, err: &mut Option<String>) {
@@ -942,7 +943,7 @@ fn remap_survival_kind_columns(spec: &mut SurvivalAnalysisSpec, plan: &Conversio
             plan.map_opt_or_oob(mv_status_column, "KaplanMeier mv_status_column", err);
             plan.map_opt_or_oob(mv_group_column, "KaplanMeier mv_group_column", err);
             if uses_cohort_columns {
-                remap_dunnett_control_column(&mut multiplicity.method, "KaplanMeier Dunnett control_column", plan, err);
+                remap_multiplicity_control_column(multiplicity, "KaplanMeier control_column", plan, err);
             }
         }
         SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, .. } => {
@@ -972,12 +973,12 @@ fn remap_multivariate_kind_columns(spec: &mut MultivariateSpec, plan: &Conversio
 fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan, err: &mut Option<String>) {
     match kind {
         AnalysisKind::Transform(spec) => remap_transform_kind_columns(spec, plan, err),
-        AnalysisKind::OneWayAnova(spec) => remap_dunnett_control_column(&mut spec.multiplicity.method, "Dunnett control_column", plan, err),
+        AnalysisKind::OneWayAnova(spec) => remap_multiplicity_control_column(&mut spec.multiplicity, "OneWayAnova control_column", plan, err),
         AnalysisKind::MultipleRowTTests(spec) => {
-            remap_dunnett_control_column(&mut spec.multiplicity.method, "MultipleRowTTests Dunnett control_column", plan, err);
+            remap_multiplicity_control_column(&mut spec.multiplicity, "MultipleRowTTests control_column", plan, err);
         }
         AnalysisKind::NestedComparison(spec) => {
-            remap_dunnett_control_column(&mut spec.multiplicity.method, "NestedComparison Dunnett control_column", plan, err);
+            remap_multiplicity_control_column(&mut spec.multiplicity, "NestedComparison control_column", plan, err);
         }
         AnalysisKind::TwoGroupComparison(spec) => {
             plan.map_opt_or_oob(&mut spec.mv_group_column, "mv_group_column", err);
@@ -995,7 +996,9 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         AnalysisKind::FactorialAnova(spec) => {
             spec.multifactor_columns = plan.map_col_list_or_oob(&spec.multifactor_columns, "FactorialAnova multifactor_columns", err);
             plan.map_opt_or_oob(&mut spec.response_column, "FactorialAnova response_column", err);
-            remap_dunnett_control_column(&mut spec.multiplicity.method, "FactorialAnova Dunnett control_column", plan, err);
+            if spec.control_factor != Some(0) {
+                remap_multiplicity_control_column(&mut spec.multiplicity, "FactorialAnova control_column", plan, err);
+            }
         }
         AnalysisKind::Survival(spec) => remap_survival_kind_columns(spec, plan, err),
         AnalysisKind::GeneralizedLinearModel(spec) => {

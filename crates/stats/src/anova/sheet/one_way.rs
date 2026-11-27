@@ -168,6 +168,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             let labels: Vec<(usize, String)> = group_inputs.iter().map(|g| (g.index, g.label.clone())).collect();
             let ns: Vec<usize> = raw_slices_owned.iter().map(Vec::len).collect();
             let details = compare_dunn_ranks(&labels, &ns, &kw.group_mean_ranks, kw.total_n, ranked.tie_sum_t3_minus_t, &anova_spec.multiplicity)?;
+            let has_ctrl = anova_spec.multiplicity.effective_control_column().is_some();
             let (dunn_title, dunn_footnote) = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
                 MultiplicityProcedure::TukeyKramer
                 | MultiplicityProcedure::NewmanKeuls
@@ -186,10 +187,17 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                         "Dunnett vs-control selection mapped to Dunn's rank-sum comparisons vs control with Bonferroni adjustment over k - 1 pairs.",
                     ),
                 ),
+                MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd if has_ctrl => (
+                    "Dunn's vs-control comparisons (uncorrected)",
+                    Some("Unadjusted Dunn's rank-sum comparisons vs control over k - 1 pairs (no multiplicity correction applied)."),
+                ),
                 MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => (
                     "Dunn's multiple comparisons (uncorrected)",
                     Some("Unadjusted Dunn's rank-sum pairwise z tests (no multiplicity correction applied)."),
                 ),
+                _ if has_ctrl => {
+                    ("Dunn's vs-control comparisons", Some("Dunn's rank-sum comparisons against the designated control group over k - 1 pairs."))
+                }
                 _ => ("Dunn's multiple comparisons", None),
             };
             push_pairwise_outputs(&mut out, &details, dunn_title, p_fmt, confidence);
@@ -811,6 +819,7 @@ pub(in crate::anova) fn run_rm_one_way_reml(
     };
 
     validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
+    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(&anova_spec.multiplicity)?;
     if anova_spec.multiplicity.method != MultiplicityMethod::None {
         if anova_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
             let kf = k as f64;
@@ -846,14 +855,14 @@ pub(in crate::anova) fn run_rm_one_way_reml(
             }
         } else {
             let mut mapped_mult = anova_spec.multiplicity;
-            if let MultiplicityMethod::Dunnett { control_column } = mapped_mult.method {
+            if let Some(control_column) = ctrl_opt {
                 let ctrl_pos = indices
                     .iter()
                     .position(|&c| c == control_column)
                     .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-                mapped_mult.method = MultiplicityMethod::Dunnett { control_column: ctrl_pos };
+                mapped_mult = mapped_mult.with_control_column(ctrl_pos);
             }
-            let pairs = collect_factor_pairs(k, mapped_mult.method, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
+            let pairs = collect_factor_pairs(k, &mapped_mult, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
             if !pairs.is_empty() {
                 let numbered_levels: Vec<(usize, String)> = indices.iter().zip(cond_labels.iter()).map(|(&c, l)| (c, l.clone())).collect();
                 let mut level_means = Vec::with_capacity(k);
@@ -945,6 +954,7 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
 
     if matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }) {
         validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
+        let _ = crate::multiplicity::validate_multiplicity_control_spec(&anova_spec.multiplicity)?;
         if scan.y_vec.is_empty() {
             return Err(StatsError::EmptyInput);
         }
@@ -1399,6 +1409,7 @@ pub(in crate::anova) fn append_one_way_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
+    let _ = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
     if mult.method == MultiplicityMethod::LinearTrend {
         let trend = linear_trend_test(inputs, ms_within, df_within)?;
         let r_squared = if ss_total > 0.0 { (trend.ss_trend / ss_total).clamp(0.0, 1.0) } else { trend.r_squared };
@@ -1571,6 +1582,7 @@ fn append_welch_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
+    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
     let proc_req = MultiplicityProcedure::from(mult.method);
     match proc_req {
         MultiplicityProcedure::None => Ok(()),
@@ -1583,15 +1595,7 @@ fn append_welch_multiplicity(
                 MultiplicityProcedure::TamhaneT2 => "Multiple comparisons (Tamhane's T2)",
                 _ => "Multiple comparisons (Dunnett's T3)",
             };
-            let details = compare_groups_with_confidence(
-                inputs,
-                base.ms_within,
-                base.df_within,
-                proc_req,
-                mult.threshold,
-                mult.report_confidence_intervals,
-                confidence,
-            )?;
+            let details = compare_groups_pairwise_with_confidence(inputs, base.ms_within, base.df_within, mult, confidence)?;
             push_pairwise_outputs(out, &details, title, p_fmt, confidence);
             Ok(())
         }
@@ -1636,22 +1640,33 @@ fn append_welch_multiplicity(
         | MultiplicityProcedure::BenjaminiYekutieliFdr
         | MultiplicityProcedure::TwoStageBkyFdr => {
             let k = inputs.len();
-            let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-            for i in 0..k {
-                for j in (i + 1)..k {
-                    let ga = &inputs[i];
-                    let gb = &inputs[j];
-                    let (se, df) = welch_pair_se_df(ga, gb);
-                    entries.push(NamedSliceContrast {
-                        id_a: ga.index,
-                        id_b: gb.index,
-                        label_a: ga.label.as_str(),
-                        label_b: gb.label.as_str(),
-                        diff: ga.mean - gb.mean,
-                        se,
-                        df,
-                    });
+            let pair_indices: Vec<(usize, usize)> = if let Some(ctrl) = ctrl_opt {
+                let ctrl_pos =
+                    inputs.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+                (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
+            } else {
+                let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+                for i in 0..k {
+                    for j in (i + 1)..k {
+                        pairs.push((i, j));
+                    }
                 }
+                pairs
+            };
+            let mut entries = Vec::with_capacity(pair_indices.len());
+            for (i, j) in pair_indices {
+                let ga = &inputs[i];
+                let gb = &inputs[j];
+                let (se, df) = welch_pair_se_df(ga, gb);
+                entries.push(NamedSliceContrast {
+                    id_a: ga.index,
+                    id_b: gb.index,
+                    label_a: ga.label.as_str(),
+                    label_b: gb.label.as_str(),
+                    diff: ga.mean - gb.mean,
+                    se,
+                    df,
+                });
             }
             let details =
                 compare_independent_contrast_family(&entries, proc_req, mult.threshold, confidence.alpha(), mult.report_confidence_intervals)?;
@@ -1827,25 +1842,37 @@ fn append_rm_paired_contrast_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
+    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
     let k = inputs.len();
     let n = blocks.len() as f64;
     let df = (blocks.len() - 1) as f64;
-    let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
-            let moments = SummaryMoments::from_slice(&diffs)?;
-            let se = moments.sample_sd().unwrap_or(0.0) / n.sqrt();
-            entries.push(NamedSliceContrast {
-                id_a: inputs[i].index,
-                id_b: inputs[j].index,
-                label_a: inputs[i].label.as_str(),
-                label_b: inputs[j].label.as_str(),
-                diff: moments.mean,
-                se,
-                df,
-            });
+    let pair_indices: Vec<(usize, usize)> = if let Some(ctrl) = ctrl_opt {
+        let ctrl_pos =
+            inputs.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
+    } else {
+        let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                pairs.push((i, j));
+            }
         }
+        pairs
+    };
+    let mut entries = Vec::with_capacity(pair_indices.len());
+    for (i, j) in pair_indices {
+        let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
+        let moments = SummaryMoments::from_slice(&diffs)?;
+        let se = moments.sample_sd().unwrap_or(0.0) / n.sqrt();
+        entries.push(NamedSliceContrast {
+            id_a: inputs[i].index,
+            id_b: inputs[j].index,
+            label_a: inputs[i].label.as_str(),
+            label_b: inputs[j].label.as_str(),
+            diff: moments.mean,
+            se,
+            df,
+        });
     }
     let details = compare_independent_contrast_family(
         &entries,
@@ -1876,6 +1903,7 @@ fn append_friedman_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
+    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
     let proc_req = MultiplicityProcedure::from(mult.method);
     match proc_req {
         MultiplicityProcedure::None => return Ok(()),
@@ -1932,7 +1960,7 @@ fn append_friedman_multiplicity(
     let var_diff = ((nf * kf * (kf + 1.0) - tie_sum / (kf - 1.0).max(1.0)) / (6.0 * nf * nf)).max(0.0);
     let se = var_diff.sqrt();
 
-    let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
+    let pair_indices: Vec<(usize, usize)> = if let Some(control_column) = ctrl_opt {
         let ctrl_pos = indices
             .iter()
             .position(|&idx| idx == control_column)

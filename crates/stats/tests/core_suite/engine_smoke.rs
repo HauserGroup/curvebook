@@ -143,7 +143,12 @@ fn all_14_multiplicity_procedures_and_anova_family() {
         &[3.0, 8.0, 13.0],
         15,
         0.0,
-        &MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::BenjaminiHochbergFdr,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+        },
     )
     .unwrap();
     assert_eq!(dunn.len(), 3);
@@ -219,7 +224,12 @@ fn all_14_multiplicity_procedures_and_anova_family() {
         AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: true,
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ..Default::default()
         }),
     )

@@ -471,7 +471,12 @@ fn preserves_graph_styles_gdos_axis_breaks_brackets_and_annotations() {
                 AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                     method: OneWayMethod::OrdinaryAnova,
                     compute_effect_sizes: true,
-                    multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+                    multiplicity: MultiplicitySpec {
+                        method: MultiplicityMethod::TukeyHsd,
+                        threshold: 0.05,
+                        report_confidence_intervals: true,
+                        control_column: None,
+                    },
                     ..Default::default()
                 }),
             )

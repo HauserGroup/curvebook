@@ -292,7 +292,12 @@ fn pillar2_factorial_anova_multiplicity_wiring() {
     let res = run_kind(
         &sheet,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+            },
             ss_type: SumOfSquaresType::TypeIII,
             ..Default::default()
         }),

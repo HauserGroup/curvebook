@@ -87,7 +87,12 @@ fn build_project() -> ProjectDocument {
     doc.add_info_sheet(info).unwrap();
 
     let anova_kind = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::TukeyHsd,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..Default::default()
     });
     let mut res = ResultSheet::new(AnalysisSpec::new("res-anova", "data-col", anova_kind).unwrap()).unwrap();

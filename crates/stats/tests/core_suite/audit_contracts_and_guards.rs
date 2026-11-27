@@ -433,7 +433,12 @@ fn audit_82_alpha_aware_pvalue_stars_across_all_families() {
     let r_mr = run_kind_conf(
         &g_mr,
         AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.01, report_confidence_intervals: false },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.01,
+                report_confidence_intervals: false,
+                control_column: None,
+            },
             ..Default::default()
         }),
         95.0,

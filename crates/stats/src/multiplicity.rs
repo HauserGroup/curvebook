@@ -519,6 +519,45 @@ pub fn try_adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, thre
 // Pairwise Group Comparison Engines (Pooled-Variance, Unequal-Variance, Rank)
 // ============================================================================
 
+/// Validate that `spec.control_column` is compatible with `spec.method` and return the effective
+/// zero-based control index when a many-to-one control-versus-all family is requested.
+pub(crate) fn validate_multiplicity_control_spec(spec: &MultiplicitySpec) -> Result<Option<usize>, StatsError> {
+    match spec.method {
+        MultiplicityMethod::Dunnett { control_column } => {
+            if let Some(extra) = spec.control_column
+                && extra != control_column
+            {
+                return Err(StatsError::InvalidParameter { name: "control_column", value: extra as f64 });
+            }
+            Ok(Some(control_column))
+        }
+        other => match spec.control_column {
+            Some(ctrl) if MultiplicitySpec::supports_control_column(other) => Ok(Some(ctrl)),
+            Some(_) => Err(StatsError::IncompatibleAnalysisSpec {
+                expected: "control-vs-all compatible multiplicity method (Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR)",
+            }),
+            None => Ok(None),
+        },
+    }
+}
+
+fn resolve_group_pair_indices(groups: &[GroupComparisonInput], control_column: Option<usize>) -> Result<Vec<(usize, usize)>, StatsError> {
+    let k = groups.len();
+    if let Some(ctrl) = control_column {
+        let ctrl_pos =
+            groups.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+        Ok((0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect())
+    } else {
+        let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                pairs.push((i, j));
+            }
+        }
+        Ok(pairs)
+    }
+}
+
 /// Compute pairwise comparisons across `groups` using pooled `mse` and `df_error` (for parametric
 /// equal-variance tests) or group SDs (for `GamesHowell`, `DunnettT3`, `TamhaneT2`).
 pub fn compare_groups_pairwise(
@@ -527,7 +566,8 @@ pub fn compare_groups_pairwise(
     df_error: f64,
     spec: &MultiplicitySpec,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    compare_groups_with_procedure(groups, mse, df_error, spec.method.into(), spec.threshold, spec.report_confidence_intervals)
+    let control_column = validate_multiplicity_control_spec(spec)?;
+    compare_groups_impl(groups, mse, df_error, spec.method.into(), control_column, spec.threshold, spec.threshold, spec.report_confidence_intervals)
 }
 
 /// Compute pairwise comparisons across `groups` using `confidence` (`ci_alpha = 1 - confidence`)
@@ -539,7 +579,17 @@ pub fn compare_groups_pairwise_with_confidence(
     spec: &MultiplicitySpec,
     confidence: curvebook_math::ConfidenceLevel,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    compare_groups_with_confidence(groups, mse, df_error, spec.method.into(), spec.threshold, spec.report_confidence_intervals, confidence)
+    let control_column = validate_multiplicity_control_spec(spec)?;
+    compare_groups_impl(
+        groups,
+        mse,
+        df_error,
+        spec.method.into(),
+        control_column,
+        spec.threshold,
+        confidence.alpha(),
+        spec.report_confidence_intervals,
+    )
 }
 
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`].
@@ -559,7 +609,11 @@ pub fn compare_groups_with_procedure(
     threshold: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    compare_groups_impl(groups, mse, df_error, procedure, threshold, threshold, report_ci)
+    let control_column = match procedure {
+        MultiplicityProcedure::Dunnett { control_column } => Some(control_column),
+        _ => None,
+    };
+    compare_groups_impl(groups, mse, df_error, procedure, control_column, threshold, threshold, report_ci)
 }
 
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`], constructing confidence
@@ -574,14 +628,20 @@ pub fn compare_groups_with_confidence(
     report_ci: bool,
     confidence: curvebook_math::ConfidenceLevel,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    compare_groups_impl(groups, mse, df_error, procedure, threshold, confidence.alpha(), report_ci)
+    let control_column = match procedure {
+        MultiplicityProcedure::Dunnett { control_column } => Some(control_column),
+        _ => None,
+    };
+    compare_groups_impl(groups, mse, df_error, procedure, control_column, threshold, confidence.alpha(), report_ci)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare_groups_impl(
     groups: &[GroupComparisonInput],
     mse: f64,
     df_error: f64,
     procedure: MultiplicityProcedure,
+    control_column: Option<usize>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
@@ -631,11 +691,26 @@ fn compare_groups_impl(
     }
     match procedure {
         MultiplicityProcedure::Dunnett { control_column } => compare_dunnett(groups, mse, df_error, control_column, threshold, ci_alpha, report_ci),
-        MultiplicityProcedure::TukeyKramer => compare_tukey_kramer(groups, mse, df_error, threshold, ci_alpha, report_ci),
-        MultiplicityProcedure::NewmanKeuls => compare_newman_keuls(groups, mse, df_error, threshold),
-        MultiplicityProcedure::GamesHowell => compare_games_howell(groups, threshold, ci_alpha, report_ci),
-        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, threshold, ci_alpha, report_ci),
-        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::TukeyKramer => {
+            if control_column.is_some() {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Tukey-Kramer procedure without control_column" });
+            }
+            compare_tukey_kramer(groups, mse, df_error, threshold, ci_alpha, report_ci)
+        }
+        MultiplicityProcedure::NewmanKeuls => {
+            if control_column.is_some() {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Newman-Keuls procedure without control_column" });
+            }
+            compare_newman_keuls(groups, mse, df_error, threshold)
+        }
+        MultiplicityProcedure::GamesHowell => {
+            if control_column.is_some() {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Games-Howell procedure without control_column" });
+            }
+            compare_games_howell(groups, threshold, ci_alpha, report_ci)
+        }
+        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, control_column, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, control_column, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::DunnRankSum => {
             Err(StatsError::InvalidParameter { name: "multiplicity_procedure_dunn_requires_kruskal_wallis", value: 0.0 })
         }
@@ -650,7 +725,9 @@ fn compare_groups_impl(
         | MultiplicityProcedure::FisherLsd
         | MultiplicityProcedure::BenjaminiHochbergFdr
         | MultiplicityProcedure::BenjaminiYekutieliFdr
-        | MultiplicityProcedure::TwoStageBkyFdr => compare_pooled_or_fdr(groups, mse, df_error, procedure, threshold, ci_alpha, report_ci),
+        | MultiplicityProcedure::TwoStageBkyFdr => {
+            compare_pooled_or_fdr(groups, mse, df_error, procedure, control_column, threshold, ci_alpha, report_ci)
+        }
     }
 }
 
@@ -663,17 +740,22 @@ fn zero_se_stat_p(diff: f64, signed: bool) -> (f64, f64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compare_pooled_or_fdr(
     groups: &[GroupComparisonInput],
     mse: f64,
     df_error: f64,
     procedure: MultiplicityProcedure,
+    control_column: Option<usize>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let k = groups.len();
-    let m = k * (k - 1) / 2;
+    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    let m = pair_indices.len();
+    if m == 0 {
+        return Ok(Vec::new());
+    }
     let mut raw_p = Vec::with_capacity(m);
     let mut entries = Vec::with_capacity(m);
 
@@ -688,22 +770,20 @@ fn compare_pooled_or_fdr(
         _ => None,
     };
 
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let ga = &groups[i];
-            let gb = &groups[j];
-            let diff = ga.mean - gb.mean;
-            let se = (mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
-            let (t_stat, p_val) = if se > 0.0 {
-                let t = diff / se;
-                (t, student_t_two_sided_p(t, df_error)?)
-            } else {
-                zero_se_stat_p(diff, true)
-            };
-            raw_p.push(p_val);
-            let ci = t_crit_opt.map(|tc| (diff - tc * se, diff + tc * se));
-            entries.push((ga, gb, diff, se, t_stat, p_val, ci));
-        }
+    for (i, j) in pair_indices {
+        let ga = &groups[i];
+        let gb = &groups[j];
+        let diff = ga.mean - gb.mean;
+        let se = (mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
+        let (t_stat, p_val) = if se > 0.0 {
+            let t = diff / se;
+            (t, student_t_two_sided_p(t, df_error)?)
+        } else {
+            zero_se_stat_p(diff, true)
+        };
+        raw_p.push(p_val);
+        let ci = t_crit_opt.map(|tc| (diff - tc * se, diff + tc * se));
+        entries.push((ga, gb, diff, se, t_stat, p_val, ci));
     }
 
     let (adj, is_fdr) = adjust_p_values(&raw_p, procedure, threshold);
@@ -1010,52 +1090,55 @@ fn compare_games_howell(
 }
 
 /// Tamhane (1979) T2 unequal-variance pairwise comparisons: per-pair Welch *t* tests with a Šidák
-/// adjustment over the `m = k(k-1)/2` comparisons (Šidák-adjusted Welch critical values for CIs).
+/// adjustment over the `m` comparisons (`m = k(k-1)/2` for all-pairs or `m = k - 1` when
+/// `control_column` is specified; Šidák-adjusted Welch critical values for CIs).
 fn compare_tamhane_t2(
     groups: &[GroupComparisonInput],
+    control_column: Option<usize>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let k = groups.len();
-    let m = (k * (k - 1) / 2) as f64;
+    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    if pair_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let m = pair_indices.len() as f64;
     let alpha_sidak = 1.0 - (1.0 - ci_alpha).powf(1.0 / m);
-    let mut out = Vec::with_capacity(k * (k - 1) / 2);
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let ga = &groups[i];
-            let gb = &groups[j];
-            let diff = ga.mean - gb.mean;
-            let (se, df) = welch_pair_se_df(ga, gb);
-            let (t_stat, raw_p) = if se > 0.0 {
-                let t = diff / se;
-                (t, student_t_two_sided_p(t, df)?)
-            } else {
-                zero_se_stat_p(diff, true)
-            };
-            let adj_p = sidak_single(raw_p, m);
-            let ci = if report_ci {
-                let tc = student_t_two_sided_isf(alpha_sidak.clamp(1e-12, 0.9999), df)?;
-                Some((diff - tc * se, diff + tc * se))
-            } else {
-                None
-            };
-            out.push(PairwiseComparisonDetail {
-                group_a: ga.index,
-                group_b: gb.index,
-                label_a: ga.label.clone(),
-                label_b: gb.label.clone(),
-                mean_diff: diff,
-                se_diff: se,
-                statistic: t_stat,
-                df,
-                raw_p,
-                adjusted_p_or_q: adj_p,
-                is_fdr_q: false,
-                ci,
-                significant: adj_p.is_finite() && adj_p <= threshold,
-            });
-        }
+    let mut out = Vec::with_capacity(pair_indices.len());
+    for (i, j) in pair_indices {
+        let ga = &groups[i];
+        let gb = &groups[j];
+        let diff = ga.mean - gb.mean;
+        let (se, df) = welch_pair_se_df(ga, gb);
+        let (t_stat, raw_p) = if se > 0.0 {
+            let t = diff / se;
+            (t, student_t_two_sided_p(t, df)?)
+        } else {
+            zero_se_stat_p(diff, true)
+        };
+        let adj_p = sidak_single(raw_p, m);
+        let ci = if report_ci {
+            let tc = student_t_two_sided_isf(alpha_sidak.clamp(1e-12, 0.9999), df)?;
+            Some((diff - tc * se, diff + tc * se))
+        } else {
+            None
+        };
+        out.push(PairwiseComparisonDetail {
+            group_a: ga.index,
+            group_b: gb.index,
+            label_a: ga.label.clone(),
+            label_b: gb.label.clone(),
+            mean_diff: diff,
+            se_diff: se,
+            statistic: t_stat,
+            df,
+            raw_p,
+            adjusted_p_or_q: adj_p,
+            is_fdr_q: false,
+            ci,
+            significant: adj_p.is_finite() && adj_p <= threshold,
+        });
     }
     Ok(out)
 }
@@ -1077,54 +1160,59 @@ fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, St
 }
 
 /// Dunnett (1980) T3 unequal-variance pairwise comparisons: per-pair Welch *t* statistics referred
-/// to the studentized maximum modulus with `m = k(k-1)/2` and the pair's Welch df. `raw_p` reports
+/// to the studentized maximum modulus with `m` comparisons (`m = k(k-1)/2` for all-pairs or
+/// `m = k - 1` when `control_column` is specified) and the pair's Welch df. `raw_p` reports
 /// the unadjusted two-sided Welch *t* *p*-value on Welch df, and `adjusted_p_or_q` reports the Dunnett
 /// T3 adjusted *p*-value.
 fn compare_dunnett_t3(
     groups: &[GroupComparisonInput],
+    control_column: Option<usize>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let k = groups.len();
-    let m = k * (k - 1) / 2;
+    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    let m = pair_indices.len();
+    if m == 0 {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::with_capacity(m);
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let ga = &groups[i];
-            let gb = &groups[j];
-            let diff = ga.mean - gb.mean;
-            let (se, df) = welch_pair_se_df(ga, gb);
-            let (t_stat, raw_p, adj_p) = if se > 0.0 {
-                let t = diff / se;
-                let rp = student_t_two_sided_p(t, df)?;
-                (t, rp, studentized_max_modulus_sf(t.abs(), m, df)?)
-            } else {
-                let (stat, p) = zero_se_stat_p(diff, true);
-                (stat, p, p)
-            };
-            let ci = if report_ci {
-                let crit = studentized_max_modulus_crit(ci_alpha, m, df)?;
-                Some((diff - crit * se, diff + crit * se))
-            } else {
-                None
-            };
-            out.push(PairwiseComparisonDetail {
-                group_a: ga.index,
-                group_b: gb.index,
-                label_a: ga.label.clone(),
-                label_b: gb.label.clone(),
-                mean_diff: diff,
-                se_diff: se,
-                statistic: t_stat,
-                df,
-                raw_p,
-                adjusted_p_or_q: adj_p,
-                is_fdr_q: false,
-                ci,
-                significant: adj_p.is_finite() && adj_p <= threshold,
-            });
-        }
+    for (i, j) in pair_indices {
+        let ga = &groups[i];
+        let gb = &groups[j];
+        let diff = ga.mean - gb.mean;
+        let (se, df) = welch_pair_se_df(ga, gb);
+        let (t_stat, raw_p, adj_p) = if se > 0.0 {
+            let t = diff / se;
+            let rp = student_t_two_sided_p(t, df)?;
+            let ap = if m == 1 { rp } else { studentized_max_modulus_sf(t.abs(), m, df)? };
+            (t, rp, ap)
+        } else {
+            let (stat, p) = zero_se_stat_p(diff, true);
+            (stat, p, p)
+        };
+        let ci = if report_ci {
+            let crit =
+                if m == 1 { student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), df)? } else { studentized_max_modulus_crit(ci_alpha, m, df)? };
+            Some((diff - crit * se, diff + crit * se))
+        } else {
+            None
+        };
+        out.push(PairwiseComparisonDetail {
+            group_a: ga.index,
+            group_b: gb.index,
+            label_a: ga.label.clone(),
+            label_b: gb.label.clone(),
+            mean_diff: diff,
+            se_diff: se,
+            statistic: t_stat,
+            df,
+            raw_p,
+            adjusted_p_or_q: adj_p,
+            is_fdr_q: false,
+            ci,
+            significant: adj_p.is_finite() && adj_p <= threshold,
+        });
     }
     Ok(out)
 }
@@ -1165,8 +1253,9 @@ pub fn compare_dunn_ranks(
             return Err(StatsError::InvalidParameter { name: "mean_rank", value: mr });
         }
     }
+    let control_column = validate_multiplicity_control_spec(spec)?;
     let proc_req = MultiplicityProcedure::from(spec.method);
-    let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
+    let pair_indices: Vec<(usize, usize)> = if let Some(control_column) = control_column {
         let ctrl_pos = group_labels
             .iter()
             .position(|(idx, _)| *idx == control_column)

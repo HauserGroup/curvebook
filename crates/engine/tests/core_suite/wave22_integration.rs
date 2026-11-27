@@ -432,5 +432,5 @@ fn analysis_wave20_21_paired_sample_cluster_factorial_and_reports() {
         AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::PairedSignTest, ..Default::default() }),
     )
     .unwrap();
-    let _ = MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true };
+    let _ = MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true, control_column: None };
 }

@@ -732,6 +732,7 @@ fn r34_factorial_dunnett_unmatched_control_column_returns_typed_error() {
             method: MultiplicityMethod::Dunnett { control_column: 9 },
             threshold: 0.05,
             report_confidence_intervals: true,
+            control_column: None,
         },
         ..FactorialAnovaSpec::default()
     };

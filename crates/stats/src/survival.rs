@@ -3545,26 +3545,64 @@ struct SurvivalPairwisePlan {
 fn resolve_survival_pairwise_plan(
     indices: &[usize],
     km_results: &[KaplanMeierCohortResult],
-    method: curvebook_doc::MultiplicityMethod,
+    mult: &curvebook_doc::MultiplicitySpec,
 ) -> Result<SurvivalPairwisePlan, StatsError> {
     let k = indices.len();
     let all_pairs = || -> Vec<(usize, usize)> { (0..k).flat_map(|i| ((i + 1)..k).map(move |j| (i, j))).collect() };
+    let control_column = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
 
-    let requested = MultiplicityProcedure::from(method);
+    let requested = MultiplicityProcedure::from(mult.method);
+    if let Some(ctrl) = control_column {
+        let ctrl_pos =
+            indices.iter().position(|&idx| idx == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+        let pair_indices: Vec<(usize, usize)> = (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect();
+        let ctrl_lbl = km_results.get(ctrl_pos).map_or("control", |r| r.label.as_str());
+        let (procedure, note) = match requested {
+            MultiplicityProcedure::Dunnett { .. } => (
+                MultiplicityProcedure::Bonferroni,
+                Some(format!(
+                    "Dunnett control-comparison mode compared each non-control cohort against '{ctrl_lbl}' ({} log-rank comparisons) with Bonferroni FWER adjustment; exact Dunnett multivariate-t quantiles apply only to Gaussian ANOVA contrasts.",
+                    pair_indices.len()
+                )),
+            ),
+            MultiplicityProcedure::FisherLsd => (
+                MultiplicityProcedure::None,
+                Some(format!(
+                    "Fisher's LSD reports unadjusted pairwise log-rank P values against control cohort '{ctrl_lbl}' ({} comparisons) without familywise error control.",
+                    pair_indices.len()
+                )),
+            ),
+            MultiplicityProcedure::Bonferroni
+            | MultiplicityProcedure::Sidak
+            | MultiplicityProcedure::HolmBonferroni
+            | MultiplicityProcedure::HolmSidak
+            | MultiplicityProcedure::BenjaminiHochbergFdr
+            | MultiplicityProcedure::BenjaminiYekutieliFdr
+            | MultiplicityProcedure::TwoStageBkyFdr => (
+                requested,
+                Some(format!(
+                    "Control-comparison mode compared each non-control cohort against '{ctrl_lbl}' ({} log-rank comparisons).",
+                    pair_indices.len()
+                )),
+            ),
+            MultiplicityProcedure::TamhaneT2 => (
+                MultiplicityProcedure::Sidak,
+                Some(format!(
+                    "Tamhane's T2 is defined for parametric ANOVA contrasts rather than censored survival curves; {} log-rank comparisons against '{ctrl_lbl}' were adjusted via Sidak.",
+                    pair_indices.len()
+                )),
+            ),
+            _ => (
+                MultiplicityProcedure::Bonferroni,
+                Some(format!(
+                    "Requested ANOVA post-hoc procedure is defined for parametric or rank contrasts rather than censored survival curves; {} log-rank comparisons against '{ctrl_lbl}' were adjusted via Bonferroni.",
+                    pair_indices.len()
+                )),
+            ),
+        };
+        return Ok(SurvivalPairwisePlan { pair_indices, procedure, note });
+    }
     match requested {
-        MultiplicityProcedure::Dunnett { control_column } => {
-            let ctrl_pos = indices
-                .iter()
-                .position(|&idx| idx == control_column)
-                .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-            let pair_indices: Vec<(usize, usize)> = (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect();
-            let ctrl_lbl = km_results.get(ctrl_pos).map_or("control", |r| r.label.as_str());
-            let note = format!(
-                "Dunnett control-comparison mode compared each non-control cohort against '{ctrl_lbl}' ({} log-rank comparisons) with Bonferroni FWER adjustment; exact Dunnett multivariate-t quantiles apply only to Gaussian ANOVA contrasts.",
-                pair_indices.len()
-            );
-            Ok(SurvivalPairwisePlan { pair_indices, procedure: MultiplicityProcedure::Bonferroni, note: Some(note) })
-        }
         MultiplicityProcedure::None => Ok(SurvivalPairwisePlan { pair_indices: all_pairs(), procedure: MultiplicityProcedure::None, note: None }),
         MultiplicityProcedure::FisherLsd => Ok(SurvivalPairwisePlan {
             pair_indices: all_pairs(),
@@ -3608,7 +3646,7 @@ fn append_survival_pairwise(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let plan = resolve_survival_pairwise_plan(indices, km_results, mult.method)?;
+    let plan = resolve_survival_pairwise_plan(indices, km_results, mult)?;
     let mut pairs = Vec::with_capacity(plan.pair_indices.len());
     let mut raw_p = Vec::with_capacity(plan.pair_indices.len());
     for (i, j) in plan.pair_indices {

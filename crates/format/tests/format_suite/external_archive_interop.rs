@@ -1133,11 +1133,28 @@ fn issue_77_bonferroni_sidak_maps_to_sidak_across_anova_designs() {
         ),
         ("one-way SIDAK is Sidak", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "SIDAK", true, Some(MultiplicityMethod::Sidak)),
         ("two-way HOLM_SIDAK is HolmSidak", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "HOLM_SIDAK", true, Some(MultiplicityMethod::HolmSidak)),
-        // Unmapped comparison families and unknown test names continue to block cleanly.
+        // One-way CONTROL_VS_ALL BONFERRONI_SIDAK also maps to Sidak (with control_column);
+        // selected-pairs, two-way CONTROL_VS_ALL without meansDesignType, and unknown tests block.
         ("one-way selected-pairs BONFERRONI_SIDAK blocks", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
-        ("one-way control-vs-all BONFERRONI_SIDAK blocks", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "CONTROL_VS_ALL", "BONFERRONI_SIDAK", true, None),
+        (
+            "one-way control-vs-all BONFERRONI_SIDAK maps to Sidak",
+            "ONE_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "CONTROL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            Some(MultiplicityMethod::Sidak),
+        ),
         ("two-way selected-pairs BONFERRONI_SIDAK blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
-        ("two-way control-vs-all BONFERRONI_SIDAK blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "CONTROL_VS_ALL", "BONFERRONI_SIDAK", true, None),
+        (
+            "two-way control-vs-all without meansDesignType blocks",
+            "TWO_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "CONTROL_VS_ALL",
+            "BONFERRONI_SIDAK",
+            true,
+            None,
+        ),
         ("two-way unknown test blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "UNKNOWN_CORRECTION", true, None),
     ];
 
@@ -1158,6 +1175,202 @@ fn issue_77_bonferroni_sidak_maps_to_sidak_across_anova_designs() {
                 assert_eq!(method, MultiplicityMethod::None, "{label}");
             }
         }
+    }
+}
+
+#[test]
+fn issue_78_control_vs_all_one_way_and_two_way_translation_and_selection_validation() {
+    use curvebook_doc::{FactorialAnovaSpec, FactorialComparisonFamilyMode, MultiplicityMethod, OneWayAnovaSpec};
+
+    let one_way_params = |design: &str, mc_type: &str, test: &str, ctrl_col: usize| {
+        let mc = match mc_type {
+            "NO_CORRECTION" => json!({"type": "NO_CORRECTION"}),
+            "FDR" => json!({"type": "FDR", "fdr": {"test": test}}),
+            _ => json!({"type": "STATISTICAL", "statistical": {"test": test}}),
+        };
+        json!({"content": {
+            "experimentalDesign": design,
+            "postTests": {
+                "type": "PAIRWISE_TESTS",
+                "pairwiseTests": {
+                    "pairwiseDesign": {"type": "CONTROL_VS_ALL", "controlID": {"col": {"idx": ctrl_col}}},
+                    "multipleComparisons": mc,
+                }
+            }
+        }})
+    };
+
+    // One-way CONTROL_VS_ALL: every supported family translates with sheet control_column preserved.
+    for (label, design, mc_type, test, want_method, want_extra_ctrl) in [
+        ("one-way Dunnett", "ORDINARY_ANOVA", "STATISTICAL", "DUNNET", MultiplicityMethod::Dunnett { control_column: 2 }, None),
+        ("one-way KW Dunn", "KRUSKAL_WALLIS", "STATISTICAL", "DUNN", MultiplicityMethod::DunnRankSum, Some(2)),
+        ("one-way Friedman Dunn", "FRIEDMAN_TEST", "STATISTICAL", "DUNN", MultiplicityMethod::DunnRankSum, Some(2)),
+        ("one-way Holm-Sidak", "ORDINARY_ANOVA", "STATISTICAL", "HOLM_SIDAK", MultiplicityMethod::HolmSidak, Some(2)),
+        ("one-way BONFERRONI_SIDAK -> Sidak", "ORDINARY_ANOVA", "STATISTICAL", "BONFERRONI_SIDAK", MultiplicityMethod::Sidak, Some(2)),
+        ("one-way BONFERRONI_DUNN -> Bonferroni", "ORDINARY_ANOVA", "STATISTICAL", "BONFERRONI_DUNN", MultiplicityMethod::Bonferroni, Some(2)),
+        ("one-way NO_CORRECTION -> FisherLsd", "ORDINARY_ANOVA", "NO_CORRECTION", "", MultiplicityMethod::FisherLsd, Some(2)),
+        ("one-way KW NO_CORRECTION -> FisherLsd", "KRUSKAL_WALLIS", "NO_CORRECTION", "", MultiplicityMethod::FisherLsd, Some(2)),
+        ("one-way Welch DUNNET_T3", "BROWN_FORSYTHE_ANOVA", "STATISTICAL", "DUNNET_T3", MultiplicityMethod::DunnettT3, Some(2)),
+        ("one-way Welch TAMHANE_T2", "BROWN_FORSYTHE_ANOVA", "STATISTICAL", "TAMHANE_T2", MultiplicityMethod::TamhaneT2, Some(2)),
+        ("one-way FDR BH", "ORDINARY_ANOVA", "FDR", "BENJAMINI_HOCHBERG", MultiplicityMethod::BenjaminiHochbergFdr, Some(2)),
+        ("one-way FDR BKY", "ORDINARY_ANOVA", "FDR", "BENJAMINI_KRIEGER_YEKUTIELI", MultiplicityMethod::TwoStageBkyFdr, Some(2)),
+    ] {
+        let tr = translate_analysis_parameters("ONE_WAY_ANOVA", &one_way_params(design, mc_type, test, 2)).unwrap();
+        assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+        let AnalysisKind::OneWayAnova(OneWayAnovaSpec { multiplicity, .. }) = &tr.kind else {
+            panic!("{label}: expected OneWayAnova");
+        };
+        assert_eq!(multiplicity.method, want_method, "{label}");
+        assert_eq!(multiplicity.control_column, want_extra_ctrl, "{label}");
+        assert_eq!(multiplicity.effective_control_column(), Some(2), "{label}");
+        assert!(check_control_in_selection(&tr.kind, &[4, 2, 0]).is_ok(), "{label} in selection");
+        assert!(check_control_in_selection(&tr.kind, &[0, 1]).is_err(), "{label} missing from selection");
+        assert!(check_control_in_selection(&tr.kind, &[]).is_ok(), "{label} empty selection");
+    }
+
+    // One-way blocked CONTROL_VS_ALL cases: ambiguous STATISTICAL+NO_TEST, Tukey, Games-Howell.
+    for (label, test) in [("one-way NO_TEST blocks", "NO_TEST"), ("one-way TUKEY blocks", "TUKEY"), ("one-way GAMES_HOWELL blocks", "GAMES_HOWELL")] {
+        let tr = translate_analysis_parameters("ONE_WAY_ANOVA", &one_way_params("ORDINARY_ANOVA", "STATISTICAL", test, 2)).unwrap();
+        assert!(!tr.blocking_options.is_empty(), "{label}");
+    }
+
+    // Two-way CONTROL_VS_ALL: meansDesignType + controlID.{col|row}.idx -> (control_factor, mode).
+    let two_way_params = |means_design: &str, mc_type: &str, test: &str, ctrl_id: serde_json::Value| {
+        let mc = match mc_type {
+            "NO_CORRECTION" => json!({"type": "NO_CORRECTION"}),
+            _ => json!({"type": "STATISTICAL", "statistical": {"test": test}}),
+        };
+        json!({"content": {
+            "experimentalDesign": "ORDINARY_ANOVA",
+            "postTests": {
+                "type": "PAIRWISE_TESTS",
+                "pairwiseTests": {
+                    "meansDesignType": means_design,
+                    "pairwiseDesign": {"type": "CONTROL_VS_ALL", "controlID": ctrl_id},
+                    "multipleComparisons": mc,
+                }
+            }
+        }})
+    };
+
+    for (label, means_design, mc_type, test, ctrl_id, want_method, want_extra_ctrl, want_factor, want_mode) in [
+        (
+            "two-way cols-within-rows separate Dunnett",
+            "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES",
+            "STATISTICAL",
+            "DUNNET",
+            json!({"col": {"idx": 1}}),
+            MultiplicityMethod::Dunnett { control_column: 1 },
+            None,
+            Some(1),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+        (
+            "two-way rows-within-cols separate Dunnett",
+            "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SEPARATE_FAMILIES",
+            "STATISTICAL",
+            "DUNNET",
+            json!({"row": {"idx": 0}}),
+            MultiplicityMethod::Dunnett { control_column: 0 },
+            None,
+            Some(0),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+        (
+            "two-way cols-within-rows single family Sidak",
+            "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SINGLE_FAMILY",
+            "STATISTICAL",
+            "BONFERRONI_SIDAK",
+            json!({"col": {"idx": 2}}),
+            MultiplicityMethod::Sidak,
+            Some(2),
+            Some(1),
+            FactorialComparisonFamilyMode::TwoFactorFamilies,
+        ),
+        (
+            "two-way rows-within-cols single family Bonferroni",
+            "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SINGLE_FAMILY",
+            "STATISTICAL",
+            "BONFERRONI_DUNN",
+            json!({"row": {"idx": 1}}),
+            MultiplicityMethod::Bonferroni,
+            Some(1),
+            Some(0),
+            FactorialComparisonFamilyMode::TwoFactorFamilies,
+        ),
+        (
+            "two-way cols-within-rows separate Holm-Sidak",
+            "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES",
+            "STATISTICAL",
+            "HOLM_SIDAK",
+            json!({"col": {"idx": 0}}),
+            MultiplicityMethod::HolmSidak,
+            Some(0),
+            Some(1),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+        (
+            "two-way COMPARE_COLUMNS Dunnett",
+            "COMPARE_COLUMNS",
+            "STATISTICAL",
+            "DUNNET",
+            json!({"col": {"idx": 3}}),
+            MultiplicityMethod::Dunnett { control_column: 3 },
+            None,
+            Some(1),
+            FactorialComparisonFamilyMode::Standard,
+        ),
+        (
+            "two-way COMPARE_ROWS Sidak",
+            "COMPARE_ROWS",
+            "STATISTICAL",
+            "BONFERRONI_SIDAK",
+            json!({"row": {"idx": 2}}),
+            MultiplicityMethod::Sidak,
+            Some(2),
+            Some(0),
+            FactorialComparisonFamilyMode::Standard,
+        ),
+        (
+            "two-way rows-within-cols NO_CORRECTION -> FisherLsd",
+            "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SEPARATE_FAMILIES",
+            "NO_CORRECTION",
+            "",
+            json!({"row": {"idx": 0}}),
+            MultiplicityMethod::FisherLsd,
+            Some(0),
+            Some(0),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+    ] {
+        let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &two_way_params(means_design, mc_type, test, ctrl_id)).unwrap();
+        assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+        let AnalysisKind::FactorialAnova(FactorialAnovaSpec { multiplicity, control_factor, comparison_family_mode, .. }) = &tr.kind else {
+            panic!("{label}: expected FactorialAnova");
+        };
+        assert_eq!(multiplicity.method, want_method, "{label}");
+        assert_eq!(multiplicity.control_column, want_extra_ctrl, "{label}");
+        assert_eq!(*control_factor, want_factor, "{label}");
+        assert_eq!(*comparison_family_mode, want_mode, "{label}");
+        if want_factor == Some(1) {
+            let ctrl = multiplicity.effective_control_column().unwrap();
+            assert!(check_control_in_selection(&tr.kind, &[ctrl, 9]).is_ok(), "{label} col ctrl present");
+            assert!(check_control_in_selection(&tr.kind, &[99]).is_err(), "{label} col ctrl missing");
+        } else {
+            // Row-factor controls must not be rejected against selected column data sets.
+            assert!(check_control_in_selection(&tr.kind, &[99]).is_ok(), "{label} row ctrl independent of selected cols");
+        }
+    }
+
+    // Two-way blocked cases: ambiguous STATISTICAL+NO_TEST, 2D COMPARE_CELLS, mismatched axis, DUNN.
+    for (label, means_design, test, ctrl_id) in [
+        ("two-way STATISTICAL NO_TEST blocks", "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES", "NO_TEST", json!({"col": {"idx": 0}})),
+        ("two-way COMPARE_CELLS 2D control blocks", "COMPARE_CELLS", "BONFERRONI_SIDAK", json!({"col": {"idx": 0}, "row": {"idx": 0}})),
+        ("two-way axis mismatch (row on COMPARE_COLUMNS) blocks", "COMPARE_COLUMNS", "DUNNET", json!({"row": {"idx": 0}})),
+        ("two-way DUNN blocks", "COMPARE_COLUMNS", "DUNN", json!({"col": {"idx": 0}})),
+    ] {
+        let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &two_way_params(means_design, "STATISTICAL", test, ctrl_id)).unwrap();
+        assert!(!tr.blocking_options.is_empty(), "{label}");
     }
 }
 

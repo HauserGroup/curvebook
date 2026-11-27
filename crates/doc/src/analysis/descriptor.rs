@@ -778,6 +778,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
             "threshold",
             "report_confidence_intervals",
             "control_column",
+            "control_factor",
             "sphericity_correction",
             "reml_zero_variance_policy",
             "comparison_family_mode",

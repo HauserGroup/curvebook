@@ -286,7 +286,12 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
     let sheet = DataSheet::new(ds_id.clone(), "Nested 3x4x5", TableArchetype::Nested(nt)).unwrap();
     let nspec = NestedAnalysisSpec {
         two_group_t_test: false,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::TukeyHsd,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..NestedAnalysisSpec::default()
     };
     let spec = AnalysisSpec::new("an-nest-tuk", ds_id, AnalysisKind::NestedComparison(nspec.clone())).unwrap();
@@ -320,7 +325,12 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
 
     let tuk_spec = NestedAnalysisSpec {
         two_group_t_test: false,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::TukeyHsd,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..NestedAnalysisSpec::default()
     };
     let res_tuk = run_nested_analysis(
@@ -340,7 +350,12 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
     // Games-Howell assumes flat independent unequal-variance samples and is incompatible with nested REML (AUD-05-20).
     let gh_spec = NestedAnalysisSpec {
         two_group_t_test: false,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::GamesHowell, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::GamesHowell,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+        },
         ..NestedAnalysisSpec::default()
     };
     let err_gh =

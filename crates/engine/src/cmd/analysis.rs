@@ -2971,7 +2971,7 @@ fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str) -> bool {
 
 fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str) -> bool {
     matches!(key, "multiplicity" | "report_confidence_intervals" | "alpha")
-        || (matches!(mult.method, MultiplicityMethod::Dunnett { .. }) && key == "control_column")
+        || (MultiplicitySpec::supports_control_column(mult.method) && key == "control_column")
 }
 
 fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat: bool) -> bool {
@@ -3095,6 +3095,7 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     | "compute_effect_sizes"
                     | "sphericity_correction"
                     | "reml_zero_variance_policy"
+                    | "control_factor"
                     | "comparison_family_mode"
                     | "preselected_pairs"
                     | "swap_direction"
@@ -3835,6 +3836,7 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
             key,
             "sphericity_correction"
                 | "reml_zero_variance_policy"
+                | "control_factor"
                 | "comparison_family_mode"
                 | "preselected_pairs"
                 | "swap_direction"
@@ -3962,6 +3964,7 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "event_prob_group2",
     "plot_distribution",
     "three_way_rm_factors",
+    "control_factor",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -4027,6 +4030,7 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "subject_column",
     "row_title_column",
     "contingency_count_column",
+    "control_factor",
 ];
 
 fn coerce_whole_int_value(val: &Value, key: &str) -> Result<Value, EngineError> {
@@ -4327,17 +4331,34 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> R
                 *mult = deserialize_strict(m_val, "/multiplicity")?;
             } else {
                 mult.method = deserialize_strict(m_val, "/multiplicity")?;
+                mult.control_column = None;
             }
         } else if let Ok(parsed) = serde_json::from_value::<MultiplicitySpec>(m_val.clone()) {
             *mult = parsed;
         } else if m_val.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("dunnett")) {
             mult.method = MultiplicityMethod::Dunnett { control_column: 0 };
+            mult.control_column = None;
         } else {
             mult.method = parse_serde_enum(m_val, "`multiplicity`")?;
+            if !MultiplicitySpec::supports_control_column(mult.method) {
+                mult.control_column = None;
+            }
         }
     }
     if let MultiplicityMethod::Dunnett { ref mut control_column } = mult.method {
         apply_usize_field(params, "control_column", control_column)?;
+        mult.control_column = None;
+    } else if let Some(ctrl_val) = params.get("control_column") {
+        if ctrl_val.is_null() {
+            mult.control_column = None;
+        } else if MultiplicitySpec::supports_control_column(mult.method) {
+            mult.control_column = Some(parse_usize_json_value(ctrl_val, "control_column")?);
+        } else {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+            ));
+        }
     }
     apply_bool_opt_checked(params, "report_confidence_intervals", &mut mult.report_confidence_intervals)?;
     if let Some(t) = opt_f64_checked(params, "alpha")? {
