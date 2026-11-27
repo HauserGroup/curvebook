@@ -2586,6 +2586,8 @@ struct SegmentPatch {
     major_tick_interval: Option<Option<f64>>,
     #[serde(default, deserialize_with = "de_some")]
     minor_ticks_per_interval: Option<u8>,
+    #[serde(default, deserialize_with = "de_some")]
+    auto_log_minor_ticks: Option<bool>,
 }
 
 impl SegmentPatch {
@@ -2596,6 +2598,7 @@ impl SegmentPatch {
             || self.length_share.is_some()
             || self.major_tick_interval.is_some()
             || self.minor_ticks_per_interval.is_some()
+            || self.auto_log_minor_ticks.is_some()
     }
 
     fn apply(&self, seg: &mut AxisSegment) -> Result<(), EngineError> {
@@ -2609,6 +2612,13 @@ impl SegmentPatch {
             self.major_tick_interval => seg.major_tick_interval,
             self.minor_ticks_per_interval => seg.minor_ticks_per_interval,
         );
+        if let Some(auto) = self.auto_log_minor_ticks {
+            seg.auto_log_minor_ticks = auto;
+        } else if self.minor_ticks_per_interval == Some(0) && seg.scale == GraphAxisScale::Log10 {
+            // Explicit `minor_ticks_per_interval: 0` on Log10 without `auto_log_minor_ticks` turns
+            // automatic 2..9 decade minor ticks off (`R0.36`).
+            seg.auto_log_minor_ticks = false;
+        }
         Ok(())
     }
 }

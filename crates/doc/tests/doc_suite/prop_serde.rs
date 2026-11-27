@@ -319,6 +319,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             length_share: 1.0,
             major_tick_interval: Some(10.0),
             minor_ticks_per_interval: 2,
+            ..AxisSegment::default()
         }],
         tick_format: TickLabelFormat::PowerOfTenSuperscript,
         ..AxisSpec::linear("Logit %")

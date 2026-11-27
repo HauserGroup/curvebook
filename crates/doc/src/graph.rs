@@ -450,13 +450,27 @@ pub struct AxisSegment {
     pub length_share: f64,
     /// Explicit major tick spacing (in data units for `Linear`, or log-decade step where applicable); `None` chooses nice ticks automatically.
     pub major_tick_interval: Option<f64>,
-    /// Number of minor tick subdivisions drawn between consecutive major ticks (`0` disables minor ticks).
+    /// Number of minor tick subdivisions drawn between consecutive major ticks (`0` disables minor ticks
+    /// unless [`Self::auto_log_minor_ticks`] is `true` on a `Log10` segment).
     pub minor_ticks_per_interval: u8,
+    /// When `true` (default) and `minor_ticks_per_interval == 0`, a `Log10` segment draws the
+    /// conventional `2..=9 × 10^k` decade minor ticks; set to `false` to explicitly disable `Log10`
+    /// minor ticks (`R0.36`).
+    #[serde(default = "default_true")]
+    pub auto_log_minor_ticks: bool,
 }
 
 impl Default for AxisSegment {
     fn default() -> Self {
-        Self { min: None, max: None, scale: GraphAxisScale::Linear, length_share: 1.0, major_tick_interval: None, minor_ticks_per_interval: 0 }
+        Self {
+            min: None,
+            max: None,
+            scale: GraphAxisScale::Linear,
+            length_share: 1.0,
+            major_tick_interval: None,
+            minor_ticks_per_interval: 0,
+            auto_log_minor_ticks: true,
+        }
     }
 }
 

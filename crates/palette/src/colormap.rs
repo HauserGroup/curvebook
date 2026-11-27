@@ -5,18 +5,13 @@
 //! - Viridis & Plasma: van der Walt & Smith (CC0 1.0 Public Domain Dedication).
 //! - Cividis: Nuñez, Anderton & Renslow, *PLOS ONE* 13(7):e0199239 (2018, public domain).
 //!
-//! The Viridis and Plasma 17-stop tables hold exact entries of the published 256-entry lookup
-//! tables: stop `i` (`t = i / 16`) is LUT entry `idx(i) = floor(i * 255 / 16 + 1/2)` (0, 16, 32, 48,
-//! 64, 80, 96, 112, 128, 143, 159, 175, 191, 207, 223, 239, 255), with each `[0, 1]` channel `c`
-//! quantised to `round(255 * c)`. Generated from `viridisLite` 0.4.2 `viridis.map` (option `"D"` =
-//! Viridis, `"C"` = Plasma) with R 4.5.2:
+//! The Viridis, Cividis, and Plasma 17-stop tables hold exact entries of the published 256-entry
+//! lookup tables: stop `i` (`t = i / 16`) is LUT entry `idx(i) = floor(i * 255 / 16 + 1/2)` (0,
+//! 16, 32, 48, 64, 80, 96, 112, 128, 143, 159, 175, 191, 207, 223, 239, 255), with each `[0, 1]`
+//! channel `c` quantised to `round(255 * c)`. Generated from `viridisLite` 0.4.2 `viridis.map`
+//! (option `"D"` = Viridis, `"E"` = Cividis, `"C"` = Plasma) with R 4.5.2:
 //! `d <- viridisLite::viridis.map; d <- d[d$opt == opt, ]; i <- floor((0:16) * 255 / 16 + 0.5) + 1;`
 //! `rgb(d$R[i], d$G[i], d$B[i])`.
-//!
-//! The Cividis table is *not* an exact LUT sample: stops 0, 3, 4, 11, 12, 13 and 16 equal LUT entries
-//! `idx(i)`, while the others are hand-adjusted approximations within 3/255 per channel of entry
-//! `idx(i)` (option `"E"`); CIE `Delta L*` between consecutive stops stays in `[3.8, 6.2]`, which the
-//! exact LUT entries `idx(0..=2)` do not satisfy (6.27 and 3.70).
 
 use crate::space::{Rgba8, lerp_oklab};
 
@@ -42,26 +37,25 @@ pub const VIRIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(253, 231, 37),
 ];
 
-/// 17 stops (`t = 0/16 .. 16/16`) approximating the published 256-entry CC0 Cividis LUT of Nuñez,
-/// Anderton & Renslow (*PLOS ONE* 13(7):e0199239, 2018; `viridisLite`); see the module docs for
-/// which stops are exact LUT entries.
+/// 17 exact entries (`t = 0/16 .. 16/16`, module-doc index rule) of the published 256-entry CC0
+/// Cividis LUT of Nuñez, Anderton & Renslow (*PLOS ONE* 13(7):e0199239, 2018; `viridisLite`).
 pub const CIVIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(0, 32, 77),
-    Rgba8::rgb(0, 43, 105),
-    Rgba8::rgb(3, 54, 110),
+    Rgba8::rgb(0, 44, 105),
+    Rgba8::rgb(6, 54, 110),
     Rgba8::rgb(45, 66, 108),
     Rgba8::rgb(65, 77, 107),
-    Rgba8::rgb(81, 88, 108),
-    Rgba8::rgb(96, 100, 111),
-    Rgba8::rgb(110, 111, 115),
-    Rgba8::rgb(124, 123, 120),
-    Rgba8::rgb(140, 135, 120),
-    Rgba8::rgb(156, 148, 119),
+    Rgba8::rgb(82, 89, 108),
+    Rgba8::rgb(97, 100, 111),
+    Rgba8::rgb(111, 112, 115),
+    Rgba8::rgb(125, 124, 120),
+    Rgba8::rgb(139, 135, 121),
+    Rgba8::rgb(155, 148, 119),
     Rgba8::rgb(172, 161, 116),
     Rgba8::rgb(188, 175, 111),
     Rgba8::rgb(206, 188, 104),
-    Rgba8::rgb(224, 204, 93),
-    Rgba8::rgb(240, 218, 82),
+    Rgba8::rgb(224, 203, 94),
+    Rgba8::rgb(242, 218, 80),
     Rgba8::rgb(255, 234, 70),
 ];
 

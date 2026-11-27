@@ -193,6 +193,7 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
         length_share: 0.5,
         major_tick_interval: Some(major_tick_interval),
         minor_ticks_per_interval: 0,
+        ..AxisSegment::default()
     };
     g_xy.spec.x_axis.segments = vec![seg(0.0, 10.0, 5.0), seg(100.0, 200.0, 50.0)];
     g_xy.spec.y_axis.thresholds = vec![

@@ -122,6 +122,14 @@ pub(super) fn render_axes_single_axis_tab(
                     state.format_axes_guard_pending_tick_format = Some(TickLabelFormat::Decimal);
                     state.categorical_guard_confirmed = false;
                 } else if draft.set_segment_scale(seg_idx, scale) {
+                    if let Some(seg) = draft.axis_draft.segments.get(seg_idx) {
+                        state.axis_minor_ticks_draft =
+                            if seg.scale == GraphAxisScale::Log10 && seg.minor_ticks_per_interval == 0 && seg.auto_log_minor_ticks {
+                                8
+                            } else {
+                                seg.minor_ticks_per_interval.min(10)
+                            };
+                    }
                     *dirty = true;
                 }
             }

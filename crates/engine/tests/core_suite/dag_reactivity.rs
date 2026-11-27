@@ -113,6 +113,7 @@ fn multi_hop_data_transform_fit_and_downstream_graph_reactivity() {
                 length_share: 0.45,
                 major_tick_interval: Some(1.0),
                 minor_ticks_per_interval: 1,
+                ..AxisSegment::default()
             },
             AxisSegment {
                 min: Some(-6.5),
@@ -121,6 +122,7 @@ fn multi_hop_data_transform_fit_and_downstream_graph_reactivity() {
                 length_share: 0.55,
                 major_tick_interval: Some(1.0),
                 minor_ticks_per_interval: 1,
+                ..AxisSegment::default()
             },
         ],
         tick_format: TickLabelFormat::Decimal,
@@ -491,6 +493,7 @@ fn preserves_graph_styles_gdos_axis_breaks_brackets_and_annotations() {
                 length_share: 0.4,
                 major_tick_interval: Some(5.0),
                 minor_ticks_per_interval: 1,
+                ..AxisSegment::default()
             },
             AxisSegment {
                 min: Some(18.0),
@@ -499,6 +502,7 @@ fn preserves_graph_styles_gdos_axis_breaks_brackets_and_annotations() {
                 length_share: 0.6,
                 major_tick_interval: Some(10.0),
                 minor_ticks_per_interval: 2,
+                ..AxisSegment::default()
             },
         ],
         tick_format: TickLabelFormat::Decimal,

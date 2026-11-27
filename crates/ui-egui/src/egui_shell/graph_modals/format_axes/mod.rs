@@ -87,7 +87,13 @@ pub(super) fn load_segment_drafts(
         state.axis_bounds_error = None;
         state.axis_major_interval_draft = seg.and_then(|s| s.major_tick_interval).map(|v| format_localized_draft_f64(v, preset)).unwrap_or_default();
         state.axis_major_interval_error = None;
-        state.axis_minor_ticks_draft = seg.map_or(0, |s| s.minor_ticks_per_interval.min(10));
+        state.axis_minor_ticks_draft = seg.map_or(0, |s| {
+            if s.scale == curvebook_doc::GraphAxisScale::Log10 && s.minor_ticks_per_interval == 0 && s.auto_log_minor_ticks {
+                8
+            } else {
+                s.minor_ticks_per_interval.min(10)
+            }
+        });
         state.axis_minor_ticks_error = None;
         let share = seg.map_or(1.0, |s| if s.length_share.is_finite() && s.length_share > 0.0 { s.length_share } else { 1.0 });
         state.axis_length_share_draft = format_localized_draft_f64(share, preset);

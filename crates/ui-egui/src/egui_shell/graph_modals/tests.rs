@@ -337,6 +337,7 @@ fn aud_10_13_35_37_40_41_and_13_16_17_axes_series_and_overlay_invariants() {
         length_share: 2.0,
         major_tick_interval: Some(50.0),
         minor_ticks_per_interval: 4,
+        ..AxisSegment::default()
     };
     let mut seg = GraphModalEguiState::default();
     sync_format_axes_local_drafts(&app, &mut seg);

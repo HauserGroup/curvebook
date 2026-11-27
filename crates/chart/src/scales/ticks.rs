@@ -669,6 +669,7 @@ fn log10_major_minor(
     let lo_tol = lo * (1.0 - 1e-9);
     let hi_tol = if hi <= f64::MAX / (1.0 + 1e-9) { hi * (1.0 + 1e-9) } else { f64::MAX };
 
+    let allow_auto_log_minors = auto_log_minor_ticks && seg.auto_log_minor_ticks;
     if let Some(exp_step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
         let (majors, eff_step) = explicit_log_major_ticks(lo, hi, 10.0, exp_step, target_major, warnings);
         if majors.len() < 2 {
@@ -677,7 +678,7 @@ fn log10_major_minor(
             let minors = if (eff_step - 1.0).abs() <= 1e-9
                 && let Some((k_lo, k_hi, _)) = log_exponent_range(lo, hi, 10.0)
                 && (i64::from(k_hi) - i64::from(k_lo)) <= 8
-                && (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0)
+                && (allow_auto_log_minors || seg.minor_ticks_per_interval > 0)
             {
                 compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval)
             } else {
@@ -712,7 +713,7 @@ fn log10_major_minor(
     }
 
     let decades = i64::from(k_hi) - i64::from(k_lo);
-    let emit_minors = (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0) && decades <= 8 && stride == 1;
+    let emit_minors = (allow_auto_log_minors || seg.minor_ticks_per_interval > 0) && decades <= 8 && stride == 1;
     let minors =
         if emit_minors { compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval) } else { Vec::new() };
     (majors, minors)
@@ -847,6 +848,7 @@ fn reciprocal_major_minor(seg: &ResolvedSegment, target_major: usize, warnings: 
         span_end_pt: seg.span_end_pt,
         major_tick_interval: None,
         minor_ticks_per_interval: seg.minor_ticks_per_interval,
+        auto_log_minor_ticks: seg.auto_log_minor_ticks,
     };
     let (t_majors, t_minors) = linear_major_minor(&temp_seg, target_major, warnings);
     let majors: Vec<f64> = t_majors.into_iter().filter_map(|t| scale_inverse(AxisScale::Reciprocal, t)).collect();

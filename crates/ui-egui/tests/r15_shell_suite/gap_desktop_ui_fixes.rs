@@ -509,3 +509,47 @@ fn r0_36_rebound_exclude_shortcut_respects_text_focus_and_falls_through_on_non_d
     assert_eq!(out.command_id.as_deref(), Some("ui.rulers.toggle"));
     Ok(())
 }
+
+#[test]
+fn r0_36_export_all_batch_error_and_log10_minor_ticks_off() -> BoxRes {
+    let mut doc = ProjectDocument::new("R0.36 Followups")?;
+    let ds = make_xy_sheet("xy-1", "Dose", &[(1.0, 1.0), (10.0, 10.0), (100.0, 100.0)])?;
+    doc.add_data_sheet(ds.clone())?;
+    doc.add_graph_sheet(GraphSheet::new_uninitialized_for_data("g-1", &ds)?)?;
+    doc.active_sheet_id = Some(SheetId::new("xy-1"));
+
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.welcome.open = false;
+    app.egui_views.launcher_open = false;
+
+    // 1. Log10 minor-tick off vs default 0 encoding through `graph.setAxes`.
+    app.execute_command("graph.setAxes", json!({ "sheet_id": "g-1", "y_axis": { "scale": "log10" } }))?;
+    let seg_default = &app.document().graph_sheet(&SheetId::new("g-1")).unwrap().spec.y_axis.segments[0];
+    assert_eq!(seg_default.minor_ticks_per_interval, 0);
+    assert!(seg_default.auto_log_minor_ticks, "default Log10 keeps automatic 2..9 minor ticks");
+
+    app.execute_command("graph.setAxes", json!({ "sheet_id": "g-1", "y_axis": { "scale": "log10", "minor_ticks_per_interval": 0 } }))?;
+    let seg_off = &app.document().graph_sheet(&SheetId::new("g-1")).unwrap().spec.y_axis.segments[0];
+    assert_eq!(seg_off.minor_ticks_per_interval, 0);
+    assert!(!seg_off.auto_log_minor_ticks, "explicit minor_ticks_per_interval=0 on Log10 turns auto minor ticks off");
+
+    // 2. Export All batch error outside Welcome hub renders in the shared shell status footer and dismisses on click.
+    let mut intents = curvebook_ui_egui::egui_shell::PendingUiIntents::new();
+    intents.push_ui("ui.export.allTablesCsv", json!({ "delimiter": ",", "decimal_separator": "." }));
+    let batch = intents.commit_all_if_settled(&mut app, false);
+    assert!(batch.first_error().is_some(), "headless ui.export.allTablesCsv should fail cleanly");
+    assert!(app.canvas_dialogs.status_banner.as_deref().is_some_and(|s| s.contains("ui.export.allTablesCsv")));
+
+    let tokens = default_tokens(&app);
+    let st = ShellTestState::new(app).with_commit_all().with_sync_raster();
+    let mut driver = make_shell_driver_with_state(st, ViewportMetrics::new(1440.0, 900.0, 1.0), tokens);
+    driver.run_settled();
+    let chip = driver.frame_meta().find_by_widget_id("status.banner_notice").ok_or("status.banner_notice must render outside Welcome hub")?;
+    let rendered = chip.full_label.clone().unwrap_or_else(|| chip.label.clone());
+    assert!(rendered.contains("ui.export.allTablesCsv"), "rendered banner: {rendered:?}");
+    driver.click_widget_id("status.banner_notice")?;
+    driver.run_settled();
+    assert!(driver.state().app.canvas_dialogs.status_banner.is_none(), "clicking status.banner_notice must dismiss it");
+    assert!(driver.frame_meta().find_by_widget_id("status.banner_notice").is_none());
+    Ok(())
+}

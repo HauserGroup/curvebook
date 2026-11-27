@@ -171,6 +171,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(50.0),
@@ -179,6 +180,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
             length_share: 3.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
     let plot = RectPt::new(50.0, 30.0, 212.0, 160.0);
@@ -214,6 +216,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(10.0),
@@ -222,6 +225,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
             length_share: 2.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(2000.0),
@@ -230,6 +234,7 @@ fn discontinuous_two_and_three_segment_axes_and_gap_geometry() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
     let y_ax = ResolvedAxis::resolve(&y_spec, AxisOrientation::Vertical, RectPt::new(40.0, 20.0, 200.0, 180.0), None, &mut warnings);
@@ -273,6 +278,7 @@ fn break_ornaments_emit_double_slash_zigzag_and_blank_gap() {
             length_share: 1.0,
             major_tick_interval: Some(5.0),
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(50.0),
@@ -281,6 +287,7 @@ fn break_ornaments_emit_double_slash_zigzag_and_blank_gap() {
             length_share: 1.0,
             major_tick_interval: Some(25.0),
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
     graph.spec.x_axis.gap_width_pt = 10.0;
@@ -316,6 +323,7 @@ fn segment_aware_polyline_and_interval_splitting_clips_cleanly_at_gaps() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(50.0),
@@ -324,6 +332,7 @@ fn segment_aware_polyline_and_interval_splitting_clips_cleanly_at_gaps() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
     let mut y_spec = AxisSpec::linear("Y");
@@ -336,6 +345,7 @@ fn segment_aware_polyline_and_interval_splitting_clips_cleanly_at_gaps() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(50.0),
@@ -344,6 +354,7 @@ fn segment_aware_polyline_and_interval_splitting_clips_cleanly_at_gaps() {
             length_share: 1.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
 
@@ -408,6 +419,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
         length_share: 1.0,
         major_tick_interval: None,
         minor_ticks_per_interval: 0,
+        ..AxisSegment::default()
     };
     let log10_ax = ResolvedAxis::resolve(&log10_spec, AxisOrientation::Horizontal, plot, None, &mut warnings);
     let log10_ticks = compute_axis_ticks(
@@ -436,6 +448,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
         length_share: 1.0,
         major_tick_interval: None,
         minor_ticks_per_interval: 0,
+        ..AxisSegment::default()
     };
     let log2_ax = ResolvedAxis::resolve(&log2_spec, AxisOrientation::Horizontal, plot, None, &mut warnings);
     let log2_ticks = compute_axis_ticks(
@@ -452,6 +465,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
         length_share: 1.0,
         major_tick_interval: None,
         minor_ticks_per_interval: 0,
+        ..AxisSegment::default()
     };
     let probit_ax = ResolvedAxis::resolve(&probit_spec, AxisOrientation::Vertical, plot, None, &mut warnings);
     let probit_ticks = compute_axis_ticks(
@@ -469,6 +483,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
         length_share: 1.0,
         major_tick_interval: None,
         minor_ticks_per_interval: 0,
+        ..AxisSegment::default()
     };
     let recip_ax = ResolvedAxis::resolve(&recip_spec, AxisOrientation::Horizontal, plot, None, &mut warnings);
     let recip_ticks = compute_axis_ticks(
@@ -486,6 +501,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
         length_share: 1.0,
         major_tick_interval: Some(1e-12),
         minor_ticks_per_interval: 5,
+        ..AxisSegment::default()
     };
     let adv_ax = ResolvedAxis::resolve(&adv_spec, AxisOrientation::Horizontal, plot, None, &mut warnings);
     let adv_ticks = compute_axis_ticks(
