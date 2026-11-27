@@ -147,7 +147,7 @@ Verification policy:
 
 Automatic WASM verification is paused. Run `cargo xtask ci wasm` on demand for the target-specific checks.
 
-Keep each worker's verification worktree and isolated `CARGO_TARGET_DIR` stable across retries during a task or wave to retain build caches unless a clean build is specifically needed; do not share a build directory between concurrent workers, and delete retired worker target directories once the wave lands so `/tmp` does not exhaust disk space. Required checks and numerical tolerances remain unchanged.
+Keep each worker's verification worktree and `CARGO_TARGET_DIR` stable across retries during a task or wave to retain build caches unless a clean build is specifically needed. Do not invent unbounded per-task `/tmp/cb-<slug>` directories: reuse a small fixed slot pool (`/tmp/cb-slot-1` .. `/tmp/cb-slot-3`) so at most one active worktree uses a slot at a time (never share a slot concurrently, and rebuild `xtask` when switching a slot to a different worktree—see [docs/pitfalls-engineering.md](docs/pitfalls-engineering.md)), pass `CARGO_INCREMENTAL=0` on one-shot verifier/audit/gate runs so throwaway builds do not accumulate multi-GB incremental caches, and delete or prune unused `/tmp/cb-*` target directories once a wave lands so `/tmp` does not exhaust disk space. Required checks and numerical tolerances remain unchanged.
 
 Select the applicable verification checks below before opening a PR or reporting completion; this is a catalogue, not a requirement to rerun every command for every change:
 
@@ -177,7 +177,7 @@ cargo xtask wasm
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:
-1. **Isolate `CARGO_TARGET_DIR` and clean up after landing:** Give every agent its own build directory (for example `CARGO_TARGET_DIR=/tmp/cb-<agent-name>`) so Cargo package locks and build artefacts never collide, retain it across retries within the wave, and remove retired `/tmp/cb-*` build directories when the wave completes to avoid `ENOSPC`.
+1. **Bound `CARGO_TARGET_DIR` to fixed slots and clean up after landing:** Never share a `CARGO_TARGET_DIR` between concurrent agents (Cargo locks and `xtask`'s baked-in `CARGO_MANIFEST_DIR` would collide), but do not invent unbounded per-task `/tmp/cb-<slug>` paths either—assign each active concurrent worker a slot from a small fixed pool (`CARGO_TARGET_DIR=/tmp/cb-slot-1` .. `/tmp/cb-slot-3`), keep it across retries within the wave, pass `CARGO_INCREMENTAL=0` for one-shot verifier/gate runs, and delete retired `/tmp/cb-*` directories (or prune stale artefacts) once the wave completes to avoid `ENOSPC`.
 2. **Strictly non-overlapping crate/file ownership:** Assign disjoint crates or files before starting. Two agents must never edit the same file simultaneously.
 3. **No shared-tree git mutations:** Never run `git add`, `git commit`, `git reset`, `git checkout`, or `git config` inside a shared working copy unless you are working in your own isolated git worktree/share.
 4. **Never use `/private/tmp` (or `/tmp` worktrees/file-tool paths):** On macOS `/tmp` resolves to `/private/tmp` outside the workspace, causing permission prompts and sandbox-locked leftovers. Keep `git worktree` checkouts and scratch files inside the workspace (e.g. `../.cb-worktrees/<agent-name>`), never pass `/tmp` or `/private/tmp` to `read_file`/`edit_file`/`write_file`, and limit `/tmp` to `run_command` env vars (`CARGO_TARGET_DIR`, `CARGO_HOME`, `RUSTUP_HOME`).

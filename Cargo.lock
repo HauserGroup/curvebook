@@ -741,7 +741,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "curvebook"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -763,7 +763,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-chart"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-fit",
@@ -778,7 +778,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-cli"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-doc"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-math",
  "curvebook-palette",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-engine"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -836,7 +836,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-fit"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-math",
@@ -847,7 +847,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-format"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "crc32fast",
  "curvebook-doc",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-math"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-testkit",
  "serde",
@@ -871,7 +871,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-mcp"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-engine",
@@ -888,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-palette"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -896,7 +896,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-pdf"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-platform"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "getrandom 0.4.3",
  "serde_json",
@@ -917,7 +917,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-render"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "crc32fast",
  "curvebook-chart",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-stats"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-math",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-svg"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "crc32fast",
  "curvebook-chart",
@@ -960,7 +960,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-testkit"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-platform",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-text"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-math",
  "curvebook-palette",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-tools"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-transform"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-doc",
  "curvebook-math",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-ui-egui"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "curvebook-chart",
  "curvebook-doc",
@@ -1034,7 +1034,7 @@ dependencies = [
 
 [[package]]
 name = "curvebook-web"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
@@ -4439,7 +4439,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "crc32fast",
  "curvebook-doc",
