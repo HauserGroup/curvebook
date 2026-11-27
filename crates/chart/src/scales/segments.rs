@@ -45,6 +45,8 @@ pub struct ResolvedSegment {
     pub span_end_pt: f64,
     pub major_tick_interval: Option<f64>,
     pub minor_ticks_per_interval: u8,
+    /// Whether `Log10` segments with `minor_ticks_per_interval == 0` draw conventional `2..=9 × 10^k` minor ticks.
+    pub auto_log_minor_ticks: bool,
 }
 
 impl ResolvedSegment {
@@ -309,6 +311,7 @@ impl ResolvedAxis {
                 span_end_pt,
                 major_tick_interval: seg.major_tick_interval,
                 minor_ticks_per_interval: seg.minor_ticks_per_interval,
+                auto_log_minor_ticks: seg.auto_log_minor_ticks,
             });
 
             if idx + 1 < n {

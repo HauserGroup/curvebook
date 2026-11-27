@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
+  <!-- Audience: Tier 1 Scientist Guide — keep answers short, plain, and scannable; link to docs/reference/*.md or pzfx-format-specification.html for exhaustive technical detail. -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell">
     <header class="site-header">
@@ -47,7 +48,7 @@
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
           <p class="eyebrow">Frequently asked questions · Reference overview</p>
           <h1 id="page-title">CurveBook FAQ.<br><span>Quick facts &amp; answers.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> is a free, open-source (MIT OR Apache-2.0) biostatistics, nonlinear regression, and scientific graphing application written in pure Rust. It runs offline with zero telemetry on macOS, Windows, Linux, and FreeBSD.</p>
+          <p class="lead"><strong>CurveBook</strong> is free, open-source software for biostatistics, curve fitting, and scientific graphs. It runs offline with zero telemetry on macOS, Windows, and Linux (plus a FreeBSD CLI).</p>
           <ul class="pill-row" aria-label="Core project facts">
             <li class="pill">MIT OR Apache-2.0</li>
             <li class="pill">Zero telemetry</li>
@@ -97,7 +98,7 @@
                 </tr>
                 <tr>
                   <th scope="row">Platforms</th>
-                  <td itemprop="operatingSystem">macOS, Windows, Linux, FreeBSD preview</td>
+                  <td itemprop="operatingSystem">macOS, Windows, Linux, FreeBSD (CLI)</td>
                 </tr>
                 <tr>
                   <th scope="row">Telemetry &amp; network</th>
@@ -113,7 +114,7 @@
                 </tr>
                 <tr>
                   <th scope="row">Interfaces</th>
-                  <td>Desktop GUI, <code>curvebook-cli</code>, local stdio MCP server</td>
+                  <td>Desktop app, command-line tool (<code>curvebook-cli</code>), local MCP server</td>
                 </tr>
                 <tr>
                   <th scope="row">Source code</th>
@@ -133,56 +134,63 @@
           <article id="faq-free-open-source" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">Is CurveBook free and open source?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Yes, CurveBook is completely free and open-source software dual-licensed under MIT OR Apache-2.0, with no account, license key, or subscription required. You can use it for academic, personal, or commercial research, inspect the Rust source code on <a href="https://github.com/HauserGroup/curvebook">GitHub</a>, and redistribute or modify it under either license.</p>
+              <p itemprop="text">Yes. CurveBook is free, open-source software dual-licensed under MIT OR Apache-2.0. It requires no account, license key, or subscription. You can use it for academic, personal, or commercial research, inspect the source code on <a href="https://github.com/HauserGroup/curvebook">GitHub</a>, and share or adapt it under either license.</p>
             </div>
           </article>
 
           <article id="faq-open-pzfx" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">Can I open or export <code>.pzfx</code> and <code>.prism</code> files on Linux, macOS, or Windows?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Yes. CurveBook reads all eight data-table archetypes (including replicate, mean/SD, mean/SEM, interval, and quartile subcolumns), rich text, Symbol-font characters, subcolumn titles, display decimals, exclusions, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files offline on Linux, macOS, Windows, and FreeBSD. Legacy binary <code>.pzf</code> files — including <code>PCFF</code>-prefixed files carrying a <code>.pzfx</code> extension (~15–18% of public <code>.pzfx</code>-named files) — are not supported and must be re-saved as XML <code>.pzfx</code> or <code>.prism</code>. From <code>.prism</code> files, CurveBook also imports preferred analysis results as clearly labelled read-only snapshots (which never feed CurveBook calculations) and raster preview PNGs for opaque binary graphs and layouts. For export, <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications (structure-conformant files may still be rejected by other applications for non-structural reasons such as checksums, cross-references, or version gates). <code>.prism</code> export is not shipped as a supported format at Beta because real <code>.prism</code> archives contain undocumented binary and digest entries; use <code>.pzfx</code> export for data interchange. See the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> guide</a> and the <a href="manual/latest/files.html">files reference</a>.</p>
+              <p itemprop="text">Yes. CurveBook opens data tables, exclusions, rich text, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files offline on macOS, Windows, Linux, and FreeBSD. Legacy binary <code>.pzf</code> files (including binary <code>PCFF</code> files named <code>.pzfx</code>) are not supported; re-save them as XML <code>.pzfx</code> or <code>.prism</code> first. Stored <code>.prism</code> results open as read-only snapshots, with graph previews when available. For export, <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications. Beta does not ship <code>.prism</code> export because real archives depend on undocumented binary and digest entries. See the <a href="open-pzfx-files.html">.pzfx and .prism guide</a>, the <a href="pzfx-format-specification.html">format specification</a>, and the <a href="manual/latest/files.html">files reference</a>.</p>
             </div>
           </article>
 
           <article id="faq-offline-telemetry" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">Does CurveBook work offline? Does it collect telemetry?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">CurveBook works completely offline and collects zero telemetry, zero analytics, and zero crash reports. It makes no outbound network calls and includes no auto-updater, enforced by automated repository checks (<code>cargo xtask telemetry</code>). Full per-platform local storage details are documented in the <a href="privacy.html">Privacy Policy</a> and <a href="manual/latest/privacy-security.html">privacy &amp; security reference</a>.</p>
+              <p itemprop="text">Yes. CurveBook works completely offline with zero telemetry, analytics, or crash reports. It makes no network calls and has no auto-updater, verified by automated checks on every change. See the <a href="privacy.html">Privacy Policy</a> and <a href="manual/latest/privacy-security.html">privacy &amp; security reference</a> for local storage details.</p>
             </div>
           </article>
 
           <article id="faq-operating-systems" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">Which operating systems does CurveBook support?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">CurveBook provides native Beta packages for macOS (signed and notarized universal <code>arm64</code> + <code>x86_64</code> <code>.dmg</code>), Windows (<code>x64</code> and <code>arm64</code> <code>.msi</code>, currently unsigned in Beta), Linux (<code>x86_64</code> and <code>aarch64</code> <code>.AppImage</code>), and FreeBSD (<code>x86_64</code> preview <code>.tar.gz</code>). Every release bundle includes both the desktop GUI and <code>curvebook-cli</code>, paired with <code>SHA256SUMS.txt</code> and GitHub Sigstore build provenance attestations; see the <a href="manual/latest/get-started.html">get started guide</a>.</p>
+              <p itemprop="text">Beta releases include native installers for macOS (signed universal <code>.dmg</code>), Windows (unsigned x64 and ARM64 <code>.msi</code>), and Linux (x86_64 and ARM64 <code>.AppImage</code>). FreeBSD x86_64 ships as a CLI-only <code>.tar.gz</code> archive. Every desktop installer bundles both the desktop app and <code>curvebook-cli</code>, with checksums and build attestations. See the <a href="manual/latest/get-started.html">get started guide</a> for install and verification steps.</p>
             </div>
           </article>
 
           <article id="faq-analyses-fitting" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">What statistical analyses and nonlinear curve-fitting methods does CurveBook include?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">CurveBook includes descriptive statistics, parametric and nonparametric group comparisons (<em>t</em>-tests, Mann-Whitney, Wilcoxon, Kruskal-Wallis, Friedman), one-way, multi-way, repeated-measures, and REML mixed-effects ANOVA with multiple-comparison post tests and compact letter display, contingency and ROC analysis, Kaplan-Meier and Cox proportional hazards survival modeling, generalized linear models, PCA, clustering, power and sample-size planning, and weighted nonlinear regression. Nonlinear regression supports parametric equations, custom DSL formulas, ODE models, profile-likelihood confidence intervals, ROUT outlier handling, and AICc or extra sum-of-squares <em>F</em> model comparison; browse the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve-fitting guide</a>.</p>
+              <p itemprop="text">CurveBook includes descriptive statistics, <em>t</em>-tests, nonparametric tests, and ordinary, repeated-measures, and mixed-effects ANOVA with multiple comparisons. It also supports contingency tables, ROC curves, Kaplan–Meier and Cox survival models, GLMs, PCA, clustering, and power planning. Nonlinear regression offers built-in equations, custom formulas, outlier detection, confidence intervals, and model comparison. Browse the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve-fitting reference</a>.</p>
             </div>
           </article>
 
           <article id="faq-share-project" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">How do I share or merge CurveBook projects?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Send a single <code>.curvebook</code> project archive, an unpacked <code>.curvebook.d/</code> directory for Git version control, or a reusable <code>.cbtemplate</code> file so your collaborator can reopen the full workspace in CurveBook. To combine sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file into your current workspace, use <strong>File › Merge Project…</strong>: CurveBook performs a one-time copy with automatic sheet ID remapping and removable navigator origin badges (with no live cross-file links). All data tables, formulas, statistical results, graphs, page layouts, and notes travel together in one deterministic project; note that externally linked CSV or TSV paths keep provenance metadata without automatically bundling external files.</p>
+              <p itemprop="text">Share a single <code>.curvebook</code> file, a Git-friendly <code>.curvebook.d/</code> folder, or a reusable <code>.cbtemplate</code> template. Data tables, formulas, results, graphs, layouts, and notes all travel together. Choose <strong>File › Merge Project…</strong> to copy sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file with removable origin badges.</p>
             </div>
           </article>
 
           <article id="faq-ai-assistants" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">Can AI assistants use CurveBook?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Yes, CurveBook ships with a built-in local stdio Model Context Protocol (MCP) server (<code>curvebook-cli mcp</code>) that lets AI assistants create tables, run analyses, fit curves, and export publication figures directly into <code>.curvebook</code> files. The MCP server opens no network sockets, supports <code>--workdir &lt;dir&gt;</code> filesystem confinement and optional live desktop attachment via <code>--control-port</code>, and produces standard projects you can inspect interactively in the desktop app. See the <a href="manual/latest/mcp-for-beginners.html">beginner's MCP guide</a> and <a href="manual/latest/automation/mcp.html">MCP automation reference</a>.</p>
+              <p itemprop="text">Yes. CurveBook includes a local Model Context Protocol (MCP) server (<code>curvebook-cli mcp</code>). Your AI assistant can build tables, run analyses, fit curves, and export graphs directly into standard <code>.curvebook</code> files. Everything stays offline and restricted to the folder you pick, and you can inspect every project in the desktop app. See the <a href="manual/latest/mcp-for-beginners.html">beginner's MCP guide</a> and <a href="manual/latest/automation/mcp.html">MCP reference</a>.</p>
             </div>
           </article>
 
           <article id="faq-clean-room" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
             <h3 itemprop="name">How is CurveBook developed?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">CurveBook is an independent open-source project written from scratch in safe Rust using clean-room engineering based on published, peer-reviewed statistical and numerical literature. No commercial statistical or graphing software is used to develop CurveBook, and no proprietary code or assets are copied; automated checks (<code>cargo xtask cleanroom</code> and <code>cargo xtask brands</code>) enforce these boundaries on every change.</p>
+              <p itemprop="text">CurveBook is an independent open-source project built from scratch in Rust from published scientific literature. No commercial statistical software is used in development, and no proprietary code or assets are copied. Automated repository checks enforce these clean-room boundaries on every change. See our <a href="manual/latest/privacy-security.html#clean-room">clean-room policy</a>.</p>
+            </div>
+          </article>
+
+          <article id="faq-cite" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
+            <h3 itemprop="name">How do I cite CurveBook in a paper?</h3>
+            <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
+              <p itemprop="text">Include the exact CurveBook version you ran. You can copy it from <strong>Help › Cite CurveBook</strong>, <strong>About CurveBook</strong>, the result <strong>Methods</strong> panel, or <code>curvebook-cli --version</code>. Ready-to-paste plain-text and BibTeX references are in <a href="manual/latest/get-started.html#how-to-cite">How to cite CurveBook</a> and <a href="https://github.com/HauserGroup/curvebook/blob/main/CITATION.cff">CITATION.cff</a>.</p>
             </div>
           </article>
         </section>
@@ -193,7 +201,7 @@
         <div class="download-content is-single">
           <div>
             <h2 id="get-title">Download CurveBook</h2>
-            <p>Installers and archives for macOS, Windows, Linux, and FreeBSD are published on GitHub Releases. Every package includes the desktop app and <code>curvebook-cli</code>.</p>
+            <p>Installers for macOS, Windows, and Linux (desktop app and CLI), plus a FreeBSD CLI archive, are on GitHub Releases.</p>
             <div class="download-links">
               <a href="index.html#downloads">Downloads</a>
               <a href="manual/latest/get-started.html">Install &amp; checksums</a>

@@ -1,59 +1,63 @@
 # Curve fitting & nonlinear regression reference
 
-This reference covers CurveBook's parametric linear and nonlinear regression algorithms, residual weighting, parameter sharing and bounds, profile-likelihood uncertainty, diagnostic safeguards, model comparison, unknown interpolation, custom equation DSL, and adaptive ODE solver.
+<!-- Audience: Tier 2 Technical Reference — complete nonlinear regression algorithms, weighting formulas, constraints, diagnostics, DSL/ODE specs, and citations belong here; keep desktop-gui.md and get-started.md concise for beginners. -->
 
-For the full catalog of built-in equations, parameters, and defaults, see the [Parametric Equations Registry](registry/equations.html). For sheet-level execution and table compatibility, see [Nonlinear Regression](analyses.md#analysis-nonlinear-regression), [Linear Regression](analyses.md#analysis-linear-regression), [Simple Logistic Regression](analyses.md#analysis-simple-logistic-regression), and the [Command Reference](../commands.md).
+Use this technical reference to look up exact regression objectives, weighting formulas, parameter constraints, uncertainty diagnostics, and custom equation or ODE rules. For a quick interactive walkthrough of running a curve fit and viewing live graphs, start with the [Desktop GUI overview](desktop-gui.md).
+
+Browse the [Parametric Equations Registry](registry/equations.html) for compact tables of built-in models, parameters, and defaults. For sheet-level execution options and table compatibility, see [Nonlinear Regression](analyses.md#analysis-nonlinear-regression), [Linear Regression](analyses.md#analysis-linear-regression), [Simple Logistic Regression](analyses.md#analysis-simple-logistic-regression), and the [Command Reference](../commands.md).
 
 ## Fitting methods & estimation objectives {#fitting-methods}
 
-Nonlinear regression fits a parametric model $y = f(x; \theta) + \varepsilon$ over active (non-excluded) observations via [`analyze.run`](../commands.md), `fit.run`, or `analysis.add` (`nonlinear`). Inputs can be raw replicates or [pre-summarized XY subcolumns](tables.md#subcolumn-modes) (`MeanSdN`, `MeanSemN`, `MeanCvN`), optionally restricted to a predictor interval with `x_range_filter`.
+Nonlinear regression fits a parametric model $y = f(x; \theta) + \varepsilon$ over active (non-excluded) observations via [`analyze.run`](../commands.md), `fit.run`, or `analysis.add` (`nonlinear`). Inputs can be raw replicates or [pre-summarized XY subcolumns](tables.md#subcolumn-modes) (`MeanSdN`, `MeanSemN`, `MeanCvN`). Optional predictor bounds restrict the fit via `x_range_filter`.
+
+Choose least squares for roughly Gaussian scatter, Poisson deviance for non-negative counts, robust Cauchy to down-weight outliers without deletion, or ROUT to flag outliers and refit clean inliers.
 
 > [!NOTE]
 > Under weighted least squares, Poisson deviance, or replicate-moment weighting, `weighted_ss` is the objective minimized by the optimizer. Reported `rss` and unweighted $R^2 = 1 - \text{rss} / \text{TSS}$ remain expressed in original response $Y$ units (Motulsky & Christopoulos 2004).
 
 ### 1. Least squares (`method: "least_squares"`)
 
-Minimizes the weighted sum of squared residuals:
+Use least squares as the default when scatter around the curve is roughly Gaussian (or becomes uniform after applying residual weighting). It minimizes the weighted sum of squared residuals:
 
 $$SS_w(\theta) = w_1 (y_1 - \hat{y}_1)^2 + w_2 (y_2 - \hat{y}_2)^2 + ... + w_N (y_N - \hat{y}_N)^2$$
 
 - **Core optimizer:** Uses trust-region Levenberg–Marquardt (Levenberg 1944; Marquardt 1963; Moré 1978 / MINPACK-1 `lmder`) with column-scaled QR decomposition on the augmented Jacobian $[J; \sqrt{\lambda} D]$. Steps accept at $\rho \ge 10^{-4}$, contract in $[0.1, 0.5]$, expand up to $\text{max}(\delta, 2 |D p|)$, and project active faces onto box bounds.
-- **Tolerances & budgets:** Relative residual reduction `ftol = 1e-15`, parameter step `xtol = 1e-14`, projected gradient cosine `gtol = 1e-13`, and stall threshold `stall_gtol = 1e-4` (with `convergence_strictness` presets `Default`, `Quick`, `Medium`, and `Strict`). Default `max_iters` is `1000` (hard cap 50,000). Replicate subcolumns can enter as `IndividualReplicates` (default) or unweighted row means (`RowMeansOnly` via `replicate_fit_mode`).
-- **Warm start & rescue:** When `use_simplex_warm_start` is `true` (default), bounded Nelder–Mead simplex search (Nelder & Mead 1965; Lagarias et al. 1998) locates an initial basin or rescues stalled and non-finite starts.
+- **Tolerances & budgets:** Stopping thresholds default to relative residual reduction `ftol = 1e-15`, parameter step `xtol = 1e-14`, projected gradient cosine `gtol = 1e-13`, and stall threshold `stall_gtol = 1e-4`. Select `convergence_strictness` presets (`Default`, `Quick`, `Medium`, `Strict`) and `max_iters` (default `1000`, hard cap `50,000`). Replicate subcolumns enter as `IndividualReplicates` (default) or unweighted row means (`RowMeansOnly` via `replicate_fit_mode`).
+- **Warm start & rescue:** When `use_simplex_warm_start` is `true` (default), bounded Nelder–Mead simplex search (Nelder & Mead 1965; Lagarias et al. 1998) finds an initial basin. It also rescues stalled or non-finite starting points.
 - **Jacobians:** Built-in models use analytical derivatives $df / d\theta_j$ where available. Other models (including all custom DSL equations) use central finite differences $h = 10^{-6} \cdot \text{max}(|\theta_j|, 1)$, switching to interior one-sided differences $h = 1.5 \times 10^{-8} \cdot \text{max}(|\theta_j|, 1)$ at active bounds (Nocedal & Wright 2006).
 
 ### 2. Poisson deviance (`method: "poisson_deviance"`)
 
-For non-negative count data $y_i \ge 0$ with strictly positive predicted mean $\hat{\mu}_i = f(x_i; \theta) > 0$, minimizes exact Poisson log-likelihood deviance (McCullagh & Nelder 1989):
+Use Poisson deviance for non-negative count data ($y_i \ge 0$) with strictly positive predicted mean $\hat{\mu}_i = f(x_i; \theta) > 0$. It minimizes exact Poisson log-likelihood deviance (McCullagh & Nelder 1989):
 
 $$D(\theta) = 2 \cdot [ y_1 \ln(y_1 / \hat{\mu}_1) - (y_1 - \hat{\mu}_1) ] + ... + 2 \cdot [ y_N \ln(y_N / \hat{\mu}_N) - (y_N - \hat{\mu}_N) ]$$
 
 Terms with $y_i = 0$ contribute $2 \hat{\mu}_i$ smoothly.
 
-- **Solver:** Uses iteratively reweighted least squares (IRLS; Green 1984) with working weights $1 / \hat{\mu}_i$ around inner trust-region Levenberg–Marquardt updates until relative deviance change drops below $10^{-10}$.
+- **Solver:** Uses iteratively reweighted least squares (IRLS; Green 1984) with working weights $1 / \hat{\mu}_i$. Inner trust-region Levenberg–Marquardt updates repeat until relative deviance change drops below $10^{-10}$.
 - **Domain guards:** Negative observed counts ($y_i < 0$) fail with `ImpossibleWeights`. Custom Gaussian `weighting` options are ignored in favor of exact Poisson variance $V(\mu) = \mu$.
-- **Inference:** Fixes dispersion at $\phi = 1$, using asymptotic Fisher information covariance, two-sided normal $z$ quantiles for curve bands, and exact Poisson log-likelihood $\text{AIC}_c$ and $\text{BIC}$.
+- **Inference:** Fixes dispersion at $\phi = 1$ and uses asymptotic Fisher information covariance. Curve bands use two-sided normal $z$ quantiles, while model criteria use exact Poisson log-likelihood $\text{AIC}_c$ and $\text{BIC}$.
 
 ### 3. Robust Cauchy regression (`method: "robust_cauchy"`)
 
-Outlier-resistant Lorentzian M-estimator minimizing the logarithmic loss (Motulsky & Brown 2006):
+Use robust Cauchy regression when outliers distort least-squares estimates and you want to down-weight extreme residuals without deleting points. This Lorentzian M-estimator minimizes the logarithmic loss (Motulsky & Brown 2006):
 
 $$L(\theta) = \ln(1 + (r_1 / \text{RSDR})^2) + ... + \ln(1 + (r_N / \text{RSDR})^2)$$
 
-Cauchy IRLS optimizes around the Robust Standard Deviation of Residuals (`RSDR`), computed from the $68.27\text{th}$ percentile of weighted residual magnitudes scaled by $N / (N - K_{\text{free}})$. Observations stay in the dataset without binary deletion.
+Cauchy IRLS scales residuals by the Robust Standard Deviation of Residuals (`RSDR`). CurveBook computes `RSDR` from the $68.27\text{th}$ percentile of weighted residual magnitudes scaled by $N / (N - K_{\text{free}})$. All observations remain in the dataset without binary deletion.
 
 > [!IMPORTANT]
-> Under `robust_cauchy`, parametric standard errors, confidence intervals, parameter dependency, Hougaard skewness, residual SD ($S_{y.x}$), $\text{AIC}_c$, $\text{BIC}$, studentized residuals, replicate lack-of-fit tests, and confidence/prediction bands are **intentionally suppressed** (reported as empty cells or open intervals). Standard Gaussian linearization covariance is invalid under non-quadratic Cauchy loss; best-fit parameters, unweighted $R^2$, and `RSDR` remain reported. Use `rout_outlier_elimination` when you need parametric inference on clean inliers.
+> Under `robust_cauchy`, parametric standard errors, confidence intervals, parameter dependency, and Hougaard skewness are **intentionally suppressed** (reported as empty cells or open intervals). Residual SD ($S_{y.x}$), $\text{AIC}_c$, $\text{BIC}$, studentized residuals, replicate lack-of-fit tests, and confidence or prediction bands are omitted as well. Standard Gaussian linearization covariance is invalid under non-quadratic Cauchy loss, while best-fit parameters, unweighted $R^2$, and `RSDR` remain reported. Use `rout_outlier_elimination` when you need parametric inference on clean inliers.
 
 ### 4. ROUT outlier elimination (`method: "rout_outlier_elimination"`)
 
-Implements the three-stage ROUT procedure (Motulsky & Brown 2006):
+Use ROUT when you want automatic outlier screening followed by standard parametric inference (SEs, CIs, bands, and model comparisons) on the retained inliers. It implements the three-stage ROUT procedure (Motulsky & Brown 2006):
 
-1. **Robust Cauchy fit:** Fits the model with `robust_cauchy` to establish a resistant baseline and computes `RSDR` on base-weighted residuals $r_{w,i} = \sqrt{w_i} (y_i - \hat{y}_i)$. Weighting (such as `relative_square` $1/Y^2$) maps residuals onto a uniform scale before testing.
-2. **FDR screening over extreme tail:** Evaluates two-sided Student-$t$ $P$ values against `RSDR` ($t_i = |r_{w,i}| / \text{RSDR}$) and applies Benjamini–Hochberg (1995) step-up FDR control **only** across the top 30% of observations furthest from the curve (`start = floor(0.70 * N)`). The remaining lower ~70% of residuals are never tested (`q_value = 1.0`, `is_outlier = false`).
+1. **Robust Cauchy fit:** Fits the model with `robust_cauchy` to establish a resistant baseline and computes `RSDR` on base-weighted residuals $r_{w,i} = \sqrt{w_i} (y_i - \hat{y}_i)$. Weighting (such as `relative_square` $1/Y^2$) places residuals on a uniform scale before screening.
+2. **FDR screening over extreme tail:** Evaluates two-sided Student-$t$ $P$ values against `RSDR` ($t_i = |r_{w,i}| / \text{RSDR}$). Benjamini–Hochberg (1995) step-up FDR control runs **only** across the top 30% of observations furthest from the curve (`start = floor(0.70 * N)`). The remaining lower ~70% of residuals are never tested (`q_value = 1.0`, `is_outlier = false`).
 3. **Least-squares refit:** Re-optimizes retained inliers with ordinary or weighted least squares, seeded from the robust Cauchy parameters.
 
-- **FDR threshold & modes:** `fdr_q_percent` is specified in percentage points (default `1.0` for $Q = 1\%$) and must satisfy $0 < Q \le 50$ in nonlinear regression (compare [univariate column outlier detection](analyses.md#analysis-outlier-detection), which allows $(0, 100]$). `outlier_handling` selects `Eliminate`, `IdentifyAndCountOnly` (reports flagged points without removing them from the least-squares fit), or `None`; `emit_cleaned_data_tab` emits an analyzable cleaned data tab with flagged outliers omitted.
+- **FDR threshold & modes:** `fdr_q_percent` sets the false discovery rate $Q$ in percentage points (default `1.0` for $Q = 1\%$). Nonlinear regression requires $0 < Q \le 50$ (unlike [univariate column outlier detection](analyses.md#analysis-outlier-detection), which allows $(0, 100]$). Set `outlier_handling` to `Eliminate`, `IdentifyAndCountOnly` (flags points without removing them from the least-squares fit), or `None`. Enable `emit_cleaned_data_tab` to generate an analyzable cleaned data tab with flagged outliers omitted.
 - **Insufficient inliers:** If ROUT excludes too many points to retain residual degrees of freedom, the solver returns `InsufficientData` or a non-converged warning. Detected outlier coordinates and $q$-values appear in the diagnostics tab without mutating the source [data table](concepts.md#cell-exclusions).
 
 ### Optimizer status outcomes
@@ -68,7 +72,7 @@ Implements the three-stage ROUT procedure (Motulsky & Brown 2006):
 
 ## Weighting schemes & replicate summary moments {#weighting-and-moments}
 
-The `weighting` option scales residuals before least-squares, Cauchy, and ROUT fitting (`weighting_source` chooses static `ObservedY` weights or IRLS curve-height `PredictedY` weights for response-dependent schemes). It is ignored by `poisson_deviance`, and explicit cell-level weights take precedence when attached. See also [Parametric Equations Registry: Weighting Schemes](registry/equations.html#weighting-schemes).
+Use weighting when experimental scatter grows or shrinks systematically across $Y$ or $X$, such as constant percentage CV across assay concentrations. The `weighting` option scales residuals before least-squares, Cauchy, and ROUT fitting, while `weighting_source` selects static `ObservedY` weights or IRLS curve-height `PredictedY` weights for response-dependent schemes. Weighting is ignored under `poisson_deviance`, and explicit cell-level weights take precedence when attached (see also [Parametric Equations Registry: Weighting Schemes](registry/equations.html#weighting-schemes)).
 
 | Canonical key | Formula | Error model & guard |
 | :--- | :--- | :--- |
@@ -84,17 +88,17 @@ Any non-finite, zero-denominator, or overflowing weight fails cleanly with `Impo
 
 ### Replicate summary subcolumns (`MeanSdN`, `MeanSemN`, `MeanCvN`)
 
-When the source XY table uses a [pre-summarized subcolumn mode](tables.md#subcolumn-modes) (`MeanSdN`, `MeanSemN`, `MeanCvN`) and `weighting` is `none` (or without explicit weights and not `observed_sd`), the solver reconstructs exact replicate-sufficient statistics from $(\text{mean}_i, \text{SD}_i, n_i)$:
+When an XY table uses a [pre-summarized subcolumn mode](tables.md#subcolumn-modes) (`MeanSdN`, `MeanSemN`, `MeanCvN`) without explicit weights or `observed_sd`, the solver reconstructs exact replicate-sufficient statistics from $(\text{mean}_i, \text{SD}_i, n_i)$:
 
 - Each row's weighted residual scales by $\sqrt{w_i \cdot n_i}$.
 - Total sample size sums $N = n_1 + ... + n_M$.
-- Pooled within-row variance contributes $w_i (n_i - 1) \text{SD}_i^2$ into `weighted_ss` and unweighted `rss`, matching an equivalent raw-replicate fit identically for estimates, parameter SEs, $\text{AIC}_c$, and replicate lack-of-fit tests (Motulsky & Christopoulos 2004).
+- Pooled within-row variance contributes $w_i (n_i - 1) \text{SD}_i^2$ into `weighted_ss` and unweighted `rss`. This matches an equivalent raw-replicate fit identically for estimates, parameter SEs, $\text{AIC}_c$, and replicate lack-of-fit tests (Motulsky & Christopoulos 2004).
 
 Under `observed_sd`, each summary row contributes one point weighted by $1 / \text{SD}_i^2$ (requiring finite $\text{SD}_i > 0$).
 
 ## Parameter scopes, bounds & dynamic hooks {#parameter-scopes}
 
-Each entry in `parameter_rules` targets a case-insensitive parameter `name` and controls its initial guess, box constraints, sharing across datasets, or constant value:
+Use `parameter_rules` to pin known assay constants, enforce physical bounds, or share parameters across multiple datasets in a global fit. Each rule targets a case-insensitive parameter `name` and sets its scope, starting value, or limits:
 
 | Canonical `scope` | Behavior & free parameters |
 | :--- | :--- |
@@ -108,17 +112,20 @@ Each entry in `parameter_rules` targets a case-insensitive parameter `name` and 
 Parameter rule details and guards:
 
 - **Hook validation:** `hooked_constant` fails cleanly if the referenced constant or scalar is missing, non-finite, or dirty.
-- **Column-title unit suffixes:** `column_title_constant` accepts scientific notation and unit suffixes (`M`, `mM`, `uM`, `nM`, `pM`, `fM`, `%`, `s`, `ms`, `min`, `h`, `Hz`, `deg`), failing cleanly if a header cannot be parsed.
-- **Initial guesses, box bounds & relational constraints:** When `initial_override` is omitted, model heuristics compute dataset-aware (or pooled `shared_global`) starting values. `lower_bound` and `upper_bound` must be finite with $\text{lower} \le \text{upper}$ and intersect with intrinsic domain bounds (such as positive rate constants). Setting $\text{lower} = \text{upper}$ fixes the parameter (0 free parameters). Relational inequality constraints between parameter pairs (such as `KFast > KSlow` in two-phase decay or `KdLo > KdHi` in two-site binding) are enforced directly by the solver and can be declared in custom equations via `[Constraints]`.
-- **Derived-scalar uncertainty:** Built-in and custom `[Transforms]` derived scalars (such as `EC50 = 10^LogEC50`, `KB = 10^-pKB`, `t_half = ln(2)/K`, `Span = Top - Bottom`, and logistic or Gompertz analytical inflection points) report propagated standard errors and confidence intervals using exact monotonic endpoint mapping (reversing bounds when the transform derivative is negative) or multi-parameter delta-method propagation.
-- **Model default rules:** Some built-in equations apply defaults when no user rule overrides them—for example, centered polynomials fix `XCenter` to the active predictor sample mean $\bar{x}$ to preserve Jacobian conditioning.
+- **Column-title unit suffixes:** `column_title_constant` accepts scientific notation and unit suffixes (`M`, `mM`, `uM`, `nM`, `pM`, `fM`, `%`, `s`, `ms`, `min`, `h`, `Hz`, `deg`). Unparseable headers fail cleanly.
+- **Initial guesses & box bounds:** When `initial_override` is omitted, model heuristics compute dataset-aware (or pooled `shared_global`) starting values. `lower_bound` and `upper_bound` must be finite with $\text{lower} \le \text{upper}$ and intersect with intrinsic domain bounds (such as positive rate constants). Setting $\text{lower} = \text{upper}$ fixes the parameter (0 free parameters).
+- **Relational constraints:** Pairwise parameter inequalities (such as `KFast > KSlow` in two-phase decay or `KdLo > KdHi` in two-site binding) are enforced directly by the solver. Custom equations can declare them in `[Constraints]`.
+- **Derived-scalar uncertainty:** Built-in and custom `[Transforms]` scalars—such as `EC50 = 10^LogEC50`, `KB = 10^-pKB`, `t_half = ln(2)/K`, `Span = Top - Bottom`, and logistic or Gompertz analytical inflection points—report propagated SEs and CIs. CurveBook applies exact monotonic endpoint mapping (reversing bounds when the transform derivative is negative) or multi-parameter delta-method propagation.
+- **Model default rules:** Some built-in equations apply defaults when no user rule overrides them. For example, centered polynomials fix `XCenter` to the active predictor sample mean $\bar{x}$ to preserve Jacobian conditioning.
 
 ## Parameter uncertainty, diagnostics & safeguards {#uncertainty-and-diagnostics}
 
 ### Profile-likelihood & Wald confidence intervals
 
-- **Wald asymptotic covariance:** $\text{Cov}(\hat{\theta}) = s_w^2 (J^T J)^{-1}$ with $s_w^2 = SS_w / \text{df}$ ($\text{df} = N - K_{\text{free}}$) for least squares, or $\text{Cov}(\hat{\theta}) = (J^T W J)^{-1}$ ($W = \text{diag}(\hat{\mu}_i)$) for Poisson deviance. Symmetric Wald intervals use Student $t_{\text{df}, \alpha/2}$ (least squares) or normal $z_{\alpha/2}$ (Poisson).
-- **Venzon–Moolgavkar (1988) profile-likelihood intervals (`profile_likelihood_ci: true`, default):** For each free parameter $\theta_j$, nuisance parameters $\theta_{-j}$ are re-optimized via reduced trust-region Levenberg–Marquardt (`ftol = 1e-12`, `xtol = 1e-12`) across an outward bracket scan refined by Brent root finding (`rel_tol = 1e-7`) to solve:
+Nonlinear parameter estimates often have asymmetric uncertainty distributions, so CurveBook defaults to profile-likelihood confidence intervals instead of symmetric Wald limits.
+
+- **Wald asymptotic covariance:** Least squares uses $\text{Cov}(\hat{\theta}) = s_w^2 (J^T J)^{-1}$ with $s_w^2 = SS_w / \text{df}$ and $\text{df} = N - K_{\text{free}}$. Poisson deviance uses $\text{Cov}(\hat{\theta}) = (J^T W J)^{-1}$ with $W = \text{diag}(\hat{\mu}_i)$. Symmetric Wald intervals use Student $t_{\text{df}, \alpha/2}$ for least squares and normal $z_{\alpha/2}$ for Poisson.
+- **Venzon–Moolgavkar (1988) profile-likelihood intervals (`profile_likelihood_ci: true`, default):** For each free parameter $\theta_j$, CurveBook re-optimizes the nuisance parameters $\theta_{-j}$ via reduced trust-region Levenberg–Marquardt (`ftol = 1e-12`, `xtol = 1e-12`). An outward bracket scan refined by Brent root finding (`rel_tol = 1e-7`) solves:
 
 $$SS_{\text{prof}}(\theta_j) = SS_{\text{min}} \cdot (1 + \frac{1}{\text{df}} F_{1 - \alpha}(1, \text{df}))$$
 
@@ -126,7 +133,7 @@ Under `poisson_deviance`, the critical threshold is the deviance increase $\Delt
 
 ### Hougaard Skewness ($g_1$)
 
-When $1 \le K_{\text{free}} \le 10$, $\text{df} > 0$, and the fit is identifiable, CurveBook evaluates Hougaard's (1985) third-order skewness measure $g_1$ per parameter from central second-derivative tensor approximations:
+Hougaard's (1985) third-order skewness $g_1$ measures how closely a parameter's sampling distribution behaves like a linear model. When $1 \le K_{\text{free}} \le 10$, $\text{df} > 0$, and the fit is identifiable, CurveBook evaluates $g_1$ per parameter from central second-derivative tensor approximations:
 
 - $|g_1| < 0.1$: effectively linear behavior (Wald and profile intervals agree closely).
 - $0.1 \le |g_1| < 0.25$: mild parameter-effects nonlinearity.
@@ -135,23 +142,24 @@ When $1 \le K_{\text{free}} \le 10$, $\text{df} > 0$, and the fit is identifiabl
 
 ### Collinearity & fit identifiability
 
-Variance-inflation collinearity per free parameter is reported via Bates & Watts dependency:
+Bates & Watts dependency measures variance inflation from parameter collinearity for each free parameter:
 
 $$R_j^2 = 1 - \frac{1}{(J^T J)_{jj} \cdot [(J^T J)^{-1}]_{jj}}$$
 
-- `Dependency > 0.99` emits a collinearity warning on the parameter and diagnostic checklist.
-- `identifiability_mode` selects three-way reporting: `IdentifyUnstableParameters` (greedy Hessian condition-number reduction marking unstable parameters), `IdentifyAmbiguousFits` (rank deficiency, $R_j^2 > 0.9999$, or open profile-likelihood bounds), or `ReportAll`. `show_standard_errors` overrides default SE visibility (omitted by default under asymmetric profile-likelihood CIs and shown under symmetric Wald CIs), and `fit_flag_rules` evaluates automated batch quality flags ($R^2$, $N$, dependency, residual normality, runs/lack-of-fit, and outlier count).
+- **Collinearity warning:** `Dependency > 0.99` emits a collinearity warning on the parameter and diagnostic checklist.
+- **Identifiability reporting (`identifiability_mode`):** Choose `IdentifyUnstableParameters` (greedy Hessian condition-number reduction marking unstable parameters), `IdentifyAmbiguousFits` (rank deficiency, $R_j^2 > 0.9999$, or open profile-likelihood bounds), or `ReportAll`.
+- **Standard errors & batch flags:** `show_standard_errors` overrides default SE visibility (omitted by default under asymmetric profile-likelihood CIs and shown under symmetric Wald CIs). `fit_flag_rules` evaluates automated batch quality flags for $R^2$, $N$, dependency, residual normality, runs/lack-of-fit, and outlier count.
 
 ### Residual diagnostics, range filters & threshold alerts
 
 - **Predictor range filter (`x_range_filter`):** Restricts fit observations to active rows in $X \in [x_{\text{min}}, x_{\text{max}}]$ (unbounded on omitted sides) and counts excluded points cleanly. Curve overlays can optionally render over an independent `[plot_x_min, plot_x_max]` range.
 - **Unweighted $R^2$ alert (`flag_r_squared_below`):** Optional threshold in $[0, 1]$ emitting a checklist warning whenever unweighted $R^2$ drops below the threshold.
-- **Internally studentized residuals:** $e_i = r_{w,i} / (s_w \sqrt{1 - h_{ii}})$ using tangent-plane leverage $h_{ii} = J_i (J^T J)^{-1} J_i^T$ (Cook & Weisberg 1982) when identifiable and $K_{\text{free}} \le 64$.
-- **Replicates lack-of-fit test:** Partitions residual variance or deviance across replicate $X$ values into pure error and lack of fit, reporting an $F$-statistic and $P$ value (honoring weighting, Poisson deviance, and summary moments).
-- **Runs test:** Wald–Wolfowitz runs test along ascending $X$, combined across datasets in global fits.
-- **Normality & homoscedasticity battery:** Shapiro–Wilk (falling back to D'Agostino–Pearson $K^2$ outside SW range), Anderson–Darling, and Lilliefors Kolmogorov–Smirnov on weighted or Pearson residuals, plus Spearman rank correlation of $|r_{w,i}|$ vs $\hat{y}_i$ ($n \ge 4$).
-- **Goodness-of-fit metrics:** Alongside unweighted $R^2$, residual sum of squares (`rss`), and `weighted_ss`, CurveBook reports Adjusted $R^2$, Willett & Singer (1988) Weighted $R^2$, root-mean-square error (`RMSE`) and residual standard deviation ($S_{y.x}$), and Poisson negative log-likelihood, residual deviance, pseudo-$R^2$, Pearson $\chi^2$, and dispersion ratio under `poisson_deviance`.
-- **Bands & AUC:** Delta-method mean confidence bands and observation prediction bands sampled over `curve_overlay_segments` (default 256; see [Graphs Reference](graphs.md)), plus fitted-curve vs. empirical trapezoidal Area Under the Curve (`fit_auc`).
+- **Internally studentized residuals:** Computes $e_i = r_{w,i} / (s_w \sqrt{1 - h_{ii}})$ using tangent-plane leverage $h_{ii} = J_i (J^T J)^{-1} J_i^T$ (Cook & Weisberg 1982) when identifiable and $K_{\text{free}} \le 64$.
+- **Replicates lack-of-fit test:** Partitions residual variance or deviance across replicate $X$ values into pure error and lack of fit. Reports an $F$-statistic and $P$ value while honoring weighting, Poisson deviance, and summary moments.
+- **Runs test:** Runs a Wald–Wolfowitz runs test along ascending $X$, combined across datasets in global fits.
+- **Normality & homoscedasticity battery:** Tests weighted or Pearson residuals with Shapiro–Wilk (falling back to D'Agostino–Pearson $K^2$ outside SW range), Anderson–Darling, and Lilliefors Kolmogorov–Smirnov. Also computes Spearman rank correlation of $|r_{w,i}|$ vs. $\hat{y}_i$ ($n \ge 4$).
+- **Goodness-of-fit metrics:** Least-squares fits report unweighted $R^2$, `rss`, `weighted_ss`, Adjusted $R^2$, Willett & Singer (1988) Weighted $R^2$, `RMSE`, and residual standard deviation ($S_{y.x}$). Under `poisson_deviance`, CurveBook also reports Poisson negative log-likelihood, residual deviance, pseudo-$R^2$, Pearson $\chi^2$, and dispersion ratio.
+- **Bands & AUC:** Samples delta-method mean confidence bands and observation prediction bands over `curve_overlay_segments` (default 256; see [Graphs Reference](graphs.md)). Also computes fitted-curve vs. empirical trapezoidal Area Under the Curve (`fit_auc`).
 
 > [!NOTE]
 > Every assumption checklist item in CurveBook is strictly diagnostics-only: it reports objective metrics and methodological limits without recommending alternative models or transformations (see [Quality of Life Capabilities](qol.md#active-qol)).
@@ -160,11 +168,13 @@ $$R_j^2 = 1 - \frac{1}{(J^T J)_{jj} \cdot [(J^T J)^{-1}]_{jj}}$$
 
 ### Comparing models (`comparison`)
 
+Use the extra-sum-of-squares $F$-test (or deviance LRT) when one model is a simpler nested case of the other. Use $\text{AIC}_c$ to compare either nested or non-nested models fit to the exact same active data and weights.
+
 1. **Nested extra-sum-of-squares $F$-test (`extra_sum_of_squares_f` / `shared_parameter_comparison`):** Compares a simpler constrained or null model (`alternative_equation_id` or globally shared parameters) against the fuller model ($\text{df}_1 > \text{df}_2$):
 
 $$F = \frac{(SS_{\text{null}} - SS_{\text{alt}}) / (\text{df}_{\text{null}} - \text{df}_{\text{alt}})}{SS_{\text{alt}} / \text{df}_{\text{alt}}}$$
 
-Under `poisson_deviance` or `likelihood_ratio_test`, CurveBook runs an asymptotic deviance-difference $\chi^2$ Likelihood Ratio Test comparing $\Delta D$ against $\chi^2_{\Delta \text{df}}$. Output appears in a model comparison tab with $F$ or $\chi^2$, $\text{df}$, $P$ value, preferred model label, and percentage difference in residual SD.
+Under `poisson_deviance` or `likelihood_ratio_test`, CurveBook runs an asymptotic deviance-difference $\chi^2$ Likelihood Ratio Test comparing $\Delta D$ against $\chi^2_{\Delta \text{df}}$. The model comparison tab reports $F$ or $\chi^2$, $\text{df}$, $P$ value, preferred model label, and percentage difference in residual SD.
 
 2. **Corrected Akaike Information Criterion (`aicc`):** Evaluates small-sample corrected AIC for identical active data and weights (Burnham & Anderson 2002):
 
@@ -174,14 +184,14 @@ Under exact Poisson log-likelihood $\ln L$, $\text{AIC}_c = -2 \ln L + 2K + \fra
 
 ### Forward prediction & inverse interpolation (`interpolate_unknowns`)
 
-When `interpolate_unknowns` is enabled, `(X, blank)` rows are predicted forward ($\hat{Y}$) and `(blank, Y)` rows are inverted numerically ($\hat{X}$) along each fitted curve using bracketed Brent and damped Newton root search.
+When `interpolate_unknowns` is enabled, `(X, blank)` rows predict $\hat{Y}$ forward along the fitted curve. `(blank, Y)` rows invert $\hat{X}$ numerically using bracketed Brent and damped Newton root search.
 
-- **Curve-mean vs. replicate intervals:** Delta-method curve uncertainty $\sigma_{\text{mean}}^2(x) = g(x)^T \text{Cov}(\hat{\theta}) g(x)$ (where $g(x)$ is the parameter gradient of $f(x; \hat{\theta})$) produces curve-mean bands (`Interpolated Mean X`). Adding observation scatter $\sigma_{\text{pred}}^2(x) = \sigma_{\text{mean}}^2(x) + s_w^2 / w(x)$ yields single-replicate inverse prediction intervals (`Interpolated Replicates`) whenever active data contain replicate scatter ($s_w > 0$). Forward and inverse intervals propagate SEs via $\text{SE}(\hat{X}) = \sigma / |df / dX|$ at $\hat{X}$.
+- **Curve-mean vs. replicate intervals:** Delta-method curve uncertainty $\sigma_{\text{mean}}^2(x) = g(x)^T \text{Cov}(\hat{\theta}) g(x)$ (where $g(x)$ is the parameter gradient of $f(x; \hat{\theta})$) produces curve-mean bands (`Interpolated Mean X`). Adding observation scatter $\sigma_{\text{pred}}^2(x) = \sigma_{\text{mean}}^2(x) + s_w^2 / w(x)$ yields single-replicate inverse prediction intervals (`Interpolated Replicates`) whenever active data contain replicate scatter ($s_w > 0$). Forward and inverse intervals propagate standard errors via $\text{SE}(\hat{X}) = \sigma / |df / dX|$ at $\hat{X}$.
 - **Extrapolation & no-root guards:** Rows with $X$ outside $[X_{\text{min}}, X_{\text{max}}]$ or target $Y$ outside the curve's monotonic range are flagged `Extrapolated`. Rows with no real root (such as $Y$ beyond a 4PL asymptote) remain empty.
 
 ## Custom equation DSL & first-order ODE models {#custom-dsl-and-ode}
 
-User-defined nonlinear equations (`custom_dsl`) compile into a sandboxed stack-based bytecode VM. Custom models use central finite-difference Jacobians and support explicit equations, dataset-branch selectors, implicit roots, initial-value rules, derived transforms, and first-order ODEs.
+User-defined nonlinear equations (`custom_dsl`) compile into a sandboxed stack-based bytecode VM and use central finite-difference Jacobians. The DSL supports explicit equations, dataset-branch selectors, implicit roots, initial-value rules, derived transforms, and first-order ODEs.
 
 ### Grammar, sections & precedence
 
@@ -189,8 +199,8 @@ Equations are newline-delimited statements organized into optional `[Equation]` 
 
 ### Reusable user equation library & theoretical distribution plotting
 
-- **Atomic user equation library:** Custom DSL equations (including `[Equation]`, `[InitialValues]`, `[Constraints]`, and `[Transforms]`) can be saved, listed, inspected, deleted, and executed by `equation_id` in `CURVEBOOK_CONFIG_DIR` via [`fit.saveUserEquation`](../commands.md), `fit.listUserEquations`, `fit.getUserEquation`, `fit.deleteUserEquation`, and `fit.cloneBuiltinEquation` (which clones any built-in equation into an editable custom template).
-- **Theoretical probability distribution plotting (`plot_distribution`):** Setting `equation_id: "plot_distribution"` with `plot_distribution` evaluates exact continuous PDF/CDF curves (`Normal`, `StudentT`, `FisherF`, `ChiSquare`) with configurable tail shading (`LowerTail`, `UpperTail`, `TwoTailed`, `Between`) and discrete integer-step PMF/step-CDF curves (`Binomial`, `Poisson`), supporting optional parameter hooks from Info or Result sheets and publishing chainable `analyzable_data` alongside chart overlays.
+- **Atomic user equation library:** Save, list, inspect, delete, and run reusable custom DSL equations (including `[Equation]`, `[InitialValues]`, `[Constraints]`, and `[Transforms]`) by `equation_id` inside `CURVEBOOK_CONFIG_DIR`. Available commands are [`fit.saveUserEquation`](../commands.md), `fit.listUserEquations`, `fit.getUserEquation`, `fit.deleteUserEquation`, and `fit.cloneBuiltinEquation` (which clones any built-in equation into an editable custom template).
+- **Theoretical probability distribution plotting (`plot_distribution`):** Set `equation_id: "plot_distribution"` with `plot_distribution` to evaluate exact theoretical curves without fitting data. Continuous distributions (`Normal`, `StudentT`, `FisherF`, `ChiSquare`) emit PDF/CDF curves with configurable tail shading (`LowerTail`, `UpperTail`, `TwoTailed`, `Between`), while discrete distributions (`Binomial`, `Poisson`) emit integer-step PMF/step-CDF curves. Optional parameter hooks pull values from Info or Result sheets, publishing chainable `analyzable_data` alongside chart overlays.
 
 **Operator precedence (highest to lowest):**
 
@@ -207,9 +217,9 @@ Equations are newline-delimited statements organized into optional `[Equation]` 
 - **Explicit assignment:** `Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))` (or a bare right-hand expression).
 - **Local helper variables:** `span = Top - Bottom` before the target `Y = ...` line.
 - **Conditional branching:** `IF(cond, then_expr, else_expr)`.
-- **Dataset-specific lines (`<A>`, `<B>`, `<A:C>`, `<2>`):** Prefix lines with angle-bracket column letters (`A`–`Z`, …), 1-based dataset indices, or ranges to apply distinct expressions or parameter assignments across datasets in a shared fit. Unscoped free identifiers become optimizable parameters; dataset-scoped assignments restrict parameters to those datasets.
-- **Initial-value rules (`[InitialValues]`):** Supply deterministic starting formulas using 21 dataset summary tokens computed from active `(X, Y)` points and numeric column titles: `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XMID`, `YMID`, `XATYMIN`, `XATYMAX`, `XATY50`, `XATYMID`, `YATXMIN`, `YATXMID`, `YATXMAX`, `SPAN`, `SIGN`, `INITIALVALUE`, `MEANCOLUMNTITLE`, `LOGMEANCOLUMNTITLE`, `SLOPEATXMIN`, `SLOPEATXMID`, and `SLOPEATXMAX`.
-- **Derived scalar transforms (`[Transforms]`):** Post-fit algebraic expressions (such as `EC50 = 10^LogEC50`) evaluated at converged estimates and reported in `derived_scalars` and summary tabs.
+- **Dataset-specific lines (`<A>`, `<B>`, `<A:C>`, `<2>`):** Prefix lines with angle-bracket column letters (`A`–`Z`, …), 1-based dataset indices, or ranges to apply distinct expressions or assignments across datasets in a shared fit. Unscoped free identifiers become optimizable parameters, whereas dataset-scoped assignments restrict parameters to those datasets.
+- **Initial-value rules (`[InitialValues]`):** Supply deterministic starting formulas from active `(X, Y)` points and numeric column titles. Supported summary tokens are `YMIN`, `YMAX`, `XMIN`, `XMAX`, `XMID`, `YMID`, `XATYMIN`, `XATYMAX`, `XATY50`, `XATYMID`, `YATXMIN`, `YATXMID`, `YATXMAX`, `SPAN`, `SIGN`, `INITIALVALUE`, `MEANCOLUMNTITLE`, `LOGMEANCOLUMNTITLE`, `SLOPEATXMIN`, `SLOPEATXMID`, and `SLOPEATXMAX`.
+- **Derived scalar transforms (`[Transforms]`):** Post-fit algebraic expressions (such as `EC50 = 10^LogEC50`) evaluate at converged estimates and appear in `derived_scalars` and summary tabs.
 - **Built-in constants & predictors:** Predictor `X` (or `T` for ODE time axis; multi-predictor `X1`, `X2`, …), response `Y`, dataset index `DS`/`DATASET`, and constants `PI`, `E`, `LN2`, `LN10`, `SQRT2`, `INF`, `NAN`.
 
 ### Built-in DSL functions
@@ -228,8 +238,8 @@ Equations are newline-delimited statements organized into optional `[Equation]` 
 
 Any `[Equation]` target where `Y` appears on both sides (or where `LHS` is not plain `Y`) compiles as an implicit root problem $F(X, Y; \theta) = \text{LHS} - \text{RHS} = 0$:
 
-- Scans multi-decade, scale-augmented positive and negative probe grids outward from 0 to bracket a sign change, then refines via safeguarded Brent root finding (`rel_tol = 1e-13`, with tight `[0, root]` re-bracketing near zero).
-- Falls back to damped Newton iteration when no sign-change bracket is found, returning a domain failure if residual $|F| > \text{tol}$ or non-finite.
+- Scans multi-decade, scale-augmented positive and negative probe grids outward from 0 to bracket a sign change. Refines brackets via safeguarded Brent root finding (`rel_tol = 1e-13`), using tight `[0, root]` re-bracketing near zero.
+- Falls back to damped Newton iteration when no sign-change bracket is found. Returns a domain failure if residual $|F| > \text{tol}$ or non-finite.
 
 ### First-order ODE models (`dY/dX` / `dY/dT` / `D(Y, X)`)
 
@@ -262,9 +272,9 @@ All custom equations run inside strict compile-time and runtime limits to preven
 Every fitting algorithm and built-in curve model is verified offline under CurveBook's clean-room policy against public benchmark corpora, primary literature, and independent reference implementations. See the full verification record in [Curve-Fitting Evidence on GitHub](https://github.com/HauserGroup/curvebook/blob/main/docs/evidence/curve-fitting.md).
 
 - **NIST StRD nonlinear benchmarks:** Parameter estimates, asymptotic SEs, residual sums of squares, and residual SDs match certified NIST StRD values across Lower, Average, and Higher difficulty datasets (`start_1` and `start_2`, including logarithmic transforms for `Nelson`). Algebraic reparameterizations are also verified across built-in pharmacology, kinetics, growth, Gaussian, Boltzmann, power-series, and polynomial equations.
-- **Dose-response & pharmacology (R 4.5.2 `stats::nls`, `stats::lm`):** Covers 4PL and 5PL log- and linear-concentration models (Motulsky & Christopoulos 2004; Gottschalk & Dunn 2005; Liao & Liu 2009). Also verifies Gaddum–Schild competitive antagonism and unity-slope `pKB` (Arunlakshana & Schild 1959; Colquhoun 2007), Black–Leff operational partial agonism and receptor depletion (Black & Leff 1983), and Christopoulos–Kenakin allosteric modulation (Christopoulos & Kenakin 2002).
-- **Binding & enzyme kinetics (R 4.5.2 `stats::nls`, `stats::lm`):** Covers Cheng–Prusoff and two-site receptor binding (Cheng & Prusoff 1973) and Swillens ligand-depletion saturation (Swillens 1995). Enzyme models cover Michaelis–Menten, Hill allosteric, Haldane substrate inhibition, and Morrison tight-binding kinetics (Cornish-Bowden 1974; Morrison 1969).
-- **Growth, peaks & radiobiology (R 4.5.2 `stats::nls`, `stats::lm`):** Verifies multi-phase exponential decay and association, Verhulst (1838) logistic, Hodgkin & Huxley (1952) Boltzmann sigmoid, and Gompertz (1825) growth (including analytical inflection points). Also covers Watts & Bacon (1974) smooth hinge, Limpert et al. (2001) log-Gaussian and area-parameterized lognormal, cumulative Gaussian (`percent`, `fraction`, `counts`), Lorentzian and sum of two Lorentzians, Padé `[1/1]`, Weibull (1951) peaks, classic legacy reparameterizations, and the Linear–Quadratic radiobiology family (Chadwick & Leenhouts 1973; Brenner 2008).
-- **Uncertainty, relational constraints, GOF & theoretical distributions (`mpmath 1.3.0`, R 4.5.2):** Verified against 80- and 120-digit `mpmath` and R (`stats::nls`, `stats::glm`, `stats::lm`). Covers Venzon–Moolgavkar (1988) profile-likelihood and Poisson deviance intervals (including open bounds), relational inequality constraints (`KFast > KSlow`, `KdLo > KdHi`, `LogKiLo > LogKiHi`), monotonic and delta-method derived-scalar CIs, Adjusted/Weighted $R^2$ and Poisson deviance GOF, Bates & Watts (1988) / Seber & Wild (1989) linearization covariance, Hougaard (1985) skewness, Cook & Weisberg (1982) leverage residuals, and exact continuous/discrete theoretical distribution grids.
+- **Dose-response & pharmacology (R 4.5.2 `stats::nls`, `stats::lm`):** Verifies 4PL and 5PL log- and linear-concentration models (Motulsky & Christopoulos 2004; Gottschalk & Dunn 2005; Liao & Liu 2009). Also verifies Gaddum–Schild competitive antagonism and unity-slope `pKB` (Arunlakshana & Schild 1959; Colquhoun 2007). Covers Black–Leff operational partial agonism and receptor depletion (Black & Leff 1983) alongside Christopoulos–Kenakin allosteric modulation (Christopoulos & Kenakin 2002).
+- **Binding & enzyme kinetics (R 4.5.2 `stats::nls`, `stats::lm`):** Covers Cheng–Prusoff and two-site receptor binding (Cheng & Prusoff 1973) plus Swillens ligand-depletion saturation (Swillens 1995). Enzyme models verify Michaelis–Menten, Hill allosteric, Haldane substrate inhibition, and Morrison tight-binding kinetics (Cornish-Bowden 1974; Morrison 1969).
+- **Growth, peaks & radiobiology (R 4.5.2 `stats::nls`, `stats::lm`):** Verifies multi-phase exponential decay and association, Verhulst (1838) logistic, Hodgkin & Huxley (1952) Boltzmann sigmoid, and Gompertz (1825) growth (including analytical inflection points). Also verifies Watts & Bacon (1974) smooth hinge, Limpert et al. (2001) log-Gaussian and area-parameterized lognormal, cumulative Gaussian (`percent`, `fraction`, `counts`), Lorentzian and sum of two Lorentzians, Padé `[1/1]`, and Weibull (1951) peaks. Covers classic legacy reparameterizations and the Linear–Quadratic radiobiology family (Chadwick & Leenhouts 1973; Brenner 2008).
+- **Uncertainty, relational constraints, GOF & theoretical distributions (`mpmath 1.3.0`, R 4.5.2):** Verified against 80- and 120-digit `mpmath` and R (`stats::nls`, `stats::glm`, `stats::lm`). Covers Venzon–Moolgavkar (1988) profile-likelihood and Poisson deviance intervals (including open bounds), relational inequality constraints (`KFast > KSlow`, `KdLo > KdHi`, `LogKiLo > LogKiHi`), and monotonic or delta-method derived-scalar CIs. Also verifies Adjusted/Weighted $R^2$, Poisson deviance GOF, Bates & Watts (1988) / Seber & Wild (1989) linearization covariance, Hougaard (1985) skewness, Cook & Weisberg (1982) leverage residuals, and exact continuous or discrete theoretical distribution grids.
 - **Model comparison, ROUT, Deming & ODEs (`mpmath 1.3.0`, R 4.5.2):** Verifies Burnham & Anderson (2002) $\text{AIC}_c$ weights, Motulsky & Brown (2006) ROUT $Q = 1\%$ detection on raw and weighted curves, and Sebaugh (2011) sparse-curve identifiability. Also verifies Deming (1943) / Linnet (1990) jackknife regression, Brent (1973) implicit roots over 400 orders of magnitude, and Hairer, Nørsett & Wanner (1993) RK45 ODE fits.
 - **Model-free splines & LOWESS (R 4.5.2):** Verified against R (`stats::splinefun`, `stats::smooth.spline`, `stats::lowess`) and analytical Akima step-overshoot oracles. Covers natural cubic splines (de Boor 1978), Akima subsplines (Akima 1970), Reinsch smoothing splines (Reinsch 1967; Hutchinson & de Hoog 1985), Cleveland LOWESS (Cleveland 1979), and dense point-to-point unknown interpolation (see [Fit Spline / LOWESS Curve](analyses.md#analysis-fit-spline-lowess)).

@@ -382,6 +382,7 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
             length_share: 0.5,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
         AxisSegment {
             min: Some(100.0),
@@ -390,6 +391,7 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
             length_share: 0.5,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            ..AxisSegment::default()
         },
     ];
     graph.spec.y_axis.segments = vec![AxisSegment {
@@ -399,6 +401,7 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
         length_share: 1.0,
         major_tick_interval: None,
         minor_ticks_per_interval: 1,
+        ..AxisSegment::default()
     }];
     graph.spec.series[0].gdo = GraphicalDataObject::ScatterAndLine {
         marker: Some(MarkerStyle::default()),

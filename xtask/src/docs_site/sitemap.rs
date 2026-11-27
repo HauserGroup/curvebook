@@ -397,14 +397,16 @@ impl LinkResolver for RepoLinkResolver<'_> {
         if let Some((snap_rel, preview_rel)) = match normalized.as_str() {
             "docs/index.html" => Some(("index.html", "index.html")),
             "docs/privacy.html" => Some(("privacy.html", "privacy-security.html")),
+            "docs/open-pzfx-files.html" => Some(("open-pzfx-files.html", "files.html")),
+            "docs/pzfx-format-specification.html" => Some(("pzfx-format-specification.html", "files.html")),
+            "docs/linux.html" => Some(("linux.html", "get-started.html")),
+            "docs/faq.html" => Some(("faq.html", "index.html")),
             _ => None,
         } {
-            let base = if self.meta.is_release_snapshot {
-                format!("{}{snap_rel}", super::template::asset_prefix(self.current_site_rel, true))
-            } else {
-                rel_href(self.current_site_rel, preview_rel)
-            };
-            return format!("{base}{frag_s}");
+            if self.meta.is_release_snapshot {
+                return format!("{}{snap_rel}{frag_s}", super::template::asset_prefix(self.current_site_rel, true));
+            }
+            return rel_href(self.current_site_rel, preview_rel);
         }
         if let Some(img) = normalized.strip_prefix("docs/images/") {
             return format!("{}images/{img}", super::template::asset_prefix(self.current_site_rel, self.meta.is_release_snapshot));

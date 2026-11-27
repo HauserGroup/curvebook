@@ -1441,6 +1441,7 @@ fn is_pure_engine_batch_step(cmd_id: &str) -> bool {
         && !matches!(
             cmd_id,
             "app.about"
+                | "app.cite"
                 | "app.feedback"
                 | "file.print"
                 | "app.quit"
@@ -2303,6 +2304,20 @@ const SHEET_DIALOGS: &[SheetDialogSpec] = &[
         Ok(())
     })
     .extra(|_| json!({ "version": env!("CARGO_PKG_VERSION") })),
+    SheetDialogSpec::custom("app.cite", "Cite", SheetDialogTarget::None, |a, _, _, _| {
+        a.canvas_dialogs.active_dialog = ActiveDialog::Cite;
+        Ok(())
+    })
+    .extra(|_| {
+        let ver = env!("CARGO_PKG_VERSION");
+        json!({
+            "version": ver,
+            "reference": curvebook_doc::CURVEBOOK_CITATION.plain_text_reference(Some(ver)),
+            "bibtex": curvebook_doc::CURVEBOOK_CITATION.bibtex(Some(ver)),
+            "doi": curvebook_doc::CURVEBOOK_CITATION.concept_doi,
+            "url": curvebook_doc::CURVEBOOK_CITATION.primary_citation_url(),
+        })
+    }),
     SheetDialogSpec::custom("ui.analyze.open", "AnalyzeSheet", SheetDialogTarget::Analyzable, |a, d, id, _| {
         let sid = id.ok_or_else(|| String::from("no data or analyzable sheet available"))?;
         if a.canvas_dialogs.open_analyze_dialog(d, sid) {
@@ -3705,6 +3720,7 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::Checkpoints => "Checkpoints",
         ActiveDialog::About => "About",
+        ActiveDialog::Cite => "Cite",
         ActiveDialog::ImportWarnings => "ImportWarnings",
         ActiveDialog::ImportProjectMode { .. } => "ImportProjectMode",
         ActiveDialog::CsvExportOptions(_) => "CsvExportOptions",

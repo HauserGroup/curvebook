@@ -401,6 +401,7 @@ fn build_graph_menu(app: &UiApp) -> CuratedMenuSection {
 fn build_help_menu(app: &UiApp) -> CuratedMenuSection {
     let mut nodes = Vec::new();
     push_os_adaptive_app_item(&mut nodes, app, "app.about", Some("menu.help.about"), false);
+    push_action(&mut nodes, app, "app.cite", Some("menu.help.cite"));
     push_action(&mut nodes, app, "app.feedback", Some("menu.help.feedback"));
     CuratedMenuSection { menu_key: "menu.help", title: app.tr("menu.help"), nodes }
 }

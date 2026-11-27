@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
+  <!-- Audience: Tier 1 Scientist Guide — keep landing copy concise and plain; put technical details in manual/latest/*.html. -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell">
     <header class="site-header">
@@ -66,6 +67,33 @@
               <a class="button primary" href="#downloads">Download</a>
               <a class="button secondary" href="manual/latest/get-started.html">Get started</a>
             </div>
+            <div class="cite-trigger-row">
+              <button type="button" class="cite-trigger" popovertarget="cite-popover" aria-haspopup="dialog" aria-controls="cite-popover">Cite CurveBook</button>
+            </div>
+            <div id="cite-popover" class="cite-popover" popover role="dialog" aria-labelledby="cite-popover-title" aria-describedby="cite-popover-hint">
+              <div class="cite-popover-header">
+                <h2 id="cite-popover-title">Cite CurveBook</h2>
+                <button type="button" class="cite-close" popovertarget="cite-popover" popovertargetaction="hide" aria-label="Close citation dialog">×</button>
+              </div>
+              <p class="cite-copy cite-copy-plain" tabindex="0">CurveBook Contributors (2026). CurveBook [Computer software]. https://github.com/HauserGroup/curvebook</p>
+              <p id="cite-popover-hint" class="cite-hint">Click the text above to select it, then copy.</p>
+              <div class="cite-popover-footer">
+                <details class="cite-bibtex">
+                  <summary>BibTeX</summary>
+                  <pre class="cite-copy" tabindex="0"><code>@software{curvebook,
+  author  = {{CurveBook Contributors}},
+  title   = {{CurveBook}},
+  year    = {2026},
+  license = {MIT OR Apache-2.0},
+  url     = {https://github.com/HauserGroup/curvebook}
+}</code></pre>
+                </details>
+                <p class="cite-links">
+                  <a href="https://github.com/HauserGroup/curvebook/blob/main/CITATION.cff">CITATION.cff <span aria-hidden="true">↗</span></a>
+                  <a href="manual/latest/get-started.html#how-to-cite">How to cite <span aria-hidden="true">→</span></a>
+                </p>
+              </div>
+            </div>
             <ul class="pill-row" aria-label="At a glance">
               <li class="pill">Free &amp; open source</li>
               <li class="pill">No tracking</li>
@@ -95,7 +123,7 @@
               <img class="feature-icon" src="images/feature-statistics.svg" width="40" height="40" alt="">
               <div>
                 <h3><a href="manual/latest/analyses.html">Run statistics <span aria-hidden="true">→</span></a></h3>
-                <p><em>t</em> tests, ANOVA, survival, contingency, ROC, and more, with assumption checks.</p>
+                <p><em>t</em>-tests, ANOVA, survival, contingency, ROC, and more, with assumption checks.</p>
               </div>
             </li>
             <li class="feature-card">
@@ -109,7 +137,7 @@
               <img class="feature-icon" src="images/feature-graphs.svg" width="40" height="40" alt="">
               <div>
                 <h3><a href="manual/latest/graphs.html#graph-families">Make graphs <span aria-hidden="true">→</span></a></h3>
-                <p>Publication-ready plots with significance brackets and color-blind-safe palettes.</p>
+                <p>Publication-ready plots with significance brackets and colorblind-safe palettes.</p>
               </div>
             </li>
             <li class="feature-card">
@@ -123,7 +151,7 @@
               <img class="feature-icon" src="images/feature-import.svg" width="40" height="40" alt="">
               <div>
                 <h3><a href="open-pzfx-files.html">Open .pzfx &amp; .prism files <span aria-hidden="true">→</span></a></h3>
-                <p>Bring in the data tables from existing files and export them to CSV.</p>
+                <p>Import tables and read-only <code>.prism</code> snapshots, merge projects, or export to CSV and data-only <code>.pzfx</code>.</p>
               </div>
             </li>
             <li class="feature-card">
@@ -174,7 +202,7 @@
               <p>Download and run the portable AppImage (<a href="linux.html">Linux guide</a>).</p>
             </article>
           </div>
-          <p class="download-footnote">Command-line tools, FreeBSD archives, and download checksums are covered in the <a href="manual/latest/get-started.html">install guide</a>.</p>
+          <p class="download-footnote">See the <a href="manual/latest/get-started.html">install guide</a> for command-line tools, FreeBSD archives, and download checksums.</p>
         </section>
       </div>
     </main>

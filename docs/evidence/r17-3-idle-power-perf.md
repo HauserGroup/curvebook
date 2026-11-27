@@ -23,9 +23,9 @@ All idle tests instrument `egui::Context::set_request_repaint_callback` (countin
 
 1. **`crates/ui-egui/src/egui_shell/canvas_view.rs`** (`raster_worker_drop_tests`):
    - `owner_dropped_on_its_own_worker_thread_does_not_self_join` & `async_failed_raster_clears_stale_texture_and_stops_polling`: **`2 passed; 0 failed`** (`0` idle repaint callbacks, `repaint_delay == Duration::MAX` after failed async raster, stale texture cleared).
-2. **`crates/ui-egui/tests/r17_3_kittest_idle.rs`** (`egui_kittest::Harness` + `UiApp`):
+2. **`crates/ui-egui/tests/r15_shell_suite/r17_3_kittest_idle.rs`** (`egui_kittest::Harness` + `UiApp`):
    - `egui_kittest_surfaces_and_idle_dialog_emit_zero_ongoing_repaints`: **`1 passed; 0 failed`** in `0.36s` across Data Grid, Graph Canvas, Layout Canvas, and idle focused `AnalyzeSheet` dialog.
-3. **`apps/curvebook/tests/r17_3_idle_repaint.rs`** (`CurveBookNativeApp` + `DesktopHostRuntime`):
+3. **`apps/curvebook/tests/desktop_suite/r17_3_idle_repaint.rs`** (`CurveBookNativeApp` + `DesktopHostRuntime`):
    - `welcome_hub_and_data_sheets_settle_to_zero_idle_repaints`
    - `data_grid_scroll_hover_and_inline_edit_settle_to_zero_idle_repaints`
    - `graph_layout_split_and_uninitialized_canvases_settle_to_zero_idle_repaints`
@@ -74,11 +74,11 @@ CARGO_TARGET_DIR=/tmp/cb-r17-perf cargo test --release -p curvebook-ui-egui --te
 
 *(Root-cause diagnostic showed every second `Click` in `r15_2` fell 50 ms after the previous click, triggering inline edit, and the subsequent `ArrowDown` committed `table.setCell`, previously paying 43.541 ms to double-clone the 1M-cell `ProjectDocument` and re-scan 1,000 columns.)*
 
-### B. Five Real-Shaped Stress Scenarios (`apps/curvebook/tests/r17_3_perf_scenarios.rs`)
+### B. Five Real-Shaped Stress Scenarios (`apps/curvebook/tests/desktop_perf_suite/r17_3_perf_scenarios.rs`)
 
 Command:
 ```sh
-CARGO_TARGET_DIR=/tmp/cb-r17-perf cargo test --release -p curvebook --test r17_3_perf_scenarios -- --nocapture
+CARGO_TARGET_DIR=/tmp/cb-r17-perf cargo test --release -p curvebook --test desktop_perf_suite r17_3_perf_scenarios -- --nocapture
 ```
 
 | Scenario | Metric | Before (`--release`) | After (`--release`) | Improvement |

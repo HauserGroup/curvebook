@@ -12,7 +12,8 @@ use crate::scan_util::{
 
 pub const SITE_BASE_URL: &str = "https://curvebook.org/";
 pub const CUSTOM_DOMAIN: Option<&str> = Some("curvebook.org");
-pub const LANDING_PAGES: &[&str] = &["index.html", "open-pzfx-files.html", "linux.html", "faq.html", "privacy.html"];
+pub const LANDING_PAGES: &[&str] =
+    &["index.html", "open-pzfx-files.html", "pzfx-format-specification.html", "linux.html", "faq.html", "privacy.html"];
 pub const REDIRECT_PAGES: &[&str] = &["get-started.html", "troubleshooting.html", "manual/index.html"];
 pub const COMMITTED_SITE_FILES: &[&str] = &["404.html", "site.css"];
 pub const GENERATED_SITE_FILES: &[&str] = &["sitemap.xml", "llms.txt", "llms-full.txt"];
@@ -420,7 +421,14 @@ mod tests {
                 "docs/index.html",
                 "<a href=\"open-pzfx-files.html#c\">x</a><a href=\"faq.html\">f</a><img src=\"images/a.png\"><a href=\"https://github.com/x\">g</a><a href=\"#top\">t</a><a href=\"mailto:a@b.c\">m</a>",
             ),
-            ("docs/open-pzfx-files.html", "<a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">"),
+            (
+                "docs/open-pzfx-files.html",
+                "<a href=\"pzfx-format-specification.html\">s</a><a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">",
+            ),
+            (
+                "docs/pzfx-format-specification.html",
+                "<a href=\"open-pzfx-files.html\">b</a><a href=\"manual/latest/files.html\">f</a><link rel=\"stylesheet\" href=\"site.css\">",
+            ),
             ("docs/linux.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/get-started.html\">gs</a>"),
             ("docs/faq.html", "<a href=\"index.html\">h</a><a href=\"manual/latest/index.html\">m</a>"),
             ("docs/privacy.html", "<a href=\"index.html\">h</a>"),
@@ -460,9 +468,9 @@ mod tests {
     fn publish_stage_manual_dir_and_html_guards() {
         let root = seed("stage");
         let files = check_publish_set(root.path()).unwrap();
-        assert!(files.len() == 24 && !files.iter().any(|f| f.ends_with("manifest.json") || f.ends_with(".md")));
+        assert!(files.len() == 25 && !files.iter().any(|f| f.ends_with("manifest.json") || f.ends_with(".md")));
         let out = root.join("_site");
-        assert_eq!(stage(root.path(), &out).unwrap(), 26);
+        assert_eq!(stage(root.path(), &out).unwrap(), 27);
         assert_eq!(std::fs::read_to_string(out.join("CNAME")).unwrap(), "curvebook.org\n");
         assert!(std::fs::read_to_string(out.join("robots.txt")).unwrap().contains("Sitemap: https://curvebook.org/sitemap.xml"));
         assert!(!out.join("ROADMAP.md").exists() && !out.join("manual/latest/manifest.json").exists());
@@ -474,7 +482,7 @@ mod tests {
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
         std::fs::rename(root.join("target/docs-manual"), &moved).unwrap();
         assert!(check_publish_set(root.path()).unwrap_err().contains("--build-manual"));
-        assert_eq!(check_publish_set_with_manual(root.path(), Some(&moved)).unwrap().len(), 24);
+        assert_eq!(check_publish_set_with_manual(root.path(), Some(&moved)).unwrap().len(), 25);
         assert_eq!(
             parse_args(&["--manual-dir=x", "--check"].map(String::from)).unwrap(),
             StageCli { manual_dir: Some(PathBuf::from("x")), action: StageAction::Check }

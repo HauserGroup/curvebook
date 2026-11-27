@@ -2924,6 +2924,9 @@ pub struct AnalysisClassDiagnosticSummary {
     pub scalars_agreed: usize,
     pub scalars_disagreed: usize,
     pub disagreed_scalar_keys: BTreeMap<String, usize>,
+    pub compared_scalar_keys: BTreeMap<String, usize>,
+    /// Per `experimentalDesign` (or `<default>`): `[recomputed_ok, analyses_compared, analyses_fully_agreed]`.
+    pub variants: BTreeMap<String, [usize; 3]>,
 }
 
 impl AnalysisClassDiagnosticSummary {
@@ -2945,6 +2948,8 @@ impl AnalysisClassDiagnosticSummary {
             "scalars_agreed": self.scalars_agreed,
             "scalars_disagreed": self.scalars_disagreed,
             "disagreed_scalar_keys": self.disagreed_scalar_keys,
+            "compared_scalar_keys": self.compared_scalar_keys,
+            "variants": self.variants.iter().map(|(k, v)| (k.clone(), json!({"recomputed_ok": v[0], "analyses_compared": v[1], "analyses_fully_agreed": v[2]}))).collect::<Map<String, Value>>(),
         })
     }
 }
@@ -4186,6 +4191,7 @@ fn verify_archive_data_layer_and_analyses(bytes: &[u8], report: &curvebook_forma
     let mut file_diffs = 0usize;
     let mut imported_ds_idx = 0usize;
     let mut data_uid_to_sheet_id: BTreeMap<String, curvebook_doc::SheetId> = BTreeMap::new();
+    let mut data_set_positions = curvebook_format::ExternalDataSetPositions::new();
 
     for sheet_uid in &doc_index.data_sheet_ids {
         let IdLookup::Found(sheet_path) = id_index.find_data_sheet_json(sheet_uid) else {
@@ -4259,6 +4265,9 @@ fn verify_archive_data_layer_and_analyses(bytes: &[u8], report: &curvebook_forma
         };
         imported_ds_idx += 1;
         data_uid_to_sheet_id.insert(sheet_uid.clone(), imported_ds.id.clone());
+        for (pos, ds_uid) in sheet_meta.table.data_sets.iter().enumerate() {
+            data_set_positions.insert(ds_uid.clone(), (sheet_uid.clone(), pos));
+        }
 
         let (cells_checked, table_diffs) = compare_external_csv_against_datasheet(
             &sheet_meta,
@@ -4284,7 +4293,8 @@ fn verify_archive_data_layer_and_analyses(bytes: &[u8], report: &curvebook_forma
     }
 
     // Step 7: `.prism` cached-result diagnostic comparison per `analysisClass`.
-    run_archive_analysis_diagnostics(&mut zip_index, &id_index, &doc_index, &data_uid_to_sheet_id, &report.document, pipeline);
+    let source_maps = ArchiveSourceMaps { data_uid_to_sheet_id: &data_uid_to_sheet_id, data_set_positions: &data_set_positions };
+    run_archive_analysis_diagnostics(&mut zip_index, &id_index, &doc_index, &source_maps, &report.document, pipeline);
 }
 
 #[cfg(feature = "docs-site")]
@@ -4683,22 +4693,53 @@ fn clamp_utf8_bytes(s: &str, max_bytes: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
+/// Per-design grouping key for agreement counts: `experimentalDesign`, a one-tailed marker, and
+/// the post-test procedure, so promotion can be decided per design rather than per class.
+#[cfg(feature = "docs-site")]
+fn analysis_variant_key(params_val: &Value) -> String {
+    let content = params_val.get("content");
+    let mut key = content.and_then(|c| c.get("experimentalDesign")).and_then(Value::as_str).unwrap_or("<default>").to_owned();
+    if content.and_then(|c| c.pointer("/options/pValueTailType")).and_then(Value::as_str) == Some("P_VALUE_ONE_TAILED") {
+        key.push_str(" | one-tailed");
+    }
+    if let Some(mc) = content.and_then(|c| c.pointer("/postTests/pairwiseTests/multipleComparisons"))
+        && content.and_then(|c| c.pointer("/postTests/type")).and_then(Value::as_str) != Some("NO_TESTS")
+    {
+        let kind = mc.get("type").and_then(Value::as_str).unwrap_or("?");
+        let test = match kind {
+            "STATISTICAL" => mc.pointer("/statistical/test").and_then(Value::as_str),
+            "FDR" => mc.pointer("/fdr/test").and_then(Value::as_str),
+            _ => None,
+        };
+        key.push_str(" | ");
+        key.push_str(test.unwrap_or(kind));
+    }
+    key
+}
+
+/// Per-archive lookup tables shared by the analysis diagnostics pass.
+#[cfg(feature = "docs-site")]
+struct ArchiveSourceMaps<'a> {
+    data_uid_to_sheet_id: &'a BTreeMap<String, curvebook_doc::SheetId>,
+    data_set_positions: &'a curvebook_format::ExternalDataSetPositions,
+}
+
 #[cfg(feature = "docs-site")]
 fn run_archive_analysis_diagnostics(
     zip_index: &mut curvebook_format::zip::ZipIndex<'_>,
     id_index: &curvebook_format::prism::schema::ArchiveIdIndex,
     doc_index: &curvebook_format::prism::schema::ExternalDocumentIndex,
-    data_uid_to_sheet_id: &BTreeMap<String, curvebook_doc::SheetId>,
+    source_maps: &ArchiveSourceMaps<'_>,
     imported_doc: &curvebook_doc::ProjectDocument,
     pipeline: &mut EnginePipelineSummary,
 ) {
     use curvebook_doc::{AnalysisSpec, ProjectDocument, ResultSheet, ResultStatus, SheetId};
     use curvebook_format::prism::schema::IdLookup;
     use curvebook_format::{
-        AnalysisVerificationStatus, compare_recomputed_against_cached_result, find_analysis_mapping, translate_analysis_parameters,
+        AnalysisVerificationStatus, CACHED_SCALAR_LINKS, cached_values_for_link, check_control_in_selection,
+        compare_recomputed_against_cached_results, find_analysis_mapping, primary_input_data_sheet_uid, resolve_selected_data_sets,
+        translate_analysis_parameters,
     };
-
-    let mut imported_res_cursor = 0usize;
 
     for analysis_uid in &doc_index.analysis_sheet_ids {
         let IdLookup::Found(sheet_path) = id_index.find_analysis_entry(analysis_uid, "sheet.json") else {
@@ -4713,10 +4754,6 @@ fn run_archive_analysis_diagnostics(
         let Some(sheet_obj) = sheet_val.as_object() else {
             continue;
         };
-
-        let imported_rs =
-            imported_doc.result_sheet(&SheetId::new(analysis_uid.as_str())).or_else(|| imported_doc.result_sheets.get(imported_res_cursor));
-        imported_res_cursor = imported_res_cursor.saturating_add(1);
 
         let raw_class = sheet_obj.get("analysisClass").and_then(Value::as_str).unwrap_or("UNKNOWN").trim();
         let class_key = if raw_class.is_empty() { String::from("UNKNOWN") } else { raw_class.to_owned() };
@@ -4754,9 +4791,20 @@ fn run_archive_analysis_diagnostics(
             *diag_entry.blocking_reason_classes.entry(String::from("missing_parameters_json")).or_insert(0) += 1;
             continue;
         };
-        let Some(translated) = translate_analysis_parameters(&class_key, &params_val) else {
+        let Some(mut translated) = translate_analysis_parameters(&class_key, &params_val) else {
             continue;
         };
+        let source_uid = primary_input_data_sheet_uid(sheet_obj, source_maps.data_uid_to_sheet_id);
+        let selected_data_sets = match resolve_selected_data_sets(sheet_obj, source_uid, source_maps.data_set_positions) {
+            Ok(sel) => sel,
+            Err(reason) => {
+                translated.blocking_options.push(reason);
+                Vec::new()
+            }
+        };
+        if let Err(reason) = check_control_in_selection(&translated.kind, &selected_data_sets) {
+            translated.blocking_options.push(reason);
+        }
         if !translated.blocking_options.is_empty() {
             diag_entry.translated_blocked += 1;
             for opt in &translated.blocking_options {
@@ -4767,22 +4815,27 @@ fn run_archive_analysis_diagnostics(
         }
         diag_entry.translated_clean += 1;
 
-        // Resolve primary compatible DataSheet source.
-        let source_ds = sheet_obj.get("inputSheets").and_then(Value::as_array).and_then(|inputs| {
-            inputs.iter().find_map(|item| {
-                let uid = item.as_str().or_else(|| item.get("uid").and_then(Value::as_str))?;
-                let sid = data_uid_to_sheet_id.get(uid)?;
-                let ds = imported_doc.data_sheet(sid)?;
-                translated.kind.is_compatible_with(ds.archetype.kind()).then_some(ds)
-            })
-        });
+        // Resolve the primary input DataSheet exactly as the importer does.
+        let source_ds = source_uid
+            .and_then(|uid| source_maps.data_uid_to_sheet_id.get(uid))
+            .and_then(|sid| imported_doc.data_sheet(sid))
+            .filter(|ds| translated.kind.is_compatible_with(ds.archetype.kind()));
         let Some(source_ds) = source_ds else {
             diag_entry.incompatible_or_unresolved_source += 1;
             continue;
         };
 
-        let cached_scalars = imported_rs.map(|rs| rs.scalars.as_slice()).unwrap_or(&[]);
-        diag_entry.cached_scalars_total = diag_entry.cached_scalars_total.saturating_add(cached_scalars.len());
+        let results_val = match id_index.find_analysis_entry(analysis_uid, "results.json") {
+            IdLookup::Found(p) => zip_index.read_entry(&p).ok().flatten().and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
+            _ => None,
+        }
+        .unwrap_or(Value::Null);
+        let cached_link_values: usize = CACHED_SCALAR_LINKS
+            .iter()
+            .filter(|l| l.foreign_class.eq_ignore_ascii_case(&class_key))
+            .map(|l| cached_values_for_link(l, &results_val).len())
+            .sum();
+        diag_entry.cached_scalars_total = diag_entry.cached_scalars_total.saturating_add(cached_link_values);
 
         let recompute_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<ResultSheet, String> {
             let mut tmp_doc = ProjectDocument::new("Diagnostic").map_err(|e| e.to_string())?;
@@ -4792,7 +4845,8 @@ fn run_archive_analysis_diagnostics(
                 tmp_doc.add_info_sheet(info.clone()).map_err(|e| e.to_string())?;
             }
             tmp_doc.add_data_sheet(source_ds.clone()).map_err(|e| e.to_string())?;
-            let spec = AnalysisSpec::new("diag-res", source_ds.id.clone(), translated.kind.clone()).map_err(|e| e.to_string())?;
+            let mut spec = AnalysisSpec::new("diag-res", source_ds.id.clone(), translated.kind.clone()).map_err(|e| e.to_string())?;
+            spec.selected_data_sets = selected_data_sets.clone();
             let rs = ResultSheet::new(spec).map_err(|e| e.to_string())?;
             tmp_doc.add_result_sheet(rs).map_err(|e| e.to_string())?;
             let _ = curvebook_engine::dag::recalculate_project_with_report(&mut tmp_doc).map_err(|e| e.to_string())?;
@@ -4806,7 +4860,25 @@ fn run_archive_analysis_diagnostics(
                 if recomputed.status == ResultStatus::UpToDate {
                     diag_entry.recomputed_ok += 1;
                     diag_entry.recomputed_scalars_total = diag_entry.recomputed_scalars_total.saturating_add(recomputed.scalars.len());
-                    let cmp = compare_recomputed_against_cached_result(&recomputed, cached_scalars, row.absolute_tolerance, row.relative_tolerance);
+                    let cmp = compare_recomputed_against_cached_results(
+                        &recomputed,
+                        &class_key,
+                        &results_val,
+                        row.absolute_tolerance,
+                        row.relative_tolerance,
+                    );
+                    let variant = analysis_variant_key(&params_val);
+                    let counts = diag_entry.variants.entry(variant).or_insert([0; 3]);
+                    counts[0] += 1;
+                    if cmp.compared_count > 0 {
+                        counts[1] += 1;
+                        if cmp.disagreements.is_empty() {
+                            counts[2] += 1;
+                        }
+                    }
+                    for (key, n) in &cmp.compared_by_key {
+                        *diag_entry.compared_scalar_keys.entry(key.clone()).or_insert(0) += n;
+                    }
                     diag_entry.scalars_compared = diag_entry.scalars_compared.saturating_add(cmp.compared_count);
                     diag_entry.scalars_disagreed = diag_entry.scalars_disagreed.saturating_add(cmp.disagreements.len());
                     diag_entry.scalars_agreed = diag_entry.scalars_agreed.saturating_add(cmp.compared_count.saturating_sub(cmp.disagreements.len()));

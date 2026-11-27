@@ -20,7 +20,12 @@ const KEY_PAGES: &[(&str, &str, &str)] = &[
     (
         "Open .pzfx and .prism Files",
         "open-pzfx-files.html",
-        "Open .pzfx and .prism data files offline on macOS, Windows, and Linux and export tables to CSV or CurveBook projects.",
+        "Open .pzfx and .prism data files offline on macOS, Windows, and Linux, inspect read-only .prism analysis snapshots, and export tables to CSV, data-only .pzfx, or CurveBook projects.",
+    ),
+    (
+        "Empirical .prism and .pzfx Specification",
+        "pzfx-format-specification.html",
+        "Clean-room empirical specification of .prism (ZIP/JSON/CSV, .dt digests, and proprietary vendor blobs) and .pzfx (XML and legacy PCFF) files observed across 3,719 public Zenodo files.",
     ),
     (
         "CurveBook on Linux",

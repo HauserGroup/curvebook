@@ -89,6 +89,7 @@ impl SegmentedAxis {
                 span_end_pt: span_end,
                 major_tick_interval: seg.and_then(|s| s.major_tick_interval),
                 minor_ticks_per_interval: seg.map_or(0, |s| s.minor_ticks_per_interval),
+                auto_log_minor_ticks: seg.is_none_or(|s| s.auto_log_minor_ticks),
             }]
         } else {
             let plot_rect = match orientation {
@@ -1534,6 +1535,7 @@ mod tests {
             span_end_pt: 200.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            auto_log_minor_ticks: true,
         };
 
         for (min, max) in [(0.0, 100.0), (-5.0, 100.0), (1.0, f64::INFINITY), (f64::NAN, 100.0)] {

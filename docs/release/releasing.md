@@ -19,7 +19,7 @@ Use the **Release** GitHub Actions workflow (`release.yml`); Alpha and Beta are 
 
 Rerunning a version updates its existing draft and replaces matching assets. The workflow refuses to modify a release that is already published before creating any attestations.
 
-**Release channel.** [`packaging/release-channel.sh`](../../packaging/release-channel.sh) classifies the resolved version for every draft. Any SemVer pre-release version is drafted as a GitHub **prerelease** that never becomes **Latest**, whatever the trigger, and is named by its first pre-release identifier: `-alpha.N` → **CurveBook Alpha v…**, `-beta.N` → **CurveBook Beta v…**, `-rc.N` → **CurveBook Release Candidate v…**, anything else → **CurveBook Prerelease v…**. A stable version (`X.Y.Z`) is a normal release unless **alpha** is checked. To cut a release, first set the workspace version (`cargo xtask version set 0.1.0-beta.1`) and commit it; a pushed tag `v0.1.0-beta.1` must match it exactly, or the version-parity check fails. Regression test: `xtask/tests/r014_release_channel.rs`.
+**Release channel.** [`packaging/release-channel.sh`](../../packaging/release-channel.sh) classifies the resolved version for every draft. Any SemVer pre-release version is drafted as a GitHub **prerelease** that never becomes **Latest**, whatever the trigger, and is named by its first pre-release identifier: `-alpha.N` → **CurveBook Alpha v…**, `-beta.N` → **CurveBook Beta v…**, `-rc.N` → **CurveBook Release Candidate v…**, anything else → **CurveBook Prerelease v…**. A stable version (`X.Y.Z`) is a normal release unless **alpha** is checked. To cut a release, first set the workspace version (`cargo xtask version set 0.1.0-beta.1`) and commit it; a pushed tag `v0.1.0-beta.1` must match it exactly, or the version-parity check fails. Regression test: `xtask/tests/xtask_suite/r014_release_channel.rs`.
 
 **Signing posture & user documentation (`R8.10` / `R8.11`):**
 - **macOS (Beta+):** signed with Developer ID Application and notarized with stapled tickets on both `CurveBook.app` and the `.dmg`; historical Alpha prereleases were ad-hoc signed.
@@ -33,7 +33,8 @@ Rerunning a version updates its existing draft and replaces matching assets. The
 Before tagging or publishing a release, verify both source invariants and packaging outputs across target platforms:
 
 1. **Workspace gates & licences:**
-   - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (check synced outputs with `git diff`).
+   - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (updates `[workspace.package] version` in `Cargo.toml`, refreshes `Cargo.lock`, and synchronizes `version:` in root `CITATION.cff`; update `date-released` in `crates/doc/src/citation.rs` and `CITATION.cff` when cutting a release, then check synced outputs with `git diff`).
+   - **Zenodo concept DOI activation (one-time post-Beta maintainer step, `R14.7`):** enable the Zenodo↔GitHub repository integration for `HauserGroup/curvebook` on Zenodo/GitHub (never adding outbound token egress or wider permissions to `.github/workflows/*`), publish one release so Zenodo archives it and mints a concept DOI, and record that concept DOI in `CURVEBOOK_CITATION.concept_doi` (`crates/doc/src/citation.rs`), `CITATION.cff`, `docs/index.html`, `docs/reference/get-started.md`, and `README.md`.
    - Run the Zero-Telemetry & static security hygiene gate:
      ```sh
      cargo xtask telemetry

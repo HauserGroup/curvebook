@@ -499,6 +499,15 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {
+        id: "app.cite",
+        label: "Cite CurveBook",
+        shortcut: "",
+        params_doc: "{}",
+        summary: "Open the Cite CurveBook dialog with plain-text reference, BibTeX, and citation link.",
+        beginner: "Copy a ready-to-paste software citation or BibTeX entry for the running version of CurveBook.",
+        rank: ActionRank::Overflow,
+    },
+    UiCommandSpec {
         id: "app.feedback",
         label: "Send Feedback",
         shortcut: "",

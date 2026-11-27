@@ -459,12 +459,13 @@ fn render_major_tick_interval_row(
 }
 
 fn apply_minor_ticks_update(draft: &mut FormatAxesState, dirty: &mut bool, seg_idx: usize, minor_ticks: u8) {
-    let cur = draft.axis_draft.segments.get(seg_idx).map_or(0, |s| s.minor_ticks_per_interval);
-    if cur != minor_ticks
-        && let Some(seg) = draft.axis_draft.segments.get_mut(seg_idx)
-    {
-        seg.minor_ticks_per_interval = minor_ticks;
-        *dirty = true;
+    if let Some(seg) = draft.axis_draft.segments.get_mut(seg_idx) {
+        let next_auto = if seg.scale == GraphAxisScale::Log10 && minor_ticks == 0 { false } else { seg.auto_log_minor_ticks };
+        if seg.minor_ticks_per_interval != minor_ticks || seg.auto_log_minor_ticks != next_auto {
+            seg.minor_ticks_per_interval = minor_ticks;
+            seg.auto_log_minor_ticks = next_auto;
+            *dirty = true;
+        }
     }
 }
 

@@ -2218,14 +2218,20 @@ impl CurveBookNativeApp {
         );
     }
 
-    /// Move a pending figure-export warning from the window's shared shell state into the desktop
-    /// toast before the shell draws, so the warning is shown once rather than both as a toast and
-    /// as the shell's status-footer notice (`GAP-06-02`, `R0.36`).
+    /// Move pending figure-export warnings and non-Welcome-hub shell status notices from the
+    /// window's shared shell state into the desktop toast before the shell draws, so each notice
+    /// is shown once rather than duplicated across both the toast and the status footer (`R0.36`).
     fn adopt_figure_export_warning(&mut self, window_id: DesktopWindowId) {
-        if let Ok(win) = self.runtime.window_mut(window_id)
-            && let Some(warning) = win.app_mut().canvas_dialogs.figure_export_warning.take()
-        {
-            self.status_banner = Some(warning);
+        if let Ok(win) = self.runtime.window_mut(window_id) {
+            if let Some(warning) = win.app_mut().canvas_dialogs.figure_export_warning.take() {
+                self.status_banner = Some(warning);
+            }
+            if !win.app().egui_views.launcher_open
+                && win.app().document().total_sheet_count() > 0
+                && let Some(banner) = win.app_mut().canvas_dialogs.status_banner.take()
+            {
+                self.status_banner = Some(banner);
+            }
         }
     }
 

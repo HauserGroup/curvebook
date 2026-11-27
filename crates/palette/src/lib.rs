@@ -172,10 +172,10 @@ mod tests {
         // Published LUT anchor entries (Nuñez, Anderton & Renslow 2018; van der Walt & Smith 2015), read
         // from R 4.5.2 `viridisLite` 0.4.2 `viridis.map` at 1-based row `idx + 1` with
         // `idx = floor(i * 255 / 16 + 1/2)` (the index rule documented in `colormap.rs`), e.g.
-        // `d <- viridisLite::viridis.map; d <- d[d$opt == "C", ]; rgb(d$R[129], d$G[129], d$B[129])`.
-        // Cividis: only the stops that are exact LUT entries are anchored (see `colormap.rs` docs).
+        // `d <- viridisLite::viridis.map; d <- d[d$opt == "E", ]; rgb(d$R[129], d$G[129], d$B[129])`.
         assert_eq!(CIVIDIS_STOPS[0], Rgba8::rgb(0, 32, 77)); // #00204D, LUT idx 0
-        assert_eq!(CIVIDIS_STOPS[3], Rgba8::rgb(45, 66, 108)); // #2D426C, LUT idx 48
+        assert_eq!(CIVIDIS_STOPS[4], Rgba8::rgb(65, 77, 107)); // #414D6B, LUT idx 64 (t = 0.25)
+        assert_eq!(CIVIDIS_STOPS[8], Rgba8::rgb(125, 124, 120)); // #7D7C78, LUT idx 128 (t = 0.50)
         assert_eq!(CIVIDIS_STOPS[12], Rgba8::rgb(188, 175, 111)); // #BCAF6F, LUT idx 191 (t = 0.75)
         assert_eq!(CIVIDIS_STOPS[16], Rgba8::rgb(255, 234, 70)); // #FFEA46, LUT idx 255
 
@@ -188,10 +188,11 @@ mod tests {
         assert_eq!(super::VIRIDIS_STOPS[8], Rgba8::rgb(33, 145, 140)); // #21918C, LUT idx 128
         assert_eq!(super::VIRIDIS_STOPS[9], Rgba8::rgb(31, 159, 136)); // #1F9F88, LUT idx 143
 
-        // Cividis CIE Delta L* smoothness across all 16 intervals (previously collapsed to 3.01 & 1.11 at stops 15-16).
+        // Cividis CIE Delta L* smoothness across all 16 intervals (published LUT gives 6.27 & 3.70
+        // on the first two intervals, while previously broken stops collapsed to 3.01 & 1.11 at 15-16).
         let civ_deltas: Vec<f64> = CIVIDIS_STOPS.windows(2).map(|w| cie_lstar(w[1]) - cie_lstar(w[0])).collect();
         for (idx, &dl) in civ_deltas.iter().enumerate() {
-            assert!((3.8..=6.2).contains(&dl), "Cividis stop {idx}->{} Delta L* = {dl:.2} out of smooth range [3.8, 6.2]", idx + 1);
+            assert!((3.6..=6.4).contains(&dl), "Cividis stop {idx}->{} Delta L* = {dl:.2} out of smooth range [3.6, 6.4]", idx + 1);
         }
         for (idx, &dl) in civ_deltas.iter().enumerate().skip(11) {
             assert!((4.5..=5.8).contains(&dl), "Cividis upper-half stop {idx}->{} Delta L* = {dl:.2} collapsed", idx + 1);

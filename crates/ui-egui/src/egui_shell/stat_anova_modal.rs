@@ -1681,6 +1681,30 @@ fn render_multiplicity_dropdown(
             }
         }
     });
+    if let Some(popup_resp) = &cb.popup_response {
+        let popup_rect = popup_resp.rect;
+        let clipped = if meta.viewport_rect.is_positive() { meta.viewport_rect.intersect(popup_rect) } else { popup_rect };
+        if clipped.is_positive() {
+            popup_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Menu, true, "Multiplicity Method"));
+            meta.record(FrameInspectNodeMeta {
+                egui_id: popup_resp.id,
+                accesskit_id: popup_resp.id.accesskit_id(),
+                widget_id: format!("popup.{salt}"),
+                role: String::from("listbox"),
+                label: String::from("Multiplicity Method"),
+                command_id: None,
+                value: Some(json!(true)),
+                enabled: true,
+                disabled_reason: None,
+                unclipped_rect: popup_rect,
+                clipped_rect: clipped,
+                z_layer: ZLayer::DropdownMenu,
+                ellipsized: false,
+                full_label: None,
+                action_rank: None,
+            });
+        }
+    }
     record_widget(
         ui,
         meta,

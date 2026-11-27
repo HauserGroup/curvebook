@@ -612,57 +612,72 @@ fn render_selected_panel_bounds_controls(
         .horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             let vis_clip = if meta.viewport_rect.is_positive() { ui.clip_rect().intersect(meta.viewport_rect) } else { ui.clip_rect() };
+            let spin_size = Vec2::new(68.0, 24.0);
             ui.label("W:");
-            let w_sized = ui
-                .add_enabled_ui(enabled, |ui| {
-                    ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut w_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
-                })
-                .inner;
-            w_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
-            if w_sized.rect.intersect(vis_clip).is_positive() && w_sized.interact_rect.intersect(vis_clip).is_positive() {
-                meta.record_response(
-                    ui,
-                    &w_sized,
-                    crate::egui_shell::FrameInspectEntryInput {
-                        widget_id: "inspector.layout.panel.width_pt",
-                        role: "spinbutton",
-                        label: "Panel Width (pt)",
-                        command_id: Some("layout.setSpec"),
-                        value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
-                        enabled,
-                        disabled_reason: None,
-                        z_layer: crate::inspect::ZLayer::Workspace,
-                        ellipsized: false,
-                        full_label: None,
-                    },
-                );
-            }
+            let w_top = ui.cursor().top();
+            let w_sized = if w_top >= vis_clip.bottom() || w_top + spin_size.y <= vis_clip.top() {
+                ui.allocate_space(spin_size);
+                None
+            } else {
+                let resp = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        ui.add_sized(spin_size, egui::DragValue::new(&mut w_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+                    })
+                    .inner;
+                resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Width (pt)"));
+                if resp.rect.intersect(vis_clip).is_positive() && resp.interact_rect.intersect(vis_clip).is_positive() {
+                    meta.record_response(
+                        ui,
+                        &resp,
+                        crate::egui_shell::FrameInspectEntryInput {
+                            widget_id: "inspector.layout.panel.width_pt",
+                            role: "spinbutton",
+                            label: "Panel Width (pt)",
+                            command_id: Some("layout.setSpec"),
+                            value: Some(json!({ "width_pt": w_pt, "panel_index": target_panel_idx })),
+                            enabled,
+                            disabled_reason: None,
+                            z_layer: crate::inspect::ZLayer::Workspace,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                }
+                Some(resp)
+            };
 
             ui.label("H:");
-            let h_sized = ui
-                .add_enabled_ui(enabled, |ui| {
-                    ui.add_sized(Vec2::new(68.0, 24.0), egui::DragValue::new(&mut h_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
-                })
-                .inner;
-            h_sized.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
-            if h_sized.rect.intersect(vis_clip).is_positive() && h_sized.interact_rect.intersect(vis_clip).is_positive() {
-                meta.record_response(
-                    ui,
-                    &h_sized,
-                    crate::egui_shell::FrameInspectEntryInput {
-                        widget_id: "inspector.layout.panel.height_pt",
-                        role: "spinbutton",
-                        label: "Panel Height (pt)",
-                        command_id: Some("layout.setSpec"),
-                        value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
-                        enabled,
-                        disabled_reason: None,
-                        z_layer: crate::inspect::ZLayer::Workspace,
-                        ellipsized: false,
-                        full_label: None,
-                    },
-                );
-            }
+            let h_top = ui.cursor().top();
+            let h_sized = if h_top >= vis_clip.bottom() || h_top + spin_size.y <= vis_clip.top() {
+                ui.allocate_space(spin_size);
+                None
+            } else {
+                let resp = ui
+                    .add_enabled_ui(enabled, |ui| {
+                        ui.add_sized(spin_size, egui::DragValue::new(&mut h_pt).range(24.0..=2000.0).speed(1.0).suffix(" pt"))
+                    })
+                    .inner;
+                resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::SpinButton, enabled, "Panel Height (pt)"));
+                if resp.rect.intersect(vis_clip).is_positive() && resp.interact_rect.intersect(vis_clip).is_positive() {
+                    meta.record_response(
+                        ui,
+                        &resp,
+                        crate::egui_shell::FrameInspectEntryInput {
+                            widget_id: "inspector.layout.panel.height_pt",
+                            role: "spinbutton",
+                            label: "Panel Height (pt)",
+                            command_id: Some("layout.setSpec"),
+                            value: Some(json!({ "height_pt": h_pt, "panel_index": target_panel_idx })),
+                            enabled,
+                            disabled_reason: None,
+                            z_layer: crate::inspect::ZLayer::Workspace,
+                            ellipsized: false,
+                            full_label: None,
+                        },
+                    );
+                }
+                Some(resp)
+            };
             (w_sized, h_sized)
         })
         .inner;
@@ -672,19 +687,27 @@ fn render_selected_panel_bounds_controls(
     let escape_pressed = ui.input(|i| i.key_pressed(egui::Key::Escape));
     let w_clamped = w_pt.clamp(24.0, 2000.0);
     let h_clamped = h_pt.clamp(24.0, 2000.0);
-    let w_dragging = enabled && w_sized.dragged();
-    let h_dragging = enabled && h_sized.dragged();
-    let w_editing = enabled && w_sized.has_focus();
-    let h_editing = enabled && h_sized.has_focus();
+    let w_dragging = enabled && w_sized.as_ref().is_some_and(egui::Response::dragged);
+    let h_dragging = enabled && h_sized.as_ref().is_some_and(egui::Response::dragged);
+    let w_editing = enabled && w_sized.as_ref().is_some_and(egui::Response::has_focus);
+    let h_editing = enabled && h_sized.as_ref().is_some_and(egui::Response::has_focus);
     let was_dragging_w = matching_draft.as_ref().is_some_and(|d| d.dragging_w);
     let was_dragging_h = matching_draft.as_ref().is_some_and(|d| d.dragging_h);
     let was_editing_w = matching_draft.as_ref().is_some_and(|d| d.editing_w);
     let was_editing_h = matching_draft.as_ref().is_some_and(|d| d.editing_h);
 
-    let w_finished = enabled && (w_sized.drag_stopped() || (was_dragging_w && !w_dragging) || w_sized.lost_focus() || (was_editing_w && !w_editing));
-    let h_finished = enabled && (h_sized.drag_stopped() || (was_dragging_h && !h_dragging) || h_sized.lost_focus() || (was_editing_h && !h_editing));
-    let instant_w = enabled && w_sized.changed() && !w_dragging && !w_editing;
-    let instant_h = enabled && h_sized.changed() && !h_dragging && !h_editing;
+    let w_finished = enabled
+        && (w_sized.as_ref().is_some_and(egui::Response::drag_stopped)
+            || (was_dragging_w && !w_dragging)
+            || w_sized.as_ref().is_some_and(egui::Response::lost_focus)
+            || (was_editing_w && !w_editing));
+    let h_finished = enabled
+        && (h_sized.as_ref().is_some_and(egui::Response::drag_stopped)
+            || (was_dragging_h && !h_dragging)
+            || h_sized.as_ref().is_some_and(egui::Response::lost_focus)
+            || (was_editing_h && !h_editing));
+    let instant_w = enabled && w_sized.as_ref().is_some_and(egui::Response::changed) && !w_dragging && !w_editing;
+    let instant_h = enabled && h_sized.as_ref().is_some_and(egui::Response::changed) && !h_dragging && !h_editing;
 
     if escape_pressed && (w_finished || h_finished) {
         set_studio_panel_size_preview(ui.ctx(), None);
@@ -692,10 +715,16 @@ fn render_selected_panel_bounds_controls(
             state.panel_size_draft = None;
         }
     } else if w_dragging || h_dragging || w_editing || h_editing {
-        let next_w =
-            if w_dragging || w_editing || w_sized.changed() { w_clamped } else { matching_draft.as_ref().map_or(bounds.width, |d| d.width_pt) };
-        let next_h =
-            if h_dragging || h_editing || h_sized.changed() { h_clamped } else { matching_draft.as_ref().map_or(bounds.height, |d| d.height_pt) };
+        let next_w = if w_dragging || w_editing || w_sized.as_ref().is_some_and(egui::Response::changed) {
+            w_clamped
+        } else {
+            matching_draft.as_ref().map_or(bounds.width, |d| d.width_pt)
+        };
+        let next_h = if h_dragging || h_editing || h_sized.as_ref().is_some_and(egui::Response::changed) {
+            h_clamped
+        } else {
+            matching_draft.as_ref().map_or(bounds.height, |d| d.height_pt)
+        };
         set_studio_panel_size_preview(ui.ctx(), Some((ls.id.clone(), target_panel_idx, next_w, next_h)));
         if !will_discard {
             state.panel_size_draft = Some(LayoutPanelSizeDraft {

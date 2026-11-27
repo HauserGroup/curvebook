@@ -1,6 +1,6 @@
 # CurveBook Roadmap
 
-CurveBook's active task list, architectural milestones (`R0`–`R17`), and release history live under `docs/`:
+CurveBook's active task list, architectural milestones (`R0`–`R24`), and release history live under `docs/`:
 
 - Active claimable roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Verified implementation status & known limits: [`docs/STATUS.md`](docs/STATUS.md)

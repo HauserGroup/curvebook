@@ -217,6 +217,18 @@ fn r0_36_import_with_open_modal_never_replaces_document_or_pending_prompt() -> R
     assert!(document_intact(&rt)? && prompt_intact(&rt)?);
     assert_eq!(rt.window_count(), 1);
 
+    // 2b. File › Open of a `.curvebook` project (both native picker and explicit path): also refused.
+    adapter.push_response("project.open", Some(saved.clone()));
+    let err = rt.dispatch_native_file_command(wid, "project.open").expect_err("File > Open behind an open dialog must be refused");
+    assert!(err.contains("dialog is open"), "{err}");
+    assert!(adapter.requests().is_empty(), "File > Open picker must not open while a dialog is open");
+    let err = rt
+        .dispatch_native_file_command_with_params(wid, "project.open", &json!({ "path": saved.to_string_lossy() }))
+        .expect_err("explicit .curvebook open behind an open dialog must be refused");
+    assert!(err.contains("dialog is open"), "{err}");
+    assert!(document_intact(&rt)? && prompt_intact(&rt)?);
+    assert_eq!(rt.window_count(), 1);
+
     // 3. The same through the desktop menu dispatch used by the macOS native menu bar: the refusal
     //    is shown to the user in the desktop status banner.
     let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
@@ -422,6 +434,25 @@ fn gap_07_05_all_tables_export_handles_unicode_long_titles_reserved_names_and_di
     assert!(replace_err.contains("directory"));
     assert_eq!(fs::read(&sentinel)?, b"DO_NOT_OVERWRITE", "earlier file must stay untouched when batch fails");
     assert!(!conflict_dir.join("table_CON.csv").exists(), "later file must not be partially created");
+
+    // Through CurveBookNativeApp outside the Welcome hub, a failing Export All batch surfaces in status_banner.
+    rt.window_mut(wid)?.app_mut().nav.welcome.open = false;
+    rt.window_mut(wid)?.app_mut().egui_views.launcher_open = false;
+    adapter.push_response("ui.export.allTablesCsv", Some(conflict_dir.clone()));
+    let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
+    h.settle(2);
+    let ctx = h.ctx.clone();
+    h.app.trigger_menu_action(&ctx, "ui.export.allTablesCsv");
+    h.settle(2);
+    assert!(matches!(h.app.runtime().window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::ExportAllTablesExistingFiles { .. }));
+    h.app.runtime_mut().window_mut(wid)?.app_mut().canvas_dialogs.close_dialog();
+    h.app.runtime_mut().window_mut(wid)?.app_mut().canvas_dialogs.status_banner = Some(replace_err.clone());
+    h.settle(2);
+    assert!(
+        h.app.status_banner().is_some_and(|s| s.contains("directory")),
+        "Export All batch error outside Welcome hub must surface in desktop status_banner, got {:?}",
+        h.app.status_banner()
+    );
     Ok(())
 }
 

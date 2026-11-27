@@ -7,22 +7,22 @@
 use std::fmt::Write as _;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation, BlandAltmanSpec, Cell,
-    ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySimDesign,
-    ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSetColumn, DataSheet,
-    DescriptiveSpec, DistributionTailShade, ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, FractionDenominator,
-    FractionOfTotalSpec, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode, KMeansAlgorithm, KappaWeighting,
-    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
-    ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec,
-    PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec,
-    PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
-    PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy, RepeatedMeasuresDesign,
-    ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RmSphericityCorrection, RocCiMethod,
-    RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise, SplineLowessMethod, SplineLowessSpec,
-    SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype,
-    TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
-    WeightingScheme, WeightingSource,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation, BlandAltmanSpec,
+    CURVEBOOK_CITATION, Cell, ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod,
+    ContingencySimDesign, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec,
+    DataSetColumn, DataSheet, DescriptiveSpec, DistributionTailShade, ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode,
+    FitMethod, FractionDenominator, FractionOfTotalSpec, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode,
+    KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset,
+    MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope,
+    PassingBablokSpec, PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget,
+    PowerTailMode, PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy,
+    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    RmSphericityCorrection, RocCiMethod, RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise,
+    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy,
+    TableArchetype, TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    TwoProportionsMethod, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -60,8 +60,26 @@ impl ReportFormat {
     }
 }
 
-/// CurveBook software version interpolated into methods prose for reproducibility (`R20.7`).
-const CURVEBOOK_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Software version and optional concept DOI interpolated into generated methods prose (`R14.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SoftwareAttribution<'a> {
+    pub version: &'a str,
+    pub concept_doi: Option<&'a str>,
+}
+
+impl<'a> SoftwareAttribution<'a> {
+    /// Construct an explicit software attribution (for deterministic fixtures or custom callers).
+    #[must_use]
+    pub const fn new(version: &'a str, concept_doi: Option<&'a str>) -> Self {
+        Self { version, concept_doi }
+    }
+
+    /// Running build version (`CARGO_PKG_VERSION`) paired with [`CURVEBOOK_CITATION`]'s concept DOI.
+    #[must_use]
+    pub const fn running() -> Self {
+        Self { version: env!("CARGO_PKG_VERSION"), concept_doi: CURVEBOOK_CITATION.concept_doi }
+    }
+}
 
 /// Scope of the generated methods report (`R20.7`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -106,7 +124,8 @@ pub fn generate_methods_report(doc: &ProjectDocument, result_sheet_id: &SheetId,
 }
 
 /// Generate a deterministic, clean-room statistical methods report for `result_sheet_id` inside
-/// `doc` in the requested [`ReportFormat`] and [`ReportScope`] (`R20.7`).
+/// `doc` in the requested [`ReportFormat`] and [`ReportScope`] (`R20.7`) using
+/// [`SoftwareAttribution::running`].
 ///
 /// # Errors
 /// Returns [`EngineError`] if `result_sheet_id` is empty or does not match a [`ResultSheet`] in `doc`.
@@ -116,6 +135,22 @@ pub fn generate_methods_report_with_scope(
     format: ReportFormat,
     scope: ReportScope,
 ) -> Result<String, EngineError> {
+    generate_methods_report_for_software(doc, result_sheet_id, format, scope, SoftwareAttribution::running())
+}
+
+/// Generate a deterministic, clean-room statistical methods report for `result_sheet_id` inside
+/// `doc` using an explicit [`SoftwareAttribution`] (`R14.7`), keeping formatting independent of
+/// compile-time package versions when callers supply a fixed version.
+///
+/// # Errors
+/// Returns [`EngineError`] if `result_sheet_id` is empty or does not match a [`ResultSheet`] in `doc`.
+pub fn generate_methods_report_for_software(
+    doc: &ProjectDocument,
+    result_sheet_id: &SheetId,
+    format: ReportFormat,
+    scope: ReportScope,
+    software: SoftwareAttribution<'_>,
+) -> Result<String, EngineError> {
     if result_sheet_id.as_str().trim().is_empty() {
         return Err(EngineError::new("result sheet identifier must not be empty"));
     }
@@ -124,8 +159,8 @@ pub fn generate_methods_report_with_scope(
         .ok_or_else(|| EngineError::with_code(curvebook_doc::ErrorCode::NotFound, format!("result sheet `{result_sheet_id}` not found")))?;
     let source_ds = res.analysis.source_sheet_id.as_ref().and_then(|sid| resolve_source_data_sheet(doc, sid));
     let blocks = match scope {
-        ReportScope::Methods => build_manuscript_methods_blocks(doc, res, source_ds),
-        ReportScope::FullReport => build_report_blocks(doc, res, source_ds),
+        ReportScope::Methods => build_manuscript_methods_blocks(doc, res, source_ds, software),
+        ReportScope::FullReport => build_report_blocks(doc, res, source_ds, software),
     };
     Ok(render_blocks(&blocks, format))
 }
@@ -204,25 +239,31 @@ where
 // Report Assembly
 // ---------------------------------------------------------------------------
 
-fn build_manuscript_methods_blocks(doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+fn build_manuscript_methods_blocks(
+    doc: &ProjectDocument,
+    res: &ResultSheet,
+    source_ds: Option<&DataSheet>,
+    software: SoftwareAttribution<'_>,
+) -> Vec<ReportBlock> {
     let mut blocks = Vec::new();
     let spec = &res.analysis;
     let (eff_conf_pct, eff_alpha) = effective_report_alpha(doc, res);
     let conf_pct = format_exact_float(eff_conf_pct);
     let alpha = format_exact_float(eff_alpha);
+    let software_tag = CURVEBOOK_CITATION.methods_software_tag_with_doi(software.version, software.concept_doi);
 
     let lead_runs = match &spec.kind {
         AnalysisKind::PowerAnalysis(_) => {
-            vec![plain(format!("Power and sample-size calculations were performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+            vec![plain(format!("Power and sample-size calculations were performed in {software_tag}."))]
         }
         AnalysisKind::Transform(_) => {
-            vec![plain(format!("Data processing was performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+            vec![plain(format!("Data processing was performed in {software_tag}."))]
         }
         AnalysisKind::NonlinearRegression(nl) if nl.method == FitMethod::RobustCauchy => {
-            vec![plain(format!("Statistical analyses were performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+            vec![plain(format!("Statistical analyses were performed in {software_tag}."))]
         }
         _ => vec![
-            plain(format!("Statistical analyses were performed in CurveBook (version {CURVEBOOK_VERSION}) with ")),
+            plain(format!("Statistical analyses were performed in {software_tag} with ")),
             math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")),
             plain(" confidence intervals and a nominal significance threshold of "),
             math(format!("alpha = {alpha}"), format!("alpha = {alpha}"), format!("\\alpha = {alpha}")),
@@ -512,12 +553,17 @@ fn describe_manuscript_sample_sizes(ds: &DataSheet, selected: &[usize]) -> Optio
     }
 }
 
-fn build_report_blocks(doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+fn build_report_blocks(
+    doc: &ProjectDocument,
+    res: &ResultSheet,
+    source_ds: Option<&DataSheet>,
+    software: SoftwareAttribution<'_>,
+) -> Vec<ReportBlock> {
     let mut blocks = Vec::new();
     blocks.push(ReportBlock::Title(vec![plain(format!("Statistical Methods and Results Report: {}", res.title()))]));
 
     append_study_context_section(&mut blocks, doc, res, source_ds);
-    append_methods_section(&mut blocks, doc, res, source_ds);
+    append_methods_section(&mut blocks, doc, res, source_ds, software);
     append_results_section(&mut blocks, doc, res, source_ds);
     append_diagnostics_section(&mut blocks, res);
 
@@ -634,7 +680,13 @@ fn effective_report_alpha(doc: &ProjectDocument, res: &ResultSheet) -> (f64, f64
     (spec.confidence_level.percent(), clean_alpha_cutoff(spec.confidence_level.alpha()))
 }
 
-fn append_methods_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) {
+fn append_methods_section(
+    blocks: &mut Vec<ReportBlock>,
+    doc: &ProjectDocument,
+    res: &ResultSheet,
+    source_ds: Option<&DataSheet>,
+    software: SoftwareAttribution<'_>,
+) {
     if res.is_imported() || matches!(res.analysis.kind, AnalysisKind::ImportedSnapshot(_)) {
         blocks.push(ReportBlock::Section(vec![plain("Imported results (not computed by CurveBook)")]));
         let (source_format, original_kind, reason) = match &res.provenance {
@@ -681,8 +733,9 @@ fn append_methods_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocument, 
         let _ = write!(star_legend, ", **** for p <= {t4}");
     }
 
+    let software_tag = CURVEBOOK_CITATION.methods_software_tag_with_doi(software.version, software.concept_doi);
     blocks.push(ReportBlock::Paragraph(vec![
-        plain(format!("Analyses were conducted in CurveBook (version {CURVEBOOK_VERSION}) with ")),
+        plain(format!("Analyses were conducted in {software_tag} with ")),
         math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")),
         plain(" confidence intervals and nominal significance threshold "),
         math(format!("alpha = {alpha}"), format!("alpha = {alpha}"), format!("\\alpha = {alpha}")),
@@ -4618,9 +4671,10 @@ mod tests {
         doc.add_result_sheet(nl_res)?;
 
         let mut corpus = String::new();
+        let fixed_software = SoftwareAttribution::new("0.0.0-fixture", None);
         for id in ["res-1", "res-missing", "res-nl"] {
             for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
-                let report = generate_methods_report(&doc, &SheetId::new(id), fmt)?;
+                let report = generate_methods_report_for_software(&doc, &SheetId::new(id), fmt, ReportScope::FullReport, fixed_software)?;
                 let _ = writeln!(corpus, "=== {id} / {} ===\n{report}", fmt.as_str());
             }
         }
@@ -4660,14 +4714,14 @@ mod tests {
     #[test]
     fn methods_report_outputs_stay_byte_identical() {
         let corpus = match build_fixture_corpus() {
-            Ok(c) => c.replace(CURVEBOOK_VERSION, "<VERSION>"),
+            Ok(c) => c,
             Err(err) => {
                 assert_eq!(err.to_string(), "");
                 return;
             }
         };
         let digest = dual_fnv1a(corpus.as_bytes());
-        assert_eq!(digest, (77_440, 11_094_136_371_273_311_663, 5_022_623_331_152_115_581));
+        assert_eq!(digest, (77_386, 13_055_826_590_155_254_624, 2_479_361_204_106_504_504));
     }
 
     #[test]
@@ -4720,7 +4774,8 @@ mod tests {
             assert_eq!(full, full_explicit, "generate_methods_report must preserve FullReport default");
 
             let methods = generate_methods_report_with_scope(&doc, &SheetId::new("res-4pl-1"), fmt, ReportScope::Methods)?;
-            assert!(methods.contains(CURVEBOOK_VERSION), "{fmt:?} methods must include CurveBook version:\n{methods}");
+            let running_tag = CURVEBOOK_CITATION.methods_software_tag(env!("CARGO_PKG_VERSION"));
+            assert!(methods.contains(&running_tag), "{fmt:?} methods must include `{running_tag}`:\n{methods}");
             let drug_lbl = if fmt == ReportFormat::Latex { "Drug\\_A (n = 3)" } else { "Drug_A (n = 3)" };
             assert!(methods.contains("Vehicle (n = 4)") && methods.contains(drug_lbl), "{fmt:?} sample sizes:\n{methods}");
             assert!(methods.contains("1 observation(s) were manually excluded prior to analysis."), "{fmt:?} exclusions:\n{methods}");
@@ -4777,5 +4832,31 @@ mod tests {
         let mut heading = String::new();
         append_md_text(&mut heading, "# heading", false, true);
         assert_eq!(heading, "\\# heading");
+    }
+
+    #[test]
+    fn r14_7_methods_report_version_and_optional_doi_across_formats() -> Result<(), Box<dyn std::error::Error>> {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+        for r in 0..3 {
+            col.data_sets[0].cells[r][0] = Cell::number(1.0 + r as f64);
+            col.data_sets[1].cells[r][0] = Cell::number(4.0 + r as f64);
+        }
+        let mut doc = ProjectDocument::new("Citation Check")?;
+        doc.add_data_sheet(DataSheet::new("ds-cite", "Groups", TableArchetype::Column(col))?)?;
+        let res = ResultSheet::new(AnalysisSpec::new("res-cite", "ds-cite", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?)?;
+        doc.add_result_sheet(res)?;
+
+        let with_doi = SoftwareAttribution::new("1.4.0", Some("10.5281/zenodo.1234567"));
+        let without_doi = SoftwareAttribution::new("1.4.0", None);
+        for scope in [ReportScope::Methods, ReportScope::FullReport] {
+            for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
+                let doi_text = generate_methods_report_for_software(&doc, &SheetId::new("res-cite"), fmt, scope, with_doi)?;
+                assert!(doi_text.contains("CurveBook 1.4.0 (doi:10.5281/zenodo.1234567)"), "{scope:?}/{fmt:?} missing version + DOI:\n{doi_text}");
+                let plain_text = generate_methods_report_for_software(&doc, &SheetId::new("res-cite"), fmt, scope, without_doi)?;
+                assert!(plain_text.contains("CurveBook 1.4.0"), "{scope:?}/{fmt:?} missing version:\n{plain_text}");
+                assert!(!plain_text.contains("doi:"), "{scope:?}/{fmt:?} must omit DOI when None:\n{plain_text}");
+            }
+        }
+        Ok(())
     }
 }

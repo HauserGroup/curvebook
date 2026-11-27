@@ -277,7 +277,8 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::None => HybridModalSurface::None,
         ActiveDialog::About => HybridModalSurface::EguiAbout,
-        ActiveDialog::ExportFigure { .. }
+        ActiveDialog::Cite
+        | ActiveDialog::ExportFigure { .. }
         | ActiveDialog::Print { .. }
         | ActiveDialog::Checkpoints
         | ActiveDialog::ImportWarnings

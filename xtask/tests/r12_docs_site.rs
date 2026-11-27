@@ -22,7 +22,7 @@ impl SimRepoTemplate {
     fn build_from_workspace() -> Result<Self, String> {
         let root = workspace_root()?;
         let mut files = Vec::new();
-        for file in ["AGENTS.md", "NOTICE", "README.md", "SECURITY.md", "Cargo.toml"] {
+        for file in ["AGENTS.md", "CITATION.cff", "NOTICE", "README.md", "SECURITY.md", "Cargo.toml"] {
             files.push((PathBuf::from(file), fs::read(root.join(file)).map_err(|e| format!("read {file}: {e}"))?));
         }
         let mut docs_paths = Vec::new();
@@ -254,7 +254,7 @@ fn docs_site_check_passes_with_absent_and_partial_analyses_md() -> Result<(), St
 
     fs::write(
         sb.path.join("docs/reference/analyses.md"),
-        "# Statistical Analyses\n\n## Two-Group Comparison {#analysis-two-group-comparison}\n\nDetails.\n",
+        "# Statistical Analyses\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n## Two-Group Comparison {#analysis-two-group-comparison}\n\nDetails.\n",
     )
     .map_err(|e| e.to_string())?;
     run_xtask_ok(&sb.path, &["docs-site", "--sitemap"])?;
@@ -273,32 +273,46 @@ fn docs_site_release_snapshot_pages_stage_and_negative_gates() -> Result<(), Str
     SimRepoTemplate::shared()?.materialize_into(sim)?;
     let ref_dir = sim.join("docs/reference");
     fs::create_dir_all(&ref_dir).map_err(|e| e.to_string())?;
+    let cite_ref = curvebook_doc::CURVEBOOK_CITATION.plain_text_reference(None);
+    let cite_bib = curvebook_doc::CURVEBOOK_CITATION.bibtex(None);
+    let get_started_stub = format!(
+        "# Get Started\n\n<!-- Audience: Tier 1 Scientist Guide -->\n\nSee [MCP](../mcp-for-beginners.md).\n\n## Linux {{#install-linux}}\n\nNotes.\n\n## FreeBSD {{#install-freebsd}}\n\nNotes.\n\n## Verify {{#verifying-downloads}}\n\nChecksums.\n\n## Cite {{#how-to-cite}}\n\nSee CITATION.cff.\n\n> {cite_ref}\n\n```bibtex\n{cite_bib}\n```\n"
+    );
     for (name, body) in [
+        ("get-started", get_started_stub.as_str()),
+        ("desktop-gui", "# Desktop GUI\n\n<!-- Audience: Tier 1 Scientist Guide -->\n\nSee [Commands](../commands.md).\n"),
+        ("concepts", "# Concepts\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Tables](tables.md).\n"),
         (
-            "get-started",
-            "# Get Started\n\nSee [MCP](../mcp-for-beginners.md).\n\n## Linux {#install-linux}\n\nNotes.\n\n## Verify {#verifying-downloads}\n\nChecksums.\n",
+            "tables",
+            "# Tables\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Files](files.md).\n\n## Archetypes {#table-archetypes}\n\nXY.\n",
         ),
-        ("desktop-gui", "# Desktop GUI\n\nSee [Commands](../commands.md).\n"),
-        ("concepts", "# Concepts\n\nSee [Tables](tables.md).\n"),
-        ("tables", "# Tables\n\nSee [Files](files.md).\n\n## Archetypes {#table-archetypes}\n\nXY.\n"),
-        ("fitting", "# Fitting\n\nSee [Equations](registry/equations.html#eq-michaelis_menten).\n"),
+        ("fitting", "# Fitting\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Equations](registry/equations.html#eq-michaelis_menten).\n"),
         (
             "graphs",
-            "# Graphs\n\n![Shot](../images/workspace-split-fit.png)\n\n## Families {#graph-families}\n\nPlots.\n\n## Layouts {#page-layouts}\n\nPanels.\n",
+            "# Graphs\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n![Shot](../images/workspace-split-fit.png)\n\n## Families {#graph-families}\n\nPlots.\n\n## Layouts {#page-layouts}\n\nPanels.\n",
         ),
-        ("qol", "# QoL\n\nSee [Graphs](graphs.md).\n"),
-        ("files", "# Files\n\nSee [Batch](../schemas/batch-v1.schema.json).\n\n## Native {#native-formats}\n\nArchives.\n"),
-        ("settings", "# Settings\n\nSee [Prefs](../schemas/preferences.schema.json).\n"),
-        ("privacy-security", "# Privacy\n\nSee [Security](../../SECURITY.md).\n"),
+        ("qol", "# QoL\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Graphs](graphs.md).\n"),
+        (
+            "files",
+            "# Files\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Batch](../schemas/batch-v1.schema.json).\n\n## Native {#native-formats}\n\nArchives.\n",
+        ),
+        (
+            "settings",
+            "# Settings\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Prefs](../schemas/preferences.schema.json).\n\n## Storage {#storage-paths}\n\nPaths.\n",
+        ),
+        (
+            "privacy-security",
+            "# Privacy\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Security](../../SECURITY.md).\n\n## Releases {#pages-and-releases}\n\nAttestations.\n\n## Clean-room {#clean-room}\n\nPolicy.\n",
+        ),
         (
             "troubleshooting",
-            "# Troubleshooting\n\n## Known Issues {#known-issues}\n\n### MCP {#mcp-connection}\n\nCheck.\n\n### FUSE {#linux-fuse}\n\nExtract.\n",
+            "# Troubleshooting\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n## Known Issues {#known-issues}\n\n### MCP {#mcp-connection}\n\nCheck.\n\n### FUSE {#linux-fuse}\n\nExtract.\n",
         ),
-        ("glossary", "# Glossary\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes.\n"),
+        ("glossary", "# Glossary\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes.\n"),
     ] {
         fs::write(ref_dir.join(format!("{name}.md")), body).map_err(|e| e.to_string())?;
     }
-    let mut analyses = String::from("# Analyses\n\n");
+    let mut analyses = String::from("# Analyses\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n");
     for slug in [
         "transform",
         "descriptive-stats",
@@ -470,7 +484,14 @@ fn docs_site_math_callouts_figures_leaks_and_broken_root_pages() -> Result<(), S
     let orig_idx = fs::read_to_string(&idx).map_err(|e| e.to_string())?;
     fs::write(&idx, orig_idx.replace("privacy.html", "does-not-exist.html")).map_err(|e| e.to_string())?;
     run_xtask_fail(sim, &["docs-site", "--check", "--output", out_str], "does-not-exist.html")?;
-    fs::write(&idx, orig_idx).map_err(|e| e.to_string())?;
+    fs::write(&idx, orig_idx.replace("No tracking", "Easy to cite")).map_err(|e| e.to_string())?;
+    run_xtask_fail(sim, &["docs-site", "--check", "--output", out_str], "easy to cite")?;
+    fs::write(&idx, &orig_idx).map_err(|e| e.to_string())?;
+    let cff = sim.join("CITATION.cff");
+    let orig_cff = fs::read_to_string(&cff).map_err(|e| e.to_string())?;
+    fs::write(&cff, orig_cff.replace("version: ", "version: 9.9.9-")).map_err(|e| e.to_string())?;
+    run_xtask_fail(sim, &["docs-site", "--check", "--output", out_str], "CITATION.cff drifted")?;
+    fs::write(&cff, orig_cff).map_err(|e| e.to_string())?;
     fs::write(sim.join("docs/get-started.html"), "<script>alert(1)</script>").map_err(|e| e.to_string())?;
     run_xtask_fail(sim, &["docs-site", "--check", "--output", out_str], "")
 }

@@ -174,6 +174,7 @@ mod tests {
             span_end_pt: 200.0,
             major_tick_interval: None,
             minor_ticks_per_interval: 0,
+            auto_log_minor_ticks: true,
         };
         let policy = LocaleNumberPolicy::publication();
         let tick_cfg =

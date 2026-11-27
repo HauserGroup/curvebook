@@ -7,13 +7,13 @@ use std::time::Instant;
 use crate::docs_site;
 use crate::{
     assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, design_tokens, has_cargo_nextest, licenses,
-    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
+    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, version, web_fonts, workflows,
 };
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
 // input-to-paint budgets (`human_wf_*`), grid, curve-fit, and ANOVA/1M throughput gates
 // off the parallel correctness runner. The complement below still covers every other test.
-const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
+pub(crate) const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
 const HOSTED_STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -201,6 +201,7 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     // binaries themselves now run in the serial `performance` stage.
     web_fonts::check_web_bundle_readiness(root)?;
     citations::run(root, &[])?;
+    version::check_citation_cff(root)?;
     pending::run_count(root)?;
     status::run(root)
 }

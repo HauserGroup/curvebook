@@ -1,3 +1,4 @@
+<!-- Audience: Tier 1 Scientist Guide — keep this overview concise and scientist-friendly; put technical reference details in docs/reference/ and contributor internals in docs/architecture.md. -->
 <div align="center">
   <img src="assets/app-icon/curvebook-win95-2508.png" alt="CurveBook logo" width="120" />
   <h1>CurveBook</h1>
@@ -45,11 +46,11 @@
 
 ## What You Can Do
 
-- **Organize experimental data** — Structured tables for XY, Column, Grouped, Survival, Contingency, and Nested datasets, with replicate columns, one-click outlier exclusion, and data transforms.
-- **Run statistics & curve fits** — *t*-tests, ANOVA, nonparametric tests, survival analysis (Kaplan–Meier & Cox), PCA/clustering, and nonlinear regression with model comparison and plain-English assumption checks.
-- **Create publication figures** — Scatter, bar, box, violin, survival, heatmap, and forest plots with error bars, significance brackets, colorblind-safe palettes, multi-panel page layouts, and `SVG`, `PDF`, `PNG`, and `TIFF` export.
-- **Keep everything in sync** — Data tables, analyses, graphs, and layouts stay linked so edits update everywhere automatically.
-- **Automate or use with AI** — Includes a command-line tool (`curvebook-cli`) for batch workflows and a local MCP server so AI assistants can create analyses and graphs you can open and polish in the app.
+- **Organize experimental data** — Use structured tables for XY, Column, Grouped, Survival, Contingency, and Nested datasets. Track replicates, exclude outliers in one click, and transform data without altering raw values.
+- **Run statistics & curve fits** — Run *t*-tests, ANOVA, nonparametric tests, survival analysis (Kaplan–Meier and Cox), PCA, clustering, and nonlinear regression. Compare models and review plain-English assumption checks alongside your results.
+- **Create publication figures** — Build scatter, bar, box, violin, survival, heatmap, and forest plots with error bars, significance brackets, and colorblind-safe palettes. Combine panels into page layouts and export SVG, PDF, PNG, or TIFF.
+- **Keep everything in sync** — Data tables, analyses, graphs, and layouts stay linked. Edit a value once and downstream results and plots update automatically.
+- **Automate or work with AI** — Run repeat analyses from the command line with `curvebook-cli`, or connect a local AI assistant via MCP and refine the saved project in the desktop app.
 
 ---
 
@@ -57,10 +58,10 @@
 
 Get the latest Beta from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)**:
 
-- **macOS** — Universal `.dmg` (Apple Silicon & Intel, signed & notarized)
-- **Windows** — `.msi` installer (`x64` / `arm64`) — *unsigned in Beta; see the [SmartScreen note](https://curvebook.org/manual/latest/troubleshooting.html#known-issues)*
-- **Linux** — Portable `.AppImage` (`x86_64` / `aarch64`)
-- **FreeBSD** — CLI-only `.tar.gz` (`x86_64`)
+- **macOS** — Universal `.dmg` (Apple Silicon & Intel, signed and notarized)
+- **Windows** — `.msi` installer (x64 / ARM64) — *unsigned in Beta; see the [SmartScreen note](https://curvebook.org/manual/latest/troubleshooting.html#known-issues)*
+- **Linux** — Portable `.AppImage` (x86_64 / ARM64)
+- **FreeBSD** — CLI-only `.tar.gz` archive (x86_64)
 
 Need help installing, setting up the CLI, or verifying downloads? See the **[Get Started Guide](https://curvebook.org/manual/latest/get-started.html)**.
 
@@ -68,11 +69,38 @@ Need help installing, setting up the CLI, or verifying downloads? See the **[Get
 
 ## Quick Start
 
-1. **Add data** — Open CurveBook, choose a table type (or try a built-in sample dataset), and paste or import your data.
-2. **Analyze** — Click **Analyze…** to run a statistical test or fit a curve. Results, assumption checks, and a linked graph are created automatically.
-3. **Export** — Style your graph or combine panels into a page layout, then export to `SVG`, `PDF`, or `PNG`.
+1. **Add data** — Open CurveBook and pick a table type (or load a built-in sample). Paste, type, or import your data.
+2. **Analyze** — Click **Analyze…** to run a statistical test or fit a curve. CurveBook creates linked results, assumption checks, and a graph automatically.
+3. **Export** — Style your graph or arrange panels on a page layout, then export SVG, PDF, or PNG.
 
 Want to drive CurveBook with a local AI assistant? Read the **[Beginner's MCP Guide](docs/mcp-for-beginners.md)**.
+
+---
+
+## Citing CurveBook
+
+If you use CurveBook in published research, include the exact version you ran (from **Help › Cite CurveBook**, **About CurveBook**, or `curvebook-cli --version`):
+
+```text
+CurveBook Contributors (2026). CurveBook [Computer software]. https://github.com/HauserGroup/curvebook
+```
+
+<details>
+<summary>BibTeX</summary>
+
+```bibtex
+@software{curvebook,
+  author  = {{CurveBook Contributors}},
+  title   = {{CurveBook}},
+  year    = {2026},
+  license = {MIT OR Apache-2.0},
+  url     = {https://github.com/HauserGroup/curvebook}
+}
+```
+
+</details>
+
+See [`CITATION.cff`](CITATION.cff) and **[How to cite CurveBook](https://curvebook.org/manual/latest/get-started.html#how-to-cite)** for citation metadata and generated methods-paragraph details.
 
 ---
 

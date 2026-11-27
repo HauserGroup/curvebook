@@ -148,6 +148,7 @@ pub enum ActiveDialog {
     CommandPalette,
     Checkpoints,
     About,
+    Cite,
     ImportWarnings,
     ImportProjectMode {
         command_id: String,

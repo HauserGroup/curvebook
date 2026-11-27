@@ -390,6 +390,10 @@ enum ImportModePrompt {
 /// dialog is already open (`R0.36`).
 const IMPORT_BLOCKED_BY_DIALOG_MESSAGE: &str = "cannot import while a dialog is open; close or finish the current dialog first";
 
+/// Error shown when File › Open of a project or data file is refused because another dialog is
+/// already open (`R0.36`).
+const OPEN_BLOCKED_BY_DIALOG_MESSAGE: &str = "cannot open files while a dialog is open; close or finish the current dialog first";
+
 /// Map any dropped project, template, or interchange path to its replace-or-merge prompt command
 /// (`project.open` for `.curvebook` / `.curvebook.d`, `project.instantiateTemplate` for `.cbtemplate`,
 /// or `table.importPrism` / `table.importPzfx` / `table.importXlsx`).
@@ -2362,14 +2366,22 @@ impl DesktopHostRuntime {
             if command_id == "project.merge" {
                 let path = PathBuf::from(explicit_path);
                 let win = self.window_mut(window_id)?;
+                let answering_import_prompt =
+                    matches!(win.app().canvas_dialogs.active_dialog, curvebook_ui_egui::dialogs_canvas::ActiveDialog::ImportProjectMode { .. });
+                if win.app().has_open_modal() && !answering_import_prompt {
+                    return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE));
+                }
                 execute_native_import_at_path_with_params(win, "project.merge", &path, true, params)?;
-                if matches!(win.app().canvas_dialogs.active_dialog, curvebook_ui_egui::dialogs_canvas::ActiveDialog::ImportProjectMode { .. }) {
+                if answering_import_prompt {
                     win.app_mut().canvas_dialogs.close_dialog();
                 }
                 return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
             }
             if matches!(command_id, "project.open" | "file.open") {
                 return self.open_or_prompt_interchange_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
+            }
+            if command_id == "project.instantiateTemplate" && self.window(window_id)?.app().has_open_modal() {
+                return Err(String::from(OPEN_BLOCKED_BY_DIALOG_MESSAGE));
             }
         }
         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
@@ -2391,6 +2403,10 @@ impl DesktopHostRuntime {
         if command_id == "project.open"
             && let Some(mut hook) = self.open_file_dialog_hook.take()
         {
+            if self.window(window_id)?.app().has_open_modal() {
+                self.open_file_dialog_hook = Some(hook);
+                return Err(String::from(OPEN_BLOCKED_BY_DIALOG_MESSAGE));
+            }
             let picked = (hook.0)(window_id);
             self.open_file_dialog_hook = Some(hook);
             if let Some(path) = picked? {
@@ -2412,6 +2428,9 @@ impl DesktopHostRuntime {
         let win_locale = self.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
         let outcome = match command_id {
             "project.open" | "file.open" => {
+                if self.window(window_id)?.app().has_open_modal() {
+                    return Err(String::from(OPEN_BLOCKED_BY_DIALOG_MESSAGE));
+                }
                 let req = NativeFileDialogRequest {
                     command_id: command_id.to_owned(),
                     kind: NativeFileDialogKind::OpenFile,
@@ -2425,6 +2444,9 @@ impl DesktopHostRuntime {
                 }
             }
             "project.merge" => {
+                if self.window(window_id)?.app().has_open_modal() {
+                    return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE));
+                }
                 let req = NativeFileDialogRequest {
                     command_id: String::from("project.merge"),
                     kind: NativeFileDialogKind::OpenFile,
@@ -2442,6 +2464,9 @@ impl DesktopHostRuntime {
                 }
             }
             "file.open_unpacked_dir" => {
+                if self.window(window_id)?.app().has_open_modal() {
+                    return Err(String::from(OPEN_BLOCKED_BY_DIALOG_MESSAGE));
+                }
                 let req = NativeFileDialogRequest {
                     command_id: command_id.to_owned(),
                     kind: NativeFileDialogKind::PickFolder,
@@ -2501,12 +2526,9 @@ impl DesktopHostRuntime {
             }
             "project.exportPzfx" => self.execute_native_pzfx_export_with_adapter(window_id, &win_locale, adapter.as_ref())?,
             "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
-                // Refuse before showing the picker: the replace-or-merge prompt cannot open while
-                // another dialog is open, and the import must never run without it (`R0.36`).
-                if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
-                    && params.get("merge").and_then(Value::as_bool).is_none()
-                    && self.window(window_id)?.app().has_open_modal()
-                {
+                // Refuse before showing the picker: neither replace-or-merge prompts nor file
+                // imports/templates may open behind an active modal dialog (`R0.36`).
+                if params.get("merge").and_then(Value::as_bool).is_none() && self.window(window_id)?.app().has_open_modal() {
                     return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE));
                 }
                 let (filter_label, extensions): (String, Vec<String>) = match command_id {
@@ -2901,17 +2923,23 @@ impl DesktopHostRuntime {
         }
         let report = write_staged_export_batch_with_hook(&dir, &staged_entries, |_| Ok(()))?;
         let count = report.exported_files.len();
+        let mut payload = json!({
+            "path": dir.to_string_lossy(),
+            "exported_files": report.exported_files,
+            "count": count,
+            "leftover_files": report.leftover_files,
+        });
+        if !report.leftover_files.is_empty()
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert(String::from("warnings"), json!(report.leftover_files));
+        }
         Ok(DesktopEventOutcome {
             handled: true,
             action: format!("native_file_dialog.completed:{COMMAND_ID}"),
             window_id: Some(window_id),
             command_id: Some(String::from(COMMAND_ID)),
-            command_result: Some(json!({
-                "path": dir.to_string_lossy(),
-                "exported_files": report.exported_files,
-                "count": count,
-                "leftover_files": report.leftover_files,
-            })),
+            command_result: Some(payload),
             ..Default::default()
         })
     }
@@ -3546,6 +3574,14 @@ impl DesktopHostRuntime {
     /// (`GAP-07-03`) or prompting replace/merge/new-window first when `path` is a `.prism`, `.pzfx`,
     /// or `.xlsx` interchange file and the window already has sheets or unsaved changes (`R10.29`).
     fn open_or_prompt_interchange_in_window(&mut self, window_id: DesktopWindowId, path: PathBuf) -> Result<DesktopEventOutcome, String> {
+        if self.window(window_id)?.app().has_open_modal() {
+            let msg = if interchange_import_command_for_extension(&path).is_some() && !is_unpacked_project_target(&path) {
+                IMPORT_BLOCKED_BY_DIALOG_MESSAGE
+            } else {
+                OPEN_BLOCKED_BY_DIALOG_MESSAGE
+            };
+            return Err(String::from(msg));
+        }
         let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
         if !self.config.new_instance
             && let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
@@ -4346,7 +4382,7 @@ fn resolve_host_or_ui_route(
         "app.preferences" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Preferences, target_sheet_id: None, query: None }))
         }
-        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.feedback" => {
+        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.cite" || cmd == "app.feedback" => {
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
         }
         _ => Ok(None),
@@ -4473,6 +4509,11 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
         "table.setCalculatedVariable" => Ok(Some(DesktopCommandRoute::UiCommand {
             ui_command_id: String::from("ui.table.openFormulaBar"),
             params: sheet_id_obj_or_empty(resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        })),
+        "table.unlinkCalculatedVariable" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_mv_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(base_cmd.to_owned()),
         })),
         "table.setVariableRole" | "table.recodeLevels" | "table.setCategoricalOrder" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::VariablesDialog,
@@ -4630,6 +4671,13 @@ fn resolve_analysis_export_graph_layout_info_route(
             Ok(Some(DesktopCommandRoute::UiCommand {
                 ui_command_id: String::from("ui.analyze.open"),
                 params: sheet_id_obj_or_empty(resolve_data_sheet_id(doc)),
+            }))
+        }
+        "fit.listUserEquations" | "fit.getUserEquation" | "fit.saveUserEquation" | "fit.deleteUserEquation" | "fit.cloneBuiltinEquation" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener {
+                kind: DesktopDialogOpener::CommandPalette,
+                target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+                query: Some(base_cmd.to_owned()),
             }))
         }
         "analysis.updateParams" => Ok(Some(DesktopCommandRoute::UiDialogOpener {

@@ -111,6 +111,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
     matches!(
         base,
         "app.about"
+            | "app.cite"
             | "app.feedback"
             | "ui.previewFilter.set"
             | "ui.workspacePreset.set"

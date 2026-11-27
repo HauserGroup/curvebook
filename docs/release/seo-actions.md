@@ -9,7 +9,7 @@ Recorded 2026-11-24. Statuses below go stale; check the roadmap before relying o
 Every action must fit the project rules that already apply to the site:
 
 - **Neutral wording & preferred format naming.** All user-facing documentation and pages should prefer `".pzfx files"` and `".prism files"` naming where appropriate; lowercase `.prism` and `.pzfx` extensions are specifically allowed over clean-room and branding principles (`AGENTS.md` §1; enforced by `cargo xtask brands`). Every other reference to the commercial application that writes those files fails `cargo xtask brands` and `cargo xtask cleanroom`, unless a separate, scoped policy decision allows it (see [Needs a policy decision](#needs-a-policy-decision)).
-- **Only claims we can check.** Each factual claim on a page is backed by a test or a command a reader can run, as `apps/curvebook-cli/tests/r12_8_pzfx_landing_page.rs` does for [`open-pzfx-files.html`](../open-pzfx-files.html). Desktop GUI steps need a passing human-path test (see `R12.7`).
+- **Only claims we can check.** Each factual claim on a page is backed by a test or a command a reader can run, as `apps/curvebook-cli/tests/cli_suite/r12_8_pzfx_landing_page.rs` does for [`open-pzfx-files.html`](../open-pzfx-files.html). Desktop GUI steps need a passing human-path test (see `R12.7`).
 - **Static, script-free, no external requests.** The site sends no analytics and loads nothing from other origins. Measurement must come from the search engines' own webmaster tools, which need nothing on the page except a verification file or meta tag.
 - **Generated, not hand-maintained.** Anything that can drift (sitemap, canonical links, metadata on manual pages) belongs in `cargo xtask docs-site` and is checked by `--check`.
 - **No gaming.** No hidden text, keyword lists, doorway pages, or repeated competitor names. These risk penalties and look like trading on another product's reputation.
@@ -137,9 +137,9 @@ Two actions in this catalogue conflict with current rules and must not start wit
 
 ## Suggested order
 
-1. Finish what is in flight: merge `R12.10`, complete the `R12.9` switch-over, verify Search Console and Bing, submit the sitemap.
-2. Cheap technical items: `404.html`, generated meta descriptions, breadcrumbs, sitemap `lastmod` decision.
+1. Verify Google Search Console and Bing Webmaster Tools, and submit the published sitemap (`R12.9` and `R12.10` are complete).
+2. Decide on accurate `<lastmod>` dates in the sitemap (other technical foundations—`404.html`, unique `<title>`/`<meta description>`, breadcrumbs, `robots.txt`, `llms.txt`—are done).
 3. Listings on alternative-software sites and bio.tools, and the GitHub topics decision.
-4. Linux, offline/data-protection, and verification pages.
+4. Offline/data-protection and verification pages (`linux.html` is done).
 5. Decide on the comparison page and terminology map.
 6. After Beta: the `R12.2` tutorial pilot, then more tutorials where Search Console shows demand.

@@ -764,6 +764,7 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::CommandPalette
         | ActiveDialog::Checkpoints
         | ActiveDialog::About
+        | ActiveDialog::Cite
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
         | ActiveDialog::CsvExportOptions(_)

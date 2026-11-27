@@ -100,6 +100,10 @@ fn r12_8_pzfx_sheet_flag_selects_a_table_by_title_and_project_conversion_works()
     run_cli(&tmp.0, &["convert", "experiment.pzfx", "experiment.curvebook"]);
     let reopened = String::from_utf8(run_cli(&tmp.0, &["info", "experiment.curvebook"]).stdout).unwrap();
     assert!(reopened.contains("2 tables"), "{reopened}");
+
+    run_cli(&tmp.0, &["convert", "experiment.curvebook", "export.pzfx"]);
+    let exported = String::from_utf8(run_cli(&tmp.0, &["info", "export.pzfx"]).stdout).unwrap();
+    assert!(exported.contains("2 tables") && exported.contains("`Dose response`") && exported.contains("`Groups`"), "{exported}");
 }
 
 #[test]
@@ -213,4 +217,21 @@ fn r12_8_public_format_docs_keep_honest_export_and_legacy_pzf_copy() {
     assert!(file_formats.contains("CURRENT_SCHEMA_VERSION = 9"), "docs/file-formats.md must document schema v9");
     let ref_files = fs::read_to_string(repo_root.join("docs/reference/files.md")).unwrap();
     assert!(ref_files.contains("| 9 |"), "docs/reference/files.md must document schema v9");
+    let landing = fs::read_to_string(repo_root.join("docs/open-pzfx-files.html")).unwrap();
+    assert!(
+        landing.contains("https://www.nature.com/articles/sdata201618")
+            && landing.contains("pzfx-format-specification.html")
+            && landing.contains("File › Export › .pzfx file…")
+            && landing.contains("curvebook-cli convert experiment.curvebook export.pzfx"),
+        "docs/open-pzfx-files.html must include FAIR citation, spec page link, and .pzfx export paths"
+    );
+    let spec = fs::read_to_string(repo_root.join("docs/pzfx-format-specification.html")).unwrap();
+    assert!(
+        spec.contains("The closest thing we have to an actual specification")
+            && spec.contains("proprietary blob hidden by the vendor")
+            && spec.contains("130ab2f63ec643bee541b74c960e10db")
+            && spec.contains("<code>.dt</code>")
+            && spec.contains("PCFFGRA4"),
+        "docs/pzfx-format-specification.html must document empirical .prism/.pzfx structure and proprietary blobs"
+    );
 }

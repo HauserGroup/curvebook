@@ -319,7 +319,11 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
     let popup_rects: Vec<Rect> = meta
         .entries
         .iter()
-        .filter(|e| matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu) && e.role == "menu" && e.clipped_rect.is_positive())
+        .filter(|e| {
+            matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu)
+                && matches!(e.role.as_str(), "menu" | "listbox")
+                && e.clipped_rect.is_positive()
+        })
         .map(|e| e.clipped_rect)
         .collect();
 

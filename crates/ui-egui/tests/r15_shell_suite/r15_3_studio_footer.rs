@@ -949,10 +949,15 @@ mod methods_tab_studio_tests {
             ("inspector.methods.scope.full", "Full Report"),
             ("inspector.copy_methods", "Copy"),
             ("inspector.save_methods", "Save"),
+            ("inspector.cite_curvebook", "Cite"),
         ] {
             let entry = meta.find_by_widget_id(wid).ok_or_else(|| format!("missing widget `{wid}`"))?;
             assert_eq!(entry.label, expected, "unexpected label on `{wid}`");
-            assert!(!entry.label.ends_with('…') && !entry.label.ends_with("..."), "R20.15 violation on `{wid}`: {}", entry.label);
+            assert!(
+                !entry.ellipsized && !entry.label.ends_with('…') && !entry.label.ends_with("..."),
+                "R20.15 violation on `{wid}`: {}",
+                entry.label
+            );
         }
 
         let preview = meta.find_by_widget_id("inspector.methods.preview").ok_or("missing methods preview")?;
@@ -1022,6 +1027,8 @@ mod methods_tab_studio_tests {
         assert!(has_save_cmd, "Save must emit result.generateReport with format+scope: {:?}", save_intents.intents());
         assert!(is_desktop_host_routed_command("result.generateReport"));
 
+        assert_methods_cite_button_and_locale_fit(&ctx, &tokens, layout, &meta_tex, &app, &mut ts)?;
+
         ts.last_copied_methods = true;
         ts.last_copied_methods_text = String::from("copied before external change");
         let _ = curvebook_ui_egui::dispatch_ui_command(
@@ -1054,6 +1061,31 @@ mod methods_tab_studio_tests {
         let (meta_anova, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
         assert!(!preview_text_from_meta(&meta_anova)?.contains("STALE_OTHER_SHEET_REPORT"));
         app.canvas_dialogs.result_view.last_methods_report = None;
+        Ok(())
+    }
+
+    fn assert_methods_cite_button_and_locale_fit(
+        ctx: &egui::Context,
+        tokens: &Tokens,
+        layout: curvebook_ui_egui::egui_shell::ResponsiveShellLayout,
+        meta_tex: &FrameInspectMeta,
+        app: &UiApp,
+        ts: &mut TrailingStudioEguiState,
+    ) -> Result<(), String> {
+        let cite_intents = click_methods_widget(ctx, tokens, layout, meta_tex, "inspector.cite_curvebook", app, ts)?;
+        assert!(
+            cite_intents.intents().iter().any(|i| matches!(i, UiIntent::UiCommand { command_id, .. } if command_id == "app.cite")),
+            "Cite button must emit app.cite: {:?}",
+            cite_intents.intents()
+        );
+        for &loc in curvebook_ui_egui::i18n::BETA_ACTIVE_LOCALES {
+            let loc_tokens = Tokens::from_theme_spec(&app.theme, loc);
+            let (loc_meta, _) = render_methods_studio_once(ctx, &loc_tokens, layout, app, ts, egui::RawInput::default())?;
+            for wid in ["inspector.copy_methods", "inspector.save_methods", "inspector.cite_curvebook"] {
+                let entry = loc_meta.find_by_widget_id(wid).ok_or_else(|| format!("{loc}: missing `{wid}`"))?;
+                assert!(!entry.ellipsized, "{loc}: Methods button `{wid}` ellipsized: `{}`", entry.label);
+            }
+        }
         Ok(())
     }
 }

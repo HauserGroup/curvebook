@@ -176,8 +176,39 @@ pub(crate) fn resolve_target_dir_from_env(root: &Path) -> PathBuf {
         .map_or_else(|| root.join("target"), |p| if p.is_absolute() { p } else { root.join(p) })
 }
 
+fn resolve_prebuilt_example_bin(dir: &Path, example: &str) -> Result<PathBuf, String> {
+    if example.is_empty() || example.contains('/') || example.contains('\\') || example.contains("..") || example.contains('\0') {
+        return Err(format!("invalid example binary name `{example}`"));
+    }
+    let bin = dir.join(format!("{example}{}", std::env::consts::EXE_SUFFIX));
+    if !bin.is_file() {
+        return Err(format!("CURVEBOOK_PREBUILT_EXAMPLES_DIR is set, but prebuilt example binary `{}` was not found", bin.display()));
+    }
+    Ok(bin)
+}
+
 pub(crate) fn run_workspace_example(root: &Path, package: &str, example: &str, args: &[&str]) -> Result<Vec<u8>, String> {
-    let target_dir = resolve_target_dir_from_env(root).join("xtask-examples");
+    if let Some(dir) = std::env::var_os("CURVEBOOK_PREBUILT_EXAMPLES_DIR").filter(|v| !v.is_empty()).map(PathBuf::from) {
+        let bin = resolve_prebuilt_example_bin(&dir, example)?;
+        let bin_str = bin.to_str().ok_or_else(|| format!("non-UTF-8 prebuilt example path {}", bin.display()))?;
+        let out = dev_tool_command(bin_str)
+            .current_dir(root)
+            .args(args.iter().copied())
+            .wall_timeout(Duration::from_secs(900))
+            .idle_timeout(Duration::from_secs(600))
+            .run()
+            .map_err(|e| format!("run prebuilt example {}: {e}", bin.display()))?;
+        if !out.success {
+            return Err(format!(
+                "prebuilt example `{}` failed ({:?}):\n{}",
+                bin.display(),
+                out.status_code,
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        return Ok(out.stdout);
+    }
+    let target_dir = resolve_target_dir_from_env(root);
     let target_str = target_dir.to_str().ok_or_else(|| format!("non-UTF-8 target dir {}", target_dir.display()))?;
     let mut cmd_args = vec!["run", "--locked", "-p", package, "--example", example];
     if !args.is_empty() {
@@ -518,5 +549,12 @@ mod tests {
             parse_single_flag(&["--chck".into()], "--check", "u").is_err()
                 && parse_single_flag(&["--check".into(), "--check".into()], "--check", "u").is_err()
         );
+        let ex_dir = TestDir::new("prebuilt-examples");
+        let bin_name = format!("gen_commands{}", std::env::consts::EXE_SUFFIX);
+        let created = ex_dir.write(&bin_name, "bin");
+        assert_eq!(super::resolve_prebuilt_example_bin(ex_dir.path(), "gen_commands").unwrap(), created);
+        for bad in ["", "../gen_commands", "sub/gen_commands", "gen_schemas"] {
+            assert!(super::resolve_prebuilt_example_bin(ex_dir.path(), bad).is_err(), "{bad}");
+        }
     }
 }

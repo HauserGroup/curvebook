@@ -1,6 +1,8 @@
 # Troubleshooting, error codes & known issues
 
-Use this guide to resolve installer security prompts, missing fonts, GPU startup errors, MCP connection failures, crash recovery warnings, structured error codes, and Beta known issues.
+<!-- Audience: Tier 2 Technical Reference — OS security workarounds, GPU/MCP diagnostics, error code tables, and Beta known issues belong here; keep get-started.md and faq.html concise for scientists. -->
+
+Use this reference to resolve installer security prompts, missing fonts, GPU startup errors, MCP connection failures, crash-recovery warnings, structured error codes, and Beta known issues. For standard installation or first-time MCP setup, start with [Install CurveBook](get-started.md) or [MCP setup for beginners](../mcp-for-beginners.md).
 
 ---
 
@@ -35,12 +37,12 @@ If running the `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or 
 
 ## Fonts and rendering issues {#fonts-and-rendering}
 
-- **Missing CJK, RTL, or mathematical glyphs:** CurveBook bundles no binary fonts and relies on system TrueType and OpenType fonts. On minimal Linux or FreeBSD systems without Noto Sans CJK or DejaVu Sans, install system fonts, set `CURVEBOOK_FONTS_DIR` to a folder of `.ttf` or `.otf` files, or pass `--ttf-font <path>` to `curvebook`.
+- **Missing CJK, RTL, or mathematical glyphs:** CurveBook bundles no binary fonts and relies on system TrueType and OpenType fonts. On minimal Linux or FreeBSD systems without Noto Sans CJK or DejaVu Sans, install system fonts. You can also set `CURVEBOOK_FONTS_DIR` to a folder of `.ttf` or `.otf` files, or pass `--ttf-font <path>` to `curvebook`.
 - **Preflight warnings (`min_font_size`, `hairline_stroke`, `text_outside_canvas`):** Run `graph.preflightCheck` or set the [page-layout resize mode](graphs.md#page-layouts) to `KeepTypographyPt` when shrinking figures for narrow journal columns. This keeps labels at 5.0 pt or larger and strokes at 0.25 pt or thicker.
 
 ### GPU and graphics initialization {#gpu-graphics}
 
-The CurveBook desktop window uses native GPU acceleration (Metal only on macOS, DirectX 12, Vulkan, or OpenGL on Windows, and Vulkan or OpenGL on Linux). On older Macs without full Metal support, virtualized desktops, or systems with outdated GPU drivers, startup or window resizing can fail with a graphics initialization error (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
+The CurveBook desktop window uses native GPU acceleration: Metal only on macOS, DirectX 12, Vulkan, or OpenGL on Windows, and Vulkan or OpenGL on Linux. Older Macs without full Metal support, virtualized desktops, or outdated GPU drivers can trigger startup or resize errors (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
 
 Try these steps in order:
 
@@ -160,7 +162,7 @@ Error details and limits:
 - **Unlocking sheets (`frozen_sheet`):** Run `sheet.unfreeze` before modifying a locked data sheet.
 - **Resource limits (`resource_limit`):** Safety caps prevent runaway memory or disk use. Project archives are capped at 128 MiB, CSV files at 64 MiB, and sheets at 30 million cells. Raster exports cap at 16,384 px per edge (67 million pixels total), PDF exports at 64 pages or 32 MiB, and formulas use bounded step limits.
 - **Missing replicates (`insufficient_data`):** Some tests require raw replicate values and cannot run when only summary columns (mean, SD/SEM, and N) are entered.
-- **Version limits (`unsupported_version`):** CurveBook supports project archives up to schema version 8, plate-map files up to version 1, and preferences files up to version 1.
+- **Version limits (`unsupported_version`):** CurveBook supports project archives up to schema version 9, plate-map files up to version 1, and preferences files up to version 1.
 - **Diagnostics-only policy (`conflict`):** Assumption banners report diagnostics only and reject automatic remediation requests.
 
 ---
@@ -170,7 +172,7 @@ Error details and limits:
 - **Supported interfaces and verification:** The native desktop GUI (`curvebook`) is supported alongside `curvebook-cli` and `curvebook-cli mcp`. Automated desktop interface suites verify widget, menu, dialog, and canvas workflows for Beta. Recorded manual cross-OS walkthroughs are part of 1.0 release verification. FreeBSD (x86_64) is a **Tier 2 CLI-only** package with no desktop GUI.
 - **Windows packages and signing:** Beta omits 32-bit Windows (x86) and portable `.zip` archives. Windows x64 and ARM64 `.msi` installers ship **unsigned** during Beta. Verify checksums and build attestations before clicking **More info** and **Run anyway** in SmartScreen. Windows 11 Smart App Control in enforcement mode blocks unsigned installers until Windows code signing or Microsoft Store MSIX distribution arrives. Uninstall any Alpha 32-bit copy manually before installing the 64-bit `.msi`.
 - **Draft translations:** Non-English Beta UI languages (German, Spanish, French, Italian, Dutch, Polish, Portuguese, Russian, Turkish, Japanese, Korean, and Simplified/Traditional Chinese) display a `[Draft]` label in **View › Language** until native-speaker scientific review finishes.
-- **Right-to-left GUI locales deferred to 1.0:** Full right-to-left desktop layout mirroring (Arabic, Persian, Hebrew, and Urdu) is deferred until CurveBook 1.0. Beta hides RTL locales in the language picker and falls back to English if an existing preferences file requests one. Mathematical axes and formulas stay left-to-right.
+- **Right-to-left GUI locales:** Full right-to-left desktop layout mirroring (Arabic, Hebrew, Persian, and Urdu) is unscheduled and unlikely. CurveBook hides RTL locales in the language picker and falls back to English if an existing preferences file requests one. Mathematical axes and formulas stay left-to-right.
 - **Browser app deferred to 1.0:** The browser WebAssembly app (`curvebook-web`) is deferred until CurveBook 1.0 and is not shipped in Beta releases.
 - **Zero bundled binary fonts:** CJK, RTL, and special scientific symbols rely on system TrueType and OpenType fonts or fonts supplied via `CURVEBOOK_FONTS_DIR` or `--ttf-font` ([Fonts](get-started.md#fonts)).
 - **Legacy archive rejection:** Early pre-CurveBook archive files are rejected with `unsupported_format`. CurveBook opens current `.curvebook` and `.curvebook.d/` projects, `.cbtemplate` templates, `.cbplate` plate maps, and `.csv`, `.tsv`, `.xlsx`, `.pzfx`, and `.prism` files.

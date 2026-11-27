@@ -70,9 +70,9 @@ pub use menus::{
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
     ClipboardBundle, GITHUB_FEEDBACK_URL, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener,
-    SystemPlatformClipboardAdapter, SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers, open_github_issue_url,
-    open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
-    validate_github_issue_url,
+    SystemPlatformClipboardAdapter, SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers, open_allowlisted_external_url,
+    open_github_issue_url, open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+    validate_external_url, validate_github_issue_url,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use os_integration::{StubPlatformClipboardAdapter, StubPlatformUrlOpener};
@@ -831,13 +831,31 @@ impl UiApp {
     /// # Errors
     /// Returns an error if URL validation fails or the configured opener returns an error.
     pub fn open_feedback_on_github(&mut self) -> Result<OsAdapterStatus, String> {
+        self.open_allowlisted_url(GITHUB_FEEDBACK_URL)
+    }
+
+    /// Open CurveBook's canonical software citation link (Zenodo concept DOI once minted, else
+    /// the canonical repository URL) in the configured [`PlatformUrlOpener`] (`R14.7`).
+    ///
+    /// Leaves `canvas_dialogs.active_dialog` untouched (keeping `Cite CurveBook` open), never
+    /// writes to the clipboard, and records a fallback message in `canvas_dialogs.status_banner`
+    /// when the URL opener reports unavailable.
+    ///
+    /// # Errors
+    /// Returns an error if URL validation fails or the configured opener returns an error.
+    pub fn open_citation_url(&mut self) -> Result<OsAdapterStatus, String> {
+        let url = curvebook_doc::CURVEBOOK_CITATION.primary_citation_url();
+        self.open_allowlisted_url(&url)
+    }
+
+    fn open_allowlisted_url(&mut self, url: &str) -> Result<OsAdapterStatus, String> {
         let status = if !self.url_opener.is_custom && self.is_human_path_only() {
-            validate_github_issue_url(GITHUB_FEEDBACK_URL)?;
+            validate_external_url(url)?;
             OsAdapterStatus::unavailable("os-browser", "browser launch disabled under human_path_only without custom URL opener")
         } else {
-            self.url_opener.opener.open_external_url(GITHUB_FEEDBACK_URL)?
+            self.url_opener.opener.open_external_url(url)?
         };
-        let fallback = format!("Could not open browser. Visit {GITHUB_FEEDBACK_URL}");
+        let fallback = format!("Could not open browser. Visit {url}");
         if status.available {
             if self.canvas_dialogs.status_banner.as_deref() == Some(fallback.as_str()) {
                 self.canvas_dialogs.status_banner = None;
@@ -1741,7 +1759,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 64);
+        assert_eq!(UI_COMMANDS.len(), 65);
         for required in [
             "ui.export.pzfx.open",
             "ui.navigator.toggle",
@@ -1784,6 +1802,7 @@ mod tests {
             "ui.table.convertArchetype.open",
             "ui.import.reshape.open",
             "app.about",
+            "app.cite",
             "app.feedback",
         ] {
             assert!(UI_COMMANDS.iter().any(|spec| spec.id == required), "missing UI command {required}");

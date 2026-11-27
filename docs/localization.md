@@ -11,7 +11,7 @@ Related: [extending.md](extending.md) (extension matrix), [evidence/localization
 Interface translations are stored in an externalized TSV table at [`crates/ui-egui/locales/catalog.tsv`](../crates/ui-egui/locales/catalog.tsv) and compiled at build time by [`crates/ui-egui/build.rs`](../crates/ui-egui/build.rs) into a static binary-searched `CATALOG` inside [`crates/ui-egui/src/i18n.rs`](../crates/ui-egui/src/i18n.rs):
 
 - `LOCALES` is the ordered list of registered BCP-47 tags. English (`en`) is first and is the reference locale.
-- `BETA_ACTIVE_LOCALES` is the Beta-active subset of LTR/CJK locales exposed in the desktop **View › Language** picker (non-English Beta entries are annotated with `[Draft]`; RTL locales are deferred to `1.0`).
+- `BETA_ACTIVE_LOCALES` is the active subset of LTR/CJK locales exposed in the desktop **View › Language** picker (non-English entries are annotated with `[Draft]` pending native-speaker review; RTL desktop GUI locales `ar`/`he` are hidden and unscheduled/unlikely per [`ROADMAP.md` (`R8.12`)](ROADMAP.md#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate)).
 - Each data row in `catalog.tsv` carries a unique dotted key followed by one tab-separated translation column per registered locale in `LOCALES` order. `build.rs` validates column alignment, uniqueness, and non-empty cells at compile time and emits the static `CATALOG` slice (replacing legacy hand-written per-shard `entry!` Rust arrays).
 
 ## 2. Adding a key
@@ -71,13 +71,13 @@ Lookup is done by `tr(locale, key)`:
 
 Command labels follow the same order through `command_label(locale, command_id, fallback)`: locale entry, then `en`, then the caller-supplied fallback.
 
-The active desktop locale is stored on `UiApp` and changed through **View › Language** or the control/MCP operation `ui.locale.set`. In **Beta**, the desktop shell normalizes through `normalize_beta_gui_locale(tag)` so active LTR/CJK locales select normally (`de-DE` -> `de`, `zh-Hant-TW` -> `zh-TW`, `unknown-XX` -> `en`), while RTL tags fall back to `en` until `1.0`.
+The active desktop locale is stored on `UiApp` and changed through **View › Language** or the control/MCP operation `ui.locale.set`. The desktop shell normalizes through `normalize_beta_gui_locale(tag)` so active LTR/CJK locales select normally (`de-DE` -> `de`, `zh-Hant-TW` -> `zh-TW`, `unknown-XX` -> `en`), while RTL tags fall back to `en`.
 
-## 6. Right-to-left locales (Beta vs. 1.0)
+## 6. Right-to-left locales
 
-- **Beta vs. `1.0` desktop state:** `LOCALES` and `catalog.tsv` already contain complete `ar` and `he` translation columns, and `is_rtl_locale(tag)` is true for primary subtags `ar`, `he`, `iw`, `fa`, and `ur` (including regional forms such as `ar-EG`; `fa`/`ur` have no catalog and normalize to `en`). However, full desktop GUI RTL layout mirroring is **deferred to `1.0`** under `R12.5`: Beta hides RTL locales from the desktop **View › Language** picker (`BETA_ACTIVE_LOCALES`), and `normalize_beta_gui_locale` falls back cleanly to `"en"` when an RTL locale is loaded from `preferences.json` or passed to `ui.locale.set`.
+- **Desktop GUI state (`ar` / `he` unlikely):** `LOCALES` and `catalog.tsv` contain `ar` and `he` translation columns, and `is_rtl_locale(tag)` is true for primary subtags `ar`, `he`, `iw`, `fa`, and `ur` (including regional forms such as `ar-EG`; `fa`/`ur` have no catalog and normalize to `en`). However, full desktop GUI RTL layout mirroring for `ar` and `he` (and `fa`/`ur`) is **unlikely and unscheduled** (not a `1.0` gate; see [`ROADMAP.md` (`R8.12`)](ROADMAP.md#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate)): the desktop **View › Language** picker hides RTL locales (`BETA_ACTIVE_LOCALES`), and `normalize_beta_gui_locale` falls back cleanly to `"en"` when an RTL locale is loaded from `preferences.json` or passed to `ui.locale.set`.
 - **Active BiDi text reordering:** Unicode bidirectional visual run reordering (`reorder_visual_bidi` / `TextDirection` in `curvebook-text`) remains active for multi-script figure labels, SVG exports, and PDF exports (`FontBook::rasterize_shaped_text`).
-- **Mirroring primitives & telemetry:** `mirror_x_for_rtl(x, width, canvas_width, is_rtl)` and `control_io` `is_rtl` status reporting remain compiled in for `1.0` activation. When adding or updating UI code, avoid hard-coding assumptions that break mirroring or BiDi text flow.
+- **Mirroring primitives & telemetry:** `mirror_x_for_rtl(x, width, canvas_width, is_rtl)` and `control_io` `is_rtl` status reporting remain compiled in. When adding or updating UI code, avoid hard-coding assumptions that break BiDi text flow.
 
 Rendering and human usability are separate from catalog coverage. Check the current implementation and [evidence/localization.md](evidence/localization.md), together with the `R10.9` typography and `R10.21` translation acceptance work. A complete catalog entry does not prove that a person sees correct glyphs, direction, clipping, or layout in a rendered screen.
 

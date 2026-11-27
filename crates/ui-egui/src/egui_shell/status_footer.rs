@@ -1795,6 +1795,36 @@ pub fn render_status_footer(
                     }
                 }
 
+                if !views.launcher_open
+                    && app.document().total_sheet_count() > 0
+                    && let Some(banner) = app.canvas_dialogs.status_banner.as_deref()
+                    && ui.available_width() > right_budget + 80.0
+                {
+                    // Surface batch/export errors and non-Welcome-hub status notices in the shared
+                    // shell footer; clicking the chip dismisses it (`R0.36`).
+                    let banner_resp = draw_footer_chip(
+                        ui,
+                        ctx_in.tokens,
+                        FooterChipSpec {
+                            label: banner,
+                            tooltip: banner,
+                            max_w: if compact { 120.0 } else { 260.0 },
+                            min_w: 44.0,
+                            selected: false,
+                            enabled: ctx_in.enabled,
+                            accent_override: Some(ctx_in.tokens.error),
+                            widget_id: "status.banner_notice",
+                            role: "button",
+                            command_id: None,
+                            disabled_reason: None,
+                        },
+                        meta,
+                    );
+                    if banner_resp.clicked() {
+                        intents.push(UiIntent::DismissStatusBanner);
+                    }
+                }
+
                 let center_budget = (ui.available_width() - right_budget).max(24.0);
                 let (stats_anchor, active_stats) = render_footer_center_readout(ui, app, views, ctx_in, center_budget, meta, &mut report);
                 anchors.stats = stats_anchor;

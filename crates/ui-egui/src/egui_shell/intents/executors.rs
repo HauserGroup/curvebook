@@ -391,6 +391,12 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         UiIntent::DismissFigureExportWarning => {
             app.canvas_dialogs.figure_export_warning = None;
         }
+        UiIntent::DismissStatusBanner => {
+            app.canvas_dialogs.status_banner = None;
+        }
+        UiIntent::OpenCitationUrl => {
+            app.open_citation_url().map_err(EngineError::new)?;
+        }
         UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id } => {
             let doc = app.session.document();
             if let Some(rs) = doc.result_sheet(&result_sheet_id) {

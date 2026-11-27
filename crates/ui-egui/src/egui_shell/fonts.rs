@@ -1197,15 +1197,28 @@ mod tests {
         let outside_font = outside_dir.join("escaped.ttf");
         std::fs::write(&outside_font, &minimal_ttf).expect("write outside font");
 
-        let mut manifest_lines =
-            vec![String::from("../../outside/escaped.ttf"), outside_font.to_string_lossy().into_owned(), String::from("./../../outside/escaped.ttf")];
+        let manifest_lines = {
+            #[cfg(unix)]
+            let mut lines = vec![
+                String::from("../../outside/escaped.ttf"),
+                outside_font.to_string_lossy().into_owned(),
+                String::from("./../../outside/escaped.ttf"),
+            ];
+            #[cfg(not(unix))]
+            let lines = vec![
+                String::from("../../outside/escaped.ttf"),
+                outside_font.to_string_lossy().into_owned(),
+                String::from("./../../outside/escaped.ttf"),
+            ];
 
-        #[cfg(unix)]
-        {
-            let link_path = fonts_dir.join("escape_link.ttf");
-            std::os::unix::fs::symlink(&outside_font, &link_path).expect("create symlink");
-            manifest_lines.push(String::from("escape_link.ttf"));
-        }
+            #[cfg(unix)]
+            {
+                let link_path = fonts_dir.join("escape_link.ttf");
+                std::os::unix::fs::symlink(&outside_font, &link_path).expect("create symlink");
+                lines.push(String::from("escape_link.ttf"));
+            }
+            lines
+        };
 
         std::fs::write(fonts_dir.join("manifest.txt"), manifest_lines.join("\n")).expect("write manifest");
 

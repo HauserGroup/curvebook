@@ -134,6 +134,7 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
 pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
     match id {
         "app.about" => ("menu.help", "Help/About"),
+        "app.cite" => ("menu.help", "Help/Cite CurveBook"),
         "app.feedback" => ("menu.help", "Help/Send Feedback"),
         "ui.navigator.toggle" => ("menu.view", "View/Navigator"),
         "ui.inspector.toggle" => ("menu.view", "View/Inspector"),

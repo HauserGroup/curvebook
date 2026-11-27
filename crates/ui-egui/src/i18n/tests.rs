@@ -57,8 +57,8 @@ fn untranslated_report() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 998);
-    assert_eq!(LOCALES.len() * catalog_len(), 15_968);
+    assert_eq!(catalog_len(), 1010);
+    assert_eq!(LOCALES.len() * catalog_len(), 16_160);
     assert!(!CATALOG.is_empty());
 
     let mut seen_keys = HashSet::new();
@@ -96,7 +96,7 @@ fn untranslated_report() {
 fn verify_command_catalog_coverage() {
     let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
     assert_eq!(engine_specs.len(), 116, "expected 116 engine CommandSpec entries");
-    assert_eq!(crate::menus::UI_COMMANDS.len(), 64, "expected 64 UiCommandSpec entries");
+    assert_eq!(crate::menus::UI_COMMANDS.len(), 65, "expected 65 UiCommandSpec entries");
 
     let mut missing_cmd = Vec::new();
     for spec in &engine_specs {

@@ -29,7 +29,7 @@ The authoritative generated list of all current engine commands is maintained at
 | `export` | Whole-figure / batch vector & raster export | `export.svg`, `export.pdf`, `export.png`, `export.tiff` |
 | `ui` / `app` | UI-only commands (`UI_COMMANDS` / `UiCommandSpec`); may use a dotted `ui.<object>.<action>` form | `ui.palette.open`, `ui.zoom.fitSheet`, `ui.navigator.toggle`, `app.about` |
 
-Introducing a brand-new `<area>` prefix requires maintainer review and adding it to both the command registry validation test (`valid_areas` in `crates/engine/tests/registry_and_errors.rs`) and this table.
+Introducing a brand-new `<area>` prefix requires maintainer review and adding it to both the command registry validation test (`valid_areas` in `crates/engine/tests/core_suite/registry_and_errors.rs`) and this table.
 
 ---
 

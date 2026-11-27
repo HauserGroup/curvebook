@@ -215,6 +215,10 @@ pub enum UiIntent {
     },
     /// Hide the figure-export warning notice in the status footer (`R0.36`).
     DismissFigureExportWarning,
+    /// Hide the shell status-banner notice outside the Welcome hub (`R0.36`).
+    DismissStatusBanner,
+    /// Open CurveBook's allowlisted citation URL (DOI or repository) in the OS browser (`R14.7`).
+    OpenCitationUrl,
     OpenRetargetDialog {
         result_sheet_id: SheetId,
         target_data_sheet_id: Option<SheetId>,

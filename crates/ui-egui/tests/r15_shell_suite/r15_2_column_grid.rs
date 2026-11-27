@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! `R15.2` Wave 2 Virtualized `Column` Data Grid integration tests.
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use curvebook_doc::{
@@ -21,6 +22,7 @@ use curvebook_ui_egui::egui_shell::driver::{
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 use curvebook_ui_egui::i18n::{is_rtl_locale, tr};
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
+use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::theme::{UiThemeMode, UiThemeSpec};
 use egui::epaint::{ClippedShape, Shape};
 use egui_kittest::Harness;
@@ -96,7 +98,9 @@ fn render_grid_harness(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, state: &m
     intents.commit_if_settled(&mut state.app, will_discard).expect("commit settled intents");
 }
 
-fn make_grid_driver(app: UiApp, w: f64, h: f64, tokens: Tokens, multi_grid: bool) -> EguiHumanPathDriver<'static, GridHarnessState> {
+fn make_grid_driver(mut app: UiApp, w: f64, h: f64, tokens: Tokens, multi_grid: bool) -> EguiHumanPathDriver<'static, GridHarnessState> {
+    // Isolate clipboard-using grid tests from the shared OS clipboard (`R0.36`).
+    app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
     let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
         GridHarnessState::new(app, multi_grid),
         ViewportMetrics::new(w, h, 1.0),

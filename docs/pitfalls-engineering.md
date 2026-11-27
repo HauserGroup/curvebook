@@ -112,7 +112,7 @@ Process-wide state (environment variables, statics, global flags) leaks into tes
 
 **Never release a port and hand its number to someone else.**
 Between dropping a listener and the child binding the port, another test can take it.
-*In CurveBook:* `apps/curvebook/tests/recovery_wiring.rs` binds `127.0.0.1:0`, drops the listener, and passes the port to a child `--control` process; prefer letting the server bind `:0` and report its port, or retry on a bind conflict. For a refused-connection probe, connect to port zero instead of borrowing a released port.
+*In CurveBook:* `apps/curvebook/tests/desktop_suite/recovery_wiring.rs` binds `127.0.0.1:0`, drops the listener, and passes the port to a child `--control` process; prefer letting the server bind `:0` and report its port, or retry on a bind conflict. For a refused-connection probe, connect to port zero instead of borrowing a released port.
 
 **Give each test case its own temporary directory.**
 Code that walks upward or scans siblings finds another case's fixtures.
@@ -124,11 +124,11 @@ TCP can split even a short line, closing on unread bytes resets the connection, 
 
 **A stand-in server answers what it was scripted for and treats anything else as unknown.**
 A mock that replies to every request in order gives a new, unexpected request the reply meant for another.
-*In CurveBook:* the fake control servers in `crates/mcp/tests/mcp_e2e.rs` dispatch on the request `method` and record which methods arrived; keep new mocks keyed the same way.
+*In CurveBook:* the fake control servers in `crates/mcp/tests/mcp_suite/mcp_e2e.rs` dispatch on the request `method` and record which methods arrived; keep new mocks keyed the same way.
 
 **Wait for a condition with a deadline, not for a number of frames or a sleep.**
 Timing-based assertions pass on fast machines and fail in CI once work moves to another thread.
-*In CurveBook:* desktop and control tests poll for a token file or child exit until a deadline (`apps/curvebook/tests/recovery_wiring.rs`). When work moves off the UI thread, grep the tests that exercise it and make them wait on the result.
+*In CurveBook:* desktop and control tests poll for a token file or child exit until a deadline (`apps/curvebook/tests/desktop_suite/recovery_wiring.rs`). When work moves off the UI thread, grep the tests that exercise it and make them wait on the result.
 
 **Prove a no-behaviour-change refactor by comparing output bytes.**
 Substring assertions miss changed output.
@@ -352,7 +352,7 @@ A list of ids elsewhere drifts silently when items are renamed or removed.
 
 **Read the id scheme before naming anything, and check external naming rules before fixing a public contract.**
 Ids chosen outside the scheme get renamed later, and protocol clients reject names outside their allowed character set.
-*In CurveBook:* [docs/command-ids.md](command-ids.md) and `is_valid_command_id_format` in `crates/engine/tests/registry_and_errors.rs`; engine ids are dotted, MCP tool names are derived in snake case and checked by `per_command_mcp_names_are_valid_and_collision_free` in `crates/mcp/src/tools.rs`.
+*In CurveBook:* [docs/command-ids.md](command-ids.md) and `is_valid_command_id_format` in `crates/engine/tests/core_suite/registry_and_errors.rs`; engine ids are dotted, MCP tool names are derived in snake case and checked by `per_command_mcp_names_are_valid_and_collision_free` in `crates/mcp/src/tools.rs`.
 
 **Check which layer owns what a feature calls before planning it.**
 A feature placed in a lower layer cannot reach a higher one, and discovering that mid-implementation forces a redesign.
