@@ -1481,45 +1481,105 @@ pub(in crate::anova) struct SimpleEffectsSpec<'a> {
     pub(in crate::anova) confidence: ConfidenceLevel,
 }
 
+/// Resolved single-factor target for either a control-versus-all or selected-pairs factorial family.
+pub(in crate::anova) enum FactorialFamilyTarget {
+    Control { factor: usize, control: usize },
+    SelectedPairs { factor: usize, pairs: Vec<(usize, usize)> },
+}
+
+impl FactorialFamilyTarget {
+    const fn factor(&self) -> usize {
+        match self {
+            Self::Control { factor, .. } | Self::SelectedPairs { factor, .. } => *factor,
+        }
+    }
+
+    fn pair_indices(&self, k_var: usize) -> Vec<(usize, usize)> {
+        match self {
+            Self::Control { control, .. } => (0..k_var).filter(|&tr| tr != *control).map(|tr| (tr, *control)).collect(),
+            Self::SelectedPairs { pairs, .. } => pairs.clone(),
+        }
+    }
+}
+
 pub(in crate::anova) fn validate_dunnett_ctrl(mult_spec: &MultiplicitySpec, n_levels: usize) -> Result<(), StatsError> {
-    if let Some(control_column) = crate::multiplicity::validate_multiplicity_control_spec(mult_spec)?
-        && control_column >= n_levels
-    {
-        return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+    match crate::multiplicity::validate_multiplicity_family_spec(mult_spec)? {
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {}
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            if control_column >= n_levels {
+                return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+            }
+        }
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            for &(a, b) in pairs {
+                if a >= n_levels {
+                    return Err(StatsError::InvalidParameter { name: "selected_pairs", value: a as f64 });
+                }
+                if b >= n_levels {
+                    return Err(StatsError::InvalidParameter { name: "selected_pairs", value: b as f64 });
+                }
+            }
+        }
     }
     Ok(())
 }
 
-/// Resolve the single factorial factor targeted by a control-versus-all post-hoc comparison.
+/// Resolve the single factorial factor targeted by a control-versus-all or selected-pairs post-hoc
+/// comparison.
 ///
 /// When `control_factor` is `Some(f)`, validates that factor `f` exists, has at least 2 levels,
-/// and contains `control_column`. Otherwise preserves legacy Dunnett target resolution: prefers
-/// primary factor `0` when `control_column` is in bounds there, falling back to the first factor
-/// with at least 2 levels where `control_column < levels.len()`.
-pub(in crate::anova) fn resolve_factorial_control_target(
+/// and contains `control_column` or every pair member in `selected_pairs`. Otherwise selects the
+/// first factor with at least 2 levels whose level count contains the requested indices.
+pub(in crate::anova) fn resolve_factorial_family_target(
     obs: &FactorialObservations,
     mult_spec: &MultiplicitySpec,
     control_factor: Option<usize>,
-) -> Result<Option<(usize, usize)>, StatsError> {
-    let Some(control_column) = crate::multiplicity::validate_multiplicity_control_spec(mult_spec)? else {
-        return Ok(None);
-    };
-    let target_f = match control_factor {
-        Some(f) => {
-            let Some(levels) = obs.factor_levels.get(f) else {
-                return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
+) -> Result<Option<FactorialFamilyTarget>, StatsError> {
+    match crate::multiplicity::validate_multiplicity_family_spec(mult_spec)? {
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => Ok(None),
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            let target_f = match control_factor {
+                Some(f) => {
+                    let Some(levels) = obs.factor_levels.get(f) else {
+                        return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
+                    };
+                    if levels.len() < 2 {
+                        return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
+                    }
+                    if control_column >= levels.len() {
+                        return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+                    }
+                    f
+                }
+                None => resolve_factorial_dunnett_target(obs, control_column)?,
             };
-            if levels.len() < 2 {
-                return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
-            }
-            if control_column >= levels.len() {
-                return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
-            }
-            f
+            Ok(Some(FactorialFamilyTarget::Control { factor: target_f, control: control_column }))
         }
-        None => resolve_factorial_dunnett_target(obs, control_column)?,
-    };
-    Ok(Some((target_f, control_column)))
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            let max_idx = pairs.iter().map(|&(a, b)| a.max(b)).max().unwrap_or(0);
+            let target_f = match control_factor {
+                Some(f) => {
+                    let Some(levels) = obs.factor_levels.get(f) else {
+                        return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
+                    };
+                    if levels.len() < 2 {
+                        return Err(StatsError::InvalidParameter { name: "control_factor", value: f as f64 });
+                    }
+                    if max_idx >= levels.len() {
+                        return Err(StatsError::InvalidParameter { name: "selected_pairs", value: max_idx as f64 });
+                    }
+                    f
+                }
+                None => obs
+                    .factor_levels
+                    .iter()
+                    .enumerate()
+                    .find_map(|(f_idx, levels)| (levels.len() >= 2 && max_idx < levels.len()).then_some(f_idx))
+                    .ok_or(StatsError::InvalidParameter { name: "selected_pairs", value: max_idx as f64 })?,
+            };
+            Ok(Some(FactorialFamilyTarget::SelectedPairs { factor: target_f, pairs: pairs.to_vec() }))
+        }
+    }
 }
 
 /// Resolve the single factorial factor targeted by `MultiplicityMethod::Dunnett { control_column }`.
@@ -1565,20 +1625,36 @@ where
     F: FnMut(usize, usize) -> Result<Option<ContrastEstimate>, StatsError>,
 {
     let mut pairs = Vec::new();
-    if let Some(control_column) = mult_spec.effective_control_column() {
-        for tr in 0..n_levels {
-            if tr == control_column {
-                continue;
-            }
-            if let Some(est) = eval_pair(tr, control_column)? {
-                pairs.push((tr, control_column, est));
-            }
-        }
-    } else {
-        for i in 0..n_levels {
-            for j in (i + 1)..n_levels {
+    match crate::multiplicity::validate_multiplicity_family_spec(mult_spec)? {
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(chosen) => {
+            for &(i, j) in chosen {
+                if i >= n_levels {
+                    return Err(StatsError::InvalidParameter { name: "selected_pairs", value: i as f64 });
+                }
+                if j >= n_levels {
+                    return Err(StatsError::InvalidParameter { name: "selected_pairs", value: j as f64 });
+                }
                 if let Some(est) = eval_pair(i, j)? {
                     pairs.push((i, j, est));
+                }
+            }
+        }
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            for tr in 0..n_levels {
+                if tr == control_column {
+                    continue;
+                }
+                if let Some(est) = eval_pair(tr, control_column)? {
+                    pairs.push((tr, control_column, est));
+                }
+            }
+        }
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {
+            for i in 0..n_levels {
+                for j in (i + 1)..n_levels {
+                    if let Some(est) = eval_pair(i, j)? {
+                        pairs.push((i, j, est));
+                    }
                 }
             }
         }
@@ -1604,9 +1680,15 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
     let ci_alpha = cfg.confidence.alpha();
 
     if k_t == 2 {
-        let (idx_a, idx_b) = match cfg.mult_spec.effective_control_column() {
-            Some(0) => (1, 0),
-            _ => (0, 1),
+        let (idx_a, idx_b) = if let Some(pairs) = cfg.mult_spec.selected_pairs.as_deref()
+            && let Some(&(a, b)) = pairs.first()
+        {
+            (a, b)
+        } else {
+            match cfg.mult_spec.effective_control_column() {
+                Some(0) => (1, 0),
+                _ => (0, 1),
+            }
         };
         struct TwoLvlItem {
             id_a: usize,
@@ -1964,11 +2046,11 @@ fn swap_standard_multiplicity_outputs(out: &mut ResultSheet, start_tabs: usize, 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn evaluate_control_vs_all_slices(
+fn evaluate_target_factor_slices(
     obs: &FactorialObservations,
     post_hoc: &FactorialPostHocContext,
     target_f: usize,
-    ctrl_idx: usize,
+    target_pairs: &[(usize, usize)],
     mult_spec: &MultiplicitySpec,
     confidence: ConfidenceLevel,
     swap_direction: bool,
@@ -1976,7 +2058,7 @@ fn evaluate_control_vs_all_slices(
 ) -> Result<(Vec<PairwiseComparisonDetail>, usize, Option<String>), StatsError> {
     let n_factors = obs.factor_levels.len();
     let k_var = obs.factor_levels[target_f].len();
-    if k_var < 2 {
+    if k_var < 2 || target_pairs.is_empty() {
         return Ok((Vec::new(), 0, None));
     }
     let unequal = is_unequal_variance_method(mult_spec.method);
@@ -1997,13 +2079,10 @@ fn evaluate_control_vs_all_slices(
                 (flatten_cell_index(&radices, &cell), format_cell_label(obs, &cell))
             })
             .collect();
-        let mut pairs = Vec::with_capacity(k_var.saturating_sub(1));
-        for tr in 0..k_var {
-            if tr == ctrl_idx {
-                continue;
-            }
+        let mut pairs = Vec::with_capacity(target_pairs.len());
+        for &(i, j) in target_pairs {
             let est_opt = if other_factors.len() == 1 {
-                post_hoc.eval_simple_pair(other_factors[0], tup[0], target_f, tr, ctrl_idx, unequal)?
+                post_hoc.eval_simple_pair(other_factors[0], tup[0], target_f, i, j, unequal)?
             } else {
                 let mut ca = vec![0_usize; n_factors];
                 let mut cb = vec![0_usize; n_factors];
@@ -2011,12 +2090,12 @@ fn evaluate_control_vs_all_slices(
                     ca[f] = v;
                     cb[f] = v;
                 }
-                ca[target_f] = tr;
-                cb[target_f] = ctrl_idx;
+                ca[target_f] = i;
+                cb[target_f] = j;
                 post_hoc.eval_cell_pair(&ca, &cb, unequal)?
             };
             if let Some(est) = est_opt {
-                pairs.push((tr, ctrl_idx, est));
+                pairs.push((i, j, est));
             }
         }
         if !pairs.is_empty() {
@@ -2088,17 +2167,17 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
     if mult_spec.method == MultiplicityMethod::None {
-        if mult_spec.control_column.is_some() {
-            let _ = crate::multiplicity::validate_multiplicity_control_spec(mult_spec)?;
+        if mult_spec.control_column.is_some() || mult_spec.selected_pairs.is_some() {
+            let _ = crate::multiplicity::validate_multiplicity_family_spec(mult_spec)?;
         }
         return Ok(());
     }
     if matches!(mult_spec.method, MultiplicityMethod::DunnRankSum | MultiplicityMethod::LinearTrend) {
         return Err(StatsError::IncompatibleAnalysisSpec {
-            expected: "parametric pairwise or vs-control factorial post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, GamesHowell, TamhaneT2, DunnettT3, Bonferroni, Sidak, HolmSidak, FisherLsd, or FDR)",
+            expected: "parametric pairwise, vs-control, or selected-pairs factorial post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, GamesHowell, TamhaneT2, DunnettT3, Bonferroni, Sidak, HolmSidak, FisherLsd, or FDR)",
         });
     }
-    let control_target = resolve_factorial_control_target(obs, mult_spec, control_factor)?;
+    let family_target = resolve_factorial_family_target(obs, mult_spec, control_factor)?;
     if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());
     }
@@ -2107,16 +2186,16 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
         FactorialComparisonFamilyMode::Standard => {
             let start_tabs = out.tabs.len();
             let start_pairs = out.pairwise_comparisons.len();
-            run_factorial_multiplicity_standard(out, obs, post_hoc, mult_spec, control_target, p_fmt, confidence)?;
+            run_factorial_multiplicity_standard(out, obs, post_hoc, mult_spec, family_target.as_ref(), p_fmt, confidence)?;
             if swap_direction {
                 swap_standard_multiplicity_outputs(out, start_tabs, start_pairs, mult_spec.method);
             }
             Ok(())
         }
         FactorialComparisonFamilyMode::CellsDifferingByOneFactor | FactorialComparisonFamilyMode::SingleGrandFamily => {
-            if control_target.is_some() {
+            if family_target.is_some() {
                 return Err(StatsError::IncompatibleAnalysisSpec {
-                    expected: "Standard, PerSliceFamilies, or TwoFactorFamilies comparison_family_mode for control-vs-all factorial comparisons",
+                    expected: "Standard, PerSliceFamilies, or TwoFactorFamilies comparison_family_mode for control-vs-all or selected-pairs factorial comparisons",
                 });
             }
             let mut all_pairs = Vec::new();
@@ -2150,18 +2229,30 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
             Ok(())
         }
         FactorialComparisonFamilyMode::TwoFactorFamilies => {
-            if let Some((target_f, ctrl_idx)) = control_target {
+            if let Some(target) = family_target.as_ref() {
+                let target_f = target.factor();
+                let k_var = obs.factor_levels[target_f].len();
+                let target_pairs = target.pair_indices(k_var);
                 let (details, _n_slices, extra_note) =
-                    evaluate_control_vs_all_slices(obs, post_hoc, target_f, ctrl_idx, mult_spec, confidence, swap_direction, false)?;
+                    evaluate_target_factor_slices(obs, post_hoc, target_f, &target_pairs, mult_spec, confidence, swap_direction, false)?;
                 if !details.is_empty() {
                     let f_name = obs.factor_names.get(target_f).map_or("Factor", String::as_str);
-                    let ctrl_lbl = obs.factor_levels[target_f].get(ctrl_idx).map_or("control", String::as_str);
                     let tab_id = format!("multiple-comparisons-family-factor-{}", target_f + 1);
                     let title = format!("Multiple comparisons: family varying {f_name}");
-                    let mut note = format!(
-                        "Multiplicity adjusted across the single family of {} control-versus-all comparisons varying {f_name} against `{ctrl_lbl}`.",
-                        details.len()
-                    );
+                    let mut note = match target {
+                        FactorialFamilyTarget::Control { control, .. } => {
+                            let ctrl_lbl = obs.factor_levels[target_f].get(*control).map_or("control", String::as_str);
+                            format!(
+                                "Multiplicity adjusted across the single family of {} control-versus-all comparisons varying {f_name} against `{ctrl_lbl}`.",
+                                details.len()
+                            )
+                        }
+                        FactorialFamilyTarget::SelectedPairs { pairs, .. } => format!(
+                            "Multiplicity adjusted across the single family of {} planned comparison(s) ({} selected pair(s) per slice) varying {f_name}.",
+                            details.len(),
+                            pairs.len()
+                        ),
+                    };
                     if let Some(extra) = extra_note {
                         note.push(' ');
                         note.push_str(&extra);
@@ -2196,19 +2287,29 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
             Ok(())
         }
         FactorialComparisonFamilyMode::PerSliceFamilies => {
-            if let Some((target_f, ctrl_idx)) = control_target {
+            if let Some(target) = family_target.as_ref() {
+                let target_f = target.factor();
+                let k_var = obs.factor_levels[target_f].len();
+                let target_pairs = target.pair_indices(k_var);
                 let (details, n_slices, extra_note) =
-                    evaluate_control_vs_all_slices(obs, post_hoc, target_f, ctrl_idx, mult_spec, confidence, swap_direction, true)?;
+                    evaluate_target_factor_slices(obs, post_hoc, target_f, &target_pairs, mult_spec, confidence, swap_direction, true)?;
                 if !details.is_empty() {
-                    let k_var = obs.factor_levels[target_f].len();
                     let f_name = obs.factor_names.get(target_f).map_or("Factor", String::as_str);
-                    let ctrl_lbl = obs.factor_levels[target_f].get(ctrl_idx).map_or("control", String::as_str);
                     let tab_id = format!("multiple-comparisons-per-slice-factor-{}", target_f + 1);
                     let title = format!("Multiple comparisons (per-slice families): {f_name}");
-                    let mut note = format!(
-                        "Each slice compares {} non-control levels of {f_name} against `{ctrl_lbl}` as its own comparison family ({n_slices} slices).",
-                        k_var.saturating_sub(1)
-                    );
+                    let mut note = match target {
+                        FactorialFamilyTarget::Control { control, .. } => {
+                            let ctrl_lbl = obs.factor_levels[target_f].get(*control).map_or("control", String::as_str);
+                            format!(
+                                "Each slice compares {} non-control levels of {f_name} against `{ctrl_lbl}` as its own comparison family ({n_slices} slices).",
+                                k_var.saturating_sub(1)
+                            )
+                        }
+                        FactorialFamilyTarget::SelectedPairs { pairs, .. } => format!(
+                            "Each slice compares {} selected pair(s) of {f_name} as its own comparison family ({n_slices} slices).",
+                            pairs.len()
+                        ),
+                    };
                     if let Some(extra) = extra_note {
                         note.push(' ');
                         note.push_str(&extra);
@@ -2264,9 +2365,9 @@ pub(in crate::anova) fn run_factorial_multiplicity_with_options(
             Ok(())
         }
         FactorialComparisonFamilyMode::PreselectedPairs => {
-            if control_target.is_some() {
+            if family_target.is_some() {
                 return Err(StatsError::IncompatibleAnalysisSpec {
-                    expected: "Standard, PerSliceFamilies, or TwoFactorFamilies comparison_family_mode for control-vs-all factorial comparisons",
+                    expected: "Standard, PerSliceFamilies, or TwoFactorFamilies comparison_family_mode for control-vs-all or selected-pairs factorial comparisons",
                 });
             }
             if preselected_pairs.is_empty() {
@@ -2305,7 +2406,7 @@ fn run_factorial_multiplicity_standard(
     obs: &FactorialObservations,
     post_hoc: &FactorialPostHocContext,
     mult_spec: &MultiplicitySpec,
-    control_target: Option<(usize, usize)>,
+    family_target: Option<&FactorialFamilyTarget>,
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
@@ -2317,8 +2418,8 @@ fn run_factorial_multiplicity_standard(
         if k < 2 {
             continue;
         }
-        if let Some((target_f, _)) = control_target
-            && f_idx != target_f
+        if let Some(target) = family_target
+            && f_idx != target.factor()
         {
             continue;
         }
@@ -2350,16 +2451,23 @@ fn run_factorial_multiplicity_standard(
         let f_name = obs.factor_names.get(f_idx).map_or("Factor", String::as_str);
         let title = format!("Multiple comparisons: {f_name} (marginal means)");
         let mut notes = Vec::new();
-        if let Some((_, ctrl_idx)) = control_target
+        if let Some(target) = family_target
             && obs.factor_levels.len() >= 2
         {
-            let ctrl_lbl = levels.get(ctrl_idx).map_or("control", String::as_str);
-            let label = if matches!(mult_spec.method, MultiplicityMethod::Dunnett { .. }) {
-                "Dunnett many-to-one comparisons"
-            } else {
-                "Control-versus-all comparisons"
-            };
-            notes.push(format!("{label} target {f_name} against control level `{ctrl_lbl}` (index {ctrl_idx})."));
+            match target {
+                FactorialFamilyTarget::Control { control, .. } => {
+                    let ctrl_lbl = levels.get(*control).map_or("control", String::as_str);
+                    let label = if matches!(mult_spec.method, MultiplicityMethod::Dunnett { .. }) {
+                        "Dunnett many-to-one comparisons"
+                    } else {
+                        "Control-versus-all comparisons"
+                    };
+                    notes.push(format!("{label} target {f_name} against control level `{ctrl_lbl}` (index {control})."));
+                }
+                FactorialFamilyTarget::SelectedPairs { pairs, .. } => {
+                    notes.push(format!("Planned pairwise comparisons target {f_name} across {} selected pair(s).", pairs.len()));
+                }
+            }
         }
         if let Some(fn_str) = fam_note {
             notes.push(fn_str);
@@ -2371,7 +2479,7 @@ fn run_factorial_multiplicity_standard(
     if obs.factor_levels.len() >= 2 {
         let name_a = obs.factor_names.first().map_or("Factor A", String::as_str);
         let name_b = obs.factor_names.get(1).map_or("Factor B", String::as_str);
-        if control_target.is_none_or(|(target_f, _)| target_f == 0) {
+        if family_target.is_none_or(|t| t.factor() == 0) {
             let title_a_within_b = format!("Simple effects: {name_a} within {name_b}");
             run_simple_effects_for_pair(
                 out,
@@ -2389,7 +2497,7 @@ fn run_factorial_multiplicity_standard(
                 &mut next_group_id,
             )?;
         }
-        if control_target.is_none_or(|(target_f, _)| target_f == 1) {
+        if family_target.is_none_or(|t| t.factor() == 1) {
             let title_b_within_a = format!("Simple effects: {name_b} within {name_a}");
             run_simple_effects_for_pair(
                 out,

@@ -211,7 +211,8 @@ pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, 
                     spec.method = curvebook_doc::OneWayMethod::OrdinaryAnova;
                 }
                 if spec.multiplicity.method == MultiplicityMethod::DunnRankSum {
-                    spec.multiplicity.method = MultiplicityMethod::TukeyHsd;
+                    spec.multiplicity.method =
+                        if spec.multiplicity.selected_pairs.is_some() { MultiplicityMethod::Sidak } else { MultiplicityMethod::TukeyHsd };
                 }
             } else {
                 spec.method = if matched { curvebook_doc::OneWayMethod::Friedman } else { curvebook_doc::OneWayMethod::KruskalWallis };
@@ -1136,6 +1137,7 @@ mod tests {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         });

@@ -575,6 +575,77 @@ impl EditAnalysisParametersState {
         }
     }
 
+    /// Enable or disable planned selected-pairs comparisons on the active multiplicity-bearing draft.
+    pub fn set_compare_selected_pairs(&mut self, enabled: bool, available_cols: &[usize]) {
+        if enabled {
+            self.compare_against_control = false;
+        }
+        let assume_gaussian = self.assume_gaussian;
+        let default_pair = match available_cols {
+            [a, b, ..] => (*a, *b),
+            _ => (0, 1),
+        };
+        self.update_draft_kind(|updated| {
+            let mult = match updated {
+                AnalysisKind::OneWayAnova(a) => &mut a.multiplicity,
+                AnalysisKind::FactorialAnova(f) => &mut f.multiplicity,
+                AnalysisKind::NestedComparison(n) => &mut n.multiplicity,
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity,
+                _ => return false,
+            };
+            if enabled {
+                mult.control_column = None;
+                if !curvebook_doc::MultiplicitySpec::supports_selected_pairs(mult.method) {
+                    mult.method = if assume_gaussian { MultiplicityMethod::Sidak } else { MultiplicityMethod::DunnRankSum };
+                }
+                if mult.selected_pairs.as_ref().is_none_or(Vec::is_empty) {
+                    mult.selected_pairs = Some(vec![default_pair]);
+                }
+            } else {
+                mult.selected_pairs = None;
+            }
+            true
+        });
+        if self.draft.is_some() {
+            self.sync_rule_flags_from_kind();
+        }
+    }
+
+    /// Toggle a planned pair `(a, b)` in `multiplicity.selected_pairs` (preserving at least one
+    /// pair while selected-pairs mode is active).
+    pub fn toggle_selected_pair(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
+        }
+        let assume_gaussian = self.assume_gaussian;
+        self.compare_against_control = false;
+        self.update_draft_kind(|updated| {
+            let mult = match updated {
+                AnalysisKind::OneWayAnova(spec) => &mut spec.multiplicity,
+                AnalysisKind::FactorialAnova(spec) => &mut spec.multiplicity,
+                AnalysisKind::NestedComparison(spec) => &mut spec.multiplicity,
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity,
+                _ => return false,
+            };
+            mult.control_column = None;
+            if !curvebook_doc::MultiplicitySpec::supports_selected_pairs(mult.method) {
+                mult.method = if assume_gaussian { MultiplicityMethod::Sidak } else { MultiplicityMethod::DunnRankSum };
+            }
+            let pairs = mult.selected_pairs.get_or_insert_with(Vec::new);
+            if let Some(pos) = pairs.iter().position(|&(x, y)| (x == a && y == b) || (x == b && y == a)) {
+                if pairs.len() > 1 {
+                    pairs.remove(pos);
+                }
+            } else {
+                pairs.push((a, b));
+            }
+            true
+        });
+        if self.draft.is_some() {
+            self.sync_rule_flags_from_kind();
+        }
+    }
+
     /// Toggle correlation all-pairs mode (turning it off clears heatmap generation).
     pub fn set_correlation_all_pairs(&mut self, all_pairs: bool) {
         self.correlation_all_pairs = all_pairs;
@@ -605,12 +676,19 @@ impl EditAnalysisParametersState {
 
     fn set_anova_multiplicity(&mut self, method: MultiplicityMethod) {
         self.update_draft_kind(|updated| {
-            match updated {
-                AnalysisKind::OneWayAnova(a) => a.multiplicity.method = method,
-                AnalysisKind::FactorialAnova(f) => f.multiplicity.method = method,
-                AnalysisKind::NestedComparison(n) => n.multiplicity.method = method,
-                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = method,
+            let mult = match updated {
+                AnalysisKind::OneWayAnova(a) => &mut a.multiplicity,
+                AnalysisKind::FactorialAnova(f) => &mut f.multiplicity,
+                AnalysisKind::NestedComparison(n) => &mut n.multiplicity,
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity,
                 _ => return false,
+            };
+            mult.method = method;
+            if matches!(method, MultiplicityMethod::Dunnett { .. }) || !curvebook_doc::MultiplicitySpec::supports_control_column(method) {
+                mult.control_column = None;
+            }
+            if !curvebook_doc::MultiplicitySpec::supports_selected_pairs(method) {
+                mult.selected_pairs = None;
             }
             true
         });

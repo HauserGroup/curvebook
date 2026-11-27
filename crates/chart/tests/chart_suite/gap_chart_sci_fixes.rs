@@ -952,10 +952,11 @@ fn gap_02_11_volcano_respects_significant_flag_and_difference_units() -> TestRes
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
         ..Default::default()
     };
-    let an = AnalysisSpec::new(SheetId::new("res-mr-vol"), ds.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
+    let an = AnalysisSpec::new(SheetId::new("res-mr-vol"), ds.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec.clone()))?;
     let res = run_multiple_row_t_tests_analysis(&ds, &an, &mr_spec)?;
     assert!(res.pairwise_comparisons[0].significant, "SmallUp must be significant");
     assert!(res.pairwise_comparisons[1].significant, "SmallDown must be significant");
@@ -1347,10 +1348,11 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
         ..Default::default()
     };
-    let an_v = AnalysisSpec::new(SheetId::new("res-v-dirty"), ds_v.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
+    let an_v = AnalysisSpec::new(SheetId::new("res-v-dirty"), ds_v.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec.clone()))?;
     let mut res_v = run_multiple_row_t_tests_analysis(&ds_v, &an_v, &mr_spec)?;
     res_v.status = ResultStatus::Dirty;
     doc.add_data_sheet(ds_v.clone())?;
@@ -1646,6 +1648,7 @@ fn delta_volcano_non_mr_pairwise_estimates_use_difference_units() -> TestResult 
                 threshold: 0.05,
                 report_confidence_intervals: false,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),

@@ -1010,7 +1010,7 @@ fn describe_multiple_row_tests(s: &MultipleRowTestsSpec, res: &ResultSheet) -> V
         (false, LognormalRowTestMode::None, false, false) => "Welch's unpaired t-tests without assuming equal SD",
     };
     let mut runs = vec![plain(format!("Row-wise two-group comparisons were evaluated using {family}. "))];
-    let mult_spec = MultiplicitySpec { report_confidence_intervals: false, ..s.multiplicity };
+    let mult_spec = MultiplicitySpec { report_confidence_intervals: false, ..s.multiplicity.clone() };
     match mult_spec.method {
         MultiplicityMethod::None => {
             runs.push(plain("Multiple comparisons across rows used no post-hoc multiplicity correction (unadjusted raw P values)."));
@@ -1039,7 +1039,7 @@ fn describe_multiple_row_tests(s: &MultipleRowTestsSpec, res: &ResultSheet) -> V
             } else {
                 let eff_method =
                     if mult_spec.method == MultiplicityMethod::TamhaneT2 { MultiplicityMethod::Sidak } else { MultiplicityMethod::Bonferroni };
-                let eff_spec = MultiplicitySpec { method: eff_method, ..mult_spec };
+                let eff_spec = MultiplicitySpec { method: eff_method, ..mult_spec.clone() };
                 runs.extend(describe_multiplicity_runs(&eff_spec, false));
             }
         }
@@ -1265,7 +1265,7 @@ fn append_welch_posthoc_runs(runs: &mut Vec<TextRun>, mult: &MultiplicitySpec, r
             append_control_clause(runs, mult, source_ds);
         }
         MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls => {
-            let eff_mult = MultiplicitySpec { method: MultiplicityMethod::GamesHowell, ..*mult };
+            let eff_mult = MultiplicitySpec { method: MultiplicityMethod::GamesHowell, ..mult.clone() };
             runs.extend(describe_multiplicity_runs(&eff_mult, has_ci));
         }
         MultiplicityMethod::Dunnett { control_column } => {
@@ -1305,6 +1305,17 @@ fn append_control_clause(runs: &mut Vec<TextRun>, mult: &MultiplicitySpec, sourc
         let ctrl_name = column_title_at(source_ds, control_column);
         runs.push(plain(" Control column for post-hoc comparisons: "));
         runs.push(code(ctrl_name));
+        runs.push(plain("."));
+    } else if let Some(pairs) = mult.selected_pairs.as_deref() {
+        runs.push(plain(format!(" Planned pairwise comparisons evaluated {} selected pair(s): ", pairs.len())));
+        for (idx, &(a, b)) in pairs.iter().enumerate() {
+            if idx > 0 {
+                runs.push(plain(", "));
+            }
+            runs.push(code(column_title_at(source_ds, a)));
+            runs.push(plain(" vs. "));
+            runs.push(code(column_title_at(source_ds, b)));
+        }
         runs.push(plain("."));
     }
 }
@@ -1493,6 +1504,13 @@ fn describe_factorial_anova(s: &FactorialAnovaSpec, res: &ResultSheet, source_ds
                 }
                 None => {}
             }
+        } else if let Some(pairs) = s.multiplicity.selected_pairs.as_deref() {
+            let factor_desc = match s.control_factor {
+                Some(0) => "row-factor",
+                Some(1) => "column-factor",
+                _ => "factor",
+            };
+            runs.push(plain(format!(" Planned pairwise comparisons evaluated {} selected {factor_desc} pair(s).", pairs.len())));
         }
     }
     vec![ReportBlock::Paragraph(runs)]
@@ -1527,7 +1545,7 @@ fn describe_nested(s: &NestedAnalysisSpec, res: &ResultSheet, source_ds: Option<
         runs.push(plain("A post-hoc test for linear trend across ordered group means was performed."));
     } else {
         append_control_clause(&mut runs, &s.multiplicity, source_ds);
-        if s.multiplicity.effective_control_column().is_some() {
+        if s.multiplicity.effective_control_column().is_some() || s.multiplicity.selected_pairs.is_some() {
             runs.push(plain(" "));
         }
         runs.extend(describe_multiplicity_runs(&s.multiplicity, result_has_posthoc_ci(res)));
@@ -1860,6 +1878,30 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
 fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&DataSheet>) -> Vec<TextRun> {
     let thresh = format_exact_float(mult.threshold);
     let mut runs = vec![plain(" For "), math(">= 3", ">= 3", "\\ge 3"), plain(" cohorts, ")];
+    if let Some(pairs) = mult.selected_pairs.as_deref() {
+        let m = pairs.len();
+        match mult.method {
+            MultiplicityMethod::FisherLsd => {
+                runs.push(plain(format!(
+                    "pairwise log-rank comparisons across {m} selected cohort pair(s) reported unadjusted Fisher's LSD P values without familywise error control."
+                )));
+            }
+            MultiplicityMethod::DunnRankSum | MultiplicityMethod::DunnettT3 => {
+                runs.push(plain(format!("pairwise log-rank comparisons across {m} selected cohort pair(s)")));
+                runs.extend(multiplicity_adjustment_clause(" used Bonferroni FWER adjustment at ", false, &thresh, "."));
+            }
+            MultiplicityMethod::TamhaneT2 => {
+                runs.push(plain(format!("pairwise log-rank comparisons across {m} selected cohort pair(s)")));
+                runs.extend(multiplicity_adjustment_clause(" used Sidak FWER adjustment at ", false, &thresh, "."));
+            }
+            _ => {
+                let eff_spec = MultiplicitySpec { report_confidence_intervals: false, ..mult.clone() };
+                runs.push(plain(format!("pairwise log-rank comparisons across {m} selected cohort pair(s): ")));
+                runs.extend(describe_multiplicity_runs(&eff_spec, false));
+            }
+        }
+        return runs;
+    }
     if let Some(control_column) = mult.effective_control_column() {
         let ctrl_lbl = column_title_at(source_ds, control_column);
         match mult.method {
@@ -1879,7 +1921,7 @@ fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&D
                 runs.extend(multiplicity_adjustment_clause(" used Sidak FWER adjustment at ", false, &thresh, "."));
             }
             _ => {
-                let eff_spec = MultiplicitySpec { report_confidence_intervals: false, ..*mult };
+                let eff_spec = MultiplicitySpec { report_confidence_intervals: false, ..mult.clone() };
                 runs.push(plain("pairwise log-rank comparisons against control cohort "));
                 runs.push(code(ctrl_lbl));
                 runs.push(plain(": "));
@@ -1909,7 +1951,7 @@ fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&D
         | MultiplicityMethod::BenjaminiHochbergFdr
         | MultiplicityMethod::BenjaminiYekutieliFdr
         | MultiplicityMethod::TwoStageBkyFdr => {
-            let eff_spec = MultiplicitySpec { report_confidence_intervals: false, ..*mult };
+            let eff_spec = MultiplicitySpec { report_confidence_intervals: false, ..mult.clone() };
             runs.push(plain("pairwise log-rank comparisons used "));
             runs.extend(describe_multiplicity_runs(&eff_spec, false));
         }
@@ -3320,6 +3362,27 @@ fn dunn_adjustment_desc(method: MultiplicityMethod) -> (&'static str, bool) {
 
 fn describe_dunn_multiplicity_runs(mult: &MultiplicitySpec, source_ds: Option<&DataSheet>, rank_scope: &str) -> Vec<TextRun> {
     let thresh = format_exact_float(mult.threshold);
+    if let Some(pairs) = mult.selected_pairs.as_deref() {
+        let mut runs = Vec::new();
+        if matches!(mult.method, MultiplicityMethod::None | MultiplicityMethod::FisherLsd) {
+            runs.push(plain(format!(
+                "Multiple comparisons used unadjusted Dunn's nonparametric {rank_scope} pairwise z-tests across {} selected pair(s) (no multiplicity correction applied).",
+                pairs.len()
+            )));
+            return runs;
+        }
+        let (adj_desc, is_fdr) = dunn_adjustment_desc(mult.method);
+        runs.extend(multiplicity_adjustment_clause(
+            format!(
+                "Multiple comparisons used Dunn's nonparametric {rank_scope} pairwise z-tests across {} selected pair(s) with {adj_desc} at ",
+                pairs.len()
+            ),
+            is_fdr,
+            &thresh,
+            ".",
+        ));
+        return runs;
+    }
     if let Some(control_column) = mult.effective_control_column() {
         let ctrl_name = column_title_at(source_ds, control_column);
         let mut runs = vec![plain("Control column for post-hoc comparisons: "), code(ctrl_name)];
@@ -4696,6 +4759,7 @@ mod tests {
                     threshold: 0.05,
                     report_confidence_intervals: true,
                     control_column: None,
+                    selected_pairs: None,
                 },
                 ..OneWayAnovaSpec::default()
             }),
@@ -4757,7 +4821,7 @@ mod tests {
         let res_ref = doc.result_sheet(&SheetId::new("res-1")).ok_or("missing res-1")?;
         for method in all_multiplicity_methods() {
             for ci in [false, true] {
-                let spec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: ci, control_column: None };
+                let spec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: ci, control_column: None, selected_pairs: None };
                 let blocks = vec![
                     ReportBlock::Paragraph(describe_multiplicity_runs(&spec, ci)),
                     ReportBlock::Paragraph(describe_dunn_multiplicity_runs(&spec, ds_ref, "rank-sum")),

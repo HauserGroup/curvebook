@@ -132,7 +132,7 @@ pub enum MultiplicityMethod {
 }
 
 /// Multiple-comparisons configuration shared across ANOVA, nonparametrics, and survival curves.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultiplicitySpec {
     /// Selected FWER, FDR, or unadjusted post-hoc comparison procedure.
     pub method: MultiplicityMethod,
@@ -143,17 +143,28 @@ pub struct MultiplicitySpec {
     /// Optional zero-based reference control group index restricting comparisons to the `k - 1`
     /// treatment-versus-control family instead of all `k * (k - 1) / 2` pairs.
     ///
-    /// Supported for `Dunnett`, `Bonferroni`, `Sidak`, `HolmSidak`, `DunnRankSum`, `FisherLsd`,
-    /// `DunnettT3`, `TamhaneT2`, and the three FDR procedures (`BenjaminiHochbergFdr`,
-    /// `BenjaminiYekutieliFdr`, `TwoStageBkyFdr`). Leave `None` for all-pairwise comparisons or
-    /// when `method` is already `MultiplicityMethod::Dunnett { control_column }`.
+    /// Mutually exclusive with [`Self::selected_pairs`]. Supported for `Dunnett`, `Bonferroni`,
+    /// `Sidak`, `HolmSidak`, `DunnRankSum`, `FisherLsd`, `DunnettT3`, `TamhaneT2`, and the three
+    /// FDR procedures (`BenjaminiHochbergFdr`, `BenjaminiYekutieliFdr`, `TwoStageBkyFdr`). Leave
+    /// `None` for all-pairwise comparisons or when `method` is already
+    /// `MultiplicityMethod::Dunnett { control_column }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_column: Option<usize>,
+    /// Optional explicit list of zero-based `(group_a, group_b)` pairs restricting comparisons to a
+    /// planned subset of `m = pairs.len()` pairwise contrasts (Hsu 1996) instead of all
+    /// `k * (k - 1) / 2` pairs.
+    ///
+    /// Mutually exclusive with [`Self::control_column`] and [`MultiplicityMethod::Dunnett`].
+    /// Supported for `Bonferroni`, `Sidak`, `HolmSidak`, `DunnRankSum`, `FisherLsd`, `DunnettT3`,
+    /// `TamhaneT2`, and the three FDR procedures (`BenjaminiHochbergFdr`, `BenjaminiYekutieliFdr`,
+    /// `TwoStageBkyFdr`). Leave `None` for all-pairwise (or control-versus-all) comparisons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_pairs: Option<Vec<(usize, usize)>>,
 }
 
 impl Default for MultiplicitySpec {
     fn default() -> Self {
-        Self { method: MultiplicityMethod::None, threshold: 0.05, report_confidence_intervals: true, control_column: None }
+        Self { method: MultiplicityMethod::None, threshold: 0.05, report_confidence_intervals: true, control_column: None, selected_pairs: None }
     }
 }
 
@@ -166,6 +177,25 @@ impl MultiplicitySpec {
             method,
             MultiplicityMethod::Dunnett { .. }
                 | MultiplicityMethod::Bonferroni
+                | MultiplicityMethod::Sidak
+                | MultiplicityMethod::HolmSidak
+                | MultiplicityMethod::DunnRankSum
+                | MultiplicityMethod::FisherLsd
+                | MultiplicityMethod::DunnettT3
+                | MultiplicityMethod::TamhaneT2
+                | MultiplicityMethod::BenjaminiHochbergFdr
+                | MultiplicityMethod::BenjaminiYekutieliFdr
+                | MultiplicityMethod::TwoStageBkyFdr
+        )
+    }
+
+    /// Return `true` when `method` supports restricting pairwise comparisons to an explicit planned
+    /// subset of `m` pairs (`Self::selected_pairs`; Hsu 1996).
+    #[must_use]
+    pub const fn supports_selected_pairs(method: MultiplicityMethod) -> bool {
+        matches!(
+            method,
+            MultiplicityMethod::Bonferroni
                 | MultiplicityMethod::Sidak
                 | MultiplicityMethod::HolmSidak
                 | MultiplicityMethod::DunnRankSum
@@ -193,7 +223,7 @@ impl MultiplicitySpec {
     /// `self.method` is [`MultiplicityMethod::Dunnett`] and setting [`Self::control_column`]
     /// otherwise).
     #[must_use]
-    pub const fn with_control_column(mut self, control_column: usize) -> Self {
+    pub fn with_control_column(mut self, control_column: usize) -> Self {
         match &mut self.method {
             MultiplicityMethod::Dunnett { control_column: c } => {
                 *c = control_column;
@@ -203,6 +233,13 @@ impl MultiplicitySpec {
                 self.control_column = Some(control_column);
             }
         }
+        self
+    }
+
+    /// Return a copy of `self` restricting comparisons to `pairs`.
+    #[must_use]
+    pub fn with_selected_pairs(mut self, pairs: Vec<(usize, usize)>) -> Self {
+        self.selected_pairs = Some(pairs);
         self
     }
 }
@@ -1054,7 +1091,7 @@ impl LognormalRowTestMode {
 }
 
 /// Row-wise multiple two-group t-test or nonparametric comparison specification.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultipleRowTestsSpec {
     /// When `true`, pairs replicates by subcolumn index (`PairedT` or `WilcoxonSignedRank`); when `false`, treats columns as independent samples (`UnpairedT`, `WelchT`, or `MannWhitneyU`).
     #[serde(default)]
@@ -1479,10 +1516,11 @@ pub struct FactorialAnovaSpec {
     pub compute_effect_sizes: bool,
     /// Post-hoc cell/simple-effect/main-effect multiple-comparisons configuration.
     pub multiplicity: MultiplicitySpec,
-    /// Optional zero-based factor axis targeted by a many-to-one control-versus-all post-hoc
-    /// comparison (`Some(0)` = row factor, `Some(1)` = column factor on a two-way `GroupedTable`).
-    /// When `None`, legacy Dunnett factor resolution selects the first factor whose level count
-    /// contains `control_column`.
+    /// Optional zero-based factor axis targeted by a one-dimensional control-versus-all
+    /// (`MultiplicitySpec::control_column`) or selected-pairs (`MultiplicitySpec::selected_pairs`)
+    /// post-hoc comparison (`Some(0)` = row factor, `Some(1)` = column factor on a two-way
+    /// `GroupedTable`). When `None`, legacy Dunnett/planned-pairs factor resolution selects the
+    /// first factor whose level count contains the requested indices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_factor: Option<usize>,
     /// Sphericity epsilon adjustment (`None`, `GreenhouseGeisser`, or `HuynhFeldt`) applied to RM factorial *F*-tests.

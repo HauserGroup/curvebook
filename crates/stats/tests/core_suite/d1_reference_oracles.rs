@@ -655,7 +655,13 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
         &kw.group_mean_ranks,
         kw.total_n,
         tie_sum,
-        &MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: false, control_column: None },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: None,
+        },
     )
     .unwrap();
     assert_eq!(dunn_bonf.len(), 3);
@@ -672,7 +678,13 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
         &kw.group_mean_ranks,
         kw.total_n,
         tie_sum,
-        &MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: false, control_column: None },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: None,
+        },
     )
     .unwrap();
     assert_approx_eq(dunn_sidak[0].adjusted_p_or_q, 0.004_212_225_384_598, 1e-10, 1e-10, "Dunn G1-G2 Sidak");
@@ -1546,6 +1558,7 @@ fn oracle_end_to_end_run_analysis_sheets() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -1811,7 +1824,13 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
 
     // 1. Bonferroni (m = 3 vs control col 1)
     let res_bonf = run_one(
-        MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true, control_column: Some(ctrl) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: Some(ctrl),
+            selected_pairs: None,
+        },
         vec![],
     )
     .unwrap();
@@ -1835,7 +1854,13 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
 
     // 2. Šidák (m = 3 vs control col 1)
     let res_sid = run_one(
-        MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: true, control_column: Some(ctrl) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: Some(ctrl),
+            selected_pairs: None,
+        },
         vec![],
     )
     .unwrap();
@@ -1858,7 +1883,13 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
 
     // 3. Holm–Šidák step-down (m = 3 vs control col 1)
     let res_hs = run_one(
-        MultiplicitySpec { method: MultiplicityMethod::HolmSidak, threshold: 0.05, report_confidence_intervals: false, control_column: Some(ctrl) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::HolmSidak,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: Some(ctrl),
+            selected_pairs: None,
+        },
         vec![],
     )
     .unwrap();
@@ -1877,7 +1908,13 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
 
     // 4. Unadjusted Fisher LSD (m = 3 vs control col 1)
     let res_lsd = run_one(
-        MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: true, control_column: Some(ctrl) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::FisherLsd,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: Some(ctrl),
+            selected_pairs: None,
+        },
         vec![],
     )
     .unwrap();
@@ -1899,7 +1936,13 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
 
     // 5. Subset selection preserves sheet data-set index; excluded control & incompatible methods error.
     let res_sub = run_one(
-        MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: Some(1),
+            selected_pairs: None,
+        },
         vec![3, 1, 0],
     )
     .unwrap();
@@ -1907,14 +1950,29 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
     assert!(res_sub.pairwise_comparisons.iter().all(|p| p.group_b == 1));
     assert!(
         run_one(
-            MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: false, control_column: Some(2) },
+            MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: Some(2),
+                selected_pairs: None
+            },
             vec![3, 1, 0],
         )
         .is_err()
     );
     for bad_method in [MultiplicityMethod::TukeyHsd, MultiplicityMethod::GamesHowell, MultiplicityMethod::LinearTrend, MultiplicityMethod::None] {
         assert!(matches!(
-            run_one(MultiplicitySpec { method: bad_method, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) }, vec![],),
+            run_one(
+                MultiplicitySpec {
+                    method: bad_method,
+                    threshold: 0.05,
+                    report_confidence_intervals: false,
+                    control_column: Some(1),
+                    selected_pairs: None
+                },
+                vec![],
+            ),
             Err(StatsError::IncompatibleAnalysisSpec { .. })
         ));
     }
@@ -1933,6 +1991,7 @@ fn issue_78_one_way_control_vs_all_bonferroni_sidak_holm_sidak_and_unadjusted_or
                     threshold: 0.05,
                     report_confidence_intervals: false,
                     control_column: Some(ctrl),
+                    selected_pairs: None,
                 },
                 ..OneWayAnovaSpec::default()
             }),
@@ -1986,6 +2045,7 @@ fn issue_78_nonparametric_dunn_and_welch_dunnett_t3_control_vs_all_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: false,
                 control_column: Some(2),
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -2012,6 +2072,7 @@ fn issue_78_nonparametric_dunn_and_welch_dunnett_t3_control_vs_all_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: false,
                 control_column: Some(2),
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -2036,6 +2097,7 @@ fn issue_78_nonparametric_dunn_and_welch_dunnett_t3_control_vs_all_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: false,
                 control_column: Some(0),
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -2078,6 +2140,7 @@ fn issue_78_nonparametric_dunn_and_welch_dunnett_t3_control_vs_all_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: Some(0),
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -2111,6 +2174,7 @@ fn issue_78_nonparametric_dunn_and_welch_dunnett_t3_control_vs_all_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: Some(0),
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -2199,6 +2263,7 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         Some(1),
         FactorialComparisonFamilyMode::PerSliceFamilies,
@@ -2229,7 +2294,13 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
 
     // 2. Single-family (TwoFactorFamilies) Šidák (1967) across all m = 2 * 3 = 6 comparisons.
     let res_single = run_fac(
-        MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: Some(1),
+            selected_pairs: None,
+        },
         Some(1),
         FactorialComparisonFamilyMode::TwoFactorFamilies,
     )
@@ -2248,7 +2319,13 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
 
     // 3. Per-slice unadjusted (FisherLsd) rows-within-columns against sheet row 1 ("T1") (m = 1 per slice).
     let res_row_lsd = run_fac(
-        MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) },
+        MultiplicitySpec {
+            method: MultiplicityMethod::FisherLsd,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: Some(1),
+            selected_pairs: None,
+        },
         Some(0),
         FactorialComparisonFamilyMode::PerSliceFamilies,
     )
@@ -2267,6 +2344,7 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
         Some(1),
         FactorialComparisonFamilyMode::Standard,
@@ -2293,6 +2371,7 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             control_factor: Some(1),
             comparison_family_mode: FactorialComparisonFamilyMode::PerSliceFamilies,
@@ -2314,7 +2393,13 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
     ] {
         assert!(matches!(
             run_fac(
-                MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) },
+                MultiplicitySpec {
+                    method: MultiplicityMethod::Sidak,
+                    threshold: 0.05,
+                    report_confidence_intervals: false,
+                    control_column: Some(1),
+                    selected_pairs: None
+                },
                 Some(1),
                 bad_mode,
             ),
@@ -2323,7 +2408,13 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
     }
     assert!(matches!(
         run_fac(
-            MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: false, control_column: Some(0) },
+            MultiplicitySpec {
+                method: MultiplicityMethod::Sidak,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: Some(0),
+                selected_pairs: None
+            },
             Some(1),
             FactorialComparisonFamilyMode::PerSliceFamilies,
         ),
@@ -2331,10 +2422,531 @@ fn issue_78_two_way_control_vs_all_dunnett_and_multiplicity_oracles() {
     ));
     assert!(matches!(
         run_fac(
-            MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: false, control_column: Some(1) },
+            MultiplicitySpec {
+                method: MultiplicityMethod::Sidak,
+                threshold: 0.05,
+                report_confidence_intervals: false,
+                control_column: Some(1),
+                selected_pairs: None
+            },
             Some(2),
             FactorialComparisonFamilyMode::PerSliceFamilies,
         ),
         Err(StatsError::InvalidParameter { name: "control_factor", .. })
+    ));
+}
+
+#[test]
+fn issue_76_one_way_selected_pairs_d1_oracles_and_guards() {
+    // D1 textbook references:
+    // - Hsu (1996), Multiple Comparisons: Theory and Methods (planned m-pair family adjustment).
+    // - Dunn (1961), JASA 56:52-64 (Bonferroni single-step FWER); Dunn (1964), Technometrics 6:241-252 (rank-sum).
+    // - Sidak (1967), JASA 62:626-633 (Sidak single-step FWER & simultaneous CI).
+    // - Holm (1979), Scand. J. Stat. 6:65-70 & Holland & Copenhaver (1987), Biometrics 43:417-423 (Holm-Sidak).
+    // - Fisher (1935), The Design of Experiments (unadjusted LSD).
+    // - Tamhane (1979), JASA 74:471-480 (T2); Dunnett (1980), JASA 75:796-800 (T3); Zar (2010), ch. 12 (Friedman).
+    use curvebook_doc::CiBound;
+    let mut tab = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 5, 4).unwrap();
+    // Col 0 is an excluded decoy column to verify sheet-index -> position remapping under selected_data_sets.
+    let cols: [(&str, &[f64]); 5] = [
+        ("Decoy", &[999.0, 998.0, 997.0, 996.0]),
+        ("G1", &[10.0, 11.0, 9.5, 10.5]),
+        ("G2", &[14.0, 13.5, 14.5, 14.0]),
+        ("G3", &[12.0, 12.2, 11.8, 12.0]),
+        ("G4", &[18.0, 19.0, 17.5, 18.5]),
+    ];
+    for (ci, (title, vals)) in cols.iter().enumerate() {
+        tab.data_sets[ci].title = String::from(*title);
+        for (ri, &v) in vals.iter().enumerate() {
+            tab.data_sets[ci].cells[ri][0] = Cell::number(v);
+        }
+    }
+    let sheet = DataSheet::new("col-76", "Selected pairs 1W", TableArchetype::Column(tab)).unwrap();
+
+    // Analysed subset: columns [1, 2, 3, 4] (k = 4, n = 4 each, df_within = 12).
+    // Planned family: m = 3 chosen pairs [(1, 2), (2, 4), (1, 4)] out of 6 total pairs.
+    let chosen = vec![(1_usize, 2_usize), (2, 4), (1, 4)];
+    let means = [10.25_f64, 14.0, 12.0, 18.25];
+    let sds = [0.6454972243679028_f64, 0.408248290463863, 0.16329931618554522, 0.6454972243679028];
+    let ss_within: f64 = sds.iter().map(|s| 3.0 * s * s).sum();
+    let ms_within = ss_within / 12.0;
+    let se_pooled = (ms_within * (1.0 / 4.0 + 1.0 / 4.0)).sqrt();
+    let df_within = 12.0;
+
+    let run_one = |method: OneWayMethod, mult: MultiplicitySpec, selected: Vec<usize>| {
+        let mut sp = AnalysisSpec::new(
+            "res-76",
+            "col-76",
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method, compute_effect_sizes: false, multiplicity: mult, ..OneWayAnovaSpec::default() }),
+        )
+        .unwrap();
+        sp.selected_data_sets = selected;
+        run_analysis(&sheet, &sp)
+    };
+
+    // Expected raw two-sided Student t p-values for chosen pairs [(G1,G2), (G2,G4), (G1,G4)].
+    let raw_diffs = [means[0] - means[1], means[1] - means[3], means[0] - means[3]];
+    let raw_p: Vec<f64> = raw_diffs.iter().map(|&d| student_t_two_sided_p(d / se_pooled, df_within).unwrap()).collect();
+    let m = 3.0_f64;
+
+    // 1. Ordinary ANOVA + Bonferroni (m = 3): p_adj = min(1, m * p), simultaneous CI at alpha / m.
+    let res_bonf = run_one(
+        OneWayMethod::OrdinaryAnova,
+        MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(chosen.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_bonf.pairwise_comparisons.len(), 3);
+    let tc_bonf = student_t_two_sided_isf(0.05 / m, df_within).unwrap();
+    let tab_bonf = res_bonf.tabs.iter().find(|t| t.id == "multiple-comparisons").unwrap();
+    for (idx, (&(ga, gb), &rp)) in chosen.iter().zip(raw_p.iter()).enumerate() {
+        let rec = &res_bonf.pairwise_comparisons[idx];
+        assert_eq!((rec.group_a, rec.group_b), (ga, gb));
+        assert_approx_eq(rec.raw_p_or_q, (m * rp).min(1.0), 1e-12, 1e-12, "Bonferroni m=3 p");
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = tab_bonf.rows[idx][6] else {
+            panic!("expected finite Bonferroni CI");
+        };
+        assert_approx_eq(lo, raw_diffs[idx] - tc_bonf * se_pooled, 1e-10, 1e-10, "Bonferroni CI lo");
+        assert_approx_eq(hi, raw_diffs[idx] + tc_bonf * se_pooled, 1e-10, 1e-10, "Bonferroni CI hi");
+    }
+
+    // 2. Ordinary ANOVA + Sidak (m = 3): p_adj = 1 - (1 - p)^m, simultaneous CI at 1 - (1 - alpha)^(1/m).
+    let res_sidak = run_one(
+        OneWayMethod::OrdinaryAnova,
+        MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(chosen.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_sidak.pairwise_comparisons.len(), 3);
+    let alpha_sidak = 1.0 - (1.0 - 0.05_f64).powf(1.0 / m);
+    let tc_sidak = student_t_two_sided_isf(alpha_sidak, df_within).unwrap();
+    let tab_sidak = res_sidak.tabs.iter().find(|t| t.id == "multiple-comparisons").unwrap();
+    for (idx, &rp) in raw_p.iter().enumerate() {
+        let want_p = 1.0 - (1.0 - rp).powf(m);
+        assert_approx_eq(res_sidak.pairwise_comparisons[idx].raw_p_or_q, want_p, 1e-12, 1e-12, "Sidak m=3 p");
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = tab_sidak.rows[idx][6] else {
+            panic!("expected finite Sidak CI");
+        };
+        assert_approx_eq(lo, raw_diffs[idx] - tc_sidak * se_pooled, 1e-10, 1e-10, "Sidak CI lo");
+        assert_approx_eq(hi, raw_diffs[idx] + tc_sidak * se_pooled, 1e-10, 1e-10, "Sidak CI hi");
+    }
+
+    // 3. Ordinary ANOVA + Holm-Sidak (m = 3 step-down) and Fisher's LSD (unadjusted).
+    let res_hs = run_one(
+        OneWayMethod::OrdinaryAnova,
+        MultiplicitySpec {
+            method: MultiplicityMethod::HolmSidak,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(chosen.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    let mut order: Vec<usize> = (0..3).collect();
+    order.sort_by(|&a, &b| raw_p[a].total_cmp(&raw_p[b]));
+    let mut running = 0.0_f64;
+    let mut want_hs = [0.0_f64; 3];
+    for (rank, &idx) in order.iter().enumerate() {
+        let rem = (3 - rank) as f64;
+        running = running.max(1.0 - (1.0 - raw_p[idx]).powf(rem)).min(1.0);
+        want_hs[idx] = running;
+    }
+    for (idx, &wp) in want_hs.iter().enumerate() {
+        assert_approx_eq(res_hs.pairwise_comparisons[idx].raw_p_or_q, wp, 1e-12, 1e-12, "Holm-Sidak m=3 p");
+    }
+
+    let res_lsd = run_one(
+        OneWayMethod::OrdinaryAnova,
+        MultiplicitySpec {
+            method: MultiplicityMethod::FisherLsd,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(chosen.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    let tc_lsd = student_t_two_sided_isf(0.05, df_within).unwrap();
+    let tab_lsd = res_lsd.tabs.iter().find(|t| t.id == "multiple-comparisons").unwrap();
+    for (idx, &rp) in raw_p.iter().enumerate() {
+        assert_approx_eq(res_lsd.pairwise_comparisons[idx].raw_p_or_q, rp, 1e-12, 1e-12, "Fisher LSD selected p");
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = tab_lsd.rows[idx][6] else {
+            panic!("expected finite LSD CI");
+        };
+        assert_approx_eq(lo, raw_diffs[idx] - tc_lsd * se_pooled, 1e-10, 1e-10, "LSD CI lo");
+        assert_approx_eq(hi, raw_diffs[idx] + tc_lsd * se_pooled, 1e-10, 1e-10, "LSD CI hi");
+    }
+}
+
+#[test]
+fn issue_76_one_way_selected_pairs_rm_nonparam_welch_and_guards() {
+    // RM (sphericity-assumed, GG paired contrasts df = n - 1, REML), Kruskal-Wallis Dunn (Dunn 1964),
+    // Friedman Dunn (Zar 2010), Welch Tamhane T2 (1979) / Dunnett T3 (1980), and validation guards.
+    let mut tab = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 5, 4).unwrap();
+    let cols: [(&str, &[f64]); 5] = [
+        ("Decoy", &[999.0, 998.0, 997.0, 996.0]),
+        ("G1", &[10.0, 11.0, 9.5, 10.5]),
+        ("G2", &[14.0, 13.5, 14.5, 14.0]),
+        ("G3", &[12.0, 12.2, 11.8, 12.0]),
+        ("G4", &[18.0, 19.0, 17.5, 18.5]),
+    ];
+    for (ci, (title, vals)) in cols.iter().enumerate() {
+        tab.data_sets[ci].title = String::from(*title);
+        for (ri, &v) in vals.iter().enumerate() {
+            tab.data_sets[ci].cells[ri][0] = Cell::number(v);
+        }
+    }
+    let sheet = DataSheet::new("col-76-b", "Selected pairs 1W RM/NP/Welch", TableArchetype::Column(tab)).unwrap();
+    let means = [10.25_f64, 14.0, 12.0, 18.25];
+    let sds = [0.6454972243679028_f64, 0.408248290463863, 0.16329931618554522, 0.6454972243679028];
+    let run_one = |method: OneWayMethod, mult: MultiplicitySpec, selected: Vec<usize>| {
+        let mut sp = AnalysisSpec::new(
+            "res-76-b",
+            "col-76-b",
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method, compute_effect_sizes: false, multiplicity: mult, ..OneWayAnovaSpec::default() }),
+        )
+        .unwrap();
+        sp.selected_data_sets = selected;
+        run_analysis(&sheet, &sp)
+    };
+
+    // 4. RM one-way (sphericity-assumed, GG paired contrasts, and REML) with m = 2 chosen pairs.
+    let pairs2 = vec![(1_usize, 2_usize), (3, 4)];
+    for (gg, reml) in [(false, false), (true, false), (false, true)] {
+        let mut sp = AnalysisSpec::new(
+            "res-rm-76",
+            "col-76-b",
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg },
+                mixed_effects_reml: reml,
+                compute_effect_sizes: false,
+                multiplicity: MultiplicitySpec {
+                    method: MultiplicityMethod::Sidak,
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                    control_column: None,
+                    selected_pairs: Some(pairs2.clone()),
+                },
+                ..OneWayAnovaSpec::default()
+            }),
+        )
+        .unwrap();
+        sp.selected_data_sets = vec![1, 2, 3, 4];
+        let res_rm = run_analysis(&sheet, &sp).unwrap();
+        assert_eq!(res_rm.pairwise_comparisons.len(), 2, "RM gg={gg} reml={reml}");
+        assert_eq!((res_rm.pairwise_comparisons[0].group_a, res_rm.pairwise_comparisons[0].group_b), (1, 2));
+        assert_eq!((res_rm.pairwise_comparisons[1].group_a, res_rm.pairwise_comparisons[1].group_b), (3, 4));
+        if gg && !reml {
+            let diffs = [-4.0_f64, -2.5, -5.0, -3.5];
+            let md: f64 = diffs.iter().sum::<f64>() / 4.0;
+            let sd = (diffs.iter().map(|x| (x - md).powi(2)).sum::<f64>() / 3.0).sqrt();
+            let se = sd / 2.0;
+            let rp = student_t_two_sided_p(md / se, 3.0).unwrap();
+            let want_sidak = 1.0 - (1.0 - rp).powi(2);
+            assert_approx_eq(res_rm.pairwise_comparisons[0].raw_p_or_q, want_sidak, 1e-11, 1e-11, "RM GG Sidak m=2");
+        }
+    }
+
+    // 5. Kruskal-Wallis Dunn (m = 2 Bonferroni & unadjusted FisherLsd) and Friedman Dunn (m = 2).
+    let res_kw = run_one(
+        OneWayMethod::KruskalWallis,
+        MultiplicitySpec {
+            method: MultiplicityMethod::DunnRankSum,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(pairs2.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    let res_kw_raw = run_one(
+        OneWayMethod::KruskalWallis,
+        MultiplicitySpec {
+            method: MultiplicityMethod::FisherLsd,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(pairs2.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_kw.pairwise_comparisons.len(), 2);
+    assert_eq!(res_kw_raw.pairwise_comparisons.len(), 2);
+    for idx in 0..2 {
+        let rp = res_kw_raw.pairwise_comparisons[idx].raw_p_or_q;
+        assert_approx_eq(res_kw.pairwise_comparisons[idx].raw_p_or_q, (2.0 * rp).min(1.0), 1e-12, 1e-12, "KW Dunn m=2");
+    }
+
+    let res_fried = run_one(
+        OneWayMethod::Friedman,
+        MultiplicitySpec {
+            method: MultiplicityMethod::DunnRankSum,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(pairs2.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_fried.pairwise_comparisons.len(), 2);
+
+    // 6. Brown-Forsythe / Welch with Tamhane T2 and Dunnett T3 over m = 2 pairs.
+    let res_t2 = run_one(
+        OneWayMethod::BrownForsytheAndWelch,
+        MultiplicitySpec {
+            method: MultiplicityMethod::TamhaneT2,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(pairs2.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_t2.pairwise_comparisons.len(), 2);
+    let v0 = sds[0] * sds[0] / 4.0;
+    let v1 = sds[1] * sds[1] / 4.0;
+    let se_w = (v0 + v1).sqrt();
+    let df_w = (v0 + v1).powi(2) / (v0 * v0 / 3.0 + v1 * v1 / 3.0);
+    let rp_w = student_t_two_sided_p((means[0] - means[1]) / se_w, df_w).unwrap();
+    assert_approx_eq(res_t2.pairwise_comparisons[0].raw_p_or_q, 1.0 - (1.0 - rp_w).powi(2), 1e-12, 1e-12, "Welch Tamhane T2 m=2");
+
+    let res_t3 = run_one(
+        OneWayMethod::BrownForsytheAndWelch,
+        MultiplicitySpec {
+            method: MultiplicityMethod::DunnettT3,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(pairs2.clone()),
+        },
+        vec![1, 2, 3, 4],
+    )
+    .unwrap();
+    assert_eq!(res_t3.pairwise_comparisons.len(), 2);
+    assert!(res_t3.pairwise_comparisons[0].raw_p_or_q.is_finite());
+
+    // 7. Validation guards: empty, self-pair, duplicate (including reversed), OOB/excluded, mutual exclusivity, incompatible methods.
+    assert!(matches!(
+        run_one(
+            OneWayMethod::OrdinaryAnova,
+            MultiplicitySpec { method: MultiplicityMethod::Bonferroni, selected_pairs: Some(vec![]), ..MultiplicitySpec::default() },
+            vec![1, 2, 3, 4],
+        ),
+        Err(StatsError::EmptyInput)
+    ));
+    for bad_pairs in [vec![(1, 1)], vec![(1, 2), (2, 1)], vec![(0, 1)], vec![(1, 9)]] {
+        assert!(
+            matches!(
+                run_one(
+                    OneWayMethod::OrdinaryAnova,
+                    MultiplicitySpec { method: MultiplicityMethod::Sidak, selected_pairs: Some(bad_pairs), ..MultiplicitySpec::default() },
+                    vec![1, 2, 3, 4],
+                ),
+                Err(StatsError::InvalidParameter { name: "selected_pairs", .. })
+            ),
+            "expected InvalidParameter for bad selected_pairs"
+        );
+    }
+    assert!(matches!(
+        run_one(
+            OneWayMethod::OrdinaryAnova,
+            MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                control_column: Some(1),
+                selected_pairs: Some(vec![(1, 2)]),
+                ..MultiplicitySpec::default()
+            },
+            vec![1, 2, 3, 4],
+        ),
+        Err(StatsError::IncompatibleAnalysisSpec { .. })
+    ));
+    for bad_method in [
+        MultiplicityMethod::None,
+        MultiplicityMethod::TukeyHsd,
+        MultiplicityMethod::Dunnett { control_column: 1 },
+        MultiplicityMethod::GamesHowell,
+        MultiplicityMethod::NewmanKeuls,
+        MultiplicityMethod::LinearTrend,
+    ] {
+        assert!(
+            matches!(
+                run_one(
+                    OneWayMethod::OrdinaryAnova,
+                    MultiplicitySpec { method: bad_method, selected_pairs: Some(vec![(1, 2)]), ..MultiplicitySpec::default() },
+                    vec![1, 2, 3, 4],
+                ),
+                Err(StatsError::IncompatibleAnalysisSpec { .. })
+            ),
+            "expected IncompatibleAnalysisSpec for {bad_method:?} + selected_pairs"
+        );
+    }
+}
+
+#[test]
+fn issue_76_two_way_selected_pairs_d1_oracles_and_guards() {
+    // Clean-room 2-row x 5-col GroupedTable (col 0 excluded via selected_data_sets = [1, 2, 3, 4]).
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(3), 5, 2).unwrap();
+    grp.row_titles = vec![String::from("R0"), String::from("R1")];
+    let cell_vals: [[&[f64]; 2]; 5] = [
+        [&[900.0, 901.0, 902.0], &[910.0, 911.0, 912.0]], // col 0 (excluded decoy)
+        [&[10.0, 11.0, 9.0], &[12.0, 13.0, 11.0]],        // col 1 -> pos 0
+        [&[14.0, 15.0, 13.0], &[18.0, 19.0, 17.0]],       // col 2 -> pos 1
+        [&[16.0, 17.0, 15.0], &[20.0, 21.0, 19.0]],       // col 3 -> pos 2
+        [&[22.0, 23.0, 21.0], &[28.0, 29.0, 27.0]],       // col 4 -> pos 3
+    ];
+    let names = ["Skip", "C0", "C1", "C2", "C3"];
+    for (ci, name) in names.iter().enumerate() {
+        grp.data_sets[ci].title = String::from(*name);
+        for (ri, row) in cell_vals[ci].iter().enumerate() {
+            for (si, &v) in row.iter().enumerate() {
+                grp.data_sets[ci].cells[ri][si] = Cell::number(v);
+            }
+        }
+    }
+    let sheet = DataSheet::new("grp-76", "Two-Way Selected Pairs", TableArchetype::Grouped(grp)).unwrap();
+    // Each active cell has variance 1.0 (3 replicates, df = 2 each) -> pooled MS_resid = 1.0, df_resid = 16.
+    let ms_resid = 1.0_f64;
+    let df_resid = 16.0_f64;
+    let cell_means = [[10.0, 14.0, 16.0, 22.0], [12.0, 18.0, 20.0, 28.0]];
+
+    let run_fac = |mult: MultiplicitySpec, factor: Option<usize>, mode: FactorialComparisonFamilyMode| {
+        let mut sp = AnalysisSpec::new(
+            "res-fac-76",
+            "grp-76",
+            AnalysisKind::FactorialAnova(FactorialAnovaSpec {
+                multiplicity: mult,
+                control_factor: factor,
+                comparison_family_mode: mode,
+                compute_effect_sizes: false,
+                ..FactorialAnovaSpec::default()
+            }),
+        )
+        .unwrap();
+        sp.selected_data_sets = vec![1, 2, 3, 4];
+        run_analysis(&sheet, &sp)
+    };
+
+    // 1. Standard marginal means on column factor (factor 1): chosen sheet col pairs [(1, 2), (3, 4)] -> m = 2.
+    let res_marg = run_fac(
+        MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            control_column: None,
+            selected_pairs: Some(vec![(1, 2), (3, 4)]),
+        },
+        Some(1),
+        FactorialComparisonFamilyMode::Standard,
+    )
+    .unwrap();
+    assert!(res_marg.tabs.iter().any(|t| t.id == "multiple-comparisons-factor-b"));
+    assert!(!res_marg.tabs.iter().any(|t| t.id == "multiple-comparisons-factor-a"));
+    let se_marg = (ms_resid * (2.0 / 6.0)).sqrt();
+    let marg_diffs = [
+        0.5 * (cell_means[0][0] + cell_means[1][0]) - 0.5 * (cell_means[0][1] + cell_means[1][1]),
+        0.5 * (cell_means[0][2] + cell_means[1][2]) - 0.5 * (cell_means[0][3] + cell_means[1][3]),
+    ];
+    for (idx, &diff) in marg_diffs.iter().enumerate() {
+        let rp = student_t_two_sided_p(diff / se_marg, df_resid).unwrap();
+        assert_approx_eq(res_marg.pairwise_comparisons[idx].raw_p_or_q, 1.0 - (1.0 - rp).powi(2), 1e-11, 1e-11, "2-way marginal Sidak m=2");
+    }
+
+    // 2. PerSliceFamilies (2 rows x 2 chosen col pairs -> each slice adjusted with m = 2) vs TwoFactorFamilies (single family m = 4).
+    let res_slice = run_fac(
+        MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(vec![(1, 2), (3, 4)]),
+        },
+        Some(1),
+        FactorialComparisonFamilyMode::PerSliceFamilies,
+    )
+    .unwrap();
+    let res_single = run_fac(
+        MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(vec![(1, 2), (3, 4)]),
+        },
+        Some(1),
+        FactorialComparisonFamilyMode::TwoFactorFamilies,
+    )
+    .unwrap();
+    assert_eq!(res_slice.pairwise_comparisons.len(), 4);
+    assert_eq!(res_single.pairwise_comparisons.len(), 4);
+    let se_cell = (ms_resid * (2.0 / 3.0)).sqrt();
+    let expected_slice_diffs = [
+        cell_means[0][0] - cell_means[0][1],
+        cell_means[0][2] - cell_means[0][3],
+        cell_means[1][0] - cell_means[1][1],
+        cell_means[1][2] - cell_means[1][3],
+    ];
+    for (idx, &diff) in expected_slice_diffs.iter().enumerate() {
+        let rp = student_t_two_sided_p(diff / se_cell, df_resid).unwrap();
+        assert_approx_eq(res_slice.pairwise_comparisons[idx].raw_p_or_q, (2.0 * rp).min(1.0), 1e-11, 1e-11, "PerSlice m=2");
+        assert_approx_eq(res_single.pairwise_comparisons[idx].raw_p_or_q, (4.0 * rp).min(1.0), 1e-11, 1e-11, "TwoFactor single family m=4");
+    }
+
+    // 3. Row-factor selected pairs (control_factor = Some(0), pair (0, 1)) under Standard & RM ColumnFactorMatched.
+    let res_row = run_fac(
+        MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: Some(vec![(0, 1)]),
+        },
+        Some(0),
+        FactorialComparisonFamilyMode::Standard,
+    )
+    .unwrap();
+    assert!(res_row.tabs.iter().any(|t| t.id == "multiple-comparisons-factor-a"));
+    assert!(!res_row.tabs.iter().any(|t| t.id == "multiple-comparisons-factor-b"));
+
+    // 4. Guard checks: incompatible family modes, skipped column pair, OOB factor.
+    for bad_mode in [
+        FactorialComparisonFamilyMode::CellsDifferingByOneFactor,
+        FactorialComparisonFamilyMode::SingleGrandFamily,
+        FactorialComparisonFamilyMode::PreselectedPairs,
+    ] {
+        assert!(matches!(
+            run_fac(
+                MultiplicitySpec { method: MultiplicityMethod::Sidak, selected_pairs: Some(vec![(1, 2)]), ..MultiplicitySpec::default() },
+                Some(1),
+                bad_mode,
+            ),
+            Err(StatsError::IncompatibleAnalysisSpec { .. })
+        ));
+    }
+    assert!(matches!(
+        run_fac(
+            MultiplicitySpec { method: MultiplicityMethod::Sidak, selected_pairs: Some(vec![(0, 1)]), ..MultiplicitySpec::default() },
+            Some(1),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+        Err(StatsError::InvalidParameter { name: "selected_pairs", .. })
     ));
 }

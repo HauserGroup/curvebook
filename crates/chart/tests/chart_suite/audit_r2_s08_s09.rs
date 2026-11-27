@@ -385,10 +385,11 @@ fn r2_s08_03_bubble_and_diagnostic_plots_honor_point_overrides_brushing_and_subc
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
         ..Default::default()
     };
-    let an_mr = AnalysisSpec::new(SheetId::new("res-mr"), ds_vol.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
+    let an_mr = AnalysisSpec::new(SheetId::new("res-mr"), ds_vol.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec.clone()))?;
     let res_mr = run_multiple_row_t_tests_analysis(&ds_vol, &an_mr, &mr_spec)?;
     let mut doc_vol = ProjectDocument::default();
     doc_vol.add_data_sheet(ds_vol.clone())?;

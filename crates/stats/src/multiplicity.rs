@@ -48,6 +48,8 @@
 //!   University (reprinted in *The Collected Works of John W. Tukey*, Vol. VIII, 1994).
 //! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall.
 
+use std::collections::BTreeSet;
+
 use curvebook_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
 use curvebook_math::dist::{
     dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, max_studentized_range_isf, max_studentized_range_sf,
@@ -519,6 +521,69 @@ pub fn try_adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, thre
 // Pairwise Group Comparison Engines (Pooled-Variance, Unequal-Variance, Rank)
 // ============================================================================
 
+/// Validated pairwise comparison family selection extracted from [`MultiplicitySpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MultiplicityFamilySelection<'a> {
+    /// All `k * (k - 1) / 2` distinct pairs.
+    AllPairs,
+    /// Many-to-one comparisons of every non-control group against the zero-based control index.
+    ControlVsAll(usize),
+    /// Explicit planned subset of `m = pairs.len()` distinct `(group_a, group_b)` pairs (Hsu 1996).
+    SelectedPairs(&'a [(usize, usize)]),
+}
+
+/// Validate that `spec.control_column` and `spec.selected_pairs` are mutually exclusive,
+/// compatible with `spec.method`, non-empty, free of self-pairs, and free of duplicate unordered
+/// pairs, returning the active [`MultiplicityFamilySelection`].
+pub(crate) fn validate_multiplicity_family_spec(spec: &MultiplicitySpec) -> Result<MultiplicityFamilySelection<'_>, StatsError> {
+    if let Some(pairs) = spec.selected_pairs.as_deref() {
+        if spec.effective_control_column().is_some() {
+            return Err(StatsError::IncompatibleAnalysisSpec { expected: "either control_column (or Dunnett) or selected_pairs, not both" });
+        }
+        if !MultiplicitySpec::supports_selected_pairs(spec.method) {
+            return Err(StatsError::IncompatibleAnalysisSpec {
+                expected: "selected-pairs compatible multiplicity method (Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR)",
+            });
+        }
+        if pairs.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let mut seen = BTreeSet::new();
+        for &(a, b) in pairs {
+            if a == b {
+                return Err(StatsError::InvalidParameter { name: "selected_pairs", value: a as f64 });
+            }
+            let key = (a.min(b), a.max(b));
+            if !seen.insert(key) {
+                return Err(StatsError::InvalidParameter { name: "selected_pairs", value: a as f64 });
+            }
+        }
+        return Ok(MultiplicityFamilySelection::SelectedPairs(pairs));
+    }
+    match validate_multiplicity_control_spec(spec)? {
+        Some(ctrl) => Ok(MultiplicityFamilySelection::ControlVsAll(ctrl)),
+        None => Ok(MultiplicityFamilySelection::AllPairs),
+    }
+}
+
+/// Map a validated slice of external group-index pairs onto slice positions using `find_pos`,
+/// rejecting any member absent from the analysed groups or collapsing onto the same position.
+pub(crate) fn resolve_selected_pair_positions<F>(pairs: &[(usize, usize)], mut find_pos: F) -> Result<Vec<(usize, usize)>, StatsError>
+where
+    F: FnMut(usize) -> Option<usize>,
+{
+    let mut out = Vec::with_capacity(pairs.len());
+    for &(a, b) in pairs {
+        let pa = find_pos(a).ok_or(StatsError::InvalidParameter { name: "selected_pairs", value: a as f64 })?;
+        let pb = find_pos(b).ok_or(StatsError::InvalidParameter { name: "selected_pairs", value: b as f64 })?;
+        if pa == pb {
+            return Err(StatsError::InvalidParameter { name: "selected_pairs", value: a as f64 });
+        }
+        out.push((pa, pb));
+    }
+    Ok(out)
+}
+
 /// Validate that `spec.control_column` is compatible with `spec.method` and return the effective
 /// zero-based control index when a many-to-one control-versus-all family is requested.
 pub(crate) fn validate_multiplicity_control_spec(spec: &MultiplicitySpec) -> Result<Option<usize>, StatsError> {
@@ -541,20 +606,24 @@ pub(crate) fn validate_multiplicity_control_spec(spec: &MultiplicitySpec) -> Res
     }
 }
 
-fn resolve_group_pair_indices(groups: &[GroupComparisonInput], control_column: Option<usize>) -> Result<Vec<(usize, usize)>, StatsError> {
+fn resolve_group_pair_indices(groups: &[GroupComparisonInput], family: MultiplicityFamilySelection<'_>) -> Result<Vec<(usize, usize)>, StatsError> {
     let k = groups.len();
-    if let Some(ctrl) = control_column {
-        let ctrl_pos =
-            groups.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
-        Ok((0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect())
-    } else {
-        let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-        for i in 0..k {
-            for j in (i + 1)..k {
-                pairs.push((i, j));
-            }
+    match family {
+        MultiplicityFamilySelection::ControlVsAll(ctrl) => {
+            let ctrl_pos =
+                groups.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+            Ok((0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect())
         }
-        Ok(pairs)
+        MultiplicityFamilySelection::SelectedPairs(pairs) => resolve_selected_pair_positions(pairs, |idx| groups.iter().position(|g| g.index == idx)),
+        MultiplicityFamilySelection::AllPairs => {
+            let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    pairs.push((i, j));
+                }
+            }
+            Ok(pairs)
+        }
     }
 }
 
@@ -566,8 +635,8 @@ pub fn compare_groups_pairwise(
     df_error: f64,
     spec: &MultiplicitySpec,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let control_column = validate_multiplicity_control_spec(spec)?;
-    compare_groups_impl(groups, mse, df_error, spec.method.into(), control_column, spec.threshold, spec.threshold, spec.report_confidence_intervals)
+    let family = validate_multiplicity_family_spec(spec)?;
+    compare_groups_impl(groups, mse, df_error, spec.method.into(), family, spec.threshold, spec.threshold, spec.report_confidence_intervals)
 }
 
 /// Compute pairwise comparisons across `groups` using `confidence` (`ci_alpha = 1 - confidence`)
@@ -579,17 +648,8 @@ pub fn compare_groups_pairwise_with_confidence(
     spec: &MultiplicitySpec,
     confidence: curvebook_math::ConfidenceLevel,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let control_column = validate_multiplicity_control_spec(spec)?;
-    compare_groups_impl(
-        groups,
-        mse,
-        df_error,
-        spec.method.into(),
-        control_column,
-        spec.threshold,
-        confidence.alpha(),
-        spec.report_confidence_intervals,
-    )
+    let family = validate_multiplicity_family_spec(spec)?;
+    compare_groups_impl(groups, mse, df_error, spec.method.into(), family, spec.threshold, confidence.alpha(), spec.report_confidence_intervals)
 }
 
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`].
@@ -609,11 +669,11 @@ pub fn compare_groups_with_procedure(
     threshold: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let control_column = match procedure {
-        MultiplicityProcedure::Dunnett { control_column } => Some(control_column),
-        _ => None,
+    let family = match procedure {
+        MultiplicityProcedure::Dunnett { control_column } => MultiplicityFamilySelection::ControlVsAll(control_column),
+        _ => MultiplicityFamilySelection::AllPairs,
     };
-    compare_groups_impl(groups, mse, df_error, procedure, control_column, threshold, threshold, report_ci)
+    compare_groups_impl(groups, mse, df_error, procedure, family, threshold, threshold, report_ci)
 }
 
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`], constructing confidence
@@ -628,11 +688,11 @@ pub fn compare_groups_with_confidence(
     report_ci: bool,
     confidence: curvebook_math::ConfidenceLevel,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let control_column = match procedure {
-        MultiplicityProcedure::Dunnett { control_column } => Some(control_column),
-        _ => None,
+    let family = match procedure {
+        MultiplicityProcedure::Dunnett { control_column } => MultiplicityFamilySelection::ControlVsAll(control_column),
+        _ => MultiplicityFamilySelection::AllPairs,
     };
-    compare_groups_impl(groups, mse, df_error, procedure, control_column, threshold, confidence.alpha(), report_ci)
+    compare_groups_impl(groups, mse, df_error, procedure, family, threshold, confidence.alpha(), report_ci)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -641,7 +701,7 @@ fn compare_groups_impl(
     mse: f64,
     df_error: f64,
     procedure: MultiplicityProcedure,
-    control_column: Option<usize>,
+    family: MultiplicityFamilySelection<'_>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
@@ -690,27 +750,38 @@ fn compare_groups_impl(
         }
     }
     match procedure {
-        MultiplicityProcedure::Dunnett { control_column } => compare_dunnett(groups, mse, df_error, control_column, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::Dunnett { control_column } => {
+            if matches!(family, MultiplicityFamilySelection::SelectedPairs(_)) {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "control-vs-all Dunnett procedure without selected_pairs" });
+            }
+            compare_dunnett(groups, mse, df_error, control_column, threshold, ci_alpha, report_ci)
+        }
         MultiplicityProcedure::TukeyKramer => {
-            if control_column.is_some() {
-                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Tukey-Kramer procedure without control_column" });
+            if !matches!(family, MultiplicityFamilySelection::AllPairs) {
+                return Err(StatsError::IncompatibleAnalysisSpec {
+                    expected: "all-pairs Tukey-Kramer procedure without control_column or selected_pairs",
+                });
             }
             compare_tukey_kramer(groups, mse, df_error, threshold, ci_alpha, report_ci)
         }
         MultiplicityProcedure::NewmanKeuls => {
-            if control_column.is_some() {
-                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Newman-Keuls procedure without control_column" });
+            if !matches!(family, MultiplicityFamilySelection::AllPairs) {
+                return Err(StatsError::IncompatibleAnalysisSpec {
+                    expected: "all-pairs Newman-Keuls procedure without control_column or selected_pairs",
+                });
             }
             compare_newman_keuls(groups, mse, df_error, threshold)
         }
         MultiplicityProcedure::GamesHowell => {
-            if control_column.is_some() {
-                return Err(StatsError::IncompatibleAnalysisSpec { expected: "all-pairs Games-Howell procedure without control_column" });
+            if !matches!(family, MultiplicityFamilySelection::AllPairs) {
+                return Err(StatsError::IncompatibleAnalysisSpec {
+                    expected: "all-pairs Games-Howell procedure without control_column or selected_pairs",
+                });
             }
             compare_games_howell(groups, threshold, ci_alpha, report_ci)
         }
-        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, control_column, threshold, ci_alpha, report_ci),
-        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, control_column, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, family, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, family, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::DunnRankSum => {
             Err(StatsError::InvalidParameter { name: "multiplicity_procedure_dunn_requires_kruskal_wallis", value: 0.0 })
         }
@@ -725,9 +796,7 @@ fn compare_groups_impl(
         | MultiplicityProcedure::FisherLsd
         | MultiplicityProcedure::BenjaminiHochbergFdr
         | MultiplicityProcedure::BenjaminiYekutieliFdr
-        | MultiplicityProcedure::TwoStageBkyFdr => {
-            compare_pooled_or_fdr(groups, mse, df_error, procedure, control_column, threshold, ci_alpha, report_ci)
-        }
+        | MultiplicityProcedure::TwoStageBkyFdr => compare_pooled_or_fdr(groups, mse, df_error, procedure, family, threshold, ci_alpha, report_ci),
     }
 }
 
@@ -746,12 +815,12 @@ fn compare_pooled_or_fdr(
     mse: f64,
     df_error: f64,
     procedure: MultiplicityProcedure,
-    control_column: Option<usize>,
+    family: MultiplicityFamilySelection<'_>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    let pair_indices = resolve_group_pair_indices(groups, family)?;
     let m = pair_indices.len();
     if m == 0 {
         return Ok(Vec::new());
@@ -1090,16 +1159,17 @@ fn compare_games_howell(
 }
 
 /// Tamhane (1979) T2 unequal-variance pairwise comparisons: per-pair Welch *t* tests with a Šidák
-/// adjustment over the `m` comparisons (`m = k(k-1)/2` for all-pairs or `m = k - 1` when
-/// `control_column` is specified; Šidák-adjusted Welch critical values for CIs).
+/// adjustment over the `m` comparisons (`m = k(k-1)/2` for all-pairs, `m = k - 1` when
+/// `control_column` is specified, or `m = selected_pairs.len()` for planned comparisons;
+/// Šidák-adjusted Welch critical values for CIs).
 fn compare_tamhane_t2(
     groups: &[GroupComparisonInput],
-    control_column: Option<usize>,
+    family: MultiplicityFamilySelection<'_>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    let pair_indices = resolve_group_pair_indices(groups, family)?;
     if pair_indices.is_empty() {
         return Ok(Vec::new());
     }
@@ -1160,18 +1230,18 @@ fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, St
 }
 
 /// Dunnett (1980) T3 unequal-variance pairwise comparisons: per-pair Welch *t* statistics referred
-/// to the studentized maximum modulus with `m` comparisons (`m = k(k-1)/2` for all-pairs or
-/// `m = k - 1` when `control_column` is specified) and the pair's Welch df. `raw_p` reports
-/// the unadjusted two-sided Welch *t* *p*-value on Welch df, and `adjusted_p_or_q` reports the Dunnett
-/// T3 adjusted *p*-value.
+/// to the studentized maximum modulus with `m` comparisons (`m = k(k-1)/2` for all-pairs,
+/// `m = k - 1` when `control_column` is specified, or `m = selected_pairs.len()` for planned
+/// comparisons) and the pair's Welch df. `raw_p` reports the unadjusted two-sided Welch *t*
+/// *p*-value on Welch df, and `adjusted_p_or_q` reports the Dunnett T3 adjusted *p*-value.
 fn compare_dunnett_t3(
     groups: &[GroupComparisonInput],
-    control_column: Option<usize>,
+    family: MultiplicityFamilySelection<'_>,
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let pair_indices = resolve_group_pair_indices(groups, control_column)?;
+    let pair_indices = resolve_group_pair_indices(groups, family)?;
     let m = pair_indices.len();
     if m == 0 {
         return Ok(Vec::new());
@@ -1253,22 +1323,28 @@ pub fn compare_dunn_ranks(
             return Err(StatsError::InvalidParameter { name: "mean_rank", value: mr });
         }
     }
-    let control_column = validate_multiplicity_control_spec(spec)?;
+    let family = validate_multiplicity_family_spec(spec)?;
     let proc_req = MultiplicityProcedure::from(spec.method);
-    let pair_indices: Vec<(usize, usize)> = if let Some(control_column) = control_column {
-        let ctrl_pos = group_labels
-            .iter()
-            .position(|(idx, _)| *idx == control_column)
-            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
-    } else {
-        let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
-        for i in 0..k {
-            for j in (i + 1)..k {
-                pairs.push((i, j));
-            }
+    let pair_indices: Vec<(usize, usize)> = match family {
+        MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            let ctrl_pos = group_labels
+                .iter()
+                .position(|(idx, _)| *idx == control_column)
+                .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+            (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
         }
-        pairs
+        MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            resolve_selected_pair_positions(pairs, |target| group_labels.iter().position(|(idx, _)| *idx == target))?
+        }
+        MultiplicityFamilySelection::AllPairs => {
+            let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    pairs.push((i, j));
+                }
+            }
+            pairs
+        }
     };
 
     let nf = total_n as f64;

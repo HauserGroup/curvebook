@@ -3549,10 +3549,44 @@ fn resolve_survival_pairwise_plan(
 ) -> Result<SurvivalPairwisePlan, StatsError> {
     let k = indices.len();
     let all_pairs = || -> Vec<(usize, usize)> { (0..k).flat_map(|i| ((i + 1)..k).map(move |j| (i, j))).collect() };
-    let control_column = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
+    let family = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
 
     let requested = MultiplicityProcedure::from(mult.method);
-    if let Some(ctrl) = control_column {
+    if let crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) = family {
+        let pair_indices = crate::multiplicity::resolve_selected_pair_positions(pairs, |target| indices.iter().position(|&idx| idx == target))?;
+        let m = pair_indices.len();
+        let (procedure, note) = match requested {
+            MultiplicityProcedure::FisherLsd => (
+                MultiplicityProcedure::None,
+                Some(format!(
+                    "Fisher's LSD reports unadjusted pairwise log-rank P values across {m} selected cohort pair(s) without familywise error control."
+                )),
+            ),
+            MultiplicityProcedure::Bonferroni
+            | MultiplicityProcedure::Sidak
+            | MultiplicityProcedure::HolmBonferroni
+            | MultiplicityProcedure::HolmSidak
+            | MultiplicityProcedure::BenjaminiHochbergFdr
+            | MultiplicityProcedure::BenjaminiYekutieliFdr
+            | MultiplicityProcedure::TwoStageBkyFdr => {
+                (requested, Some(format!("Selected-pairs mode evaluated {m} planned pairwise log-rank comparison(s).")))
+            }
+            MultiplicityProcedure::TamhaneT2 => (
+                MultiplicityProcedure::Sidak,
+                Some(format!(
+                    "Tamhane's T2 is defined for parametric ANOVA contrasts rather than censored survival curves; {m} selected log-rank comparisons were adjusted via Sidak."
+                )),
+            ),
+            _ => (
+                MultiplicityProcedure::Bonferroni,
+                Some(format!(
+                    "Requested ANOVA post-hoc procedure is defined for parametric or rank contrasts rather than censored survival curves; {m} selected log-rank comparisons were adjusted via Bonferroni."
+                )),
+            ),
+        };
+        return Ok(SurvivalPairwisePlan { pair_indices, procedure, note });
+    }
+    if let crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(ctrl) = family {
         let ctrl_pos =
             indices.iter().position(|&idx| idx == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
         let pair_indices: Vec<(usize, usize)> = (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect();

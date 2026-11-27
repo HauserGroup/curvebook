@@ -359,7 +359,13 @@ fn audit_81_83_nested_welch_friedman_and_row_t_plans() {
             sid,
             "grp-mr",
             AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
-                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
+                multiplicity: MultiplicitySpec {
+                    method: mult,
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                    control_column: None,
+                    selected_pairs: None,
+                },
                 ..Default::default()
             }),
         )
@@ -380,6 +386,7 @@ fn audit_81_83_nested_welch_friedman_and_row_t_plans() {
                     threshold: 0.05,
                     report_confidence_intervals: true,
                     control_column: None,
+                    selected_pairs: None,
                 },
                 ..Default::default()
             }),
@@ -546,7 +553,13 @@ fn audit_111_post_test_confidence_intervals() {
             "col-3",
             AnalysisKind::OneWayAnova(OneWayAnovaSpec {
                 method: OneWayMethod::OrdinaryAnova,
-                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
+                multiplicity: MultiplicitySpec {
+                    method: mult,
+                    threshold: 0.05,
+                    report_confidence_intervals: true,
+                    control_column: None,
+                    selected_pairs: None,
+                },
                 ..Default::default()
             }),
         )
@@ -854,5 +867,125 @@ fn issue_78_engine_control_vs_all_commands_methods_report_and_conversion() {
         assert_eq!(spec.multiplicity.control_column, Some(1), "Y[0] shifted to MV col 1 past X");
     } else {
         panic!("expected MultipleRowTTests");
+    }
+}
+
+#[test]
+fn issue_76_engine_selected_pairs_commands_report_and_table_convert() {
+    let mut session = session_with(
+        "SelectedPairsEngine",
+        vec![
+            col_sheet(
+                "col-4",
+                "FourGroups",
+                &[
+                    ("Ctrl", &[10.0, 11.0, 9.5, 10.5]),
+                    ("Low", &[13.0, 13.5, 12.5, 13.0]),
+                    ("Mid", &[16.0, 16.5, 15.5, 16.0]),
+                    ("High", &[22.0, 23.0, 21.5, 22.5]),
+                ],
+            ),
+            grouped_rep_sheet(
+                "grp-2w",
+                "TwoWay",
+                &["R0", "R1"],
+                &[
+                    ("C0", &[&[10.0, 11.0, 9.0], &[12.0, 13.0, 11.0]]),
+                    ("C1", &[&[14.0, 15.0, 13.0], &[18.0, 19.0, 17.0]]),
+                    ("C2", &[&[20.0, 21.0, 19.0], &[26.0, 27.0, 25.0]]),
+                ],
+            ),
+        ],
+    );
+
+    // 1. One-way ANOVA with selected_pairs via analysis.run shorthand.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "aov-sel",
+            "source_sheet_id": "col-4",
+            "kind": "one_way_anova",
+            "multiplicity": "sidak",
+            "selected_pairs": [[0, 1], [0, 3]],
+        }),
+    );
+    let r_sel = rs(&session, "aov-sel");
+    assert_eq!(r_sel.pairwise_comparisons.len(), 2);
+    assert_eq!((r_sel.pairwise_comparisons[0].group_a, r_sel.pairwise_comparisons[0].group_b), (0, 1));
+    assert_eq!((r_sel.pairwise_comparisons[1].group_a, r_sel.pairwise_comparisons[1].group_b), (0, 3));
+    let rep_sel = rep_txt(session.document(), "aov-sel");
+    assert!(rep_sel.contains("2 selected pair(s)") && rep_sel.contains("Ctrl") && rep_sel.contains("High"), "{rep_sel}");
+
+    // 2. analysis.updateParams modifies selected_pairs, then clears via null back to all 6 pairs.
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "aov-sel", "selected_pairs": [[1, 2]] }));
+    assert_eq!(rs(&session, "aov-sel").pairwise_comparisons.len(), 1);
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "aov-sel", "selected_pairs": null }));
+    assert_eq!(rs(&session, "aov-sel").pairwise_comparisons.len(), 6);
+
+    // 3. Kruskal-Wallis with Dunn + selected_pairs.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "kw-sel",
+            "source_sheet_id": "col-4",
+            "kind": "kruskal_wallis",
+            "multiplicity": "dunn_rank_sum",
+            "selected_pairs": [[0, 2], [2, 3]],
+        }),
+    );
+    assert_eq!(rs(&session, "kw-sel").pairwise_comparisons.len(), 2);
+    let rep_kw = rep_txt(session.document(), "kw-sel");
+    assert!(rep_kw.contains("2 selected pair(s)"), "{rep_kw}");
+
+    // 4. Two-way ANOVA with column-factor selected_pairs and PerSliceFamilies.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "fac-sel",
+            "source_sheet_id": "grp-2w",
+            "kind": "two_way_anova",
+            "multiplicity": "bonferroni",
+            "control_factor": 1,
+            "comparison_family_mode": "per_slice_families",
+            "selected_pairs": [[0, 1], [1, 2]],
+        }),
+    );
+    assert_eq!(rs(&session, "fac-sel").pairwise_comparisons.len(), 4);
+    let rep_fac = rep_txt(session.document(), "fac-sel");
+    assert!(rep_fac.contains("2 selected column-factor pair(s)"), "{rep_fac}");
+
+    // 5. Validation errors return BadInput up front.
+    for bad_params in [
+        json!({ "sheet_id": "b1", "source_sheet_id": "col-4", "kind": "one_way_anova", "multiplicity": "bonferroni", "selected_pairs": [] }),
+        json!({ "sheet_id": "b2", "source_sheet_id": "col-4", "kind": "one_way_anova", "multiplicity": "bonferroni", "selected_pairs": [[1, 1]] }),
+        json!({ "sheet_id": "b3", "source_sheet_id": "col-4", "kind": "one_way_anova", "multiplicity": "bonferroni", "selected_pairs": [[0, 1], [1, 0]] }),
+        json!({ "sheet_id": "b4", "source_sheet_id": "col-4", "kind": "one_way_anova", "multiplicity": "bonferroni", "control_column": 0, "selected_pairs": [[0, 1]] }),
+        json!({ "sheet_id": "b5", "source_sheet_id": "col-4", "kind": "one_way_anova", "multiplicity": "tukey_hsd", "selected_pairs": [[0, 1]] }),
+        json!({ "sheet_id": "b6", "source_sheet_id": "col-4", "kind": "multiple_row_t_tests", "multiplicity": "bonferroni", "selected_pairs": [[0, 1]] }),
+    ] {
+        let err = session.execute("analysis.run", bad_params).unwrap_err();
+        assert_eq!(err.code, curvebook_doc::ErrorCode::BadInput);
+    }
+
+    // 6. Table conversion Column -> MultipleVariables remaps MultiplicitySpec::selected_pairs cleanly.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "aov-cv",
+            "source_sheet_id": "col-4",
+            "kind": "one_way_anova",
+            "multiplicity": "sidak",
+            "selected_pairs": [[0, 2], [1, 3]],
+        }),
+    );
+    ok_cmd(&mut session, "table.convertArchetype", json!({ "sheet_id": "col-4", "target_kind": "MultipleVariables", "allow_lossy": true }));
+    if let AnalysisKind::OneWayAnova(spec) = &rs(&session, "aov-cv").analysis.kind {
+        assert_eq!(spec.multiplicity.selected_pairs.as_deref(), Some(&[(0, 2), (1, 3)][..]));
+    } else {
+        panic!("expected OneWayAnova");
     }
 }

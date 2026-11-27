@@ -476,6 +476,7 @@ fn preserves_graph_styles_gdos_axis_breaks_brackets_and_annotations() {
                         threshold: 0.05,
                         report_confidence_intervals: true,
                         control_column: None,
+                        selected_pairs: None,
                     },
                     ..Default::default()
                 }),

@@ -316,13 +316,20 @@ pub(in crate::anova) fn append_nested_multiplicity(
         return Ok(());
     }
 
-    let mut mapped_mult = nested_spec.multiplicity;
-    if let Some(control_column) = crate::multiplicity::validate_multiplicity_control_spec(&mapped_mult)? {
-        let ctrl_pos = selected_groups
-            .iter()
-            .position(|&c| c == control_column)
-            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-        mapped_mult = mapped_mult.with_control_column(ctrl_pos);
+    let mut mapped_mult = nested_spec.multiplicity.clone();
+    match crate::multiplicity::validate_multiplicity_family_spec(&mapped_mult)? {
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {}
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            let ctrl_pos = selected_groups
+                .iter()
+                .position(|&c| c == control_column)
+                .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+            mapped_mult = mapped_mult.with_control_column(ctrl_pos);
+        }
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            let remapped = crate::multiplicity::resolve_selected_pair_positions(pairs, |c| selected_groups.iter().position(|&g| g == c))?;
+            mapped_mult = mapped_mult.with_selected_pairs(remapped);
+        }
     }
     let pairs = collect_factor_pairs(k, &mapped_mult, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
     if !pairs.is_empty() {

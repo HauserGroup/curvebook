@@ -965,12 +965,23 @@ fn render_stat_multiplicity_tab(
         };
         if render_modal_radio(ui, tokens, meta, &format!("edit.post_hoc.{slug}"), lbl, is_active, &en) {
             let mut next = spec.clone();
-            match &mut next.kind {
-                AnalysisKind::FactorialAnova(f) => f.multiplicity.method = m,
-                AnalysisKind::NestedComparison(n) => n.multiplicity.method = m,
-                AnalysisKind::MultipleRowTTests(mr) => mr.multiplicity.method = m,
-                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = m,
-                _ => {}
+            let clear_pairs = !curvebook_doc::MultiplicitySpec::supports_selected_pairs(m);
+            let clear_ctrl = matches!(m, MultiplicityMethod::Dunnett { .. }) || !curvebook_doc::MultiplicitySpec::supports_control_column(m);
+            let mult_opt = match &mut next.kind {
+                AnalysisKind::FactorialAnova(f) => Some(&mut f.multiplicity),
+                AnalysisKind::NestedComparison(n) => Some(&mut n.multiplicity),
+                AnalysisKind::MultipleRowTTests(mr) => Some(&mut mr.multiplicity),
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => Some(multiplicity),
+                _ => None,
+            };
+            if let Some(mult) = mult_opt {
+                mult.method = m;
+                if clear_ctrl {
+                    mult.control_column = None;
+                }
+                if clear_pairs {
+                    mult.selected_pairs = None;
+                }
             }
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }

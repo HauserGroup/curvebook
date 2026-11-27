@@ -86,6 +86,7 @@ fn r36_1a_one_way_rm_missing_cell_cs_and_un_kr_vs_satterthwaite() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
     };
     let res_cs_kr =
@@ -163,7 +164,13 @@ fn r36_1b_one_way_rm_incomplete_blocks_without_complete_rows_and_dunnett_linear_
     for mult in [MultiplicityMethod::Dunnett { control_column: 0 }, MultiplicityMethod::LinearTrend, MultiplicityMethod::Sidak] {
         let ow = OneWayAnovaSpec {
             method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: false },
-            multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true, control_column: None },
+            multiplicity: MultiplicitySpec {
+                method: mult,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+                selected_pairs: None,
+            },
             ..OneWayAnovaSpec::default()
         };
         let res = run_one_way_anova(&sheet, &AnalysisSpec::new("res-bib", "bib", AnalysisKind::OneWayAnova(ow.clone())).unwrap(), &ow).unwrap();
@@ -221,6 +228,7 @@ fn r36_2a_two_way_rm_missing_cell_kr_vs_satterthwaite_oracle() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..FactorialAnovaSpec::default()
     };
@@ -516,6 +524,7 @@ fn r36_3a_three_way_rm_balanced_matches_aov_and_missing_cell_reml_oracles() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..FactorialAnovaSpec {
             three_way: true,

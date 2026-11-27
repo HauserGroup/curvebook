@@ -297,6 +297,7 @@ fn pillar2_factorial_anova_multiplicity_wiring() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ss_type: SumOfSquaresType::TypeIII,
             ..Default::default()

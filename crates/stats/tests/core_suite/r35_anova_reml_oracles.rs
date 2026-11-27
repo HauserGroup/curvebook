@@ -291,6 +291,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..NestedAnalysisSpec::default()
     };
@@ -330,6 +331,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..NestedAnalysisSpec::default()
     };
@@ -355,6 +357,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..NestedAnalysisSpec::default()
     };

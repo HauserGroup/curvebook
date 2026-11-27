@@ -169,6 +169,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             let ns: Vec<usize> = raw_slices_owned.iter().map(Vec::len).collect();
             let details = compare_dunn_ranks(&labels, &ns, &kw.group_mean_ranks, kw.total_n, ranked.tie_sum_t3_minus_t, &anova_spec.multiplicity)?;
             let has_ctrl = anova_spec.multiplicity.effective_control_column().is_some();
+            let has_selected = anova_spec.multiplicity.selected_pairs.is_some();
             let (dunn_title, dunn_footnote) = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
                 MultiplicityProcedure::TukeyKramer
                 | MultiplicityProcedure::NewmanKeuls
@@ -191,6 +192,10 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                     "Dunn's vs-control comparisons (uncorrected)",
                     Some("Unadjusted Dunn's rank-sum comparisons vs control over k - 1 pairs (no multiplicity correction applied)."),
                 ),
+                MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd if has_selected => (
+                    "Dunn's selected-pairs comparisons (uncorrected)",
+                    Some("Unadjusted Dunn's rank-sum comparisons across the chosen pairs (no multiplicity correction applied)."),
+                ),
                 MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => (
                     "Dunn's multiple comparisons (uncorrected)",
                     Some("Unadjusted Dunn's rank-sum pairwise z tests (no multiplicity correction applied)."),
@@ -198,6 +203,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 _ if has_ctrl => {
                     ("Dunn's vs-control comparisons", Some("Dunn's rank-sum comparisons against the designated control group over k - 1 pairs."))
                 }
+                _ if has_selected => ("Dunn's selected-pairs comparisons", Some("Dunn's rank-sum comparisons adjusted across the chosen pairs.")),
                 _ => ("Dunn's multiple comparisons", None),
             };
             push_pairwise_outputs(&mut out, &details, dunn_title, p_fmt, confidence);
@@ -819,7 +825,7 @@ pub(in crate::anova) fn run_rm_one_way_reml(
     };
 
     validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
-    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(&anova_spec.multiplicity)?;
+    let family = crate::multiplicity::validate_multiplicity_family_spec(&anova_spec.multiplicity)?;
     if anova_spec.multiplicity.method != MultiplicityMethod::None {
         if anova_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
             let kf = k as f64;
@@ -854,13 +860,20 @@ pub(in crate::anova) fn run_rm_one_way_reml(
                 );
             }
         } else {
-            let mut mapped_mult = anova_spec.multiplicity;
-            if let Some(control_column) = ctrl_opt {
-                let ctrl_pos = indices
-                    .iter()
-                    .position(|&c| c == control_column)
-                    .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-                mapped_mult = mapped_mult.with_control_column(ctrl_pos);
+            let mut mapped_mult = anova_spec.multiplicity.clone();
+            match family {
+                crate::multiplicity::MultiplicityFamilySelection::AllPairs => {}
+                crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+                    let ctrl_pos = indices
+                        .iter()
+                        .position(|&c| c == control_column)
+                        .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+                    mapped_mult = mapped_mult.with_control_column(ctrl_pos);
+                }
+                crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+                    let remapped = crate::multiplicity::resolve_selected_pair_positions(pairs, |c| indices.iter().position(|&idx| idx == c))?;
+                    mapped_mult = mapped_mult.with_selected_pairs(remapped);
+                }
             }
             let pairs = collect_factor_pairs(k, &mapped_mult, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
             if !pairs.is_empty() {
@@ -954,7 +967,7 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
 
     if matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }) {
         validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
-        let _ = crate::multiplicity::validate_multiplicity_control_spec(&anova_spec.multiplicity)?;
+        let _ = crate::multiplicity::validate_multiplicity_family_spec(&anova_spec.multiplicity)?;
         if scan.y_vec.is_empty() {
             return Err(StatsError::EmptyInput);
         }
@@ -1409,7 +1422,7 @@ pub(in crate::anova) fn append_one_way_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let _ = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
+    let _ = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
     if mult.method == MultiplicityMethod::LinearTrend {
         let trend = linear_trend_test(inputs, ms_within, df_within)?;
         let r_squared = if ss_total > 0.0 { (trend.ss_trend / ss_total).clamp(0.0, 1.0) } else { trend.r_squared };
@@ -1582,7 +1595,7 @@ fn append_welch_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
+    let family = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
     let proc_req = MultiplicityProcedure::from(mult.method);
     match proc_req {
         MultiplicityProcedure::None => Ok(()),
@@ -1640,18 +1653,26 @@ fn append_welch_multiplicity(
         | MultiplicityProcedure::BenjaminiYekutieliFdr
         | MultiplicityProcedure::TwoStageBkyFdr => {
             let k = inputs.len();
-            let pair_indices: Vec<(usize, usize)> = if let Some(ctrl) = ctrl_opt {
-                let ctrl_pos =
-                    inputs.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
-                (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
-            } else {
-                let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-                for i in 0..k {
-                    for j in (i + 1)..k {
-                        pairs.push((i, j));
-                    }
+            let pair_indices: Vec<(usize, usize)> = match family {
+                crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(ctrl) => {
+                    let ctrl_pos = inputs
+                        .iter()
+                        .position(|g| g.index == ctrl)
+                        .ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+                    (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
                 }
-                pairs
+                crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+                    crate::multiplicity::resolve_selected_pair_positions(pairs, |idx| inputs.iter().position(|g| g.index == idx))?
+                }
+                crate::multiplicity::MultiplicityFamilySelection::AllPairs => {
+                    let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+                    for i in 0..k {
+                        for j in (i + 1)..k {
+                            pairs.push((i, j));
+                        }
+                    }
+                    pairs
+                }
             };
             let mut entries = Vec::with_capacity(pair_indices.len());
             for (i, j) in pair_indices {
@@ -1749,7 +1770,7 @@ fn append_rm_non_sphericity_family_multiplicity(
     let n = blocks.len();
     let nf = n as f64;
     let df = (n - 1) as f64;
-    let mut mapped_mult = *mult;
+    let mut mapped_mult = mult.clone();
     let pairs = if let MultiplicityMethod::Dunnett { control_column } = mult.method {
         let ctrl_pos = inputs
             .iter()
@@ -1842,22 +1863,28 @@ fn append_rm_paired_contrast_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
+    let family = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
     let k = inputs.len();
     let n = blocks.len() as f64;
     let df = (blocks.len() - 1) as f64;
-    let pair_indices: Vec<(usize, usize)> = if let Some(ctrl) = ctrl_opt {
-        let ctrl_pos =
-            inputs.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
-        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
-    } else {
-        let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-        for i in 0..k {
-            for j in (i + 1)..k {
-                pairs.push((i, j));
-            }
+    let pair_indices: Vec<(usize, usize)> = match family {
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(ctrl) => {
+            let ctrl_pos =
+                inputs.iter().position(|g| g.index == ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: ctrl as f64 })?;
+            (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
         }
-        pairs
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            crate::multiplicity::resolve_selected_pair_positions(pairs, |idx| inputs.iter().position(|g| g.index == idx))?
+        }
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {
+            let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    pairs.push((i, j));
+                }
+            }
+            pairs
+        }
     };
     let mut entries = Vec::with_capacity(pair_indices.len());
     for (i, j) in pair_indices {
@@ -1903,7 +1930,7 @@ fn append_friedman_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let ctrl_opt = crate::multiplicity::validate_multiplicity_control_spec(mult)?;
+    let family = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
     let proc_req = MultiplicityProcedure::from(mult.method);
     match proc_req {
         MultiplicityProcedure::None => return Ok(()),
@@ -1960,20 +1987,26 @@ fn append_friedman_multiplicity(
     let var_diff = ((nf * kf * (kf + 1.0) - tie_sum / (kf - 1.0).max(1.0)) / (6.0 * nf * nf)).max(0.0);
     let se = var_diff.sqrt();
 
-    let pair_indices: Vec<(usize, usize)> = if let Some(control_column) = ctrl_opt {
-        let ctrl_pos = indices
-            .iter()
-            .position(|&idx| idx == control_column)
-            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
-        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
-    } else {
-        let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
-        for i in 0..k {
-            for j in (i + 1)..k {
-                pairs.push((i, j));
-            }
+    let pair_indices: Vec<(usize, usize)> = match family {
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(control_column) => {
+            let ctrl_pos = indices
+                .iter()
+                .position(|&idx| idx == control_column)
+                .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+            (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
         }
-        pairs
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            crate::multiplicity::resolve_selected_pair_positions(pairs, |c| indices.iter().position(|&idx| idx == c))?
+        }
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {
+            let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    pairs.push((i, j));
+                }
+            }
+            pairs
+        }
     };
 
     let mut raw_p = Vec::with_capacity(pair_indices.len());

@@ -861,3 +861,79 @@ fn wf12_human_two_way_anova_interaction_and_grouped_guard() -> TestRes {
     )?;
     run.finish()
 }
+
+#[test]
+fn issue_76_one_way_anova_selected_pairs_human_workflow() -> TestRes {
+    // Five-stage human-path WorkflowRun exercising One-Way ANOVA planned selected-pairs UI controls
+    // (`edit.compare_selected_pairs` + `edit.selected_pair.<a>.<b>`) end-to-end against a fresh
+    // headless Session oracle (Hsu 1996 / Sidak 1967).
+    let mut run = WorkflowRun::start("ISSUE-76-SELECTED-PAIRS");
+    let col_id = run.create_table_via_welcome("welcome.arch.column", "Four Dose Cohort", &["welcome.stepper.cols.inc"])?;
+
+    for (idx, name) in ["Ctrl", "Low", "Mid", "High"].iter().enumerate() {
+        run.enter_column_title(idx, name)?;
+    }
+    run.click("grid.cell.0.0.0")?;
+    let tsv = "10.0\t12.0\t15.0\t22.0\n10.5\t12.4\t15.6\t23.0\n9.5\t11.6\t14.4\t21.0\n10.0\t12.0\t15.0\t22.0";
+    run.paste_clipboard(tsv)?;
+
+    let res_id = run.run_analyze_entry("One-way", "analyze.entry.stats.one_way_anova")?;
+    run.select_sheet(&res_id)?;
+
+    // Open Cmd+T -> Multiple Comparisons -> choose Sidak + enable selected-pairs -> toggle pairs (0,1) + (0,3).
+    run.open_cmd_t()?;
+    run.click("edit.tab.multiple_comparisons")?;
+    run.click("edit.post_hoc.sidak")?;
+    run.click("edit.compare_selected_pairs")?;
+    // Default seeded pair is (0, 1); add pair (0, 3) ("Ctrl vs. High") for a 2-pair planned family.
+    run.click("edit.selected_pair.0.3")?;
+    run.commit_modal_ok()?;
+
+    let rs_sel = run.document().result_sheet(&res_id).ok_or_else(|| String::from("missing selected-pairs ResultSheet"))?;
+    match &rs_sel.analysis.kind {
+        AnalysisKind::OneWayAnova(s)
+            if s.multiplicity.method == MultiplicityMethod::Sidak
+                && s.multiplicity.control_column.is_none()
+                && s.multiplicity.selected_pairs.as_deref() == Some(&[(0, 1), (0, 3)][..]) => {}
+        other => return Err(format!("expected Sidak with selected_pairs=[(0,1),(0,3)], got {other:?}")),
+    }
+    if rs_sel.pairwise_comparisons.len() != 2 {
+        return Err(format!("expected 2 planned comparisons, got {}", rs_sel.pairwise_comparisons.len()));
+    }
+
+    let ref_data: [&[Option<f64>]; 4] = [
+        &[Some(10.0), Some(10.5), Some(9.5), Some(10.0)],
+        &[Some(12.0), Some(12.4), Some(11.6), Some(12.0)],
+        &[Some(15.0), Some(15.6), Some(14.4), Some(15.0)],
+        &[Some(22.0), Some(23.0), Some(21.0), Some(22.0)],
+    ];
+    let ref_sheet =
+        build_column_sheet("ref-issue76", "Four Dose Cohort", ColumnDesignHint::UnpairedReplicates, &["Ctrl", "Low", "Mid", "High"], &ref_data)?;
+    let sel_kind = serde_json::to_value(AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Sidak,
+            selected_pairs: Some(vec![(0, 1), (0, 3)]),
+            ..MultiplicitySpec::default()
+        },
+        ..OneWayAnovaSpec::default()
+    }))
+    .map_err(|e| e.to_string())?;
+    let mc_tab_idx =
+        rs_sel.tabs.iter().position(|t| t.id == "multiple-comparisons").ok_or_else(|| String::from("missing multiple-comparisons tab"))?;
+    run.verify_reference(
+        ReferenceSpec::for_result(res_id.clone(), move |sess| {
+            sess.execute("analysis.run", json!({ "source_sheet_id": "ref-issue76", "sheet_id": "ref-res-76", "kind": sel_kind }))
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-res-76"))
+        .scalar("F", None, 1e-6, 1e-6)
+        .scalar("P value", None, 1e-9, 1e-9)
+        .tab_cell(mc_tab_idx, 0, 5, 1e-9, 1e-9)
+        .tab_cell(mc_tab_idx, 1, 5, 1e-9, 1e-9),
+    )?;
+
+    run.live_edit_all(LiveEditTarget::sheet_grid_cell(col_id, 0, 1, 0, "18.0"), vec![LiveEditExpectation::scalar_changed(res_id, "F", None, 1.0)])?;
+    run.finish()
+}

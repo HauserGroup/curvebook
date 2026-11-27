@@ -1192,6 +1192,49 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         intents.push(UiIntent::StatParams(super::StatParamsIntent::CycleControlColumn));
     }
 
+    let sel_pairs_active = mult.selected_pairs.is_some();
+    let sel_pairs_en = if titles.len() >= 2 {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled("Selected-pairs comparisons require at least two columns.")
+    };
+    if render_modal_checkbox(
+        ui,
+        rc.tokens,
+        meta,
+        "edit.compare_selected_pairs",
+        "Compare only selected pairs of columns",
+        sel_pairs_active,
+        &sel_pairs_en,
+    ) {
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::SetCompareSelectedPairs { enabled: !sel_pairs_active }));
+    }
+    if let Some(chosen) = mult.selected_pairs.as_deref() {
+        let active_cols: Vec<usize> = match rc.ep.draft.as_ref().map(|d| d.selected_data_sets.as_slice()) {
+            Some(sel) if !sel.is_empty() => sel.iter().copied().filter(|&i| i < titles.len()).collect(),
+            _ => (0..titles.len()).collect(),
+        };
+        let mut shown = 0_usize;
+        ui.horizontal_wrapped(|ui| {
+            for (pos_a, &col_a) in active_cols.iter().enumerate() {
+                for &col_b in active_cols.iter().skip(pos_a + 1) {
+                    if shown >= 15 {
+                        break;
+                    }
+                    shown += 1;
+                    let is_chosen = chosen.iter().any(|&(x, y)| (x == col_a && y == col_b) || (x == col_b && y == col_a));
+                    let lbl_a = titles.get(col_a).map_or("Col", String::as_str);
+                    let lbl_b = titles.get(col_b).map_or("Col", String::as_str);
+                    let chip_lbl = format!("{lbl_a} vs. {lbl_b}");
+                    let wid = format!("edit.selected_pair.{col_a}.{col_b}");
+                    if render_modal_seg_btn(ui, rc.tokens, meta, &wid, &chip_lbl, is_chosen, &ControlEnablement::enabled()) {
+                        intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleSelectedPair { a: col_a, b: col_b }));
+                    }
+                }
+            }
+        });
+    }
+
     if render_modal_checkbox(
         ui,
         rc.tokens,

@@ -438,6 +438,7 @@ fn audit_82_alpha_aware_pvalue_stars_across_all_families() {
                 threshold: 0.01,
                 report_confidence_intervals: false,
                 control_column: None,
+                selected_pairs: None,
             },
             ..Default::default()
         }),

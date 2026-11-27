@@ -169,7 +169,7 @@ fn dunn_rank_sum_and_linear_trend_never_emit_silent_unadjusted_output() {
 
     // Parametric pairwise comparison paths reject both DunnRankSum and LinearTrend with Typed Errors.
     for method in [MultiplicityMethod::DunnRankSum, MultiplicityMethod::LinearTrend] {
-        let spec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true, control_column: None };
+        let spec = MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: true, control_column: None, selected_pairs: None };
         assert!(
             matches!(compare_groups_pairwise(&groups, 2.25, 12.0, &spec), Err(StatsError::InvalidParameter { .. })),
             "expected InvalidParameter for {method:?} on parametric pairwise path"
@@ -193,7 +193,13 @@ fn dunn_rank_sum_and_linear_trend_never_emit_silent_unadjusted_output() {
         &[3.0, 8.0, 13.0],
         15,
         0.0,
-        &MultiplicitySpec { method: MultiplicityMethod::LinearTrend, threshold: 0.05, report_confidence_intervals: false, control_column: None },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::LinearTrend,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            control_column: None,
+            selected_pairs: None,
+        },
     )
     .unwrap();
     for row in &dunn_lt {
@@ -229,7 +235,8 @@ fn dunnett_and_dunn_control_column_lookup_errors_on_missing_and_respects_sparse_
                 method: MultiplicityMethod::Dunnett { control_column: 0 },
                 threshold: 0.05,
                 report_confidence_intervals: false,
-                control_column: None
+                control_column: None,
+                selected_pairs: None
             },
         ),
         Err(StatsError::InvalidParameter { name: "control_column", .. })
@@ -245,6 +252,7 @@ fn dunnett_and_dunn_control_column_lookup_errors_on_missing_and_respects_sparse_
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
     )
     .unwrap();

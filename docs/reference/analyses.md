@@ -14,7 +14,7 @@ Use the sidebar to jump to a specific test. Compact summaries of table compatibi
   - An empty `selected_data_sets` selects every compatible column, unless the analysis requires explicit indices.
   - Excluded cells are always removed before any computation ([Cell exclusions](concepts.md#cell-exclusions)).
 - **Running analyses:** Run an analysis with [`analysis.run`](../commands.md) (or `transform.run`, `stats.run`, `fit.run`), change it with [`analysis.updateParams`](../commands.md), or point it at different data with [`analysis.retargetData`](../commands.md). [`analyze.run`](../commands.md) recalculates every pending sheet in the project. An unknown option key returns `bad_input` ([Engine error codes](registry/tables.html#error-codes)).
-- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_sidak`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
+- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_sidak`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Supplying `selected_pairs` (`[[a, b], ...]`, mutually exclusive with `control_column` and `dunnett`) restricts comparisons to $m$ planned pairs for `bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
 
 ---
 
@@ -200,7 +200,7 @@ This analysis compares $k \ge 2$ groups. Groups in independent columns are compa
   - `df_method`: `kenward_roger` (default) or `satterthwaite`.
   - `residual_covariance`: `compound_symmetry` (default) or `unstructured`. The unstructured model uses the Pinheiro–Bates log-Cholesky REML parameterization and falls back automatically to compound symmetry when it is under-identified.
   - `compute_effect_sizes`: boolean. Reports $\eta^2$, $\omega^2$, and Cohen's $f$ with noncentral-*F* CIs, or $\varepsilon^2$ and Kendall's $W$ for rank tests.
-  - `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column`.
+  - `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, and `selected_pairs`.
 - **Reported outputs:**
   - **ANOVA Table** (`anova-table`, `unequal-var-anova`, `rm-one-way-anova`, `kruskal-wallis`, `friedman`): treatment, residual, and total SS, df, and MS; the test statistic ($F$, Welch's $W$, Brown–Forsythe $F^*$, Kruskal–Wallis $H$, or Friedman's $\chi^2_F$); and the *P* value.
   - **Diagnostics:** for unpaired ANOVA, Bartlett's test and the Brown–Forsythe (median-centered Levene) test of equal variances; for repeated-measures ANOVA, Mauchly's $W$ and the Greenhouse–Geisser $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ sphericity estimates.
@@ -234,12 +234,12 @@ This analysis fits fixed-effects or repeated-measures factorial linear models, a
     - `df_method`: `kenward_roger` (default) or `satterthwaite`.
     - `residual_covariance`: `compound_symmetry` (default) or `unstructured`.
     - The optional `heteroscedasticity_test` adds a tab of Spearman $|r|$ against predicted values for `HomoscedasticityPlot`. `emit_consolidated_data_tab` exports the reshaped data.
-  - `compute_effect_sizes`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, `control_factor` (`0` = row factor, `1` = column factor for two-way control-versus-all families), and `comparison_family_mode` (`standard`, `per_slice_families`, `two_factor_families`, `cells_differing_by_one_factor`, `single_grand_family`, or `preselected_pairs`).
+  - `compute_effect_sizes`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, `selected_pairs`, `control_factor` (`0` = row factor, `1` = column factor for two-way control-versus-all or selected-pairs families), and `comparison_family_mode` (`standard`, `per_slice_families`, `two_factor_families`, `cells_differing_by_one_factor`, `single_grand_family`, or `preselected_pairs`).
 - **Reported outputs:**
   - **ANOVA Table** (`factorial-anova`): main effects, interactions, and subject and residual terms, with SS, df, MS, $F$ (or the Kenward–Roger $F^*$), *P*, and partial $\eta^2$ or $\omega^2$.
   - **Diagnostics** (`rm-sphericity`): the Greenhouse–Geisser and Huynh–Feldt $\varepsilon$ for each repeated-measures factor.
   - **Parameters and CIs** and **Covariance Matrix**: REML variance components and the estimated unstructured covariance.
-  - **Multiple Comparisons:** simple-effect and main-effect pairwise or control-versus-all comparisons (targeting `control_factor` and `control_column` when specified).
+  - **Multiple Comparisons:** simple-effect and main-effect pairwise, control-versus-all, or selected-pairs comparisons (targeting `control_factor` with `control_column` or `selected_pairs` when specified).
 - **Diagnostic checks:** The checklist reports normality and variance checks on cells and residuals, sphericity $\varepsilon$ against its thresholds, REML boundary and convergence warnings, empty levels that were dropped, and notes on missing cells.
 - **Edge cases and limits:**
   - Pre-summarized subcolumns on Grouped tables are always rejected, because the analysis needs raw observations.
@@ -260,7 +260,7 @@ This analysis fits a hierarchical mixed-effects model that separates the fixed t
 - **Options and defaults:**
   - `two_group_t_test`: boolean (default `false`). When `true`, exactly 2 treatment groups must be selected.
   - `df_method`: `kenward_roger` (default) or `satterthwaite`.
-  - `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column` (for $k \ge 3$).
+  - `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, and `selected_pairs` (for $k \ge 3$).
 - **Reported outputs:**
   - **ANOVA Table** (`nested-anova`): SS for groups, for subclusters within groups, and for the technical residual, with df (Kenward–Roger or Satterthwaite), MS, $F$ (or, for `nested_t`, the signed $t$ and its CI), and *P* values.
   - **Parameters and CIs** (`variance-components`): the REML variance components $\hat{\sigma}^2_{\text{subcluster}}$ and $\hat{\sigma}^2_{\text{error}}$, their SDs, each as a percentage of the total variance, $\text{ICC}_{\text{subclusters}}$, and the denominator df by both the Kenward–Roger and Satterthwaite methods.
@@ -324,7 +324,7 @@ See [Analysis Registry: `survival`](registry/tables.html#analysis-kind-survival)
   - Kaplan–Meier:
     - Tests: turn on `log_rank_mantel_cox`, `gehan_breslow_wilcoxon`, or `trend_test` (the Tarone 1975 1-df trend test, for $\ge 3$ cohorts).
     - Confidence bands: `asymmetrical_greenwood_ci` chooses between Kalbfleisch–Prentice $\ln(-\ln S(t))$ bounds, which stay within $[0, 1]$ (the default), and symmetric linear Greenwood bounds.
-    - Coding and comparisons: `event_code`, `censored_code`, `treat_other_as`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column`.
+    - Coding and comparisons: `event_code`, `censored_code`, `treat_other_as`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, and `selected_pairs`.
     - On Multiple Variables tables, set `mv_time_column`, `mv_status_column`, and `mv_group_column`.
   - Cox PH:
     - Model: `time_column`, `status_column`, `predictor_columns`, `reference_levels`, and `formula` (interaction and transform terms).

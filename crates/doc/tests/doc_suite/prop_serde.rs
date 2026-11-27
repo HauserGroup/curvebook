@@ -479,6 +479,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
@@ -543,6 +544,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..MultipleRowTestsSpec::default()
         }),
@@ -570,9 +572,11 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
 #[test]
 fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
     fn assert_copy_spec<T: Copy + Clone + PartialEq + Default + serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
+    fn assert_clone_spec<T: Clone + PartialEq + Default + serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
     assert_copy_spec::<TwoGroupSpec>();
     assert_copy_spec::<BlandAltmanSpec>();
-    assert_copy_spec::<MultipleRowTestsSpec>();
+    // `MultipleRowTestsSpec` carries `MultiplicitySpec` (which holds `Option<Vec<(usize, usize)>>` for `selected_pairs`).
+    assert_clone_spec::<MultipleRowTestsSpec>();
     assert_copy_spec::<PassingBablokSpec>();
 
     assert_eq!(BlandAltmanSpec::default(), BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, xy_compare_x_vs_y: None });
@@ -616,6 +620,7 @@ fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
                 threshold: 0.05,
                 report_confidence_intervals: false,
                 control_column: None,
+                selected_pairs: None,
             },
             ..MultipleRowTestsSpec::default()
         });

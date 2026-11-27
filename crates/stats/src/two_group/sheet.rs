@@ -397,7 +397,12 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
 /// Execute [`MultipleRowTestsSpec`] row-by-row across two groups and emit a complete [`ResultSheet`]
 /// (`MainSummary`, `MultipleComparisons`, `scalars`, and `PairwiseComparisonRecord`s for Volcano plots).
 pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mr: &MultipleRowTestsSpec) -> Result<ResultSheet, StatsError> {
-    enforce_summary_mode_matrix(sheet, &AnalysisKind::MultipleRowTTests(*mr))?;
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::MultipleRowTTests(mr.clone()))?;
+    if mr.multiplicity.selected_pairs.is_some() {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "multiple-row t-tests compare rows across two groups and do not support selected_pairs",
+        });
+    }
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;

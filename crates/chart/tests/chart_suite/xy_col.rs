@@ -588,6 +588,7 @@ fn live_pairwise_brackets_auto_stacked_and_formatted_from_anova_results() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),

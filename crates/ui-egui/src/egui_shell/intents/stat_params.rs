@@ -120,6 +120,13 @@ pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent
             app.canvas_dialogs.edit_params.set_compare_against_control(enabled);
         }
         StatParamsIntent::CycleControlColumn => handle_cycle_control_col(app)?,
+        StatParamsIntent::SetCompareSelectedPairs { enabled } => {
+            let cols = available_dataset_indices(app);
+            app.canvas_dialogs.edit_params.set_compare_selected_pairs(enabled, &cols);
+        }
+        StatParamsIntent::ToggleSelectedPair { a, b } => {
+            app.canvas_dialogs.edit_params.toggle_selected_pair(a, b);
+        }
         StatParamsIntent::ToggleMultiplicityReportCi => handle_toggle_mult_ci(app),
         StatParamsIntent::ToggleEffectSizes => handle_toggle_effect_sizes(app),
         StatParamsIntent::SetPValueFormat { slug } => {
@@ -545,14 +552,20 @@ fn parse_mult_method(raw: &str, ctrl: usize) -> Result<MultiplicityMethod, Engin
     }
 }
 
+fn available_dataset_indices(app: &UiApp) -> Vec<usize> {
+    let total = source_sheet_col_count(app);
+    let selected = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| d.selected_data_sets.as_slice()).unwrap_or(&[]);
+    if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
+}
+
 fn current_multiplicity(ep: &EditAnalysisParametersState) -> Option<curvebook_doc::MultiplicitySpec> {
     let spec = ep.draft.as_ref()?;
     match &spec.kind {
-        AnalysisKind::OneWayAnova(a) => Some(a.multiplicity),
-        AnalysisKind::FactorialAnova(f) => Some(f.multiplicity),
-        AnalysisKind::NestedComparison(n) => Some(n.multiplicity),
-        AnalysisKind::MultipleRowTTests(m) => Some(m.multiplicity),
-        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => Some(*multiplicity),
+        AnalysisKind::OneWayAnova(a) => Some(a.multiplicity.clone()),
+        AnalysisKind::FactorialAnova(f) => Some(f.multiplicity.clone()),
+        AnalysisKind::NestedComparison(n) => Some(n.multiplicity.clone()),
+        AnalysisKind::MultipleRowTTests(m) => Some(m.multiplicity.clone()),
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => Some(multiplicity.clone()),
         _ => None,
     }
 }

@@ -75,6 +75,8 @@ pub enum StatParamsIntent {
     StepMultiplicityThreshold { delta: f64 },
     SetCompareAgainstControl { enabled: bool },
     CycleControlColumn,
+    SetCompareSelectedPairs { enabled: bool },
+    ToggleSelectedPair { a: usize, b: usize },
     ToggleMultiplicityReportCi,
     ToggleEffectSizes,
     SetPValueFormat { slug: String },

@@ -973,9 +973,9 @@ fn external_archive_post_tests_and_replicate_handling_translate_or_block() {
         ("no test", post("ALL_VS_ALL", "STATISTICAL", "NO_TEST"), Some(MultiplicityMethod::None)),
         ("Dunnett keeps sheet control", post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET"), Some(MultiplicityMethod::Dunnett { control_column: 2 })),
         ("unknown test name blocks", post("ALL_VS_ALL", "STATISTICAL", "UNKNOWN_POST_TEST"), None),
-        ("selected pairs block", post("SELECTED_VS_SELECTED", "STATISTICAL", "HOLM_SIDAK"), None),
+        ("selected pairs without pair list block", post("SELECTED_VS_SELECTED", "STATISTICAL", "HOLM_SIDAK"), None),
         ("Tukey against control blocks", post("CONTROL_VS_ALL", "STATISTICAL", "TUKEY"), None),
-        ("unadjusted selected pairs block", post("SELECTED_VS_SELECTED", "NO_CORRECTION", "TUKEY"), None),
+        ("unadjusted selected pairs without pair list block", post("SELECTED_VS_SELECTED", "NO_CORRECTION", "TUKEY"), None),
         ("unadjusted control family blocks", post("CONTROL_VS_ALL", "STATISTICAL", "NO_TEST"), None),
     ];
     for (label, params, expected) in cases {
@@ -1134,8 +1134,16 @@ fn issue_77_bonferroni_sidak_maps_to_sidak_across_anova_designs() {
         ("one-way SIDAK is Sidak", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "SIDAK", true, Some(MultiplicityMethod::Sidak)),
         ("two-way HOLM_SIDAK is HolmSidak", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "ALL_VS_ALL", "HOLM_SIDAK", true, Some(MultiplicityMethod::HolmSidak)),
         // One-way CONTROL_VS_ALL BONFERRONI_SIDAK also maps to Sidak (with control_column);
-        // selected-pairs, two-way CONTROL_VS_ALL without meansDesignType, and unknown tests block.
-        ("one-way selected-pairs BONFERRONI_SIDAK blocks", "ONE_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
+        // selected-pairs without selectedPairIDList, two-way CONTROL_VS_ALL without meansDesignType, and unknown tests block.
+        (
+            "one-way selected-pairs without pair list blocks",
+            "ONE_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "SELECTED_VS_SELECTED",
+            "BONFERRONI_SIDAK",
+            true,
+            None,
+        ),
         (
             "one-way control-vs-all BONFERRONI_SIDAK maps to Sidak",
             "ONE_WAY_ANOVA",
@@ -1145,7 +1153,15 @@ fn issue_77_bonferroni_sidak_maps_to_sidak_across_anova_designs() {
             true,
             Some(MultiplicityMethod::Sidak),
         ),
-        ("two-way selected-pairs BONFERRONI_SIDAK blocks", "TWO_WAY_ANOVA", "ORDINARY_ANOVA", "SELECTED_VS_SELECTED", "BONFERRONI_SIDAK", true, None),
+        (
+            "two-way selected-pairs without pair list blocks",
+            "TWO_WAY_ANOVA",
+            "ORDINARY_ANOVA",
+            "SELECTED_VS_SELECTED",
+            "BONFERRONI_SIDAK",
+            true,
+            None,
+        ),
         (
             "two-way control-vs-all without meansDesignType blocks",
             "TWO_WAY_ANOVA",
@@ -1371,6 +1387,180 @@ fn issue_78_control_vs_all_one_way_and_two_way_translation_and_selection_validat
     ] {
         let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &two_way_params(means_design, "STATISTICAL", test, ctrl_id)).unwrap();
         assert!(!tr.blocking_options.is_empty(), "{label}");
+    }
+}
+
+#[test]
+fn issue_76_selected_pairs_one_way_and_two_way_translation_and_selection_validation() {
+    use curvebook_doc::{FactorialAnovaSpec, FactorialComparisonFamilyMode, MultiplicityMethod, OneWayAnovaSpec};
+
+    let col_pair = |a: usize, b: usize| json!([{"col": {"idx": a}}, {"col": {"idx": b}}]);
+    let row_pair = |a: usize, b: usize| json!([{"row": {"idx": a}}, {"row": {"idx": b}}]);
+    let one_way_params = |design: &str, mc_type: &str, test: &str, pair_list: serde_json::Value| {
+        let mc = match mc_type {
+            "NO_CORRECTION" => json!({"type": "NO_CORRECTION"}),
+            "FDR" => json!({"type": "FDR", "fdr": {"test": test}}),
+            _ => json!({"type": "STATISTICAL", "statistical": {"test": test}}),
+        };
+        json!({"content": {
+            "experimentalDesign": design,
+            "postTests": {
+                "type": "PAIRWISE_TESTS",
+                "pairwiseTests": {
+                    "pairwiseDesign": {"type": "SELECTED_VS_SELECTED", "selectedPairIDList": pair_list},
+                    "multipleComparisons": mc,
+                }
+            }
+        }})
+    };
+
+    // One-way SELECTED_VS_SELECTED: every supported method translates cleanly and preserves exact sheet pairs.
+    let valid_list = json!([col_pair(0, 2), col_pair(1, 3)]);
+    for (label, design, mc_type, test, want_method) in [
+        ("one-way BONFERRONI_SIDAK -> Sidak", "ORDINARY_ANOVA", "STATISTICAL", "BONFERRONI_SIDAK", MultiplicityMethod::Sidak),
+        ("one-way BONFERRONI_DUNN -> Bonferroni", "ORDINARY_ANOVA", "STATISTICAL", "BONFERRONI_DUNN", MultiplicityMethod::Bonferroni),
+        ("one-way HOLM_SIDAK", "ORDINARY_ANOVA", "STATISTICAL", "HOLM_SIDAK", MultiplicityMethod::HolmSidak),
+        ("one-way RM BONFERRONI_SIDAK", "REPEATED_MEASURES_ANOVA", "STATISTICAL", "BONFERRONI_SIDAK", MultiplicityMethod::Sidak),
+        ("one-way KW DUNN", "KRUSKAL_WALLIS_TEST", "STATISTICAL", "DUNN", MultiplicityMethod::DunnRankSum),
+        ("one-way NO_CORRECTION -> FisherLsd", "ORDINARY_ANOVA", "NO_CORRECTION", "", MultiplicityMethod::FisherLsd),
+        ("one-way Welch DUNNET_T3", "BROWN_FORSYTHE_ANOVA", "STATISTICAL", "DUNNET_T3", MultiplicityMethod::DunnettT3),
+        ("one-way Welch TAMHANE_T2", "BROWN_FORSYTHE_ANOVA", "STATISTICAL", "TAMHANE_T2", MultiplicityMethod::TamhaneT2),
+        ("one-way FDR BH", "ORDINARY_ANOVA", "FDR", "BENJAMINI_HOCHBERG", MultiplicityMethod::BenjaminiHochbergFdr),
+        ("one-way FDR BKY", "ORDINARY_ANOVA", "FDR", "BENJAMINI_KRIEGER_YEKUTIELI", MultiplicityMethod::TwoStageBkyFdr),
+    ] {
+        let tr = translate_analysis_parameters("ONE_WAY_ANOVA", &one_way_params(design, mc_type, test, valid_list.clone())).unwrap();
+        assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+        let AnalysisKind::OneWayAnova(OneWayAnovaSpec { multiplicity, .. }) = &tr.kind else {
+            panic!("{label}: expected OneWayAnova");
+        };
+        assert_eq!(multiplicity.method, want_method, "{label}");
+        assert_eq!(multiplicity.control_column, None, "{label}");
+        assert_eq!(multiplicity.selected_pairs.as_deref(), Some(&[(0, 2), (1, 3)][..]), "{label}");
+        assert!(check_control_in_selection(&tr.kind, &[0, 1, 2, 3]).is_ok(), "{label} all in selection");
+        assert!(check_control_in_selection(&tr.kind, &[0, 1, 2]).is_err(), "{label} missing col 3");
+        assert!(check_control_in_selection(&tr.kind, &[]).is_ok(), "{label} empty selection");
+    }
+
+    // Partial-null placeholder slots ([null, null]) are skipped when valid pairs are present.
+    let partial_null = json!([col_pair(0, 1), [null, null], col_pair(2, 4), [null, null]]);
+    let tr_partial =
+        translate_analysis_parameters("ONE_WAY_ANOVA", &one_way_params("ORDINARY_ANOVA", "STATISTICAL", "BONFERRONI_SIDAK", partial_null)).unwrap();
+    assert!(tr_partial.blocking_options.is_empty(), "partial-null should translate cleanly: {:?}", tr_partial.blocking_options);
+    let AnalysisKind::OneWayAnova(OneWayAnovaSpec { multiplicity, .. }) = &tr_partial.kind else { panic!("not OneWayAnova") };
+    assert_eq!(multiplicity.selected_pairs.as_deref(), Some(&[(0, 1), (2, 4)][..]));
+
+    // Blocked one-way SELECTED_VS_SELECTED cases: empty, all-null placeholders, half-null, self-pair,
+    // duplicate (incl. reversed), STATISTICAL+NO_TEST, incompatible methods, and row index.
+    for (label, mc_type, test, pair_list) in [
+        ("empty pair list (STATISTICAL)", "STATISTICAL", "BONFERRONI_SIDAK", json!([])),
+        ("empty pair list (NO_CORRECTION)", "NO_CORRECTION", "", json!([])),
+        ("all-null placeholders", "STATISTICAL", "BONFERRONI_SIDAK", json!([[null, null], [null, null]])),
+        ("half-null incomplete pair", "STATISTICAL", "BONFERRONI_SIDAK", json!([[{"col": {"idx": 0}}, null]])),
+        ("self-pair", "STATISTICAL", "BONFERRONI_SIDAK", json!([col_pair(2, 2)])),
+        ("duplicate reversed pair", "STATISTICAL", "BONFERRONI_SIDAK", json!([col_pair(0, 1), col_pair(1, 0)])),
+        ("ambiguous STATISTICAL+NO_TEST", "STATISTICAL", "NO_TEST", valid_list.clone()),
+        ("incompatible TUKEY", "STATISTICAL", "TUKEY", valid_list.clone()),
+        ("incompatible DUNNET", "STATISTICAL", "DUNNET", valid_list.clone()),
+        ("incompatible GAMES_HOWELL", "STATISTICAL", "GAMES_HOWELL", valid_list.clone()),
+        ("row member in one-way", "STATISTICAL", "BONFERRONI_SIDAK", json!([row_pair(0, 1)])),
+    ] {
+        let tr = translate_analysis_parameters("ONE_WAY_ANOVA", &one_way_params("ORDINARY_ANOVA", mc_type, test, pair_list)).unwrap();
+        assert!(!tr.blocking_options.is_empty(), "{label} should block");
+    }
+
+    // Two-way SELECTED_VS_SELECTED: supported 1D row/col designs translate cleanly.
+    let two_way_params = |means_design: &str, mc_type: &str, test: &str, pair_list: serde_json::Value| {
+        let mc = match mc_type {
+            "NO_CORRECTION" => json!({"type": "NO_CORRECTION"}),
+            _ => json!({"type": "STATISTICAL", "statistical": {"test": test}}),
+        };
+        json!({"content": {
+            "experimentalDesign": "ORDINARY_ANOVA",
+            "postTests": {
+                "type": "PAIRWISE_TESTS",
+                "pairwiseTests": {
+                    "meansDesignType": means_design,
+                    "pairwiseDesign": {"type": "SELECTED_VS_SELECTED", "selectedPairIDList": pair_list},
+                    "multipleComparisons": mc,
+                }
+            }
+        }})
+    };
+
+    for (label, means_design, mc_type, test, pair_list, want_method, want_pairs, want_factor, want_mode) in [
+        (
+            "two-way COMPARE_ROWS with null slots",
+            "COMPARE_ROWS",
+            "STATISTICAL",
+            "BONFERRONI_SIDAK",
+            json!([row_pair(0, 4), row_pair(0, 1), [null, null], row_pair(4, 5)]),
+            MultiplicityMethod::Sidak,
+            vec![(0, 4), (0, 1), (4, 5)],
+            Some(0),
+            FactorialComparisonFamilyMode::Standard,
+        ),
+        (
+            "two-way COMPARE_COLUMNS Bonferroni",
+            "COMPARE_COLUMNS",
+            "STATISTICAL",
+            "BONFERRONI_DUNN",
+            json!([col_pair(0, 2), col_pair(1, 3)]),
+            MultiplicityMethod::Bonferroni,
+            vec![(0, 2), (1, 3)],
+            Some(1),
+            FactorialComparisonFamilyMode::Standard,
+        ),
+        (
+            "two-way cols-within-rows separate Holm-Sidak",
+            "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES",
+            "STATISTICAL",
+            "HOLM_SIDAK",
+            json!([col_pair(0, 1), col_pair(2, 3)]),
+            MultiplicityMethod::HolmSidak,
+            vec![(0, 1), (2, 3)],
+            Some(1),
+            FactorialComparisonFamilyMode::PerSliceFamilies,
+        ),
+        (
+            "two-way rows-within-cols single NO_CORRECTION -> FisherLsd",
+            "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SINGLE_FAMILY",
+            "NO_CORRECTION",
+            "",
+            json!([row_pair(0, 1), row_pair(1, 2)]),
+            MultiplicityMethod::FisherLsd,
+            vec![(0, 1), (1, 2)],
+            Some(0),
+            FactorialComparisonFamilyMode::TwoFactorFamilies,
+        ),
+    ] {
+        let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &two_way_params(means_design, mc_type, test, pair_list)).unwrap();
+        assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+        let AnalysisKind::FactorialAnova(FactorialAnovaSpec { multiplicity, control_factor, comparison_family_mode, .. }) = &tr.kind else {
+            panic!("{label}: expected FactorialAnova");
+        };
+        assert_eq!(multiplicity.method, want_method, "{label}");
+        assert_eq!(multiplicity.selected_pairs.as_deref(), Some(want_pairs.as_slice()), "{label}");
+        assert_eq!(*control_factor, want_factor, "{label}");
+        assert_eq!(*comparison_family_mode, want_mode, "{label}");
+        if want_factor == Some(1) {
+            assert!(check_control_in_selection(&tr.kind, &[0, 1, 2, 3]).is_ok(), "{label} all cols present");
+            assert!(check_control_in_selection(&tr.kind, &[0, 1, 2]).is_err(), "{label} col 3 missing");
+        } else {
+            assert!(check_control_in_selection(&tr.kind, &[99]).is_ok(), "{label} row pairs independent of selected cols");
+        }
+    }
+
+    // Blocked two-way SELECTED_VS_SELECTED cases: 2D COMPARE_CELLS, STATISTICAL+NO_TEST, empty NO_CORRECTION, axis mismatch, DUNN.
+    let cell_pair = json!([[{"col": {"idx": 0}, "row": {"idx": 0}}, {"col": {"idx": 1}, "row": {"idx": 0}}]]);
+    for (label, means_design, mc_type, test, pair_list) in [
+        ("two-way 2D COMPARE_CELLS blocks", "COMPARE_CELLS", "STATISTICAL", "BONFERRONI_SIDAK", cell_pair),
+        ("two-way STATISTICAL NO_TEST blocks", "COMPARE_COLUMNS", "STATISTICAL", "NO_TEST", json!([col_pair(0, 1)])),
+        ("two-way NO_CORRECTION empty list blocks", "COMPARE_CELLS_DIFFER_BY_ONE_FACTOR_SINGLE_FAMILY", "NO_CORRECTION", "", json!([])),
+        ("two-way axis mismatch blocks", "COMPARE_COLUMNS", "STATISTICAL", "BONFERRONI_SIDAK", json!([row_pair(0, 1)])),
+        ("two-way DUNN blocks", "COMPARE_COLUMNS", "STATISTICAL", "DUNN", json!([col_pair(0, 1)])),
+    ] {
+        let tr = translate_analysis_parameters("TWO_WAY_ANOVA", &two_way_params(means_design, mc_type, test, pair_list)).unwrap();
+        assert!(!tr.blocking_options.is_empty(), "{label} should block");
     }
 }
 

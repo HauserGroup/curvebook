@@ -1231,6 +1231,48 @@ impl Default for ParsedPostTests {
     }
 }
 
+fn map_two_way_means_design_type(
+    pairwise: Option<&JsonMap>,
+    family_label: &str,
+    blocking: &mut Vec<String>,
+) -> Option<(usize, FactorialComparisonFamilyMode, &'static str)> {
+    let Some(means_design) = get_str(pairwise, "meansDesignType") else {
+        blocking.push(format!("two-way {family_label} comparison is missing `meansDesignType`"));
+        return None;
+    };
+    match means_design {
+        "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES" => {
+            Some((1_usize, FactorialComparisonFamilyMode::PerSliceFamilies, "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES"))
+        }
+        "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SEPARATE_FAMILIES" => {
+            Some((0_usize, FactorialComparisonFamilyMode::PerSliceFamilies, "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SEPARATE_FAMILIES"))
+        }
+        "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SINGLE_FAMILY" => {
+            Some((1_usize, FactorialComparisonFamilyMode::TwoFactorFamilies, "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SINGLE_FAMILY"))
+        }
+        "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SINGLE_FAMILY" => {
+            Some((0_usize, FactorialComparisonFamilyMode::TwoFactorFamilies, "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SINGLE_FAMILY"))
+        }
+        "COMPARE_COLUMNS" => Some((1_usize, FactorialComparisonFamilyMode::Standard, "COMPARE_COLUMNS")),
+        "COMPARE_ROWS" => Some((0_usize, FactorialComparisonFamilyMode::Standard, "COMPARE_ROWS")),
+        "COMPARE_CELLS" => {
+            blocking.push(format!("two-way {family_label} `COMPARE_CELLS` requires two-dimensional cell coordinates"));
+            None
+        }
+        other => {
+            blocking.push(format!("unmapped two-way {family_label} meansDesignType `{other}`"));
+            None
+        }
+    }
+}
+
+fn parse_pair_member_indices(member: &serde_json::Value) -> (Option<usize>, Option<usize>) {
+    let obj = member.as_object();
+    let col_idx = get_obj(obj, "col").and_then(|c| c.get("idx")).and_then(serde_json::Value::as_u64).and_then(|i| usize::try_from(i).ok());
+    let row_idx = get_obj(obj, "row").and_then(|r| r.get("idx")).and_then(serde_json::Value::as_u64).and_then(|i| usize::try_from(i).ok());
+    (row_idx, col_idx)
+}
+
 fn parse_control_vs_all_target(
     pairwise: Option<&JsonMap>,
     design_obj: Option<&JsonMap>,
@@ -1255,26 +1297,7 @@ fn parse_control_vs_all_target(
         };
     }
 
-    let Some(means_design) = get_str(pairwise, "meansDesignType") else {
-        blocking.push(String::from("two-way control-versus-all comparison is missing `meansDesignType`"));
-        return None;
-    };
-    let (target_factor, family_mode) = match means_design {
-        "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SEPARATE_FAMILIES" => (1_usize, FactorialComparisonFamilyMode::PerSliceFamilies),
-        "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SEPARATE_FAMILIES" => (0_usize, FactorialComparisonFamilyMode::PerSliceFamilies),
-        "COMPARE_CELLS_BY_COLUMNS_WITHIN_ROWS_SINGLE_FAMILY" => (1_usize, FactorialComparisonFamilyMode::TwoFactorFamilies),
-        "COMPARE_CELLS_BY_ROWS_WITHIN_COLUMNS_SINGLE_FAMILY" => (0_usize, FactorialComparisonFamilyMode::TwoFactorFamilies),
-        "COMPARE_COLUMNS" => (1_usize, FactorialComparisonFamilyMode::Standard),
-        "COMPARE_ROWS" => (0_usize, FactorialComparisonFamilyMode::Standard),
-        "COMPARE_CELLS" => {
-            blocking.push(String::from("two-way control-versus-all `COMPARE_CELLS` requires a two-dimensional control cell"));
-            return None;
-        }
-        other => {
-            blocking.push(format!("unmapped two-way control-versus-all meansDesignType `{other}`"));
-            return None;
-        }
-    };
+    let (target_factor, family_mode, means_design) = map_two_way_means_design_type(pairwise, "control-versus-all", blocking)?;
     match (target_factor, row_idx, col_idx) {
         (0, Some(r), None) => Some((r, Some(0), family_mode)),
         (1, None, Some(c)) => Some((c, Some(1), family_mode)),
@@ -1285,6 +1308,110 @@ fn parse_control_vs_all_target(
     }
 }
 
+struct ParsedSelectedPairs {
+    pairs: Vec<(usize, usize)>,
+    control_factor: Option<usize>,
+    family_mode: FactorialComparisonFamilyMode,
+}
+
+fn parse_selected_pairs_target(
+    pairwise: Option<&JsonMap>,
+    design_obj: Option<&JsonMap>,
+    is_two_way: bool,
+    blocking: &mut Vec<String>,
+) -> Option<ParsedSelectedPairs> {
+    let (target_factor, family_mode, means_design) = if is_two_way {
+        let (tf, fm, md) = map_two_way_means_design_type(pairwise, "selected-pairs", blocking)?;
+        (Some(tf), fm, Some(md))
+    } else {
+        (None, FactorialComparisonFamilyMode::Standard, None)
+    };
+
+    let Some(raw_list) = design_obj.and_then(|d| d.get("selectedPairIDList")).and_then(serde_json::Value::as_array) else {
+        blocking.push(String::from("selected-pairs comparison is missing `selectedPairIDList`"));
+        return None;
+    };
+    if raw_list.is_empty() {
+        blocking.push(String::from("selected-pairs comparison has empty `selectedPairIDList`"));
+        return None;
+    }
+
+    let mut pairs = Vec::new();
+    let mut seen = HashSet::new();
+    let mut null_slots = 0_usize;
+
+    for entry in raw_list {
+        let Some(pair_arr) = entry.as_array() else {
+            blocking.push(String::from("selected-pairs entry is not a two-element pair"));
+            return None;
+        };
+        let [first, second] = pair_arr.as_slice() else {
+            blocking.push(String::from("selected-pairs entry does not contain two members"));
+            return None;
+        };
+        if first.is_null() && second.is_null() {
+            null_slots += 1;
+            continue;
+        }
+        if first.is_null() || second.is_null() {
+            blocking.push(String::from("selected-pairs entry has an incomplete pair"));
+            return None;
+        }
+        let (r0, c0) = parse_pair_member_indices(first);
+        let (r1, c1) = parse_pair_member_indices(second);
+        let (idx_a, idx_b) = match target_factor {
+            None => match (r0, c0, r1, c1) {
+                (None, Some(a), None, Some(b)) => (a, b),
+                _ => {
+                    blocking.push(String::from("one-way selected-pairs member is missing `col.idx` or specifies a row index"));
+                    return None;
+                }
+            },
+            Some(0) => match (r0, c0, r1, c1) {
+                (Some(a), None, Some(b), None) => (a, b),
+                _ => {
+                    let md = means_design.unwrap_or("COMPARE_ROWS");
+                    blocking.push(format!("two-way selected-pairs member does not match `{md}`"));
+                    return None;
+                }
+            },
+            Some(1) => match (r0, c0, r1, c1) {
+                (None, Some(a), None, Some(b)) => (a, b),
+                _ => {
+                    let md = means_design.unwrap_or("COMPARE_COLUMNS");
+                    blocking.push(format!("two-way selected-pairs member does not match `{md}`"));
+                    return None;
+                }
+            },
+            Some(_) => {
+                blocking.push(String::from("unmapped two-way selected-pairs factor axis"));
+                return None;
+            }
+        };
+        if idx_a == idx_b {
+            blocking.push(format!("selected-pairs list contains self-pair ({idx_a}, {idx_b})"));
+            return None;
+        }
+        let canon = (idx_a.min(idx_b), idx_a.max(idx_b));
+        if !seen.insert(canon) {
+            blocking.push(format!("selected-pairs list contains duplicate pair ({idx_a}, {idx_b})"));
+            return None;
+        }
+        pairs.push((idx_a, idx_b));
+    }
+
+    if pairs.is_empty() {
+        if null_slots > 0 {
+            blocking.push(String::from("selected-pairs list contains only null placeholders (targets omitted)"));
+        } else {
+            blocking.push(String::from("selected-pairs comparison has empty `selectedPairIDList`"));
+        }
+        return None;
+    }
+
+    Some(ParsedSelectedPairs { pairs, control_factor: target_factor, family_mode })
+}
+
 /// Translate `postTests` into a [`MultiplicitySpec`] plus optional two-way control-factor and
 /// comparison-family routing.
 ///
@@ -1292,11 +1419,13 @@ fn parse_control_vs_all_target(
 /// `fdr.test`, `NO_CORRECTION` → unadjusted), and `pairwiseTests.pairwiseDesign.type` selects the
 /// comparison family. `BONFERRONI_DUNN` denotes single-step Bonferroni (Dunn 1961) and
 /// `BONFERRONI_SIDAK` denotes single-step Šidák (1967), with no distinguishing sub-field in
-/// `parameters.json` (see `docs/evidence/interop-format-notes.md`). Both `ALL_VS_ALL` and
-/// one-way / two-way `CONTROL_VS_ALL` families translate; a column-factor control keeps its sheet
-/// data-set index and must lie in the analysed selection ([`check_control_in_selection`]).
-/// `STATISTICAL` with `NO_TEST` under `CONTROL_VS_ALL` is ambiguous in the corpus and stays
-/// blocked, as do unknown test names, `COMPARE_CELLS` 2D controls, and selected-pairs families.
+/// `parameters.json` (see `docs/evidence/interop-format-notes.md`). `ALL_VS_ALL`,
+/// `CONTROL_VS_ALL`, and one-way / 1D two-way `SELECTED_VS_SELECTED` families translate; column
+/// targets keep their sheet data-set indices and must lie in the analysed selection
+/// ([`check_control_in_selection`]). Trailing `[null, null]` placeholder slots in
+/// `selectedPairIDList` are skipped when at least one valid pair is present; empty lists,
+/// all-null placeholder lists, incomplete pairs, `STATISTICAL` with `NO_TEST`, unknown test names,
+/// and 2D `COMPARE_CELLS` targets stay explicitly blocked.
 fn parse_multiplicity(post_tests: Option<&JsonMap>, is_two_way: bool, blocking: &mut Vec<String>) -> ParsedPostTests {
     let mut parsed = ParsedPostTests::default();
     let Some(pt) = post_tests else {
@@ -1320,6 +1449,13 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, is_two_way: bool, blocking: 
                     parsed.control_factor = control_factor;
                     parsed.comparison_family_mode = family_mode;
                 }
+            } else if family == "SELECTED_VS_SELECTED" {
+                if let Some(sel) = parse_selected_pairs_target(pairwise, design_obj, is_two_way, blocking) {
+                    parsed.multiplicity.method = MultiplicityMethod::FisherLsd;
+                    parsed.multiplicity.selected_pairs = Some(sel.pairs);
+                    parsed.control_factor = sel.control_factor;
+                    parsed.comparison_family_mode = sel.family_mode;
+                }
             } else if family != "ALL_VS_ALL" {
                 blocking.push(format!("unadjusted pairwise comparison family `{family}`"));
             }
@@ -1341,9 +1477,9 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, is_two_way: bool, blocking: 
 
     let raw_upper = raw_test.map(str::to_ascii_uppercase);
     let Some(test) = raw_upper.as_deref().filter(|t| *t != "NO_TEST" && *t != "NONE" && *t != "NO_CORRECTION") else {
-        if family == "CONTROL_VS_ALL" {
+        if family == "CONTROL_VS_ALL" || family == "SELECTED_VS_SELECTED" {
             let token = raw_upper.as_deref().unwrap_or("NONE");
-            blocking.push(format!("unspecified statistical test `{token}` for pairwise comparison family `CONTROL_VS_ALL`"));
+            blocking.push(format!("unspecified statistical test `{token}` for pairwise comparison family `{family}`"));
         } else if family != "ALL_VS_ALL" {
             blocking.push(format!("unadjusted pairwise comparison family `{family}`"));
         }
@@ -1385,6 +1521,31 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, is_two_way: bool, blocking: 
                 parsed.comparison_family_mode = family_mode;
             }
         }
+        "SELECTED_VS_SELECTED" => {
+            let mapped = match test {
+                "HOLM_SIDAK" => Some(MultiplicityMethod::HolmSidak),
+                "BONFERRONI_DUNN" | "BONFERRONI" => Some(MultiplicityMethod::Bonferroni),
+                "BONFERRONI_SIDAK" | "SIDAK" => Some(MultiplicityMethod::Sidak),
+                "DUNN" if !is_two_way => Some(MultiplicityMethod::DunnRankSum),
+                "DUNNET_T3" | "DUNNETT_T3" => Some(MultiplicityMethod::DunnettT3),
+                "TAMHANE_T2" => Some(MultiplicityMethod::TamhaneT2),
+                "FISHER_LSD" | "UNCORRECTED_FISHER_LSD" => Some(MultiplicityMethod::FisherLsd),
+                "BENJAMINI_HOCHBERG" => Some(MultiplicityMethod::BenjaminiHochbergFdr),
+                "BENJAMINI_YEKUTIELI" => Some(MultiplicityMethod::BenjaminiYekutieliFdr),
+                "TWO_STAGE_BKY" | "BENJAMINI_KRIEGER_YEKUTIELI" => Some(MultiplicityMethod::TwoStageBkyFdr),
+                _ => None,
+            };
+            let Some(method) = mapped else {
+                blocking.push(format!("unmapped pairwise comparison family `{family}` with `{test}`"));
+                return parsed;
+            };
+            if let Some(sel) = parse_selected_pairs_target(pairwise, design_obj, is_two_way, blocking) {
+                parsed.multiplicity.method = method;
+                parsed.multiplicity.selected_pairs = Some(sel.pairs);
+                parsed.control_factor = sel.control_factor;
+                parsed.comparison_family_mode = sel.family_mode;
+            }
+        }
         "ALL_VS_ALL" => {
             parsed.multiplicity.method = match test {
                 "TUKEY" | "TUKEY_HSD" => MultiplicityMethod::TukeyHsd,
@@ -1412,23 +1573,32 @@ fn parse_multiplicity(post_tests: Option<&JsonMap>, is_two_way: bool, blocking: 
     parsed
 }
 
-/// Check that a control-versus-all column index (a sheet data-set index, which is how CurveBook
-/// identifies the control column on one-way ANOVA and column-factor two-way ANOVA) is among the
-/// analysed data sets. An empty selection analyses every data set.
+/// Check that control-versus-all and selected-pairs column indices (sheet data-set indices on
+/// one-way ANOVA and column-factor two-way ANOVA) lie within the analysed data sets. An empty
+/// selection analyses every data set.
 pub fn check_control_in_selection(kind: &AnalysisKind, selected: &[usize]) -> Result<(), String> {
-    let control_col = match kind {
-        AnalysisKind::OneWayAnova(spec) => spec.multiplicity.effective_control_column(),
-        AnalysisKind::FactorialAnova(spec) if spec.control_factor == Some(1) => spec.multiplicity.effective_control_column(),
+    if selected.is_empty() {
+        return Ok(());
+    }
+    let mult = match kind {
+        AnalysisKind::OneWayAnova(spec) => Some(&spec.multiplicity),
+        AnalysisKind::FactorialAnova(spec) if spec.control_factor == Some(1) => Some(&spec.multiplicity),
         _ => None,
     };
-    let Some(control_column) = control_col else {
+    let Some(mult) = mult else {
         return Ok(());
     };
-    if selected.is_empty() || selected.contains(&control_column) {
-        Ok(())
-    } else {
-        Err(String::from("control group is not among the analysed data sets"))
+    if let Some(control_column) = mult.effective_control_column()
+        && !selected.contains(&control_column)
+    {
+        return Err(String::from("control group is not among the analysed data sets"));
     }
+    if let Some(pairs) = mult.selected_pairs.as_deref()
+        && pairs.iter().any(|(a, b)| !selected.contains(a) || !selected.contains(b))
+    {
+        return Err(String::from("selected comparison pair references a data set outside the analysed selection"));
+    }
+    Ok(())
 }
 
 fn translate_one_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {

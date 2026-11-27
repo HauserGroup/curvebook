@@ -733,6 +733,7 @@ fn r34_factorial_dunnett_unmatched_control_column_returns_typed_error() {
             threshold: 0.05,
             report_confidence_intervals: true,
             control_column: None,
+            selected_pairs: None,
         },
         ..FactorialAnovaSpec::default()
     };

@@ -117,7 +117,13 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
     let r_all = run_kind(
         &sh0,
         km(
-            MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true, control_column: None },
+            MultiplicitySpec {
+                method: MultiplicityMethod::Bonferroni,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+                selected_pairs: None,
+            },
             true,
         ),
     )
@@ -179,7 +185,16 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
     let sh4 = survival_sheet("rv67", &cohorts);
     let r_s = run_kind(
         &sh4,
-        km(MultiplicitySpec { method: MultiplicityMethod::Sidak, threshold: 0.05, report_confidence_intervals: true, control_column: None }, false),
+        km(
+            MultiplicitySpec {
+                method: MultiplicityMethod::Sidak,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                control_column: None,
+                selected_pairs: None,
+            },
+            false,
+        ),
     )
     .unwrap();
     for (rec, &ep) in r_s.pairwise_comparisons.iter().zip(&exp_s) {
@@ -193,6 +208,7 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             false,
         ),
@@ -208,7 +224,8 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
                     method: MultiplicityMethod::Dunnett { control_column: 9 },
                     threshold: 0.05,
                     report_confidence_intervals: true,
-                    control_column: None
+                    control_column: None,
+                    selected_pairs: None
                 },
                 false
             )
@@ -216,8 +233,11 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
         Err(StatsError::InvalidParameter { name: "control_column", .. })
     ));
     for (m, name) in [(MultiplicityMethod::TukeyHsd, "Tukey-Kramer"), (MultiplicityMethod::GamesHowell, "Games-Howell")] {
-        let rf = run_kind(&sh4, km(MultiplicitySpec { method: m, threshold: 0.05, report_confidence_intervals: true, control_column: None }, false))
-            .unwrap();
+        let rf = run_kind(
+            &sh4,
+            km(MultiplicitySpec { method: m, threshold: 0.05, report_confidence_intervals: true, control_column: None, selected_pairs: None }, false),
+        )
+        .unwrap();
         assert!(tab_by_id(&rf, "survival-pairwise").footnotes.iter().any(|f| f.contains(name) && f.contains("Bonferroni")));
     }
 }

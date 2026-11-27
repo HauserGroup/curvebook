@@ -113,19 +113,33 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
         append_spearman_heteroscedasticity(&mut out, &obs, &post_hoc, p_fmt, confidence.alpha())?;
     }
 
-    let mut effective_mult = fac_spec.multiplicity;
-    if let Some(raw_ctrl) = crate::multiplicity::validate_multiplicity_control_spec(&effective_mult)?
-        && let Some(target_f) = fac_spec.control_factor
-    {
-        if target_f >= obs.factor_levels.len() {
-            return Err(StatsError::InvalidParameter { name: "control_factor", value: target_f as f64 });
+    let mut effective_mult = fac_spec.multiplicity.clone();
+    match crate::multiplicity::validate_multiplicity_family_spec(&effective_mult)? {
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {}
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(raw_ctrl) => {
+            if let Some(target_f) = fac_spec.control_factor {
+                if target_f >= obs.factor_levels.len() {
+                    return Err(StatsError::InvalidParameter { name: "control_factor", value: target_f as f64 });
+                }
+                if let Some(Some(src_indices)) = factor_source_indices.get(target_f) {
+                    let pos = src_indices
+                        .iter()
+                        .position(|&idx| idx == raw_ctrl)
+                        .ok_or(StatsError::InvalidParameter { name: "control_column", value: raw_ctrl as f64 })?;
+                    effective_mult = effective_mult.with_control_column(pos);
+                }
+            }
         }
-        if let Some(Some(src_indices)) = factor_source_indices.get(target_f) {
-            let pos = src_indices
-                .iter()
-                .position(|&idx| idx == raw_ctrl)
-                .ok_or(StatsError::InvalidParameter { name: "control_column", value: raw_ctrl as f64 })?;
-            effective_mult = effective_mult.with_control_column(pos);
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(raw_pairs) => {
+            if let Some(target_f) = fac_spec.control_factor {
+                if target_f >= obs.factor_levels.len() {
+                    return Err(StatsError::InvalidParameter { name: "control_factor", value: target_f as f64 });
+                }
+                if let Some(Some(src_indices)) = factor_source_indices.get(target_f) {
+                    let remapped = crate::multiplicity::resolve_selected_pair_positions(raw_pairs, |idx| src_indices.iter().position(|&c| c == idx))?;
+                    effective_mult = effective_mult.with_selected_pairs(remapped);
+                }
+            }
         }
     }
 

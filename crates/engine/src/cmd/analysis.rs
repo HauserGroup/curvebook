@@ -2381,7 +2381,59 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
         }
         AnalysisKind::FitSplineLowess(sp) => validate_spline_lowess_spec_semantics(sp)?,
         AnalysisKind::AreaUnderCurve(auc) => validate_area_under_curve_spec_semantics(auc)?,
+        AnalysisKind::OneWayAnova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
+        AnalysisKind::FactorialAnova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
+        AnalysisKind::NestedComparison(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => validate_multiplicity_spec_semantics(multiplicity, true)?,
+        AnalysisKind::MultipleRowTTests(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, false)?,
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_selected_pairs_list(pairs: &[(usize, usize)]) -> Result<(), EngineError> {
+    if pairs.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_pairs` must contain at least one pair"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for &(a, b) in pairs {
+        if a == b {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`selected_pairs` cannot contain self-pair [{a}, {b}]")));
+        }
+        if !seen.insert((a.min(b), a.max(b))) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`selected_pairs` contains duplicate pair [{a}, {b}]")));
+        }
+    }
+    Ok(())
+}
+
+fn validate_multiplicity_spec_semantics(mult: &MultiplicitySpec, allow_selected_pairs: bool) -> Result<(), EngineError> {
+    if let Some(pairs) = mult.selected_pairs.as_deref() {
+        if !allow_selected_pairs {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_pairs` is not supported for this analysis kind"));
+        }
+        if mult.effective_control_column().is_some() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_pairs` cannot be combined with `control_column` or `Dunnett`"));
+        }
+        if !MultiplicitySpec::supports_selected_pairs(mult.method) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+            ));
+        }
+        validate_selected_pairs_list(pairs)?;
+    }
+    if let MultiplicityMethod::Dunnett { control_column } = mult.method {
+        if let Some(extra) = mult.control_column
+            && extra != control_column
+        {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`control_column` disagrees with Dunnett control index"));
+        }
+    } else if mult.control_column.is_some() && !MultiplicitySpec::supports_control_column(mult.method) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+        ));
     }
     Ok(())
 }
@@ -2969,9 +3021,10 @@ fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str) -> bool {
     }
 }
 
-fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str) -> bool {
+fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str, allow_selected_pairs: bool) -> bool {
     matches!(key, "multiplicity" | "report_confidence_intervals" | "alpha")
         || (MultiplicitySpec::supports_control_column(mult.method) && key == "control_column")
+        || (allow_selected_pairs && MultiplicitySpec::supports_selected_pairs(mult.method) && key == "selected_pairs")
 }
 
 fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat: bool) -> bool {
@@ -3071,13 +3124,14 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
         AnalysisKind::BlandAltman(_) => matches!(key, "column_a" | "column_b" | "percent_difference" | "xy_compare_x_vs_y"),
         AnalysisKind::PassingBablok(_) => matches!(key, "x_column" | "y_column"),
         AnalysisKind::MultipleRowTTests(mr) => {
-            matches!(key, "paired" | "nonparametric" | "assume_equal_sd" | "lognormal_mode") || is_key_allowed_for_multiplicity(&mr.multiplicity, key)
+            matches!(key, "paired" | "nonparametric" | "assume_equal_sd" | "lognormal_mode")
+                || is_key_allowed_for_multiplicity(&mr.multiplicity, key, false)
         }
         AnalysisKind::OneWayAnova(spec) => {
             matches!(key, "mixed_effects_reml" | "df_method" | "residual_covariance" | "compute_effect_sizes")
                 || (matches!(spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. })
                     && key == "geisser_greenhouse")
-                || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+                || is_key_allowed_for_multiplicity(&spec.multiplicity, key, true)
         }
         AnalysisKind::FactorialAnova(spec) => {
             matches!(
@@ -3103,10 +3157,10 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     | "formula"
                     | "three_way_rm_factors"
                     | "emit_consolidated_data_tab"
-            ) || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+            ) || is_key_allowed_for_multiplicity(&spec.multiplicity, key, true)
         }
         AnalysisKind::NestedComparison(spec) => {
-            matches!(key, "two_group_t_test" | "df_method") || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+            matches!(key, "two_group_t_test" | "df_method") || is_key_allowed_for_multiplicity(&spec.multiplicity, key, true)
         }
         AnalysisKind::Contingency(c) => {
             matches!(
@@ -3136,7 +3190,7 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     | "ratio_median_ci"
                     | "mv_status_columns"
                     | "mv_group_columns"
-            ) || is_key_allowed_for_multiplicity(multiplicity, key)
+            ) || is_key_allowed_for_multiplicity(multiplicity, key, true)
         }
         AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => {
             matches!(
@@ -3965,6 +4019,7 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "plot_distribution",
     "three_way_rm_factors",
     "control_factor",
+    "selected_pairs",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -4115,7 +4170,7 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         }
         AnalysisKind::MultipleRowTTests(spec) => {
             apply_enum_field(norm, "lognormal_mode", &mut spec.lognormal_mode, "`lognormal_mode`")?;
-            apply_multiplicity_override(&mut spec.multiplicity, norm)?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm, false)?;
         }
         AnalysisKind::OneWayAnova(spec) => {
             if let OneWayMethod::RepeatedMeasures { ref mut geisser_greenhouse }
@@ -4125,11 +4180,11 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             }
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
             apply_enum_field(norm, "residual_covariance", &mut spec.residual_covariance, "`residual_covariance`")?;
-            apply_multiplicity_override(&mut spec.multiplicity, norm)?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
         }
         AnalysisKind::NestedComparison(spec) => {
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
-            apply_multiplicity_override(&mut spec.multiplicity, norm)?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
         }
         AnalysisKind::FactorialAnova(spec) => {
             apply_enum_field(norm, "repeated_measures", &mut spec.repeated_measures, "`repeated_measures`")?;
@@ -4138,7 +4193,7 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             apply_enum_field(norm, "sphericity_correction", &mut spec.sphericity_correction, "`sphericity_correction`")?;
             apply_enum_field(norm, "reml_zero_variance_policy", &mut spec.reml_zero_variance_policy, "`reml_zero_variance_policy`")?;
             apply_enum_field(norm, "comparison_family_mode", &mut spec.comparison_family_mode, "`comparison_family_mode`")?;
-            apply_multiplicity_override(&mut spec.multiplicity, norm)?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
         }
         AnalysisKind::PValueStack(spec) => {
             apply_enum_field(norm, "method", &mut spec.method, "P-value stack `method`")?;
@@ -4190,7 +4245,7 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         AnalysisKind::Survival(spec) => match spec {
             SurvivalAnalysisSpec::KaplanMeier { multiplicity, treat_other_as, .. } => {
                 apply_enum_field(norm, "treat_other_as", treat_other_as, "`treat_other_as`")?;
-                apply_multiplicity_override(multiplicity, norm)?;
+                apply_multiplicity_override(multiplicity, norm, true)?;
             }
             SurvivalAnalysisSpec::CoxProportionalHazards { reference_levels, tie_method, ci_method, treat_other_as, .. } => {
                 if let Some(rl) = norm.get("reference_levels") {
@@ -4322,7 +4377,30 @@ fn apply_contingency_custom_overrides(spec: &mut ContingencySpec, norm: &Value) 
     Ok(())
 }
 
-fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> Result<(), EngineError> {
+fn parse_selected_pairs_json(val: &Value) -> Result<Vec<(usize, usize)>, EngineError> {
+    let Some(arr) = val.as_array() else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_pairs` must be an array of [col_a, col_b] integer pairs"));
+    };
+    let mut pairs = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let Some(pair) = item.as_array() else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`selected_pairs[{idx}]` must be a two-element array [col_a, col_b]")));
+        };
+        let [first, second] = pair.as_slice() else {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("`selected_pairs[{idx}]` must contain exactly 2 indices, got {}", pair.len()),
+            ));
+        };
+        let a = parse_usize_json_value(first, "selected_pairs")?;
+        let b = parse_usize_json_value(second, "selected_pairs")?;
+        pairs.push((a, b));
+    }
+    validate_selected_pairs_list(&pairs)?;
+    Ok(pairs)
+}
+
+fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allow_selected_pairs: bool) -> Result<(), EngineError> {
     if let Some(m_val) = params.get("multiplicity")
         && !m_val.is_null()
     {
@@ -4332,18 +4410,28 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> R
             } else {
                 mult.method = deserialize_strict(m_val, "/multiplicity")?;
                 mult.control_column = None;
+                mult.selected_pairs = None;
             }
         } else if let Ok(parsed) = serde_json::from_value::<MultiplicitySpec>(m_val.clone()) {
             *mult = parsed;
         } else if m_val.as_str().is_some_and(|s| s.trim().eq_ignore_ascii_case("dunnett")) {
             mult.method = MultiplicityMethod::Dunnett { control_column: 0 };
             mult.control_column = None;
+            mult.selected_pairs = None;
         } else {
             mult.method = parse_serde_enum(m_val, "`multiplicity`")?;
             if !MultiplicitySpec::supports_control_column(mult.method) {
                 mult.control_column = None;
             }
+            if !MultiplicitySpec::supports_selected_pairs(mult.method) {
+                mult.selected_pairs = None;
+            }
         }
+    }
+    let has_non_null_ctrl = params.get("control_column").is_some_and(|v| !v.is_null());
+    let has_non_null_pairs = params.get("selected_pairs").is_some_and(|v| !v.is_null());
+    if has_non_null_ctrl && has_non_null_pairs {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`control_column` and `selected_pairs` are mutually exclusive"));
     }
     if let MultiplicityMethod::Dunnett { ref mut control_column } = mult.method {
         apply_usize_field(params, "control_column", control_column)?;
@@ -4353,10 +4441,27 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> R
             mult.control_column = None;
         } else if MultiplicitySpec::supports_control_column(mult.method) {
             mult.control_column = Some(parse_usize_json_value(ctrl_val, "control_column")?);
+            mult.selected_pairs = None;
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
                 "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+            ));
+        }
+    }
+    if let Some(pairs_val) = params.get("selected_pairs") {
+        if pairs_val.is_null() {
+            mult.selected_pairs = None;
+        } else if !allow_selected_pairs {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_pairs` is not supported for this analysis kind"));
+        } else if MultiplicitySpec::supports_selected_pairs(mult.method) {
+            let pairs = parse_selected_pairs_json(pairs_val)?;
+            mult.selected_pairs = Some(pairs);
+            mult.control_column = None;
+        } else {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
     }

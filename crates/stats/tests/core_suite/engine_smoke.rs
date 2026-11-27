@@ -148,6 +148,7 @@ fn all_14_multiplicity_procedures_and_anova_family() {
             threshold: 0.05,
             report_confidence_intervals: false,
             control_column: None,
+            selected_pairs: None,
         },
     )
     .unwrap();
@@ -229,6 +230,7 @@ fn all_14_multiplicity_procedures_and_anova_family() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..Default::default()
         }),

@@ -271,6 +271,7 @@ fn build_interop_fixtures() -> Result<InteropFixtures, Box<dyn Error>> {
                 threshold: 0.05,
                 report_confidence_intervals: true,
                 control_column: None,
+                selected_pairs: None,
             },
             ..OneWayAnovaSpec::default()
         }),
