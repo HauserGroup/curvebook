@@ -1,8 +1,10 @@
 # Privacy, security, licensing, and clean-room policy
 
+<!-- Audience: Tier 2 Technical Reference — zero-egress architecture, local IPC trust boundaries, dependency licence rules, and vulnerability reporting belong here; keep ../index.html and ../faq.html concise for scientists. -->
+
 CurveBook is built for confidential laboratory and clinical research data. The desktop app, headless CLI, MCP server, and statistical libraries run offline on your machine with zero telemetry and zero network egress.
 
-See the public [Privacy Policy](https://curvebook.org/privacy.html), [Security Policy](../../SECURITY.md), and [Licence & Attribution Policy](../licences.md).
+This reference covers local trust boundaries, build attestations, licensing, and vulnerability reporting. For a plain-language overview, see [CurveBook home](../index.html), the [FAQ](../faq.html), or the full [Privacy Policy](../privacy.html). Repository policies also live in [Security Policy](../../SECURITY.md) and [Licence & Attribution Policy](../licences.md).
 
 ---
 
@@ -29,14 +31,23 @@ CurveBook's binaries (`curvebook`, `curvebook-cli`) and core libraries contain *
 When enabled with `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, port `1` to `65535`):
 
 - CurveBook binds strictly to **`127.0.0.1:<port>`** (loopback only, never `0.0.0.0` or external interfaces).
-- Requests require a bearer token checked in constant time. Set `CURVEBOOK_CONTROL_TOKEN` rather than passing `--control-token` on the command line, which exposes the token in process listings and prints a warning.
+- Requests require a bearer token checked in constant time. Set `CURVEBOOK_CONTROL_TOKEN` rather than passing `--control-token` on the command line. Command-line tokens appear in process listings and trigger a warning.
 
 ---
 
 ## GitHub Pages and GitHub Releases policies {#pages-and-releases}
 
-- **GitHub Pages:** Serves static documentation pages directly from GitHub infrastructure with zero application tracking, analytics beacons, or scripts. See the [Privacy Policy](https://curvebook.org/privacy.html) for GitHub hosting details.
+- **GitHub Pages:** Serves static documentation pages directly from GitHub infrastructure with zero application tracking, analytics beacons, or scripts. See the [Privacy Policy](../privacy.html) for GitHub hosting details.
 - **GitHub Releases and build attestations:** Release packages, the CycloneDX 1.5 SBOM (`curvebook-<version>.cdx.json`), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` are published through GitHub Actions. Each release carries a keyless Sigstore build provenance attestation, and platform packages carry CycloneDX SBOM attestations ([Releasing](../release/releasing.md)). Attestation steps run only in CI and add zero network code to CurveBook binaries.
+
+To verify the signed CycloneDX 1.5 SBOM attestation attached to an installer or FreeBSD archive:
+
+```sh
+gh attestation verify <downloaded-file> \
+  --repo HauserGroup/curvebook \
+  --predicate-type https://cyclonedx.org/bom \
+  --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
+```
 
 ---
 
@@ -52,7 +63,7 @@ When enabled with `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, port `1` to `
 
 CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, probability distributions, vector graphics renderers, container parsers, and UI components are written independently in Rust from peer-reviewed literature.
 
-Citations are documented across the numerical modules, [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html), and validated against NIST StRD and open-source reference oracles. Automated checks (`cargo xtask brands`, `cargo xtask cleanroom`, `cargo xtask citations`) enforce clean-room boundaries continuously. Support for `.pzfx files` and `.prism files` is isolated at the external file-format import boundary.
+Citations appear across the numerical modules, the [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and the [Parametric Equations Registry](registry/equations.html). Results are validated against NIST StRD and open-source reference oracles. Automated checks (`cargo xtask brands`, `cargo xtask cleanroom`, `cargo xtask citations`) enforce clean-room boundaries continuously. Support for `.pzfx files` and `.prism files` is isolated at the external file-format import boundary.
 
 ---
 

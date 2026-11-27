@@ -1,6 +1,8 @@
 # Control protocol, batch format, and engine errors
 
-CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-lines `--control` channel attached to the desktop app, standalone `run` scripts, and `curvebook.batch.v1` batch manifests. Every engine command follows the stability contract in [Command IDs](../../command-ids.md).
+<!-- Audience: Tier 2 Technical Reference — loopback --control wire protocol, curvebook.batch.v1 manifest keys, run scripts, and engine error categories belong here; keep ../get-started.md and ../../mcp-for-beginners.md concise for scientists. -->
+
+CurveBook supports three scriptable interfaces alongside MCP: a loopback JSON-lines `--control` channel attached to the desktop app, standalone `run` scripts, and `curvebook.batch.v1` batch manifests. For standard installation or AI assistant setup, start with [Install CurveBook](../get-started.md) or [MCP setup for beginners](../../mcp-for-beginners.md). Every engine command follows the stability contract in [Command IDs](../../command-ids.md).
 
 ## Loopback desktop control protocol (`--control`)
 
@@ -20,9 +22,9 @@ Single-call request and response syntax:
 {"id":1,"ok":true,"result":{"command_id":"sheet.createData","mutated":true,"message":"created data table sheet","payload":{"sheet_id":"data-1","title":"Data 1","kind":"xy","info_sheet_id":"info-1","graph_sheet_id":"graph-1"}},"error":null}
 ```
 
-Built-in control methods are `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, and interactive UI actions (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`). You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
+Built-in control methods include `"auth"`, `"ping"`, `"command.list"`, `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`), and `"app.quit"`. Interactive UI actions add `ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, and `ui.switch_tab`. You can also pass any registered engine or `ui.*` command ID directly as `"method"` or `"op"`.
 
-When calling `doc.export`, optional `transparent_bg: true` is supported only for `svg`, `png`, and `tiff`; passing `transparent_bg: true` for opaque formats such as `pdf` or `emf` fails with `bad_input`.
+When calling `doc.export`, optional `transparent_bg: true` works only for `svg`, `png`, and `tiff`. Passing `transparent_bg: true` for opaque formats such as `pdf` or `emf` fails with `bad_input`.
 
 ## Batch manifest format (`curvebook.batch.v1`) {#batch-manifest}
 
@@ -40,11 +42,11 @@ Top-level manifest keys:
 - `project` / `template`: Optional source project or `.cbtemplate` path. These two keys are mutually exclusive; omit both to start from a blank session.
 - `inputs`: Optional ordered list of delimited imports using `path` or `file` (or inline `csv` / `tsv`), plus optional `sheet`, `kind`, `subcolumn_mode`, `delimiter`, and `decimal_separator`.
 - `commands`: Optional ordered list of steps, each naming `cmd` (aliases: `command`, `method`) with an optional `id` and canonical `snake_case` `params` object.
-- `exports`: Optional ordered list of project saves or table/figure exports using `out` or `path` and optional `format`, `sheet`, `dpi`, `pretty`, `tab_index`, `pdf_version`, and `ttf_font`. Use `format: "curvebook"` or `"curvebook.d"` to save the resulting project.
+- `exports`: Optional ordered list of project saves or table/figure exports using `out` or `path`. Optional keys are `format`, `sheet`, `dpi`, `pretty`, `tab_index`, `pdf_version`, and `ttf_font`. Use `format: "curvebook"` or `"curvebook.d"` to save the resulting project.
 
 ## `run` script format
 
-`curvebook-cli run <script> [--workdir <dir>] [--json]` accepts newline-delimited JSON objects (NDJSON) or a JSON array of command steps (`{"cmd":"...","id":"...","params":{...}}`, accepting `cmd`, `command`, or `method`). Pass `-` to read the script from standard input.
+`curvebook-cli run <script> [--workdir <dir>] [--json]` accepts newline-delimited JSON objects (NDJSON) or a JSON array of command steps. Each step uses `{"cmd":"...","id":"...","params":{...}}` (accepting `cmd`, `command`, or `method`). Pass `-` to read the script from standard input.
 
 ## Engine error codes and categories {#error-codes}
 

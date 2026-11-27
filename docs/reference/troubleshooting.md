@@ -1,6 +1,8 @@
 # Troubleshooting, error codes & known issues
 
-Use this guide to resolve installer security prompts, missing fonts, GPU startup errors, MCP connection failures, crash recovery warnings, structured error codes, and Beta known issues.
+<!-- Audience: Tier 2 Technical Reference — OS security workarounds, GPU/MCP diagnostics, error code tables, and Beta known issues belong here; keep get-started.md and faq.html concise for scientists. -->
+
+Use this reference to resolve installer security prompts, missing fonts, GPU startup errors, MCP connection failures, crash-recovery warnings, structured error codes, and Beta known issues. For standard installation or first-time MCP setup, start with [Install CurveBook](get-started.md) or [MCP setup for beginners](../mcp-for-beginners.md).
 
 ---
 
@@ -35,12 +37,12 @@ If running the `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or 
 
 ## Fonts and rendering issues {#fonts-and-rendering}
 
-- **Missing CJK, RTL, or mathematical glyphs:** CurveBook bundles no binary fonts and relies on system TrueType and OpenType fonts. On minimal Linux or FreeBSD systems without Noto Sans CJK or DejaVu Sans, install system fonts, set `CURVEBOOK_FONTS_DIR` to a folder of `.ttf` or `.otf` files, or pass `--ttf-font <path>` to `curvebook`.
+- **Missing CJK, RTL, or mathematical glyphs:** CurveBook bundles no binary fonts and relies on system TrueType and OpenType fonts. On minimal Linux or FreeBSD systems without Noto Sans CJK or DejaVu Sans, install system fonts. You can also set `CURVEBOOK_FONTS_DIR` to a folder of `.ttf` or `.otf` files, or pass `--ttf-font <path>` to `curvebook`.
 - **Preflight warnings (`min_font_size`, `hairline_stroke`, `text_outside_canvas`):** Run `graph.preflightCheck` or set the [page-layout resize mode](graphs.md#page-layouts) to `KeepTypographyPt` when shrinking figures for narrow journal columns. This keeps labels at 5.0 pt or larger and strokes at 0.25 pt or thicker.
 
 ### GPU and graphics initialization {#gpu-graphics}
 
-The CurveBook desktop window uses native GPU acceleration (Metal only on macOS, DirectX 12, Vulkan, or OpenGL on Windows, and Vulkan or OpenGL on Linux). On older Macs without full Metal support, virtualized desktops, or systems with outdated GPU drivers, startup or window resizing can fail with a graphics initialization error (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
+The CurveBook desktop window uses native GPU acceleration: Metal only on macOS, DirectX 12, Vulkan, or OpenGL on Windows, and Vulkan or OpenGL on Linux. Older Macs without full Metal support, virtualized desktops, or outdated GPU drivers can trigger startup or resize errors (`RequestAdapterError`, `RequestDeviceError`, `CreateSurfaceError`, `NoSurfaceFormatsAvailable`) or a `GPU device lost` message.
 
 Try these steps in order:
 

@@ -1,5 +1,7 @@
 # MCP server reference
 
+<!-- Audience: Tier 2 Technical Reference — JSON-RPC wire framing, attachment flags, tool annotations, resource URIs, and error payloads belong here; keep ../../mcp-for-beginners.md concise for scientists. -->
+
 CurveBook exposes calculation, graphing, inspection, and UI automation over the Model Context Protocol (MCP, JSON-RPC 2.0). The stdio server works with headless files or attaches to a live desktop window started with `--control <port>`.
 
 For client setup snippets and checks, see [MCP setup for beginners](../../mcp-for-beginners.md). For complete generated tool schemas, annotations, prompts, and resources, see the [MCP Tools & Surface Registry](../registry/mcp-tools.html) and [Engine Command Registry](../registry/commands.html).
@@ -41,7 +43,7 @@ Environment variables and flags for live-attach mode:
 - `--control-port <port>` / `CURVEBOOK_CONTROL_PORT`: Loopback TCP control port from `1` to `65535`; the CLI flag overrides the environment variable.
 - `--control-token <token>` / `CURVEBOOK_CONTROL_TOKEN`: Bearer authentication token. Prefer the environment variable or automatic discovery from the per-port `control-<port>.token` file written by `curvebook --control <port>`.
 - `CURVEBOOK_CONFIG_DIR`: Overrides the configuration folder searched for `control-<port>.token`.
-- `CURVEBOOK_CONTROL_IO_TIMEOUT_MS`: Loopback TCP read/write timeout in milliseconds (`100` to `600000`). Defaults are 30 s for standard requests and 120 s for heavy commands (`doc.export`, `command.batch`, `engine.execute`, imports, and renders); TCP connect uses a fixed 2 s timeout.
+- `CURVEBOOK_CONTROL_IO_TIMEOUT_MS`: Loopback TCP read/write timeout in milliseconds (`100` to `600000`). Defaults are 30 s for standard requests and 120 s for heavy commands (`doc.export`, `command.batch`, `engine.execute`, imports, and renders). TCP connect uses a fixed 2 s timeout.
 
 ## Core tools and dynamic toolsets
 
@@ -64,21 +66,21 @@ Single-call `tools/call` request and response syntax (`doc_inspect`):
 {"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"analyses\":[],\"dirty\":false,\"file_path\":null,\"graphs\":[],\"layouts\":[],\"schema_version\":9,\"sheets\":{\"data\":[],\"info\":[]},\"title\":\"Untitled Project\",\"total_sheet_count\":0,\"variables\":{\"result_scalars\":[]}}","type":"text"}],"isError":false,"structuredContent":{"analyses":[],"dirty":false,"file_path":null,"graphs":[],"layouts":[],"schema_version":9,"sheets":{"data":[],"info":[]},"title":"Untitled Project","total_sheet_count":0,"variables":{"result_scalars":[]}}}}
 ```
 
-In `--control-port` live-attach mode, calling `doc_inspect` without `sheet_id` returns `mode: "live_attach"`, `control_port`, the live desktop `snapshot`, and project summary fields regardless of `include_cells`. Supplying `sheet_id` returns that sheet's detail (with optional `include_cells` previews) alongside `mode` and `control_port`.
+In `--control-port` live-attach mode, calling `doc_inspect` without `sheet_id` returns `mode: "live_attach"`, `control_port`, the live desktop `snapshot`, and project summary fields. This response ignores `include_cells`. Supplying `sheet_id` returns that sheet's detail (with optional `include_cells` previews) alongside `mode` and `control_port`.
 
 Exact schemas, annotations, and request/response examples for every core tool, dynamic group toolset, and `gui` tool appear in the [MCP Tools & Surface Registry](../registry/mcp-tools.html).
 
 ## Files: open, save, and export
 
 - **`open_file`** opens or imports `.curvebook`, `.curvebook.d`, `.cbtemplate`, `.pzfx files`, `.prism files`, `.xlsx`, `.csv`, and `.tsv`. Pass `append: true` to merge the incoming sheets into the open project instead of replacing it (the same merge as **File › Merge Project…**).
-- **`save_file`** writes `.curvebook`, `.curvebook.d`, or `.cbtemplate`. It can also write a data-only `.pzfx` file (`format: "pzfx"`; `path` is required), or an experimental `.prism` file (the `.prism` format value plus `experimental: true`; `.prism files` are import-only at Beta). Writing `.pzfx` or `.prism` leaves the project's own file path and unsaved-changes state unchanged.
+- **`save_file`** writes `.curvebook`, `.curvebook.d`, or `.cbtemplate`. It can also write a data-only `.pzfx` file (`format: "pzfx"`; `path` is required). Experimental `.prism` export requires the `.prism` format value plus `experimental: true` (`.prism files` are import-only at Beta). Writing `.pzfx` or `.prism` leaves the project's own file path and unsaved-changes state unchanged.
 - **`export`** writes a sheet or the project as `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, or `json`, plus the same data-only `.pzfx` and experimental `.prism` options, either to disk or inline.
 
 `.pzfx` export saves data tables and info sheets only; analyses, graphs, and layouts stay in the `.curvebook` project. It is written to match the structure of real `.pzfx files` but has not been tested in other applications. Without `experimental: true`, a `.prism` export fails with `unsupported_format`.
 
 ## Resources and prompts
 
-- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for each project sheet, `result://<id>` (`application/json`) for computed results sheets, and URI templates (`sheet://{id}`, `result://{id}`). To keep responses small, `sheet://` URIs accept `?max_rows=N`, `?tab_id=<id>`, and `?detail=summary|full`, and `result://` URIs accept `?include_curves=false` or `?detail=summary` to leave out dense fitted-curve arrays.
+- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for each project sheet, `result://<id>` (`application/json`) for computed results sheets, and URI templates (`sheet://{id}`, `result://{id}`). To keep responses small, `sheet://` URIs accept `?max_rows=N`, `?tab_id=<id>`, and `?detail=summary|full`. Likewise, `result://` URIs accept `?include_curves=false` or `?detail=summary` to leave out dense fitted-curve arrays.
 - **Prompts (`prompts/list`, `prompts/get`):** Built-in prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide structured scientific checklists.
 
 Single-call `resources/read` syntax:

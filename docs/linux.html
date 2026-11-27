@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
+  <!-- Audience: Tier 1 Scientist Guide — keep sentences short and task-focused; put full packaging/CLI reference details in docs/reference/get-started.md and docs/reference/automation/cli.md. -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell" itemscope itemtype="https://schema.org/SoftwareApplication">
     <meta itemprop="name" content="CurveBook">
@@ -53,9 +54,9 @@
     <main id="main" tabindex="-1">
       <div class="overview doc-body">
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
-          <p class="eyebrow">Linux · <code>x86_64</code> · <code>aarch64</code></p>
+          <p class="eyebrow">Linux · x86_64 · ARM64</p>
           <h1 id="page-title">Biostatistics and curve fitting on Linux.<br><span>Native, offline, and open source.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> runs natively on Linux without Wine, virtual machines, or cloud accounts. Each portable <code>.AppImage</code> bundles the pure-Rust desktop GUI, the headless <code>curvebook-cli</code> runner, and the local stdio MCP server — opening <code>.pzfx</code>, <code>.prism</code>, <code>.xlsx</code>, and CSV/TSV data tables offline with zero telemetry.</p>
+          <p class="lead"><strong>CurveBook</strong> runs natively on Linux without Wine, virtual machines, or cloud accounts. One portable AppImage includes the desktop app, the <code>curvebook-cli</code> tool, and local AI assistant support (MCP). Open <code>.pzfx</code>, <code>.prism</code>, <code>.xlsx</code>, and CSV files offline with zero telemetry.</p>
           <ul class="pill-row" aria-label="Linux highlights">
             <li class="pill">x86_64 &amp; aarch64 AppImage</li>
             <li class="pill">Wayland &amp; X11</li>
@@ -81,15 +82,15 @@
         <section id="install" aria-labelledby="install-title" tabindex="-1">
           <p class="eyebrow">Quick start</p>
           <h2 id="install-title">Install and run on Linux</h2>
-          <p>Download <code>curvebook-&lt;version&gt;-linux-x86_64.AppImage</code> (or <code>aarch64</code> for ARM Linux) from <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases</a>, mark it executable, and launch:</p>
+          <p>Download the x86_64 or ARM64 AppImage from <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases</a>. Mark it executable and launch:</p>
           <pre><code>chmod +x curvebook-&lt;version&gt;-linux-x86_64.AppImage
 ./curvebook-&lt;version&gt;-linux-x86_64.AppImage</code></pre>
 
-          <h3>Without FUSE v2 (<code>libfuse2</code>) or for headless CLI use</h3>
-          <p>If your distribution does not ship FUSE v2 (for example newer Ubuntu releases) or you want to invoke <code>curvebook-cli</code> directly in scripts and MCP clients, extract the AppImage once:</p>
+          <h3>Without FUSE v2 or for command-line use</h3>
+          <p>On newer distributions without FUSE v2 (<code>libfuse2</code>), or to run <code>curvebook-cli</code> directly in scripts, extract the AppImage once:</p>
           <pre><code>./curvebook-&lt;version&gt;-linux-x86_64.AppImage --appimage-extract
 ./squashfs-root/usr/bin/curvebook-cli --version</code></pre>
-          <p>See <a href="manual/latest/troubleshooting.html#linux-fuse">Troubleshooting: Linux FUSE</a> and <a href="manual/latest/get-started.html#verifying-downloads">Verifying downloads</a> for <code>SHA256SUMS.txt</code> and keyless GitHub Sigstore attestation checks.</p>
+          <p>Need FUSE troubleshooting or download verification? See <a href="manual/latest/troubleshooting.html#linux-fuse">Linux FUSE help</a> and <a href="manual/latest/get-started.html#verifying-downloads">verifying downloads</a>.</p>
         </section>
 
         <hr>
@@ -98,10 +99,10 @@
           <p class="eyebrow">Full scientific workbench</p>
           <h2 id="capabilities-title">What you can do on Linux</h2>
           <ul>
-            <li><strong>Open existing lab files:</strong> read data tables from <code>.pzfx</code> and <code>.prism</code> files (<a href="open-pzfx-files.html">file-format guide</a>), Excel <code>.xlsx</code> workbooks, and CSV/TSV files, or work natively in <code>.curvebook</code> archives and Git-friendly <code>.curvebook.d/</code> directories.</li>
-            <li><strong>Biostatistics &amp; nonlinear regression:</strong> run <em>t</em>-tests, nonparametric comparisons, ordinary, repeated-measures, and REML mixed-effects ANOVA with multiple-comparison post tests, Kaplan–Meier and Cox proportional hazards survival analysis, contingency and ROC analyses, GLMs, PCA and clustering, power planning, and weighted or robust nonlinear curve fitting (including custom DSL and ODE models). See the <a href="manual/latest/analyses.html">analyses reference</a> and <a href="manual/latest/fitting.html">curve fitting reference</a>.</li>
-            <li><strong>Publication figures &amp; layouts:</strong> compose multi-panel figures on physical millimeter presets with significance brackets, compact letter display, live TeX equations, and colorblind-safe palettes, then export vector SVG, PDF, EMF, and raster PNG or TIFF. See <a href="manual/latest/graphs.html">graphs and layouts</a>.</li>
-            <li><strong>Headless CLI &amp; local AI automation (MCP):</strong> run reproducible batch pipelines with <code>curvebook-cli</code> or connect local MCP assistants via <code>curvebook-cli mcp --workdir &lt;folder&gt;</code>. See the <a href="manual/latest/mcp-for-beginners.html">beginner's MCP guide</a>.</li>
+            <li><strong>Open existing lab files:</strong> Import <code>.pzfx</code> and <code>.prism</code> tables (<a href="open-pzfx-files.html">file-format guide</a>), Excel workbooks, and CSV files. Save natively as a <code>.curvebook</code> file or a Git-friendly <code>.curvebook.d/</code> folder.</li>
+            <li><strong>Statistics &amp; curve fitting:</strong> Run <em>t</em>-tests, nonparametric tests, ANOVA, survival analysis, ROC curves, PCA, and nonlinear regression. Fit built-in models or write your own equations. See the <a href="manual/latest/analyses.html">analyses</a> and <a href="manual/latest/fitting.html">curve fitting</a> references.</li>
+            <li><strong>Publication figures &amp; layouts:</strong> Arrange multi-panel figures to journal column widths with significance brackets and colorblind-safe palettes. Export vector SVG, PDF, or EMF and raster PNG or TIFF. See <a href="manual/latest/graphs.html">graphs and layouts</a>.</li>
+            <li><strong>CLI &amp; AI assistants:</strong> Automate batch pipelines with <code>curvebook-cli</code>, or connect a local AI assistant via MCP. Read the <a href="manual/latest/mcp-for-beginners.html">beginner's MCP guide</a>.</li>
           </ul>
         </section>
 
@@ -111,9 +112,9 @@
           <p class="eyebrow">Packaging scope</p>
           <h2 id="packaging-title">Beta Linux packaging notes</h2>
           <ul>
-            <li><strong>AppImage only in Beta:</strong> Beta GitHub Releases ship portable <code>x86_64</code> and <code>aarch64</code> AppImages tested with Wayland and X11 portals, paired with <code>SHA256SUMS.txt</code> and Sigstore build provenance attestations. Native <code>.deb</code>, <code>.rpm</code>, and Flatpak packages are not part of the Beta download set.</li>
-            <li><strong>Zero telemetry &amp; offline-first:</strong> CurveBook makes no outbound network connections, sends no analytics or crash reports, and includes no auto-updater. Read the <a href="privacy.html">Privacy Policy</a>.</li>
-            <li><strong>Build from source:</strong> CurveBook is dual-licensed under <strong>MIT OR Apache-2.0</strong> and builds from source with Rust; see the <a href="https://github.com/HauserGroup/curvebook">GitHub repository</a>.</li>
+            <li><strong>AppImage only in Beta:</strong> Releases ship portable x86_64 and ARM64 AppImages for Wayland and X11, with checksums and build attestations. Native .deb, .rpm, and Flatpak packages are not built in Beta.</li>
+            <li><strong>Offline &amp; zero telemetry:</strong> CurveBook makes no network calls, collects no analytics, and has no auto-updater. Read the <a href="privacy.html">Privacy Policy</a>.</li>
+            <li><strong>Open source:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong> and buildable from source on <a href="https://github.com/HauserGroup/curvebook">GitHub</a>.</li>
           </ul>
         </section>
       </div>

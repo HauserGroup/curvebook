@@ -220,18 +220,17 @@ fn r12_8_public_format_docs_keep_honest_export_and_legacy_pzf_copy() {
     let landing = fs::read_to_string(repo_root.join("docs/open-pzfx-files.html")).unwrap();
     assert!(
         landing.contains("https://www.nature.com/articles/sdata201618")
-            && landing.contains("PCFFGRA4")
-            && landing.contains("<code>.dt</code>")
             && landing.contains("pzfx-format-specification.html")
             && landing.contains("File › Export › .pzfx file…")
             && landing.contains("curvebook-cli convert experiment.curvebook export.pzfx"),
-        "docs/open-pzfx-files.html must include FAIR citation, empirical .prism format callout, spec page link, and .pzfx export paths"
+        "docs/open-pzfx-files.html must include FAIR citation, spec page link, and .pzfx export paths"
     );
     let spec = fs::read_to_string(repo_root.join("docs/pzfx-format-specification.html")).unwrap();
     assert!(
         spec.contains("The closest thing we have to an actual specification")
             && spec.contains("proprietary blob hidden by the vendor")
             && spec.contains("130ab2f63ec643bee541b74c960e10db")
+            && spec.contains("<code>.dt</code>")
             && spec.contains("PCFFGRA4"),
         "docs/pzfx-format-specification.html must document empirical .prism/.pzfx structure and proprietary blobs"
     );

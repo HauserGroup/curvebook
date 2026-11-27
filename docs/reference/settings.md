@@ -1,6 +1,8 @@
 # Settings, shortcuts & languages
 
-CurveBook stores interface preferences and custom keyboard bindings locally in plain versioned JSON files. It uses no cloud accounts or remote syncing.
+<!-- Audience: Tier 2 Technical Reference — complete preferences schema keys, storage paths, shortcut scopes, and locale rules belong here; keep get-started.md and desktop-gui.md concise for scientists. -->
+
+CurveBook stores interface preferences and custom keyboard bindings locally in plain versioned JSON files, with no cloud accounts or remote syncing. This reference lists the exact JSON keys, OS storage paths, shortcut scopes, and locale rules. For installation or everyday workspace controls, start with [Install CurveBook](get-started.md) or the [Desktop GUI overview](desktop-gui.md).
 
 ---
 
@@ -36,14 +38,16 @@ Unless overridden, `curvebook` resolves configuration (`preferences.json`, `shor
 
 Set `CURVEBOOK_NO_PREFS=1` (or `true`, `yes`, `on`) to run statelessly without reading or writing preferences, shortcuts, or recovery journals.
 
+Optional desktop launch flags (`curvebook --help`) include `--portable-dir <dir>`, `--rulers`, `--in-window-menus`, `--ttf-font <path>`, and `--new-instance`.
+
 ---
 
 ## Keyboard shortcut customization {#keyboard-shortcuts}
 
 All engine commands and interactive desktop actions support customizable keyboard shortcuts:
 
-- **Context scopes:** Bindings use global, results-sheet, or non-results-sheet scopes. Context-sensitive shortcuts—such as **Cmd/Ctrl+T** editing analysis parameters on a results sheet versus creating a data table elsewhere—coexist without false conflicts.
-- **Saving and conflict checks:** Custom bindings save atomically to `preferences.json` (under `shortcuts`) and `shortcuts.json`. CurveBook rejects conflicts across overlapping scopes and supports resetting individual shortcuts or restoring all defaults.
+- **Context scopes:** Bindings use global, results-sheet, or non-results-sheet scopes. Context-sensitive shortcuts coexist without false conflicts—for example, **Cmd/Ctrl+T** edits analysis parameters on a results sheet and creates a data table elsewhere.
+- **Saving and conflict checks:** Custom bindings save atomically to `preferences.json` (under `shortcuts`) and `shortcuts.json`. CurveBook rejects conflicts across overlapping scopes. You can reset individual shortcuts or restore all defaults.
 
 ---
 

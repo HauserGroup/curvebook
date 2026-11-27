@@ -1,6 +1,10 @@
 # Concepts & document architecture
 
-CurveBook stores an entire statistical and graphing study inside one deterministic project. Projects are organized into five workspace sections, connected by a reactive directed acyclic graph (DAG), and protected by non-destructive exclusions, bounded undo/redo, and explicit schema versioning.
+<!-- Audience: Tier 2 Technical Reference — exhaustive project schemas, limits, and reactive lifecycle rules belong here; link to Tier 1 guides (desktop-gui.md or get-started.md) for scientist walkthroughs. -->
+
+This technical reference specifies CurveBook's project structure, structural limits, reactive dependency graph (DAG), non-destructive exclusions, undo/checkpoint budgets, and persisted analysis settings. For a quick workspace walkthrough, start with the [Desktop GUI guide](desktop-gui.md) or [Get started & installation](get-started.md).
+
+CurveBook stores an entire statistical and graphing study inside one deterministic project. Five workspace sections connect through a reactive directed acyclic graph (DAG). Non-destructive exclusions, bounded undo/redo, and explicit schema versioning protect your study at every step.
 
 ---
 
@@ -12,7 +16,7 @@ Editing and archive validation enforce these structural limits:
 
 | Limit | Value | Scope |
 |---|---:|---|
-| Document schema version | 8 | Active project JSON schema version |
+| Document schema version | 9 | Active project JSON schema version |
 | Sheets per project | 500 | Total sheets across all five navigator sections |
 | Rows per table | 1,000,000 | Maximum rows in one data table |
 | Datasets per table | 1,024 | Maximum dataset, group, or variable columns |
@@ -23,7 +27,7 @@ Editing and archive validation enforce these structural limits:
 | Sheet ID length | 256 bytes | Maximum UTF-8 byte length for a sheet ID |
 | Named checkpoints | 32 (64 on open) | Creation limit vs. archive validation ceiling |
 
-`project.createCheckpoint` allows creating up to 32 checkpoints per project. Opening an existing archive accepts up to 64 checkpoints.
+`project.createCheckpoint` allows up to 32 checkpoints per project. Opening an existing archive accepts up to 64 checkpoints.
 
 ---
 
@@ -41,14 +45,17 @@ CurveBook organizes sheets into five navigator sections:
 
 Key workspace behaviors across sections:
 
-- **Data tables:** Store row titles, non-destructive exclusion masks, exclusion provenance notes, `=` Calculated Variables, and linked data regions.
-- **Info sheets:** Hold text, numeric, or boolean constants—including standard metadata keys (`ExperimentDate`, `Experimenter`, `Protocol`, `ProjectCode`, `NotebookId`, `LotNumber`, `Instrument`, `Notes`)—that can be hooked into formulas, analyses, and graph text.
+- **Data tables:** Store row titles, non-destructive exclusion masks, and exclusion provenance notes. They also hold `=` Calculated Variables and linked data regions.
+- **Info sheets:** Hold text, numeric, or boolean constants that can hook into formulas, analyses, and graph text. Standard metadata keys include `ExperimentDate`, `Experimenter`, `Protocol`, `ProjectCode`, `NotebookId`, `LotNumber`, `Instrument`, and `Notes`.
 - **Results sheets:** Derive from a data table or another analyzable results sheet. Each results sheet includes assumption diagnostics, hookable scalar outputs, curve overlays, and optional floating notes.
-- **Graphs and page layouts:** Graphs reference one or more data tables plus optional overlays (fitted curves, comparison brackets, compact letter display, and live $\TeX$ equations). Page layouts hold up to 64 panels with physical paper sizes and journal column-width presets.
+- **Graphs:** Reference one or more data tables plus optional overlays. Supported overlays include fitted curves, comparison brackets, compact letter display, and live $\TeX$ equations.
+- **Page layouts:** Combine up to 64 panels on one page. Layouts support physical paper sizes and journal column-width presets.
 
 ### Sheet families {#sheet-families}
 
-Each sheet tracks its root data table via `family_anchor_sheet_id`. Downstream results sheets, derived transform tables, graphs, and page layouts stay linked to that anchor. You can inspect a family together or clone an entire pipeline coherently with `sheet.duplicateFamily` and `sheet.clonePipeline` (see the [Command Reference](../commands.md)).
+Each sheet tracks its root data table via `family_anchor_sheet_id`. Downstream results sheets, derived transform tables, graphs, and page layouts stay linked to that anchor.
+
+You can inspect a whole family together in the navigator. Use `sheet.duplicateFamily` or `sheet.clonePipeline` to clone an entire pipeline coherently (see the [Command Reference](../commands.md)).
 
 ---
 
@@ -64,13 +71,15 @@ Data table (raw observations) ├──► Formulas (= Calculated Variables)
                               └──► Graph (series + fit overlays + CLD/TeX) ──► Page layout
 ```
 
-- **Cycle detection:** Circular formulas, linked-region loops, and cyclic hook parameter bindings are rejected (`CycleDetected`) before any edit or recalculation commits.
+- **Cycle detection:** Circular formulas, linked-region loops, and cyclic hook bindings are rejected before any edit commits (`CycleDetected`).
 - **Dirty propagation:** Editing a cell, toggling an exclusion, updating an info constant, or changing analysis parameters marks downstream dependents dirty. Recalculation then runs in deterministic topological order (`project.recalculate`).
 - **Freezing sheets:** `sheet.freeze` and `sheet.unfreeze` toggle the `frozen` flag on any data, results, graph, or layout sheet. A frozen data table rejects direct mutations (`FrozenSheet`). A frozen results sheet keeps its existing snapshot when upstream data change.
-- **Result status lifecycle:** Every results sheet reports one of three states:
-  - **Dirty:** Upstream inputs or analysis parameters changed and recalculation is pending.
+- **Result status lifecycle:** Every results sheet reports one of these states:
+  - **Dirty:** Upstream inputs or analysis parameters changed, and recalculation is pending.
   - **Up to date:** Tabs, scalars, pairwise comparisons, fitted curves, and diagnostics match current inputs.
-  - **Failed:** Recalculation could not succeed for current inputs (for example, all rows excluded or a singular model). Scalar hooks return no value while failed so invalid results never propagate; restoring valid upstream inputs returns results to up to date automatically.
+  - **Imported:** Read-only snapshot imported from an external file (such as `.prism files`), with its upstream table unedited since import. Imported snapshots never feed scalar hooks or downstream analyses.
+  - **Imported stale:** Read-only imported snapshot whose upstream table was edited or removed after import. Cached tabs remain inspectable as a stale reference.
+  - **Failed:** Recalculation could not succeed for current inputs (for example, all rows excluded or a singular model). Scalar hooks return no value while failed so invalid results never propagate. Restoring valid upstream inputs returns the sheet to up to date automatically.
 
 ---
 
@@ -78,10 +87,10 @@ Data table (raw observations) ├──► Formulas (= Calculated Variables)
 
 Every numeric or text cell stores its `excluded` flag independently of its value. Marking a cell excluded has four effects:
 
-1. Preserves the raw numeric or text value in memory, `.curvebook` archives, and `.curvebook.d/` CSV files (written with a leading `*`, such as `*12.4`, when `parse_asterisk_exclusions` is active).
-2. Excludes the observation from descriptive summaries, statistical tests, curve fits, transforms, plotted points and error bars, and selection [Quick Statistics](qol.md#quick-statistics).
-3. Propagates as missing in [`=` Calculated Variables](tables.md#calculated-variables).
-4. Supports optional structured audit notes storing cell coordinate, `reason_tag`, `note`, and `timestamp_utc` (`table.excludeCellsWithReason` and `table.exclusionAuditReport`) without affecting numerical computations.
+1. **Raw value preserved:** The value stays intact in memory, `.curvebook` archives, and `.curvebook.d/` CSV files. When `parse_asterisk_exclusions` is active, CSV exports write excluded numbers with a leading `*` (such as `*12.4`).
+2. **Computation skipped:** Descriptive summaries, statistical tests, curve fits, transforms, plotted points, error bars, and selection [Quick Statistics](qol.md#quick-statistics) omit the observation.
+3. **Formula propagation:** Excluded cells propagate as missing in [`=` Calculated Variables](tables.md#calculated-variables).
+4. **Optional audit trail:** Structured audit notes record cell coordinate, `reason_tag`, `note`, and `timestamp_utc` via `table.excludeCellsWithReason` and `table.exclusionAuditReport`. Audit notes never affect numerical calculations.
 
 ---
 
@@ -101,21 +110,21 @@ Undo/redo history lives only in the active session and is not written inside `.c
 
 ### Named in-file checkpoints {#named-checkpoints}
 
-Use named checkpoints for milestone snapshots that persist across sessions (`project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, `project.deleteCheckpoint`). You can create up to 32 checkpoints per project, and opening existing archives accepts up to 64.
+Use named checkpoints for milestone snapshots that persist across sessions. Manage them with `project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, and `project.deleteCheckpoint`. You can create up to 32 checkpoints per project, and opening existing archives accepts up to 64.
 
-Each checkpoint stores an `id`, display `name`, optional `note`, UTC timestamp, and a validated JSON snapshot of the project (subject to the 128 MiB archive limit on restore). Restoring a checkpoint creates a single undoable action in the active session.
+Each checkpoint stores an `id`, display `name`, optional `note`, UTC timestamp, and validated JSON snapshot of the project. Restoring a checkpoint enforces the 128 MiB archive limit and creates one undoable step in the active session.
 
 ---
 
 ## Number formatting & *P*-value conventions {#number-and-pvalue-formatting}
 
-- **Data and tick formatting:** Tables and graphs separate stored IEEE-754 double-precision values from display formatting. Locale settings control decimal separators (`.` or `,`) and thousands grouping. Numeric axis ticks support decimal, power-of-ten superscript, scientific E, antilog, engineering SI, and categorical labels without rounding underlying data.
-- ***P*-value display:** Configured per analysis with four format modes:
+- **Data and tick formatting:** Tables and graphs separate stored IEEE-754 double-precision values from display formatting. Locale settings control decimal separators (`.` or `,`) and thousands grouping. Numeric axis ticks support decimal, power-of-ten superscript, scientific E, antilog, engineering SI, and categorical labels without rounding stored values.
+- ***P*-value display:** Configure formatting per analysis using four modes:
   - **Four decimals** (default): floor `< 0.0001`, up to `****`.
   - **APA:** `.123` style, floor `< .001`, up to `***`.
   - **NEJM:** `0.123` style, floor `< 0.001`, up to `***`.
   - **Custom:** `1` to `15` decimal places with an optional scientific-notation cutoff.
-- Display formatting never rounds numerical calculations. Multiplicity procedures and hypothesis decisions always use full IEEE-754 probabilities.
+- **Full-precision math:** Display formatting never rounds numerical calculations. Multiplicity procedures and hypothesis decisions always use full IEEE-754 probabilities.
 
 ---
 

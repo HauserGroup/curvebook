@@ -4,7 +4,7 @@ Start with the [README](../README.md). People using CurveBook should read the [o
 
 ## Using CurveBook
 
-These pages are published on the documentation site by `cargo xtask docs-site`. Edit the Markdown here, not the generated HTML.
+These pages are published on the documentation site by `cargo xtask docs-site`. Edit the Markdown or landing-page HTML here, not the generated HTML. Published pages follow the two-tier audience split defined in [`AGENTS.md`](../AGENTS.md#documentation-audience-tiers-docs-site---check) and [`release/github-pages.md`](release/github-pages.md#audience-tiers-scientist-guides-vs-technical-references): **Tier 1 scientist guides** stay short and plain-language (enforced by `docs-site --check`), while **Tier 2 technical references** hold exhaustive flags, schemas, equations, and format specifications. Read each file's top-of-file `Audience:` comment before editing.
 
 | Guide | Contents |
 |---|---|

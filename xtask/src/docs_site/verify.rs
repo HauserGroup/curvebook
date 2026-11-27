@@ -844,6 +844,23 @@ fn run_hygiene_scanners(root: &Path, out_dir: &Path, is_manual_build_dir: bool) 
     Ok(())
 }
 
+const TIER1_MAX_AVG_SENTENCE: f64 = 21.0;
+const TIER1_MAX_CODE_PER_100W: f64 = 10.0;
+const TIER1_MAX_HTML_WORDS: usize = 900;
+
+const TIER1_MD_GUIDES: &[(&str, &str)] = &[
+    ("docs/reference/get-started.md", "docs/reference/files.md or docs/reference/troubleshooting.md"),
+    ("docs/reference/desktop-gui.md", "docs/reference/tables.md, analyses.md, or graphs.md"),
+    ("docs/mcp-for-beginners.md", "docs/reference/automation/mcp.md"),
+];
+
+const TIER1_HTML_GUIDES: &[(&str, &str)] = &[
+    ("docs/index.html", "manual/latest/index.html"),
+    ("docs/open-pzfx-files.html", "docs/pzfx-format-specification.html or docs/reference/files.md"),
+    ("docs/linux.html", "docs/reference/get-started.md"),
+    ("docs/faq.html", "docs/reference/files.md or manual/latest/reference.html"),
+];
+
 pub fn check_guide_readability(root: &Path) -> Result<(), String> {
     let mut violations = Vec::new();
     for guide in super::sitemap::MANUAL_GUIDES {
@@ -860,12 +877,193 @@ pub fn check_guide_readability(root: &Path) -> Result<(), String> {
             }
         }
         let (avg_w, code_100, rs_n) = compute_guide_readability_stats(&raw);
-        println!("docs-site readability: {}: avg_sentence={avg_w:.1} words, code_per_100w={code_100:.1}, rs_refs={rs_n}", guide.repo_path);
+        let tier1_target = TIER1_MD_GUIDES.iter().find(|(p, _)| *p == guide.repo_path).map(|(_, t)| *t);
+        let tier_tag = if tier1_target.is_some() { "tier1" } else { "tier2" };
+        println!(
+            "docs-site readability ({tier_tag}): {}: avg_sentence={avg_w:.1} words, code_per_100w={code_100:.1}, rs_refs={rs_n}",
+            guide.repo_path
+        );
+        check_audience_banner(guide.repo_path, &raw, tier1_target.is_some(), &mut violations);
+        if let Some(target) = tier1_target {
+            enforce_tier1_ceilings(guide.repo_path, None, avg_w, code_100, rs_n, target, &mut violations);
+        } else if rs_n > 0 {
+            violations.push(format!("{}: Tier 2 user reference contains {rs_n} `.rs` source reference(s)", guide.repo_path));
+        }
+    }
+    for &page in super::seo::LANDING_PAGES {
+        let repo_path = format!("docs/{page}");
+        let full = root.join(&repo_path);
+        if !is_regular_file(&full) {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&full).map_err(|e| format!("read {repo_path}: {e}"))?;
+        let (words, avg_w, code_100, rs_n, forbidden_id) = compute_html_readability_stats(&raw);
+        if let Some(tok) = forbidden_id {
+            violations.push(format!("{repo_path}: forbidden internal ID `{tok}` in visible page prose"));
+        }
+        let tier1_target = TIER1_HTML_GUIDES.iter().find(|(p, _)| *p == repo_path).map(|(_, t)| *t);
+        let tier_tag = if tier1_target.is_some() { "tier1" } else { "tier2" };
+        println!(
+            "docs-site readability ({tier_tag}): {repo_path}: words={words}, avg_sentence={avg_w:.1} words, code_per_100w={code_100:.1}, rs_refs={rs_n}"
+        );
+        check_audience_banner(&repo_path, &raw, tier1_target.is_some(), &mut violations);
+        if let Some(target) = tier1_target {
+            enforce_tier1_ceilings(&repo_path, Some(words), avg_w, code_100, rs_n, target, &mut violations);
+        } else if rs_n > 0 {
+            violations.push(format!("{repo_path}: Tier 2 user reference contains {rs_n} `.rs` source reference(s)"));
+        }
     }
     if let Some(first) = violations.first() {
-        return Err(format!("user-guide readability lint found {} internal ID violation(s) (first: {first})", violations.len()));
+        return Err(format!("user-guide readability lint found {} violation(s) (first: {first})", violations.len()));
     }
     Ok(())
+}
+
+fn check_audience_banner(repo_path: &str, raw: &str, is_tier1: bool, violations: &mut Vec<String>) {
+    let expected = if is_tier1 { "<!-- Audience: Tier 1" } else { "<!-- Audience: Tier 2" };
+    if !raw.lines().take(35).any(|line| line.trim().starts_with(expected)) {
+        violations.push(format!("{repo_path}: missing `{expected} ... -->` audience banner near top of file (expected within first 35 lines)"));
+    }
+}
+
+fn enforce_tier1_ceilings(
+    repo_path: &str,
+    html_words: Option<usize>,
+    avg_w: f64,
+    code_100: f64,
+    rs_n: usize,
+    tier2_target: &str,
+    violations: &mut Vec<String>,
+) {
+    let mut exceeded = Vec::new();
+    if let Some(w) = html_words
+        && w > TIER1_MAX_HTML_WORDS
+    {
+        exceeded.push(format!("words={w} > {TIER1_MAX_HTML_WORDS}"));
+    }
+    if avg_w > TIER1_MAX_AVG_SENTENCE {
+        exceeded.push(format!("avg_sentence={avg_w:.1} > {TIER1_MAX_AVG_SENTENCE:.1}"));
+    }
+    if code_100 > TIER1_MAX_CODE_PER_100W {
+        exceeded.push(format!("code_per_100w={code_100:.1} > {TIER1_MAX_CODE_PER_100W:.1}"));
+    }
+    if rs_n > 0 {
+        exceeded.push(format!("rs_refs={rs_n} > 0"));
+    }
+    if !exceeded.is_empty() {
+        violations.push(format!(
+            "{repo_path}: Tier 1 scientist guide exceeds readability ceiling ({}); keep guides short and plain, and move technical detail to {tier2_target}",
+            exceeded.join(", ")
+        ));
+    }
+}
+
+fn count_rs_refs(text: &str) -> usize {
+    let lb = text.as_bytes();
+    text.match_indices(".rs")
+        .filter(|&(d, _)| d > 0 && !is_word_boundary_byte(lb.get(d - 1).copied()) && is_word_boundary_byte(lb.get(d + 3).copied()))
+        .count()
+}
+
+fn count_sentence_terminators(text: &str, in_code: bool) -> usize {
+    if in_code {
+        return 0;
+    }
+    let cb = text.as_bytes();
+    cb.iter()
+        .enumerate()
+        .filter(|&(i, &c)| {
+            matches!(c, b'.' | b'!' | b'?')
+                && !(c == b'.' && cb.get(i + 1).is_some_and(u8::is_ascii_digit))
+                && matches!(cb.get(i + 1), None | Some(b' ' | b'\t' | b'\r' | b'\n' | b')' | b']' | b'"' | b'\'' | b'*'))
+        })
+        .count()
+}
+
+fn compute_html_readability_stats(raw: &str) -> (usize, f64, f64, usize, Option<String>) {
+    let main_slice = raw
+        .find("<main")
+        .and_then(|s| raw.get(s..))
+        .and_then(|s| s.find('>').and_then(|gt| s.get(gt + 1..)))
+        .map_or(raw, |s| s.find("</main>").and_then(|e| s.get(..e)).unwrap_or(s));
+    let (mut rest, mut skip_depth, mut code_depth) = (main_slice, 0usize, 0usize);
+    let (mut words, mut sents, mut code_spans, mut rs_refs) = (0usize, 0usize, 0usize, 0usize);
+    let (mut block_words, mut block_sents, mut forbidden) = (0usize, 0usize, None::<String>);
+
+    let flush_block = |words: &mut usize, sents: &mut usize, bw: &mut usize, bs: &mut usize| {
+        if *bw > 0 {
+            *words += *bw;
+            *sents += (*bs).max(usize::from(*bw >= 4));
+            *bw = 0;
+            *bs = 0;
+        }
+    };
+
+    while let Some((before_lt, after_lt)) = rest.split_once('<') {
+        if skip_depth == 0 {
+            let trimmed = before_lt.trim();
+            if !trimmed.is_empty() {
+                if forbidden.is_none()
+                    && let Some(tok) = find_forbidden_guide_id(trimmed)
+                {
+                    forbidden = Some(tok.to_owned());
+                }
+                rs_refs += count_rs_refs(trimmed);
+                block_words += trimmed.split_whitespace().count();
+                block_sents += count_sentence_terminators(trimmed, code_depth > 0);
+            }
+        }
+        if !is_html_tag_start(after_lt) {
+            rest = after_lt;
+            continue;
+        }
+        if let Some(after_c) = after_lt.strip_prefix("!--") {
+            rest = find_html_comment_end(after_c).and_then(|e| after_c.get(e..)).unwrap_or("");
+            continue;
+        }
+        let Some((tag_body, tail)) = find_html_tag_close(after_lt).and_then(|e| after_lt.split_at_checked(e)) else {
+            break;
+        };
+        rest = tail.strip_prefix('>').unwrap_or(tail);
+        let trimmed = tag_body.trim();
+        let is_close = trimmed.starts_with('/');
+        let tag = extract_html_tag_name(trimmed).to_ascii_lowercase();
+        let is_skipped = matches!(tag.as_str(), "pre" | "nav" | "table" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+        let is_block =
+            is_skipped || matches!(tag.as_str(), "p" | "li" | "div" | "section" | "aside" | "article" | "ul" | "ol" | "figure" | "figcaption");
+        if is_block {
+            flush_block(&mut words, &mut sents, &mut block_words, &mut block_sents);
+        }
+        if is_skipped {
+            if is_close {
+                skip_depth = skip_depth.saturating_sub(1);
+            } else if !trimmed.ends_with('/') {
+                skip_depth += 1;
+            }
+        } else if tag == "code" {
+            if is_close {
+                code_depth = code_depth.saturating_sub(1);
+            } else if !trimmed.ends_with('/') {
+                if skip_depth == 0 {
+                    code_spans += 1;
+                }
+                code_depth += 1;
+            }
+        }
+    }
+    if skip_depth == 0 {
+        let trimmed = rest.trim();
+        if !trimmed.is_empty() {
+            rs_refs += count_rs_refs(trimmed);
+            block_words += trimmed.split_whitespace().count();
+            block_sents += count_sentence_terminators(trimmed, code_depth > 0);
+        }
+    }
+    flush_block(&mut words, &mut sents, &mut block_words, &mut block_sents);
+    let eff = sents.max(usize::from(words > 0));
+    let avg = if eff == 0 { 0.0 } else { words as f64 / eff as f64 };
+    let code_100 = if words == 0 { 0.0 } else { code_spans as f64 * 100.0 / words as f64 };
+    (words, avg, code_100, rs_refs, forbidden)
 }
 
 fn is_word_boundary_byte(b: Option<u8>) -> bool {
@@ -1068,5 +1266,18 @@ mod tests {
             (Some("R12.11"), None)
         );
         assert_eq!(compute_guide_readability_stats("# H\n\nUse `a.rs`.\n```rust\n// b.rs\n```\n| `c.rs` |\n").2, 2);
+        let html_ok = "<main><!-- R12.8 ok --><h1>Title</h1><p>Short plain sentence. Another clear line.</p><pre><code>a.rs</code></pre></main>";
+        let (w, avg, c100, rs, bad_id) = compute_html_readability_stats(html_ok);
+        assert!(w == 6 && avg <= 4.0 && c100 == 0.0 && rs == 0 && bad_id.is_none());
+        let mut tier_v = Vec::new();
+        enforce_tier1_ceilings("docs/open-pzfx-files.html", Some(1200), 25.0, 12.0, 1, "docs/pzfx-format-specification.html", &mut tier_v);
+        check_audience_banner("docs/a.md", "# Title\n\n<!-- Audience: Tier 1 Scientist Guide -->\n", true, &mut tier_v);
+        check_audience_banner("docs/b.md", "# Title\n\nNo banner\n", false, &mut tier_v);
+        assert!(
+            tier_v.len() == 2
+                && tier_v[0].contains("Tier 1 scientist guide")
+                && tier_v[0].contains("pzfx-format-specification.html")
+                && tier_v[1].contains("<!-- Audience: Tier 2")
+        );
     }
 }

@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
+  <!-- Audience: Tier 2 Technical Reference — wire-format details, JSON paths, corpus counts, and binary/digest findings belong here; keep open-pzfx-files.html concise for scientists. -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell">
     <header class="site-header">
@@ -55,7 +56,8 @@
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
           <p class="eyebrow">Clean-room empirical reference · <code>.prism</code> · <code>.pzfx</code></p>
           <h1 id="page-title">The closest thing we have to an actual specification<br><span>of .prism and .pzfx files.</span></h1>
-          <p class="lead">Neither <code>.prism</code> nor <code>.pzfx</code> ships with a published schema. This page documents every structural fact CurveBook relies on, observed directly from <strong>3,719 public CC-BY-4.0 and CC0-1.0 files on Zenodo</strong> (2,240 XML <code>.pzfx</code>, 496 legacy binary <code>PCFF</code>, and 983 <code>.prism</code> archives across v10 and v11) together with public standards — including the parts that remain a <strong>proprietary blob hidden by the vendor</strong>.</p>
+          <p class="lead">Neither <code>.prism</code> nor <code>.pzfx</code> ships with a published schema. This technical reference documents every structural fact CurveBook relies on, including the parts that remain a <strong>proprietary blob hidden by the vendor</strong>. All observations come from <strong>3,719 public CC-BY-4.0 and CC0-1.0 files on Zenodo</strong> (2,240 XML <code>.pzfx</code>, 496 legacy binary <code>PCFF</code>, and 983 <code>.prism</code> archives across v10 and v11) alongside public standards.</p>
+          <p>Looking to open or convert these files offline? Start with the <a href="open-pzfx-files.html">scientist guide to <code>.pzfx</code> and <code>.prism</code> files</a>.</p>
           <ul class="pill-row" aria-label="Corpus scope">
             <li class="pill">3,719 Zenodo files</li>
             <li class="pill">Clean-room</li>
@@ -80,7 +82,7 @@
         <section id="archive-container" aria-labelledby="archive-container-title" tabindex="-1">
           <p class="eyebrow">Part 1 · <code>.prism</code> archive format</p>
           <h2 id="archive-container-title"><code>.prism</code> ZIP container layout</h2>
-          <p>Every valid <code>.prism</code> archive observed on Zenodo (978 valid v10/v11 archives across 165 deposits; 979 readable ZIPs total; 4 missing ZIP EOCD) is a standard Deflate (method <code>8</code>) ZIP archive with UTF-8 entry names, forward slashes, and zero ZIP64 archives. Paths are indexed by opaque sheet and table UIDs declared in <code>document.json</code>:</p>
+          <p>Every valid <code>.prism</code> archive observed on Zenodo is a standard Deflate (method <code>8</code>) ZIP archive with UTF-8 entry names, forward slashes, and zero ZIP64 archives. Across 165 deposits, the corpus contains 978 valid v10/v11 archives, 979 readable ZIPs total, and 4 files missing a ZIP EOCD. Paths are indexed by opaque sheet and table UIDs declared in <code>document.json</code>:</p>
           <pre><code>study.prism (ZIP, Deflate method 8)
 ├── document.json                           # @class="Document", formatVersion, sheets.*, sheetAttributesMap
 ├── data/
@@ -195,7 +197,7 @@
           <p class="eyebrow">Results, digests &amp; opaque payloads</p>
           <h2 id="archive-analyses-blobs-title">Analysis snapshots, <code>.dt</code> digests, and proprietary blobs</h2>
           <h3>Three-hop analysis result chain</h3>
-          <p>Stored analysis results are resolved through three JSON indirection hops (verified <code>784 / 784</code> across <code>7,021</code> analyses in <code>694</code> files; <code>32</code> distinct <code>analysisClass</code> values, including exact wire spellings <code>TRNSFORM</code> and <code>shaproWilks</code>):</p>
+          <p>Stored analysis results are resolved through three JSON indirection hops, verified <code>784 / 784</code> across <code>7,021</code> analyses in <code>694</code> files. The corpus spans <code>32</code> distinct <code>analysisClass</code> values, including the exact wire spellings <code>TRNSFORM</code> and <code>shaproWilks</code>:</p>
           <pre><code>analyses/&lt;aUid&gt;/sheet.json              (preferredResultSheet: &lt;rsUid&gt;)
   └─▶ analyses/&lt;aUid&gt;/result_sheets/&lt;rsUid&gt;.json   (dataSheet: &lt;viewSheetUid&gt;)
         └─▶ data/sheets/&lt;viewSheetUid&gt;/sheet.json  (flags: ["ANALYSIS_VIEW"], table.format: "view")
@@ -262,7 +264,7 @@
           <h2 id="pzfx-container-title"><code>.pzfx</code> XML grammar and legacy <code>PCFF</code> detection</h2>
           <p>Before invoking an XML parser on a <code>.pzfx</code> file, check its leading bytes:</p>
           <ul>
-            <li><strong>Legacy binary <code>PCFF</code> files masquerading as <code>.pzfx</code>:</strong> <code>496</code> of <code>2,736</code> <code>.pzfx</code>-named files on Zenodo (<code>18.1%</code>) begin with the 4-byte ASCII header <code>PCFF</code> — an older legacy binary container (<strong>proprietary blob hidden by the vendor</strong>), not XML. Refuse before UTF-8 decoding.</li>
+            <li><strong>Legacy binary <code>PCFF</code> files masquerading as <code>.pzfx</code>:</strong> On Zenodo, <code>496</code> of <code>2,736</code> <code>.pzfx</code>-named files (<code>18.1%</code>) begin with the 4-byte ASCII header <code>PCFF</code>. That header marks an older legacy binary container (<strong>proprietary blob hidden by the vendor</strong>), not XML. Refuse it before UTF-8 decoding.</li>
             <li><strong>UTF-8 &amp; optional XSLT wrapper:</strong> all <code>2,240</code> XML <code>.pzfx</code> files are UTF-8 with zero <code>DOCTYPE</code> and zero non-whitespace trailing bytes. <code>22</code> files wrap the root element directly inside <code>&lt;xsl:stylesheet version="1.0"&gt;</code> (no intermediate <code>&lt;xsl:template&gt;</code>). <code>1,437</code> carry a default <code>xmlns</code> and <code>803</code> omit it — match tags by XML local name.</li>
           </ul>
 
@@ -294,7 +296,7 @@
   &lt;/Table&gt;                                 &lt;!-- &lt;HugeTable&gt; and &lt;Table1024&gt; share identical grammar --&gt;
   &lt;Template&gt;...&lt;/Template&gt;                 &lt;!-- opaque ASCII/base64-like payload (up to 89 MB) — proprietary blob hidden by the vendor --&gt;
 &lt;/Root&gt;</code></pre>
-          <p>Three interchangeable root-level table elements share identical attributes, child order, and <code>&lt;TableSequence&gt;&lt;Ref&gt;</code> linkage: <code>&lt;Table&gt;</code> (<code>12,790</code> tables), <code>&lt;HugeTable&gt;</code> (<code>120</code> tables, up to 256 Y columns / 208 subcolumns), and <code>&lt;Table1024&gt;</code> (<code>16</code> tables, up to 745 Y columns). The trailing <code>&lt;Template&gt;</code> block (present in <code>2,239 / 2,240</code> files; median <code>39.9 KB</code>, max <code>89.0 MB</code>, <code>657.7 MB</code> total across the corpus) stores analyses, graphs, and layouts as an opaque <strong>proprietary blob hidden by the vendor</strong> and must be skipped while streaming.</p>
+          <p>Three interchangeable root-level table elements share identical attributes, child order, and <code>&lt;TableSequence&gt;&lt;Ref&gt;</code> linkage: <code>&lt;Table&gt;</code> (<code>12,790</code> tables), <code>&lt;HugeTable&gt;</code> (<code>120</code> tables, up to 256 Y columns / 208 subcolumns), and <code>&lt;Table1024&gt;</code> (<code>16</code> tables, up to 745 Y columns). The trailing <code>&lt;Template&gt;</code> block appears in <code>2,239 / 2,240</code> files (median <code>39.9 KB</code>, max <code>89.0 MB</code>, <code>657.7 MB</code> total across the corpus). It stores analyses, graphs, and layouts as an opaque <strong>proprietary blob hidden by the vendor</strong> and must be skipped while streaming.</p>
         </section>
 
         <hr>
@@ -343,12 +345,12 @@
           <h2 id="evidence-and-alternative-title">Full evidence ledger &amp; open alternative</h2>
           <aside class="callout callout-note" aria-labelledby="open-science-title">
             <p class="callout-title" id="open-science-title">Why open formats matter for scientific progress</p>
-            <p>Reproducibility depends on being able to inspect the exact data, outlier exclusions, statistical settings, and figure definitions behind a published claim years later — without paying rent to a single software vendor. Undocumented binary blobs and proprietary integrity tokens turn public repositories into software-locked archives, forcing researchers to reverse-engineer their own field’s supplementary files instead of building on earlier work. Scientific records should outlive any single application through open, documented, schema-validated formats.</p>
+            <p>Reproducibility depends on inspecting the exact data, outlier exclusions, statistical settings, and figure definitions behind a published claim years later — without paying rent to a single software vendor. Undocumented binary blobs and proprietary integrity tokens turn public repositories into software-locked archives. They force researchers to reverse-engineer their own field’s supplementary files instead of building on earlier work. Scientific records should outlive any single application through open, documented, schema-validated formats.</p>
           </aside>
           <ul>
-            <li><strong>Tracked evidence ledger:</strong> the full corpus-backed table of public-standard citations, observation counts, and dependent CurveBook modules is maintained in <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/evidence/interop-format-notes.md"><code>docs/evidence/interop-format-notes.md</code> <span aria-hidden="true">↗</span></a> (containing zero corpus filenames, zero user values, and zero vendor prose).</li>
-            <li><strong>Open or convert these files offline:</strong> see the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> guide</a> for desktop GUI, CLI, and MCP workflows.</li>
-            <li><strong>Need a genuinely open format?</strong> CurveBook’s native <code>.curvebook</code> archive and unpacked <code>.curvebook.d/</code> directory ship with a <a href="manual/latest/files.html">published JSON Schema</a>, RFC-4180 CSVs with explicit headers, zero proprietary binary blobs, and deterministic plain-text diffs.</li>
+            <li><strong>Tracked evidence ledger:</strong> The full corpus-backed table of public-standard citations, observation counts, and dependent CurveBook modules lives in <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/evidence/interop-format-notes.md"><code>docs/evidence/interop-format-notes.md</code> <span aria-hidden="true">↗</span></a>. It contains zero corpus filenames, zero user values, and zero vendor prose.</li>
+            <li><strong>Open or convert these files offline:</strong> See the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> guide</a> for desktop GUI, CLI, and MCP workflows.</li>
+            <li><strong>Need a genuinely open format?</strong> CurveBook’s native <code>.curvebook</code> archive and unpacked <code>.curvebook.d/</code> directory ship with a <a href="manual/latest/files.html">published JSON Schema</a>. They use RFC-4180 CSVs with explicit headers, zero proprietary binary blobs, and deterministic plain-text diffs.</li>
           </ul>
         </section>
       </div>
