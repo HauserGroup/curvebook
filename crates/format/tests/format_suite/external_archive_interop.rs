@@ -3209,3 +3209,326 @@ fn issue_81_respects_max_annotations_and_max_sheets_caps_non_fatally() {
     assert_eq!(rebuilt_warn_count, MAX_SHEETS_PER_PROJECT - 1);
     assert_eq!(refused_warn_count, 3);
 }
+
+#[test]
+fn issue_74_nonlinear_equation_mapping_and_blocking() {
+    let translate_eq = |name: &str, def: Option<&str>| {
+        let mut eq = json!({ "name": name });
+        if let Some(d) = def {
+            eq["definition"] = json!(d);
+        }
+        translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({ "content": { "model": { "equation": eq } } })).unwrap()
+    };
+
+    // Mathematically proven built-in equations map cleanly (case- and whitespace-insensitive).
+    for (ext_name, expected_id) in [
+        ("log(agonist) vs. response -- Variable slope (four parameters)", "log_agonist_vs_response_4pl"),
+        ("log(inhibitor) vs. response -- Variable slope (four parameters)", "log_inhibitor_vs_response_4pl"),
+        ("log(agonist) vs. response (three parameters)", "log_agonist_vs_response_3pl"),
+        ("log(inhibitor) vs. response (three parameters)", "log_inhibitor_vs_response_3pl"),
+        ("log(agonist) vs. response -- Find ECanything", "log_agonist_vs_response_ecf"),
+        ("[Agonist] vs. response (three parameters)", "agonist_vs_response_3pl"),
+        ("[Agonist] vs. response -- Variable slope (four parameters)  ", "agonist_vs_response_4pl"),
+        ("[Agonist] vs. normalized response -- Variable slope", "agonist_vs_response_normalized_var"),
+        ("[Inhibitor] vs. normalized response -- Variable slope", "inhibitor_vs_response_normalized_var"),
+        ("One phase decay", "one_phase_decay"),
+        ("One phase association", "one_phase_association"),
+        ("One phase exponential association", "classic_one_phase_association"),
+        ("Michaelis-Menten", "michaelis_menten"),
+        ("One site -- Specific binding", "one_site_specific_binding"),
+        ("Hyperbola (X is concentration)", "one_site_specific_binding"),
+        ("One site -- Total", "one_site_total_and_ns"),
+        ("Dissociation - One phase exponential decay", "dissociation_one_phase"),
+        ("Straight line", "straight_line"),
+        ("Line", "straight_line"),
+        ("Semilog line -- X is log, Y is linear", "semi_log_line"),
+        ("Semilog line -- X is linear,  Y is log", "semilog_x_lin_y_log"),
+        ("Second order polynomial (quadratic)", "polynomial_2"),
+        ("Gaussian", "gaussian"),
+        ("Lorentzian (Cauchy)", "lorentzian"),
+        ("Linear quadratic survival (Y is percentage)", "linear_quadratic_percent_surviving"),
+    ] {
+        let tr = translate_eq(ext_name, None);
+        assert!(tr.blocking_options.is_empty(), "{ext_name}: {:?}", tr.blocking_options);
+        assert!(matches!(&tr.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == expected_id), "{ext_name}: {:?}", tr.kind);
+    }
+
+    // Equations with distinct parameterizations, units, or custom formulas stay explicitly blocked.
+    for blocked_name in [
+        "[Inhibitor] vs. response -- Variable slope (four parameters)",
+        "Sigmoidal, 4PL, X is concentration",
+        "Association kinetics - Two or more conc. of hot.",
+        "Custom User Equation",
+    ] {
+        let tr = translate_eq(blocked_name, None);
+        assert!(
+            tr.blocking_options.iter().any(|b| b.contains("unmapped nonlinear equation")),
+            "{blocked_name}: expected blocking reason, got {:?}",
+            tr.blocking_options
+        );
+    }
+}
+
+#[test]
+fn issue_74_nonlinear_constraints_initials_ranges_weighting_outliers_convergence_and_comparison() {
+    use curvebook_doc::{
+        ConvergenceStrictness, FitMethod, IdentifiabilityMode, ModelComparisonMethod, ModelComparisonQuestion, OutlierHandling, ParameterScope,
+        ReplicateFitMode, WeightingScheme, WeightingSource,
+    };
+
+    let nl_of = |content: serde_json::Value| {
+        let tr = translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({ "content": content })).unwrap();
+        let AnalysisKind::NonlinearRegression(spec) = tr.kind.clone() else { panic!("expected NonlinearRegression") };
+        (spec, tr.blocking_options)
+    };
+
+    // 1. Constraints + initialValues + exact HillSlope negation on external `log(inhibitor) 4PL`.
+    let (spec, blocking) = nl_of(json!({
+        "model": {
+            "equation": { "name": "log(inhibitor) vs. response -- Variable slope (four parameters)" },
+            "constraints": {
+                "Bottom": { "type": "CONST", "value": 0.0 },
+                "Top": { "type": "BETWEEN", "min": 50.0, "max": 120.0 },
+                "LogIC50": { "type": "SHARE" },
+                "HillSlope": { "type": "LESS", "value": -0.5 }
+            },
+            "initialValues": {
+                "Top": [{ "dataSet": 0, "isAuto": false, "value": 100.0 }, { "dataSet": 1, "isAuto": false, "value": 100.0 }],
+                "HillSlope": [{ "dataSet": 0, "isAuto": false, "value": -1.5 }],
+                "LogIC50": [{ "dataSet": 0, "isAuto": true, "value": 99.0 }]
+            }
+        },
+        "data": {
+            "handleReplicatesAs": "AVERAGE",
+            "range": {
+                "minX": { "enabled": true, "value": -9.0 },
+                "maxX": { "enabled": true, "value": -3.0 },
+                "minY": { "enabled": false, "value": "undefined" },
+                "maxY": { "enabled": true, "value": 150.0 }
+            }
+        },
+        "method": {
+            "fittingMethod": "LS",
+            "weighting": { "type": "1/Y^2", "k": 2.0 },
+            "outliers": { "method": "ELIMINATE", "q": 2.5, "outputCleanedData": true },
+            "convergence": { "criteriaType": "MEDIUM", "switchToStrictCriteria": false, "maxIterations": 100000 }
+        },
+        "confidence": {
+            "ciMethod": "WALD",
+            "calcSE": true,
+            "ambiguityTestMethod": "PAR_DEPENDENCY"
+        },
+        "interpolation": { "enabled": true },
+        "modelComparison": {
+            "type": "CONSTRAINED_PARAMETER",
+            "method": "STAT_TEST",
+            "preferUnambiguousFit": true,
+            "options": { "parameterName": "HillSlope", "hypoteticalValue": -1.0 }
+        }
+    }));
+    assert!(blocking.is_empty(), "unexpected blocking: {blocking:?}");
+    let find_rule = |name: &str| spec.parameter_rules.iter().find(|r| r.name == name).unwrap();
+    assert_eq!(find_rule("Bottom").scope, ParameterScope::Constant(0.0));
+    assert_eq!(
+        (find_rule("Top").lower_bound, find_rule("Top").upper_bound, find_rule("Top").initial_override),
+        (Some(50.0), Some(120.0), Some(100.0))
+    );
+    assert_eq!((&find_rule("LogIC50").scope, find_rule("LogIC50").initial_override), (&ParameterScope::SharedGlobal, None));
+    // External `HillSlope < -0.5` & initial `-1.5` negate cleanly to CurveBook `HillSlope > +0.5` & initial `+1.5`.
+    assert_eq!(
+        (find_rule("HillSlope").lower_bound, find_rule("HillSlope").upper_bound, find_rule("HillSlope").initial_override),
+        (Some(0.5), None, Some(1.5))
+    );
+    assert_eq!(spec.replicate_fit_mode, ReplicateFitMode::RowMeansOnly);
+    assert_eq!(spec.x_range_filter, Some((Some(-9.0), Some(-3.0))));
+    assert_eq!(spec.y_range_filter, Some((None, Some(150.0))));
+    assert_eq!((spec.weighting, spec.weighting_source), (WeightingScheme::RelativeSquare, WeightingSource::PredictedY));
+    assert_eq!(
+        (spec.method, spec.outlier_handling, spec.emit_cleaned_data_tab),
+        (FitMethod::RoutOutlierElimination { fdr_q_percent: 2.5 }, OutlierHandling::Eliminate, true)
+    );
+    assert_eq!((spec.max_iters, spec.convergence_strictness), (curvebook_doc::NonlinearFitSpec::HARD_MAX_ITERS, ConvergenceStrictness::Medium));
+    assert_eq!(
+        (spec.profile_likelihood_ci, spec.show_standard_errors, spec.identifiability_mode),
+        (false, Some(true), Some(IdentifiabilityMode::IdentifyAmbiguousFits))
+    );
+    assert!(spec.interpolate_unknowns);
+    assert_eq!(spec.comparison_method, Some(ModelComparisonMethod::ExtraSumOfSquaresF));
+    assert_eq!(
+        spec.comparison_question,
+        Some(ModelComparisonQuestion::ParameterEqualsTheoretical { param: String::from("HillSlope"), theoretical_value: 1.0 })
+    );
+    assert!(spec.prefer_well_defined_fit);
+}
+
+#[test]
+fn issue_74_nonlinear_shared_bounds_renames_and_unsupported_option_blocking() {
+    use curvebook_doc::{
+        ConvergenceStrictness, IdentifiabilityMode, ModelComparisonMethod, ModelComparisonQuestion, OutlierHandling, ParameterScope, WeightingScheme,
+        WeightingSource,
+    };
+
+    let nl_of = |content: serde_json::Value| {
+        let tr = translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({ "content": content })).unwrap();
+        let AnalysisKind::NonlinearRegression(spec) = tr.kind.clone() else { panic!("expected NonlinearRegression") };
+        (spec, tr.blocking_options)
+    };
+
+    // Intrinsic positive floor preservation (`GREATER 0.0` on `Km` must leave `lower_bound: None`
+    // so the solver's `1e-30` domain floor is not overwritten by `0.0`), plus `SH_GREATER`, `SH_LESS`,
+    // `CONST_DS_TITLE`, `SHARED_PARAMETERS`, `MEDIUM` + `switchToStrictCriteria: true`, and `1/Y^K`.
+    let (spec_mm, blocking_mm) = nl_of(json!({
+        "model": {
+            "equation": { "name": "Michaelis-Menten" },
+            "constraints": {
+                "Km": { "type": "SH_GREATER", "value": 0.0 },
+                "Vmax": { "type": "SH_LESS", "value": 500.0 }
+            }
+        },
+        "method": {
+            "weighting": { "type": "1/Y^K", "k": 1.5 },
+            "outliers": { "method": "COUNT", "q": 1.0 },
+            "convergence": { "criteriaType": "MEDIUM", "switchToStrictCriteria": true, "maxIterations": 500 }
+        },
+        "confidence": { "ambiguityTestMethod": "CONDITION_NUMBER" },
+        "modelComparison": {
+            "type": "SHARED_PARAMETERS",
+            "method": "AICC",
+            "options": { "sharedParameters": ["Km"] }
+        }
+    }));
+    assert!(blocking_mm.is_empty(), "{blocking_mm:?}");
+    let km_rule = spec_mm.parameter_rules.iter().find(|r| r.name == "Km").unwrap();
+    assert_eq!((&km_rule.scope, km_rule.lower_bound), (&ParameterScope::SharedGlobal, None));
+    let vmax_rule = spec_mm.parameter_rules.iter().find(|r| r.name == "Vmax").unwrap();
+    assert_eq!((&vmax_rule.scope, vmax_rule.upper_bound), (&ParameterScope::SharedGlobal, Some(500.0)));
+    assert_eq!((spec_mm.weighting, spec_mm.weighting_source), (WeightingScheme::GeneralPowerY(1.5), WeightingSource::PredictedY));
+    assert_eq!(spec_mm.outlier_handling, OutlierHandling::IdentifyAndCountOnly);
+    assert_eq!((spec_mm.max_iters, spec_mm.convergence_strictness), (500, ConvergenceStrictness::Strict));
+    assert_eq!(spec_mm.identifiability_mode, Some(IdentifiabilityMode::IdentifyUnstableParameters));
+    assert_eq!(spec_mm.comparison_method, Some(ModelComparisonMethod::Aicc));
+    assert_eq!(
+        spec_mm.comparison_question,
+        Some(ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params: vec![String::from("Km")] })
+    );
+
+    let (spec_title, blocking_title) = nl_of(json!({
+        "model": {
+            "equation": { "name": "One phase decay" },
+            "constraints": { "Plateau": { "type": "CONST_DS_TITLE" } }
+        },
+        "confidence": { "ambiguityTestMethod": "NONE" }
+    }));
+    assert!(blocking_title.is_empty(), "{blocking_title:?}");
+    assert_eq!(spec_title.parameter_rules[0].scope, ParameterScope::ColumnTitleConstant);
+    assert_eq!(spec_title.identifiability_mode, Some(IdentifiabilityMode::ReportAll));
+
+    // 3. Parameter renames (`A`/`B` -> `Alpha`/`Beta`; `K` -> `Koff`) resolve through constraints too.
+    let (spec_lq, blocking_lq) = nl_of(json!({
+        "model": {
+            "equation": { "name": "Linear quadratic survival (Y is percentage)" },
+            "constraints": { "A": { "type": "GREATER", "value": 0.01 }, "B": { "type": "CONST", "value": 0.0 } }
+        }
+    }));
+    assert!(blocking_lq.is_empty(), "{blocking_lq:?}");
+    assert!(spec_lq.parameter_rules.iter().any(|r| r.name == "Alpha" && r.lower_bound == Some(0.01)));
+    assert!(spec_lq.parameter_rules.iter().any(|r| r.name == "Beta" && r.scope == ParameterScope::Constant(0.0)));
+
+    // 4. Unsupported, divergent, or malformed options MUST explicitly block live translation.
+    let blocked_cases: [(&str, serde_json::Value); 10] = [
+        ("unknown constraint type", json!({"model": {"equation": {"name": "Straight line"}, "constraints": {"Slope": {"type": "EXOTIC"}}}})),
+        (
+            "unknown constraint param",
+            json!({"model": {"equation": {"name": "Straight line"}, "constraints": {"NoSuchParam": {"type": "CONST", "value": 1.0}}}}),
+        ),
+        (
+            "divergent per-dataset initialValues",
+            json!({"model": {"equation": {"name": "Straight line"}, "initialValues": {"Slope": [{"isAuto": false, "value": 1.0}, {"isAuto": false, "value": 2.0}]}}}),
+        ),
+        (
+            "inverted data.range",
+            json!({"model": {"equation": {"name": "Straight line"}}, "data": {"range": {"minX": {"enabled": true, "value": 10.0}, "maxX": {"enabled": true, "value": 2.0}}}}),
+        ),
+        ("unknown weighting", json!({"model": {"equation": {"name": "Straight line"}}, "method": {"weighting": {"type": "CUSTOM_WEIGHT"}}})),
+        (
+            "ROUT with non-LS",
+            json!({"model": {"equation": {"name": "Straight line"}}, "method": {"fittingMethod": "ROBUST", "outliers": {"method": "ELIMINATE", "q": 1.0}}}),
+        ),
+        ("invalid ROUT q", json!({"model": {"equation": {"name": "Straight line"}}, "method": {"outliers": {"method": "ELIMINATE", "q": 99.0}}})),
+        (
+            "unknown convergence criteria",
+            json!({"model": {"equation": {"name": "Straight line"}}, "method": {"convergence": {"criteriaType": "ULTRA"}}}),
+        ),
+        ("unknown ambiguityTestMethod", json!({"model": {"equation": {"name": "Straight line"}}, "confidence": {"ambiguityTestMethod": "MAGIC"}})),
+        ("unsupported modelComparison", json!({"model": {"equation": {"name": "Straight line"}}, "modelComparison": {"type": "DIFFERENT_EQUATION"}})),
+    ];
+    for (label, content) in blocked_cases {
+        let (_, b) = nl_of(content);
+        assert!(!b.is_empty(), "{label}: expected blocking reason");
+    }
+}
+
+#[test]
+fn issue_74_nonlinear_crosswalk_model1_only_and_inhibitor_hill_slope_sign() {
+    use curvebook_doc::NonlinearFitSpec;
+
+    let scalar = |key: &str, ds: Option<usize>, value: f64| ResultScalarEntry { key: key.to_owned(), data_set_index: ds, value, units: None };
+    let nl_sheet = |eq_id: &str, scalars: Vec<ResultScalarEntry>| {
+        let spec = AnalysisSpec::new("res-nl", "src-xy", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new(eq_id))).unwrap();
+        let mut rs = ResultSheet::new(spec).unwrap();
+        rs.scalars = scalars;
+        rs
+    };
+
+    // 1. `Model 2` (competing comparison model) must never pollute `Model 1` cached comparisons.
+    let results_two_models = json!({ "content": { "models": {
+        "m1": {
+            "id": { "col": { "idx": 0 }, "model": { "name": "Model 1", "title": "One phase decay" } },
+            "value": { "parameters": {
+                "Span": { "p1": { "value": { "estimate": 0.6848 } } },
+                "K": { "p2": { "value": { "estimate": 0.25 } } }
+            }}
+        },
+        "m2": {
+            "id": { "col": { "idx": 0 }, "model": { "name": "Model 2", "title": "One phase decay" } },
+            "value": { "parameters": {
+                "Span": { "p1": { "value": { "estimate": 0.9999 } } },
+                "K": { "p2": { "value": { "estimate": 0.99 } } }
+            }}
+        }
+    }}});
+    let rs_decay = nl_sheet("one_phase_decay", vec![scalar("Span", Some(0), 0.6848), scalar("K", Some(0), 0.25)]);
+    let diag_decay = compare_recomputed_against_cached_results(&rs_decay, "NONLINEAR_REGRESSION", &results_two_models, 1e-6, 1e-3);
+    assert_eq!((diag_decay.compared_count, diag_decay.disagreements.len()), (2, 0));
+
+    // 2. External `log(inhibitor) 4PL` compares `HillSlope` strictly against `-cached` (opposite
+    // sign agrees; identical sign MUST disagree, stronger than unsigned magnitude comparison).
+    let results_inh = json!({ "content": { "models": {
+        "m1": {
+            "id": { "col": { "idx": 0 }, "model": { "name": "Model 1", "title": "log(inhibitor) vs. response -- Variable slope (four parameters)" } },
+            "value": { "parameters": {
+                "LogIC50": { "p1": { "value": { "estimate": -6.5 } } },
+                "HillSlope": { "p2": { "value": { "estimate": -1.4 } } }
+            }}
+        }
+    }}});
+    let rs_inh_ok = nl_sheet("log_inhibitor_vs_response_4pl", vec![scalar("LogIC50", Some(0), -6.5), scalar("HillSlope", Some(0), 1.4)]);
+    let diag_ok = compare_recomputed_against_cached_results(&rs_inh_ok, "NONLINEAR_REGRESSION", &results_inh, 1e-6, 1e-3);
+    assert_eq!((diag_ok.compared_count, diag_ok.disagreements.len()), (2, 0));
+
+    let rs_inh_wrong_sign = nl_sheet("log_inhibitor_vs_response_4pl", vec![scalar("LogIC50", Some(0), -6.5), scalar("HillSlope", Some(0), -1.4)]);
+    let diag_bad = compare_recomputed_against_cached_results(&rs_inh_wrong_sign, "NONLINEAR_REGRESSION", &results_inh, 1e-6, 1e-3);
+    assert_eq!((diag_bad.compared_count, diag_bad.disagreements.len()), (2, 1));
+    assert_eq!(diag_bad.disagreements[0].key, "HillSlope");
+
+    // 3. Agonist 4PL keeps exact signed `HillSlope` comparison (opposite sign MUST disagree).
+    let results_ag = json!({ "content": { "models": {
+        "m1": {
+            "id": { "col": { "idx": 0 }, "model": { "name": "Model 1", "title": "log(agonist) vs. response -- Variable slope (four parameters)" } },
+            "value": { "parameters": { "HillSlope": { "p1": { "value": { "estimate": 1.4 } } } } }
+        }
+    }}});
+    let rs_ag_flipped = nl_sheet("log_agonist_vs_response_4pl", vec![scalar("HillSlope", Some(0), -1.4)]);
+    let diag_ag_bad = compare_recomputed_against_cached_results(&rs_ag_flipped, "NONLINEAR_REGRESSION", &results_ag, 1e-6, 1e-3);
+    assert_eq!((diag_ag_bad.compared_count, diag_ag_bad.disagreements.len()), (1, 1));
+}

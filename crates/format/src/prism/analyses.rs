@@ -5,12 +5,13 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    FactorialComparisonFamilyMode, FitMethod, MathTransformPreset, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ProjectDocument, RemlZeroVariancePolicy,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, ConvergenceStrictness, DataSheet, DescriptiveSpec, ErrorPropagationMode,
+    FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, IdentifiabilityMode, MathTransformPreset, ModelComparisonMethod,
+    ModelComparisonQuestion, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ParameterRule, ParameterScope, ProjectDocument, RemlZeroVariancePolicy,
     RepeatedMeasuresDesign, ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, RmSphericityCorrection, SheetId,
-    SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme, default_column_label,
+    SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
+    WeightingSource, default_column_label,
 };
 
 use crate::archive::{BoundedJsonOutcome, parse_bounded_json_outcome};
@@ -456,8 +457,19 @@ fn extract_post_test_key(content: Option<&JsonMap>) -> (Option<String>, Option<S
 pub fn extract_analysis_design_key(foreign_class: &str, params_json: &serde_json::Value) -> AnalysisDesignKey {
     let class = foreign_class.trim().to_ascii_uppercase();
     let content = params_json.get("content").and_then(serde_json::Value::as_object).or_else(|| params_json.as_object());
-    let experimental_design =
-        get_str(content, "experimentalDesign").map(str::trim).filter(|s| !s.is_empty()).map(normalize_experimental_design_alias);
+    let experimental_design = get_str(content, "experimentalDesign")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(normalize_experimental_design_alias)
+        .or_else(|| {
+            if class == NL {
+                get_str(get_obj(get_obj(content, "model"), "equation"), "name")
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .filter(|s| !s.is_empty())
+            } else {
+                None
+            }
+        });
     let tail = if class == TT {
         match get_str(get_obj(content, "options"), "pValueTailType").map(|s| s.trim().to_ascii_uppercase()).as_deref() {
             Some("P_VALUE_ONE_TAILED") => DesignTail::OneTailed,
@@ -641,6 +653,10 @@ pub struct CachedPairwiseRef {
 pub struct CachedAnalysisReference {
     pub scalars: Vec<CachedScalarRef>,
     pub pairwise: Vec<CachedPairwiseRef>,
+    /// `true` when `results.json` came from the external negative-slope inhibitor 4PL
+    /// (`Y = Bottom + (Top - Bottom) / (1 + 10^((LogIC50 - X) * HillSlope))`), whose
+    /// `HillSlope` is the exact algebraic negation of CurveBook's `log_inhibitor_vs_response_4pl`.
+    pub negate_inhibitor_4pl_hill_slope: bool,
 }
 
 /// Transient 3-hop cached snapshot payload preserved alongside a promoted live `.prism` analysis
@@ -761,13 +777,48 @@ pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
     link(SV, "curveComparison.logrankMantelCoxTest.pValue.value", "Log-rank P value"),
     link(SV, "curveComparison.gehanBreslowWilcoxonTest.chiSquared", "Gehan-Breslow-Wilcoxon chi-square"),
     link(SV, "curveComparison.gehanBreslowWilcoxonTest.pValue.value", "Gehan-Breslow-Wilcoxon P"),
-    // Per-data-set dose-response parameter estimates (More 1978 Levenberg-Marquardt).
+    // Per-data-set nonlinear regression parameter estimates (More 1978 Levenberg-Marquardt;
+    // Motulsky & Christopoulos 2004).
     link(NL, "models.*.value.parameters.Top.*.value.estimate", "Top"),
     link(NL, "models.*.value.parameters.Bottom.*.value.estimate", "Bottom"),
     link(NL, "models.*.value.parameters.Span.*.value.estimate", "Span"),
     link(NL, "models.*.value.parameters.LogIC50.*.value.estimate", "LogIC50"),
+    link(NL, "models.*.value.parameters.logIC50.*.value.estimate", "LogIC50"),
     link(NL, "models.*.value.parameters.LogEC50.*.value.estimate", "LogEC50"),
+    link(NL, "models.*.value.parameters.logEC50.*.value.estimate", "LogEC50"),
+    link(NL, "models.*.value.parameters.logECF.*.value.estimate", "LogECF"),
     link(NL, "models.*.value.parameters.HillSlope.*.value.estimate", "HillSlope"),
+    link(NL, "models.*.value.parameters.Hillslope.*.value.estimate", "HillSlope"),
+    link(NL, "models.*.value.parameters.EC50.*.value.estimate", "EC50"),
+    link(NL, "models.*.value.parameters.IC50.*.value.estimate", "IC50"),
+    link(NL, "models.*.value.parameters.Y0.*.value.estimate", "Y0"),
+    link(NL, "models.*.value.parameters.Plateau.*.value.estimate", "Plateau"),
+    link(NL, "models.*.value.parameters.K.*.value.estimate", "K"),
+    link(NL, "models.*.value.parameters.K.*.value.estimate", "Koff"),
+    link(NL, "models.*.value.parameters.Half Life.*.value.estimate", "HalfLife"),
+    link(NL, "models.*.value.parameters.HalfLife.*.value.estimate", "HalfLife"),
+    link(NL, "models.*.value.parameters.Half-time.*.value.estimate", "HalfTime"),
+    link(NL, "models.*.value.parameters.Tau.*.value.estimate", "Tau"),
+    link(NL, "models.*.value.parameters.Ymax.*.value.estimate", "Ymax"),
+    link(NL, "models.*.value.parameters.Slope.*.value.estimate", "Slope"),
+    link(NL, "models.*.value.parameters.YIntercept.*.value.estimate", "YIntercept"),
+    link(NL, "models.*.value.parameters.Yintercept.*.value.estimate", "YIntercept"),
+    link(NL, "models.*.value.parameters.Vmax.*.value.estimate", "Vmax"),
+    link(NL, "models.*.value.parameters.Km.*.value.estimate", "Km"),
+    link(NL, "models.*.value.parameters.Bmax.*.value.estimate", "Bmax"),
+    link(NL, "models.*.value.parameters.Kd.*.value.estimate", "Kd"),
+    link(NL, "models.*.value.parameters.NS.*.value.estimate", "NS"),
+    link(NL, "models.*.value.parameters.Background.*.value.estimate", "Background"),
+    link(NL, "models.*.value.parameters.Amplitude.*.value.estimate", "Amplitude"),
+    link(NL, "models.*.value.parameters.Mean.*.value.estimate", "Mean"),
+    link(NL, "models.*.value.parameters.SD.*.value.estimate", "SD"),
+    link(NL, "models.*.value.parameters.Center.*.value.estimate", "Center"),
+    link(NL, "models.*.value.parameters.Width.*.value.estimate", "Width"),
+    link(NL, "models.*.value.parameters.B0.*.value.estimate", "B0"),
+    link(NL, "models.*.value.parameters.B1.*.value.estimate", "B1"),
+    link(NL, "models.*.value.parameters.B2.*.value.estimate", "B2"),
+    link(NL, "models.*.value.parameters.A.*.value.estimate", "Alpha"),
+    link(NL, "models.*.value.parameters.B.*.value.estimate", "Beta"),
     // Per-data-set total area (composite trapezoidal rule) and outlier counts (Motulsky & Brown 2006).
     link("AREA_UNDER_CURVE", "samples.*.value.summary.totalArea", "TotalArea"),
     link("IDENTIFY_OUTLIERS", "samples.*.value.outlierCount", "OutlierCount"),
@@ -826,6 +877,14 @@ fn collect_link_values_with_bounds(val: &serde_json::Value, segments: &[&str], c
     if out.len() >= MAX_VALUES_PER_LINK {
         return;
     }
+    // When a nonlinear model comparison stores both `Model 1` (primary) and `Model 2` (competing
+    // constrained or shared model) under `models.*`, restrict crosswalk extraction to `Model 1`
+    // so competing-model estimates never compare against the primary CurveBook fit.
+    if let Some(model_name) = val.get("id").and_then(|id| id.get("model")).and_then(|m| m.get("name")).and_then(serde_json::Value::as_str)
+        && !model_name.eq_ignore_ascii_case("Model 1")
+    {
+        return;
+    }
     let col = val
         .get("id")
         .and_then(|id| id.get("col"))
@@ -859,6 +918,29 @@ fn collect_link_values_with_bounds(val: &serde_json::Value, segments: &[&str], c
             }
         }
     }
+}
+
+/// Return `true` when `results_val` records a `NONLINEAR_REGRESSION` `Model 1` using the external
+/// negative-slope inhibitor 4PL (`Y = Bottom + (Top - Bottom) / (1 + 10^((LogIC50 - X) * HillSlope))`),
+/// whose `HillSlope` is the exact algebraic negation of CurveBook's `log_inhibitor_vs_response_4pl`
+/// (`(X - LogIC50) * HillSlope`).
+fn cached_results_has_negated_inhibitor_4pl_hill_slope(foreign_class: &str, results_val: &serde_json::Value) -> bool {
+    if !foreign_class.trim().eq_ignore_ascii_case(NL) {
+        return false;
+    }
+    let root = results_val.get("content").unwrap_or(results_val);
+    let Some(models) = root.get("models").and_then(serde_json::Value::as_object) else {
+        return false;
+    };
+    models.values().any(|entry| {
+        let model_name = entry.pointer("/id/model/name").and_then(serde_json::Value::as_str);
+        if model_name.is_some_and(|n| !n.eq_ignore_ascii_case("Model 1")) {
+            return false;
+        }
+        let target = "log(inhibitor) vs. response -- variable slope (four parameters)";
+        entry.pointer("/id/model/title").and_then(serde_json::Value::as_str).is_some_and(|s| normalize_equation_name(s) == target)
+            || entry.pointer("/value/modelDescription").and_then(serde_json::Value::as_str).is_some_and(|s| normalize_equation_name(s) == target)
+    })
 }
 
 fn extract_column_only_idx(entry: &serde_json::Value) -> Option<usize> {
@@ -944,7 +1026,10 @@ fn collect_pairwise_refs_for_link(link: &CachedPairwiseLink, results_val: &serde
 #[must_use]
 pub fn extract_cached_analysis_reference(foreign_class: &str, results_val: &serde_json::Value) -> CachedAnalysisReference {
     let class = foreign_class.trim();
-    let mut reference = CachedAnalysisReference::default();
+    let mut reference = CachedAnalysisReference {
+        negate_inhibitor_4pl_hill_slope: cached_results_has_negated_inhibitor_4pl_hill_slope(class, results_val),
+        ..CachedAnalysisReference::default()
+    };
     for scalar_link in CACHED_SCALAR_LINKS.iter().filter(|l| l.foreign_class.eq_ignore_ascii_case(class)) {
         for (data_set_index, value, bound) in cached_values_with_bounds_for_link(scalar_link, results_val) {
             reference.scalars.push(CachedScalarRef {
@@ -995,7 +1080,14 @@ fn scalar_display_meta(curvebook_key: &str, data_set_index: Option<usize>) -> (S
     (sym.to_owned(), label)
 }
 
-fn compare_scalar_ref(recomputed: &ResultSheet, scalar_ref: &CachedScalarRef, abs_t: f64, rel_t: f64, diag: &mut CachedResultDiagnostic) {
+fn compare_scalar_ref(
+    recomputed: &ResultSheet,
+    scalar_ref: &CachedScalarRef,
+    negate_hill: bool,
+    abs_t: f64,
+    rel_t: f64,
+    diag: &mut CachedResultDiagnostic,
+) {
     let Some(rec) = recomputed
         .scalars
         .iter()
@@ -1003,9 +1095,10 @@ fn compare_scalar_ref(recomputed: &ResultSheet, scalar_ref: &CachedScalarRef, ab
     else {
         return;
     };
+    let expected_cached = if negate_hill && scalar_ref.key.eq_ignore_ascii_case("HillSlope") { -scalar_ref.value } else { scalar_ref.value };
     let (a, b) = match scalar_ref.comparison {
-        CrosswalkComparison::Signed => (rec.value, scalar_ref.value),
-        CrosswalkComparison::Magnitude => (rec.value.abs(), scalar_ref.value.abs()),
+        CrosswalkComparison::Signed => (rec.value, expected_cached),
+        CrosswalkComparison::Magnitude => (rec.value.abs(), expected_cached.abs()),
     };
     diag.compared_count += 1;
     *diag.compared_by_key.entry(scalar_ref.key.clone()).or_insert(0) += 1;
@@ -1121,8 +1214,10 @@ pub fn compare_recomputed_against_reference(
     let mut diag = CachedResultDiagnostic::default();
     let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
     let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
+    let negate_hill = reference.negate_inhibitor_4pl_hill_slope
+        && matches!(&recomputed.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "log_inhibitor_vs_response_4pl");
     for scalar_ref in &reference.scalars {
-        compare_scalar_ref(recomputed, scalar_ref, abs_t, rel_t, &mut diag);
+        compare_scalar_ref(recomputed, scalar_ref, negate_hill, abs_t, rel_t, &mut diag);
     }
     for pw in &reference.pairwise {
         compare_pairwise_ref(recomputed, pw, abs_t, rel_t, &mut diag);
@@ -1676,34 +1771,549 @@ fn translate_two_way_anova(content: Option<&JsonMap>, blocking: &mut Vec<String>
     })
 }
 
+/// Collapse ASCII whitespace runs, trim, and lowercase an external equation title.
+fn normalize_equation_name(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for part in raw.split_whitespace() {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&part.to_ascii_lowercase());
+    }
+    out
+}
+
+/// Canonical CurveBook equation target plus exact algebraic parameter-mapping metadata.
+#[derive(Debug, Clone, Copy)]
+struct MappedNonlinearEquation {
+    equation_id: &'static str,
+    param_names: &'static [&'static str],
+    param_renames: &'static [(&'static str, &'static str)],
+    negated_params: &'static [&'static str],
+    strictly_positive_params: &'static [&'static str],
+}
+
+impl MappedNonlinearEquation {
+    const fn direct(equation_id: &'static str, param_names: &'static [&'static str]) -> Self {
+        Self { equation_id, param_names, param_renames: &[], negated_params: &[], strictly_positive_params: &[] }
+    }
+
+    const fn with_positive(
+        equation_id: &'static str,
+        param_names: &'static [&'static str],
+        strictly_positive_params: &'static [&'static str],
+    ) -> Self {
+        Self { equation_id, param_names, param_renames: &[], negated_params: &[], strictly_positive_params }
+    }
+
+    fn resolve_param_name(&self, external: &str) -> Option<&'static str> {
+        let lower = external.trim().to_ascii_lowercase();
+        for &(ext_lower, canon) in self.param_renames {
+            if lower == ext_lower {
+                return Some(canon);
+            }
+        }
+        self.param_names.iter().copied().find(|p| p.eq_ignore_ascii_case(external.trim()))
+    }
+
+    fn is_negated(&self, canon: &str) -> bool {
+        self.negated_params.iter().any(|p| p.eq_ignore_ascii_case(canon))
+    }
+
+    fn is_strictly_positive(&self, canon: &str) -> bool {
+        self.strictly_positive_params.iter().any(|p| p.eq_ignore_ascii_case(canon))
+    }
+}
+
 /// Map documented built-in external equation names to canonical CurveBook `ParametricModel` IDs
-/// only where parameterizations (e.g., `LogEC50` vs `EC50` and Hill slope sign) match identically.
-fn map_nonlinear_equation_alias(name: &str) -> Option<&'static str> {
-    let norm = name.trim().to_ascii_lowercase();
+/// only where functional forms and parameter domains are mathematically proven identical (up to
+/// explicitly recorded parameter renames or exact sign bijection on `HillSlope`).
+fn map_nonlinear_equation(name: &str, definition: Option<&str>) -> Option<MappedNonlinearEquation> {
+    let norm = normalize_equation_name(name);
     match norm.as_str() {
-        "log(agonist) vs. response -- variable slope (four parameters)" | "log_agonist_vs_response_4pl" => Some("log_agonist_vs_response_4pl"),
-        "log(inhibitor) vs. response -- variable slope (four parameters)" | "log_inhibitor_vs_response_4pl" => Some("log_inhibitor_vs_response_4pl"),
-        "log(agonist) vs. response (three parameters)" | "log_agonist_vs_response_3pl" => Some("log_agonist_vs_response_3pl"),
-        "log(inhibitor) vs. response (three parameters)" | "log_inhibitor_vs_response_3pl" => Some("log_inhibitor_vs_response_3pl"),
-        "one phase decay" | "one_phase_decay" => Some("one_phase_decay"),
-        "one phase association" | "one_phase_association" => Some("one_phase_association"),
-        "michaelis-menten" | "michaelis_menten" => Some("michaelis_menten"),
-        "straight line" | "linear" | "straight_line" => Some("straight_line"),
+        "log(agonist) vs. response -- variable slope (four parameters)" | "log_agonist_vs_response_4pl" => {
+            Some(MappedNonlinearEquation::direct("log_agonist_vs_response_4pl", &["Bottom", "Top", "LogEC50", "HillSlope"]))
+        }
+        "log(inhibitor) vs. response -- variable slope (four parameters)" => {
+            // External built-in form is `Y = Bottom + (Top - Bottom) / (1 + 10^((LogIC50 - X) * HillSlope))`,
+            // whose `HillSlope` is the exact negation of CurveBook's `(X - LogIC50) * HillSlope`
+            // unless `definition` explicitly writes `(x-logic50)`.
+            let compact_def: String = definition.unwrap_or("").chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
+            let negated: &'static [&'static str] = if compact_def.contains("(x-logic50)") { &[] } else { &["HillSlope"] };
+            Some(MappedNonlinearEquation {
+                equation_id: "log_inhibitor_vs_response_4pl",
+                param_names: &["Bottom", "Top", "LogIC50", "HillSlope"],
+                param_renames: &[],
+                negated_params: negated,
+                strictly_positive_params: &[],
+            })
+        }
+        "log_inhibitor_vs_response_4pl" => {
+            Some(MappedNonlinearEquation::direct("log_inhibitor_vs_response_4pl", &["Bottom", "Top", "LogIC50", "HillSlope"]))
+        }
+        "log(agonist) vs. response (three parameters)" | "log_agonist_vs_response_3pl" => {
+            Some(MappedNonlinearEquation::direct("log_agonist_vs_response_3pl", &["Bottom", "Top", "LogEC50"]))
+        }
+        "log(inhibitor) vs. response (three parameters)" | "log_inhibitor_vs_response_3pl" => {
+            Some(MappedNonlinearEquation::direct("log_inhibitor_vs_response_3pl", &["Bottom", "Top", "LogIC50"]))
+        }
+        "log(agonist) vs. response -- find ecanything" | "log_agonist_vs_response_ecf" => {
+            Some(MappedNonlinearEquation::direct("log_agonist_vs_response_ecf", &["Bottom", "Top", "LogECF", "HillSlope", "F"]))
+        }
+        "[agonist] vs. response (three parameters)" | "agonist_vs_response_3pl" => {
+            Some(MappedNonlinearEquation::with_positive("agonist_vs_response_3pl", &["Bottom", "Top", "EC50"], &["EC50"]))
+        }
+        "[agonist] vs. response -- variable slope (four parameters)" | "agonist_vs_response_4pl" => {
+            Some(MappedNonlinearEquation::with_positive("agonist_vs_response_4pl", &["Bottom", "Top", "EC50", "HillSlope"], &["EC50"]))
+        }
+        "[agonist] vs. normalized response -- variable slope" | "agonist_vs_response_normalized_var" => {
+            Some(MappedNonlinearEquation::with_positive("agonist_vs_response_normalized_var", &["EC50", "HillSlope"], &["EC50"]))
+        }
+        "[inhibitor] vs. normalized response -- variable slope" | "inhibitor_vs_response_normalized_var" => {
+            // CurveBook's `inhibitor_vs_response_normalized_var` uses `100 / (1 + (IC50 / X)^HillSlope)`
+            // with unbounded signed `HillSlope` (negative for descending inhibition), matching identically.
+            Some(MappedNonlinearEquation::with_positive("inhibitor_vs_response_normalized_var", &["IC50", "HillSlope"], &["IC50"]))
+        }
+        "one phase decay" | "one-phase decay" | "one_phase_decay" => {
+            Some(MappedNonlinearEquation::direct("one_phase_decay", &["Y0", "Plateau", "K"]))
+        }
+        "one phase association" | "one-phase association" | "one_phase_association" => {
+            Some(MappedNonlinearEquation::direct("one_phase_association", &["Y0", "Plateau", "K"]))
+        }
+        "one phase exponential association" | "classic_one_phase_association" => {
+            Some(MappedNonlinearEquation::direct("classic_one_phase_association", &["Ymax", "K"]))
+        }
+        "michaelis-menten" | "michaelis_menten" => Some(MappedNonlinearEquation::with_positive("michaelis_menten", &["Vmax", "Km"], &["Km"])),
+        "one site -- specific binding" | "hyperbola (x is concentration)" | "one_site_specific_binding" => {
+            Some(MappedNonlinearEquation::with_positive("one_site_specific_binding", &["Bmax", "Kd"], &["Kd"]))
+        }
+        "one site -- total" | "one_site_total_and_ns" => {
+            Some(MappedNonlinearEquation::with_positive("one_site_total_and_ns", &["Bmax", "Kd", "NS", "Background"], &["Kd"]))
+        }
+        "dissociation - one phase exponential decay" | "dissociation_one_phase" => Some(MappedNonlinearEquation {
+            equation_id: "dissociation_one_phase",
+            param_names: &["Y0", "NS", "Koff"],
+            param_renames: &[("k", "Koff")],
+            negated_params: &[],
+            strictly_positive_params: &[],
+        }),
+        "straight line" | "line" | "linear" | "straight_line" => Some(MappedNonlinearEquation::direct("straight_line", &["Slope", "YIntercept"])),
+        "semilog line -- x is log, y is linear" | "semi_log_line" => Some(MappedNonlinearEquation::direct("semi_log_line", &["Slope", "YIntercept"])),
+        "semilog line -- x is linear, y is log" | "semilog_x_lin_y_log" => {
+            Some(MappedNonlinearEquation::direct("semilog_x_lin_y_log", &["Slope", "YIntercept"]))
+        }
+        "second order polynomial (quadratic)" | "polynomial_2" => Some(MappedNonlinearEquation::direct("polynomial_2", &["B0", "B1", "B2"])),
+        "gaussian" => Some(MappedNonlinearEquation::with_positive("gaussian", &["Amplitude", "Mean", "SD"], &["SD"])),
+        "lorentzian (cauchy)" | "lorentzian" => {
+            Some(MappedNonlinearEquation::with_positive("lorentzian", &["Amplitude", "Center", "Width"], &["Width"]))
+        }
+        "linear quadratic survival (y is percentage)" | "linear_quadratic_percent_surviving" => Some(MappedNonlinearEquation {
+            equation_id: "linear_quadratic_percent_surviving",
+            param_names: &["Alpha", "Beta"],
+            param_renames: &[("a", "Alpha"), ("b", "Beta")],
+            negated_params: &[],
+            strictly_positive_params: &[],
+        }),
         _ => None,
     }
 }
 
-fn translate_nonlinear(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {
-    let eq_obj = get_obj(get_obj(content, "model"), "equation");
-    let raw_eq_name = get_str(eq_obj, "name").unwrap_or("");
-    let eq_id = if let Some(mapped) = map_nonlinear_equation_alias(raw_eq_name) {
-        mapped
+fn apply_nonlinear_lower_bound(rule: &mut ParameterRule, value: f64, negated: bool, strict_pos: bool) {
+    if negated {
+        let bound = -value;
+        rule.upper_bound = Some(rule.upper_bound.map_or(bound, |u| u.min(bound)));
+    } else if !(strict_pos && value == 0.0) {
+        rule.lower_bound = Some(rule.lower_bound.map_or(value, |l| l.max(value)));
+    }
+}
+
+fn apply_nonlinear_upper_bound(rule: &mut ParameterRule, value: f64, negated: bool) {
+    if negated {
+        let bound = -value;
+        rule.lower_bound = Some(rule.lower_bound.map_or(bound, |l| l.max(bound)));
     } else {
-        blocking.push(format!("unmapped nonlinear equation `{raw_eq_name}`"));
-        "log_agonist_vs_response_4pl"
+        rule.upper_bound = Some(rule.upper_bound.map_or(value, |u| u.min(value)));
+    }
+}
+
+fn translate_nonlinear_constraint_entry(
+    raw_name: &str,
+    entry: &serde_json::Value,
+    mapped: &MappedNonlinearEquation,
+    rules: &mut BTreeMap<&'static str, ParameterRule>,
+    blocking: &mut Vec<String>,
+) {
+    let Some(obj) = entry.as_object() else {
+        blocking.push(format!("unsupported non-object constraint for `{raw_name}`"));
+        return;
+    };
+    let ctype = get_str(Some(obj), "type").unwrap_or("");
+    if ctype.is_empty() || ctype.eq_ignore_ascii_case("NO_CONSTRAINT") || ctype.eq_ignore_ascii_case("NONE") {
+        return;
+    }
+    let Some(canon) = mapped.resolve_param_name(raw_name) else {
+        blocking.push(format!("constraint references unknown parameter `{raw_name}`"));
+        return;
+    };
+    let negated = mapped.is_negated(canon);
+    let strict_pos = mapped.is_strictly_positive(canon);
+    let rule = rules.entry(canon).or_insert_with(|| ParameterRule {
+        name: canon.to_owned(),
+        scope: ParameterScope::Local,
+        initial_override: None,
+        lower_bound: None,
+        upper_bound: None,
+    });
+    match ctype {
+        "CONST" => match get_f64(Some(obj), "value") {
+            Some(v) => rule.scope = ParameterScope::Constant(if negated { -v } else { v }),
+            None => blocking.push(format!("non-numeric CONST constraint value for `{raw_name}`")),
+        },
+        "GREATER" => match get_f64(Some(obj), "value") {
+            Some(v) => apply_nonlinear_lower_bound(rule, v, negated, strict_pos),
+            None => blocking.push(format!("non-numeric GREATER constraint value for `{raw_name}`")),
+        },
+        "LESS" => match get_f64(Some(obj), "value") {
+            Some(v) => apply_nonlinear_upper_bound(rule, v, negated),
+            None => blocking.push(format!("non-numeric LESS constraint value for `{raw_name}`")),
+        },
+        "BETWEEN" => {
+            let lo = get_f64(Some(obj), "min").or_else(|| get_f64(Some(obj), "lower"));
+            let hi = get_f64(Some(obj), "max").or_else(|| get_f64(Some(obj), "upper"));
+            match (lo, hi) {
+                (Some(l), Some(u)) if l <= u => {
+                    apply_nonlinear_lower_bound(rule, l, negated, strict_pos);
+                    apply_nonlinear_upper_bound(rule, u, negated);
+                }
+                _ => blocking.push(format!("invalid BETWEEN constraint bounds for `{raw_name}`")),
+            }
+        }
+        "SHARE" => rule.scope = ParameterScope::SharedGlobal,
+        "SH_GREATER" => match get_f64(Some(obj), "value") {
+            Some(v) => {
+                rule.scope = ParameterScope::SharedGlobal;
+                apply_nonlinear_lower_bound(rule, v, negated, strict_pos);
+            }
+            None => blocking.push(format!("non-numeric SH_GREATER constraint value for `{raw_name}`")),
+        },
+        "SH_LESS" => match get_f64(Some(obj), "value") {
+            Some(v) => {
+                rule.scope = ParameterScope::SharedGlobal;
+                apply_nonlinear_upper_bound(rule, v, negated);
+            }
+            None => blocking.push(format!("non-numeric SH_LESS constraint value for `{raw_name}`")),
+        },
+        "CONST_DS_TITLE" => rule.scope = ParameterScope::ColumnTitleConstant,
+        other => blocking.push(format!("unsupported parameter constraint `{other}`")),
+    }
+}
+
+fn translate_nonlinear_initial_values(
+    model_obj: Option<&JsonMap>,
+    mapped: &MappedNonlinearEquation,
+    rules: &mut BTreeMap<&'static str, ParameterRule>,
+    blocking: &mut Vec<String>,
+) {
+    let Some(inits) = get_obj(model_obj, "initialValues") else {
+        return;
+    };
+    for (raw_name, val) in inits {
+        let Some(entries) = val.as_array() else {
+            continue;
+        };
+        let mut custom_vals: Vec<f64> = Vec::new();
+        let mut has_invalid = false;
+        for entry in entries {
+            let Some(eobj) = entry.as_object() else {
+                continue;
+            };
+            if get_bool(Some(eobj), "isAuto").unwrap_or(true) {
+                continue;
+            }
+            match get_f64(Some(eobj), "value") {
+                Some(v) => custom_vals.push(v),
+                None => has_invalid = true,
+            }
+        }
+        if has_invalid {
+            blocking.push(format!("non-numeric manual initial value for `{raw_name}`"));
+            continue;
+        }
+        let Some(&first) = custom_vals.first() else {
+            continue;
+        };
+        let all_same = custom_vals.iter().all(|&v| (v - first).abs() <= 1e-12 * first.abs().max(1.0));
+        if !all_same {
+            blocking.push(format!("per-dataset manual initial values for `{raw_name}` are not supported"));
+            continue;
+        }
+        let Some(canon) = mapped.resolve_param_name(raw_name) else {
+            blocking.push(format!("initial value references unknown parameter `{raw_name}`"));
+            continue;
+        };
+        let v = if mapped.is_negated(canon) { -first } else { first };
+        let rule = rules.entry(canon).or_insert_with(|| ParameterRule {
+            name: canon.to_owned(),
+            scope: ParameterScope::Local,
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        });
+        rule.initial_override = Some(v);
+    }
+}
+
+fn translate_nonlinear_parameter_rules(
+    model_obj: Option<&JsonMap>,
+    mapped: &MappedNonlinearEquation,
+    blocking: &mut Vec<String>,
+) -> Vec<ParameterRule> {
+    let mut rules: BTreeMap<&'static str, ParameterRule> = BTreeMap::new();
+    if let Some(cons) = get_obj(model_obj, "constraints") {
+        for (raw_name, entry) in cons {
+            translate_nonlinear_constraint_entry(raw_name, entry, mapped, &mut rules, blocking);
+        }
+    }
+    translate_nonlinear_initial_values(model_obj, mapped, &mut rules, blocking);
+    for rule in rules.values() {
+        if let (Some(l), Some(u)) = (rule.lower_bound, rule.upper_bound)
+            && l > u
+        {
+            blocking.push(format!("infeasible parameter bounds for `{}`", rule.name));
+        }
+    }
+    rules.into_values().collect()
+}
+
+fn parse_range_endpoint(range_obj: &JsonMap, key: &str, blocking: &mut Vec<String>) -> Option<f64> {
+    let ep = range_obj.get(key)?.as_object()?;
+    if !get_bool(Some(ep), "enabled").unwrap_or(false) {
+        return None;
+    }
+    match get_f64(Some(ep), "value") {
+        Some(v) => Some(v),
+        None => {
+            blocking.push(format!("non-numeric range endpoint `{key}`"));
+            None
+        }
+    }
+}
+
+fn translate_nonlinear_range(data: Option<&JsonMap>, spec: &mut NonlinearFitSpec, blocking: &mut Vec<String>) {
+    let Some(rng) = get_obj(data, "range") else {
+        return;
+    };
+    for (k, v) in rng {
+        if !matches!(k.as_str(), "minX" | "maxX" | "minY" | "maxY") && v.as_object().and_then(|o| get_bool(Some(o), "enabled")).unwrap_or(false) {
+            blocking.push(format!("unsupported data.range key `{k}`"));
+        }
+    }
+    let min_x = parse_range_endpoint(rng, "minX", blocking);
+    let max_x = parse_range_endpoint(rng, "maxX", blocking);
+    if let (Some(lo), Some(hi)) = (min_x, max_x)
+        && lo > hi
+    {
+        blocking.push(String::from("invalid data.range: minX > maxX"));
+    } else if min_x.is_some() || max_x.is_some() {
+        spec.x_range_filter = Some((min_x, max_x));
+    }
+
+    let min_y = parse_range_endpoint(rng, "minY", blocking);
+    let max_y = parse_range_endpoint(rng, "maxY", blocking);
+    if let (Some(lo), Some(hi)) = (min_y, max_y)
+        && lo > hi
+    {
+        blocking.push(String::from("invalid data.range: minY > maxY"));
+    } else if min_y.is_some() || max_y.is_some() {
+        spec.y_range_filter = Some((min_y, max_y));
+    }
+}
+
+fn translate_nonlinear_weighting(method: Option<&JsonMap>, spec: &mut NonlinearFitSpec, blocking: &mut Vec<String>) {
+    let Some(w_obj) = get_obj(method, "weighting") else {
+        return;
+    };
+    let Some(w_type) = get_str(Some(w_obj), "type") else {
+        return;
+    };
+    match w_type {
+        "NO_WEIGHTING" => {
+            spec.weighting = WeightingScheme::None;
+            spec.weighting_source = WeightingSource::ObservedY;
+        }
+        "1/Y^2" | "RELATIVE" | "ONE_OVER_Y2" => {
+            // Response-power weighting uses predicted curve heights `1 / Y_hat^2` via IRLS
+            // (Carroll & Ruppert 1988; Motulsky & Christopoulos 2004).
+            spec.weighting = WeightingScheme::RelativeSquare;
+            spec.weighting_source = WeightingSource::PredictedY;
+        }
+        "1/Y" | "POISSON" | "ONE_OVER_Y" => {
+            spec.weighting = WeightingScheme::Relative;
+            spec.weighting_source = WeightingSource::PredictedY;
+        }
+        "1/Y^K" | "GENERAL" => match get_f64(Some(w_obj), "k") {
+            Some(k) => {
+                spec.weighting = WeightingScheme::GeneralPowerY(k);
+                spec.weighting_source = WeightingSource::PredictedY;
+            }
+            None => blocking.push(String::from("missing or non-numeric exponent `k` for general power weighting")),
+        },
+        "1/X" | "ONE_OVER_X" => {
+            spec.weighting = WeightingScheme::InverseX;
+            spec.weighting_source = WeightingSource::ObservedY;
+        }
+        "1/X^2" | "ONE_OVER_X2" => {
+            spec.weighting = WeightingScheme::InverseX2;
+            spec.weighting_source = WeightingSource::ObservedY;
+        }
+        "1/SD^2" | "OBSERVED_SD" => {
+            spec.weighting = WeightingScheme::ObservedSd;
+            spec.weighting_source = WeightingSource::ObservedY;
+        }
+        other => {
+            blocking.push(format!("unmapped weighting `{other}`"));
+            spec.weighting = WeightingScheme::None;
+        }
+    }
+}
+
+fn translate_nonlinear_outliers(method: Option<&JsonMap>, spec: &mut NonlinearFitSpec, blocking: &mut Vec<String>) {
+    let Some(out_obj) = get_obj(method, "outliers") else {
+        return;
+    };
+    let Some(out_m) = get_str(Some(out_obj), "method") else {
+        return;
+    };
+    let parse_q = |blocking: &mut Vec<String>| -> f64 {
+        match out_obj.get("q") {
+            None => 1.0,
+            Some(v) => match v.as_f64().filter(|&q| q.is_finite() && q > 0.0 && q <= 50.0) {
+                Some(q) => q,
+                None => {
+                    blocking.push(String::from("invalid ROUT outlier threshold `q`"));
+                    1.0
+                }
+            },
+        }
+    };
+    match out_m {
+        "DO_NOT_HANDLE" | "NONE" => spec.outlier_handling = OutlierHandling::None,
+        "ELIMINATE" | "ROUT_ELIMINATE" => {
+            let q = parse_q(blocking);
+            if spec.method != FitMethod::LeastSquares {
+                blocking.push(String::from("ROUT outlier elimination requires least-squares fittingMethod"));
+                return;
+            }
+            spec.outlier_handling = OutlierHandling::Eliminate;
+            spec.method = FitMethod::RoutOutlierElimination { fdr_q_percent: q };
+            spec.emit_cleaned_data_tab = get_bool(Some(out_obj), "outputCleanedData").unwrap_or(false);
+        }
+        "COUNT" | "IDENTIFY_AND_COUNT" | "ROUT_COUNT" => {
+            let q = parse_q(blocking);
+            if spec.method != FitMethod::LeastSquares {
+                blocking.push(String::from("ROUT outlier counting requires least-squares fittingMethod"));
+                return;
+            }
+            spec.outlier_handling = OutlierHandling::IdentifyAndCountOnly;
+            spec.method = FitMethod::RoutOutlierElimination { fdr_q_percent: q };
+            spec.emit_cleaned_data_tab = get_bool(Some(out_obj), "outputCleanedData").unwrap_or(false);
+        }
+        other => blocking.push(format!("unmapped outlier method `{other}`")),
+    }
+}
+
+fn translate_nonlinear_model_comparison(
+    content: Option<&JsonMap>,
+    mapped: &MappedNonlinearEquation,
+    spec: &mut NonlinearFitSpec,
+    blocking: &mut Vec<String>,
+) {
+    let Some(mc) = get_obj(content, "modelComparison") else {
+        return;
+    };
+    let Some(mc_type) = get_str(Some(mc), "type") else {
+        return;
+    };
+    if mc_type == "NO_COMPARISON" {
+        return;
+    }
+    let comp_method = match get_str(Some(mc), "method").unwrap_or("STAT_TEST") {
+        "STAT_TEST" | "F_TEST" => ModelComparisonMethod::ExtraSumOfSquaresF,
+        "AICC" | "AIC" => ModelComparisonMethod::Aicc,
+        other => {
+            blocking.push(format!("unmapped modelComparison method `{other}`"));
+            return;
+        }
+    };
+    let opts = get_obj(Some(mc), "options");
+    let question = match mc_type {
+        "CONSTRAINED_PARAMETER" => {
+            let raw_param = get_str(opts, "parameterName").unwrap_or("");
+            // Exact corpus wire spelling is `hypoteticalValue` (missing `h`).
+            let raw_val = get_f64(opts, "hypoteticalValue").or_else(|| get_f64(opts, "hypotheticalValue"));
+            match (mapped.resolve_param_name(raw_param), raw_val) {
+                (Some(canon), Some(v)) => {
+                    let val = if mapped.is_negated(canon) { -v } else { v };
+                    ModelComparisonQuestion::ParameterEqualsTheoretical { param: canon.to_owned(), theoretical_value: val }
+                }
+                _ => {
+                    blocking.push(format!("invalid CONSTRAINED_PARAMETER comparison options for `{raw_param}`"));
+                    return;
+                }
+            }
+        }
+        "SHARED_PARAMETERS" => {
+            let Some(arr) = opts.and_then(|o| o.get("sharedParameters")).and_then(serde_json::Value::as_array) else {
+                blocking.push(String::from("missing sharedParameters in SHARED_PARAMETERS modelComparison"));
+                return;
+            };
+            let mut shared = Vec::with_capacity(arr.len());
+            for item in arr {
+                let raw_p = item.as_str().unwrap_or("");
+                match mapped.resolve_param_name(raw_p) {
+                    Some(canon) => shared.push(canon.to_owned()),
+                    None => {
+                        blocking.push(format!("unknown shared comparison parameter `{raw_p}`"));
+                        return;
+                    }
+                }
+            }
+            if shared.is_empty() {
+                blocking.push(String::from("empty sharedParameters in SHARED_PARAMETERS modelComparison"));
+                return;
+            }
+            ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params: shared }
+        }
+        other => {
+            blocking.push(format!("unsupported modelComparison `{other}`"));
+            return;
+        }
+    };
+    spec.comparison_method = Some(comp_method);
+    spec.comparison_question = Some(question);
+    spec.prefer_well_defined_fit = get_bool(Some(mc), "preferUnambiguousFit").unwrap_or(false);
+}
+
+fn translate_nonlinear(content: Option<&JsonMap>, blocking: &mut Vec<String>) -> AnalysisKind {
+    let model_obj = get_obj(content, "model");
+    let eq_obj = get_obj(model_obj, "equation");
+    let raw_eq_name = get_str(eq_obj, "name").unwrap_or("");
+    let raw_eq_def = get_str(eq_obj, "definition");
+    let mapped = map_nonlinear_equation(raw_eq_name, raw_eq_def);
+    let eq_id = match mapped {
+        Some(m) => m.equation_id,
+        None => {
+            blocking.push(format!("unmapped nonlinear equation `{raw_eq_name}`"));
+            "log_agonist_vs_response_4pl"
+        }
     };
 
     let mut spec = NonlinearFitSpec::new(eq_id);
+    if let Some(m) = mapped {
+        spec.parameter_rules = translate_nonlinear_parameter_rules(model_obj, &m, blocking);
+        translate_nonlinear_model_comparison(content, &m, &mut spec, blocking);
+    }
+
     let data = get_obj(content, "data");
     if let Some(rep_mode) = get_str(data, "handleReplicatesAs") {
         spec.replicate_fit_mode = match rep_mode {
@@ -1715,6 +2325,7 @@ fn translate_nonlinear(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
             }
         };
     }
+    translate_nonlinear_range(data, &mut spec, blocking);
 
     let method = get_obj(content, "method");
     if let Some(fit_m) = get_str(method, "fittingMethod") {
@@ -1728,37 +2339,54 @@ fn translate_nonlinear(content: Option<&JsonMap>, blocking: &mut Vec<String>) ->
             }
         };
     }
-    if let Some(w_type) = get_str(get_obj(method, "weighting"), "type") {
-        spec.weighting = match w_type {
-            "NO_WEIGHTING" => WeightingScheme::None,
-            "RELATIVE" | "ONE_OVER_Y2" => WeightingScheme::RelativeSquare,
-            "POISSON" | "ONE_OVER_Y" => WeightingScheme::Relative,
-            "ONE_OVER_X" => WeightingScheme::InverseX,
-            "ONE_OVER_X2" => WeightingScheme::InverseX2,
-            "OBSERVED_SD" => WeightingScheme::ObservedSd,
-            other => {
-                blocking.push(format!("unmapped weighting `{other}`"));
-                WeightingScheme::None
-            }
-        };
-    }
-    if let Some(out_m) = get_str(get_obj(method, "outliers"), "method") {
-        match out_m {
-            "DO_NOT_HANDLE" | "NONE" => spec.outlier_handling = OutlierHandling::None,
-            "ROUT_ELIMINATE" => {
-                spec.outlier_handling = OutlierHandling::Eliminate;
-                spec.method = FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 };
-            }
-            "ROUT_COUNT" => spec.outlier_handling = OutlierHandling::IdentifyAndCountOnly,
-            other => blocking.push(format!("unmapped outlier method `{other}`")),
+    translate_nonlinear_weighting(method, &mut spec, blocking);
+    translate_nonlinear_outliers(method, &mut spec, blocking);
+    if let Some(conv) = get_obj(method, "convergence") {
+        if let Some(max_iters) = conv.get("maxIterations").and_then(serde_json::Value::as_u64)
+            && let Ok(n) = usize::try_from(max_iters)
+            && n > 0
+        {
+            spec.max_iters = n.clamp(1, NonlinearFitSpec::HARD_MAX_ITERS);
+        }
+        if let Some(criteria) = get_str(Some(conv), "criteriaType") {
+            let switch_to_strict = get_bool(Some(conv), "switchToStrictCriteria").unwrap_or(false);
+            spec.convergence_strictness = match criteria {
+                "QUICK" => ConvergenceStrictness::Quick,
+                "MEDIUM" if switch_to_strict => ConvergenceStrictness::Strict,
+                "MEDIUM" => ConvergenceStrictness::Medium,
+                "STRICT" => ConvergenceStrictness::Strict,
+                other => {
+                    blocking.push(format!("unmapped convergence criteriaType `{other}`"));
+                    ConvergenceStrictness::Default
+                }
+            };
         }
     }
-    if let Some(ci_m) = get_str(get_obj(content, "confidence"), "ciMethod") {
+
+    let conf = get_obj(content, "confidence");
+    if let Some(ci_m) = get_str(conf, "ciMethod") {
         match ci_m {
             "PROFILE_LIKELIHOOD" | "ASYMMETRICAL" => spec.profile_likelihood_ci = true,
             "WALD" | "SYMMETRICAL" => spec.profile_likelihood_ci = false,
             other => blocking.push(format!("unmapped ciMethod `{other}`")),
         }
+    }
+    if let Some(calc_se) = get_bool(conf, "calcSE") {
+        spec.show_standard_errors = Some(calc_se);
+    }
+    if let Some(ambig_m) = get_str(conf, "ambiguityTestMethod") {
+        spec.identifiability_mode = match ambig_m {
+            "CONDITION_NUMBER" => Some(IdentifiabilityMode::IdentifyUnstableParameters),
+            "PAR_DEPENDENCY" => Some(IdentifiabilityMode::IdentifyAmbiguousFits),
+            "NONE" => Some(IdentifiabilityMode::ReportAll),
+            other => {
+                blocking.push(format!("unmapped ambiguityTestMethod `{other}`"));
+                None
+            }
+        };
+    }
+    if get_bool(get_obj(content, "interpolation"), "enabled") == Some(true) {
+        spec.interpolate_unknowns = true;
     }
     AnalysisKind::NonlinearRegression(spec)
 }

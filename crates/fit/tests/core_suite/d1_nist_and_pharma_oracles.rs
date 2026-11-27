@@ -7,7 +7,7 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CiBound, ConstantValue, DataSheet, FitMethod, HookSource, InfoSheet, LinearRegressionSpec,
-    ModelComparisonSpec, NonlinearFitSpec, ParameterRule, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
+    ModelComparisonSpec, NonlinearFitSpec, ParameterRule, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, WeightingSource, XyTable,
 };
 use curvebook_fit::{
     DataPoint, DatasetSeries, DemingOptions, FitError, FitStatus, HookContext, ModelComparisonOutcome, NonlinearFitResult, ParameterNote,
@@ -986,4 +986,104 @@ fn rout_outlier_elimination_q1_percent_and_guards_oracle() {
         pt.n = Some(3.0);
     }
     assert!(matches!(fit_nonlinear(ag_m.as_ref(), &[pre_ds], &HookContext::default(), &rout_cfg), Err(FitError::RequiresRawReplicates)));
+}
+
+#[test]
+fn issue_74_log_dose_response_initial_guess_preserves_positive_span_on_reversed_trends() {
+    // Hill (1910); Motulsky & Christopoulos (2004): fitting `log_inhibitor_vs_response_4pl`
+    // (`Y = Bottom + (Top - Bottom) / (1 + 10^((X - LogIC50) * HillSlope))`) to an increasing
+    // curve must seed `HillSlope < 0` so `Bottom < Top` (`Span > 0`) instead of inverting asymptotes.
+    let log_x: Vec<f64> = (-16..=-4).map(|i| i as f64 * 0.5).collect();
+    let (true_b, true_t, true_ic, true_h) = (15.0_f64, 95.0, -5.0, -1.4);
+    let y_rising: Vec<f64> = log_x.iter().map(|&x| true_b + (true_t - true_b) / (1.0 + 10_f64.powf((x - true_ic) * true_h))).collect();
+    let inh_model = get_builtin_model("log_inhibitor_vs_response_4pl").unwrap();
+    let ds_rising = series_xy(0, "RisingInh", &log_x, &y_rising);
+    let inh_res = fit_default(inh_model.as_ref(), std::slice::from_ref(&ds_rising));
+    assert_converged(&inh_res, "4PL inhibitor on rising curve");
+    assert_params_approx(
+        &inh_res,
+        0,
+        &[("Bottom", true_b, 1e-6, 1e-6), ("Top", true_t, 1e-6, 1e-6), ("LogIC50", true_ic, 1e-6, 1e-6), ("HillSlope", true_h, 1e-6, 1e-6)],
+        "4PL inh rising",
+    );
+    assert_approx_eq(find_derived(&inh_res, 0, "Span"), true_t - true_b, 1e-6, 1e-6, "4PL inh rising Span > 0");
+    assert_normal_equations_small(inh_model.as_ref(), &inh_res, &ds_rising, &["Bottom", "Top", "LogIC50", "HillSlope"], 1e-6);
+
+    // Mirror case: fitting `log_agonist_vs_response_4pl` to a falling curve must seed
+    // `HillSlope < 0` and keep `Bottom < Top` (`Span > 0`).
+    let (ag_b, ag_t, ag_ec, ag_h) = (10.0_f64, 88.0, -5.25, -1.25);
+    let jitter = [0.25, -0.30, 0.20, -0.15, 0.35, -0.25, 0.10, -0.20, 0.30, -0.10, 0.15, -0.25, 0.20];
+    let y_falling: Vec<f64> = log_x.iter().zip(jitter).map(|(&x, e)| ag_b + (ag_t - ag_b) / (1.0 + 10_f64.powf((ag_ec - x) * ag_h)) + e).collect();
+    let ag_model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let ds_falling = series_xy(0, "FallingAg", &log_x, &y_falling);
+    let ag_res = fit_default(ag_model.as_ref(), std::slice::from_ref(&ds_falling));
+    assert_converged(&ag_res, "4PL agonist on falling curve");
+    assert!(find_param_ds(&ag_res, 0, "Bottom").estimate < find_param_ds(&ag_res, 0, "Top").estimate);
+    assert!(find_param_ds(&ag_res, 0, "HillSlope").estimate < 0.0);
+    assert!(find_derived(&ag_res, 0, "Span") > 0.0);
+    assert_normal_equations_small(ag_model.as_ref(), &ag_res, &ds_falling, &["Bottom", "Top", "LogEC50", "HillSlope"], 1e-5);
+}
+
+#[test]
+fn issue_74_linear_dose_response_derived_transforms_and_relative_square_irls_score() {
+    // Verify `LinearDoseResponse` (3PL and 4PL agonist/inhibitor) emits exact `LogEC50`/`LogIC50`
+    // and `Span = Top - Bottom` derived transforms.
+    let conc: Vec<f64> = (-6..=4).map(|k| 10_f64.powf(k as f64 * 0.5)).collect();
+    let (b, t, c50, h) = (12.0_f64, 96.0, 2.5, 1.45);
+    for (eq_id, is_inh, var_slope, log_key) in [
+        ("agonist_vs_response_3pl", false, false, "LogEC50"),
+        ("agonist_vs_response_4pl", false, true, "LogEC50"),
+        ("inhibitor_vs_response_3pl", true, false, "LogIC50"),
+        ("inhibitor_vs_response_4pl", true, true, "LogIC50"),
+    ] {
+        let slope = if var_slope { h } else { 1.0 };
+        let ys: Vec<f64> = conc
+            .iter()
+            .map(|&x| {
+                let r = (x / c50).powf(slope);
+                let frac = if is_inh { 1.0 / (1.0 + r) } else { r / (1.0 + r) };
+                b + (t - b) * frac
+            })
+            .collect();
+        let model = get_builtin_model(eq_id).unwrap();
+        let res = fit_default(model.as_ref(), &[series_xy(0, eq_id, &conc, &ys)]);
+        assert_converged(&res, eq_id);
+        assert_approx_eq(find_derived(&res, 0, log_key), c50.log10(), 1e-6, 1e-6, &format!("{eq_id} {log_key}"));
+        assert_approx_eq(find_derived(&res, 0, "Span"), t - b, 1e-6, 1e-6, &format!("{eq_id} Span"));
+    }
+
+    // Carroll & Ruppert (1988) / Motulsky & Christopoulos (2004): `1/Y^2` predicted-Y IRLS solves
+    // the exact estimating equation `sum_i ((y_i - yhat_i) / yhat_i^2) * d(yhat_i)/d(theta_j) = 0`,
+    // distinct from observed-Y `1/y_i^2` weighting.
+    let log_c: Vec<f64> = (-9..=-3).map(|i| i as f64).collect();
+    let rel_err = [0.06, -0.05, 0.04, -0.06, 0.05, -0.04, 0.03];
+    let y_het: Vec<f64> = log_c.iter().zip(rel_err).map(|(&x, e)| (5.0 + 95.0 / (1.0 + 10_f64.powf((-6.0 - x) * 1.15))) * (1.0 + e)).collect();
+    let ag_model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let ds = series_xy(0, "HetIRLS", &log_c, &y_het);
+    let cfg_pred = SolverConfig {
+        weighting: WeightingScheme::RelativeSquare,
+        weighting_source: WeightingSource::PredictedY,
+        compute_profile_ci: false,
+        ..SolverConfig::default()
+    };
+    let res_pred = fit_with(ag_model.as_ref(), std::slice::from_ref(&ds), &cfg_pred);
+    assert_converged(&res_pred, "1/Y^2 PredictedY IRLS");
+    let theta = &res_pred.datasets[0].params;
+    let mut grad_buf = vec![0.0_f64; 4];
+    let mut score = [0.0_f64; 4];
+    let mut expected_wss = 0.0_f64;
+    for pt in &ds.points {
+        let yhat = ag_model.eval(&pt.x, theta, 0).unwrap();
+        assert!(ag_model.grad(&pt.x, theta, 0, &mut grad_buf));
+        let w = 1.0 / (yhat * yhat);
+        let r = pt.y - yhat;
+        expected_wss += w * r * r;
+        for (s, &g) in score.iter_mut().zip(&grad_buf) {
+            *s += w * r * g;
+        }
+    }
+    assert_approx_eq(res_pred.weighted_ss, expected_wss, 1e-10, 1e-10, "IRLS weighted SS");
+    for (j, s) in score.iter().enumerate() {
+        assert!(s.abs() < 1e-6, "IRLS score component {j} = {s:.3e} exceeds 1e-6");
+    }
 }

@@ -703,11 +703,16 @@ impl ParametricModel for LogDoseResponse {
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let log_mid = estimate_x_at_ymid(points);
+        let falling = estimate_curve_is_falling(points);
+        // Match the initial HillSlope sign to the observed monotonic trend so that
+        // `Bottom` stays the lower asymptote and `Top` stays the upper asymptote (`Span >= 0`)
+        // regardless of whether an agonist or inhibitor equation is fitted to rising or falling data.
+        let hill_seed = if self.is_inhibition == falling { 1.0 } else { -1.0 };
         match (self.normalized, self.variable_slope) {
             (true, false) => vec![log_mid],
-            (true, true) => vec![log_mid, 1.0],
+            (true, true) => vec![log_mid, hill_seed],
             (false, false) => vec![ymin, ymax, log_mid],
-            (false, true) => vec![ymin, ymax, log_mid, 1.0],
+            (false, true) => vec![ymin, ymax, log_mid, hill_seed],
         }
     }
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
@@ -832,6 +837,21 @@ impl ParametricModel for LinearDoseResponse {
         } else {
             vec![(None, None), (None, None), (Some(1e-30), None)]
         }
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() < 3 {
+            return out;
+        }
+        let (bottom, top, c50) = (params[0], params[1], params[2]);
+        if c50.is_finite() && c50 > 0.0 {
+            let label = if self.is_inhibition { "LogIC50" } else { "LogEC50" };
+            push_finite_scalar(&mut out, label, c50.log10());
+        }
+        if bottom.is_finite() && top.is_finite() {
+            push_finite_scalar(&mut out, "Span", top - bottom);
+        }
+        out
     }
 }
 
