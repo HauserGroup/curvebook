@@ -13,7 +13,7 @@ use crate::{
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
 // input-to-paint budgets (`human_wf_*`), grid, curve-fit, and ANOVA/1M throughput gates
 // off the parallel correctness runner. The complement below still covers every other test.
-const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
+pub(crate) const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
 const HOSTED_STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {

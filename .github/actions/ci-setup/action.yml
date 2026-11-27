@@ -10,6 +10,9 @@ inputs:
   install-deny:
     description: Ensure cargo-deny is installed (needed by the build cache writer and policy stage).
     default: 'false'
+  install-about:
+    description: Ensure cargo-about is installed (needed by the build cache writer and tests stage for offline license HTML checks).
+    default: 'false'
   reclaim-disk:
     description: Reclaim unused preinstalled runner SDK disk space before large archive builds or extractions.
     default: 'false'
@@ -99,6 +102,7 @@ runs:
         INSTALL_NEXTEST: ${{ inputs.install-nextest }}
         INSTALL_LINTERS: ${{ inputs.install-linters }}
         INSTALL_DENY: ${{ inputs.install-deny }}
+        INSTALL_ABOUT: ${{ inputs.install-about }}
       run: |
         set -euo pipefail
         mkdir -p "$RUNNER_TEMP/ci-tools"
@@ -119,4 +123,7 @@ runs:
         echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
         if [ "$INSTALL_DENY" = "true" ] && ! cargo deny --version 2>/dev/null | grep -Fx 'cargo-deny 0.20.2'; then
           cargo install --locked cargo-deny --version 0.20.2
+        fi
+        if [ "$INSTALL_ABOUT" = "true" ] && ! cargo about --version 2>/dev/null | grep -Fx 'cargo-about 0.9.3'; then
+          cargo install --locked cargo-about --version 0.9.3 --features cli
         fi

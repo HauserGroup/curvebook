@@ -104,9 +104,9 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     ])?);
     fs::write(rel_dir.join("curvebook-0.1.0-freebsd-x86_64.tar.gz"), tgz_bytes).unwrap();
 
-    let mut expected_assets = 5usize;
     #[cfg(target_os = "macos")]
-    {
+    let expected_assets = {
+        let mut count = 5usize;
         let dmg_src = fx.path.join("dmg-src");
         fs::create_dir_all(dmg_src.join("CurveBook.app/Contents/Resources")).unwrap();
         let plist = fs::read_to_string(root.join("packaging/macos/Info.plist.in"))
@@ -118,9 +118,12 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
         fs::write(dmg_src.join("CurveBook.app/Contents/Resources/curvebook.icns"), read_repo(&root, "assets/app-icon/curvebook.icns")?).unwrap();
         std::os::unix::fs::symlink("/Applications", dmg_src.join("Applications")).unwrap();
         if try_create_macos_dmg(&dmg_src, &rel_dir.join("curvebook-0.1.0-macos-universal.dmg")) {
-            expected_assets += 1;
+            count += 1;
         }
-    }
+        count
+    };
+    #[cfg(not(target_os = "macos"))]
+    let expected_assets = 5usize;
 
     write_sha256sums_for_dir(&rel_dir)?;
     let report_path = fx.path.join("scan-report.json");

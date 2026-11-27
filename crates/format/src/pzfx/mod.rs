@@ -6,7 +6,7 @@
 //!   `ExtTableType` (`Nested` / `MultipleVariables`), v9 2-subcolumn `MeanSd` / `MeanSem` modes,
 //!   `<SubColumnTitles>`, `Decimals`, per-table `<Info>` links, sequence ordering & selection,
 //!   colour tags, rich text, and Symbol-font decoding.
-//! - [`richtext`]: Adobe `SYMBOL.TXT` mapping, `.pzfx` rich-text <-> `curvebook-text` inline
+//! - `richtext` (crate-private): Adobe `SYMBOL.TXT` mapping, `.pzfx` rich-text <-> `curvebook-text` inline
 //!   markup conversion, strict ISO-8601 date parsing, and colour-tag / highlight-palette helpers.
 //! - [`export`]: Shared [`preflight_pzfx_export`] summary, deterministic data-only
 //!   [`export_pzfx_bytes`] writer, tracked §6.3 [`PZFX_FEATURE_CORPUS_COVERAGE`] table, and

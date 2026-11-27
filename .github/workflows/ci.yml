@@ -91,6 +91,7 @@ jobs:
         with:
           save-cache: 'true'
           install-deny: 'true'
+          install-about: 'true'
           reclaim-disk: 'true'
           install-gui-libs: 'true'
           install-linters: 'true'
@@ -135,6 +136,7 @@ jobs:
           install-libarchive: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           install-pdf-qa: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           install-deny: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
+          install-about: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           reclaim-disk: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
       - name: Restore the test binaries built for this revision
         if: matrix.stage == 'tests' || matrix.stage == 'performance'
