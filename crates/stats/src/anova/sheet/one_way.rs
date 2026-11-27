@@ -1196,7 +1196,12 @@ pub(in crate::anova) fn extract_one_way_inputs(
         return Ok((inputs, None, Vec::new(), Vec::new()));
     }
 
-    let cols = extract_numeric_columns(sheet, selected)?;
+    let mut cols = extract_numeric_columns(sheet, selected)?;
+    if selected.is_empty() {
+        // Analysing every data set skips those without a single active numeric value (for example
+        // a blank trailing column); an explicitly selected empty data set still fails below.
+        cols.retain(|c| !c.values.is_empty());
+    }
     let ignored_non_numeric: Vec<(String, usize)> =
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
     let is_lognormal = matches!(method, OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf);
