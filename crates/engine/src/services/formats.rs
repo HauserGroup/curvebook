@@ -731,6 +731,7 @@ mod tests {
                     },
                 ],
                 pairwise: Vec::new(),
+                ..CachedAnalysisReference::default()
             },
             fallback: ImportedAnalysisFallback {
                 original_kind_label: String::from("T_TESTS_AND_NONPARAMETRIC"),
@@ -800,6 +801,7 @@ mod tests {
                     means_diff: Some(99.0),
                     p_abs_tol: None,
                 }],
+                ..CachedAnalysisReference::default()
             },
             fallback: ImportedAnalysisFallback { original_kind_label: String::from("ONE_WAY_ANOVA"), tabs: Vec::new(), scalars: Vec::new() },
         };
@@ -864,7 +866,7 @@ mod tests {
             foreign_class: String::from("ONE_WAY_ANOVA"),
             abs_tol: 1e-9,
             rel_tol: 1e-6,
-            reference: CachedAnalysisReference { scalars: many_refs, pairwise: Vec::new() },
+            reference: CachedAnalysisReference { scalars: many_refs, ..CachedAnalysisReference::default() },
             fallback: ImportedAnalysisFallback { original_kind_label: String::from("ONE_WAY_ANOVA"), tabs: Vec::new(), scalars: Vec::new() },
         };
         let mut capped_warnings = Vec::new();

@@ -6696,7 +6696,9 @@ mod tests {
         assert_eq!(tr.scalars_disagreed, 0);
         assert_eq!(tr.compared_scalar_keys.get("TransformedX"), Some(&4));
         assert_eq!(tr.compared_scalar_keys.get("TransformedY"), Some(&8));
-        assert_eq!(tr.variants.get("Y:Y/K"), Some(&[1, 1, 1]));
-        assert_eq!(tr.variants.get("X:1/X | Y:1/Y"), Some(&[1, 1, 1]));
+        let div_var = tr.variants.get("Y:Y/K").expect("Y:Y/K variant");
+        assert_eq!((div_var.recomputed_ok, div_var.analyses_compared, div_var.analyses_fully_agreed), (1, 1, 1));
+        let lb_var = tr.variants.get("X:1/X | Y:1/Y").expect("X:1/X | Y:1/Y variant");
+        assert_eq!((lb_var.recomputed_ok, lb_var.analyses_compared, lb_var.analyses_fully_agreed), (1, 1, 1));
     }
 }

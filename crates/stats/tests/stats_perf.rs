@@ -41,7 +41,12 @@ fn posttest_two_way_48_levels_by_2_slices_tukey_perf() {
         SheetId::new("res_48x2"),
         sheet.id.clone(),
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                ..MultiplicitySpec::default()
+            },
             ..FactorialAnovaSpec::default()
         }),
     )

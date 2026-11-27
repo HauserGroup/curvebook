@@ -891,7 +891,12 @@ fn issue_73_unbalanced_split_plot_rm_two_way_type3_sphericity_and_additive_oracl
     let fac_col = FactorialAnovaSpec {
         repeated_measures: RepeatedMeasuresDesign::ColumnFactorMatched,
         sphericity_correction: RmSphericityCorrection::GreenhouseGeisser,
-        multiplicity: MultiplicitySpec { method: MultiplicityMethod::Bonferroni, threshold: 0.05, report_confidence_intervals: true },
+        multiplicity: MultiplicitySpec {
+            method: MultiplicityMethod::Bonferroni,
+            threshold: 0.05,
+            report_confidence_intervals: true,
+            ..MultiplicitySpec::default()
+        },
         ..FactorialAnovaSpec::default()
     };
     let res_col = run_factorial_anova(

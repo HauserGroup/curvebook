@@ -2138,7 +2138,12 @@ fn issue_82_posttest_families_match_scalar_studentized_range_sf() {
     let res_std = run_kind(
         &sh_6x2,
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::TukeyHsd,
+                threshold: 0.05,
+                report_confidence_intervals: true,
+                ..MultiplicitySpec::default()
+            },
             ..Default::default()
         }),
     )

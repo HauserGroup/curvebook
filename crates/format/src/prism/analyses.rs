@@ -457,11 +457,8 @@ fn extract_post_test_key(content: Option<&JsonMap>) -> (Option<String>, Option<S
 pub fn extract_analysis_design_key(foreign_class: &str, params_json: &serde_json::Value) -> AnalysisDesignKey {
     let class = foreign_class.trim().to_ascii_uppercase();
     let content = params_json.get("content").and_then(serde_json::Value::as_object).or_else(|| params_json.as_object());
-    let experimental_design = get_str(content, "experimentalDesign")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(normalize_experimental_design_alias)
-        .or_else(|| {
+    let experimental_design =
+        get_str(content, "experimentalDesign").map(str::trim).filter(|s| !s.is_empty()).map(normalize_experimental_design_alias).or_else(|| {
             if class == NL {
                 get_str(get_obj(get_obj(content, "model"), "equation"), "name")
                     .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))

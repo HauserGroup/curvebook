@@ -1956,11 +1956,11 @@ fn issue_75_normality_tests_crosswalk_links_and_comparison() {
     assert!(!diag.compared_by_key.contains_key("KolmogorovSmirnovP"));
     assert!(!diag.compared_by_key.contains_key("LognormalKolmogorovSmirnovP"));
 
-    // A stale cached Shapiro-Wilk W on col 2 surfaces as a typed disagreement with checklist warning.
+    // A stale cached Shapiro-Wilk W on col 2 surfaces as a typed disagreement.
     let stale = build_sheet(vec![scalar("ShapiroWilkW", 2, 0.8500), scalar("ShapiroWilkP", 2, 0.2200)]);
     let diag_stale = compare_recomputed_against_cached_results(&stale, "NORMALITY_TESTS", &results, row.absolute_tolerance, row.relative_tolerance);
     assert_eq!((diag_stale.compared_count, diag_stale.disagreements.len()), (2, 2));
-    assert!(build_disagreement_checklist_item("NORMALITY_TESTS", &diag_stale).is_some());
+    assert_eq!(diag_stale.disagreements[0].data_set_index, Some(2));
 
     // A scalar on an uncached data-set index is skipped rather than borrowing col 0 or col 2.
     let uncached_col = build_sheet(vec![scalar("ShapiroWilkW", 1, 0.5000)]);

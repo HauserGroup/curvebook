@@ -803,7 +803,12 @@ fn issue_72_kruskal_wallis_exact_permutation_and_dunn_oracles() {
         &kw_d.group_mean_ranks,
         kw_d.total_n,
         30.0,
-        &MultiplicitySpec { method: MultiplicityMethod::DunnRankSum, threshold: 0.05, report_confidence_intervals: false },
+        &MultiplicitySpec {
+            method: MultiplicityMethod::DunnRankSum,
+            threshold: 0.05,
+            report_confidence_intervals: false,
+            ..MultiplicitySpec::default()
+        },
     )
     .unwrap();
     assert_eq!(dunn.len(), 3);
