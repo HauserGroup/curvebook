@@ -33,7 +33,7 @@ use super::export::PZFX_ROOT_ELEMENT;
 use super::richtext::{
     attr_ci, extract_pzfx_color_tag, extract_pzfx_table_color_tag, parse_pzfx_constant_date, pzfx_element_to_markup, pzfx_element_to_plain_text,
 };
-use crate::archive::validate_project_document;
+use crate::archive::{validate_archive_save_limits, validate_project_document};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::xml::{MAX_XML_OPAQUE_BYTES, ParsedXml, XmlElement, XmlLimits, XmlParseOptions, parse_xml_bytes_with_options, parse_xml_with_options};
 
@@ -143,6 +143,7 @@ fn import_parsed_pzfx(parsed: ParsedXml, used_cells: &mut usize) -> Result<Impor
     warn_ignored_sections(root, &mut warnings);
 
     validate_project_document(&doc)?;
+    validate_archive_save_limits(&doc)?;
     Ok(ImportReport::new(doc, warnings))
 }
 

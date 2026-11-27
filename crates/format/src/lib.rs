@@ -25,12 +25,13 @@ pub mod xml;
 pub mod zip;
 
 pub use archive::{
-    ArchiveKind, ArchiveManifest, AssetManifestEntry, MAX_ARCHIVE_FILE_BYTES, SheetManifestEntry, detect_dependency_cycles,
-    ensure_existing_archive_not_newer, ensure_existing_unpacked_dir_not_newer, instantiate_template_bytes, is_unpacked_project_dir,
-    migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_archive_bytes_with_limits_and_warnings,
-    open_archive_bytes_with_warnings, open_project_bytes, open_project_file, open_project_unpacked_dir, open_project_unpacked_dir_with_warnings,
-    open_template_bytes, open_template_file, sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir,
-    save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document, validate_project_document_skip_checkpoints,
+    ArchiveKind, ArchiveManifest, AssetManifestEntry, MAX_ARCHIVE_ENTRY_BYTES, MAX_ARCHIVE_FILE_BYTES, MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+    SheetManifestEntry, detect_dependency_cycles, ensure_existing_archive_not_newer, ensure_existing_unpacked_dir_not_newer,
+    instantiate_template_bytes, is_unpacked_project_dir, migrate_document_json, native_archive_zip_limits, open_archive_bytes,
+    open_archive_bytes_with_limits, open_archive_bytes_with_limits_and_warnings, open_archive_bytes_with_warnings, open_project_bytes,
+    open_project_file, open_project_unpacked_dir, open_project_unpacked_dir_with_warnings, open_template_bytes, open_template_file,
+    sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes, save_template_file,
+    strip_project_data_for_template, validate_project_document, validate_project_document_skip_checkpoints,
 };
 pub use csv::{
     CsvMultiImportResult, CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link,

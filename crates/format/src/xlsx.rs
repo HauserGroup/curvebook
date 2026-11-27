@@ -15,7 +15,7 @@ use curvebook_doc::{
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
-use crate::archive::{MAX_ARCHIVE_FILE_BYTES, validate_project_document};
+use crate::archive::{MAX_ARCHIVE_FILE_BYTES, validate_archive_save_limits, validate_project_document};
 use crate::csv::{MAX_IMPORT_CELLS, collapse_merged_header_rows, detect_xy_x_subcolumn_header, make_deterministic_split_id};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::preamble::{build_preamble_info_sheet, extract_preamble_info};
@@ -301,6 +301,7 @@ pub fn import_xlsx_bytes_with_options(bytes: &[u8], opts: &XlsxImportOptions) ->
 
     doc.active_sheet_id = doc.data_sheets.first().map(|s| s.id.clone());
     validate_project_document(&doc)?;
+    validate_archive_save_limits(&doc)?;
     Ok(ImportReport::new(doc, warnings))
 }
 

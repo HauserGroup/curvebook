@@ -6,8 +6,9 @@ use curvebook_doc::{Cell, CellCoord, TableArchetype};
 use curvebook_format::prism::MAX_PROJECT_CELLS;
 use curvebook_format::pzfx::MAX_IMPORT_CELLS;
 use curvebook_format::{
-    ArchiveKind, ArchiveManifest, FormatError, import_prism_bytes, import_pzfx_str, is_unpacked_project_dir, open_project_bytes,
-    open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir, save_template_bytes,
+    ArchiveKind, ArchiveManifest, FormatError, MAX_ARCHIVE_ENTRY_BYTES, MAX_ARCHIVE_FILE_BYTES, MAX_ARCHIVE_UNCOMPRESSED_BYTES, MAX_ZIP_ENTRIES,
+    MAX_ZIP_ENTRY_BYTES, ZipArchive, import_prism_bytes, import_pzfx_str, is_unpacked_project_dir, native_archive_zip_limits, open_project_bytes,
+    open_project_file, open_project_unpacked_dir, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes,
 };
 use serde_json::json;
 
@@ -317,4 +318,135 @@ fn prism_multi_entry_cumulative_project_cell_budget_enforcement() {
         ("embedded/small.pzfx", small_pzfx.as_bytes()),
     ]);
     assert_eq!(import_prism_bytes(&mixed_ok).unwrap().document.data_sheets.len(), 2);
+}
+
+#[test]
+fn issue_80_large_imported_projects_compact_save_and_reopen() {
+    // Reproduce the corpus failure shape: a modest tabular import (~700k cells) whose 2-space
+    // pretty-printed `document.json` (~81 MiB) exceeds generic `MAX_ZIP_ENTRY_BYTES` (64 MiB),
+    // while its compact schema-v9 `document.json` (~24 MiB) saves and reopens cleanly in both
+    // `.curvebook` and `.curvebook.d/`.
+    let pzfx_table = build_large_table_xml("t_big", "TableType=\"XY\" YFormat=\"replicates\" Replicates=\"50\"", 1, 1_400, "Y", 10);
+    let pzfx_rep = import_pzfx_str(&pzfx_tables(&pzfx_table)).unwrap();
+    assert_eq!(pzfx_rep.document.data_sheets[0].archetype.allocated_cell_slots(), 701_400);
+
+    let saved_pzfx = save_project_bytes(&pzfx_rep.document).unwrap();
+    // Determinism check: saving twice yields identical bytes.
+    assert_eq!(saved_pzfx, save_project_bytes(&pzfx_rep.document).unwrap());
+    let zip = ZipArchive::from_bytes_with_limits(&saved_pzfx, native_archive_zip_limits()).unwrap();
+    let doc_bytes = zip.get("document.json").unwrap();
+    // Compact fallback triggers because 701,400 cells exceed 64 MiB when pretty-printed.
+    assert!(doc_bytes.starts_with(b"{\"schema_version\":"));
+    assert!((doc_bytes.len() as u64) < MAX_ZIP_ENTRY_BYTES);
+    assert_eq!(open_project_bytes(&saved_pzfx).unwrap(), pzfx_rep.document);
+
+    // Matching `.prism` import with the same cell count saves, reopens, and overwrites cleanly.
+    let archive_csv = format!("X{}\n{}", ",Y".repeat(500), "0\n".repeat(1_400));
+    let archive_manifest =
+        br#"{"title":"Large Archive","sheets":[{"csv_path":"tables/t1.csv","kind":"xy","subcolumn_mode":"replicates","replicates":50}]}"#;
+    let archive_zip = build_zip_entries(&[("manifest.json", archive_manifest), ("tables/t1.csv", archive_csv.as_bytes())]);
+    let archive_rep = import_prism_bytes(&archive_zip).unwrap();
+    let saved_archive = save_project_bytes(&archive_rep.document).unwrap();
+    assert_eq!(open_project_bytes(&saved_archive).unwrap(), archive_rep.document);
+
+    let root = TempDirGuard::new("issue80-compact").unwrap();
+    let dir_path = root.child("large.curvebook.d");
+    save_project_unpacked_dir(&archive_rep.document, &dir_path).unwrap();
+    assert!(is_unpacked_project_dir(&dir_path));
+    assert_eq!(open_project_unpacked_dir(&dir_path).unwrap(), archive_rep.document);
+}
+
+#[test]
+fn issue_80_project_at_import_limit_saves_and_reopens_and_over_limit_refused_up_front() {
+    let limits = native_archive_zip_limits();
+    assert_eq!(limits.max_entries, MAX_ZIP_ENTRIES);
+    assert_eq!(limits.max_entry_uncompressed_bytes, MAX_ARCHIVE_ENTRY_BYTES);
+    assert_eq!(limits.max_total_uncompressed_bytes, MAX_ARCHIVE_UNCOMPRESSED_BYTES);
+
+    // 1. Project with > 64 MiB compact `document.json` (~96 MiB, well above generic
+    //    MAX_ZIP_ENTRY_BYTES = 64 MiB and matching the largest corpus `.prism` compact size,
+    //    yet within `.prism`'s 128 MiB lazy read budget and native 256 MiB archive cap)
+    //    imports, saves as `.curvebook` and `.curvebook.d/`, overwrites on re-save, and reopens.
+    let constant_value = "v".repeat(3_900);
+    let make_info_json = |id: &str, count: usize| -> Vec<u8> {
+        let entries: Vec<String> = (0..count).map(|i| format!("{{\"name\":\"k{i:05}\",\"value\":\"{constant_value}\"}}")).collect();
+        format!("{{\"id\":\"{id}\",\"title\":\"Info {id}\",\"constants\":[{}]}}", entries.join(",")).into_bytes()
+    };
+    let info_a = make_info_json("info-a", 12_500); // ~49 MB JSON (< 64 MiB per .prism entry)
+    let info_b = make_info_json("info-b", 12_500); // ~49 MB JSON (< 64 MiB per .prism entry; total ~98 MB < 128 MiB read budget)
+    let at_limit_archive =
+        build_zip_entries(&[("manifest.json", br#"{"title":"Near Limit Study"}"#), ("info/a.json", &info_a), ("info/b.json", &info_b)]);
+    let imported = import_prism_bytes(&at_limit_archive).unwrap();
+    assert_eq!(imported.document.info_sheets.len(), 2);
+
+    let saved_zip = save_project_bytes(&imported.document).unwrap();
+    assert!(saved_zip.len() <= MAX_ARCHIVE_FILE_BYTES);
+    let inspected = ZipArchive::from_bytes_with_limits(&saved_zip, limits).unwrap();
+    let compact_len = inspected.get("document.json").unwrap().len() as u64;
+    assert!(compact_len > MAX_ZIP_ENTRY_BYTES && compact_len <= MAX_ARCHIVE_ENTRY_BYTES, "compact_len={compact_len}");
+    assert_eq!(open_project_bytes(&saved_zip).unwrap(), imported.document);
+
+    // Disk save, reopen, and overwrite (exercising ensure_existing_archive_not_newer & unpacked
+    // forward-overwrite guards on a > 64 MiB compact `document.json`).
+    let root = TempDirGuard::new("issue80-limit").unwrap();
+    let archive_path = root.child("near_limit.curvebook");
+    save_project_file(&archive_path, &imported.document).unwrap();
+    save_project_file(&archive_path, &imported.document).unwrap();
+    assert_eq!(open_project_file(&archive_path).unwrap(), imported.document);
+
+    let dir_path = root.child("near_limit.curvebook.d");
+    save_project_unpacked_dir(&imported.document, &dir_path).unwrap();
+    assert!(is_unpacked_project_dir(&dir_path));
+    save_project_unpacked_dir(&imported.document, &dir_path).unwrap();
+    assert_eq!(open_project_unpacked_dir(&dir_path).unwrap(), imported.document);
+    drop((imported, saved_zip, inspected, info_a, info_b, at_limit_archive));
+
+    // 1b. `.pzfx` project right near the native 256 MiB archive limit (~240 MiB total uncompressed,
+    //     ~234 MiB compact `document.json` > MAX_ARCHIVE_FILE_BYTES = 128 MiB) imports, saves,
+    //     overwrites in both `.curvebook` and `.curvebook.d/` (verifying unpacked overwrite above
+    //     128 MiB), and reopens cleanly.
+    let near_256m_pzfx = build_large_table_xml("t_near_limit", "TableType=\"XY\" YFormat=\"replicates\" Replicates=\"50\"", 1, 2_500, "Y", 56);
+    let near_256m = import_pzfx_str(&pzfx_tables(&near_256m_pzfx)).unwrap();
+    let near_256m_zip = save_project_bytes(&near_256m.document).unwrap();
+    assert!(near_256m_zip.len() <= MAX_ARCHIVE_FILE_BYTES);
+    let near_256m_inspected = ZipArchive::from_bytes_with_limits(&near_256m_zip, limits).unwrap();
+    let near_256m_doc_len = near_256m_inspected.get("document.json").unwrap().len() as u64;
+    assert!(
+        near_256m_doc_len > MAX_ARCHIVE_FILE_BYTES as u64 && near_256m_doc_len <= MAX_ARCHIVE_ENTRY_BYTES,
+        "near_256m_doc_len={near_256m_doc_len}"
+    );
+    assert_eq!(open_project_bytes(&near_256m_zip).unwrap(), near_256m.document);
+
+    let near_256m_dir = root.child("near_256m.curvebook.d");
+    save_project_unpacked_dir(&near_256m.document, &near_256m_dir).unwrap();
+    save_project_unpacked_dir(&near_256m.document, &near_256m_dir).unwrap();
+    assert_eq!(open_project_unpacked_dir(&near_256m_dir).unwrap(), near_256m.document);
+    drop((near_256m, near_256m_zip, near_256m_inspected));
+
+    // 2. Project exceeding the native 256 MiB compact `document.json` archive cap while still
+    //    under MAX_IMPORT_CELLS (10M cells): 2,500 rows * 62 Y-cols * 50 replicates = 7,752,500
+    //    cells (~271 MB compact JSON > 256 MiB) is refused UP FRONT at `.pzfx` AND `.prism` import
+    //    with the same FormatError::ZipBomb as save/reopen.
+    let over_pzfx = build_large_table_xml("t_over", "TableType=\"XY\" YFormat=\"replicates\" Replicates=\"50\"", 1, 2_500, "Y", 62);
+    let pzfx_err = import_pzfx_str(&pzfx_tables(&over_pzfx)).unwrap_err();
+    assert!(matches!(pzfx_err, FormatError::ZipBomb { .. }), "expected ZipBomb on over-archive-cap .pzfx import, got {pzfx_err:?}");
+
+    let over_csv = format!("X{}\n{}", ",Y".repeat(3_100), "0\n".repeat(2_500));
+    let over_manifest =
+        br#"{"title":"Over Archive Cap","sheets":[{"csv_path":"tables/over.csv","kind":"xy","subcolumn_mode":"replicates","replicates":50}]}"#;
+    let over_archive = build_zip_entries(&[("manifest.json", over_manifest), ("tables/over.csv", over_csv.as_bytes())]);
+    let archive_err = import_prism_bytes(&over_archive).unwrap_err();
+    assert!(matches!(archive_err, FormatError::ZipBomb { .. }), "expected ZipBomb on over-archive-cap .prism import, got {archive_err:?}");
+
+    // 3. Compressed archive byte cap (MAX_ARCHIVE_FILE_BYTES = 128 MiB) is enforced consistently
+    //    on in-memory open and import paths too.
+    let oversized_buf = vec![0_u8; MAX_ARCHIVE_FILE_BYTES + 1];
+    assert!(matches!(
+        open_project_bytes(&oversized_buf),
+        Err(FormatError::FileTooLarge { limit_bytes, .. }) if limit_bytes == MAX_ARCHIVE_FILE_BYTES
+    ));
+    assert!(matches!(
+        import_prism_bytes(&oversized_buf),
+        Err(FormatError::FileTooLarge { limit_bytes, .. }) if limit_bytes == MAX_ARCHIVE_FILE_BYTES
+    ));
 }

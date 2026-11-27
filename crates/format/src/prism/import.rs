@@ -12,8 +12,8 @@ use curvebook_doc::{
 };
 
 use crate::archive::{
-    BoundedJsonOutcome, StreamedDocumentOutcome, clamp_peek_schema_version, finalize_migrated_document, migrate_document_json,
-    parse_bounded_json_outcome, parse_streamed_document_outcome, validate_project_document,
+    BoundedJsonOutcome, MAX_ARCHIVE_FILE_BYTES, StreamedDocumentOutcome, clamp_peek_schema_version, finalize_migrated_document,
+    migrate_document_json, parse_bounded_json_outcome, parse_streamed_document_outcome, validate_archive_save_limits, validate_project_document,
 };
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_cell_token, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
@@ -58,6 +58,13 @@ pub fn import_prism_bytes(bytes: &[u8]) -> Result<ImportReport, FormatError> {
 
 /// Import a `.prism` ZIP container enforcing explicit [`ZipLimits`].
 pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<ImportReport, FormatError> {
+    if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+        return Err(FormatError::FileTooLarge {
+            path: String::from(".prism"),
+            actual_bytes: Some(bytes.len() as u64),
+            limit_bytes: MAX_ARCHIVE_FILE_BYTES,
+        });
+    }
     if crate::pzfx::is_binary_pzf_bytes(bytes) {
         return Err(crate::pzfx::binary_pzf_unsupported_error());
     }
@@ -65,13 +72,15 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
     let root_prefix = detect_archive_root_prefix(&zip_index);
     let mut warnings = Vec::new();
 
-    match route_document_json(&mut zip_index, &root_prefix, &mut warnings)? {
-        DocumentRoute::NativeEmbedded(report) => Ok(*report),
-        DocumentRoute::ExternalIndexed { doc_val } => import_external_indexed_archive(&mut zip_index, &doc_val, warnings),
+    let report = match route_document_json(&mut zip_index, &root_prefix, &mut warnings)? {
+        DocumentRoute::NativeEmbedded(report) => *report,
+        DocumentRoute::ExternalIndexed { doc_val } => import_external_indexed_archive(&mut zip_index, &doc_val, warnings)?,
         DocumentRoute::Generic { doc_meta, handled_doc_path } => {
-            import_generic_archive(&mut zip_index, &root_prefix, doc_meta, handled_doc_path, warnings)
+            import_generic_archive(&mut zip_index, &root_prefix, doc_meta, handled_doc_path, warnings)?
         }
-    }
+    };
+    validate_archive_save_limits(&report.document)?;
+    Ok(report)
 }
 
 enum DocumentRoute {

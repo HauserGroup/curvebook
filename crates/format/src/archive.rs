@@ -1,21 +1,22 @@
 //! Native `.curvebook` and `.cbtemplate` ZIP archive serialization, deserialization,
 //! schema migration, dimension/float validation, and circular dependency guards.
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 
 use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, CellExclusionNote, CloneDataSheetOptions, DataSheet, DocError, FittedCurveOverlay, FloatingNote,
-    GraphAnnotation, HookSource, ImageMimeKind, LayoutItem, LinkedDataRegion, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS,
-    MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT, NormalizeAnchor, ParameterScope, PlateCellOrigin, ProjectDocument, ResultStatus, ResultTab, SheetId,
-    SheetSection, SourceCellId, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_project_cells,
-    validate_title,
+    GraphAnnotation, GraphSheet, HookSource, ImageMimeKind, InfoSheet, LayoutItem, LayoutSheet, LinkedDataRegion, MAX_IMAGE_ASSET_BYTES,
+    MAX_PROJECT_IMAGE_ASSETS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT, NamedCheckpoint, NormalizeAnchor, ParameterScope, PlateCellOrigin,
+    ProjectDocument, ResultSheet, ResultStatus, ResultTab, SheetId, SheetSection, SourceCellId, TableArchetype, TransformAnalysisSpec,
+    extract_template_hooks, is_valid_asset_id, validate_project_cells, validate_title,
 };
+use flate2::Compression;
+use flate2::write::DeflateEncoder;
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
 use crate::error::FormatError;
@@ -38,8 +39,33 @@ const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
 const MAX_SHEET_CSV_STEM_LEN: usize = 64;
 const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
 
-/// Maximum byte length permitted when reading a `.curvebook`, `.cbtemplate`, or `.prism` archive file.
+/// Maximum byte length permitted when reading or writing a compressed `.curvebook`,
+/// `.cbtemplate`, `.prism`, or `.xlsx` archive file (`128 MiB`).
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
+
+/// Maximum uncompressed byte length permitted for a single entry inside a native `.curvebook`,
+/// `.cbtemplate`, or `.curvebook.d/` archive (`256 MiB`).
+///
+/// Schema-v9 `document.json` serializes each cell with explicit `value` and `excluded` fields
+/// (~35–48 bytes per cell even in compact JSON), so valid multi-million-cell imported projects
+/// exceed generic [`crate::zip::MAX_ZIP_ENTRY_BYTES`] (`64 MiB`) while compressing well within
+/// [`MAX_ARCHIVE_FILE_BYTES`] (`128 MiB`).
+pub const MAX_ARCHIVE_ENTRY_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Maximum cumulative uncompressed bytes permitted across all entries inside a native `.curvebook`,
+/// `.cbtemplate`, or `.curvebook.d/` archive (`256 MiB`).
+pub const MAX_ARCHIVE_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Canonical [`ZipLimits`] shared across native `.curvebook`, `.cbtemplate`, and `.curvebook.d/`
+/// save, reopen, and post-import validation paths.
+#[must_use]
+pub const fn native_archive_zip_limits() -> ZipLimits {
+    ZipLimits {
+        max_entries: crate::zip::MAX_ZIP_ENTRIES,
+        max_total_uncompressed_bytes: MAX_ARCHIVE_UNCOMPRESSED_BYTES,
+        max_entry_uncompressed_bytes: MAX_ARCHIVE_ENTRY_BYTES,
+    }
+}
 
 /// Kind of native CurveBook ZIP archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -137,13 +163,27 @@ pub fn instantiate_template_bytes(bytes: &[u8], new_title: Option<&str>) -> Resu
 /// Load any native CurveBook archive (`.curvebook` or `.cbtemplate`), returning its [`ArchiveKind`]
 /// and validated, schema-migrated [`ProjectDocument`].
 pub fn open_archive_bytes(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument), FormatError> {
-    open_archive_bytes_with_limits(bytes, ZipLimits::default())
+    if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+        return Err(FormatError::FileTooLarge {
+            path: String::from(".curvebook"),
+            actual_bytes: Some(bytes.len() as u64),
+            limit_bytes: MAX_ARCHIVE_FILE_BYTES,
+        });
+    }
+    open_archive_bytes_with_limits(bytes, native_archive_zip_limits())
 }
 
 /// Load any native CurveBook archive (`.curvebook` or `.cbtemplate`), returning its [`ArchiveKind`],
 /// validated [`ProjectDocument`], and any non-fatal load warnings (such as cleared dangling selection IDs).
 pub fn open_archive_bytes_with_warnings(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument, Vec<String>), FormatError> {
-    open_archive_bytes_with_limits_and_warnings(bytes, ZipLimits::default())
+    if bytes.len() > MAX_ARCHIVE_FILE_BYTES {
+        return Err(FormatError::FileTooLarge {
+            path: String::from(".curvebook"),
+            actual_bytes: Some(bytes.len() as u64),
+            limit_bytes: MAX_ARCHIVE_FILE_BYTES,
+        });
+    }
+    open_archive_bytes_with_limits_and_warnings(bytes, native_archive_zip_limits())
 }
 
 /// Load a native archive with explicit [`ZipLimits`] for security testing.
@@ -305,12 +345,12 @@ pub fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError>
         if bytes.is_empty() {
             return Ok(());
         }
-        match ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()) {
+        match ZipArchive::from_bytes_with_limits(&bytes, native_archive_zip_limits()) {
             Ok(archive) => {
                 inspect_archive_entries_not_newer([(MANIFEST_PATH, archive.get(MANIFEST_PATH)), (DOCUMENT_PATH, archive.get(DOCUMENT_PATH))])
             }
             Err(zip_err) => {
-                if let Ok(peeked) = ZipArchive::peek_named_entries_bounded(&bytes, &[MANIFEST_PATH, DOCUMENT_PATH], crate::zip::MAX_ZIP_ENTRY_BYTES) {
+                if let Ok(peeked) = ZipArchive::peek_named_entries_bounded(&bytes, &[MANIFEST_PATH, DOCUMENT_PATH], MAX_ARCHIVE_ENTRY_BYTES) {
                     for entry_path in [MANIFEST_PATH, DOCUMENT_PATH] {
                         if let Some(entry_bytes) = peeked.get(entry_path)
                             && let Some(version) = peek_json_schema_version(entry_bytes)
@@ -389,10 +429,11 @@ pub fn is_unpacked_project_dir(path: &Path) -> bool {
 }
 
 /// Write `doc` to an unpacked, Git-friendly `.curvebook.d/` project directory using the exact
-/// deterministic `.curvebook` layout (`manifest.json`, canonical 2-space `document.json`, and
-/// RFC-4180 `sheets/<id>.csv` CSVs), pruning stale tracked sheet files without disturbing `.git`
-/// or user files, enforcing `ZipLimits::default()`, refusing future-schema overwrites, and
-/// committing transactionally across staged temp files.
+/// deterministic `.curvebook` layout (`manifest.json`, canonical 2-space `document.json` with
+/// compact-JSON fallback for large documents, and RFC-4180 `sheets/<id>.csv` CSVs), pruning stale
+/// tracked sheet files without disturbing `.git` or user files, enforcing
+/// [`native_archive_zip_limits()`], refusing future-schema overwrites, and committing
+/// transactionally across staged temp files.
 pub fn save_project_unpacked_dir(doc: &ProjectDocument, dir: &Path) -> Result<(), FormatError> {
     save_project_unpacked_dir_with_hook(doc, dir, |_| Ok(()))
 }
@@ -443,7 +484,7 @@ where
         return Ok(());
     }
 
-    let prev_entries = capture_prior_snapshot_entries(&canon_root, ZipLimits::default());
+    let prev_entries = capture_prior_snapshot_entries(&canon_root, native_archive_zip_limits());
     let mut tx_guard = begin_unpacked_tx(&canon_root, &entries, prev_entries.as_deref())?;
 
     let sheets_dir = canon_root.join(SHEETS_DIR);
@@ -498,7 +539,7 @@ pub fn open_project_unpacked_dir_with_warnings(dir: &Path) -> Result<(ProjectDoc
         return Err(FormatError::Io(format!("`{}` is not a directory", dir.display())));
     }
     let canon_root = std::fs::canonicalize(dir)?;
-    let limits = ZipLimits::default();
+    let limits = native_archive_zip_limits();
     match inspect_pending_tx_state(&canon_root)? {
         PendingUnpackedTx::None => open_validated_unpacked_snapshot_with_warnings(&canon_root, limits),
         PendingUnpackedTx::Committing { next_dir, prev_dir } => match open_validated_unpacked_snapshot_with_warnings(&next_dir, limits) {
@@ -1702,13 +1743,557 @@ fn decode_and_validate_document_inner(
     Ok(doc)
 }
 
+fn slice_is_empty<T>(slice: &[T]) -> bool {
+    slice.is_empty()
+}
+
+#[derive(serde::Serialize)]
+struct ArchiveImageAssetRef<'a> {
+    asset_id: &'a str,
+    media_type: ImageMimeKind,
+    pixel_size: (u32, u32),
+}
+
+#[derive(serde::Serialize)]
+struct ArchiveDocumentRef<'a> {
+    schema_version: u32,
+    title: &'a str,
+    data_sheets: &'a [DataSheet],
+    info_sheets: &'a [InfoSheet],
+    result_sheets: &'a [ResultSheet],
+    graph_sheets: &'a [GraphSheet],
+    layout_sheets: &'a [LayoutSheet],
+    active_sheet_id: &'a Option<SheetId>,
+    family_anchor_sheet_id: &'a Option<SheetId>,
+    #[serde(skip_serializing_if = "slice_is_empty")]
+    checkpoints: &'a [NamedCheckpoint],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    image_assets: Vec<ArchiveImageAssetRef<'a>>,
+}
+
+impl<'a> ArchiveDocumentRef<'a> {
+    fn from_doc(doc: &'a ProjectDocument) -> Self {
+        let ProjectDocument {
+            schema_version: _,
+            title,
+            data_sheets,
+            info_sheets,
+            result_sheets,
+            graph_sheets,
+            layout_sheets,
+            active_sheet_id,
+            family_anchor_sheet_id,
+            checkpoints,
+            image_assets,
+        } = doc;
+        let stripped_assets = image_assets
+            .iter()
+            .map(|asset| {
+                let curvebook_doc::ProjectImageAsset { asset_id, media_type, pixel_size, bytes: _ } = asset;
+                ArchiveImageAssetRef { asset_id: asset_id.as_str(), media_type: *media_type, pixel_size: *pixel_size }
+            })
+            .collect();
+        Self {
+            schema_version: CURRENT_SCHEMA_VERSION,
+            title: title.as_str(),
+            data_sheets: data_sheets.as_slice(),
+            info_sheets: info_sheets.as_slice(),
+            result_sheets: result_sheets.as_slice(),
+            graph_sheets: graph_sheets.as_slice(),
+            layout_sheets: layout_sheets.as_slice(),
+            active_sheet_id,
+            family_anchor_sheet_id,
+            checkpoints: checkpoints.as_slice(),
+            image_assets: stripped_assets,
+        }
+    }
+}
+
+struct BoundedVecWriter {
+    buf: Vec<u8>,
+    max_bytes: usize,
+    exceeded: bool,
+}
+
+impl BoundedVecWriter {
+    fn new(max_bytes: u64) -> Self {
+        Self { buf: Vec::new(), max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX), exceeded: false }
+    }
+}
+
+impl Write for BoundedVecWriter {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.buf.len().checked_add(data.len()).is_none_or(|next| next > self.max_bytes) {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded buffer limit exceeded"));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BoundedByteCounter {
+    written: u64,
+    max_bytes: u64,
+    exceeded: bool,
+}
+
+impl BoundedByteCounter {
+    const fn new(max_bytes: u64) -> Self {
+        Self { written: 0, max_bytes, exceeded: false }
+    }
+}
+
+impl Write for BoundedByteCounter {
+    #[inline]
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let Some(next) = self.written.checked_add(data.len() as u64) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded byte counter overflow"));
+        };
+        if next > self.max_bytes {
+            self.exceeded = true;
+            return Err(std::io::Error::other("bounded byte limit exceeded"));
+        }
+        self.written = next;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn archive_limit_exceeded_error(doc_cap: u64, limits: ZipLimits) -> FormatError {
+    if doc_cap < limits.max_entry_uncompressed_bytes {
+        FormatError::ZipBomb { reason: format!("archive total uncompressed size exceeds security limit {}", limits.max_total_uncompressed_bytes) }
+    } else {
+        FormatError::ZipBomb { reason: format!("entry `{DOCUMENT_PATH}` size exceeds security limit {}", limits.max_entry_uncompressed_bytes) }
+    }
+}
+
+fn serialize_archive_document_json(
+    doc: &ProjectDocument,
+    pretty_budget: u64,
+    compact_budget: u64,
+    limits: ZipLimits,
+) -> Result<Vec<u8>, FormatError> {
+    let view = ArchiveDocumentRef::from_doc(doc);
+    // Every serialized `Cell` in 2-space pretty JSON requires at least 40 bytes even without indentation;
+    // skip the doomed pretty pass immediately on multi-million-cell projects.
+    let min_pretty_bytes = (doc.total_allocated_cells().unwrap_or(usize::MAX) as u64).saturating_mul(40);
+    if pretty_budget > 0 && min_pretty_bytes <= pretty_budget {
+        let mut pretty_writer = BoundedVecWriter::new(pretty_budget);
+        match serde_json::to_writer_pretty(&mut pretty_writer, &view) {
+            Ok(()) => return Ok(pretty_writer.buf),
+            Err(_) if pretty_writer.exceeded => {}
+            Err(err) => return Err(FormatError::from(err)),
+        }
+    }
+
+    let mut compact_writer = BoundedVecWriter::new(compact_budget);
+    match serde_json::to_writer(&mut compact_writer, &view) {
+        Ok(()) => Ok(compact_writer.buf),
+        Err(_) if compact_writer.exceeded => Err(archive_limit_exceeded_error(compact_budget, limits)),
+        Err(err) => Err(FormatError::from(err)),
+    }
+}
+
+fn compressed_entry_payload_len_with_level(raw: &[u8], level: Compression) -> u64 {
+    let raw_len = raw.len() as u64;
+    let counter = BoundedByteCounter::new(raw_len.saturating_sub(1));
+    let mut encoder = DeflateEncoder::new(counter, level);
+    if encoder.write_all(raw).is_err() {
+        return raw_len;
+    }
+    match encoder.finish() {
+        Ok(done) if !done.exceeded => done.written.min(raw_len),
+        _ => raw_len,
+    }
+}
+
+fn compressed_document_payload_len_with_level(doc: &ProjectDocument, raw_compact_len: u64, level: Compression) -> u64 {
+    let view = ArchiveDocumentRef::from_doc(doc);
+    let counter = BoundedByteCounter::new(raw_compact_len.saturating_sub(1));
+    let encoder = DeflateEncoder::new(counter, level);
+    let mut buffered = BufWriter::with_capacity(64 * 1024, encoder);
+    if serde_json::to_writer(&mut buffered, &view).is_err() {
+        return raw_compact_len;
+    }
+    let Ok(encoder) = buffered.into_inner() else {
+        return raw_compact_len;
+    };
+    match encoder.finish() {
+        Ok(done) if !done.exceeded => done.written.min(raw_compact_len),
+        _ => raw_compact_len,
+    }
+}
+
+fn check_compressed_archive_limit(compressed_total: u64) -> Result<(), FormatError> {
+    if compressed_total > MAX_ARCHIVE_FILE_BYTES as u64 {
+        return Err(FormatError::FileTooLarge {
+            path: String::from(".curvebook"),
+            actual_bytes: Some(compressed_total),
+            limit_bytes: MAX_ARCHIVE_FILE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+fn measure_compressed_archive_bytes(
+    doc: &ProjectDocument,
+    doc_compact_bytes: u64,
+    manifest_bytes: &[u8],
+    csv_entries: &[(String, Vec<u8>)],
+    framing: u64,
+    level: Compression,
+) -> Result<u64, FormatError> {
+    let mut compressed_total = framing.saturating_add(compressed_document_payload_len_with_level(doc, doc_compact_bytes, level));
+    check_compressed_archive_limit(compressed_total)?;
+    compressed_total = compressed_total.saturating_add(compressed_entry_payload_len_with_level(manifest_bytes, level));
+    check_compressed_archive_limit(compressed_total)?;
+    for (_, csv_bytes) in csv_entries {
+        compressed_total = compressed_total.saturating_add(compressed_entry_payload_len_with_level(csv_bytes, level));
+        check_compressed_archive_limit(compressed_total)?;
+    }
+    for asset in &doc.image_assets {
+        compressed_total = compressed_total.saturating_add(compressed_entry_payload_len_with_level(&asset.bytes, level));
+        check_compressed_archive_limit(compressed_total)?;
+    }
+    Ok(compressed_total)
+}
+
+fn csv_header_str_upper_bound(raw: &str) -> u64 {
+    (raw.len() as u64).saturating_mul(2).saturating_add(16)
+}
+
+fn dataset_csv_headers_upper_bound(data_sets: &[curvebook_doc::DataSetColumn], mode: curvebook_doc::SubcolumnMode) -> u64 {
+    let subs = mode.subcolumn_count().max(1) as u64;
+    let mut total = 0_u64;
+    for ds in data_sets {
+        let per_sub = (ds.title.len() as u64).saturating_mul(2).saturating_add(64);
+        total = total.saturating_add(subs.saturating_mul(per_sub));
+    }
+    total
+}
+
+fn datasheet_csv_header_and_grid_upper_bound(ds: &DataSheet) -> u64 {
+    // Upper bound on per-cell CSV expansion beyond any text already counted in `doc_compact_bytes`:
+    // Rust's `Display` for finite `f64` emits up to 326 bytes (`5e-324`) plus `*` and delimiter,
+    // and empty/generated/ragged cells emit at most 330 bytes each.
+    const MAX_PER_CELL_NON_TEXT_CSV_BYTES: u64 = 330;
+
+    let (header_bytes, row_count, col_count): (u64, usize, usize) = match &ds.archetype {
+        TableArchetype::Xy(t) => {
+            let x_subs = t.x_mode.subcolumn_count().max(1);
+            let x_header = (x_subs as u64).saturating_mul((t.x_title.len() as u64).saturating_mul(2).saturating_add(64));
+            let y_header = dataset_csv_headers_upper_bound(&t.data_sets, t.y_subcolumn_mode);
+            let y_mode_subs = t.y_subcolumn_mode.subcolumn_count().max(1);
+            let y_cols = t.data_sets.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(y_mode_subs)));
+            (16_u64.saturating_add(x_header).saturating_add(y_header), t.row_count(), 1_usize.saturating_add(x_subs).saturating_add(y_cols))
+        }
+        TableArchetype::Column(t) => {
+            let mode_subs = t.subcolumn_mode.subcolumn_count().max(1);
+            let cols = t.data_sets.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(mode_subs)));
+            (16_u64.saturating_add(dataset_csv_headers_upper_bound(&t.data_sets, t.subcolumn_mode)), t.row_count(), 1_usize.saturating_add(cols))
+        }
+        TableArchetype::Grouped(t) => {
+            let mode_subs = t.subcolumn_mode.subcolumn_count().max(1);
+            let cols = t.data_sets.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(mode_subs)));
+            (
+                csv_header_str_upper_bound(&t.row_factor_title).saturating_add(dataset_csv_headers_upper_bound(&t.data_sets, t.subcolumn_mode)),
+                t.row_count(),
+                1_usize.saturating_add(cols),
+            )
+        }
+        TableArchetype::Contingency(t) => {
+            let cols = t.data_sets.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(1)));
+            (
+                csv_header_str_upper_bound(&t.row_factor_title)
+                    .saturating_add(dataset_csv_headers_upper_bound(&t.data_sets, curvebook_doc::SubcolumnMode::Single)),
+                t.row_count(),
+                1_usize.saturating_add(cols),
+            )
+        }
+        TableArchetype::Survival(t) => {
+            let cols = t.cohorts.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(1)));
+            (
+                16_u64
+                    .saturating_add(csv_header_str_upper_bound(&t.time_title))
+                    .saturating_add(dataset_csv_headers_upper_bound(&t.cohorts, curvebook_doc::SubcolumnMode::Single)),
+                t.row_count(),
+                2_usize.saturating_add(cols),
+            )
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            let cols = t.data_sets.iter().fold(0_usize, |acc, col| acc.saturating_add(col.subcolumn_count().max(1)));
+            (
+                16_u64.saturating_add(dataset_csv_headers_upper_bound(&t.data_sets, curvebook_doc::SubcolumnMode::Single)),
+                t.row_count(),
+                1_usize.saturating_add(cols),
+            )
+        }
+        TableArchetype::MultipleVariables(t) => {
+            let header = t.variables.iter().fold(16_u64, |acc, var| acc.saturating_add(csv_header_str_upper_bound(&var.title)));
+            (header, t.row_count(), 1_usize.saturating_add(t.variables.len()))
+        }
+        TableArchetype::Nested(t) => {
+            let mut header = 16_u64;
+            let mut cols = 1_usize;
+            for g in &t.groups {
+                let g_len = g.title.len() as u64;
+                for sub in &g.subcolumn_titles {
+                    header = header.saturating_add(g_len.saturating_add(sub.len() as u64).saturating_mul(2).saturating_add(64));
+                }
+                cols = cols.saturating_add(g.biological_unit_count().max(g.subcolumn_titles.len()));
+            }
+            (header, t.row_count(), cols)
+        }
+    };
+
+    let row_bytes = (col_count as u64).saturating_mul(MAX_PER_CELL_NON_TEXT_CSV_BYTES).saturating_add(2);
+    header_bytes.saturating_add((row_count as u64).saturating_mul(row_bytes))
+}
+
+fn manifest_entry_upper_bound(id: &SheetId, title: &str) -> u64 {
+    // JSON string escaping (`\u00XX`) expands a string by at most 6x.
+    (id.as_str().len() as u64).saturating_add(title.len() as u64).saturating_mul(6).saturating_add(512)
+}
+
+fn conservative_archive_total_upper_bound(doc: &ProjectDocument, doc_compact_bytes: u64, assets_bytes: u64, entry_count: usize) -> u64 {
+    let mut csv_extra = 0_u64;
+    for ds in &doc.data_sheets {
+        csv_extra = csv_extra.saturating_add(datasheet_csv_header_and_grid_upper_bound(ds));
+    }
+
+    let mut manifest_upper = (doc.title.len() as u64).saturating_mul(6).saturating_add(512);
+    for s in &doc.data_sheets {
+        manifest_upper = manifest_upper.saturating_add(manifest_entry_upper_bound(&s.id, &s.title));
+    }
+    for s in &doc.info_sheets {
+        manifest_upper = manifest_upper.saturating_add(manifest_entry_upper_bound(&s.id, &s.title));
+    }
+    for s in &doc.result_sheets {
+        manifest_upper = manifest_upper.saturating_add(manifest_entry_upper_bound(&s.id, s.title()));
+    }
+    for s in &doc.graph_sheets {
+        manifest_upper = manifest_upper.saturating_add(manifest_entry_upper_bound(&s.id, &s.title));
+    }
+    for s in &doc.layout_sheets {
+        manifest_upper = manifest_upper.saturating_add(manifest_entry_upper_bound(&s.id, &s.title));
+    }
+    for a in &doc.image_assets {
+        manifest_upper = manifest_upper.saturating_add((a.asset_id.len() as u64).saturating_mul(6).saturating_add(512));
+    }
+
+    let framing_upper = 22_u64.saturating_add((entry_count as u64).saturating_mul(512));
+    // `doc_compact_bytes` for `document.json` + `2 * doc_compact_bytes` covering CSV quote-doubling
+    // of all text cells and row titles + `csv_extra` covering header repetitions, `GeneratedSequence`
+    // X values, ragged rows, and extreme `f64` Display lengths + assets + manifest + ZIP framing.
+    doc_compact_bytes
+        .saturating_mul(3)
+        .saturating_add(csv_extra)
+        .saturating_add(assets_bytes)
+        .saturating_add(manifest_upper)
+        .saturating_add(framing_upper)
+}
+
+fn zip_framing_overhead_bytes<'a, I>(paths: I) -> u64
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    let mut overhead = 22_u64;
+    for path in paths {
+        let name_len = path.len() as u64;
+        overhead = overhead.saturating_add(76).saturating_add(name_len.saturating_mul(2));
+    }
+    overhead
+}
+
+/// Verify that `doc` satisfies the native `.curvebook` / `.curvebook.d/` archive entry-count,
+/// uncompressed-byte, and compressed-file-size limits (`native_archive_zip_limits()` and
+/// [`MAX_ARCHIVE_FILE_BYTES`]).
+///
+/// External project importers (`.pzfx`, `.prism`, `.xlsx`) call this up front so every accepted
+/// import is guaranteed to save and reopen cleanly, and over-budget inputs are refused at import
+/// with the same actionable error as save/reopen.
+pub(crate) fn validate_archive_save_limits(doc: &ProjectDocument) -> Result<(), FormatError> {
+    let limits = native_archive_zip_limits();
+    let entry_count = doc.data_sheets.len().saturating_add(doc.image_assets.len()).saturating_add(2);
+    if entry_count > limits.max_entries {
+        return Err(FormatError::ZipBomb { reason: format!("archive entry count {entry_count} exceeds limit {}", limits.max_entries) });
+    }
+
+    let mut assets_bytes = 0_u64;
+    for asset in &doc.image_assets {
+        let len = asset.bytes.len() as u64;
+        if len > limits.max_entry_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!(
+                    "entry `{ASSETS_DIR}/{}.{}` size {len} exceeds security limit {}",
+                    asset.asset_id,
+                    asset.media_type.extension(),
+                    limits.max_entry_uncompressed_bytes
+                ),
+            });
+        }
+        assets_bytes =
+            assets_bytes.checked_add(len).ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+        if assets_bytes > limits.max_total_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("archive total size {assets_bytes} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+            });
+        }
+    }
+
+    let remaining_for_doc = limits.max_total_uncompressed_bytes.saturating_sub(assets_bytes);
+    let doc_cap = limits.max_entry_uncompressed_bytes.min(remaining_for_doc);
+    let view = ArchiveDocumentRef::from_doc(doc);
+    let mut doc_counter = BoundedByteCounter::new(doc_cap);
+    if let Err(err) = serde_json::to_writer(&mut doc_counter, &view) {
+        if doc_counter.exceeded {
+            return Err(archive_limit_exceeded_error(doc_cap, limits));
+        }
+        return Err(FormatError::from(err));
+    }
+    let doc_compact_bytes = doc_counter.written;
+
+    // Sound fast path: if a strict worst-case upper bound on `document.json` + all exported CSVs
+    // (including multi-subcolumn header repetition, `GeneratedSequence` rows, ragged rows, and
+    // extreme `f64` formatting) + assets + full `manifest.json` + ZIP framing fits in
+    // `MAX_ARCHIVE_FILE_BYTES` (128 MiB <= 256 MiB), uncompressed and compressed limits both hold.
+    if conservative_archive_total_upper_bound(doc, doc_compact_bytes, assets_bytes, entry_count) <= MAX_ARCHIVE_FILE_BYTES as u64 {
+        return Ok(());
+    }
+
+    validate_large_archive_save_limits(doc, doc_compact_bytes, assets_bytes, limits)
+}
+
+fn validate_large_archive_save_limits(
+    doc: &ProjectDocument,
+    doc_compact_bytes: u64,
+    assets_bytes: u64,
+    limits: ZipLimits,
+) -> Result<(), FormatError> {
+    let mut manifest_assets = Vec::with_capacity(doc.image_assets.len());
+    for asset in &doc.image_assets {
+        let path = format!("{ASSETS_DIR}/{}.{}", asset.asset_id, asset.media_type.extension());
+        manifest_assets.push(AssetManifestEntry {
+            asset_id: asset.asset_id.clone(),
+            media_type: asset.media_type,
+            path,
+            byte_len: asset.bytes.len() as u64,
+            crc32: crc32fast::hash(&asset.bytes),
+        });
+    }
+
+    let mut manifest_sheets = Vec::with_capacity(doc.total_sheet_count());
+    let csv_opts = CsvOptions::csv();
+    let mut used_paths = HashSet::new();
+    let mut csv_entries: Vec<(String, Vec<u8>)> = Vec::with_capacity(doc.data_sheets.len());
+    let mut running_uncompressed = doc_compact_bytes.saturating_add(assets_bytes);
+
+    for (idx, ds) in doc.data_sheets.iter().enumerate() {
+        let csv_path = unique_sheet_csv_path(idx, &ds.id, &mut used_paths);
+        let csv_bytes = export_datasheet_to_csv(ds, &csv_opts)?.into_bytes();
+        let len = csv_bytes.len() as u64;
+        if len > limits.max_entry_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("entry `{csv_path}` size {len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+            });
+        }
+        running_uncompressed = running_uncompressed
+            .checked_add(len)
+            .ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+        if running_uncompressed > limits.max_total_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("archive total size {running_uncompressed} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+            });
+        }
+        let crc = crc32fast::hash(&csv_bytes);
+        manifest_sheets.push(SheetManifestEntry {
+            id: ds.id.clone(),
+            section: SheetSection::Data,
+            title: ds.title.clone(),
+            csv_path: Some(csv_path.clone()),
+            crc32: Some(crc),
+        });
+        csv_entries.push((csv_path, csv_bytes));
+    }
+
+    push_metadata_entries(&mut manifest_sheets, doc);
+    let manifest_placeholder = ArchiveManifest {
+        format: String::from(FORMAT_MAGIC),
+        schema_version: CURRENT_SCHEMA_VERSION,
+        kind: ArchiveKind::Project,
+        title: doc.title.clone(),
+        document_crc32: u32::MAX,
+        sheets: manifest_sheets,
+        assets: manifest_assets,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest_placeholder)?;
+    let manifest_len = manifest_bytes.len() as u64;
+    if manifest_len > limits.max_entry_uncompressed_bytes {
+        return Err(FormatError::ZipBomb {
+            reason: format!("entry `{MANIFEST_PATH}` size {manifest_len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+        });
+    }
+    let total_uncompressed = running_uncompressed
+        .checked_add(manifest_len)
+        .ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+    if total_uncompressed > limits.max_total_uncompressed_bytes {
+        return Err(FormatError::ZipBomb {
+            reason: format!("archive total size {total_uncompressed} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+        });
+    }
+
+    let framing = zip_framing_overhead_bytes(
+        [DOCUMENT_PATH, MANIFEST_PATH]
+            .into_iter()
+            .chain(csv_entries.iter().map(|(p, _)| p.as_str()))
+            .chain(manifest_placeholder.assets.iter().map(|a| a.path.as_str())),
+    );
+    if total_uncompressed.saturating_add(framing) <= MAX_ARCHIVE_FILE_BYTES as u64 {
+        return Ok(());
+    }
+
+    // Check compressed size with fast level 1 first; only fall back to exact default level 6 when
+    // fast compression lands within 1 MiB of (or above) MAX_ARCHIVE_FILE_BYTES.
+    const FAST_COMPRESS_SAFETY_MARGIN: u64 = 1024 * 1024;
+    if let Ok(fast_len) = measure_compressed_archive_bytes(doc, doc_compact_bytes, &manifest_bytes, &csv_entries, framing, Compression::fast())
+        && fast_len <= (MAX_ARCHIVE_FILE_BYTES as u64).saturating_sub(FAST_COMPRESS_SAFETY_MARGIN)
+    {
+        return Ok(());
+    }
+    let _ = measure_compressed_archive_bytes(doc, doc_compact_bytes, &manifest_bytes, &csv_entries, framing, Compression::default())?;
+    Ok(())
+}
+
 fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8>, FormatError> {
+    let limits = native_archive_zip_limits();
     let entries = build_archive_entries(doc, kind)?;
-    let mut writer = ZipWriter::new();
+    let mut writer = ZipWriter::with_limits(limits);
     for (path, bytes) in entries {
         writer.add_file(&path, bytes)?;
     }
-    writer.finish()
+    let out = writer.finish()?;
+    if out.len() > MAX_ARCHIVE_FILE_BYTES {
+        let label = match kind {
+            ArchiveKind::Project => ".curvebook",
+            ArchiveKind::Template => ".cbtemplate",
+        };
+        return Err(FormatError::FileTooLarge {
+            path: String::from(label),
+            actual_bytes: Some(out.len() as u64),
+            limit_bytes: MAX_ARCHIVE_FILE_BYTES,
+        });
+    }
+    Ok(out)
 }
 
 fn validate_archive_entry_limits(entries: &[(String, Vec<u8>)], limits: ZipLimits) -> Result<(), FormatError> {
@@ -1738,37 +2323,58 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
 
+    let limits = native_archive_zip_limits();
+    let entry_count = doc.data_sheets.len().saturating_add(doc.image_assets.len()).saturating_add(2);
+    if entry_count > limits.max_entries {
+        return Err(FormatError::ZipBomb { reason: format!("archive entry count {entry_count} exceeds limit {}", limits.max_entries) });
+    }
+
     let mut asset_entries = Vec::with_capacity(doc.image_assets.len());
     let mut manifest_assets = Vec::with_capacity(doc.image_assets.len());
-    let normalized: Cow<'_, ProjectDocument> = if doc.schema_version == CURRENT_SCHEMA_VERSION && doc.image_assets.is_empty() {
-        Cow::Borrowed(doc)
-    } else {
-        let mut owned = doc.clone();
-        owned.schema_version = CURRENT_SCHEMA_VERSION;
-        for asset in &mut owned.image_assets {
-            let path = format!("{ASSETS_DIR}/{}.{}", asset.asset_id, asset.media_type.extension());
-            let crc = crc32fast::hash(&asset.bytes);
-            let byte_len = asset.bytes.len() as u64;
-            asset_entries.push((path.clone(), std::mem::take(&mut asset.bytes)));
-            manifest_assets.push(AssetManifestEntry { asset_id: asset.asset_id.clone(), media_type: asset.media_type, path, byte_len, crc32: crc });
+    let mut other_bytes = 0_u64;
+    for asset in &doc.image_assets {
+        let path = format!("{ASSETS_DIR}/{}.{}", asset.asset_id, asset.media_type.extension());
+        let crc = crc32fast::hash(&asset.bytes);
+        let byte_len = asset.bytes.len() as u64;
+        if byte_len > limits.max_entry_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("entry `{path}` size {byte_len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+            });
         }
-        Cow::Owned(owned)
-    };
-    let doc_json = serde_json::to_vec_pretty(normalized.as_ref())?;
-    let doc_crc = crc32fast::hash(&doc_json);
+        other_bytes =
+            other_bytes.checked_add(byte_len).ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+        if other_bytes > limits.max_total_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("archive total size {other_bytes} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+            });
+        }
+        asset_entries.push((path.clone(), asset.bytes.clone()));
+        manifest_assets.push(AssetManifestEntry { asset_id: asset.asset_id.clone(), media_type: asset.media_type, path, byte_len, crc32: crc });
+    }
 
-    let mut entries = Vec::with_capacity(normalized.data_sheets.len() + asset_entries.len() + 2);
-    entries.push((String::from(DOCUMENT_PATH), doc_json));
-
-    let mut manifest_sheets = Vec::with_capacity(normalized.total_sheet_count());
+    let mut csv_entries = Vec::with_capacity(doc.data_sheets.len());
+    let mut manifest_sheets = Vec::with_capacity(doc.total_sheet_count());
     let csv_opts = CsvOptions::csv();
     let mut used_paths = HashSet::new();
 
-    for (idx, ds) in normalized.data_sheets.iter().enumerate() {
+    for (idx, ds) in doc.data_sheets.iter().enumerate() {
         let csv_path = unique_sheet_csv_path(idx, &ds.id, &mut used_paths);
         let csv_bytes = export_datasheet_to_csv(ds, &csv_opts)?.into_bytes();
+        let len = csv_bytes.len() as u64;
+        if len > limits.max_entry_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("entry `{csv_path}` size {len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+            });
+        }
+        other_bytes =
+            other_bytes.checked_add(len).ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+        if other_bytes > limits.max_total_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("archive total size {other_bytes} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+            });
+        }
         let crc = crc32fast::hash(&csv_bytes);
-        entries.push((csv_path.clone(), csv_bytes));
+        csv_entries.push((csv_path.clone(), csv_bytes));
         manifest_sheets.push(SheetManifestEntry {
             id: ds.id.clone(),
             section: SheetSection::Data,
@@ -1778,21 +2384,55 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
         });
     }
 
-    entries.extend(asset_entries);
-    push_metadata_entries(&mut manifest_sheets, &normalized);
+    push_metadata_entries(&mut manifest_sheets, doc);
 
-    let manifest = ArchiveManifest {
+    let mut manifest = ArchiveManifest {
         format: String::from(FORMAT_MAGIC),
         schema_version: CURRENT_SCHEMA_VERSION,
         kind,
-        title: normalized.title.clone(),
-        document_crc32: doc_crc,
+        title: doc.title.clone(),
+        document_crc32: u32::MAX,
         sheets: manifest_sheets,
         assets: manifest_assets,
     };
+    let manifest_max_len = serde_json::to_vec_pretty(&manifest)?.len() as u64;
+    if manifest_max_len > limits.max_entry_uncompressed_bytes {
+        return Err(FormatError::ZipBomb {
+            reason: format!("entry `{MANIFEST_PATH}` size {manifest_max_len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+        });
+    }
+    other_bytes = other_bytes
+        .checked_add(manifest_max_len)
+        .ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+    if other_bytes > limits.max_total_uncompressed_bytes {
+        return Err(FormatError::ZipBomb {
+            reason: format!("archive total size {other_bytes} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+        });
+    }
+
+    // Use 2-space pretty-printed `document.json` whenever it fits within generic ZIP defaults
+    // (64 MiB per entry / 128 MiB total including ZIP framing) so normal projects keep clean Git
+    // diffs and stay guaranteed under MAX_ARCHIVE_FILE_BYTES, falling back deterministically to
+    // compact schema-v9 JSON for large projects up to native archive limits.
+    let framing = zip_framing_overhead_bytes(
+        [DOCUMENT_PATH, MANIFEST_PATH]
+            .into_iter()
+            .chain(csv_entries.iter().map(|(p, _)| p.as_str()))
+            .chain(asset_entries.iter().map(|(p, _)| p.as_str())),
+    );
+    let pretty_budget =
+        crate::zip::MAX_ZIP_ENTRY_BYTES.min(crate::zip::MAX_ZIP_UNCOMPRESSED_BYTES.saturating_sub(other_bytes).saturating_sub(framing));
+    let compact_budget = limits.max_entry_uncompressed_bytes.min(limits.max_total_uncompressed_bytes.saturating_sub(other_bytes));
+    let doc_json = serialize_archive_document_json(doc, pretty_budget, compact_budget, limits)?;
+    manifest.document_crc32 = crc32fast::hash(&doc_json);
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
+
+    let mut entries = Vec::with_capacity(entry_count);
+    entries.push((String::from(DOCUMENT_PATH), doc_json));
+    entries.extend(csv_entries);
+    entries.extend(asset_entries);
     entries.push((String::from(MANIFEST_PATH), manifest_json));
-    validate_archive_entry_limits(&entries, ZipLimits::default())?;
+    validate_archive_entry_limits(&entries, limits)?;
     Ok(entries)
 }
 
@@ -1934,7 +2574,7 @@ fn ensure_non_symlink_subpath(parent: &Path, child_name: &str, rel_label: &str) 
 }
 
 fn ensure_unpacked_metadata_files_not_newer(dir_root: &Path, allow_corrupt_json: bool) -> Result<(), FormatError> {
-    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let cap = usize::try_from(MAX_ARCHIVE_ENTRY_BYTES).unwrap_or(usize::MAX);
     for rel in [MANIFEST_PATH, DOCUMENT_PATH] {
         let resolved = match resolve_contained_path(dir_root, rel, true) {
             Ok(path) => path,
@@ -2123,8 +2763,9 @@ fn open_validated_unpacked_snapshot_with_warnings(canon_snap: &Path, limits: Zip
 }
 
 fn check_snapshot_project_dir(canon_snap: &Path, verify_doc_crc: bool) -> Result<bool, FormatError> {
-    let mut remaining_budget = crate::zip::MAX_ZIP_UNCOMPRESSED_BYTES;
-    let manifest_bytes = read_contained_file(canon_snap, MANIFEST_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
+    let limits = native_archive_zip_limits();
+    let mut remaining_budget = limits.max_total_uncompressed_bytes;
+    let manifest_bytes = read_contained_file(canon_snap, MANIFEST_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
     let manifest_text = std::str::from_utf8(&manifest_bytes)
         .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
     let manifest = parse_and_validate_manifest(manifest_text)?;
@@ -2132,12 +2773,12 @@ fn check_snapshot_project_dir(canon_snap: &Path, verify_doc_crc: bool) -> Result
         return Ok(false);
     }
     if verify_doc_crc {
-        let doc_bytes = read_contained_file(canon_snap, DOCUMENT_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
+        let doc_bytes = read_contained_file(canon_snap, DOCUMENT_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
         return Ok(crc32fast::hash(&doc_bytes) == manifest.document_crc32);
     }
     let doc_path = resolve_contained_path(canon_snap, DOCUMENT_PATH, true)?;
     let doc_meta = std::fs::metadata(doc_path)?;
-    Ok(doc_meta.is_file() && doc_meta.len() <= crate::zip::MAX_ZIP_ENTRY_BYTES)
+    Ok(doc_meta.is_file() && doc_meta.len() <= limits.max_entry_uncompressed_bytes)
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -2349,9 +2990,10 @@ fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
     let next_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_NEXT_DIR)?;
     let prev_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_PREV_DIR)?;
 
+    let limits = native_archive_zip_limits();
     let mut primary_err: Option<FormatError> = None;
     let recovered = match next_dir {
-        Some(ref next) => match verify_and_read_snapshot(next, ZipLimits::default(), true) {
+        Some(ref next) => match verify_and_read_snapshot(next, limits, true) {
             Ok(snap) => {
                 install_recovered_snapshot(canon_root, &snap.entries, &record.prior_csv_paths, &record.new_csv_paths)?;
                 true
@@ -2369,7 +3011,7 @@ fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
 
     if !recovered {
         if let Some(prev) = prev_dir {
-            let prev_snap = verify_and_read_snapshot(&prev, ZipLimits::default(), true)?;
+            let prev_snap = verify_and_read_snapshot(&prev, limits, true)?;
             let mut prev_tracked: Vec<String> = prev_snap.manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect();
             prev_tracked.extend(prev_snap.manifest.assets.into_iter().map(|e| e.path));
             install_recovered_snapshot(canon_root, &prev_snap.entries, &record.new_csv_paths, &prev_tracked)?;
@@ -2420,7 +3062,7 @@ fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, Fo
         Err(FormatError::MissingArchiveEntry { .. }) => return Ok(Vec::new()),
         Err(err) => return Err(err),
     };
-    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let cap = usize::try_from(MAX_ARCHIVE_ENTRY_BYTES).unwrap_or(usize::MAX);
     let Ok(bytes) = platform_read_regular_file(&manifest_path, cap) else {
         return Ok(Vec::new());
     };
@@ -2533,12 +3175,13 @@ enum ExistingEntryState {
 }
 
 fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<ExistingEntryState, FormatError> {
+    let max_entry = usize::try_from(MAX_ARCHIVE_ENTRY_BYTES).unwrap_or(usize::MAX);
     match std::fs::symlink_metadata(target) {
         Ok(meta) => {
             if !meta.file_type().is_symlink()
                 && meta.is_file()
                 && meta.len() == new_bytes.len() as u64
-                && new_bytes.len() <= MAX_ARCHIVE_FILE_BYTES
+                && new_bytes.len() <= max_entry
                 && let Ok(existing) = platform_read_regular_file(target, new_bytes.len())
             {
                 if existing == new_bytes {
@@ -2547,7 +3190,7 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
                 let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
                 return Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms });
             }
-            let existing = platform_read_regular_file(target, MAX_ARCHIVE_FILE_BYTES)?;
+            let existing = platform_read_regular_file(target, max_entry)?;
             let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
             Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms })
         }
@@ -3662,6 +4305,157 @@ mod tests {
         let current_entries = build_archive_entries(&current, ArchiveKind::Project).unwrap();
         let legacy_entries = build_archive_entries(&legacy, ArchiveKind::Project).unwrap();
         assert_eq!(current_entries, legacy_entries);
+    }
+
+    #[test]
+    fn issue_80_archive_document_ref_matches_owned_project_document_bytes() {
+        use super::ArchiveDocumentRef;
+
+        let mut doc = ProjectDocument::new("Zero-Clone Parity").unwrap();
+        doc.schema_version = 4;
+        doc.add_data_sheet(test_col_sheet("sheet-a", "A", 42.0)).unwrap();
+        let raw = b"\x89PNG\r\n\x1a\nplaceholder".to_vec();
+        let png_asset = curvebook_doc::ProjectImageAsset {
+            asset_id: curvebook_doc::content_addressed_asset_id(&raw),
+            media_type: curvebook_doc::ImageMimeKind::Png,
+            pixel_size: (2, 2),
+            bytes: raw,
+        };
+        doc.image_assets.push(png_asset);
+
+        let mut expected_doc = doc.clone();
+        expected_doc.schema_version = CURRENT_SCHEMA_VERSION;
+        for asset in &mut expected_doc.image_assets {
+            asset.bytes.clear();
+        }
+
+        let view = ArchiveDocumentRef::from_doc(&doc);
+        assert_eq!(serde_json::to_vec_pretty(&view).unwrap(), serde_json::to_vec_pretty(&expected_doc).unwrap());
+        assert_eq!(serde_json::to_vec(&view).unwrap(), serde_json::to_vec(&expected_doc).unwrap());
+    }
+
+    #[test]
+    fn issue_80_zero_sheet_compressed_archive_limit_refused_by_validator() {
+        use super::{FormatError, MAX_ARCHIVE_FILE_BYTES, measure_compressed_archive_bytes, save_project_bytes, validate_archive_save_limits};
+        use curvebook_doc::{ConstantValue, InfoConstant, InfoSheet};
+
+        // 1. Direct boundary check: 0 data sheets and 0 assets with compressed total > MAX_ARCHIVE_FILE_BYTES.
+        let empty_doc = ProjectDocument::new("Zero Sheets").unwrap();
+        let err = measure_compressed_archive_bytes(&empty_doc, 1024, b"{}", &[], MAX_ARCHIVE_FILE_BYTES as u64, flate2::Compression::default())
+            .unwrap_err();
+        assert!(matches!(err, FormatError::FileTooLarge { limit_bytes, .. } if limit_bytes == MAX_ARCHIVE_FILE_BYTES));
+
+        // 2. End-to-end 0-datasheet, 0-asset document whose compact `document.json` is <= 256 MiB
+        //    uncompressed (~172 MB of high-entropy base64-alphabet constants) yet > 128 MiB
+        //    compressed must be refused identically by both `validate_archive_save_limits` and
+        //    `save_project_bytes`.
+        let mut high_entropy_doc = ProjectDocument::new("High Entropy Info Only").unwrap();
+        let mut info = InfoSheet::new_preseeded("info-rand", "Random Constants").unwrap();
+        const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut rng_state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next_u64 = || -> u64 {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            rng_state
+        };
+        // 54,000 constants * 3,600 high-entropy 6-bit chars (~196 MB compact JSON < 256 MiB
+        // uncompressed, ~147 MB Deflate-compressed > 128 MiB = MAX_ARCHIVE_FILE_BYTES).
+        const CONST_COUNT: usize = 54_000;
+        const VALUE_LEN: usize = 3_600;
+        info.constants.reserve(CONST_COUNT);
+        for idx in 0..CONST_COUNT {
+            let mut val = String::with_capacity(VALUE_LEN);
+            while val.len() < VALUE_LEN {
+                let mut bits = next_u64();
+                for _ in 0..10 {
+                    if val.len() == VALUE_LEN {
+                        break;
+                    }
+                    let byte = ALPHABET[(bits & 0x3f) as usize];
+                    val.push(char::from(byte));
+                    bits >>= 6;
+                }
+            }
+            info.constants.push(InfoConstant { name: format!("k{idx:05}"), value: ConstantValue::Text(val), units: None });
+        }
+        high_entropy_doc.add_info_sheet(info).unwrap();
+
+        let val_err = validate_archive_save_limits(&high_entropy_doc).unwrap_err();
+        assert!(
+            matches!(val_err, FormatError::FileTooLarge { limit_bytes, .. } if limit_bytes == MAX_ARCHIVE_FILE_BYTES),
+            "expected FileTooLarge from validate_archive_save_limits, got {val_err:?}"
+        );
+        let save_err = save_project_bytes(&high_entropy_doc).unwrap_err();
+        assert!(
+            matches!(save_err, FormatError::FileTooLarge { limit_bytes, .. } if limit_bytes == MAX_ARCHIVE_FILE_BYTES),
+            "expected FileTooLarge from save_project_bytes, got {save_err:?}"
+        );
+    }
+
+    #[test]
+    fn issue_80_fast_path_upper_bound_catches_csv_header_and_sequence_expansion() {
+        use super::{FormatError, MAX_ARCHIVE_FILE_BYTES, conservative_archive_total_upper_bound, save_project_bytes, validate_archive_save_limits};
+        use curvebook_doc::{
+            DataSetColumn, DataSheet, GroupedTable, MAX_TITLE_BYTES, ReplicateStacking, SequenceProgression, SubcolumnMode, TableArchetype,
+            XColumnMode, XyTable,
+        };
+
+        // 1. Multi-subcolumn long-title table: 1 row * 256 replicates * 265 data sets with
+        //    3,968-byte titles has compact `document.json` ~ 3.5 MiB (naive `3x` ~ 10.5 MiB
+        //    << 128 MiB), yet its CSV header repeats every title 256x (~269 MiB > 256 MiB cap).
+        let long_title = "T".repeat(MAX_TITLE_BYTES - 128);
+        let mode = SubcolumnMode::RawReplicates(256);
+        let mut data_sets = Vec::with_capacity(265);
+        for _ in 0..265 {
+            data_sets.push(DataSetColumn::new(long_title.clone(), 1, 256).unwrap());
+        }
+        let grouped_table = GroupedTable {
+            row_factor_title: String::from("Row"),
+            column_factor_title: String::from("Col"),
+            row_titles: Vec::new(),
+            row_numeric_spacing: None,
+            subcolumn_mode: mode,
+            replicate_stacking: ReplicateStacking::default(),
+            three_way_grouping: None,
+            data_sets,
+        };
+        let mut doc = ProjectDocument::new("Wide Header Expansion").unwrap();
+        doc.add_data_sheet(DataSheet::new("wide", "Wide Headers", TableArchetype::Grouped(grouped_table)).unwrap()).unwrap();
+
+        let compact_len = serde_json::to_vec(&super::ArchiveDocumentRef::from_doc(&doc)).unwrap().len() as u64;
+        assert!(compact_len * 3 <= MAX_ARCHIVE_FILE_BYTES as u64, "fixture must defeat naive 3x bound (compact_len={compact_len})");
+        assert!(
+            conservative_archive_total_upper_bound(&doc, compact_len, 0, 3) > MAX_ARCHIVE_FILE_BYTES as u64,
+            "sound fast-path bound must route wide-header table to exact validation"
+        );
+        assert!(matches!(validate_archive_save_limits(&doc), Err(FormatError::ZipBomb { .. })));
+        assert!(matches!(save_project_bytes(&doc), Err(FormatError::ZipBomb { .. })));
+
+        // 2. `XColumnMode::GeneratedSequence` with 400k rows and empty `x_cells` materializes
+        //    400k numeric X values in CSV; upper bound must exceed actual `document.json` + CSV.
+        let xy = XyTable {
+            x_title: String::from("X"),
+            x_mode: XColumnMode::GeneratedSequence { start: 1.0, step: 1.0, progression: SequenceProgression::Arithmetic },
+            x_subcolumn_titles: Vec::new(),
+            x_display_decimals: None,
+            x_cells: vec![Vec::new(); 400_000],
+            row_titles: Vec::new(),
+            row_titles_expanded: false,
+            y_subcolumn_mode: SubcolumnMode::Single,
+            data_sets: vec![DataSetColumn::new("Y", 400_000, 1).unwrap()],
+        };
+        let mut seq_doc = ProjectDocument::new("Generated Sequence").unwrap();
+        seq_doc.add_data_sheet(DataSheet::new("seq", "Seq", TableArchetype::Xy(xy)).unwrap()).unwrap();
+        let seq_compact = serde_json::to_vec(&super::ArchiveDocumentRef::from_doc(&seq_doc)).unwrap().len() as u64;
+        let seq_csv = crate::csv::export_datasheet_to_csv(&seq_doc.data_sheets[0], &crate::csv::CsvOptions::csv()).unwrap();
+        let seq_upper = conservative_archive_total_upper_bound(&seq_doc, seq_compact, 0, 3);
+        assert!(
+            seq_upper >= seq_compact + seq_csv.len() as u64,
+            "seq_upper={seq_upper} must bound seq_compact={seq_compact} + seq_csv={}",
+            seq_csv.len()
+        );
+        validate_archive_save_limits(&seq_doc).unwrap();
     }
 
     #[test]

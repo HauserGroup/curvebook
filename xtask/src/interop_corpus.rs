@@ -4160,6 +4160,8 @@ fn format_error_subclass(err: &curvebook_format::FormatError) -> String {
                 "compression_ratio_cap"
             } else if low.contains("total") || low.contains("uncompressed") || low.contains("budget") {
                 "uncompressed_bytes_cap"
+            } else if low.contains("entry `") || low.contains("per-entry") {
+                "entry_size_cap"
             } else {
                 "other"
             };

@@ -17,21 +17,21 @@ A `.curvebook` file is a standard ZIP archive. CurveBook writes it with a determ
 | Entry path | Contents | Integrity and limits |
 |---|---|---|
 | `manifest.json` | Format tag, schema version, sheet index, and asset descriptors. | Validated against `archive-manifest.schema.json` and `document_crc32`. |
-| `document.json` | Canonical project JSON, indented with 2 spaces, without inline image bytes. | Validated against `document.schema.json`, and checked for finite floats, limits, and an acyclic DAG. |
+| `document.json` | Canonical project JSON, indented with 2 spaces (falling back deterministically to compact JSON for large projects), without inline image bytes. | Validated against `document.schema.json`, and checked for finite floats, limits, and an acyclic DAG. |
 | `sheets/<id>.csv` | An RFC-4180 CSV snapshot of each data table (`*` marks excluded cells). | Per-sheet CRC-32, verified against `manifest.json`. |
 | `assets/<asset_id>.<ext>` | Content-addressed embedded images in PNG, JPEG, or TIFF format. | Up to 32 MiB and 67,108,864 pixels; verified with CRC-32 and SHA-256. |
 
 Archive structure and safety limits:
 
 - **Manifest metadata:** `manifest.json` records `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, and `document_crc32`. It also lists a descriptor for each sheet (`id`, `section`, `title`, `csv_path`, `crc32`) and for each asset (`asset_id`, `media_type`, `pixel_size`, `asset_path`, `crc32`).
-- **Hard size and path caps:** When CurveBook opens an archive, it enforces caps of 128 MiB archive size, 4,096 ZIP entries, 128 MiB of uncompressed data in total, and 64 MiB per entry. Strict path checks reject `..` traversal, absolute paths, and symlink escapes.
+- **Hard size and path caps:** Saving, reopening, and importing projects enforce consistent native archive caps of 128 MiB compressed size, 4,096 ZIP entries, and 256 MiB per-entry and total uncompressed bytes. Pretty-printed 2-space `document.json` is written up to 64 MiB per entry or 128 MiB total, switching to compact schema-v9 JSON above that threshold. Generic ZIP imports cap reads at 64 MiB per entry and 128 MiB cumulative bytes, and external project importers verify the native archive save caps up front. Strict path checks reject `..` traversal, absolute paths, and symlink escapes.
 - **Atomic writes:** Every save to disk writes a temporary file, syncs it to disk, and then renames it into place atomically.
 
 ### `.curvebook.d/` unpacked project directory {#unpacked-dir}
 
 CurveBook can also read and write a project as an unpacked `.curvebook.d/` directory, which gives clean line-by-line Git diffs:
 
-- The directory mirrors the `.curvebook` layout exactly on disk: `manifest.json`, the 2-space-indented `document.json`, `sheets/<id>.csv`, and `assets/<asset_id>.<ext>`.
+- The directory mirrors the `.curvebook` layout exactly on disk: `manifest.json`, the 2-space-indented `document.json` (with compact fallback for large projects), `sheets/<id>.csv`, and `assets/<asset_id>.<ext>`.
 - CurveBook keeps files that are not part of the archive, such as `.git/`, READMEs, or notes. It prunes stale sheet CSVs and unused image assets that earlier manifests tracked.
 - On open, CurveBook canonicalizes the root path and applies symlink boundary checks, archive size limits, and CRC-32 validation.
 

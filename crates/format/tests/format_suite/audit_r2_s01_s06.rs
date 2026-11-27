@@ -12,10 +12,10 @@ use curvebook_doc::{
 use curvebook_format::ZipArchive;
 use curvebook_format::recovery::{DirectoryJournalBackend, JournalBackend, JournalLockLease, LOCKFILE_NAME};
 use curvebook_format::{
-    ArchiveManifest, ExportOptions, ExportSource, FormatError, FormatKind, FormatRegistry, MAX_ZIP_ENTRY_BYTES, SheetManifestEntry, ZipLimits,
-    batch_v1_schema, instantiate_template_bytes, journal_record_schema, open_project_file, open_project_unpacked_dir, open_template_bytes,
-    preferences_schema, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes, save_template_file,
-    strip_project_data_for_template, validate_batch_manifest_version, validate_project_document,
+    ArchiveManifest, ExportOptions, ExportSource, FormatError, FormatKind, FormatRegistry, MAX_ARCHIVE_ENTRY_BYTES, SheetManifestEntry,
+    batch_v1_schema, instantiate_template_bytes, journal_record_schema, native_archive_zip_limits, open_project_file, open_project_unpacked_dir,
+    open_template_bytes, preferences_schema, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes,
+    save_template_file, strip_project_data_for_template, validate_batch_manifest_version, validate_project_document,
 };
 use curvebook_palette::CanvasPreviewFilter;
 use curvebook_platform::{PathResolver, PlatformError, ProcessCommand, WorkdirGuard, write_atomic};
@@ -374,7 +374,8 @@ fn r2_s06_05_unpacked_save_enforces_zip_limits_matching_reopen() -> TestResult {
     let mut big_doc = ProjectDocument::new("Oversized")?;
     let huge_name = "x".repeat(MAX_TITLE_BYTES);
     let mut info = InfoSheet::new_preseeded("info-big", "Big Constants")?;
-    info.constants.extend((0..17_000).map(|i| InfoConstant {
+    let over_entry_count = usize::try_from(MAX_ARCHIVE_ENTRY_BYTES / (MAX_TITLE_BYTES as u64)).unwrap_or(usize::MAX) + 512;
+    info.constants.extend((0..over_entry_count).map(|i| InfoConstant {
         name: huge_name.clone(),
         value: curvebook_doc::ConstantValue::Number(i as f64),
         units: None,
@@ -382,8 +383,12 @@ fn r2_s06_05_unpacked_save_enforces_zip_limits_matching_reopen() -> TestResult {
     big_doc.add_info_sheet(info)?;
 
     assert!(matches!(save_project_unpacked_dir(&big_doc, &proj_dir), Err(FormatError::ZipBomb { .. })));
-    assert!(serde_json::to_vec_pretty(&big_doc)?.len() as u64 > MAX_ZIP_ENTRY_BYTES);
-    assert_eq!((open_project_unpacked_dir(&proj_dir)?, ZipLimits::default().max_entry_uncompressed_bytes), (base_doc, MAX_ZIP_ENTRY_BYTES));
+    assert!(matches!(save_project_bytes(&big_doc), Err(FormatError::ZipBomb { .. })));
+    assert!(serde_json::to_vec(&big_doc)?.len() as u64 > MAX_ARCHIVE_ENTRY_BYTES);
+    assert_eq!(
+        (open_project_unpacked_dir(&proj_dir)?, native_archive_zip_limits().max_entry_uncompressed_bytes),
+        (base_doc, MAX_ARCHIVE_ENTRY_BYTES)
+    );
     Ok(())
 }
 
