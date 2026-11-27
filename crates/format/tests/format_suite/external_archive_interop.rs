@@ -1983,3 +1983,42 @@ fn external_archive_lazy_zip_index_exceeds_4096_entries_while_native_limits_and_
     let cap_err = import_prism_bytes_with_limits(&big_zip, tiny_byte_cap).unwrap_err();
     assert!(matches!(cap_err, FormatError::ZipBomb { .. }), "expected ZipBomb for decompressed byte cap, got {cap_err:?}");
 }
+
+#[test]
+fn issue_72_kruskal_wallis_crosswalk_links_statistic_and_pvalue() {
+    let has_h = CACHED_SCALAR_LINKS.iter().any(|l| {
+        l.foreign_class == "ONE_WAY_ANOVA"
+            && l.cached_path == "kruskalWallisTestModel.kruskalWallisTest.statistic"
+            && l.curvebook_key == "Kruskal-Wallis H"
+    });
+    let has_p = CACHED_SCALAR_LINKS.iter().any(|l| {
+        l.foreign_class == "ONE_WAY_ANOVA" && l.cached_path == "kruskalWallisTestModel.kruskalWallisTest.pValue.value" && l.curvebook_key == "P value"
+    });
+    assert!(has_h && has_p, "ONE_WAY_ANOVA crosswalk must link both Kruskal-Wallis H and P value");
+
+    let results = json!({"content": {
+        "kruskalWallisTestModel": {
+            "kruskalWallisTest": {
+                "statistic": 7.2,
+                "pValue": { "value": 1.0 / 280.0 }
+            }
+        }
+    }});
+    let spec = AnalysisSpec::new(
+        "res",
+        "src",
+        AnalysisKind::OneWayAnova(curvebook_doc::OneWayAnovaSpec {
+            method: curvebook_doc::OneWayMethod::KruskalWallis,
+            ..curvebook_doc::OneWayAnovaSpec::default()
+        }),
+    )
+    .unwrap();
+    let mut rs = ResultSheet::new(spec).unwrap();
+    rs.scalars = vec![
+        ResultScalarEntry { key: String::from("Kruskal-Wallis H"), data_set_index: None, value: 7.2, units: None },
+        ResultScalarEntry { key: String::from("P value"), data_set_index: None, value: 1.0 / 280.0, units: None },
+    ];
+    let diag = compare_recomputed_against_cached_results(&rs, "ONE_WAY_ANOVA", &results, 1e-6, 1e-4);
+    assert_eq!(diag.compared_count, 2);
+    assert!(diag.disagreements.is_empty(), "exact H and P should agree: {:?}", diag.disagreements);
+}

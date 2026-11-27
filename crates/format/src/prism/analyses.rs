@@ -706,6 +706,7 @@ pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
     link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.f", "F"),
     link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.colFactor.fTest.pValue.value", "P value"),
     link(OW, "repeatedMeasuresGlmAnovaModel.anovaTable.residual.ms", "MS residual"),
+    link(OW, "kruskalWallisTestModel.kruskalWallisTest.statistic", "Kruskal-Wallis H"),
     link(OW, "kruskalWallisTestModel.kruskalWallisTest.pValue.value", "P value"),
     link(OW, "friedmanTestModel.friedmanTest.pValue.value", "P value"),
     // Two-way factorial designs (Maxwell, Delaney & Kelley 2017), ordinary and repeated measures.

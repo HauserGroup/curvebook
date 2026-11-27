@@ -23,9 +23,9 @@ use curvebook_doc::{
 };
 use curvebook_math::DenseMatrix;
 use curvebook_stats::anova::{
-    FactorialObservations, compute_anova_effect_sizes, fit_factorial_anova, fit_random_intercept_reml, fit_rm_two_way_anova, friedman_test,
-    kruskal_wallis_test, nested_one_way_anova, ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova,
-    unequal_variance_one_way_anova, variance_homogeneity_tests,
+    FactorialObservations, KruskalWallisPMethod, compute_anova_effect_sizes, fit_factorial_anova, fit_random_intercept_reml, fit_rm_two_way_anova,
+    friedman_test, kruskal_wallis_test, kruskal_wallis_test_with_method, nested_one_way_anova, ordinary_one_way_anova, ordinary_one_way_from_summary,
+    rm_one_way_anova, unequal_variance_one_way_anova, variance_homogeneity_tests,
 };
 use curvebook_stats::categorical::{
     KappaWeighting, analyze_2x2_ratios, analyze_contingency, baptista_pike_or_ci, clopper_pearson_ci, cochran_armitage_trend, cohens_kappa,
@@ -629,10 +629,17 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
     let g1 = [12.1, 14.3, 14.3, 15.0, 16.2];
     let g2 = [18.5, 19.0, 19.0, 21.4, 22.0];
     let g3 = [15.0, 16.8, 17.2, 18.5, 20.1];
+    // Asymptotic chi^2(2) oracle (R stats::kruskal.test) AND exact conditional permutation DP
+    // (Kruskal & Wallis 1952; Baglivo, Olivier & Pagano 1992; Meyer & Seaman 2013).
+    let kw_asymp = kruskal_wallis_test_with_method(&[&g1, &g2, &g3], KruskalWallisPMethod::Asymptotic).unwrap();
+    assert!(!kw_asymp.exact_p_used, "Asymptotic mode must use chi-square approximation");
+    assert_approx_eq(kw_asymp.h_statistic, 10.258_273_381_294_973, 1e-10, 1e-10, "KW H with ties");
+    assert_approx_eq(kw_asymp.df, 2.0, 1e-15, 0.0, "KW df");
+    assert_approx_eq(kw_asymp.p_value, 0.005_921_670_501_123, 1e-10, 1e-10, "KW asymptotic chi2 p");
     let kw = kruskal_wallis_test(&[&g1, &g2, &g3]).unwrap();
-    assert_approx_eq(kw.h_statistic, 10.258_273_381_294_973, 1e-10, 1e-10, "KW H with ties");
-    assert_approx_eq(kw.df, 2.0, 1e-15, 0.0, "KW df");
-    assert_approx_eq(kw.p_value, 0.005_921_670_501_123, 1e-10, 1e-10, "KW p");
+    assert!(kw.exact_p_used, "default Auto uses exact conditional permutation DP at (5,5,5)");
+    assert_approx_eq(kw.h_statistic, 10.258_273_381_294_973, 1e-10, 1e-10, "KW exact H with ties");
+    assert_approx_eq(kw.p_value, 37.0 / 63_063.0, 1e-12, 1e-12, "KW exact conditional permutation p");
 
     // Dunn pairwise comparisons with ties (exact tie sum from g1..g3)
     // Ties: 14.3 (x2), 15.0 (x2), 18.5 (x2), 19.0 (x2) -> 4 pairs -> sum(t^3-t) = 4*(8-2) = 24
@@ -681,6 +688,114 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
     assert_approx_eq(fr.df, 3.0, 1e-15, 0.0, "Friedman df");
     assert_approx_eq(fr.p_value, 0.000_576_179_488_694, 1e-10, 1e-10, "Friedman p ties");
     assert_approx_eq(fr.kendalls_w, fr.q_statistic / (6.0 * 3.0), 1e-12, 0.0, "Kendall W");
+}
+
+#[test]
+fn issue_72_kruskal_wallis_exact_permutation_and_dunn_oracles() {
+    // D1 Provenance:
+    // - Small-sample exact permutation probabilities: Kruskal & Wallis (1952) Table 6.1, Iman,
+    //   Quade & Alexander (1975), Baglivo, Olivier & Pagano (1992), and Meyer & Seaman (2013),
+    //   independently cross-checked by exact integer enumeration / DP.
+    // - k = 2 exact equivalence & above-budget chi^2(k - 1) fallback: R 4.5.2 (2025-10-31)
+    //   `stats::wilcox.test(..., exact = TRUE)` and `stats::kruskal.test`.
+    // - Dunn (1964) tie-corrected pairwise rank-sum z and Bonferroni adjustment (Zar 2010, ch. 10).
+
+    // 1. k = 2 untied (matches R wilcox.test exact = TRUE) and tied (matches mann_whitney_u exact).
+    let a2 = [1.0, 3.0, 5.0, 7.0, 9.0, 11.0];
+    let b2 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0];
+    let kw2 = kruskal_wallis_test(&[&a2, &b2]).unwrap();
+    assert!(kw2.exact_p_used, "k=2 N=14 must use exact permutation DP");
+    assert_approx_eq(kw2.p_value, 0.282_384_282_384_282_4, 1e-12, 1e-12, "k=2 exact R wilcox.test p");
+    let at2 = [1.0, 2.0, 2.0, 5.0, 7.0];
+    let bt2 = [2.0, 4.0, 5.0, 8.0, 9.0, 10.0];
+    let kw2_t = kruskal_wallis_test(&[&at2, &bt2]).unwrap();
+    let mw2_t = mann_whitney_u(&at2, &bt2, true, conf_95()).unwrap();
+    assert!(kw2_t.exact_p_used);
+    assert_approx_eq(kw2_t.p_value, mw2_t.p_value, 1e-12, 1e-12, "k=2 tied KW equals two-sided exact MW");
+
+    // 2. k = 3 classic Kruskal & Wallis (1952) Table 6.1 (3,3,3): H = 7.2 -> 1/280, H = 5.9556 -> 1/40.
+    let kw3_max = kruskal_wallis_test(&[&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0], &[7.0, 8.0, 9.0]]).unwrap();
+    assert!(kw3_max.exact_p_used);
+    assert_approx_eq(kw3_max.h_statistic, 7.2, 1e-12, 0.0, "KW1952 (3,3,3) H=7.2");
+    assert_approx_eq(kw3_max.p_value, 1.0 / 280.0, 1e-12, 1e-12, "KW1952 (3,3,3) exact p=1/280");
+
+    let kw3_mid = kruskal_wallis_test(&[&[1.0, 2.0, 5.0], &[3.0, 4.0, 6.0], &[7.0, 8.0, 9.0]]).unwrap();
+    assert!(kw3_mid.exact_p_used);
+    assert_approx_eq(kw3_mid.h_statistic, 268.0 / 45.0, 1e-12, 0.0, "KW1952 (3,3,3) H=268/45");
+    assert_approx_eq(kw3_mid.p_value, 0.025, 1e-12, 1e-12, "KW1952 (3,3,3) exact p=1/40");
+
+    // k = 3 heavy ties (5,5,5) and unbalanced (3,9,9) N = 21 + group-order permutation invariance.
+    let h1 = [0.0, 0.0, 0.0, 1.0, 2.0];
+    let h2 = [0.0, 0.0, 1.0, 2.0, 3.0];
+    let h3 = [0.0, 1.0, 2.0, 3.0, 4.0];
+    let kw3_tie = kruskal_wallis_test(&[&h1, &h2, &h3]).unwrap();
+    let kw3_tie_perm = kruskal_wallis_test(&[&h3, &h1, &h2]).unwrap();
+    assert!(kw3_tie.exact_p_used);
+    assert_approx_eq(kw3_tie.p_value, 6631.0 / 21_021.0, 1e-12, 1e-12, "k=3 (5,5,5) heavy-tie exact p");
+    assert_approx_eq(kw3_tie.p_value, kw3_tie_perm.p_value, 1e-13, 1e-13, "k=3 group-order invariance");
+
+    let u1 = [1.0, 2.0, 5.0];
+    let u2 = [3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0];
+    let u3 = [7.0, 9.0, 11.0, 13.0, 15.0, 17.0, 19.0, 20.0, 21.0];
+    let kw3_21 = kruskal_wallis_test(&[&u1, &u2, &u3]).unwrap();
+    let kw3_21_perm = kruskal_wallis_test(&[&u2, &u3, &u1]).unwrap();
+    assert!(kw3_21.exact_p_used);
+    assert_approx_eq(kw3_21.p_value, 182_103.0 / 32_332_300.0, 1e-12, 1e-12, "k=3 (3,9,9) N=21 exact p");
+    assert_approx_eq(kw3_21.p_value, kw3_21_perm.p_value, 1e-13, 1e-13, "k=3 (3,9,9) group-order invariance");
+
+    // 3. k = 4 meet-in-the-middle exact: (3,4,4,4) untied + group-order invariance.
+    let q1 = [1.0, 2.0, 4.0];
+    let q2 = [3.0, 5.0, 7.0, 8.0];
+    let q3 = [6.0, 9.0, 10.0, 12.0];
+    let q4 = [11.0, 13.0, 14.0, 15.0];
+    let kw4 = kruskal_wallis_test(&[&q1, &q2, &q3, &q4]).unwrap();
+    let kw4_perm = kruskal_wallis_test(&[&q3, &q1, &q4, &q2]).unwrap();
+    assert!(kw4.exact_p_used, "k=4 (3,4,4,4) must use exact meet-in-the-middle");
+    assert_approx_eq(kw4.p_value, 487.0 / 2_627_625.0, 1e-12, 1e-12, "k=4 (3,4,4,4) exact p");
+    assert_approx_eq(kw4.p_value, kw4_perm.p_value, 1e-13, 1e-13, "k=4 group-order invariance");
+
+    // 4. k = 5 symmetry-canonicalized branch-and-bound + MITM: (3,3,3,3,3) max-sep & non-trivial.
+    let kw5_max = kruskal_wallis_test(&[&[1.0, 2.0, 3.0], &[4.0, 5.0, 6.0], &[7.0, 8.0, 9.0], &[10.0, 11.0, 12.0], &[13.0, 14.0, 15.0]]).unwrap();
+    assert!(kw5_max.exact_p_used, "k=5 (3,3,3,3,3) must use exact permutation");
+    assert_approx_eq(kw5_max.h_statistic, 13.5, 1e-12, 0.0, "k=5 (3,3,3,3,3) max H");
+    assert_approx_eq(kw5_max.p_value, 1.0 / 1_401_400.0, 1e-12, 1e-12, "k=5 (3,3,3,3,3) exact max-sep p");
+
+    let kw5_mid = kruskal_wallis_test(&[&[1.0, 2.0, 5.0], &[3.0, 4.0, 8.0], &[6.0, 7.0, 11.0], &[9.0, 10.0, 13.0], &[12.0, 14.0, 15.0]]).unwrap();
+    assert!(kw5_mid.exact_p_used);
+    assert_approx_eq(kw5_mid.h_statistic, 11.5, 1e-12, 0.0, "k=5 (3,3,3,3,3) H=11.5");
+    assert_approx_eq(kw5_mid.p_value, 71.0 / 53_900.0, 1e-12, 1e-12, "k=5 (3,3,3,3,3) exact p=71/53900");
+
+    // 5. Above budget (k = 3, N = 30 > 25): automatically falls back to chi^2(2) matching R 4.5.2.
+    let big1: Vec<f64> = (1..=10).map(f64::from).collect();
+    let big2: Vec<f64> = (0..10).map(|i| (3 + 2 * i) as f64).collect();
+    let big3: Vec<f64> = (0..10).map(|i| (6 + 2 * i) as f64).collect();
+    let kw_big = kruskal_wallis_test(&[&big1, &big2, &big3]).unwrap();
+    assert!(!kw_big.exact_p_used, "k=3 N=30 > 25 must fall back to chi^2(2)");
+    assert_approx_eq(kw_big.h_statistic, 11.716_956_327_985_745, 1e-10, 1e-10, "N=30 R KW H");
+    assert_approx_eq(kw_big.p_value, 0.002_855_586_111_375_120_3, 1e-10, 1e-10, "N=30 R KW chi2 p");
+
+    // 6. Dunn (1964) tie-corrected pairwise rank-sum z & Bonferroni adjustment on unequal (3, 5, 4).
+    let d0 = [1.0, 2.0, 2.0];
+    let d1 = [2.0, 4.0, 5.0, 6.0, 7.0];
+    let d2 = [7.0, 8.0, 9.0, 10.0];
+    let kw_d = kruskal_wallis_test(&[&d0, &d1, &d2]).unwrap();
+    // Ranks: 1->1, 2(x3)->3, 4->5, 5->6, 6->7, 7(x2)->8.5, 8->10, 9->11, 10->12; sum(t^3-t) = 24 + 6 = 30.
+    let d_labels = [(0, String::from("A")), (1, String::from("B")), (2, String::from("C"))];
+    let dunn = compare_dunn_ranks(
+        &d_labels,
+        &[3, 5, 4],
+        &kw_d.group_mean_ranks,
+        kw_d.total_n,
+        30.0,
+        &MultiplicitySpec { method: MultiplicityMethod::DunnRankSum, threshold: 0.05, report_confidence_intervals: false },
+    )
+    .unwrap();
+    assert_eq!(dunn.len(), 3);
+    let expected_se_02 = ((281.0_f64 / 22.0) * (7.0 / 12.0)).sqrt();
+    let expected_z_02 = (7.0 / 3.0 - 83.0 / 8.0) / expected_se_02;
+    assert_approx_eq(dunn[1].se_diff, expected_se_02, 1e-12, 1e-12, "Dunn unequal-n tied SE(A,C)");
+    assert_approx_eq(dunn[1].statistic, expected_z_02, 1e-12, 1e-12, "Dunn unequal-n tied z(A,C)");
+    assert_approx_eq(dunn[1].adjusted_p_or_q, (3.0 * dunn[1].raw_p).min(1.0), 1e-12, 1e-12, "Dunn Bonferroni adj p(A,C)");
 }
 
 // ============================================================================

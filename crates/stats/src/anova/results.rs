@@ -223,8 +223,13 @@ pub struct KruskalWallisResult {
     pub h_statistic: f64,
     /// Chi-square degrees of freedom `k - 1`.
     pub df: f64,
-    /// Asymptotic upper-tail $\chi^2(k - 1)$ *P* value testing identical group rank distributions.
+    /// Upper-tail *P* value testing identical group rank distributions (exact conditional
+    /// permutation distribution when within budget, else asymptotic $\chi^2(k - 1)$).
     pub p_value: f64,
+    /// True if the exact conditional permutation distribution was used; false for the
+    /// asymptotic $\chi^2(k - 1)$ approximation.
+    #[serde(default)]
+    pub exact_p_used: bool,
     /// Multiplicative tie adjustment denominator $1 - \sum (t_r^3 - t_r) / (N^3 - N) \in (0, 1]$.
     pub tie_correction: f64,
     /// Rank-based variance-explained epsilon-squared `H / (N - 1)` clamped to `[0, 1]`.

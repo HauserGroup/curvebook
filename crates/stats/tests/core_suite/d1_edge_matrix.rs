@@ -19,8 +19,8 @@ use curvebook_doc::{
 };
 use curvebook_math::DenseMatrix;
 use curvebook_stats::anova::{
-    FactorialAnovaTerm, FactorialObservations, fit_factorial_anova, fit_random_intercept_reml, friedman_test, kruskal_wallis_test,
-    run_factorial_anova, unequal_variance_one_way_anova,
+    FactorialAnovaTerm, FactorialObservations, KruskalWallisPMethod, fit_factorial_anova, fit_random_intercept_reml, friedman_test,
+    kruskal_wallis_test, kruskal_wallis_test_with_method, run_factorial_anova, unequal_variance_one_way_anova,
 };
 use curvebook_stats::multiplicity::{GroupComparisonInput, compare_groups_with_procedure};
 use curvebook_stats::multivariate::{LinkageMethod, hierarchical_clustering, kmeans_pp, pca_analysis};
@@ -839,11 +839,15 @@ fn edge_06b_extreme_tied_rank_kruskal_wallis_and_friedman() {
     let kw2 = [1.0, 2.0, 2.0, 2.0, 3.0];
     let kw3 = [2.0, 2.0, 3.0, 3.0, 3.0];
     let kw4 = [3.0, 3.0, 3.0, 3.0, 2.0];
-    let kw = kruskal_wallis_test(&[&kw1, &kw2, &kw3, &kw4]).unwrap();
-    assert_approx_eq(kw.df, 3.0, 1e-12, 1e-12, "Tied KW df");
-    assert_approx_eq(kw.tie_correction, 1.0 - 1068.0 / 7980.0, 1e-12, 1e-12, "Tied KW tie factor");
-    assert_approx_eq(kw.h_statistic, 10.080_555_555_555_566, 1e-9, 1e-9, "Tied KW H");
-    assert_approx_eq(kw.p_value, 1.789_364_980_525_992e-02, 1e-9, 1e-8, "Tied KW p");
+    let kw_asymp = kruskal_wallis_test_with_method(&[&kw1, &kw2, &kw3, &kw4], KruskalWallisPMethod::Asymptotic).unwrap();
+    assert!(!kw_asymp.exact_p_used);
+    assert_approx_eq(kw_asymp.df, 3.0, 1e-12, 1e-12, "Tied KW df");
+    assert_approx_eq(kw_asymp.tie_correction, 1.0 - 1068.0 / 7980.0, 1e-12, 1e-12, "Tied KW tie factor");
+    assert_approx_eq(kw_asymp.h_statistic, 10.080_555_555_555_566, 1e-9, 1e-9, "Tied KW H");
+    assert_approx_eq(kw_asymp.p_value, 1.789_364_980_525_992e-02, 1e-9, 1e-8, "Tied KW asymptotic p");
+    let kw_exact = kruskal_wallis_test(&[&kw1, &kw2, &kw3, &kw4]).unwrap();
+    assert!(kw_exact.exact_p_used, "default Auto uses exact meet-in-the-middle permutation at (5,5,5,5)");
+    assert_approx_eq(kw_exact.p_value, 388.0 / 37_791.0, 1e-12, 1e-12, "Tied KW (5,5,5,5) exact permutation p");
 
     let blocks = vec![
         vec![1.0, 1.0, 2.0, 3.0],

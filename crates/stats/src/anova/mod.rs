@@ -38,6 +38,17 @@
 //! - Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis.
 //!   *Journal of the American Statistical Association* 47(260):583–621.
 //!   doi:10.1080/01621459.1952.10483441
+//! - Iman, R. L., Quade, D., & Alexander, D. A. (1975). Exact probability levels for the
+//!   Kruskal–Wallis test. *Selected Tables in Mathematical Statistics* 3:329–384.
+//! - Streitberg, B., & Röhmel, J. (1986). Exact distributions for permutation and rank tests:
+//!   An introduction to some recently published algorithms. *Statistical Software Newsletter*
+//!   12(1):10–17.
+//! - Baglivo, J., Olivier, D., & Pagano, M. (1992). Methods for exact goodness-of-fit tests.
+//!   *Journal of the American Statistical Association* 87(418):464–469.
+//!   doi:10.1080/01621459.1992.10475227
+//! - Meyer, J. P., & Seaman, M. A. (2013). A comparison of the exact Kruskal–Wallis distribution
+//!   to asymptotic approximations for all sample sizes up to 105. *Journal of the American
+//!   Statistical Association* 108(504):1418–1428. doi:10.1080/01621459.2013.800759
 //! - Friedman, M. (1937). The use of ranks to avoid the assumption of normality implicit in the
 //!   analysis of variance. *Journal of the American Statistical Association* 32(200):675–701.
 //!   doi:10.1080/01621459.1937.10503522
@@ -99,7 +110,7 @@ mod sheet;
 pub use effect_sizes::{compute_anova_effect_sizes, compute_anova_effect_sizes_for_n, variance_homogeneity_tests};
 pub use factorial::{FactorialObservations, fit_factorial_anova};
 pub use nested::{nested_one_way_anova, nested_one_way_anova_with_df_method};
-pub use nonparametric::{friedman_test, kruskal_wallis_test};
+pub use nonparametric::{KruskalWallisPMethod, friedman_test, kruskal_wallis_test, kruskal_wallis_test_with_method};
 pub use one_way::{ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova, unequal_variance_one_way_anova};
 pub use reml::{
     fit_multi_vc_reml, fit_multi_vc_reml_with_df_method, fit_multi_vc_reml_with_policy, fit_random_intercept_reml,
