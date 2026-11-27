@@ -2319,15 +2319,11 @@ impl GridViewState {
         }
 
         let max_rows_for_cols = (MAX_MATERIALIZED_SELECTION_COORDS / (hi - lo + 1).max(1)).max(1);
-        if let Some(last_pop) = last_populated_row_in_range(sheet, r0, raw_r1) {
-            if last_pop.saturating_sub(r0) < max_rows_for_cols {
-                return Some((r0, last_pop, lo, hi));
-            }
-            let first_pop = first_populated_row_in_range(sheet, r0, last_pop).unwrap_or(r0);
-            let win_r1 = last_pop.min(first_pop.saturating_add(max_rows_for_cols - 1));
-            return Some((first_pop, win_r1, lo, hi));
-        }
-        None
+        let first_pop = first_populated_row_in_range(sheet, r0, raw_r1)?;
+        let window_r1 = raw_r1.min(first_pop.saturating_add(max_rows_for_cols - 1));
+        let last_pop = last_populated_row_in_range(sheet, first_pop, window_r1).unwrap_or(first_pop);
+        let out_r0 = if last_pop.saturating_sub(r0) < max_rows_for_cols { r0 } else { first_pop };
+        Some((out_r0, last_pop, lo, hi))
     }
 
     /// Recompute quick summary statistics (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`)
@@ -2722,76 +2718,132 @@ where
         return best;
     }
     let max_hi = r1.min(slice.len() - 1);
-    let (lo, hi) =
-        if from_end { (best.map_or(r0, |b| (b + 1).max(r0)), max_hi) } else { (r0, best.map_or(max_hi, |b| b.saturating_sub(1).min(max_hi))) };
-    if lo > hi {
-        return best;
-    }
-    if from_end {
-        slice[lo..=hi].iter().rposition(is_pop).map_or(best, |rel| Some(lo + rel))
+    let (lo, hi) = if from_end {
+        let Some(lo) = best.map_or(Some(r0), |b| b.checked_add(1).map(|n| n.max(r0))) else {
+            return best;
+        };
+        (lo, max_hi)
     } else {
-        slice[lo..=hi].iter().position(is_pop).map_or(best, |rel| Some(lo + rel))
+        let Some(hi) = best.map_or(Some(max_hi), |b| b.checked_sub(1).map(|p| p.min(max_hi))) else {
+            return best;
+        };
+        (r0, hi)
+    };
+    let Some(window) = slice.get(lo..=hi) else {
+        return best;
+    };
+    if from_end {
+        window.iter().rposition(is_pop).map_or(best, |rel| Some(lo + rel))
+    } else {
+        window.iter().position(is_pop).map_or(best, |rel| Some(lo + rel))
     }
 }
 
-fn populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize, from_end: bool) -> Option<usize> {
+fn scan_cell_columns(columns: &[curvebook_doc::DataSetColumn], r0: usize, r1: usize, mut best: Option<usize>, from_end: bool) -> Option<usize> {
+    let target = if from_end { r1 } else { r0 };
+    for col in columns {
+        if best == Some(target) {
+            break;
+        }
+        best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
+    }
+    best
+}
+
+fn populated_row_in_block(sheet: &DataSheet, r0: usize, r1: usize, from_end: bool) -> Option<usize> {
+    let target = if from_end { r1 } else { r0 };
     let mut best = None;
     match &sheet.archetype {
         TableArchetype::Xy(t) => {
-            if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
-                return (r0 <= r1 && r0 < t.row_count()).then(|| if from_end { r1.min(t.row_count() - 1) } else { r0 });
-            }
             best = scan_window(&t.x_cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            for col in &t.data_sets {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.data_sets, r0, r1, best, from_end);
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Column(t) => {
-            for col in &t.data_sets {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.data_sets, r0, r1, best, from_end);
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Grouped(t) => {
-            for col in &t.data_sets {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.data_sets, r0, r1, best, from_end);
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Contingency(t) => {
-            for col in &t.data_sets {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.data_sets, r0, r1, best, from_end);
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Survival(t) => {
             best = scan_window(&t.times, r0, r1, best, from_end, is_cell_populated);
-            for col in &t.cohorts {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.cohorts, r0, r1, best, from_end);
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::PartsOfWhole(t) => {
-            for col in &t.data_sets {
-                best = scan_window(&col.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
-            }
+            best = scan_cell_columns(&t.data_sets, r0, r1, best, from_end);
             best = scan_window(&t.slice_labels, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::MultipleVariables(t) => {
             for var in &t.variables {
+                if best == Some(target) {
+                    break;
+                }
                 best = scan_window(&var.cells, r0, r1, best, from_end, is_cell_populated);
             }
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
         TableArchetype::Nested(t) => {
             for grp in &t.groups {
+                if best == Some(target) {
+                    break;
+                }
                 best = scan_window(&grp.cells, r0, r1, best, from_end, |subs| is_subrow_populated(subs));
             }
             best = scan_window(&t.row_titles, r0, r1, best, from_end, |s| !s.is_empty());
         }
     }
     best
+}
+
+fn populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize, from_end: bool) -> Option<usize> {
+    const INITIAL_SCAN_BLOCK: usize = 64;
+    const SCAN_BLOCK: usize = 2_048;
+
+    let total_rows = sheet.archetype.row_count();
+    if total_rows == 0 || r0 > r1 || r0 >= total_rows {
+        return None;
+    }
+    let r1 = r1.min(total_rows - 1);
+    if matches!(&sheet.archetype, TableArchetype::Xy(t) if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. })) {
+        return Some(if from_end { r1 } else { r0 });
+    }
+
+    let mut block_len = INITIAL_SCAN_BLOCK;
+    if from_end {
+        let mut cur_end = r1;
+        loop {
+            let block_start = cur_end.saturating_sub(block_len - 1).max(r0);
+            if let Some(found) = populated_row_in_block(sheet, block_start, cur_end, true) {
+                return Some(found);
+            }
+            if block_start == r0 {
+                return None;
+            }
+            cur_end = block_start - 1;
+            block_len = SCAN_BLOCK;
+        }
+    } else {
+        let mut cur_start = r0;
+        while cur_start <= r1 {
+            let block_end = cur_start.saturating_add(block_len - 1).min(r1);
+            if let Some(found) = populated_row_in_block(sheet, cur_start, block_end, false) {
+                return Some(found);
+            }
+            let Some(next_start) = block_end.checked_add(1) else {
+                break;
+            };
+            cur_start = next_start;
+            block_len = SCAN_BLOCK;
+        }
+        None
+    }
 }
 
 fn first_populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize) -> Option<usize> {
@@ -4298,6 +4350,73 @@ mod tests {
         assert_eq!(coords.len(), 50);
         assert_eq!(targets.len(), 50);
         assert!(frame.rows.iter().all(|r| r.cells.iter().all(|c| c.visual.is_selected)));
+    }
+
+    #[test]
+    fn one_million_row_selection_block_scan_handles_late_columns_distant_tail_and_sparse_windows() {
+        use std::time::Instant;
+
+        use curvebook_doc::{ColumnDesignHint, ColumnTable, MAX_ROWS};
+
+        // 1. 1M-row XY sheet where `x_cells` and `data_sets[0]` are empty, `data_sets[1]` has rows 0..25
+        //    plus a distant tail row at 500_000: block-scanning must find row 0 immediately without
+        //    scanning 1M empty cells in earlier columns, and trim trailing empty rows within the window.
+        let mut xy = XyTable::new(SubcolumnMode::Single, 2, MAX_ROWS).expect("1M-row XyTable");
+        for r in 0..25 {
+            xy.data_sets[1].cells[r][0] = Cell::number(r as f64);
+        }
+        xy.data_sets[1].cells[500_000][0] = Cell::number(999.0);
+        let sheet = DataSheet::new("xy-1m-late-col", "1M Late Col", TableArchetype::Xy(xy)).expect("datasheet");
+        let mut grid = GridViewState::default();
+        let t0 = Instant::now();
+        grid.select_single_sync(GridCellCoord::new(0, 0, 0));
+        grid.extend_shift_range(&sheet, GridCellCoord::new(MAX_ROWS - 1, 1, 0));
+        let coords = grid.all_selected_coords(&sheet);
+        let targets = grid.selected_graph_point_targets(&sheet, 2);
+        let elapsed = t0.elapsed();
+        let budget_ms = if cfg!(debug_assertions) { 25 } else { 5 };
+        assert!(elapsed < std::time::Duration::from_millis(budget_ms), "late-column 1M selection exceeded {budget_ms} ms budget: {elapsed:?}");
+        assert_eq!(coords.len(), 50);
+        assert_eq!(targets.len(), 50);
+
+        // 2. Sparse/windowed range boundaries on a 6,000-row table (`max_rows_for_cols = 2,048` for 2 cols).
+        struct SparseCase {
+            name: &'static str,
+            populated: &'static [(usize, f64)],
+            expected_len: usize,
+            expected_row_bounds: Option<(usize, usize)>,
+        }
+        let cases = [
+            SparseCase { name: "leading_blanks_within_cap", populated: &[(5, 1.0), (24, 2.0)], expected_len: 50, expected_row_bounds: Some((0, 24)) },
+            SparseCase {
+                name: "leading_blanks_crossing_cap",
+                populated: &[(1_000, 1.0), (3_000, 2.0)],
+                expected_len: 4_002,
+                expected_row_bounds: Some((1_000, 3_000)),
+            },
+            SparseCase {
+                name: "sparse_tail_past_cap",
+                populated: &[(5_500, 1.0), (5_502, 2.0)],
+                expected_len: 6,
+                expected_row_bounds: Some((5_500, 5_502)),
+            },
+            SparseCase { name: "completely_empty", populated: &[], expected_len: 0, expected_row_bounds: None },
+        ];
+        for case in cases {
+            let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 6_000).expect("6k column table");
+            for &(row, val) in case.populated {
+                col.data_sets[1].cells[row][0] = Cell::number(val);
+            }
+            let ds = DataSheet::new(case.name, case.name, TableArchetype::Column(col)).expect("datasheet");
+            let mut g = GridViewState::default();
+            g.select_single_sync(GridCellCoord::new(0, 0, 0));
+            g.extend_shift_range(&ds, GridCellCoord::new(5_999, 1, 0));
+            let c = g.all_selected_coords(&ds);
+            let t = g.selected_graph_point_targets(&ds, 2);
+            assert_eq!((c.len(), t.len()), (case.expected_len, case.expected_len), "case {} len mismatch", case.name);
+            let actual_bounds = c.first().zip(c.last()).map(|(a, b)| (a.row, b.row));
+            assert_eq!(actual_bounds, case.expected_row_bounds, "case {} row bounds mismatch", case.name);
+        }
     }
 
     #[test]
