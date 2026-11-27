@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/HauserGroup/curvebook/security/policy
     about: Do not open a public issue. Follow the security policy to report it privately.
   - name: What is planned, and in what order
-    url: https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md#execution-order
+    url: https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md#order-and-dependencies
     about: Check the execution order and the gap list before asking for a feature.
