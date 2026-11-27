@@ -1,17 +1,17 @@
-# Get started & installation
+# Getting started and installation
 
 <!-- Audience: Tier 1 Scientist Guide — keep sentences short and plain; put exhaustive format or troubleshooting details in files.md or troubleshooting.md. -->
 
-CurveBook runs offline on your computer with zero telemetry and no background network connections. Every desktop installer includes both the desktop app and the command-line tool (`curvebook-cli`).
+CurveBook runs offline on your computer. It sends no telemetry and makes no background network connections. Every desktop installer includes both the desktop app and the command-line tool (`curvebook-cli`).
 
 > [!NOTE]
-> **Release assets note:** The steps below describe CurveBook's Beta packages. Check the **Assets** list on [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases) to see the downloads currently available.
+> **Available downloads:** The steps below describe the Beta packages. For the current downloads, check the **Assets** list on [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases).
 
 ---
 
 ## Install CurveBook {#installing-packages}
 
-Download the installer for your platform from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases). Do not download GitHub's automatic **Source code** archive unless you plan to build from source.
+Download the installer for your computer from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases). Skip GitHub's automatic **Source code** archive unless you plan to build from source.
 
 ### macOS {#install-macos}
 
@@ -19,7 +19,7 @@ Download the installer for your platform from [CurveBook Releases](https://githu
 2. Open the disk image and drag **CurveBook.app** into **Applications**.
 3. Open **CurveBook** from **Applications**. Beta macOS installers are signed and notarized.
 
-To run the command-line tool from Terminal or an AI assistant, call `/Applications/CurveBook.app/Contents/MacOS/curvebook-cli` directly, or add it to your shell PATH in `~/.zshrc`:
+To use the command-line tool from Terminal or an AI assistant, run `/Applications/CurveBook.app/Contents/MacOS/curvebook-cli` directly, or add its folder to your shell PATH in `~/.zshrc`:
 
 ```zsh
 export PATH="/Applications/CurveBook.app/Contents/MacOS:$PATH"
@@ -29,8 +29,8 @@ Run `curvebook-cli --version` to check that it works.
 
 ### Windows {#install-windows}
 
-1. Download `curvebook-<version>-windows-x64.msi` (or the ARM64 installer on Windows on ARM) and `SHA256SUMS.txt` into one folder.
-2. **Verify your download before running it.** Beta Windows installers are currently unsigned. Check `SHA256SUMS.txt` with the [GitHub CLI](https://cli.github.com/) and verify the installer hash in PowerShell first:
+1. Download `curvebook-<version>-windows-x64.msi` (or the ARM64 installer on Windows on ARM) and `SHA256SUMS.txt` into the same folder.
+2. **Verify your download before you run it.** Beta Windows installers are not yet signed. First check `SHA256SUMS.txt` with the [GitHub CLI](https://cli.github.com/), then check the installer's hash in PowerShell:
 
 ```powershell
 gh attestation verify SHA256SUMS.txt --repo HauserGroup/curvebook --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
@@ -39,38 +39,38 @@ $expected = (Select-String -Path SHA256SUMS.txt -SimpleMatch "  $f").Line.Split(
 (Get-FileHash $f -Algorithm SHA256).Hash -eq $expected.ToUpper()
 ```
 
-   Change the filename if you downloaded the ARM64 installer. The hash check prints **True** when the file matches. If either check fails, stop and see [If a check fails](#verification-fails).
-3. Double-click the verified installer. When Windows Defender SmartScreen shows *"Windows protected your PC"*, click **More info** and then **Run anyway**.
-4. Finish the wizard. By default, CurveBook installs for your user account in `%LocalAppData%\Programs\CurveBook` with both the desktop app and `curvebook-cli.exe`.
+   If you downloaded the ARM64 installer, change the filename. The hash check prints **True** when the file matches. If either check fails, stop and see [If a check fails](#verification-fails).
+3. Double-click the verified installer. If Windows Defender SmartScreen shows *"Windows protected your PC"*, click **More info**, then **Run anyway**.
+4. Finish the wizard. By default, the desktop app and `curvebook-cli.exe` install for your user account in `%LocalAppData%\Programs\CurveBook`.
 
 Important Windows notes:
 
-- **Windows 11 Smart App Control:** Systems in enforcement mode block unsigned installers until Windows code signing or the signed Microsoft Store package ships.
-- **Machine-wide installs:** Administrators can deploy for all users with `msiexec` (`ALLUSERS=1`). Uninstall any existing copy before switching install scopes.
-- **Upgrading from Alpha 32-bit:** Beta publishes 64-bit Windows installers only. Uninstall any 32-bit Alpha copy manually first.
+- **Windows 11 Smart App Control:** In enforcement mode, it blocks unsigned installers until Windows code signing or the signed Microsoft Store package ships.
+- **Machine-wide installs:** Administrators can install CurveBook for all users with `msiexec` (`ALLUSERS=1`). Uninstall any existing copy before you switch install scopes.
+- **Upgrading from the 32-bit Alpha:** The Beta has 64-bit Windows installers only. Uninstall any 32-bit Alpha copy by hand first.
 
 ### Linux {#install-linux}
 
-1. Download `curvebook-<version>-linux-x86_64.AppImage` (or the ARM64 build on aarch64 Linux).
-2. Make the file executable and launch CurveBook:
+1. Download `curvebook-<version>-linux-x86_64.AppImage` (or the ARM64 build for aarch64 Linux).
+2. Make the file executable and start CurveBook:
 
 ```sh
 chmod +x curvebook-<version>-linux-x86_64.AppImage
 ./curvebook-<version>-linux-x86_64.AppImage
 ```
 
-3. To run the bundled CLI directly—or on systems without FUSE v2—extract the AppImage once:
+3. To run the bundled command-line tool directly, or if your system lacks FUSE v2, extract the AppImage once:
 
 ```sh
 ./curvebook-<version>-linux-x86_64.AppImage --appimage-extract
 ./squashfs-root/usr/bin/curvebook-cli --version
 ```
 
-If launching reports a missing FUSE library, see [Troubleshooting: Linux FUSE](troubleshooting.md#linux-fuse).
+If CurveBook reports a missing FUSE library, see [Troubleshooting: Linux FUSE](troubleshooting.md#linux-fuse).
 
 ### FreeBSD {#install-freebsd}
 
-FreeBSD ships as a CLI-only preview archive for x86_64 (command-line tool and local MCP, no desktop app). Extract the archive and run `bin/curvebook-cli`:
+On FreeBSD, CurveBook is a command-line-only preview for x86_64, with the local MCP server but no desktop app. Extract the archive, then run `bin/curvebook-cli`:
 
 ```sh
 tar -xzf curvebook-<version>-freebsd-x86_64.tar.gz
@@ -80,7 +80,7 @@ tar -xzf curvebook-<version>-freebsd-x86_64.tar.gz
 
 ## System requirements and release files {#system-requirements}
 
-Every Beta release uses the naming pattern `curvebook-<version>-<os>-<arch>.<ext>`:
+Beta release files follow the naming pattern `curvebook-<version>-<os>-<arch>.<ext>`:
 
 | Platform | Beta release files | Included | Status |
 |---|---|---|---|
@@ -88,24 +88,24 @@ Every Beta release uses the naming pattern `curvebook-<version>-<os>-<arch>.<ext
 | **Windows** (10/11, x64 & ARM64) | `curvebook-<version>-windows-x64.msi`<br>`curvebook-<version>-windows-arm64.msi` | Desktop app, CLI | Unsigned in Beta |
 | **Linux** (Wayland/X11, x86_64 & ARM64) | `curvebook-<version>-linux-x86_64.AppImage`<br>`curvebook-<version>-linux-aarch64.AppImage` | Desktop app, CLI | Needs FUSE v2 or AppImage extract |
 | **FreeBSD** (x86_64) | `curvebook-<version>-freebsd-x86_64.tar.gz` | CLI and MCP only | Preview, no desktop app |
-| **Shared release metadata** | `SHA256SUMS.txt`<br>`curvebook-<version>.cdx.json`<br>`THIRD-PARTY-LICENSES.html` | Checksums, SBOM, licences | Published with every release |
+| **Shared release metadata** | `SHA256SUMS.txt`<br>`curvebook-<version>.cdx.json`<br>`THIRD-PARTY-LICENSES.html` | Checksums, SBOM, licenses | Published with every release |
 
 Packaging notes:
 
-- **One format per OS:** Beta does not build macOS CLI zips, 32-bit or portable Windows zips, or Linux .deb, .rpm, Flatpak, or zsync packages.
-- **Microsoft Store and browser app:** A signed Microsoft Store MSIX package is planned separately. The browser app is deferred until CurveBook 1.0.
-- **Licenses and software inventory:** Every release ships a CycloneDX software bill of materials and third-party license notices.
+- **One format per OS:** The Beta does not build macOS CLI zips, 32-bit or portable Windows zips, or Linux .deb, .rpm, Flatpak, or zsync packages.
+- **Microsoft Store and browser app:** A signed Microsoft Store (MSIX) package is planned separately. The browser version of CurveBook is postponed until CurveBook 1.0.
+- **Licenses and software inventory:** Every release includes a CycloneDX software bill of materials (SBOM) and third-party license notices.
 
 ---
 
 ## Verifying downloads {#verifying-downloads}
 
-Download both your installer and `SHA256SUMS.txt` from the same release into one folder:
+Download your installer and `SHA256SUMS.txt` from the same release into one folder. There are two checks:
 
-- **Checksums:** Confirm your file was not corrupted during download.
-- **Build provenance:** Confirms GitHub Actions built `SHA256SUMS.txt` and each package from CurveBook's repository. This step requires the [GitHub CLI](https://cli.github.com/) signed in with `gh auth login`.
+- **Checksums** confirm that your file was not corrupted during download.
+- **Build provenance** confirms that GitHub Actions built `SHA256SUMS.txt` and each package from CurveBook's repository. This check needs the [GitHub CLI](https://cli.github.com/), signed in with `gh auth login`.
 
-1. **Verify `SHA256SUMS.txt` build provenance:**
+1. **Verify the build provenance of `SHA256SUMS.txt`:**
 
 ```sh
 gh attestation verify SHA256SUMS.txt \
@@ -113,30 +113,30 @@ gh attestation verify SHA256SUMS.txt \
   --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
 ```
 
-   For tagged releases, also pin the tag with `--source-ref refs/tags/v<version>`. Always keep `--signer-workflow` in the command.
+   For a tagged release, also pin the tag by adding `--source-ref refs/tags/v<version>`. Always keep `--signer-workflow` in the command.
 
 2. **Check your file's SHA-256 hash against `SHA256SUMS.txt`:**
 
-   - **macOS** (prints **OK** next to the matched file):
+   - **macOS** (prints **OK** next to the matching file):
 
      ```sh
      shasum -a 256 --check --ignore-missing SHA256SUMS.txt
      ```
 
-   - **Linux** (prints **OK** next to the matched file):
+   - **Linux** (prints **OK** next to the matching file):
 
      ```sh
      sha256sum --check --ignore-missing SHA256SUMS.txt
      ```
 
-   - **FreeBSD** (exits cleanly on match and reports mismatches):
+   - **FreeBSD** (finishes without error on a match and reports any mismatch):
 
      ```sh
      f=curvebook-<version>-freebsd-x86_64.tar.gz
      sha256 -c "$(awk -v f="$f" '$2 == f { print $1 }' SHA256SUMS.txt)" "$f"
      ```
 
-   - **Windows PowerShell** (replace the filename for ARM64 if needed; prints **True** on match):
+   - **Windows PowerShell** (prints **True** on a match; change the filename for ARM64 if needed):
 
      ```powershell
      $f = "curvebook-<version>-windows-x64.msi"
@@ -144,29 +144,29 @@ gh attestation verify SHA256SUMS.txt \
      (Get-FileHash $f -Algorithm SHA256).Hash -eq $expected.ToUpper()
      ```
 
-You can also run `gh attestation verify` directly on any downloaded installer. For CycloneDX SBOM attestation commands and release security details, see [Privacy & Security](privacy-security.md#pages-and-releases).
+You can also run `gh attestation verify` directly on any downloaded installer. For CycloneDX SBOM attestation commands and other release security details, see [Privacy and Security](privacy-security.md#pages-and-releases).
 
 > [!NOTE]
-> Linux AppImage and FreeBSD archives use public Sigstore build attestations rather than separate GPG or Minisign signature files.
+> Linux AppImages and FreeBSD archives use public Sigstore build attestations, not separate GPG or Minisign signature files.
 
 ### What a passing check means {#verification-meaning}
 
 - Your file's hash matches an attestation signed by CurveBook's release workflow.
-- The attestation records the exact commit and tag used to build the release.
-- Build provenance is separate from OS code signing. Beta macOS installers are signed and notarized, while Beta Windows installers ship unsigned.
+- The attestation records the exact commit and tag that the release was built from.
+- Build provenance is not the same as operating-system code signing. Beta macOS installers are signed and notarized, but Beta Windows installers are not signed.
 
 ### If a check fails {#verification-fails}
 
-**Do not open or install the file.** Delete it, download a fresh copy from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases), and check again. If the mismatch persists, report it via [Privacy & Security](privacy-security.md#security-reporting) or [SECURITY.md](../../SECURITY.md).
+**Do not open or install the file.** Delete it, download a fresh copy from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases), and check again. If the mismatch persists, report it through [Privacy and Security](privacy-security.md#security-reporting) or [SECURITY.md](../../SECURITY.md).
 
 ---
 
 ## Fonts and custom font folders {#fonts}
 
-CurveBook bundles no fonts and uses standard TrueType or OpenType fonts installed on your system (such as Arial, Noto Sans, DejaVu Sans, or Liberation Sans). Built-in fallback metrics keep canvas text and PDF export working when a face is unavailable.
+CurveBook does not bundle any fonts. It uses standard TrueType or OpenType fonts installed on your system, such as Arial, Noto Sans, DejaVu Sans, or Liberation Sans. If a font is missing, built-in fallback metrics keep canvas text and PDF export working.
 
-- **Custom font folder:** Set `CURVEBOOK_FONTS_DIR` to a folder of TrueType or OpenType font files to load them ahead of system fonts.
-- **Single font file:** Pass `--ttf-font <path>` when launching the desktop app from a terminal to load one TrueType font.
+- **Custom font folder:** Set `CURVEBOOK_FONTS_DIR` to a folder of TrueType or OpenType font files. CurveBook loads them before your system fonts.
+- **Single font file:** To load one TrueType font, start the desktop app from a terminal with `--ttf-font <path>`.
 
 ---
 
@@ -174,25 +174,25 @@ CurveBook bundles no fonts and uses standard TrueType or OpenType fonts installe
 
 ### Updating without an auto-updater {#updating}
 
-CurveBook makes no background network connections ([Privacy & Security](privacy-security.md#zero-egress)), so it never checks for updates automatically. To update:
+CurveBook makes no background network connections ([Privacy and Security](privacy-security.md#zero-egress)), so it never checks for updates by itself. To update:
 
 1. Download and verify the new release from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases).
-2. Replace **CurveBook.app** on macOS, replace the AppImage on Linux (or the extracted folder on FreeBSD), or run the new Windows installer. The Windows installer remembers your previous folder and scope.
-3. Your preferences, keyboard shortcuts, and recovery files stay intact in your OS configuration folder ([Settings & storage paths](settings.md#storage-paths)).
+2. On macOS, replace **CurveBook.app**. On Linux, replace the AppImage; on FreeBSD, replace the extracted folder. On Windows, run the new installer, which remembers your previous install folder and scope.
+3. Your preferences, keyboard shortcuts, and recovery files stay intact in your system's configuration folder ([settings and storage paths](settings.md#storage-paths)).
 
 ### Uninstalling cleanly {#uninstalling}
 
-- **macOS:** Move **CurveBook.app** from Applications to Trash and remove any PATH line you added to `~/.zshrc`. Optionally delete `~/Library/Application Support/CurveBook`.
-- **Windows:** Open **Settings › Apps › Installed apps** and uninstall **CurveBook**. Optionally delete `%APPDATA%\CurveBook` and `%LOCALAPPDATA%\CurveBook`.
-- **Linux / FreeBSD:** Delete the AppImage (and any extracted `squashfs-root/` folder) or the extracted FreeBSD folder. Optionally remove `~/.config/curvebook` and `~/.local/share/curvebook`.
+- **macOS:** Move **CurveBook.app** from Applications to the Trash, and remove any PATH line you added to `~/.zshrc`. You may also delete `~/Library/Application Support/CurveBook`.
+- **Windows:** Open **Settings › Apps › Installed apps** and uninstall **CurveBook**. You may also delete `%APPDATA%\CurveBook` and `%LOCALAPPDATA%\CurveBook`.
+- **Linux and FreeBSD:** Delete the AppImage and any extracted `squashfs-root/` folder, or delete the extracted FreeBSD folder. You may also remove `~/.config/curvebook` and `~/.local/share/curvebook`.
 
 ---
 
 ## How to cite CurveBook {#how-to-cite}
 
-When reporting analyses or figures made with CurveBook, include the exact version you ran. Copy a ready-to-paste reference or BibTeX entry from **Help › Cite CurveBook**, **About CurveBook**, or **Cite** in the result **Methods** panel. You can also check the CLI version with `curvebook-cli --version`.
+When you report analyses or figures made with CurveBook, include the exact version you used. To copy a ready-to-paste reference or BibTeX entry, use **Help › Cite CurveBook**, **About CurveBook**, or **Cite** in a result's **Methods** panel. `curvebook-cli --version` also prints the version.
 
-Plain-text reference (insert your running version number):
+Plain-text reference (add the version number you used):
 
 ```text
 CurveBook Contributors (2026). CurveBook [Computer software]. https://github.com/HauserGroup/curvebook
@@ -210,6 +210,6 @@ BibTeX:
 }
 ```
 
-Machine-readable citation metadata lives in [`CITATION.cff`](https://github.com/HauserGroup/curvebook/blob/main/CITATION.cff). A permanent Zenodo concept DOI will be added once the first archived release is minted.
+Machine-readable citation metadata is in [`CITATION.cff`](https://github.com/HauserGroup/curvebook/blob/main/CITATION.cff). A permanent Zenodo concept DOI will be added once the first archived release receives its DOI.
 
-Next steps: explore the [Desktop GUI overview](desktop-gui.md), connect an AI assistant with [MCP setup for beginners](../mcp-for-beginners.md), or read the [MCP automation reference](automation/mcp.md).
+Next, explore the [desktop app overview](desktop-gui.md), connect an AI assistant with [MCP setup for beginners](../mcp-for-beginners.md), or read the [MCP automation reference](automation/mcp.md).

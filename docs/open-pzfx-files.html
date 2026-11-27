@@ -49,17 +49,17 @@
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
           <p class="eyebrow">File formats · .pzfx · .prism</p>
           <h1 id="page-title">Open .pzfx and .prism files.<br><span>Export tables to CSV or data-only .pzfx.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> opens <code>.pzfx</code> and <code>.prism</code> data tables and info sheets offline on macOS, Windows, and Linux. View stored <code>.prism</code> results, export to CSV or data-only <code>.pzfx</code>, or re-run analyses in CurveBook.</p>
+          <p class="lead"><strong>CurveBook</strong> opens the data tables and info sheets in <code>.pzfx</code> and <code>.prism</code> files offline on macOS, Windows, and Linux. You can view stored <code>.prism</code> results, export tables to CSV or data-only <code>.pzfx</code>, and re-run analyses.</p>
           <ul class="pill-row" aria-label="Key facts">
-            <li class="pill">Free &amp; open source</li>
+            <li class="pill">Free and open source</li>
             <li class="pill">Offline</li>
             <li class="pill">macOS · Windows · Linux</li>
           </ul>
           <nav class="toc" aria-label="On this page">
             <p class="toc-title">On this page</p>
             <ul>
-              <li><a href="#what-is-read">What is read &amp; written</a></li>
-              <li><a href="#archive-format-notes">Why .prism files are not FAIR</a></li>
+              <li><a href="#what-is-read">What CurveBook reads and writes</a></li>
+              <li><a href="#archive-format-notes">Why .prism files are not truly FAIR</a></li>
               <li><a href="#desktop">Open, merge, and export in the desktop app</a></li>
               <li><a href="#convert">Convert and export from the command line</a></li>
               <li><a href="#limits">Limits and privacy</a></li>
@@ -71,7 +71,7 @@
         <hr>
 
         <section id="what-is-read" aria-labelledby="what-is-read-title" tabindex="-1">
-          <p class="eyebrow">Import &amp; export scope</p>
+          <p class="eyebrow">Import and export</p>
           <h2 id="what-is-read-title">What CurveBook reads and writes</h2>
           <div class="table-wrap">
             <table>
@@ -87,18 +87,18 @@
                 <tr>
                   <th scope="row"><code>.pzfx</code> (XML)</th>
                   <td>All 8 table types, info sheets, exclusions, rich text, notes</td>
-                  <td>Data tables &amp; info sheets only</td>
+                  <td>Data tables and info sheets only</td>
                   <td>Analyses, graphs, and layouts stay in <code>.curvebook</code>.</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>.prism</code> (ZIP)</th>
-                  <td>All 8 table types, info sheets, exclusions, read-only results, graph previews</td>
-                  <td>Import-only at Beta</td>
-                  <td>Proprietary binary blobs and undocumented digest files block safe export.</td>
+                  <td>All 8 table types, info sheets, exclusions, read-only results, graph previews when available</td>
+                  <td>Import only during Beta</td>
+                  <td>Proprietary binary data and undocumented digest files prevent safe export. Export to <code>.pzfx</code> or CSV instead.</td>
                 </tr>
                 <tr>
                   <th scope="row"><code>.pzf</code> / binary <code>PCFF</code></th>
-                  <td>Not supported (clear error)</td>
+                  <td>Not supported (CurveBook shows a clear error)</td>
                   <td>Not supported</td>
                   <td>Legacy binary format; re-save as XML <code>.pzfx</code> or <code>.prism</code> first.</td>
                 </tr>
@@ -106,28 +106,27 @@
                   <th scope="row"><code>.curvebook</code> / <code>.curvebook.d/</code></th>
                   <td>Full project</td>
                   <td>Full project</td>
-                  <td>Open JSON Schema format with no proprietary binary blobs.</td>
+                  <td>Open format described by a JSON Schema, with no proprietary binary data.</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <ul>
-            <li><strong>Importing files:</strong> Open tables, exclusions, rich text, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files. Stored <code>.prism</code> results open as read-only snapshots (with graph previews) and never feed calculations. Binary <code>.pzf</code> and <code>PCFF</code> files are refused cleanly; re-save as XML <code>.pzfx</code> or <code>.prism</code> first.</li>
-            <li><strong>Exporting to <code>.pzfx</code>:</strong> <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Each export writes a separate copy and lists dropped items. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications.</li>
-            <li><strong>Why <code>.prism</code> is import-only:</strong> Real <code>.prism</code> archives depend on undocumented binary and digest entries. Use <code>.pzfx</code> or CSV export at Beta.</li>
-            <li><strong>Merging projects:</strong> Choose <strong>File › Merge Project…</strong> to copy sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file with removable origin badges.</li>
+            <li><strong>Importing files:</strong> CurveBook opens tables, exclusions, rich text, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files. Stored <code>.prism</code> results open as read-only snapshots, with graph previews when available, and are never used in calculations. Binary <code>.pzf</code> and <code>PCFF</code> files are refused with a clear message. Re-save them as XML <code>.pzfx</code> or <code>.prism</code> first.</li>
+            <li><strong>Exporting to <code>.pzfx</code>:</strong> <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Each export writes a separate copy and lists any items it leaves out. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications.</li>
+            <li><strong>Merging projects:</strong> Choose <strong>File › Merge Project…</strong> to copy sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file. Copied sheets get origin badges that you can remove.</li>
           </ul>
-          <p>See the <a href="manual/latest/files.html">files reference</a> for full format coverage, or <a href="manual/latest/analyses.html">re-run analyses in CurveBook</a>.</p>
+          <p>See the <a href="manual/latest/files.html">files reference</a> for full format coverage. To compute fresh results, <a href="manual/latest/analyses.html">re-run analyses in CurveBook</a>.</p>
 
           <aside class="callout callout-warning" id="archive-format-notes" aria-labelledby="archive-format-notes-title" tabindex="-1">
             <p class="callout-title" id="archive-format-notes-title">Why .prism files are not truly FAIR</p>
-            <p>A <code>.prism</code> file is a ZIP of CSV and JSON files, so it is often called <a href="https://www.nature.com/articles/sdata201618">FAIR</a> (Wilkinson et al., <em>Scientific Data</em>, 2016) <span aria-hidden="true">↗</span>. Without a published schema, three barriers remain:</p>
+            <p>A <code>.prism</code> file is a ZIP archive of CSV and JSON files, so it is often called <a href="https://www.nature.com/articles/sdata201618">FAIR</a> (Wilkinson et al., <em>Scientific Data</em>, 2016) <span aria-hidden="true">↗</span>. Without a published schema, three barriers remain:</p>
             <ul>
-              <li><strong>Raw CSVs lose headers and exclusions:</strong> Unzipped CSVs lack column titles and outlier masks, so R, Python, or Excel silently include excluded points.</li>
-              <li><strong>Graphs stay locked in binary:</strong> Figures and layouts are stored as proprietary binary blobs.</li>
-              <li><strong>Undocumented digest files block writing:</strong> Companion integrity files stop independent tools from safely writing <code>.prism</code> archives.</li>
+              <li><strong>Raw CSVs lose headers and exclusions:</strong> The unzipped CSV files have no column titles or outlier masks, so R, Python, or Excel silently include excluded points.</li>
+              <li><strong>Graphs stay locked in binary:</strong> Figures and layouts are stored as proprietary binary data.</li>
+              <li><strong>Undocumented digest files block writing:</strong> Companion integrity files prevent independent tools from writing <code>.prism</code> archives safely.</li>
             </ul>
-            <p><strong>Proprietary formats slow down science.</strong> Publicly funded data belong to science, not a vendor license. Read our <a href="pzfx-format-specification.html">empirical .prism and .pzfx specification</a>, or save natively in the open <a href="manual/latest/files.html">.curvebook format</a>.</p>
+            <p>Proprietary formats slow down science. Publicly funded data belong to science, not to a vendor's license. Read our <a href="pzfx-format-specification.html">empirical .prism and .pzfx specification</a>, or save your work in the open <a href="manual/latest/files.html">.curvebook format</a>.</p>
           </aside>
         </section>
 
@@ -137,9 +136,9 @@
           <p class="eyebrow">Desktop app</p>
           <h2 id="desktop-title">Open, merge, and export in the desktop app</h2>
           <ol>
-            <li><strong>Open or merge:</strong> Choose <strong>File › Open…</strong> or <strong>File › Import</strong> for a <code>.pzfx</code> or <code>.prism</code> file, or <strong>File › Merge Project…</strong> to add sheets into an open project.</li>
-            <li><strong>Review warnings and snapshots:</strong> Unsupported items appear in <strong>Import Warnings</strong>. On read-only <code>.prism</code> snapshots, click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh results.</li>
-            <li><strong>Export tables:</strong> Choose <strong>File › Export › CSV Table…</strong> for one table or <strong>Export All Data Tables…</strong> for a folder. Use <strong>File › Export › .pzfx file…</strong> to export data tables and info sheets.</li>
+            <li><strong>Open or merge:</strong> Choose <strong>File › Open…</strong> or <strong>File › Import</strong> to open a <code>.pzfx</code> or <code>.prism</code> file. To add its sheets to an open project instead, choose <strong>File › Merge Project…</strong>.</li>
+            <li><strong>Review warnings and snapshots:</strong> Unsupported items are listed under <strong>Import Warnings</strong>. On a read-only <code>.prism</code> snapshot, click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh results.</li>
+            <li><strong>Export tables:</strong> Choose <strong>File › Export › CSV Table…</strong> to export one table, or <strong>Export All Data Tables…</strong> to export every table to a folder. Choose <strong>File › Export › .pzfx file…</strong> to export data tables and info sheets.</li>
           </ol>
         </section>
 
@@ -148,21 +147,21 @@
         <section id="convert" aria-labelledby="convert-title" tabindex="-1">
           <p class="eyebrow">Command line</p>
           <h2 id="convert-title">Convert and export from the command line</h2>
-          <p>Every download includes <code>curvebook-cli</code> beside the desktop app. Open a terminal in the folder with your file.</p>
+          <p>Every download includes <code>curvebook-cli</code> alongside the desktop app. Open a terminal in the folder that contains your file.</p>
           <h3>1. List the tables in a file</h3>
           <pre><code>curvebook-cli info experiment.pzfx</code></pre>
-          <p>Prints each table's ID, type, title, size, and any import warnings.</p>
+          <p>This lists each table's ID, type, title, size, and any import warnings.</p>
           <h3>2. Export a table to CSV</h3>
           <pre><code>curvebook-cli convert experiment.pzfx experiment.csv</code></pre>
-          <p>Exports the first table. Select another table by title or ID:</p>
+          <p>This exports the first table. To pick another table, give its title or ID:</p>
           <pre><code>curvebook-cli convert experiment.pzfx groups.csv --sheet "Groups"</code></pre>
-          <p>Replicates stay side by side, and excluded values keep a trailing <code>*</code> (such as <code>55*</code>). Use a <code>.tsv</code> filename for tab-separated output.</p>
+          <p>Replicates stay side by side, and excluded values keep a trailing <code>*</code> (for example, <code>55*</code>). Use a <code>.tsv</code> file name for tab-separated output.</p>
           <h3>3. Convert the whole file to a CurveBook project</h3>
           <pre><code>curvebook-cli convert experiment.pzfx experiment.curvebook</code></pre>
-          <p>Keeps every table together for analyses, fits, and graphs. The same commands work on <code>.prism</code> files.</p>
+          <p>The project keeps every table together for analyses, fits, and graphs. The same commands also work on <code>.prism</code> files.</p>
           <h3>4. Export tables and info sheets to .pzfx</h3>
           <pre><code>curvebook-cli convert experiment.curvebook export.pzfx</code></pre>
-          <p>Writes a data-only <code>.pzfx</code> copy without modifying your project, and lists dropped items. See the <a href="manual/latest/automation/cli.html">CLI reference</a> for all options, or <a href="manual/latest/mcp-for-beginners.html">MCP setup</a> for AI assistants.</p>
+          <p>This writes a data-only <code>.pzfx</code> copy without changing your project, and lists any items it leaves out. See the <a href="manual/latest/automation/cli.html">CLI reference</a> for all options, or <a href="manual/latest/mcp-for-beginners.html">MCP setup</a> to use an AI assistant.</p>
         </section>
 
         <hr>
@@ -171,9 +170,9 @@
           <p class="eyebrow">Good to know</p>
           <h2 id="limits-title">Limits and privacy</h2>
           <ul>
-            <li><strong>Local only:</strong> Files stay on your computer with zero telemetry or network calls (<a href="privacy.html">Privacy Policy</a>).</li>
-            <li><strong>Size limits:</strong> Oversized files are refused cleanly rather than read partially. See exact caps in the <a href="manual/latest/files.html">files reference</a>.</li>
-            <li><strong>Problems:</strong> Check <a href="manual/latest/troubleshooting.html#known-issues">known issues</a> or open a bug on <a href="https://github.com/HauserGroup/curvebook/issues">GitHub Issues</a> (share only data that can be public).</li>
+            <li><strong>Local only:</strong> Your files stay on your computer, with no telemetry or network calls (<a href="privacy.html">Privacy Policy</a>).</li>
+            <li><strong>Size limits:</strong> CurveBook refuses oversized files instead of reading them partially. The <a href="manual/latest/files.html">files reference</a> lists the exact limits.</li>
+            <li><strong>Problems:</strong> Check the <a href="manual/latest/troubleshooting.html#known-issues">known issues</a>, or report a bug on <a href="https://github.com/HauserGroup/curvebook/issues">GitHub Issues</a>. Share only data that can be public.</li>
           </ul>
         </section>
       </div>
@@ -183,10 +182,10 @@
         <div class="download-content is-single">
           <div>
             <h2 id="get-title">Download CurveBook</h2>
-            <p>Installers for macOS, Windows, and Linux (desktop app and CLI), plus a FreeBSD CLI archive, are on GitHub Releases.</p>
+            <p>GitHub Releases has installers for macOS, Windows, and Linux (desktop app and CLI), plus a CLI-only archive for FreeBSD.</p>
             <div class="download-links">
               <a href="index.html#downloads">Downloads</a>
-              <a href="manual/latest/get-started.html">Install &amp; checksums</a>
+              <a href="manual/latest/get-started.html">Install and checksums</a>
               <a href="https://github.com/HauserGroup/curvebook/releases">GitHub Releases <span aria-hidden="true">↗</span></a>
             </div>
           </div>
@@ -195,11 +194,11 @@
     </main>
 
     <footer class="site-footer">
-      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p><strong>License:</strong> MIT OR Apache-2.0. CurveBook is a clean-room implementation built from published scientific references, without commercial software or copied proprietary assets. It runs locally and sends no telemetry. This site is hosted on GitHub Pages, which logs visitor IP addresses for security.</p>
       <p class="footer-links">
         <a href="privacy.html">Privacy Policy</a>
         <a href="faq.html">FAQ</a>
-        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code and credits <span aria-hidden="true">↗</span></a>
       </p>
     </footer>
   </div>

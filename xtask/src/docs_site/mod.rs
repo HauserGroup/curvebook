@@ -245,8 +245,8 @@ fn run_release_snapshot(root: &Path, version_raw: &str, manual_dir: &Path, check
             ),
             (
                 "docs/troubleshooting.html",
-                "Troubleshooting & Known Issues",
-                "Redirecting to CurveBook Troubleshooting & Known Issues in the reference manual.",
+                "Troubleshooting and Known Issues",
+                "Redirecting to CurveBook Troubleshooting and Known Issues in the reference manual.",
                 "manual/latest/troubleshooting.html#known-issues",
             ),
         ] {

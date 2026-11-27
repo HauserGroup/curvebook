@@ -187,7 +187,7 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
     let (p_href, p_label) = if spec.meta.is_release_snapshot {
         (format!("{assets}privacy.html"), "Privacy Policy")
     } else {
-        (format!("{root}privacy-security.html"), "Privacy, Licences &amp; Security")
+        (format!("{root}privacy-security.html"), "Privacy, Licences and Security")
     };
     let mut extra = format!("        <a href=\"{}section-contribute.html\">Contribute</a>\n", eh(&root));
     if spec.meta.is_release_snapshot {
