@@ -14,5 +14,7 @@
 *.pem
 *.key
 *.p12
-.claude/
+# Keep local Claude state out of git, but keep shared project skills visible.
+/.claude/*
+!/.claude/skills/
 .codex/

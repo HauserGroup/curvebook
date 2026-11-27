@@ -61,9 +61,6 @@ const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const ERROR_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[cfg(not(target_arch = "wasm32"))]
-const DETACHED_POST_EXIT_DRAIN: Duration = Duration::from_millis(20);
-
-#[cfg(not(target_arch = "wasm32"))]
 const FALLBACK_MAX_DEADLINE: Duration = Duration::from_secs(365 * 24 * 3600);
 
 /// Buffered result returned by [`ProcessCommand::run`].
@@ -100,7 +97,6 @@ pub struct ProcessCommand {
     max_output_bytes: usize,
     capture_stdout: bool,
     capture_stderr: bool,
-    allow_detached_descendants: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -121,7 +117,6 @@ impl ProcessCommand {
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
             capture_stdout: true,
             capture_stderr: true,
-            allow_detached_descendants: false,
         }
     }
 
@@ -227,20 +222,6 @@ impl ProcessCommand {
         self
     }
 
-    /// Allow detached descendant processes (such as viewers spawned by desktop openers) to keep
-    /// inherited output pipes open after the direct child exits with a successful status (`0`).
-    ///
-    /// When `true` and the direct child exits cleanly (after any staged `stdin` finishes writing),
-    /// [`Self::run`] stops waiting for descendant EOF, drains buffered chunks briefly, disarms
-    /// process-group termination, and returns `Ok(ProcessOutput)` without waiting for
-    /// `idle_timeout` or killing the launched descendant. Defaults to `false`, preserving strict
-    /// process-group cleanup for runaway commands that leak pipe-holding background processes.
-    #[must_use]
-    pub const fn allow_detached_descendants(mut self, allow: bool) -> Self {
-        self.allow_detached_descendants = allow;
-        self
-    }
-
     /// Configure whether child `stdout` is captured via a pipe (`true`) or redirected to [`Stdio::null()`] (`false`).
     #[must_use]
     pub const fn capture_stdout(mut self, capture: bool) -> Self {
@@ -290,19 +271,9 @@ impl ProcessCommand {
             }
         };
 
-        if state.stdout_eof && state.stderr_eof && state.stdin_done {
-            join_best_effort(stdin_handle);
-            join_best_effort(stdout_handle);
-            join_best_effort(stderr_handle);
-        } else {
-            // Detached descendant still holds an output pipe open after clean child exit:
-            // drop the receiver and join only workers that already completed so we never block
-            // waiting for an interactive viewer process to close.
-            drop(rx);
-            join_if_done(stdin_handle);
-            join_if_done(stdout_handle);
-            join_if_done(stderr_handle);
-        }
+        join_best_effort(stdin_handle);
+        join_best_effort(stdout_handle);
+        join_best_effort(stderr_handle);
 
         Ok(ProcessOutput { status_code: status.code(), success: status.success(), stdout: state.stdout, stderr: state.stderr })
     }
@@ -767,7 +738,6 @@ struct MonitorState {
     idle_timeout: Duration,
     max_output_bytes: usize,
     enforce_idle_timeout: bool,
-    allow_detached_descendants: bool,
     wall_deadline: Instant,
     idle_deadline: Instant,
     stdout: Vec<u8>,
@@ -788,7 +758,6 @@ impl MonitorState {
             idle_timeout: cmd.idle_timeout,
             max_output_bytes: cmd.max_output_bytes,
             enforce_idle_timeout: cmd.capture_stdout || cmd.capture_stderr,
-            allow_detached_descendants: cmd.allow_detached_descendants,
             wall_deadline: add_deadline(now, cmd.wall_timeout),
             idle_deadline: add_deadline(now, cmd.idle_timeout),
             stdout: Vec::new(),
@@ -810,12 +779,7 @@ impl MonitorState {
         Ok(())
     }
 
-    fn try_finish_on_exit(
-        &mut self,
-        guard: &mut ChildGuard,
-        rx: &mpsc::Receiver<StreamEvent>,
-        cancelled: &AtomicBool,
-    ) -> Result<Option<ExitStatus>, PlatformError> {
+    fn try_finish_on_exit(&mut self, guard: &mut ChildGuard) -> Result<Option<ExitStatus>, PlatformError> {
         if self.stdout_eof
             && self.stderr_eof
             && self.stdin_done
@@ -825,16 +789,6 @@ impl MonitorState {
             return Ok(Some(status));
         }
 
-        if self.allow_detached_descendants
-            && self.stdin_done
-            && let Some(status) = self.exit_status
-            && status.success()
-        {
-            self.drain_detached_after_exit(rx)?;
-            cancelled.store(true, Ordering::Release);
-            guard.clear_pgid();
-            return Ok(Some(status));
-        }
         Ok(None)
     }
 
@@ -846,7 +800,7 @@ impl MonitorState {
     ) -> Result<ExitStatus, PlatformError> {
         loop {
             self.poll_child_exit(guard)?;
-            if let Some(status) = self.try_finish_on_exit(guard, rx, cancelled)? {
+            if let Some(status) = self.try_finish_on_exit(guard)? {
                 return Ok(status);
             }
 
@@ -857,15 +811,13 @@ impl MonitorState {
             }
 
             let remaining = self.remaining_until_deadline()?;
-            let wait_slice =
-                if self.allow_detached_descendants && self.exit_status.is_none() { remaining.min(EXIT_POLL_INTERVAL) } else { remaining };
-            match rx.recv_timeout(wait_slice) {
+            match rx.recv_timeout(remaining) {
                 Ok(event) => self.handle_event(event)?,
                 Err(RecvTimeoutError::Timeout) => {
                     // Re-poll child exit before declaring timeout so a process that finished right
                     // as `wait_slice` elapsed does not spuriously lose to an idle/wall deadline.
                     self.poll_child_exit(guard)?;
-                    if let Some(status) = self.try_finish_on_exit(guard, rx, cancelled)? {
+                    if let Some(status) = self.try_finish_on_exit(guard)? {
                         return Ok(status);
                     }
                     if let Some(err) = self.check_timeout(Instant::now()) {
@@ -880,26 +832,6 @@ impl MonitorState {
                 }
             }
         }
-    }
-
-    fn drain_detached_after_exit(&mut self, rx: &mpsc::Receiver<StreamEvent>) -> Result<(), PlatformError> {
-        let deadline = add_deadline(Instant::now(), DETACHED_POST_EXIT_DRAIN);
-        while !(self.stdout_eof && self.stderr_eof) {
-            let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
-            match rx.recv_timeout(deadline.saturating_duration_since(now)) {
-                Ok(event) => self.handle_event(event)?,
-                Err(RecvTimeoutError::Timeout) => break,
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.stdout_eof = true;
-                    self.stderr_eof = true;
-                    break;
-                }
-            }
-        }
-        Ok(())
     }
 
     fn remaining_until_deadline(&self) -> Result<Duration, PlatformError> {
@@ -1070,15 +1002,6 @@ fn spawn_reader<R: Read + Send + 'static>(
 #[cfg(not(target_arch = "wasm32"))]
 fn join_best_effort(handle: Option<WorkerHandle>) {
     if let Some(h) = handle {
-        let _ = h.join.join();
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn join_if_done(handle: Option<WorkerHandle>) {
-    if let Some(h) = handle
-        && h.done.load(Ordering::Acquire)
-    {
         let _ = h.join.join();
     }
 }
@@ -1432,49 +1355,6 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PlatformError::TimedOut { kind: TimeoutKind::Wall, limit_ms: 120, .. }), "unexpected err: {err:?}");
         assert!(wall_start.elapsed() < Duration::from_secs(2));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn gap_04_01_allow_detached_descendants_returns_success_without_killing_viewer() {
-        let dir = std::env::temp_dir().join(format!("cb-proc-detach-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let pid_file = dir.join("viewer.pid");
-        let _ = std::fs::remove_file(&pid_file);
-
-        let start = Instant::now();
-        let out = ProcessCommand::new("sh")
-            .args(["-c", "echo launched; sleep 5 & printf '%s' \"$!\" > \"$CB_PID_FILE\"; exit 0"])
-            .env("CB_PID_FILE", pid_file.to_string_lossy().as_ref())
-            .wall_timeout(Duration::from_secs(4))
-            .idle_timeout(Duration::from_millis(1_200))
-            .allow_detached_descendants(true)
-            .run()
-            .expect("clean child exit with detached viewer holding pipes must succeed");
-        let elapsed = start.elapsed();
-        assert!(out.success);
-        assert_eq!(out.status_code, Some(0));
-        assert!(elapsed < Duration::from_secs(2), "detached launch waited too long: {elapsed:?}");
-
-        let pid_str = std::fs::read_to_string(&pid_file).expect("viewer pid recorded").trim().to_owned();
-        assert!(!pid_str.is_empty());
-        let alive = std::process::Command::new("/bin/kill")
-            .args(["-0", &pid_str])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        // Clean up the test background `sleep 5` immediately after asserting survival.
-        let _ = std::process::Command::new("/bin/kill")
-            .args(["-s", "KILL", &pid_str])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        let _ = std::fs::remove_file(&pid_file);
-        let _ = std::fs::remove_dir(&dir);
-        assert!(alive, "detached viewer pid {pid_str} must not be killed after clean launcher exit");
     }
 
     #[cfg(unix)]

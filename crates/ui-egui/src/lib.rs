@@ -1051,16 +1051,16 @@ impl UiApp {
         Ok(outcome)
     }
 
-    /// Surface non-fatal warnings emitted by figure export commands in `status_banner` (`GAP-06-02`).
+    /// Surface non-fatal warnings emitted by figure export commands in
+    /// `canvas_dialogs.figure_export_warning`, which the shell status footer renders (`GAP-06-02`).
+    ///
+    /// A later figure export without warnings clears the notice. The desktop host moves the notice
+    /// into its own toast before the shell draws, so it is shown once (`R0.36`).
     pub fn surface_figure_export_warnings(&mut self, command_id: &str, warnings: &[String]) {
         if !is_figure_export_command(command_id) {
             return;
         }
-        if let Some(banner) = format_figure_export_warnings_banner(warnings) {
-            self.canvas_dialogs.status_banner = Some(banner);
-        } else if self.canvas_dialogs.status_banner.as_deref().is_some_and(|b| b.starts_with(FIGURE_EXPORT_WARNING_PREFIX)) {
-            self.canvas_dialogs.status_banner = None;
-        }
+        self.canvas_dialogs.figure_export_warning = format_figure_export_warnings_banner(warnings);
     }
 
     /// Execute an external control-protocol command (`Caller::Control`).

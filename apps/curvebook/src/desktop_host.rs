@@ -375,18 +375,44 @@ fn interchange_import_command_for_extension(path: &Path) -> Option<&'static str>
     }
 }
 
+/// Result of [`open_import_mode_prompt_if_needed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportModePrompt {
+    /// The window is empty and clean, so the import may replace it without asking.
+    NotNeeded,
+    /// The replace-or-merge prompt is now open; the caller waits for the user's answer.
+    Opened,
+    /// Another dialog is open, so neither the prompt nor the import may proceed (`R0.36`).
+    Blocked,
+}
+
+/// Error shown when File › Import / File › Open of an interchange file is refused because another
+/// dialog is already open (`R0.36`).
+const IMPORT_BLOCKED_BY_DIALOG_MESSAGE: &str = "cannot import while a dialog is open; close or finish the current dialog first";
+
 /// Open the replace-or-merge import prompt (`ActiveDialog::ImportProjectMode`) when importing
 /// `path` with `command_id` would otherwise replace a window whose document has sheets or unsaved
-/// changes. Returns `true` when the prompt was opened; the caller then waits for the user's answer,
-/// which re-enters the host as `command_id` with explicit `{ "path", "merge" }` params.
+/// changes. On [`ImportModePrompt::Opened`] the caller waits for the user's answer, which re-enters
+/// the host as `command_id` with explicit `{ "path", "merge" }` params.
+///
+/// Returns [`ImportModePrompt::Blocked`] whenever any modal dialog is already open, so callers
+/// never fall through to a replace import behind (or instead of) a prompt that could not be shown;
+/// this matters for the macOS native menu bar, which stays live while an in-window modal is open.
 ///
 /// Shared by File › Import, File › Open…, and file drops so all three use the same condition and prompt.
-fn open_import_mode_prompt_if_needed(win: &mut DesktopWindowSession, command_id: &str, path: &Path) -> bool {
+fn open_import_mode_prompt_if_needed(win: &mut DesktopWindowSession, command_id: &str, path: &Path) -> ImportModePrompt {
+    if win.app().has_open_modal() {
+        return ImportModePrompt::Blocked;
+    }
     let has_unsaved = win.has_unsaved_changes();
     if win.app().document().total_sheet_count() == 0 && !has_unsaved {
-        return false;
+        return ImportModePrompt::NotNeeded;
     }
-    win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved)
+    if win.app_mut().open_import_project_mode_dialog(command_id, path.to_string_lossy().into_owned(), has_unsaved) {
+        ImportModePrompt::Opened
+    } else {
+        ImportModePrompt::Blocked
+    }
 }
 
 fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
@@ -1761,11 +1787,22 @@ fn export_path_is_occupied(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok()
 }
 
+/// Key under which two export file names count as the same file: canonical (NFD) decomposition,
+/// full lower-casing, then NFC recomposition, so canonically equivalent spellings (NFC vs NFD) and
+/// case variants map to one key (`R0.36`). Over-matching only adds a `-N` suffix; under-matching
+/// would let one table overwrite another.
+fn export_name_collision_key(name: &str) -> String {
+    use unicode_normalization::UnicodeNormalization as _;
+    let decomposed: String = name.nfd().collect();
+    decomposed.to_lowercase().nfc().collect()
+}
+
 /// Plan one output path per data table for Export All Data Tables (`GAP-07-05`).
 ///
-/// Tables whose sanitized titles collide under full Unicode case-folding (`.to_lowercase()`) get
-/// `-2`, `-3`, … suffixes so one batch never writes two tables to the same file on case-insensitive
-/// filesystems (APFS/NTFS). Every filename is bounded safely below 255 bytes on UTF-8 char
+/// Tables whose sanitized titles collide under [`export_name_collision_key`] (Unicode canonical
+/// normalisation plus full case-folding) get `-2`, `-3`, … suffixes so one batch never writes two
+/// tables to the same file on case-insensitive or normalisation-insensitive filesystems
+/// (APFS treats NFC `Café` and NFD `Café` as one name; NTFS and APFS fold case). Every filename is bounded safely below 255 bytes on UTF-8 char
 /// boundaries and guards Windows reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`,
 /// `LPT1..9`). With `avoid_existing`, names already present in `dir` are skipped the same way so
 /// the batch leaves every pre-existing file untouched.
@@ -1779,7 +1816,7 @@ pub(crate) fn plan_all_tables_export_paths(dir: &Path, sheets: Vec<(SheetId, Str
             let candidate = build_bounded_export_stem(&base, sheet_id.as_str(), ext, suffix);
             let path = dir.join(format!("{candidate}.{ext}"));
             let free_on_disk = !avoid_existing || !export_path_is_occupied(&path);
-            if free_on_disk && used_stems.insert(candidate.to_lowercase()) {
+            if free_on_disk && used_stems.insert(export_name_collision_key(&candidate)) {
                 planned.push((sheet_id, path));
                 break;
             }
@@ -1789,98 +1826,263 @@ pub(crate) fn plan_all_tables_export_paths(dir: &Path, sheets: Vec<(SheetId, Str
     planned
 }
 
-/// Stage all batch CSV files into sibling temp files inside `dir`, then move them into place with
-/// automatic backup-and-rollback if any rename fails partway through (`GAP-07-05`).
-fn write_staged_export_batch_with_hook<F>(dir: &Path, entries: &[(PathBuf, Vec<u8>)], mut before_commit_target: F) -> Result<Vec<String>, String>
-where
-    F: FnMut(usize, &Path) -> Result<(), String>,
-{
-    use std::io::Write as _;
+/// Largest existing file Export All Data Tables copies as a rollback backup when the folder's
+/// filesystem cannot hard-link (for example exFAT/FAT removable drives).
+const MAX_EXPORT_BACKUP_COPY_BYTES: usize = 256 * 1024 * 1024;
 
-    // 1. Validate every target before writing any temp file.
-    for (target_path, _) in entries {
-        if let Ok(meta) = std::fs::symlink_metadata(target_path)
-            && meta.is_dir()
+/// Filesystem step reported to the [`write_staged_export_batch_with_hook`] test seam just before
+/// it happens, so tests can inject a failure at any point of the batch (`GAP-07-05`, `R0.36`).
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(test), allow(dead_code, reason = "fields are read only by the test hooks"))]
+enum ExportBatchStep<'a> {
+    /// About to rename the staged file of entry `idx` over `target`.
+    Commit { idx: usize, target: &'a Path },
+    /// Rolling back: about to rename `backup` back over `target` for entry `idx`.
+    Restore { idx: usize, target: &'a Path, backup: &'a Path },
+}
+
+/// Files that Export All Data Tables wrote, plus any rollback backup it could not remove afterwards.
+#[derive(Debug, Default)]
+struct ExportBatchReport {
+    exported_files: Vec<String>,
+    leftover_files: Vec<String>,
+}
+
+/// One validated batch destination.
+struct PreparedExportTarget<'a> {
+    target: &'a Path,
+    bytes: &'a [u8],
+    /// Whether a regular file already occupied `target` when the batch was prepared.
+    existed: bool,
+    perms: Option<std::fs::Permissions>,
+}
+
+/// Whether two metadata records describe the same file on disk (hard links or names that the
+/// filesystem folds to one entry). Platforms without inode identity report `false`.
+fn export_metadata_same_file(a: &std::fs::Metadata, b: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (a, b);
+        false
+    }
+}
+
+/// Validate every destination before anything is written: no folders or links, no two entries
+/// that name the same file after Unicode normalisation and case folding, and no two entries that
+/// already resolve to one file on disk.
+fn prepare_export_targets(entries: &[(PathBuf, Vec<u8>)]) -> Result<Vec<PreparedExportTarget<'_>>, String> {
+    let mut keys: std::collections::HashSet<String> = std::collections::HashSet::with_capacity(entries.len());
+    let mut existing: Vec<std::fs::Metadata> = Vec::new();
+    let mut prepared = Vec::with_capacity(entries.len());
+    for (target, bytes) in entries {
+        let name_key = target.file_name().map(|name| export_name_collision_key(&name.to_string_lossy()));
+        if let Some(key) = name_key
+            && !keys.insert(key)
         {
-            return Err(format!("cannot export `{}`: destination path is an existing directory", target_path.display()));
+            return Err(format!("cannot export `{}`: another table in this batch uses the same file name", target.display()));
         }
+        let (existed, perms) = match std::fs::symlink_metadata(target) {
+            Ok(meta) if meta.is_dir() => {
+                return Err(format!("cannot export `{}`: destination path is an existing directory", target.display()));
+            }
+            Ok(meta) if !meta.file_type().is_file() => {
+                return Err(format!(
+                    "cannot export `{}`: destination exists but is not a regular file (for example a link); move it away or choose another folder",
+                    target.display()
+                ));
+            }
+            Ok(meta) => {
+                if existing.iter().any(|other| export_metadata_same_file(other, &meta)) {
+                    return Err(format!("cannot export `{}`: two tables in this batch resolve to the same file on this disk", target.display()));
+                }
+                let perms = meta.permissions();
+                existing.push(meta);
+                (true, Some(perms))
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (false, None),
+            Err(err) => return Err(format!("cannot inspect export destination `{}`: {err}", target.display())),
+        };
+        prepared.push(PreparedExportTarget { target, bytes, existed, perms });
     }
+    Ok(prepared)
+}
 
+/// Keep a rollback copy of the file at `target` without moving it, so the target never goes
+/// missing: a hard link where the filesystem supports one, otherwise a synced copy written through
+/// `curvebook-platform`.
+fn create_export_backup(dir: &Path, prepared: &PreparedExportTarget<'_>) -> Result<PathBuf, String> {
     let pid = std::process::id();
-    let batch_seq = BATCH_EXPORT_STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    // 2. Write and sync all staged temp files inside `dir`.
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(entries.len());
-    for (idx, (target_path, bytes)) in entries.iter().enumerate() {
-        let stage_path = dir.join(format!(".cb-export-stage.{pid}.{batch_seq}.{idx}.tmp"));
-        let write_res: Result<(), std::io::Error> = (|| {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&stage_path)?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-            Ok(())
-        })();
-        if let Err(err) = write_res {
-            let _ = std::fs::remove_file(&stage_path);
-            for (prev_stage, _) in &staged {
-                let _ = std::fs::remove_file(prev_stage);
-            }
-            return Err(format!("failed to stage export `{}`: {err}", target_path.display()));
+    for _ in 0..32 {
+        let seq = BATCH_EXPORT_STAGE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let backup = dir.join(format!(".cb-export-bak.{pid}.{seq}.tmp"));
+        match std::fs::hard_link(prepared.target, &backup) {
+            Ok(()) => return Ok(backup),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => break,
         }
-        staged.push((stage_path, target_path.clone()));
+    }
+    let bytes = curvebook_platform::read_regular_file_bytes(prepared.target, MAX_EXPORT_BACKUP_COPY_BYTES)
+        .map_err(|err| format!("cannot keep a backup of `{}` before replacing it: {err}; nothing was exported", prepared.target.display()))?;
+    curvebook_platform::fs::write_staged_sibling(dir, prepared.target, "cbbak", &bytes, prepared.perms.clone())
+        .map(curvebook_platform::fs::StagedSibling::into_path)
+        .map_err(|err| format!("cannot keep a backup of `{}` before replacing it: {err}; nothing was exported", prepared.target.display()))
+}
+
+/// Remove rollback backups that are no longer needed, returning a message for each one left behind.
+fn remove_export_backups(backups: &mut [Option<PathBuf>]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for backup in backups.iter_mut().filter_map(Option::take) {
+        if let Err(err) = std::fs::remove_file(&backup) {
+            problems.push(format!("could not remove backup `{}` ({err}); it is safe to delete", backup.display()));
+        }
+    }
+    problems
+}
+
+/// Undo every committed entry in reverse order, returning a message for each step that failed.
+///
+/// A replaced file is restored by renaming its backup back over the target (an atomic swap, so the
+/// target is never missing); a newly created file is removed.
+fn rollback_export_batch<F>(
+    dir: &Path,
+    prepared: &[PreparedExportTarget<'_>],
+    committed: &[usize],
+    backups: &mut [Option<PathBuf>],
+    hook: &mut F,
+) -> Vec<String>
+where
+    F: FnMut(ExportBatchStep<'_>) -> Result<(), String>,
+{
+    let mut problems = Vec::new();
+    for &idx in committed.iter().rev() {
+        let Some(entry) = prepared.get(idx) else {
+            continue;
+        };
+        match backups.get_mut(idx).and_then(Option::take) {
+            Some(backup) => {
+                let restored = hook(ExportBatchStep::Restore { idx, target: entry.target, backup: &backup })
+                    .and_then(|()| std::fs::rename(&backup, entry.target).map_err(|err| err.to_string()));
+                if let Err(err) = restored {
+                    problems.push(format!(
+                        "could not restore `{}` ({err}); its previous contents are kept in `{}`",
+                        entry.target.display(),
+                        backup.display()
+                    ));
+                }
+            }
+            None => {
+                if let Err(err) = std::fs::remove_file(entry.target) {
+                    problems.push(format!("could not remove partially exported `{}` ({err})", entry.target.display()));
+                }
+            }
+        }
+    }
+    problems.extend(remove_export_backups(backups));
+    if let Err(err) = curvebook_platform::sync_dir(dir) {
+        problems.push(format!("could not sync `{}` after rollback ({err})", dir.display()));
+    }
+    problems
+}
+
+/// Rename every staged file over its target, stopping at the first failure. Returns the indices
+/// committed so far and the error that stopped the batch, if any.
+fn commit_staged_exports<F>(
+    dir: &Path,
+    prepared: &[PreparedExportTarget<'_>],
+    staged: &mut [Option<curvebook_platform::fs::StagedSibling>],
+    hook: &mut F,
+) -> (Vec<usize>, Option<String>)
+where
+    F: FnMut(ExportBatchStep<'_>) -> Result<(), String>,
+{
+    let mut committed = Vec::with_capacity(prepared.len());
+    for (idx, entry) in prepared.iter().enumerate() {
+        if let Err(err) = hook(ExportBatchStep::Commit { idx, target: entry.target }) {
+            return (committed, Some(err));
+        }
+        // A destination that was free when the batch started but is occupied now was written by
+        // an earlier entry under a name this disk treats as the same, or by another program.
+        if !entry.existed && export_path_is_occupied(entry.target) {
+            return (
+                committed,
+                Some(format!(
+                    "cannot export `{}`: a file with this name appeared during the export (another table may map to the same file name on this disk); it was not overwritten",
+                    entry.target.display()
+                )),
+            );
+        }
+        let Some(stage) = staged.get_mut(idx).and_then(Option::take) else {
+            return (committed, Some(format!("internal error: no staged file for `{}`", entry.target.display())));
+        };
+        if let Err(err) = stage.persist_to(entry.target) {
+            return (committed, Some(format!("failed to finalize export `{}`: {err}", entry.target.display())));
+        }
+        committed.push(idx);
+    }
+    if let Err(err) = curvebook_platform::sync_dir(dir) {
+        return (committed, Some(format!("failed to sync export folder `{}`: {err}", dir.display())));
+    }
+    (committed, None)
+}
+
+/// Write a batch of exported tables all-or-nothing (`GAP-07-05`, `R0.36`).
+///
+/// Every destination is validated and every file is staged and synced (through
+/// `curvebook-platform`) before any destination changes. Each existing destination first gets a
+/// rollback backup (a hard link or copy, never a move), then each staged file is renamed over its
+/// destination, so a destination is never missing even if the process dies mid-batch. If any step
+/// fails, committed entries are rolled back; the error names every file the rollback could not
+/// clean up, including backups that still hold a file's previous contents.
+fn write_staged_export_batch_with_hook<F>(dir: &Path, entries: &[(PathBuf, Vec<u8>)], mut hook: F) -> Result<ExportBatchReport, String>
+where
+    F: FnMut(ExportBatchStep<'_>) -> Result<(), String>,
+{
+    let prepared = prepare_export_targets(entries)?;
+
+    let mut staged: Vec<Option<curvebook_platform::fs::StagedSibling>> = Vec::with_capacity(prepared.len());
+    for entry in &prepared {
+        let stage = curvebook_platform::fs::write_staged_sibling(dir, entry.target, "cbexp", entry.bytes, entry.perms.clone())
+            .map_err(|err| format!("failed to stage export `{}`: {err}", entry.target.display()))?;
+        staged.push(Some(stage));
     }
 
-    // 3. Commit staged files into target paths, backing up replaced targets for clean rollback.
-    let mut committed: Vec<(PathBuf, Option<PathBuf>)> = Vec::with_capacity(staged.len());
-    let mut commit_err: Option<String> = None;
-    for (idx, (stage_path, target_path)) in staged.iter().enumerate() {
-        if let Err(err) = before_commit_target(idx, target_path) {
-            commit_err = Some(err);
-            break;
-        }
-        let backup_path = if export_path_is_occupied(target_path) {
-            let bak = dir.join(format!(".cb-export-bak.{pid}.{batch_seq}.{idx}.tmp"));
-            if let Err(err) = std::fs::rename(target_path, &bak) {
-                commit_err = Some(format!("failed to prepare replacement for `{}`: {err}", target_path.display()));
-                break;
+    let mut backups: Vec<Option<PathBuf>> = Vec::with_capacity(prepared.len());
+    for entry in &prepared {
+        let backup = if entry.existed {
+            match create_export_backup(dir, entry) {
+                Ok(path) => Some(path),
+                Err(err) => {
+                    let problems = remove_export_backups(&mut backups);
+                    return Err(join_export_rollback_problems(err, &problems));
+                }
             }
-            Some(bak)
         } else {
             None
         };
-
-        if let Err(err) = std::fs::rename(stage_path, target_path) {
-            if let Some(bak) = &backup_path {
-                let _ = std::fs::rename(bak, target_path);
-            }
-            commit_err = Some(format!("failed to finalize export `{}`: {err}", target_path.display()));
-            break;
-        }
-        committed.push((target_path.clone(), backup_path));
+        backups.push(backup);
     }
 
+    let (committed, commit_err) = commit_staged_exports(dir, &prepared, &mut staged, &mut hook);
+    drop(staged);
     if let Some(err) = commit_err {
-        // Roll back every previously committed file in reverse order and delete remaining staged temps.
-        for (target_path, backup_path) in committed.into_iter().rev() {
-            let _ = std::fs::remove_file(&target_path);
-            if let Some(bak) = backup_path {
-                let _ = std::fs::rename(&bak, &target_path);
-            }
-        }
-        for (stage_path, _) in &staged {
-            let _ = std::fs::remove_file(stage_path);
-        }
-        return Err(err);
+        let problems = rollback_export_batch(dir, &prepared, &committed, &mut backups, &mut hook);
+        return Err(join_export_rollback_problems(format!("{err}; no table was exported"), &problems));
     }
 
-    // 4. All targets committed cleanly; remove temporary backups.
-    let mut exported_files = Vec::with_capacity(committed.len());
-    for (target_path, backup_path) in committed {
-        if let Some(bak) = backup_path {
-            let _ = std::fs::remove_file(bak);
-        }
-        exported_files.push(target_path.to_string_lossy().into_owned());
+    let leftover_files = remove_export_backups(&mut backups);
+    for problem in &leftover_files {
+        eprintln!("curvebook export warning: {problem}");
     }
-    Ok(exported_files)
+    Ok(ExportBatchReport { exported_files: prepared.iter().map(|entry| entry.target.to_string_lossy().into_owned()).collect(), leftover_files })
+}
+
+fn join_export_rollback_problems(err: String, problems: &[String]) -> String {
+    if problems.is_empty() { err } else { format!("{err}; rollback incomplete: {}", problems.join("; ")) }
 }
 
 fn resolve_native_export_sheet_id_with_hint(doc: &ProjectDocument, kind: NativeExportTargetKind, hint: Option<&str>) -> Option<SheetId> {
@@ -2225,6 +2427,14 @@ impl DesktopHostRuntime {
                 }
             }
             "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
+                // Refuse before showing the picker: the replace-or-merge prompt cannot open while
+                // another dialog is open, and the import must never run without it (`R0.36`).
+                if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
+                    && params.get("merge").and_then(Value::as_bool).is_none()
+                    && self.window(window_id)?.app().has_open_modal()
+                {
+                    return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE));
+                }
                 let (filter_label, extensions): (String, Vec<String>) = match command_id {
                     "project.instantiateTemplate" => (
                         tr(&win_locale, "w6.view.shell.filter_template").to_owned(),
@@ -2252,18 +2462,22 @@ impl DesktopHostRuntime {
                             if let Some(merge) = params.get("merge").and_then(Value::as_bool) {
                                 execute_native_import_at_path_with_params(win, command_id, &path, merge, params)?;
                                 Self::completed_file_dialog_outcome(window_id, command_id, &path)
-                            } else if open_import_mode_prompt_if_needed(win, command_id, &path) {
-                                DesktopEventOutcome {
-                                    handled: true,
-                                    action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
-                                    window_id: Some(window_id),
-                                    command_id: Some(command_id.to_owned()),
-                                    command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
-                                    ..Default::default()
-                                }
                             } else {
-                                execute_native_import_at_path_with_params(win, command_id, &path, false, params)?;
-                                Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                                match open_import_mode_prompt_if_needed(win, command_id, &path) {
+                                    ImportModePrompt::Opened => DesktopEventOutcome {
+                                        handled: true,
+                                        action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
+                                        window_id: Some(window_id),
+                                        command_id: Some(command_id.to_owned()),
+                                        command_result: Some(json!({ "path": path.to_string_lossy(), "prompted": true })),
+                                        ..Default::default()
+                                    },
+                                    ImportModePrompt::Blocked => return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE)),
+                                    ImportModePrompt::NotNeeded => {
+                                        execute_native_import_at_path_with_params(win, command_id, &path, false, params)?;
+                                        Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                                    }
+                                }
                             }
                         } else {
                             execute_native_import_at_path_with_params(win, command_id, &path, false, params)?;
@@ -2569,7 +2783,8 @@ impl DesktopHostRuntime {
                 .ok_or_else(|| format!("table `{}` export did not produce CSV payload", sheet_id.as_str()))?;
             staged_entries.push((file_path, csv_text.as_bytes().to_vec()));
         }
-        let exported_files = write_staged_export_batch_with_hook(&dir, &staged_entries, |_, _| Ok(()))?;
+        let report = write_staged_export_batch_with_hook(&dir, &staged_entries, |_| Ok(()))?;
+        let count = report.exported_files.len();
         Ok(DesktopEventOutcome {
             handled: true,
             action: format!("native_file_dialog.completed:{COMMAND_ID}"),
@@ -2577,8 +2792,9 @@ impl DesktopHostRuntime {
             command_id: Some(String::from(COMMAND_ID)),
             command_result: Some(json!({
                 "path": dir.to_string_lossy(),
-                "exported_files": exported_files,
-                "count": exported_files.len(),
+                "exported_files": report.exported_files,
+                "count": count,
+                "leftover_files": report.leftover_files,
             })),
             ..Default::default()
         })
@@ -3193,15 +3409,19 @@ impl DesktopHostRuntime {
             && !is_unpacked_project_target(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
-            if open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
-                return Ok(DesktopEventOutcome {
-                    handled: true,
-                    action: format!("file.dropped_confirm_import_mode:{command_id}"),
-                    window_id: Some(window_id),
-                    command_id: Some(command_id.to_owned()),
-                    command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
-                    ..Default::default()
-                });
+            match open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
+                ImportModePrompt::Opened => {
+                    return Ok(DesktopEventOutcome {
+                        handled: true,
+                        action: format!("file.dropped_confirm_import_mode:{command_id}"),
+                        window_id: Some(window_id),
+                        command_id: Some(command_id.to_owned()),
+                        command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
+                        ..Default::default()
+                    });
+                }
+                ImportModePrompt::Blocked => return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE)),
+                ImportModePrompt::NotNeeded => {}
             }
         }
         self.open_path_in_window(window_id, resolved_path)
@@ -3218,15 +3438,19 @@ impl DesktopHostRuntime {
         {
             let win = self.window_mut(window_id)?;
             win.hovered_files.clear();
-            if open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
-                return Ok(DesktopEventOutcome {
-                    handled: true,
-                    action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
-                    window_id: Some(window_id),
-                    command_id: Some(command_id.to_owned()),
-                    command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
-                    ..Default::default()
-                });
+            match open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
+                ImportModePrompt::Opened => {
+                    return Ok(DesktopEventOutcome {
+                        handled: true,
+                        action: format!("native_file_dialog.confirm_import_mode:{command_id}"),
+                        window_id: Some(window_id),
+                        command_id: Some(command_id.to_owned()),
+                        command_result: Some(json!({ "path": resolved_path.to_string_lossy(), "prompted": true })),
+                        ..Default::default()
+                    });
+                }
+                ImportModePrompt::Blocked => return Err(String::from(IMPORT_BLOCKED_BY_DIALOG_MESSAGE)),
+                ImportModePrompt::NotNeeded => {}
             }
         }
         self.open_path_in_window(window_id, resolved_path)
@@ -4884,8 +5108,9 @@ mod wave_b_host_tests {
             (created.clone(), b"new,b\n8,8\n".to_vec()),
             (failing.clone(), b"new,c\n7,7\n".to_vec()),
         ];
-        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |idx, _| {
-            if idx == 2 { Err(String::from("simulated mid-batch I/O error")) } else { Ok(()) }
+        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |step| match step {
+            super::ExportBatchStep::Commit { idx: 2, .. } => Err(String::from("simulated mid-batch I/O error")),
+            _ => Ok(()),
         })
         .expect_err("mid-batch error must abort and roll back");
         assert!(err.contains("simulated mid-batch I/O error"));
@@ -4893,13 +5118,133 @@ mod wave_b_host_tests {
         assert_eq!(std::fs::read(&existing).map_err(|e| e.to_string())?, orig_bytes, "earlier replaced file must be restored byte-for-byte");
         assert!(!created.exists(), "earlier newly created file must be rolled back");
         assert!(!failing.exists(), "failing target must not exist");
-        let leftover_temps: Vec<String> = std::fs::read_dir(&dir)
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| n.starts_with(".cb-export-"))
-            .collect();
-        assert!(leftover_temps.is_empty(), "staging/backup temp files leaked: {leftover_temps:?}");
+        // Staged files and backups use platform-generated names, so check the whole folder.
+        let remaining = sorted_dir_names(&dir)?;
+        assert_eq!(remaining, vec![String::from("TableA.csv")], "staging/backup temp files leaked");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    fn sorted_dir_names(dir: &std::path::Path) -> Result<Vec<String>, String> {
+        let mut names: Vec<String> =
+            std::fs::read_dir(dir).map_err(|e| e.to_string())?.filter_map(Result::ok).map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        Ok(names)
+    }
+
+    fn fresh_test_dir(tag: &str) -> Result<std::path::PathBuf, String> {
+        let dir = std::env::temp_dir().join(format!("cb-r036-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        Ok(dir)
+    }
+
+    /// `R0.36`: replacing files never moves the original away, so every replaced target exists at
+    /// every step of commit and rollback, and a backup the rollback cannot restore is named in the error.
+    #[test]
+    fn r0_36_batch_export_never_leaves_replaced_target_missing_and_names_leftover_backup() -> Result<(), String> {
+        let dir = fresh_test_dir("export-missing")?;
+        let first = dir.join("First.csv");
+        let second = dir.join("Second.csv");
+        let third = dir.join("Third.csv");
+        std::fs::write(&first, b"first,original\n").map_err(|e| e.to_string())?;
+        std::fs::write(&second, b"second,original\n").map_err(|e| e.to_string())?;
+        let entries =
+            vec![(first.clone(), b"first,new\n".to_vec()), (second.clone(), b"second,new\n".to_vec()), (third.clone(), b"third,new\n".to_vec())];
+
+        let mut missing_seen: Vec<String> = Vec::new();
+        let mut restore_targets: Vec<std::path::PathBuf> = Vec::new();
+        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |step| {
+            for target in [&first, &second] {
+                if !target.exists() {
+                    missing_seen.push(format!("{step:?}: {} missing", target.display()));
+                }
+            }
+            if let super::ExportBatchStep::Restore { backup, .. } = step
+                && !backup.is_file()
+            {
+                missing_seen.push(format!("{step:?}: backup missing"));
+            }
+            match step {
+                super::ExportBatchStep::Commit { idx: 2, .. } => Err(String::from("simulated commit failure")),
+                super::ExportBatchStep::Restore { idx: 0, target, .. } => {
+                    restore_targets.push(target.to_path_buf());
+                    Err(String::from("simulated restore failure"))
+                }
+                super::ExportBatchStep::Restore { target, .. } => {
+                    restore_targets.push(target.to_path_buf());
+                    Ok(())
+                }
+                super::ExportBatchStep::Commit { .. } => Ok(()),
+            }
+        })
+        .expect_err("batch must fail");
+        assert!(missing_seen.is_empty(), "a replaced target went missing mid-batch: {missing_seen:?}");
+        assert_eq!(restore_targets, vec![second.clone(), first.clone()], "rollback restores committed entries in reverse order");
+        assert!(err.contains("simulated commit failure") && err.contains("simulated restore failure"), "{err}");
+
+        // `Second.csv` was restored; `First.csv` still exists (with the new bytes) and its previous
+        // contents survive in a backup file that the error names.
+        assert_eq!(std::fs::read(&second).map_err(|e| e.to_string())?, b"second,original\n");
+        assert_eq!(std::fs::read(&first).map_err(|e| e.to_string())?, b"first,new\n");
+        assert!(!third.exists());
+        let leftovers: Vec<String> = sorted_dir_names(&dir)?.into_iter().filter(|n| n.starts_with('.')).collect();
+        assert_eq!(leftovers.len(), 1, "exactly one backup must remain: {leftovers:?}");
+        let backup = dir.join(leftovers.first().ok_or("no backup left")?);
+        assert!(err.contains(&backup.display().to_string()), "error must name leftover backup `{}`: {err}", backup.display());
+        assert_eq!(std::fs::read(&backup).map_err(|e| e.to_string())?, b"first,original\n");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// `R0.36`: a destination that was free when the batch started but exists at commit time (for
+    /// example because an earlier entry wrote it under a name the disk folds together) is a
+    /// conflict, never an overwrite.
+    #[test]
+    fn r0_36_batch_export_refuses_destination_written_during_the_batch() -> Result<(), String> {
+        let dir = fresh_test_dir("export-appeared")?;
+        let first = dir.join("One.csv");
+        let second = dir.join("Two.csv");
+        let entries = vec![(first.clone(), b"one\n".to_vec()), (second.clone(), b"two\n".to_vec())];
+        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |step| {
+            if let super::ExportBatchStep::Commit { idx: 1, target } = step {
+                std::fs::write(target, b"someone else's data\n").map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        })
+        .expect_err("destination that appeared mid-batch must abort the batch");
+        assert!(err.contains("Two.csv") && err.contains("not overwritten"), "{err}");
+        assert_eq!(std::fs::read(&second).map_err(|e| e.to_string())?, b"someone else's data\n");
+        assert!(!first.exists(), "earlier entry must be rolled back");
+        assert_eq!(sorted_dir_names(&dir)?, vec![String::from("Two.csv")]);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// `R0.36`: NFC and NFD spellings of one title are the same file name on APFS, so the planner
+    /// suffixes the second one and the writer refuses two entries with equivalent names.
+    #[test]
+    fn r0_36_export_names_compare_nfc_and_nfd_as_the_same_file() -> Result<(), String> {
+        let nfc = "Caf\u{e9}";
+        let nfd = "Cafe\u{301}";
+        assert_ne!(nfc, nfd);
+        assert_eq!(super::export_name_collision_key(nfc), super::export_name_collision_key(nfd));
+        assert_eq!(super::export_name_collision_key("CAF\u{c9}"), super::export_name_collision_key(nfd));
+
+        let plan = super::plan_all_tables_export_paths(
+            std::path::Path::new("nonexistent-plan-dir"),
+            vec![(SheetId::new("n1"), String::from(nfc)), (SheetId::new("n2"), String::from(nfd))],
+            "csv",
+            false,
+        );
+        let names: Vec<String> = plan.iter().map(|(_, p)| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+        assert_eq!(names, vec![format!("{nfc}.csv"), format!("{nfd}-2.csv")]);
+
+        let dir = fresh_test_dir("export-nfc-nfd")?;
+        let entries = vec![(dir.join(format!("{nfc}.csv")), b"1\n".to_vec()), (dir.join(format!("{nfd}.csv")), b"2\n".to_vec())];
+        let err = super::write_staged_export_batch_with_hook(&dir, &entries, |_| Ok(())).expect_err("equivalent names must be refused");
+        assert!(err.contains("same file name"), "{err}");
+        assert!(sorted_dir_names(&dir)?.is_empty(), "nothing may be written when names collide");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

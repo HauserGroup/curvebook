@@ -689,12 +689,13 @@ fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str, expected_version: 
     if components.is_empty() {
         return Err(format!("`{asset_name}`: CycloneDX SBOM has empty `components` array"));
     }
-    let mut comp_versions: BTreeMap<&str, Option<&str>> = BTreeMap::new();
+    // Map each component name to every declared version (`None` when missing/empty) so duplicates fail closed (`R0.36`).
+    let mut comp_versions: BTreeMap<&str, Vec<Option<&str>>> = BTreeMap::new();
     for (idx, comp) in components.iter().enumerate() {
         let co = comp.as_object().ok_or_else(|| format!("`{asset_name}`: CycloneDX `components[{idx}]` must be a JSON object"))?;
         let name =
             str_trim(co, "name").ok_or_else(|| format!("`{asset_name}`: CycloneDX `components[{idx}]` is missing a non-empty string `name`"))?;
-        comp_versions.entry(name).or_insert(str_trim(co, "version"));
+        comp_versions.entry(name).or_default().push(str_trim(co, "version"));
     }
     let meta_comp = obj
         .get("metadata")
@@ -719,13 +720,25 @@ fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str, expected_version: 
     {
         return Err(format!("`{asset_name}`: CycloneDX `metadata.component.version` `{root_ver}` does not match expected version `{ev}`"));
     }
-    match comp_versions.get("curvebook-cli") {
-        None => Err(format!("`{asset_name}`: CycloneDX SBOM `components` is missing shipped binary component `curvebook-cli`")),
-        Some(Some(ver)) if *ver != root_ver => {
-            Err(format!("`{asset_name}`: CycloneDX component `curvebook-cli` version `{ver}` does not match root version `{root_ver}`"))
+    // Exactly one versioned `curvebook-cli` entry is accepted (`R0.36`): missing version or duplicate entries fail closed.
+    let cli_versions = comp_versions.get("curvebook-cli").map(Vec::as_slice).unwrap_or_default();
+    let cli_ver = match cli_versions {
+        [] => return Err(format!("`{asset_name}`: CycloneDX SBOM `components` is missing shipped binary component `curvebook-cli`")),
+        [single] => *single,
+        many => {
+            return Err(format!(
+                "`{asset_name}`: CycloneDX SBOM `components` lists shipped binary component `curvebook-cli` {} times; expected exactly one",
+                many.len()
+            ));
         }
-        Some(_) => Ok(()),
+    };
+    let Some(ver) = cli_ver else {
+        return Err(format!("`{asset_name}`: CycloneDX component `curvebook-cli` is missing a non-empty `version`"));
+    };
+    if ver != root_ver {
+        return Err(format!("`{asset_name}`: CycloneDX component `curvebook-cli` version `{ver}` does not match root version `{root_ver}`"));
     }
+    Ok(())
 }
 
 fn scan_unpacked_tree(

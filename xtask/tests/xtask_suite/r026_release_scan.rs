@@ -355,5 +355,38 @@ fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Resul
     ] {
         seed_single_and_fail(&fx, sub, sbom_name, &make_sbom(comp), &[sbom_name, needle])?;
     }
+
+    // 4. The shipped `curvebook-cli` component must appear exactly once with the root version (`R0.36`).
+    let cli = |version: Option<&str>| match version {
+        Some(v) => serde_json::json!({ "type": "application", "name": "curvebook-cli", "version": v }),
+        None => serde_json::json!({ "type": "application", "name": "curvebook-cli" }),
+    };
+    for (label, cli_components, expected) in [
+        ("cli-missing", vec![], "missing shipped binary component `curvebook-cli`"),
+        ("cli-no-version", vec![cli(None)], "`curvebook-cli` is missing a non-empty `version`"),
+        ("cli-empty-version", vec![cli(Some("  "))], "`curvebook-cli` is missing a non-empty `version`"),
+        ("cli-duplicate", vec![cli(Some("0.0.9")), cli(Some("0.1.0-beta.1"))], "`curvebook-cli` 2 times"),
+        ("cli-mismatch", vec![cli(Some("0.0.9"))], "does not match root version"),
+    ] {
+        let dir = fx.path.join(label);
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut components = cli_components;
+        components.push(serde_json::json!({ "type": "library", "name": "serde", "version": "1.0.0" }));
+        let sbom = serde_json::to_vec_pretty(&serde_json::json!({
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "version": 1,
+            "metadata": { "component": { "type": "application", "name": "curvebook", "version": "0.1.0-beta.1" } },
+            "components": components
+        }))
+        .map_err(|e| e.to_string())?;
+        fs::write(dir.join(sbom_name), sbom).map_err(|e| e.to_string())?;
+        write_sha256sums_for_dir(&dir)?;
+
+        let out = run_release_scan(&[dir.to_str().ok_or("non-UTF-8 fixture path")?])?;
+        assert!(!out.status.success(), "{label} must fail closed");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(sbom_name) && stderr.contains(expected), "{label}: {stderr}");
+    }
     Ok(())
 }

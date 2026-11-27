@@ -27,6 +27,7 @@ curvebook-text = { workspace = true }
 curvebook-ui-egui = { workspace = true, features = ["bundled-fonts"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 curvebook-chart = { workspace = true }

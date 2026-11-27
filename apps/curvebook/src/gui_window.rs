@@ -1707,6 +1707,7 @@ impl CurveBookNativeApp {
             .map(|w| (w.app().egui_views.column_grid.scroll_offset_pt, w.app().egui_views.center_stage.secondary_column_grid.scroll_offset_pt));
         let mut next_intents = PendingUiIntents::default();
         let mut next_meta = FrameInspectMeta::default();
+        self.adopt_figure_export_warning(input_window_id);
         let report = if let Ok(win) = self.runtime.window_mut(input_window_id) {
             let mut views = std::mem::take(&mut win.app_mut().egui_views);
             let rep = inspect_bridge::render_egui_shell_frame_with_host(
@@ -2204,6 +2205,17 @@ impl CurveBookNativeApp {
                 );
             },
         );
+    }
+
+    /// Move a pending figure-export warning from the window's shared shell state into the desktop
+    /// toast before the shell draws, so the warning is shown once rather than both as a toast and
+    /// as the shell's status-footer notice (`GAP-06-02`, `R0.36`).
+    fn adopt_figure_export_warning(&mut self, window_id: DesktopWindowId) {
+        if let Ok(win) = self.runtime.window_mut(window_id)
+            && let Some(warning) = win.app_mut().canvas_dialogs.figure_export_warning.take()
+        {
+            self.status_banner = Some(warning);
+        }
     }
 
     fn render_status_banner_toast(&mut self, ctx: &egui::Context) {

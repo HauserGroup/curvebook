@@ -10,7 +10,7 @@ use curvebook_stats::multivariate::{DendrogramMerge, hierarchical_clustering_pai
 use curvebook_text::{RichText, parse_markup};
 
 use super::super::multivariate::cell_token;
-use super::{find_matching_result_where_checked, resolve_source_data_sheet_checked, result_cell_num};
+use super::{find_matching_result_where_checked, has_blocked_matching_result, resolve_source_data_sheet_checked, result_cell_num};
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, TextAnchor};
 use crate::survival_cat::{
     PlotMarginConfig, draw_colorbar, draw_empty_open_frame, path_line, path_move, sanitize_range, solid_stroke, text_metrics,
@@ -57,6 +57,34 @@ fn cap_heatmap_dimensions(orig_rows: usize, orig_cols: usize, warnings: &mut Vec
     (rows, cols, truncated)
 }
 
+/// Largest `k` with `k * k <= MAX_HEATMAP_RENDER_CELLS` and `k <= MAX_HEATMAP_RENDER_COLS` (158 for the current budget).
+fn max_square_heatmap_side() -> usize {
+    let mut k = MAX_HEATMAP_RENDER_COLS.min(MAX_HEATMAP_RENDER_ROWS);
+    while k > 1 && k.saturating_mul(k) > MAX_HEATMAP_RENDER_CELLS {
+        k -= 1;
+    }
+    k
+}
+
+/// Caps a symmetric `n x n` matrix (correlation matrix) to its leading `k x k` principal submatrix.
+///
+/// Unlike [`cap_heatmap_dimensions`], rows and columns are truncated together so cell `(i, j)`
+/// keeps meaning `r(variable i, variable j)` and the unit diagonal stays on the diagonal.
+fn cap_symmetric_heatmap_dimension(n: usize, warnings: &mut Vec<ChartWarning>) -> (usize, bool) {
+    let k = n.min(max_square_heatmap_side());
+    let truncated = k < n;
+    if truncated {
+        warnings.push(ChartWarning::new(
+            "heatmap_cell_budget_exceeded",
+            format!(
+                "symmetric heatmap matrix ({n}x{n} = {} cells) exceeded rendering budget ({MAX_HEATMAP_RENDER_CELLS} cells); truncated to the leading {k}x{k} submatrix",
+                n.saturating_mul(n),
+            ),
+        ));
+    }
+    (k, truncated)
+}
+
 // 2a. Heatmap (+ Perceptual Colorbar + Optional Hierarchical Dendrogram)
 
 struct HeatmapData {
@@ -67,6 +95,28 @@ struct HeatmapData {
     cluster_distance: ClusterDistance,
     cluster_linkage: ClusterLinkage,
     clustering_cue: Option<String>,
+    /// Square matrix whose rows and columns index the same variables (correlation matrix): any
+    /// leaf ordering is applied to rows and columns together, and it is never auto-clustered.
+    symmetric: bool,
+    /// Suppresses the chart-side default clustering (truncated matrix, or a linked clustering
+    /// result that is stale or cannot be applied), so rows stay in table order.
+    suppress_auto_cluster: bool,
+}
+
+impl HeatmapData {
+    fn new(row_labels: Vec<String>, col_labels: Vec<String>, values: Vec<Vec<Option<f64>>>) -> Self {
+        Self {
+            row_labels,
+            col_labels,
+            values,
+            merges: Vec::new(),
+            cluster_distance: ClusterDistance::Euclidean,
+            cluster_linkage: ClusterLinkage::Ward,
+            clustering_cue: None,
+            symmetric: false,
+            suppress_auto_cluster: false,
+        }
+    }
 }
 
 fn cluster_metric_labels(distance: ClusterDistance, linkage: ClusterLinkage) -> (&'static str, &'static str) {
@@ -108,12 +158,17 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
         return Ok(());
     }
 
-    if hm.merges.is_empty() && (2..=128).contains(&n_rows) && n_cols >= 2 {
+    // Default row clustering of raw data matrices only: a symmetric correlation matrix keeps the
+    // user's variable order (clustering its rows alone would scramble the diagonal), and a truncated
+    // or stale-linked matrix is never silently re-clustered on a partial view of the data.
+    if hm.merges.is_empty() && !hm.symmetric && !hm.suppress_auto_cluster && (2..=128).contains(&n_rows) && n_cols >= 2 {
         hm.merges = cluster_heatmap_rows(&hm.values, n_cols, hm.cluster_distance, hm.cluster_linkage, &mut scene.warnings);
     }
 
     let row_order = if !hm.merges.is_empty() { dendrogram_leaf_order(&hm.merges, n_rows) } else { (0..n_rows).collect() };
     let has_dendro = !hm.merges.is_empty();
+    // A symmetric matrix is permuted on both axes so cell (i, j) keeps meaning (row label, column label).
+    let col_order: Vec<usize> = if hm.symmetric && has_dendro && n_rows == n_cols { row_order.clone() } else { (0..n_cols).collect() };
 
     let (min_v, max_v) = heatmap_min_max(&hm.values);
     let has_neg_and_pos = min_v < 0.0 && max_v > 0.0;
@@ -188,8 +243,8 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
     for (vis_row, &orig_row) in row_order.iter().enumerate() {
         let Some(row_vals) = hm.values.get(orig_row) else { continue };
         let y = grid.y + (vis_row as f64) * cell_h;
-        for c in 0..n_cols {
-            let x = grid.x + (c as f64) * cell_w;
+        for (vis_col, &c) in col_order.iter().enumerate() {
+            let x = grid.x + (vis_col as f64) * cell_w;
             let tile_rect = RectPt::new(x + half_gap, y + half_gap, (cell_w - gap).max(1.0), (cell_h - gap).max(1.0));
             if let Some(val) = row_vals.get(c).copied().flatten().filter(|v| v.is_finite()) {
                 let t = crate::clamp_f64_safe((val - dom_lo) / denom, 0.0, 1.0);
@@ -247,8 +302,8 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
         }
     }
 
-    for (c, lbl) in resolved_col_labels.iter().enumerate() {
-        let cx = grid.x + ((c as f64) + 0.5) * cell_w;
+    for (vis_col, lbl) in col_order.iter().filter_map(|&c| resolved_col_labels.get(c)).enumerate() {
+        let cx = grid.x + ((vis_col as f64) + 0.5) * cell_w;
         let (anchor_pt, anchor, rotation_deg) = match lbl_spec.column_angle {
             HeatmapColumnLabelAngle::Horizontal0 => (PointPt::new(cx, grid.bottom() + 11.0), TextAnchor::Middle, 0.0),
             HeatmapColumnLabelAngle::Angled45 => (PointPt::new(cx + 2.0, grid.bottom() + 6.0), TextAnchor::End, -45.0),
@@ -304,7 +359,15 @@ fn spreadsheet_column_letters(mut index: usize) -> String {
 fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab, warnings: &mut Vec<ChartWarning>) -> HeatmapData {
     let orig_rows = tab.rows.len();
     let orig_cols = tab.column_headers.len();
-    let (n_rows, n_cols, truncated) = cap_heatmap_dimensions(orig_rows, orig_cols, warnings);
+    // A correlation matrix is square with the same variables on both axes; keep it square when
+    // capping so the leading principal submatrix (not a row-major slab) is shown.
+    let symmetric = orig_rows == orig_cols && orig_rows > 0;
+    let (n_rows, n_cols, truncated) = if symmetric {
+        let (k, truncated) = cap_symmetric_heatmap_dimension(orig_rows, warnings);
+        (k, k, truncated)
+    } else {
+        cap_heatmap_dimensions(orig_rows, orig_cols, warnings)
+    };
     let mut matrix = Vec::with_capacity(n_rows);
     for row in tab.rows.iter().take(n_rows) {
         let vals: Vec<Option<f64>> = row
@@ -323,15 +386,12 @@ fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab, warnings: &mut V
     } else {
         res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, n_rows))
     };
-    HeatmapData {
-        row_labels: tab.row_labels.iter().take(n_rows).cloned().collect(),
-        col_labels: tab.column_headers.iter().take(n_cols).cloned().collect(),
-        values: matrix,
-        merges,
-        cluster_distance: ClusterDistance::Euclidean,
-        cluster_linkage: ClusterLinkage::Ward,
-        clustering_cue: None,
-    }
+    let mut hm =
+        HeatmapData::new(tab.row_labels.iter().take(n_rows).cloned().collect(), tab.column_headers.iter().take(n_cols).cloned().collect(), matrix);
+    hm.merges = merges;
+    hm.symmetric = symmetric;
+    hm.suppress_auto_cluster = true;
+    hm
 }
 
 fn resolve_selected_heatmap_cols(selected: &[usize], len: usize) -> Vec<usize> {
@@ -381,7 +441,7 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
 
     let selected_cols = clustering_res.map(|r| r.analysis.selected_data_sets.as_slice()).unwrap_or(&[]);
     let ds = resolve_source_data_sheet_checked(graph, doc, warnings)?;
-    let (mut hm, expect_rows, truncated) = match &ds.archetype {
+    let (mut hm, dims) = match &ds.archetype {
         TableArchetype::MultipleVariables(mv) => {
             let mut num_cols: Vec<(usize, String)> = if selected_cols.is_empty() {
                 mv.variables
@@ -402,7 +462,8 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if num_cols.is_empty() {
                 return None;
             }
-            let (n_rows, n_cols, truncated) = cap_heatmap_dimensions(mv.row_count(), num_cols.len(), warnings);
+            let orig_num_cols = num_cols.len();
+            let (n_rows, n_cols, _) = cap_heatmap_dimensions(mv.row_count(), orig_num_cols, warnings);
             num_cols.truncate(n_cols);
             let label_col = graph
                 .spec
@@ -427,17 +488,8 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             }
             let col_labels = num_cols.into_iter().map(|(_, t)| t).collect();
             (
-                HeatmapData {
-                    row_labels,
-                    col_labels,
-                    values,
-                    merges: Vec::new(),
-                    cluster_distance: ClusterDistance::Euclidean,
-                    cluster_linkage: ClusterLinkage::Ward,
-                    clustering_cue: None,
-                },
-                n_rows,
-                truncated,
+                HeatmapData::new(row_labels, col_labels, values),
+                HeatmapDims { rows: n_rows, cols: n_cols, orig_rows: mv.row_count(), orig_cols: orig_num_cols },
             )
         }
         TableArchetype::Column(col) => {
@@ -449,7 +501,8 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if col_indices.is_empty() {
                 return None;
             }
-            let (nrows, ncols, truncated) = cap_heatmap_dimensions(col.row_count(), col_indices.len(), warnings);
+            let (orig_rows, orig_cols) = (col.row_count(), col_indices.len());
+            let (nrows, ncols, _) = cap_heatmap_dimensions(orig_rows, orig_cols, warnings);
             col_indices.truncate(ncols);
             let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| col.data_sets.get(c).map(|d| d.title.clone())).collect();
             let row_labels =
@@ -469,19 +522,7 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                         .collect()
                 })
                 .collect();
-            (
-                HeatmapData {
-                    row_labels,
-                    col_labels,
-                    values,
-                    merges: Vec::new(),
-                    cluster_distance: ClusterDistance::Euclidean,
-                    cluster_linkage: ClusterLinkage::Ward,
-                    clustering_cue: None,
-                },
-                nrows,
-                truncated,
-            )
+            (HeatmapData::new(row_labels, col_labels, values), HeatmapDims { rows: nrows, cols: ncols, orig_rows, orig_cols })
         }
         TableArchetype::Grouped(g) => {
             let mut col_indices: Vec<usize> = if selected_cols.is_empty() {
@@ -492,7 +533,8 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             if col_indices.is_empty() {
                 return None;
             }
-            let (nrows, ncols, truncated) = cap_heatmap_dimensions(g.row_count(), col_indices.len(), warnings);
+            let (orig_rows, orig_cols) = (g.row_count(), col_indices.len());
+            let (nrows, ncols, _) = cap_heatmap_dimensions(orig_rows, orig_cols, warnings);
             col_indices.truncate(ncols);
             let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| g.data_sets.get(c).map(|d| d.title.clone())).collect();
             let row_labels =
@@ -517,45 +559,82 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
                         .collect()
                 })
                 .collect();
-            (
-                HeatmapData {
-                    row_labels,
-                    col_labels,
-                    values,
-                    merges: Vec::new(),
-                    cluster_distance: ClusterDistance::Euclidean,
-                    cluster_linkage: ClusterLinkage::Ward,
-                    clustering_cue: None,
-                },
-                nrows,
-                truncated,
-            )
+            (HeatmapData::new(row_labels, col_labels, values), HeatmapDims { rows: nrows, cols: ncols, orig_rows, orig_cols })
         }
         _ => return None,
     };
 
-    if !truncated
-        && let Some(cres) = clustering_res
+    let rows_truncated = dims.rows < dims.orig_rows;
+    let cols_truncated = dims.cols < dims.orig_cols;
+    // Never let the chart silently substitute its own default clustering for a matrix the user
+    // cannot see in full, or for a linked clustering result that is stale or failed.
+    if rows_truncated || cols_truncated {
+        hm.suppress_auto_cluster = true;
+    }
+    if clustering_res.is_none()
+        && has_blocked_matching_result(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })))
+    {
+        hm.suppress_auto_cluster = true;
+    }
+
+    if let Some(cres) = clustering_res
         && let AnalysisKind::Multivariate(MultivariateSpec::Clustering { distance, linkage, .. }) = cres.analysis.kind
     {
-        hm.cluster_distance = distance;
-        hm.cluster_linkage = linkage;
         let (dist_lbl, link_lbl) = cluster_metric_labels(distance, linkage);
-        hm.clustering_cue = Some(format!("Clustered: {dist_lbl} / {link_lbl}"));
-        let has_missing = hm.values.iter().flatten().any(Option::is_none);
-        if !has_missing {
-            let tab_merges = cres
-                .tabs
-                .iter()
-                .find(|t| t.id == "hierarchical-dendrogram")
-                .map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, expect_rows));
-            if !tab_merges.is_empty() && tab_merges.len() + 1 == expect_rows {
-                hm.merges = tab_merges;
+        if rows_truncated {
+            // Dendrogram leaves index every clustered row; with rows dropped the merge tree no longer
+            // maps onto the drawn rows, so show table order rather than a re-clustered partial view.
+            hm.suppress_auto_cluster = true;
+            warnings.push(ChartWarning::new(
+                "heatmap_clustering_not_shown_truncated",
+                format!(
+                    "clustering result '{}' ({dist_lbl} / {link_lbl}) is not shown because the heatmap was truncated to {} of {} rows; rows are drawn in table order",
+                    cres.id, dims.rows, dims.orig_rows
+                ),
+            ));
+        } else {
+            // Only columns were dropped: the user's row dendrogram was computed on all variables and its
+            // leaves still map one-to-one onto the drawn rows, so it is shown unchanged, with a cue that
+            // states it was computed on every variable while only the leading columns are drawn.
+            hm.cluster_distance = distance;
+            hm.cluster_linkage = linkage;
+            hm.clustering_cue = Some(if cols_truncated {
+                format!("Clustered: {dist_lbl} / {link_lbl} (on all {} variables; first {} shown)", dims.orig_cols, dims.cols)
+            } else {
+                format!("Clustered: {dist_lbl} / {link_lbl}")
+            });
+            let has_missing = hm.values.iter().flatten().any(Option::is_none);
+            if !has_missing {
+                let tab_merges = cres
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == "hierarchical-dendrogram")
+                    .map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, dims.rows));
+                if !tab_merges.is_empty() && tab_merges.len() + 1 == dims.rows {
+                    hm.merges = tab_merges;
+                }
+            }
+            if cols_truncated && hm.merges.is_empty() {
+                warnings.push(ChartWarning::new(
+                    "heatmap_clustering_not_shown_truncated",
+                    format!(
+                        "clustering result '{}' ({dist_lbl} / {link_lbl}) could not be mapped onto the truncated heatmap; rows are drawn in table order",
+                        cres.id
+                    ),
+                ));
             }
         }
     }
 
     Some(hm)
+}
+
+/// Rendered vs original heatmap matrix dimensions after [`cap_heatmap_dimensions`].
+struct HeatmapDims {
+    rows: usize,
+    cols: usize,
+    orig_rows: usize,
+    orig_cols: usize,
 }
 
 fn parse_dendro_node_id(raw: f64, step: usize, n_leaves: usize) -> Option<isize> {
@@ -724,6 +803,42 @@ fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[Dend
 #[cfg(test)]
 mod tests {
     use crate::scene::{ChartScene, ScenePrimitive};
+
+    #[test]
+    fn cap_dimensions_cover_every_budget_branch() {
+        use super::{cap_heatmap_dimensions, cap_symmetric_heatmap_dimension};
+
+        let cap = |rows: usize, cols: usize| {
+            let mut warnings = Vec::new();
+            let out = cap_heatmap_dimensions(rows, cols, &mut warnings);
+            assert_eq!(out.2, !warnings.is_empty(), "truncation must warn exactly when it truncates ({rows}x{cols})");
+            out
+        };
+        // Exactly on the 25_000-cell budget with 250 columns: untouched, no warning.
+        assert_eq!(cap(100, 250), (100, 250, false));
+        // Columns over the 250 limit only: 10 x 250 = 2_500 cells fits, so only columns shrink.
+        assert_eq!(cap(10, 300), (10, 250, true));
+        // Columns over the limit and the capped 200 x 250 = 50_000 still over budget: rows kept,
+        // columns = floor(25_000 / 200) = 125.
+        assert_eq!(cap(200, 300), (200, 125, true));
+        // Rows within limit, columns within limit, product over budget: 130 x 200 -> rows = 25_000 / 200 = 125.
+        assert_eq!(cap(130, 200), (125, 200, true));
+        // Both axes over their limits: 1_000 x 250 = 250_000 cells, scale = sqrt(25_000 / 250_000) = 0.3162,
+        // rows = floor(1_000 * 0.3162) = 316, cols = floor(25_000 / 316) = 79 (316 * 79 = 24_964).
+        assert_eq!(cap(2_000, 400), (316, 79, true));
+
+        // Symmetric matrices keep a square leading block: floor(sqrt(25_000)) = 158 (158^2 = 24_964, 159^2 = 25_281).
+        let sym = |n: usize| {
+            let mut warnings = Vec::new();
+            let out = cap_symmetric_heatmap_dimension(n, &mut warnings);
+            assert_eq!(out.1, !warnings.is_empty());
+            out
+        };
+        assert_eq!(sym(158), (158, false));
+        assert_eq!(sym(159), (158, true));
+        assert_eq!(sym(300), (158, true));
+        assert_eq!(sym(4), (4, false));
+    }
 
     #[test]
     fn dendrogram_node_conversion_guards_extreme_and_malformed_ids() {

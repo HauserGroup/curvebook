@@ -1,20 +1,18 @@
 //! Regression tests for verified scientific-chart gap audit findings (`GAP-02-01`..`GAP-02-13` and `GAP-06-03`).
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
-use std::time::Instant;
-
 use curvebook_chart::compile_graph;
 use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, BlandAltmanSpec, BracketLabelMode, BracketStyle, Cell, ClusterDistance, ClusterLinkage,
     ColorChannelMapping, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DiagnosticPlotKind, GlmFamily, GlmSpec, GraphKind, GraphSheet,
     GraphSpec, GraphicalDataObject, GroupedArrangement, GroupedTable, HeatmapLabelSpec, MultipleRowTestsSpec, MultipleVariablesTable,
-    MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NonlinearFitSpec, PairwiseBracketSpec,
-    PairwiseComparisonRecord, ParameterRule, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTabKind, RocCiMethod,
-    RocSpec, SheetId, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, SurvivalTable, TableArchetype, VariableRole, WhiskerMethod, XyTable,
+    MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec,
+    OneWayMethod, PairwiseBracketSpec, PairwiseComparisonRecord, ParameterRule, ParameterScope, ProjectDocument, ResultCell, ResultSheet,
+    ResultStatus, ResultTabKind, RocCiMethod, RocSpec, SheetId, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, SurvivalTable,
+    TableArchetype, VariableRole, WhiskerMethod, XyTable,
 };
 use curvebook_fit::execute_analysis as execute_fit_analysis;
-use curvebook_math::ConfidenceLevel;
 use curvebook_palette::{MarkerStyle, PaletteId, Rgba8};
 use curvebook_stats::multivariate::run_multivariate_analysis;
 use curvebook_stats::regression::run_glm_analysis;
@@ -363,7 +361,16 @@ fn gap_02_04_forest_pooled_diamond_off_for_covariate_tables() -> TestResult {
     gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot);
     gs.spec.primary_source_sheet_id = res.id;
     let sc_default = compile_graph(&gs, &doc)?;
-    assert!(!plain_texts(&sc_default).iter().any(|t| t.contains("Pooled")), "MLR forest plot must not render Pooled (FE) by default");
+    let default_texts = plain_texts(&sc_default);
+    assert!(!default_texts.iter().any(|t| t.contains("Pooled")), "MLR forest plot must not render Pooled (FE) by default");
+    // What IS plotted: one row per regression coefficient with its estimate and 95% CI.
+    // R 4.5.2: r <- 0:7; age <- 20 + 5*r; dose <- (r %% 3)*10 + 1
+    //          y <- 5 + 0.4*age + 1.8*dose + ifelse(r %% 2 == 0, 0.5, -0.5); m <- lm(y ~ age + dose)
+    //          coef(m) -> 5.420000 0.391111 1.791111; confint(m) -> age [0.342371, 0.439851], dose [1.719580, 1.862642]
+    for (label, ci_text) in [("Age", "0.39 [0.34, 0.44]"), ("Dose", "1.79 [1.72, 1.86]")] {
+        assert!(default_texts.iter().any(|t| t == label), "forest row label {label} missing: {default_texts:?}");
+        assert!(default_texts.iter().any(|t| t == ci_text), "forest row {label} must show {ci_text}: {default_texts:?}");
+    }
 
     gs.spec.forest_show_pooled_diamond = true;
     let sc_forced = compile_graph(&gs, &doc)?;
@@ -597,7 +604,9 @@ fn gap_02_06_contingency_manual_y_max_100_or_1_preserves_raw_counts() -> TestRes
 }
 
 #[test]
-fn gap_02_07_superimposed_layout_scales_subquadratically() -> TestResult {
+fn gap_02_07_superimposed_layout_large_slot_count_compiles() -> TestResult {
+    // Functional check only; the wall-clock budget lives in `tests/chart_sci_perf.rs`
+    // (`gap_02_07_perf_superimposed_layout_compiles_within_budget`, performance stage).
     let nrows = 2_500;
     let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 2, nrows)?;
     for r in 0..nrows {
@@ -619,10 +628,7 @@ fn gap_02_07_superimposed_layout_scales_subquadratically() -> TestResult {
                 *replicate_overlay = None;
             }
         }
-        let t0 = Instant::now();
         let scene = compile_graph(&gs, &doc)?;
-        let elapsed = t0.elapsed();
-        assert!(elapsed.as_secs_f64() < 5.0, "5000-slot {orient:?} superimposed compile took {elapsed:?}");
         assert!(all_points_finite(&scene));
     }
     Ok(())
@@ -1028,6 +1034,7 @@ fn gap_02_12_nonlinear_residuals_dataset_column_and_filtering() -> TestResult {
 
 #[test]
 fn gap_02_13_heatmap_enforces_rendering_budget_and_warns() -> TestResult {
+    // The wall-clock budget lives in `tests/chart_sci_perf.rs` (`gap_02_13_perf_capped_heatmap_compiles_within_budget`).
     let nrows = 4_000;
     let ncols = 10;
     let mut mv = MultipleVariablesTable::new(ncols, nrows)?;
@@ -1044,10 +1051,7 @@ fn gap_02_13_heatmap_enforces_rendering_budget_and_warns() -> TestResult {
     gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap);
     gs.spec.heatmap_labels = HeatmapLabelSpec { annotate_cells: true, ..HeatmapLabelSpec::default() };
 
-    let t0 = Instant::now();
     let scene = compile_graph(&gs, &doc)?;
-    let elapsed = t0.elapsed();
-    assert!(elapsed.as_secs_f64() < 5.0, "capped heatmap took too long: {elapsed:?}");
     assert!(all_points_finite(&scene));
     assert!(
         scene.warnings.iter().any(|w| w.code == "heatmap_cell_budget_exceeded"),
@@ -1061,6 +1065,69 @@ fn gap_02_13_heatmap_enforces_rendering_budget_and_warns() -> TestResult {
     );
     assert!(scene.primitives.len() <= 35_000, "heatmap primitives must stay strictly bounded, got {}", scene.primitives.len());
     Ok(())
+}
+
+/// Checks the `GAP-01-07` log10-axis Kaplan-Meier scene for three events at t = 1, 2, 3.
+fn assert_log10_km_three_event_scene(scene: &ChartScene) {
+    // Raw cohort events at t = 1, 2, 3 (n = 3, no censoring): S = 2/3, 1/3, 0 at those times
+    // (Kaplan & Meier 1958 product limit). On the log10 axis [0.5, 10] the fraction of the plot width
+    // for time t is (log10 t - log10 0.5) / (log10 10 - log10 0.5).
+    let r = scene.plot_rect_pt;
+    let x_at = |t: f64| r.x + (t.log10() - 0.5_f64.log10()) / (10.0_f64.log10() - 0.5_f64.log10()) * r.width;
+    let y_at = |s: f64| r.bottom() - s * r.height;
+    let step_pts: Vec<(f64, f64)> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Path { path, fill: None, stroke: Some(_), clip: Some(_) } if path.commands.len() >= 4 => Some(path),
+            _ => None,
+        })
+        .flat_map(|path| {
+            path.commands.iter().filter_map(|c| match *c {
+                PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => Some((pt.x, pt.y)),
+                _ => None,
+            })
+        })
+        .collect();
+    for (t, surv) in [(1.0, 2.0 / 3.0), (2.0, 1.0 / 3.0), (3.0, 0.0)] {
+        assert!(
+            step_pts.iter().any(|&(x, y)| (x - x_at(t)).abs() <= 0.01 && (y - y_at(surv)).abs() <= 0.01),
+            "KM step to S={surv} at t={t} missing on the log axis: {step_pts:?}"
+        );
+    }
+    // Major ticks sit on the two decades (1 and 10); with `minor_ticks_per_interval = 0` a Log10
+    // axis keeps the conventional 2..9 x 10^k minor ticks (`R0.36`), which are drawn shorter.
+    let x_ticks: Vec<(f64, f64)> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Path { path, clip: None, .. } => match (path.commands.first(), path.commands.get(1), path.commands.len()) {
+                (Some(PathCmd::MoveTo(a)), Some(PathCmd::LineTo(b)), 2)
+                    if (a.x - b.x).abs() < 1e-9 && (a.y - r.bottom()).abs() < 1e-9 && b.y > a.y =>
+                {
+                    Some((a.x, b.y - a.y))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    let major_len = x_ticks.iter().map(|&(_, len)| len).fold(0.0_f64, f64::max);
+    let mut majors: Vec<f64> = x_ticks.iter().filter(|&&(_, len)| (len - major_len).abs() < 1e-9).map(|&(x, _)| x).collect();
+    majors.sort_by(f64::total_cmp);
+    assert_eq!(majors.len(), 2, "major decade ticks: {x_ticks:?}");
+    assert!((majors[0] - x_at(1.0)).abs() <= 0.01 && (majors[1] - x_at(10.0)).abs() <= 0.01, "{majors:?}");
+    let minor_slots: Vec<f64> = [0.1, 1.0, 10.0].iter().flat_map(|&d| (2..=9).map(move |m| x_at(f64::from(m) * d))).collect();
+    for &(x, len) in x_ticks.iter().filter(|&&(_, len)| (len - major_len).abs() >= 1e-9) {
+        assert!(len < major_len, "minor ticks are shorter than majors: {x_ticks:?}");
+        assert!(minor_slots.iter().any(|&slot| (slot - x).abs() <= 0.01), "minor tick at x={x} is not on a 2..9 x 10^k position: {x_ticks:?}");
+    }
+    assert!(x_ticks.len() > majors.len(), "conventional log minor ticks are drawn: {x_ticks:?}");
+    // Number at risk: all 3 subjects at t = 1 (risk set before the first event) and none at t = 10.
+    let texts_log = text_positions(scene);
+    let nar_row_y = texts_log.iter().find(|(t, _, _)| t == "Number at risk").map(|&(_, _, y)| y).expect("number-at-risk header");
+    let at_risk = |want: &str, t: f64| texts_log.iter().any(|(s, x, y)| s == want && (x - x_at(t)).abs() <= 0.01 && *y > nar_row_y);
+    assert!(at_risk("3", 1.0) && at_risk("0", 10.0), "number at risk must read 3 at t=1 and 0 at t=10: {texts_log:?}");
 }
 
 #[test]
@@ -1208,6 +1275,8 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
     let sc_hm_cl = compile_graph(&g_hm_cl, &doc)?;
     assert!(sc_hm_cl.warnings.iter().any(|w| w.code == "pending_analysis_result"), "dirty clustering heatmap: {:?}", sc_hm_cl.warnings);
     assert!(!plain_texts(&sc_hm_cl).iter().any(|t| t.contains("Manhattan")), "dirty clustering cue must not leak into heatmap");
+    // ... and the chart must not silently substitute its own Euclidean/Ward clustering either.
+    assert_heatmap_rows_unclustered_in_table_order(&sc_hm_cl, 5);
 
     // 7. Dirty Volcano MultipleRowTTests
     let mut grp_v = GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 2)?;
@@ -1280,6 +1349,386 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
     g_surv_log.spec.x_axis.segments[0].minor_ticks_per_interval = 0;
     let sc_surv_log = compile_graph(&g_surv_log, &doc)?;
     assert!(all_points_finite(&sc_surv_log));
-    let _ = ConfidenceLevel::DEFAULT_95;
+    assert_log10_km_three_event_scene(&sc_surv_log);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Delta audit of 14b823d.. (R0.36): heatmap clustering/symmetry, volcano units, contingency
+// keyword matching, duplicate KM cohort titles, and the raw-table pooled forest diamond.
+// ---------------------------------------------------------------------------------------------
+
+/// `(text, anchor x, anchor y)` for every text primitive, in emission order.
+fn text_positions(scene: &ChartScene) -> Vec<(String, f64, f64)> {
+    scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Text(t) => Some((t.rich.plain_text(), t.anchor_pt.x, t.anchor_pt.y)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `(row number, y)` of the default `R<n>` heatmap row labels, in emission order.
+fn heatmap_row_label_ys(scene: &ChartScene) -> Vec<(usize, f64)> {
+    text_positions(scene).into_iter().filter_map(|(t, _, y)| t.strip_prefix('R').and_then(|n| n.parse::<usize>().ok()).map(|n| (n, y))).collect()
+}
+
+/// Dendrogram strokes use the dedicated dark-grey `rgb(65, 70, 80)` linkage colour.
+fn has_dendrogram(scene: &ChartScene) -> bool {
+    scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: None, stroke: Some(s), .. } if s.color == Rgba8::rgb(65, 70, 80)))
+}
+
+/// No dendrogram, and row labels `R1..R{n}` drawn top to bottom in table order.
+fn assert_heatmap_rows_unclustered_in_table_order(scene: &ChartScene, n: usize) {
+    assert!(!has_dendrogram(scene), "heatmap must not be silently (re-)clustered");
+    let rows = heatmap_row_label_ys(scene);
+    assert_eq!(rows.iter().map(|&(r, _)| r).collect::<Vec<_>>(), (1..=n).collect::<Vec<_>>(), "table order R1..R{n}");
+    assert!(rows.windows(2).all(|w| w[0].1 < w[1].1), "rows must stay in table order top to bottom");
+}
+
+/// Deterministic, non-constant pseudo-random `MultipleVariables` matrix `V0..V{ncols-1}` x `nrows`.
+fn pseudo_random_mv_sheet(id: &str, nrows: usize, ncols: usize) -> TestResult<DataSheet> {
+    let mut mv = MultipleVariablesTable::new(ncols, nrows)?;
+    for c in 0..ncols {
+        mv.variables[c].title = format!("V{c}");
+        for r in 0..nrows {
+            mv.variables[c].cells[r] = Cell::number(((r * 7_919 + c * 104_729 + r * c * 31) % 1_009) as f64 / 10.0);
+        }
+    }
+    Ok(DataSheet::new(SheetId::new(id), id, TableArchetype::MultipleVariables(mv))?)
+}
+
+fn manhattan_complete_clustering(ds: &DataSheet, res_id: &str) -> TestResult<ResultSheet> {
+    let cl_spec = MultivariateSpec::Clustering {
+        distance: ClusterDistance::Manhattan,
+        linkage: ClusterLinkage::Complete,
+        k_means_k: Some(2),
+        k_sweep_max: None,
+    };
+    let an = AnalysisSpec::new(SheetId::new(res_id), ds.id.clone(), AnalysisKind::Multivariate(cl_spec.clone()))?;
+    Ok(run_multivariate_analysis(ds, &an, &cl_spec)?)
+}
+
+fn heatmap_graph_for(ds: &DataSheet, id: &str) -> TestResult<GraphSheet> {
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new(id), ds)?;
+    gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap);
+    gs.spec.primary_source_sheet_id = ds.id.clone();
+    Ok(gs)
+}
+
+#[test]
+fn delta_heatmap_truncation_never_silently_reclusters_user_clustering() -> TestResult {
+    // 1. Column-only truncation (100 x 300 -> 100 x 250): rows are intact, so the user's own
+    //    Manhattan/Complete dendrogram (computed on all 300 variables) still maps one-to-one onto the
+    //    drawn rows and is shown with a cue that says so. To prove the stored merges are used (and not a
+    //    chart-side Euclidean/Ward re-clustering), the stored tree is replaced by a valid chain whose
+    //    depth-first leaf order is the exact reverse of table order:
+    //      step 0 joins leaves 99 and 98, step s >= 1 joins node s-1 with leaf 98-s,
+    //    so the left-first traversal visits leaves 99, 98, ..., 0.
+    let n = 100;
+    let ds_cols = pseudo_random_mv_sheet("hm-wide", n, 300)?;
+    let mut res_wide = manhattan_complete_clustering(&ds_cols, "res-cl-wide")?;
+    let dendro = res_wide.tabs.iter_mut().find(|t| t.id == "hierarchical-dendrogram").expect("dendrogram tab");
+    let num = |value: f64| ResultCell::Number { value, prefix: None, units: None };
+    dendro.rows = (0..n - 1)
+        .map(|s| {
+            let (left, right) = if s == 0 { (-(n as f64), -((n - 1) as f64)) } else { ((s - 1) as f64, -((n - 1 - s) as f64)) };
+            vec![num(left), num(right), num((s + 1) as f64), num((s + 2) as f64)]
+        })
+        .collect();
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds_cols.clone())?;
+    doc.add_result_sheet(res_wide)?;
+    let sc_wide = compile_graph(&heatmap_graph_for(&ds_cols, "g-hm-wide")?, &doc)?;
+    assert!(sc_wide.warnings.iter().any(|w| w.code == "heatmap_cell_budget_exceeded"), "{:?}", sc_wide.warnings);
+    assert!(
+        plain_texts(&sc_wide).iter().any(|t| t == "Clustered: Manhattan / Complete (on all 300 variables; first 250 shown)"),
+        "column-truncated heatmap must keep the user's clustering cue: {:?}",
+        plain_texts(&sc_wide).iter().filter(|t| t.starts_with("Clustered")).collect::<Vec<_>>()
+    );
+    assert!(has_dendrogram(&sc_wide), "user dendrogram must be drawn");
+    let rows_wide = heatmap_row_label_ys(&sc_wide);
+    assert_eq!(rows_wide.len(), n);
+    let mut by_row: Vec<(usize, f64)> = rows_wide.clone();
+    by_row.sort_by_key(|&(r, _)| r);
+    assert!(
+        by_row.windows(2).all(|w| w[0].1 > w[1].1),
+        "rows must follow the stored dendrogram (reverse table order), not a chart-side re-clustering: {:?}",
+        &rows_wide[..5]
+    );
+
+    // 2. Row truncation (130 x 200 = 26_000 cells -> 125 x 200): the user's dendrogram no longer maps
+    //    onto the drawn rows, so it is not shown, nothing is auto-clustered, and a warning says why.
+    let ds_rows = pseudo_random_mv_sheet("hm-tall", 130, 200)?;
+    let res_tall = manhattan_complete_clustering(&ds_rows, "res-cl-tall")?;
+    let mut doc_tall = ProjectDocument::default();
+    doc_tall.add_data_sheet(ds_rows.clone())?;
+    doc_tall.add_result_sheet(res_tall)?;
+    let sc_tall = compile_graph(&heatmap_graph_for(&ds_rows, "g-hm-tall")?, &doc_tall)?;
+    assert!(sc_tall.warnings.iter().any(|w| w.code == "heatmap_clustering_not_shown_truncated"), "{:?}", sc_tall.warnings);
+    assert!(!plain_texts(&sc_tall).iter().any(|t| t.starts_with("Clustered")), "no clustering cue for an unclustered display");
+    assert_heatmap_rows_unclustered_in_table_order(&sc_tall, 125);
+
+    // 3. The same truncated matrix without any clustering result is not auto-clustered either.
+    let mut doc_raw = ProjectDocument::default();
+    doc_raw.add_data_sheet(ds_rows.clone())?;
+    let sc_raw = compile_graph(&heatmap_graph_for(&ds_rows, "g-hm-raw")?, &doc_raw)?;
+    assert!(!has_dendrogram(&sc_raw), "a partial matrix must not get a chart-side default dendrogram");
+    Ok(())
+}
+
+#[test]
+fn delta_correlation_heatmap_keeps_symmetric_axes_and_square_cap() -> TestResult {
+    // Pearson correlation of four variables; Ward clustering of the matrix rows would reorder them
+    // (R 4.5.2: hclust(dist(cor(m)), "ward.D2")$order = 2 4 1 3), scrambling the diagonal.
+    let cols: [[f64; 6]; 4] =
+        [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6.0, 5.0, 4.0, 3.0, 2.0, 1.0], [1.0, 2.0, 3.0, 4.0, 5.0, 7.0], [2.0, 1.0, 4.0, 3.0, 6.0, 5.0]];
+    let mut mv = MultipleVariablesTable::new(4, 6)?;
+    for (c, vals) in cols.iter().enumerate() {
+        mv.variables[c].title = format!("V{c}");
+        for (r, &v) in vals.iter().enumerate() {
+            mv.variables[c].cells[r] = Cell::number(v);
+        }
+    }
+    let ds = DataSheet::new(SheetId::new("corr-4"), "Corr4", TableArchetype::MultipleVariables(mv))?;
+    let corr_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false };
+    let an = AnalysisSpec::new(SheetId::new("res-corr-4"), ds.id.clone(), AnalysisKind::Multivariate(corr_spec.clone()))?;
+    let res = run_multivariate_analysis(&ds, &an, &corr_spec)?;
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone())?;
+    doc.add_result_sheet(res.clone())?;
+    let mut gs = heatmap_graph_for(&ds, "g-corr-4")?;
+    gs.spec.primary_source_sheet_id = res.id;
+    gs.spec.heatmap_labels = HeatmapLabelSpec { annotate_cells: true, ..HeatmapLabelSpec::default() };
+    let scene = compile_graph(&gs, &doc)?;
+    assert!(!has_dendrogram(&scene), "a correlation matrix keeps the variable order (no default clustering)");
+
+    // Each drawn row emits its four cell annotations followed by its row label; column labels follow.
+    let texts = plain_texts(&scene);
+    let var_idx: Vec<usize> = texts.iter().enumerate().filter(|(_, t)| ["V0", "V1", "V2", "V3"].contains(&t.as_str())).map(|(i, _)| i).collect();
+    assert_eq!(var_idx.len(), 8, "four row labels + four column labels: {texts:?}");
+    let row_labels: Vec<&str> = var_idx[..4].iter().map(|&i| texts[i].as_str()).collect();
+    let col_labels: Vec<&str> = var_idx[4..].iter().map(|&i| texts[i].as_str()).collect();
+    assert_eq!(row_labels, ["V0", "V1", "V2", "V3"]);
+    assert_eq!(col_labels, ["V0", "V1", "V2", "V3"]);
+    // R 4.5.2: round(cor(cbind(V0 = 1:6, V1 = 6:1, V2 = c(1,2,3,4,5,7), V3 = c(2,1,4,3,6,5))), 4)
+    let expected = [
+        ["1", "-1", "0.9897", "0.8286"],
+        ["-1", "1", "-0.9897", "-0.8286"],
+        ["0.9897", "-0.9897", "1", "0.7918"],
+        ["0.8286", "-0.8286", "0.7918", "1"],
+    ];
+    for (k, &label_at) in var_idx[..4].iter().enumerate() {
+        let cells: Vec<&str> = texts[label_at - 4..label_at].iter().map(String::as_str).collect();
+        assert_eq!(cells, expected[k], "row {k} of the drawn matrix must be r(V{k}, V0..V3) with the unit diagonal on the diagonal");
+    }
+
+    // A 300-variable correlation matrix is capped to its leading 158 x 158 principal submatrix
+    // (floor(sqrt(25_000)) = 158), not to a 300 x 83 row-major slab.
+    let n_vars = 300;
+    let mut big = MultipleVariablesTable::new(n_vars, 5)?;
+    for c in 0..n_vars {
+        big.variables[c].title = format!("W{c}");
+        for r in 0..5 {
+            big.variables[c].cells[r] = Cell::number(((r * (c + 3)) % 11) as f64 + (r as f64) * 0.5);
+        }
+    }
+    let ds_big = DataSheet::new(SheetId::new("corr-300"), "Corr300", TableArchetype::MultipleVariables(big))?;
+    let an_big = AnalysisSpec::new(SheetId::new("res-corr-300"), ds_big.id.clone(), AnalysisKind::Multivariate(corr_spec.clone()))?;
+    let res_big = run_multivariate_analysis(&ds_big, &an_big, &corr_spec)?;
+    let mut doc_big = ProjectDocument::default();
+    doc_big.add_data_sheet(ds_big.clone())?;
+    doc_big.add_result_sheet(res_big.clone())?;
+    let mut gs_big = heatmap_graph_for(&ds_big, "g-corr-300")?;
+    gs_big.spec.primary_source_sheet_id = res_big.id;
+    let sc_big = compile_graph(&gs_big, &doc_big)?;
+    let cap_warning = sc_big.warnings.iter().find(|w| w.code == "heatmap_cell_budget_exceeded").expect("cap warning");
+    assert!(cap_warning.message.contains("158x158"), "{}", cap_warning.message);
+    let tiles = sc_big
+        .primitives
+        .iter()
+        .filter(|p| {
+            matches!(p, ScenePrimitive::Path { stroke: Some(s), clip: None, .. }
+                if s.color == Rgba8::rgba(255, 255, 255, 160) || s.color == Rgba8::rgba(170, 176, 186, 180))
+        })
+        .count();
+    assert_eq!(tiles, 158 * 158, "square cap draws exactly 158 x 158 tiles");
+    let big_texts = plain_texts(&sc_big);
+    assert_eq!(big_texts.iter().filter(|t| *t == "W157").count(), 2, "W157 labels both axes");
+    assert!(!big_texts.iter().any(|t| t == "W158"), "variables past the square cap must not appear on either axis");
+    Ok(())
+}
+
+#[test]
+fn delta_volcano_non_mr_pairwise_estimates_use_difference_units() -> TestResult {
+    // One-way ANOVA with Dunnett vs control: pairwise `estimate_diff` values are mean differences
+    // (+0.5 and -0.4), never log2 fold changes, so the volcano must not apply +/-1 log2FC cuts.
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4)?;
+    let groups = [("Control", [10.0, 10.1, 9.9, 10.0]), ("Up", [10.5, 10.6, 10.4, 10.5]), ("Down", [9.6, 9.7, 9.5, 9.6])];
+    for (c, (title, vals)) in groups.iter().enumerate() {
+        col.data_sets[c].title = String::from(*title);
+        for (r, &v) in vals.iter().enumerate() {
+            col.data_sets[c].cells[r][0] = Cell::number(v);
+        }
+    }
+    let ds = DataSheet::new(SheetId::new("anova-vol"), "AnovaVol", TableArchetype::Column(col))?;
+    let an = AnalysisSpec::new(
+        SheetId::new("res-anova-vol"),
+        ds.id.clone(),
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            method: OneWayMethod::OrdinaryAnova,
+            multiplicity: MultiplicitySpec {
+                method: MultiplicityMethod::Dunnett { control_column: 0 },
+                threshold: 0.05,
+                report_confidence_intervals: false,
+            },
+            ..OneWayAnovaSpec::default()
+        }),
+    )?;
+    let res = curvebook_stats::run_analysis(&ds, &an)?;
+    let diffs: Vec<f64> = res.pairwise_comparisons.iter().filter_map(|p| p.estimate_diff).collect();
+    assert_eq!(diffs.len(), 2);
+    assert!(diffs.iter().all(|d| d.abs() < 1.0) && res.pairwise_comparisons.iter().all(|p| p.significant), "{:?}", res.pairwise_comparisons);
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone())?;
+    doc.add_result_sheet(res.clone())?;
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-anova-vol"), &ds)?;
+    gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Volcano);
+    gs.spec.primary_source_sheet_id = res.id;
+    let scene = compile_graph(&gs, &doc)?;
+
+    let texts = plain_texts(&scene);
+    assert!(texts.iter().any(|t| t == "Difference (A - B)"), "x axis must be titled as a difference: {texts:?}");
+    assert!(!texts.iter().any(|t| t.contains("log2")), "no log2FC wording for mean differences: {texts:?}");
+    assert_eq!(scene.plotted_points.len(), 2);
+    assert!(scene.plotted_points.iter().all(|p| p.value_summary.starts_with("Difference=")), "{:?}", scene.plotted_points);
+    // Significant |diff| < 1 points are coloured up/down instead of greyed out by a +/-1 log2FC cut.
+    let has_up =
+        scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(f), clip: Some(_), .. } if f.color == Rgba8::rgb(213, 94, 0)));
+    let has_down =
+        scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(f), clip: Some(_), .. } if f.color == Rgba8::rgb(0, 114, 178)));
+    assert!(has_up && has_down, "significant mean differences must be coloured as up and down");
+    Ok(())
+}
+
+fn min_filled_clipped_y(scene: &ChartScene) -> f64 {
+    scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Path { path, fill: Some(_), clip: Some(_), .. } => path
+                .commands
+                .iter()
+                .filter_map(|c| match *c {
+                    PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) => Some(pt.y),
+                    _ => None,
+                })
+                .reduce(f64::min),
+            _ => None,
+        })
+        .reduce(f64::min)
+        .expect("filled bars")
+}
+
+#[test]
+fn delta_contingency_percent_title_containing_count_substring_still_normalizes() -> TestResult {
+    let mut cont = ContingencyTable::new(2, 2)?;
+    cont.data_sets[0].cells[0][0] = Cell::number(15.0);
+    cont.data_sets[1].cells[0][0] = Cell::number(25.0); // row sum 40
+    cont.data_sets[0].cells[1][0] = Cell::number(10.0);
+    cont.data_sets[1].cells[1][0] = Cell::number(30.0); // row sum 40
+    let ds = DataSheet::new(SheetId::new("cont-enc"), "Encounters", TableArchetype::Contingency(cont))?;
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone())?;
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-cont-enc"), &ds)?;
+    gs.spec.kind = GraphKind::Contingency;
+    gs.spec.grouped_arrangement = GroupedArrangement::Stacked;
+    gs.spec.y_axis.segments[0].min = Some(0.0);
+    gs.spec.y_axis.segments[0].max = Some(100.0);
+
+    // "encounters" contains "count" but is not the word "count": rows normalize to 100% (plot top).
+    gs.spec.y_axis.title = String::from("Percent of encounters (%)");
+    let sc_pct = compile_graph(&gs, &doc)?;
+    assert!(
+        (min_filled_clipped_y(&sc_pct) - sc_pct.plot_rect_pt.y).abs() <= 1.0,
+        "percent title must stack rows to 100% at the plot top y={}",
+        sc_pct.plot_rect_pt.y
+    );
+    // The word "Count" keeps raw counts: stacked total 40 on [0, 100] sits at 40% of the plot height.
+    gs.spec.y_axis.title = String::from("Count");
+    let sc_count = compile_graph(&gs, &doc)?;
+    let expected_y_40 = sc_count.plot_rect_pt.bottom() - 0.40 * sc_count.plot_rect_pt.height;
+    assert!((min_filled_clipped_y(&sc_count) - expected_y_40).abs() <= 1.0, "Count title must keep raw counts");
+    Ok(())
+}
+
+#[test]
+fn delta_km_duplicate_cohort_titles_keep_separate_censor_schedules() -> TestResult {
+    // Two cohorts that share the title "Control". Cohort 1: events at t=1, 2 and one subject censored
+    // at t=6 (schedule rows (1, n=3, d=1), (2, 2, 1), (6, 1, 0): c = n - d - n_next = 1 at t=6).
+    // Cohort 2: six events at t=1, 2, 3, 4, 5, 7 (no censoring). Exactly one censor tick, at t=6.
+    let cohort1 = [(1.0, 1.0), (2.0, 1.0), (6.0, 0.0)];
+    let cohort2 = [(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0), (5.0, 1.0), (7.0, 1.0)];
+    let mut surv = SurvivalTable::new(2, cohort1.len() + cohort2.len())?;
+    surv.cohorts[0].title = String::from("Control");
+    surv.cohorts[1].title = String::from("Control");
+    for (r, &(t, st)) in cohort1.iter().enumerate() {
+        surv.times[r] = Cell::number(t);
+        surv.cohorts[0].cells[r][0] = Cell::number(st);
+    }
+    for (k, &(t, st)) in cohort2.iter().enumerate() {
+        let r = cohort1.len() + k;
+        surv.times[r] = Cell::number(t);
+        surv.cohorts[1].cells[r][0] = Cell::number(st);
+    }
+    let ds = DataSheet::new(SheetId::new("surv-dup"), "SurvDup", TableArchetype::Survival(surv))?;
+    let km_spec = km_spec_default();
+    let mut an = AnalysisSpec::new(SheetId::new("km-dup"), ds.id.clone(), AnalysisKind::Survival(km_spec.clone()))?;
+    an.selected_data_sets = vec![0, 1];
+    let res = run_survival_analysis(&ds, &an, &km_spec)?;
+    assert_eq!(res.fitted_curves.len(), 2);
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone())?;
+    doc.add_result_sheet(res.clone())?;
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-km-dup"), &ds)?;
+    gs.spec.kind = GraphKind::Survival;
+    gs.spec.primary_source_sheet_id = res.id;
+    gs.spec.x_axis.segments[0].min = Some(0.0);
+    gs.spec.x_axis.segments[0].max = Some(10.0);
+    let scene = compile_graph(&gs, &doc)?;
+    let ticks = censor_tick_x_coords(&scene);
+    assert_eq!(ticks.len(), 1, "one censored subject -> one tick, got {ticks:?}");
+    let expected_x_t6 = scene.plot_rect_pt.x + 0.6 * scene.plot_rect_pt.width;
+    assert!((ticks[0] - expected_x_t6).abs() <= 0.5, "censor tick x={} must sit at t=6 (expected {expected_x_t6})", ticks[0]);
+    Ok(())
+}
+
+#[test]
+fn delta_forest_raw_table_pooled_diamond_states_assumed_95_ci() -> TestResult {
+    // Two studies entered as (estimate, lower, upper) with SE_1 = 1 and SE_2 = 0.5 at 95%
+    // (half-widths z * SE with z = qnorm(0.975)). Inverse-variance FE pool (Borenstein et al. 2009,
+    // ch. 11): M = (1*2 + 4*1) / 5 = 1.2, 95% CI 1.2 -/+ z sqrt(1/5) = [0.32, 2.08].
+    // R 4.5.2: w <- c(1, 4); M <- sum(w * c(2, 1)) / sum(w); M + c(-1, 1) * qnorm(0.975) * sqrt(1 / sum(w))
+    let z = 1.959_963_984_540_054;
+    let mut grp = GroupedTable::new(SubcolumnMode::UpperLowerLimits, 1, 2)?;
+    grp.row_titles = vec![String::from("Study 1"), String::from("Study 2")];
+    grp.data_sets[0].cells[0] = vec![Cell::number(2.0), Cell::number(2.0 - z), Cell::number(2.0 + z)];
+    grp.data_sets[0].cells[1] = vec![Cell::number(1.0), Cell::number(1.0 - 0.5 * z), Cell::number(1.0 + 0.5 * z)];
+    let ds = DataSheet::new(SheetId::new("fe-raw"), "FeRaw", TableArchetype::Grouped(grp))?;
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds.clone())?;
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-fe-raw"), &ds)?;
+    gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot);
+    gs.spec.forest_show_pooled_diamond = true;
+    let scene = compile_graph(&gs, &doc)?;
+    let texts = plain_texts(&scene);
+    assert!(texts.iter().any(|t| t == "1.20 [0.32, 2.08]"), "pooled FE estimate and CI: {texts:?}");
+    assert!(
+        texts.iter().any(|t| t == "Pooled (FE, 95% CIs assumed)"),
+        "raw tables carry no CI level, so the pooled row must state the 95% assumption: {texts:?}"
+    );
+    assert!(scene.warnings.is_empty(), "an ordinary raw-table forest plot compiles without warnings: {:?}", scene.warnings);
     Ok(())
 }

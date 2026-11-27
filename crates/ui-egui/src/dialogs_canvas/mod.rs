@@ -211,6 +211,11 @@ pub struct CanvasDialogState {
     pub canvas: CanvasToolState,
     pub active_dialog: ActiveDialog,
     pub status_banner: Option<String>,
+    /// Non-fatal warnings from the last figure export, shown by the shell status footer until
+    /// dismissed or replaced (`GAP-06-02`, `R0.36`). Kept apart from `status_banner`, which the
+    /// Welcome hub reads as an open-file error.
+    #[serde(default)]
+    pub figure_export_warning: Option<String>,
     pub active_inspector: ActiveInspector,
     pub analyze: AnalyzeDialogState,
     pub edit_params: EditAnalysisParametersState,
@@ -284,6 +289,7 @@ impl Default for CanvasDialogState {
             canvas: CanvasToolState::default(),
             active_dialog: ActiveDialog::default(),
             status_banner: None,
+            figure_export_warning: None,
             active_inspector: ActiveInspector::default(),
             analyze: AnalyzeDialogState::default(),
             edit_params: EditAnalysisParametersState::default(),

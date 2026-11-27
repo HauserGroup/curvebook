@@ -122,7 +122,7 @@ fn gap_06_02_desktop_native_figure_export_surfaces_pending_regression_warnings()
     rt.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
     let wid = rt.open_window_with_session(dirty_session, ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
 
-    // 1. Direct desktop_host dispatch returns warnings in command_result AND sets UiApp status_banner.
+    // 1. Direct desktop_host dispatch returns warnings in command_result AND sets the UiApp figure-export notice.
     let outcome = rt.dispatch_native_file_command(wid, "export.svg")?.expect("handled");
     assert_eq!(outcome.action, "native_file_dialog.completed:export.svg");
     assert!(out_svg.exists(), "SVG file should be written");
@@ -136,11 +136,12 @@ fn gap_06_02_desktop_native_figure_export_surfaces_pending_regression_warnings()
         warnings.iter().any(|w| w.as_str().is_some_and(|s| s.contains("pending_regression_result"))),
         "expected pending_regression_result warning, got {warnings:?}"
     );
-    let ui_banner = rt.window(wid)?.app().canvas_dialogs.status_banner.clone();
+    let ui_notice = rt.window(wid)?.app().canvas_dialogs.figure_export_warning.clone();
     assert!(
-        ui_banner.as_deref().is_some_and(|s| s.contains("pending_regression_result")),
-        "expected UiApp status_banner to surface export warning, got {ui_banner:?}"
+        ui_notice.as_deref().is_some_and(|s| s.contains("pending_regression_result")),
+        "expected UiApp figure_export_warning to surface export warning, got {ui_notice:?}"
     );
+    assert!(rt.window(wid)?.app().canvas_dialogs.status_banner.is_none(), "export warnings must not masquerade as an open-file error");
 
     // 2. Through CurveBookNativeApp menu action, native toast `status_banner()` surfaces the warning too.
     let out_svg_2 = tmp.child("dirty_fit_toast.svg");
@@ -156,6 +157,82 @@ fn gap_06_02_desktop_native_figure_export_surfaces_pending_regression_warnings()
         "expected desktop toast status_banner to surface export warning, got {:?}",
         h.app.status_banner()
     );
+    // 3. `R0.36`: the desktop shows the warning once, in its toast, not again as the shared
+    //    shell's status-footer notice.
+    assert!(h.app.runtime().window(wid)?.app().canvas_dialogs.figure_export_warning.is_none(), "desktop must adopt the shell notice");
+    assert!(
+        h.app.inspect_meta().find_by_widget_id("status.figure_export_warning").is_none(),
+        "desktop must not render the shell footer notice in addition to its toast"
+    );
+    Ok(())
+}
+
+/// `R0.36`: File › Import / File › Open of an interchange file while another dialog is open must
+/// neither replace the document nor disturb the pending dialog. The macOS menu bar stays live
+/// while an in-window modal is open, so the host refuses the import instead of skipping the
+/// replace-or-merge prompt.
+#[test]
+fn r0_36_import_with_open_modal_never_replaces_document_or_pending_prompt() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDirGuard::new("r0-36-import-modal")?;
+    let first = tmp.child("first.pzfx");
+    let second = tmp.child("second.pzfx");
+    write_pzfx_fixture(&first, "First PZFX")?;
+    write_pzfx_fixture(&second, "Second PZFX")?;
+
+    let (mut rt, wid, saved) = saved_occupied_runtime(tmp.path(), false)?;
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    rt.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
+    rt.window_mut(wid)?.execute_and_journal("sheet.rename", json!({ "sheet_id": "base-assay", "title": "Unsaved Work" }))?;
+
+    // A pending replace-or-merge prompt for `first.pzfx`.
+    let dropped = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: first.clone() })?;
+    assert_eq!(dropped.action, "file.dropped_confirm_import_mode:table.importPzfx");
+    let first_str = first.to_string_lossy().into_owned();
+    let prompt_intact = |rt: &DesktopHostRuntime| -> Result<bool, Box<dyn std::error::Error>> {
+        Ok(matches!(
+            &rt.window(wid)?.app().canvas_dialogs.active_dialog,
+            ActiveDialog::ImportProjectMode { command_id, path, has_unsaved_changes: true } if command_id == "table.importPzfx" && *path == first_str
+        ))
+    };
+    let document_intact = |rt: &DesktopHostRuntime| -> Result<bool, Box<dyn std::error::Error>> {
+        let win = rt.window(wid)?;
+        let titles: Vec<&str> = win.app().document().data_sheets.iter().map(|s| s.title.as_str()).collect();
+        Ok(titles == ["Unsaved Work"] && win.app().session().file_path() == Some(saved.as_path()) && win.has_unsaved_changes())
+    };
+    assert!(prompt_intact(&rt)?);
+
+    // 1. File › Import through the host (native picker path): refused before the picker opens.
+    adapter.push_response("table.importPzfx", Some(second.clone()));
+    let err = rt.dispatch_native_file_command(wid, "table.importPzfx").expect_err("import behind an open dialog must be refused");
+    assert!(err.contains("dialog is open"), "{err}");
+    assert!(adapter.requests().is_empty(), "no file picker may open while a dialog is open");
+    assert!(document_intact(&rt)?, "File › Import must not replace the document while a dialog is open");
+    assert!(prompt_intact(&rt)?, "the pending prompt must stay open");
+
+    // 2. File › Open / Welcome hub with an explicit interchange path: refused the same way.
+    let err = rt
+        .dispatch_native_file_command_with_params(wid, "project.open", &json!({ "path": second.to_string_lossy() }))
+        .expect_err("open of an interchange file behind an open dialog must be refused");
+    assert!(err.contains("dialog is open"), "{err}");
+    assert!(document_intact(&rt)? && prompt_intact(&rt)?);
+    assert_eq!(rt.window_count(), 1);
+
+    // 3. The same through the desktop menu dispatch used by the macOS native menu bar: the refusal
+    //    is shown to the user in the desktop status banner.
+    let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
+    h.settle(2);
+    let ctx = h.ctx.clone();
+    h.app.trigger_menu_action(&ctx, "table.importPzfx");
+    h.settle(2);
+    assert!(h.app.status_banner().is_some_and(|s| s.contains("dialog is open")), "got {:?}", h.app.status_banner());
+    assert!(adapter.requests().is_empty());
+    assert!(document_intact(h.app.runtime())? && prompt_intact(h.app.runtime())?);
+
+    // 4. Once the prompt is answered, the answer still imports (the explicit `merge` path is not blocked).
+    h.app.runtime_mut().dispatch_native_file_command_with_params(wid, "table.importPzfx", &json!({ "path": first_str, "merge": true }))?;
+    let win = h.app.runtime().window(wid)?;
+    assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::None));
+    assert_eq!(win.app().document().data_sheets.len(), 2, "merge answer must add the imported sheet");
     Ok(())
 }
 
@@ -345,5 +422,43 @@ fn gap_07_05_all_tables_export_handles_unicode_long_titles_reserved_names_and_di
     assert!(replace_err.contains("directory"));
     assert_eq!(fs::read(&sentinel)?, b"DO_NOT_OVERWRITE", "earlier file must stay untouched when batch fails");
     assert!(!conflict_dir.join("table_CON.csv").exists(), "later file must not be partially created");
+    Ok(())
+}
+
+/// `R0.36`: tables titled with NFC and NFD spellings of one name export to two different files
+/// (APFS treats both spellings as one file name), and both files keep their own table's data.
+#[test]
+fn r0_36_all_tables_export_keeps_nfc_and_nfd_titles_apart() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDirGuard::new("r0-36-nfc-nfd")?;
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    rt.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
+    let wid = rt.open_window(None, ViewportMetrics::new(1280.0, 800.0, 1.0))?;
+    for (idx, title) in ["Caf\u{e9}", "Cafe\u{301}"].into_iter().enumerate() {
+        let sid = format!("t-{idx}");
+        rt.window_mut(wid)?.execute_and_journal("sheet.createData", json!({ "sheet_id": sid, "title": title, "auto_graph": false }))?;
+        rt.window_mut(wid)?.execute_and_journal("table.setCell", json!({ "sheet_id": sid, "row": 0, "col": 0, "value": 1000.0 + idx as f64 }))?;
+    }
+    let out_dir = tmp.child("export-nfc-nfd");
+    adapter.push_response("ui.export.allTablesCsv", Some(out_dir.clone()));
+    let out = rt
+        .dispatch_native_file_command_with_params(wid, "ui.export.allTablesCsv", &json!({ "delimiter": ",", "decimal_separator": "." }))?
+        .expect("exported");
+    assert_eq!(out.action, "native_file_dialog.completed:ui.export.allTablesCsv");
+    let exported: Vec<PathBuf> = out
+        .command_result
+        .as_ref()
+        .and_then(|v| v.get("exported_files"))
+        .and_then(serde_json::Value::as_array)
+        .expect("exported_files")
+        .iter()
+        .map(|v| PathBuf::from(v.as_str().expect("path")))
+        .collect();
+    assert_eq!(exported.len(), 2);
+    assert!(exported[1].file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("-2.csv")), "second spelling needs a suffix: {exported:?}");
+    let first = fs::read_to_string(&exported[0])?;
+    let second = fs::read_to_string(&exported[1])?;
+    assert!(first.contains("1000") && !first.contains("1001"), "first table's file was overwritten: {first:?}");
+    assert!(second.contains("1001"), "second table's data missing: {second:?}");
     Ok(())
 }

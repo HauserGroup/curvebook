@@ -58,6 +58,7 @@ pulldown-cmark = { version = "0.13", default-features = false }
 read-fonts = "0.41"
 rfd = "0.18"
 skrifa = "0.44"
+unicode-normalization = "0.1"
 wasm-bindgen = "=0.2.130"
 web-sys = { version = "0.3", default-features = false, features = ["Window"] }
 winresource = "0.1"

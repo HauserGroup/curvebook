@@ -1,8 +1,6 @@
 //! Regression tests for `GAP-01-01` .. `GAP-01-08` (chart core, equation box, scales, XY overlays, fit summary).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::time::Instant;
-
 use curvebook_chart::equation_box::render_tex_equation_box;
 use curvebook_chart::fit_summary::{FitSummaryPlacement, FitSummarySpec, extract_fit_summary_entries};
 use curvebook_chart::scales::{
@@ -120,11 +118,9 @@ fn gap_01_02_adversarial_unmatched_delims_and_tags_parse_in_linear_time() {
     ];
 
     for (label, payload) in &cases {
-        let start = Instant::now();
+        // Wall-clock bound lives in `tests/chart_perf.rs` (performance-filtered binary).
         let mut scene = ChartScene::new("g-adv", *label, 400.0, 200.0, None);
         render_tex_equation_box(&mut scene, DocRectPt::new(10.0, 10.0, 0.0, 0.0), payload, 10.0, false);
-        let elapsed = start.elapsed();
-        assert!(elapsed.as_secs_f64() < 5.0, "{label} took too long ({elapsed:?}); suspected quadratic rescan");
         assert!(!scene.primitives.is_empty(), "{label} should emit primitives");
     }
 
@@ -635,7 +631,8 @@ fn gap_01_07_major_tick_interval_honored_on_log_prob_scales_and_log10_minor_tick
         assert!(w.iter().any(|x| x.code == "major_tick_interval_capped"), "{scale:?} warnings: {w:?}");
     }
 
-    // Live XY compile_graph: setting `minor_ticks_per_interval = 0` on Log10 disables minor ticks; `8` enables them.
+    // Live XY compile_graph: `minor_ticks_per_interval = 0` is the unset default and keeps the conventional 2..9 log minors;
+    // an explicit count draws that many evenly spaced in-decade minors.
     let (doc, mut graph) = build_xy_doc_with_fit(&[(1.0, 1.0), (2.0, 10.0), (3.0, 100.0)]);
     graph.spec.y_axis.segments = vec![AxisSegment {
         min: Some(1.0),
@@ -645,9 +642,11 @@ fn gap_01_07_major_tick_interval_honored_on_log_prob_scales_and_log10_minor_tick
         major_tick_interval: None,
         minor_ticks_per_interval: 0,
     }];
-    let scene_no_minor = compile_graph(&graph, &doc).unwrap();
+    let scene_default_minor = compile_graph(&graph, &doc).unwrap();
     graph.spec.y_axis.segments[0].minor_ticks_per_interval = 8;
     let scene_with_minor = compile_graph(&graph, &doc).unwrap();
+    graph.spec.y_axis.segments[0].minor_ticks_per_interval = 4;
+    let scene_four_minor = compile_graph(&graph, &doc).unwrap();
 
     // Count horizontal tick strokes protruding left of `plot_rect_pt.x` (minor length = 2.2 pt, major length = 4.0 pt).
     let count_left_y_minor_ticks = |scene: &ChartScene| -> usize {
@@ -670,8 +669,9 @@ fn gap_01_07_major_tick_interval_honored_on_log_prob_scales_and_log10_minor_tick
             })
             .count()
     };
-    assert_eq!(count_left_y_minor_ticks(&scene_no_minor), 0, "minor_ticks_per_interval=0 must turn off Log10 minor ticks");
+    assert_eq!(count_left_y_minor_ticks(&scene_default_minor), 24, "unset (0) Log10 minors keep the conventional 2..9 ticks");
     assert_eq!(count_left_y_minor_ticks(&scene_with_minor), 24, "minor_ticks_per_interval=8 over 3 decades must draw 24 minor ticks");
+    assert_eq!(count_left_y_minor_ticks(&scene_four_minor), 12, "minor_ticks_per_interval=4 over 3 decades must draw 12 minor ticks");
 }
 
 #[test]
@@ -869,4 +869,58 @@ fn analyzable_data_chaining_across_mv_survival_contingency_pow_and_diagnostics()
     g_fail.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot);
     g_fail.spec.primary_source_sheet_id = SheetId::new("res-mv-failed");
     assert!(compile_graph(&g_fail, &doc).expect("compile fail").plotted_points.is_empty());
+}
+
+fn tick_majors(scale: AxisScale, min: f64, max: f64, step: f64) -> (Vec<f64>, Vec<curvebook_chart::ChartWarning>) {
+    let policy = LocaleNumberPolicy::publication();
+    let plot = curvebook_chart::RectPt::new(50.0, 20.0, 280.0, 200.0);
+    let mut spec = AxisSpec::linear("Axis");
+    spec.segments =
+        vec![AxisSegment { min: Some(min), max: Some(max), scale, length_share: 1.0, major_tick_interval: Some(step), minor_ticks_per_interval: 0 }];
+    let mut w = Vec::new();
+    let resolved = ResolvedAxis::resolve(&spec, AxisOrientation::Horizontal, plot, None, &mut w);
+    let ticks = compute_axis_ticks_with_warnings(
+        &resolved,
+        TickComputeConfig { tick_format: TickLabelFormat::Decimal, policy: &policy, auto_log_minor_ticks: true, categorical_ticks: None },
+        &mut w,
+    );
+    (ticks.into_iter().filter(|t| t.kind == TickKind::Major).map(|t| t.value).collect(), w)
+}
+
+#[test]
+fn r0_36_stale_linear_interval_on_nonlinear_scale_falls_back_to_default_ticks_with_warning() {
+    let close = |got: &[f64], exp: &[f64]| got.len() == exp.len() && got.iter().zip(exp).all(|(g, e)| (g - e).abs() <= 1e-9 * e.abs().max(1.0));
+    for step in [10.0, 50.0] {
+        let (m, w) = tick_majors(AxisScale::Log10, 1.0, 1000.0, step);
+        assert!(close(&m, &[1.0, 10.0, 100.0, 1000.0]), "Log10 step {step}: {m:?}");
+        assert!(w.iter().any(|x| x.code == "major_tick_interval_ignored"), "{w:?}");
+    }
+    let (m, w) = tick_majors(AxisScale::Log2, 1.0, 64.0, 25.0);
+    assert!(m.len() >= 2 && m.contains(&1.0) && m.contains(&64.0), "Log2: {m:?}");
+    assert!(w.iter().any(|x| x.code == "major_tick_interval_ignored"));
+    let (m, w) = tick_majors(AxisScale::Probit, 1.0, 99.0, 50.0);
+    assert!(m.len() >= 2, "Probit: {m:?}");
+    assert!(w.iter().any(|x| x.code == "major_tick_interval_ignored"));
+    let (m, w) = tick_majors(AxisScale::Logit(LogitDomain::Proportion), 0.01, 0.99, 0.5);
+    assert!(m.len() >= 2, "Logit: {m:?}");
+    assert!(w.iter().any(|x| x.code == "major_tick_interval_ignored"));
+    // A sensible explicit step is still honoured and does not warn.
+    let (m, w) = tick_majors(AxisScale::Log10, 1.0, 1e6, 2.0);
+    assert_eq!(m.len(), 4);
+    assert!(!w.iter().any(|x| x.code == "major_tick_interval_ignored"));
+}
+
+#[test]
+fn r0_36_dollar_math_inside_group_renders_when_later_dollar_exists() {
+    let render = |src: &str| {
+        let mut scene = ChartScene::new("g-dollar", "D", 400.0, 200.0, None);
+        render_tex_equation_box(&mut scene, DocRectPt::new(10.0, 10.0, 0.0, 0.0), src, 10.0, false);
+        scene_texts(&scene)
+    };
+    let base = render(r"\frac{$x^2$}{2}");
+    let both = render(r"\frac{$x^2$}{2} + $y^2$");
+    assert!(both.iter().all(|t| !t.contains('$')), "stray delimiter: {both:?}");
+    assert_eq!(both.get(..base.len()), Some(base.as_slice()), "{both:?} vs {base:?}");
+    let braced = render(r"{$x^2$} + $y^2$");
+    assert!(braced.iter().all(|t| !t.contains('$')), "stray delimiter: {braced:?}");
 }

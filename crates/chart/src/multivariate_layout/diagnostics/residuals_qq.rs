@@ -346,6 +346,12 @@ pub(super) fn selected_dataset_label_in_tab(
     seen.get(ds_idx).or_else(|| seen.first()).cloned()
 }
 
+/// Sorted values paired with Blom normal scores for a normal Q-Q plot.
+///
+/// The `i`-th smallest of `n` values (1-based) is plotted against `Phi^{-1}((i - 3/8) / (n + 1/4))`,
+/// the plotting positions of Blom, G. (1958), *Statistical Estimates and Transformed Beta-Variables*,
+/// Wiley — the same positions the nonlinear-fit residual tab uses
+/// (`curvebook_fit` `append_nonlinear_residuals_tab`), so raw and result-sourced Q-Q plots agree.
 fn values_to_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>) -> Vec<DiagPoint> {
     vals.retain(|(v, _, _)| v.is_finite());
     vals.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.row.cmp(&b.1.row)).then_with(|| a.1.subcol.cmp(&b.1.subcol)));
@@ -356,7 +362,8 @@ fn values_to_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>) -> Vec<D
     vals.into_iter()
         .enumerate()
         .filter_map(|(i, (y, source, series_label))| {
-            let p = ((i as f64) + 0.5) / (n as f64);
+            // 0-based rank i: (i + 1 - 3/8) / (n + 1/4) = (i + 0.625) / (n + 0.25).
+            let p = ((i as f64) + 0.625) / ((n as f64) + 0.25);
             let z = norm_ppf(p).ok()?;
             Some(DiagPoint { x: z, y, label: None, source, series_label })
         })
@@ -526,4 +533,30 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     let series_label = if label.is_empty() { graph.spec.title.clone() } else { label };
     let tagged = val_sources.into_iter().map(|(v, src)| (v, src, series_label.clone())).collect();
     values_to_qq_diag_points(tagged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::values_to_qq_diag_points;
+    use crate::scene::SourceCellId;
+
+    #[test]
+    fn qq_points_use_blom_positions() {
+        let vals: Vec<(f64, SourceCellId, String)> = [3.0, 1.0, 5.0, 2.0, 4.0]
+            .into_iter()
+            .enumerate()
+            .map(|(row, v)| (v, SourceCellId { sheet_id: curvebook_doc::SheetId::new("qq"), row, col: 0, subcol: 0 }, String::from("S")))
+            .collect();
+        let pts = values_to_qq_diag_points(vals);
+        assert_eq!(pts.len(), 5);
+        // R 4.5.2: qnorm((1:5 - 3/8) / 5.25)
+        //   -1.179761117611861 -0.497200570681554 0.000000000000000 0.497200570681554 1.179761117611861
+        // (Hazen positions (i - 0.5) / n would give qnorm(0.1) = -1.281551565545 for the smallest value.)
+        // Tolerance 1e-9: far above `norm_ppf` round-off (Halley-refined probit), far below the 0.1 Hazen gap.
+        let expected = [-1.179_761_117_611_861, -0.497_200_570_681_554, 0.0, 0.497_200_570_681_554, 1.179_761_117_611_861];
+        for (pt, (want_x, want_y)) in pts.iter().zip(expected.into_iter().zip([1.0, 2.0, 3.0, 4.0, 5.0])) {
+            assert!((pt.x - want_x).abs() <= 1e-9, "Blom score {} != {want_x}", pt.x);
+            assert!((pt.y - want_y).abs() <= f64::EPSILON, "sorted value {} != {want_y}", pt.y);
+        }
+    }
 }

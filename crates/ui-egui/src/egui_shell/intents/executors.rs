@@ -388,6 +388,9 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                 app.egui_views.center_stage.dismissed_banner_sheets.push(sheet_id);
             }
         }
+        UiIntent::DismissFigureExportWarning => {
+            app.canvas_dialogs.figure_export_warning = None;
+        }
         UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id } => {
             let doc = app.session.document();
             if let Some(rs) = doc.result_sheet(&result_sheet_id) {

@@ -566,6 +566,15 @@ fn pow_in_base(base: f64, exp: f64) -> f64 {
     }
 }
 
+/// Records that an explicit major tick interval produced fewer than two major ticks on a non-linear scale
+/// (typically a linear-axis interval left over after switching to a log/probit/logit scale) and was ignored.
+fn warn_interval_ignored(warnings: &mut Vec<ChartWarning>, step: f64, scale: AxisScale) {
+    warnings.push(ChartWarning::new(
+        "major_tick_interval_ignored",
+        format!("major_tick_interval ({step:e}) yields fewer than 2 major ticks on {scale:?} axis; using the scale's default ticks"),
+    ));
+}
+
 fn explicit_log_major_ticks(lo: f64, hi: f64, base: f64, exp_step: f64, target_major: usize, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, f64) {
     let t_lo = log_in_base(lo, base);
     let t_hi = log_in_base(hi, base);
@@ -662,16 +671,20 @@ fn log10_major_minor(
 
     if let Some(exp_step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
         let (majors, eff_step) = explicit_log_major_ticks(lo, hi, 10.0, exp_step, target_major, warnings);
-        let minors = if (eff_step - 1.0).abs() <= 1e-9
-            && let Some((k_lo, k_hi, _)) = log_exponent_range(lo, hi, 10.0)
-            && (i64::from(k_hi) - i64::from(k_lo)) <= 8
-            && (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0)
-        {
-            compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval)
+        if majors.len() < 2 {
+            warn_interval_ignored(warnings, exp_step, seg.scale);
         } else {
-            compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval)
-        };
-        return (majors, minors);
+            let minors = if (eff_step - 1.0).abs() <= 1e-9
+                && let Some((k_lo, k_hi, _)) = log_exponent_range(lo, hi, 10.0)
+                && (i64::from(k_hi) - i64::from(k_lo)) <= 8
+                && (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0)
+            {
+                compute_log10_decade_minors(k_lo, k_hi, lo_tol, hi_tol, &majors, seg.minor_ticks_per_interval)
+            } else {
+                compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval)
+            };
+            return (majors, minors);
+        }
     }
 
     let Some((k_lo, k_hi, stride)) = log_exponent_range(lo, hi, 10.0) else {
@@ -720,8 +733,12 @@ fn log_base_major_minor(seg: &ResolvedSegment, base: f64, target_major: usize, w
 
     if let Some(exp_step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
         let (majors, _) = explicit_log_major_ticks(lo, hi, base, exp_step, target_major, warnings);
-        let minors = compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval);
-        return (majors, minors);
+        if majors.len() < 2 {
+            warn_interval_ignored(warnings, exp_step, seg.scale);
+        } else {
+            let minors = compute_log_spaced_minors(&majors, seg.minor_ticks_per_interval);
+            return (majors, minors);
+        }
     }
 
     let Some((k_lo, k_hi, stride)) = log_exponent_range(lo, hi, base) else {
@@ -782,10 +799,11 @@ fn candidate_prob_ticks(seg: &ResolvedSegment, candidates: &[f64], target_major:
     if let Some(step) = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0) {
         let (raw_majors, _, _) = compute_safe_linear_ticks(lo, hi, Some(step), target_major, warnings);
         let majors: Vec<f64> = raw_majors.into_iter().filter(|&v| v.is_finite() && scale_transform(seg.scale, v).is_some()).collect();
-        if !majors.is_empty() {
+        if majors.len() >= 2 {
             let minors = compute_transformed_prob_minors(seg, &majors);
             return (majors, minors);
         }
+        warn_interval_ignored(warnings, step, seg.scale);
     }
 
     let eps = 1e-12 * hi.abs().max(1.0);

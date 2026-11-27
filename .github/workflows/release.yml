@@ -391,12 +391,12 @@ jobs:
             done < <(security list-keychains -d user)
             (umask 077 && printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert")
             security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
-            security set-keychain-settings -lut 3600 "$kc"
+            security set-keychain-settings -lut 21600 "$kc"
             security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
             security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -x -t cert -f pkcs12 -k "$kc" -T /usr/bin/codesign
             rm -f "$cert"
             security list-keychains -d user -s "$kc" "${existing_kcs[@]+"${existing_kcs[@]}"}"
-            security set-key-partition-list -S apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
+            security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
             identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
             if [[ -z "$identity" ]]; then
               echo "error: no Developer ID Application codesigning identity found in imported certificate" >&2
@@ -405,7 +405,10 @@ jobs:
             MACOS_KEYCHAIN="$kc" MACOS_SIGN_IDENTITY="$identity" \
               ./packaging/macos/package.sh --arch universal --require-signing --skip-build
             cleanup_keychain
-            ./packaging/macos/verify.sh --arch universal --require-notarized
+            # verify.sh runs the shipped curvebook-cli, so keep signing credentials out of its environment.
+            env -u APPLE_CERTIFICATE -u APPLE_CERTIFICATE_PASSWORD -u KEYCHAIN_PASSWORD \
+              -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
+              ./packaging/macos/verify.sh --arch universal --require-notarized
           fi
       - name: Scan macOS release assets
         run: cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-macos-universal.json dist/release

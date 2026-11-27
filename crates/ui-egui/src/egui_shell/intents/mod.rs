@@ -213,6 +213,8 @@ pub enum UiIntent {
     DismissDiagnosticBanner {
         sheet_id: SheetId,
     },
+    /// Hide the figure-export warning notice in the status footer (`R0.36`).
+    DismissFigureExportWarning,
     OpenRetargetDialog {
         result_sheet_id: SheetId,
         target_data_sheet_id: Option<SheetId>,

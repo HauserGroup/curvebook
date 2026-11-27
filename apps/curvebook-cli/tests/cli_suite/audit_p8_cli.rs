@@ -328,3 +328,56 @@ fn fa_sec04_04_cli_convert_and_export_refuse_failed_result_sheet_csv_and_tsv() {
     assert!(!res_tsv.status.success(), "CLI export TSV must refuse Failed ResultSheet");
     assert!(!out_tsv.exists(), "refused export TSV must not create output file");
 }
+
+/// R0.36: `convert` prints each figure warning exactly once in text mode.
+#[test]
+fn r0_36_convert_prints_figure_warning_once() {
+    use curvebook_doc::{EmbeddedTableStyle, GraphAnnotation, GraphSheet, RectPt, SheetId};
+
+    let dir = TempDir::new("r036-warn-once").unwrap();
+    let mut doc = ProjectDocument::new("Warn Once Doc").expect("new doc");
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3).expect("xy");
+    for (i, v) in [1.0, 2.0, 3.0].into_iter().enumerate() {
+        xy.x_cells[i][0] = Cell::number(v);
+        xy.data_sets[0].cells[i][0] = Cell::number(v * 2.0);
+    }
+    let ds = DataSheet::new("data-1", "Data 1", TableArchetype::Xy(xy)).expect("ds");
+    let mut graph = GraphSheet::new_uninitialized_for_data(SheetId::new("graph-1"), &ds).expect("graph");
+    graph.initialized = true;
+    doc.add_data_sheet(ds).expect("add data");
+    doc.add_graph_sheet(graph).expect("add graph");
+
+    // Dirty result whose analysis cannot be recalculated (missing source sheet).
+    let spec = AnalysisSpec::new("res-bad", "missing-data", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("spec");
+    let mut res = ResultSheet::new(spec).expect("result");
+    res.status = ResultStatus::Dirty;
+    res.tabs.push(ResultTab {
+        id: String::from("summary"),
+        title: String::from("Summary"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![String::from("Value")],
+        row_labels: vec![String::from("Stale")],
+        rows: vec![vec![ResultCell::Text(String::from("STALE"))]],
+        footnotes: vec![],
+    });
+    doc.add_result_sheet(res).expect("add result");
+    if let Some(g) = doc.graph_sheet_mut(&SheetId::new("graph-1")) {
+        g.spec.annotations.push(GraphAnnotation::EmbeddedResultTable {
+            result_sheet_id: SheetId::new("res-bad"),
+            tab_id: None,
+            bounds_pt: RectPt::new(10.0, 10.0, 100.0, 40.0),
+            selected_rows: None,
+            selected_cols: None,
+            style: EmbeddedTableStyle::default(),
+        });
+    }
+    let archive = dir.path().join("warn.curvebook");
+    save_project_file(&archive, &doc).expect("save");
+    let archive_str = archive.display().to_string();
+
+    let svg = dir.path().join("out.svg");
+    let out = run_cli(&["convert", &archive_str, &svg.display().to_string(), "--sheet", "graph-1"]);
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert_eq!(stderr.matches("failed_embedded_result_table").count(), 1, "figure warning must print once: {stderr}");
+}

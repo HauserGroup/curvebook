@@ -166,6 +166,11 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
                 pdf_version: exp.pdf_version,
                 embedded_truetype_font: ttf_font_bytes.as_deref(),
             })?;
+            if !parsed.json {
+                for w in &summary.warnings {
+                    eprintln!("warning: {w}");
+                }
+            }
             export_summaries.push(json!({
                 "out": summary.out_path,
                 "format": summary.format,

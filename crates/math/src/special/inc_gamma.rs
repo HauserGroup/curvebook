@@ -697,12 +697,28 @@ mod tests {
         assert!((q_diag - ramanujan).abs() < 1e-15, "q_diag={q_diag} vs {ramanujan}");
 
         // GAP-03-04: verify Temme c1(eta) Taylor expansion (`1/378` eta^2 term, Temme 1979 §3 / DLMF 8.11)
-        // is continuous across the `|eta| = 0.02` branch boundary.
+        // is continuous across the `|eta| = 0.02` branch boundary. The two points straddle eta = 0.02 at
+        // a relative offset of 1e-12 (`mu_seam` solves `mu - ln(1 + mu) = 2e-4`, i.e. `eta(mu) = 0.02`), so
+        // the smooth change of `corr` between them (`|d corr / d eta| ~ 1 / (12 sqrt(2 pi a))`) is ~1e-17.
         let a_seam = 4096.0_f64;
-        let (_, _, corr_below) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + 0.019_999));
-        let (_, _, corr_above) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + 0.020_100));
-        // Smooth linear slope across dx/a = 1.01e-4; jump from the wrong 25/12096 coeff would be ~1e-12.
-        assert!((corr_above - corr_below).abs() < 5e-7, "Temme seam jump: {corr_below} vs {corr_above}");
+        let mu_seam = 0.020_133_554_963_707_46_f64;
+        let (_, z_below, corr_below) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + mu_seam * (1.0 - 1e-12)));
+        let (_, z_above, corr_above) = super::temme_corr_and_z(a_seam, a_seam * (1.0 + mu_seam * (1.0 + 1e-12)));
+        let eta_below = z_below * (2.0 / a_seam).sqrt();
+        let eta_above = z_above * (2.0 / a_seam).sqrt();
+        assert!(eta_below < 0.02 && eta_above >= 0.02, "points must straddle the seam: {eta_below} / {eta_above}");
+        // `corr = (c0 + c1 / a + c2 / a^2) / sqrt(2 pi a)`, so a wrong eta^2 coefficient in c1 (the old
+        // `25/12096` instead of `1/378`) opens a seam jump of `|1/378 - 25/12096| eta^2 / (a sqrt(2 pi a))`
+        // = 3.5e-13 (measured 3.3e-13). With the correct coefficients the residual jump comes from holding
+        // c2 at its constant term `25/6048` in the Taylor branch: `|c2'(0)| eta / (a^2 sqrt(2 pi a))` with
+        // `c2'(0) = -139/51840` (Temme 1979) = 2.0e-14 (measured 2.0e-14). The 1e-13 tolerance sits 5x
+        // above the expected residual and 3.5x below the wrong-coefficient jump.
+        let seam_scale = 1.0 / (a_seam * (std::f64::consts::TAU * a_seam).sqrt());
+        let wrong_coeff_jump = (1.0 / 378.0 - 25.0 / 12_096.0_f64).abs() * 0.02 * 0.02 * seam_scale;
+        let c2_truncation_jump = (139.0 / 51_840.0) * 0.02 / a_seam * seam_scale;
+        let seam_tol = 1e-13;
+        assert!(seam_tol < wrong_coeff_jump / 3.0 && seam_tol > 4.0 * c2_truncation_jump);
+        assert!((corr_above - corr_below).abs() < seam_tol, "Temme seam jump: {corr_below} vs {corr_above}");
         // Direct check of the exact c1(eta) identity against the Taylor polynomial at mu = 0.05
         // using Sterbenz-exact `gamma_deviance` (no truncation error in `lambda(eta)`). The buggy
         // `25/12096` coefficient would deviate by ~1.4e-6 here, while exact `1/378` matches to ~1e-9.

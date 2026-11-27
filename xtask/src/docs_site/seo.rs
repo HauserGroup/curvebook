@@ -211,9 +211,22 @@ fn check_landing_page_social_meta(root: &Path, page: &str, expected_url: &str, m
     let Some(rel_img) = og_image.strip_prefix(SITE_BASE_URL) else {
         return Err(format!("docs/{page}: `og:image` `{og_image}` must start with `{SITE_BASE_URL}`"));
     };
-    if !rel_img.starts_with("images/") || rel_img.split('/').any(|s| s.is_empty() || s == "..") || !is_regular_file(&root.join("docs").join(rel_img))
-    {
+    let img_path = root.join("docs").join(rel_img);
+    if !rel_img.starts_with("images/") || rel_img.split('/').any(|s| s.is_empty() || s == "..") || !is_regular_file(&img_path) {
         return Err(format!("docs/{page}: `og:image` `{og_image}` must point to an existing file under `docs/images/`"));
+    }
+    // The declared dimensions must describe the actual image, or link previews crop or reject it (`R0.36`).
+    if rel_img.to_ascii_lowercase().ends_with(".png") {
+        let bytes = std::fs::read(&img_path).map_err(|e| format!("docs/{page}: read `docs/{rel_img}`: {e}"))?;
+        let (width, height) = crate::ico::png_dimensions(&bytes).map_err(|e| format!("docs/{page}: `og:image` `docs/{rel_img}`: {e}"))?;
+        for (dim, actual) in [("og:image:width", width), ("og:image:height", height)] {
+            let declared = metas.get(dim).map(String::as_str).unwrap_or("").trim();
+            if declared != actual.to_string() {
+                return Err(format!("docs/{page}: `{dim}` is `{declared}` but `docs/{rel_img}` is {width}x{height}"));
+            }
+        }
+    } else {
+        return Err(format!("docs/{page}: `og:image` `docs/{rel_img}` must be a PNG so its declared dimensions can be checked"));
     }
     Ok(())
 }
@@ -256,6 +269,16 @@ mod tests {
         )
     }
 
+    /// A PNG signature plus a leading IHDR chunk is all the dimension check reads.
+    fn png_header(width: u32, height: u32) -> Vec<u8> {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13];
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&width.to_be_bytes());
+        png.extend_from_slice(&height.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        png
+    }
+
     #[test]
     fn site_config_sitemap_snapshots_and_social_meta_guards() {
         assert!(validate_site_config(SITE_BASE_URL, CUSTOM_DOMAIN).is_ok());
@@ -263,7 +286,8 @@ mod tests {
             assert!(validate_site_config(u, d).is_err());
         }
         let root = TestDir::new("docs-seo");
-        root.write("docs/images/a.png", "png");
+        std::fs::create_dir_all(root.join("docs/images")).unwrap();
+        std::fs::write(root.join("docs/images/a.png"), png_header(1440, 900)).unwrap();
         for page in LANDING_PAGES {
             root.write(&format!("docs/{page}"), &valid_landing(page));
         }
@@ -292,6 +316,8 @@ mod tests {
             base.replace("<meta property=\"og:url\"", "<meta/property=\"og:url\"/content=\"https://evil.example/\"><meta property=\"og:url\""),
             base.replace("a.png", "missing.png"),
             base.replace("content=\"1440\"", "content=\"0\""),
+            base.replace("content=\"1440\"", "content=\"1200\""),
+            base.replace("content=\"900\"", "content=\"630\""),
             base.replace("<head>", "<head><!--><link rel=\"canonical\" href=\"https://evil.example/\"><!-- -->"),
             base.replace("<head>", "<head><title><!--</title><meta property=\"og:url\" content=\"https://evil.example/\"><!-- -->"),
         ] {

@@ -1758,6 +1758,34 @@ pub fn render_status_footer(
                     }
                 }
 
+                if let Some(warning) = app.canvas_dialogs.figure_export_warning.as_deref()
+                    && ui.available_width() > right_budget + 80.0
+                {
+                    // Figure-export warnings (`GAP-06-02`): the web build has no host toast, so the
+                    // shared shell shows them here; clicking the chip dismisses it (`R0.36`).
+                    let warn_resp = draw_footer_chip(
+                        ui,
+                        ctx_in.tokens,
+                        FooterChipSpec {
+                            label: warning,
+                            tooltip: warning,
+                            max_w: if compact { 120.0 } else { 260.0 },
+                            min_w: 44.0,
+                            selected: false,
+                            enabled: ctx_in.enabled,
+                            accent_override: Some(ctx_in.tokens.warning),
+                            widget_id: "status.figure_export_warning",
+                            role: "button",
+                            command_id: None,
+                            disabled_reason: None,
+                        },
+                        meta,
+                    );
+                    if warn_resp.clicked() {
+                        intents.push(UiIntent::DismissFigureExportWarning);
+                    }
+                }
+
                 let center_budget = (ui.available_width() - right_budget).max(24.0);
                 let (stats_anchor, active_stats) = render_footer_center_readout(ui, app, views, ctx_in, center_budget, meta, &mut report);
                 anchors.stats = stats_anchor;

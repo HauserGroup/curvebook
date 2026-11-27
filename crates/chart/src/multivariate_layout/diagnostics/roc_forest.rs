@@ -239,6 +239,8 @@ struct ForestExtracted {
     is_covariate_regression: bool,
     is_ratio_scale: bool,
     confidence: ConfidenceLevel,
+    /// `true` when `confidence` is an assumed 95% (raw data tables carry no interval level).
+    confidence_assumed: bool,
 }
 
 pub(in crate::multivariate_layout) fn compile_forest_plot(
@@ -275,7 +277,13 @@ pub(in crate::multivariate_layout) fn compile_forest_plot(
                 "pooled_diamond_suppressed_for_covariates",
                 "fixed-effect pooled summary diamond is not applicable to heterogeneous regression covariates and was omitted",
             ));
-        } else if let Some(pooled) = compute_pooled_forest_entry(&entries, is_log || ref_x == 1.0, extracted.confidence, &mut scene.warnings) {
+        } else if let Some(mut pooled) = compute_pooled_forest_entry(&entries, is_log || ref_x == 1.0, extracted.confidence, &mut scene.warnings) {
+            // Raw data tables record no confidence level, so the pooled standard errors assume
+            // two-sided 95% study intervals. State that on the figure itself rather than as a
+            // warning, which would fire on every ordinary raw-table forest plot (`R0.36`).
+            if extracted.confidence_assumed {
+                pooled.label = String::from("Pooled (FE, 95% CIs assumed)");
+            }
             entries.push(pooled);
         }
     }
@@ -581,8 +589,13 @@ fn select_forest_columns(tab: &ResultTab) -> (Option<usize>, Option<usize>, bool
 }
 
 fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> ForestExtracted {
-    let empty =
-        ForestExtracted { entries: Vec::new(), is_covariate_regression: false, is_ratio_scale: false, confidence: ConfidenceLevel::DEFAULT_95 };
+    let empty = ForestExtracted {
+        entries: Vec::new(),
+        is_covariate_regression: false,
+        is_ratio_scale: false,
+        confidence: ConfidenceLevel::DEFAULT_95,
+        confidence_assumed: true,
+    };
     if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, is_forest_result_sheet)
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.kind == ResultTabKind::MainSummary)
     {
@@ -621,6 +634,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                 is_covariate_regression: is_covariate_regression_kind(&res.analysis.kind),
                 is_ratio_scale,
                 confidence: res.analysis.confidence_level,
+                confidence_assumed: false,
             };
         }
     }
@@ -695,9 +709,26 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
         }
         _ => Vec::new(),
     };
-    ForestExtracted { entries, is_covariate_regression: false, is_ratio_scale: false, confidence: ConfidenceLevel::DEFAULT_95 }
+    ForestExtracted {
+        entries,
+        is_covariate_regression: false,
+        is_ratio_scale: false,
+        confidence: ConfidenceLevel::DEFAULT_95,
+        confidence_assumed: true,
+    }
 }
 
+/// Inverse-variance fixed-effect pooled estimate for the forest-plot summary diamond.
+///
+/// Follows Borenstein, Hedges, Higgins & Rothstein (2009), *Introduction to Meta-Analysis*,
+/// Wiley, ch. 11 "Fixed-Effect Model": weights `W_i = 1 / V_i`, pooled
+/// `M = sum(W_i Y_i) / sum(W_i)`, `V_M = 1 / sum(W_i)`, and limits `M -/+ z_{1-alpha/2} sqrt(V_M)`.
+/// Each study's standard error is recovered from its reported symmetric two-sided interval at
+/// `confidence` as `SE_i = (upper - lower) / (2 z_{1-alpha/2})`; ratio measures (odds, hazard,
+/// risk ratios) are pooled on the natural-log scale with `SE_i = (ln upper - ln lower) / (2 z)` and
+/// back-transformed (Borenstein et al. 2009, ch. 5 "Effect Sizes Based on Binary Data").
+/// Returns `None` (with a `pooled_diamond_degenerate_ci` warning for zero-width intervals) when any
+/// entry is non-positive on the log scale or has a non-finite or zero-width interval.
 fn compute_pooled_forest_entry(
     entries: &[ForestEntry],
     on_log_scale: bool,
@@ -742,4 +773,47 @@ fn compute_pooled_forest_entry(
         return None;
     }
     Some(ForestEntry { label: String::from("Pooled (FE)"), estimate: est, lower: lo, upper: hi, is_pooled: true })
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_math::ConfidenceLevel;
+
+    use super::{ForestEntry, compute_pooled_forest_entry};
+
+    fn entry(label: &str, estimate: f64, lower: f64, upper: f64) -> ForestEntry {
+        ForestEntry { label: String::from(label), estimate, lower, upper, is_pooled: false }
+    }
+
+    #[test]
+    fn pooled_fixed_effect_matches_inverse_variance_hand_derivation() {
+        // z = qnorm(0.975) = 1.959963984540054 (R 4.5.2).
+        let z = 1.959_963_984_540_054;
+        // Two studies with SE_1 = 1 and SE_2 = 0.5, reported as symmetric 95% intervals Y_i -/+ z SE_i.
+        // Borenstein et al. (2009) ch. 11: W = (1, 4), M = (1*2 + 4*1) / 5 = 1.2, SE_M = sqrt(1/5).
+        // R 4.5.2: w <- c(1, 4); y <- c(2, 1); M <- sum(w*y)/sum(w); se <- sqrt(1/sum(w))
+        //          c(M, M - qnorm(0.975)*se, M + qnorm(0.975)*se) -> 1.2 0.323477459423419 2.076522540576581
+        let linear = [entry("S1", 2.0, 2.0 - z, 2.0 + z), entry("S2", 1.0, 1.0 - 0.5 * z, 1.0 + 0.5 * z)];
+        let mut warnings = Vec::new();
+        let pooled = compute_pooled_forest_entry(&linear, false, ConfidenceLevel::DEFAULT_95, &mut warnings).expect("pooled entry");
+        assert!(warnings.is_empty());
+        assert!(pooled.is_pooled);
+        // Tolerance 1e-12: only floating-point round-off separates the closed form from the pooled sums.
+        for (got, want) in [(pooled.estimate, 1.2), (pooled.lower, 0.323_477_459_423_419), (pooled.upper, 2.076_522_540_576_581)] {
+            assert!((got - want).abs() <= 1e-12, "linear pooled {got} != {want}");
+        }
+
+        // Ratio scale: OR_1 = 1 (log 0, SE 1) and OR_2 = 2 (log 2, SE 0.5) reported as exp(log OR -/+ z SE).
+        // Pooled log OR = (0 + 4 ln 2) / 5 = 0.8 ln 2, so OR = 2^0.8.
+        // R 4.5.2: yl <- c(0, log(2)); Ml <- sum(w*yl)/sum(w)
+        //          exp(c(Ml, Ml - qnorm(0.975)*se, Ml + qnorm(0.975)*se)) -> 1.741101126592248 0.724694714592503 4.183048491978276
+        let ln2 = std::f64::consts::LN_2;
+        let ratio = [entry("S1", 1.0, (-z).exp(), z.exp()), entry("S2", 2.0, (ln2 - 0.5 * z).exp(), (ln2 + 0.5 * z).exp())];
+        let pooled_or = compute_pooled_forest_entry(&ratio, true, ConfidenceLevel::DEFAULT_95, &mut warnings).expect("pooled OR");
+        for (got, want) in
+            [(pooled_or.estimate, 1.741_101_126_592_248), (pooled_or.lower, 0.724_694_714_592_503), (pooled_or.upper, 4.183_048_491_978_276)]
+        {
+            assert!((got - want).abs() <= 1e-12, "ratio pooled {got} != {want}");
+        }
+    }
 }

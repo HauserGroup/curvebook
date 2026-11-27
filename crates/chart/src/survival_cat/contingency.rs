@@ -180,13 +180,20 @@ fn detect_proportion_scale(spec: &GraphSpec) -> Option<f64> {
     // Only normalize contingency counts to row proportions when the Y axis title explicitly asks
     // for proportions/percentages (never infer normalization from a manual Y-axis max of 1 or 100,
     // which would silently rewrite raw counts on a "Count" chart).
-    let title = spec.y_axis.title.to_ascii_lowercase();
-    if title.contains("count") {
+    proportion_scale_for_title(&spec.y_axis.title)
+}
+
+fn proportion_scale_for_title(title: &str) -> Option<f64> {
+    // Keywords are matched as whole words so "encounters", "accounts", "country", or "discount"
+    // never read as "count", and "fractional" or "percentile" never read as a normalization request.
+    let title = title.to_ascii_lowercase();
+    let has_word = |words: &[&str]| title.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| words.contains(&w));
+    if has_word(&["count", "counts"]) {
         return None;
     }
-    if title.contains("proportion") || title.contains("fraction") {
+    if has_word(&["proportion", "proportions", "fraction", "fractions"]) {
         Some(1.0)
-    } else if title.contains('%') || title.contains("percent") {
+    } else if title.contains('%') || has_word(&["percent", "percentage", "percentages"]) {
         Some(100.0)
     } else {
         None
@@ -272,4 +279,27 @@ fn series_color_or_palette(graph: &GraphSheet, idx: usize) -> Rgba8 {
         }
     }
     graph.spec.palette.color_at(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proportion_scale_for_title;
+
+    #[test]
+    fn proportion_scale_matches_whole_words_only() {
+        let scale_for = proportion_scale_for_title;
+        // Substrings of "count" inside other words must not veto an explicit percent request.
+        assert_eq!(scale_for("Percent of encounters (%)"), Some(100.0));
+        assert_eq!(scale_for("Percentage of accounts"), Some(100.0));
+        assert_eq!(scale_for("Proportion by country"), Some(1.0));
+        assert_eq!(scale_for("Fraction with discount"), Some(1.0));
+        // Whole-word count titles always keep raw counts, even beside "%".
+        assert_eq!(scale_for("Count"), None);
+        assert_eq!(scale_for("Counts (% of max)"), None);
+        assert_eq!(scale_for("Cell count"), None);
+        // Words that merely contain a keyword do not request normalization.
+        assert_eq!(scale_for("Percentile rank"), None);
+        assert_eq!(scale_for("Fractional yield"), None);
+        assert_eq!(scale_for("Subjects"), None);
+    }
 }

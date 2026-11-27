@@ -53,7 +53,7 @@ pub fn pack_files(out: &Path, inputs: &[PathBuf]) -> Result<(), String> {
     write_atomic(out, &ico).map_err(|e| format!("write {}: {e}", out.display()))
 }
 
-fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
+pub(crate) fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), String> {
     if bytes.len() < MIN_PNG_IHDR_BYTES || bytes[..8] != PNG_SIG || bytes[8..12] != 13u32.to_be_bytes() || &bytes[12..16] != b"IHDR" {
         return Err(String::from("not a valid PNG with leading 13-byte IHDR chunk"));
     }

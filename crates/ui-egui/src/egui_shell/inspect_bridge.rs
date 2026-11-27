@@ -2790,15 +2790,18 @@ pub fn prepare_grid_type_text_target(
 
     if let Some(wid) = widget_id.or(live_focus_wid)
         && let Some((row, subcol)) = parse_x_cell_widget_id(wid)
-        && app
+        && let Some(sheet_id) = app
             .document()
             .active_sheet_id
             .as_ref()
             .and_then(|id| app.document().data_sheet(id))
-            .is_some_and(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)))
+            .filter(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)))
+            .map(|ds| ds.id.clone())
         && app.egui_views.column_grid.inline_edit.is_none()
     {
-        app.grid.select_x_cell_sync(row, subcol);
+        // Bind the X-cell selection to the active sheet so a selection left on another sheet
+        // (split view) never keeps `active_x_cell` pointing at that sheet (`GAP-07-02`, `R0.36`).
+        app.grid.select_x_cell_for_sheet(&sheet_id, row, subcol);
     }
 
     Ok((is_x_cell_target, is_y_cell_target))
@@ -4044,6 +4047,28 @@ mod tests {
             .ok_or_else(|| String::from("expected BadInput for retired ui.answer_dialog"))?;
         assert_eq!(retired_err.code, ErrorCode::BadInput, "got {retired_err:?}");
         app.canvas_dialogs.close_dialog();
+        Ok(())
+    }
+
+    /// `R0.36`: `ui.type_text` aimed at an X cell of the active sheet rebinds the selection to that
+    /// sheet even when the previous selection belonged to another sheet (split view).
+    #[test]
+    fn r0_36_type_text_x_cell_binds_selection_to_active_sheet() -> Result<(), String> {
+        let mut app = UiApp::new();
+        for sid in ["xy-a", "xy-b"] {
+            app.execute_command("sheet.createData", json!({ "sheet_id": sid, "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }))
+                .map_err(|e| e.to_string())?;
+        }
+        app.execute_command("sheet.select", json!({ "sheet_id": "xy-b" })).map_err(|e| e.to_string())?;
+        let sheet_a = curvebook_doc::SheetId::from("xy-a");
+        let sheet_b = curvebook_doc::SheetId::from("xy-b");
+        app.grid.select_x_cell_for_sheet(&sheet_a, 0, 0);
+        assert_eq!(app.grid.active_x_cell_for_sheet(&sheet_b), None);
+
+        let (is_x, _) = super::prepare_grid_type_text_target(&mut app, Some("grid.x.2.0"), None, false, false).map_err(|e| e.to_string())?;
+        assert!(is_x);
+        assert_eq!(app.grid.active_x_cell_for_sheet(&sheet_b), Some((2, 0)), "X-cell selection must bind to the active sheet");
+        assert_eq!(app.grid.active_x_cell_for_sheet(&sheet_a), None, "the other sheet must no longer own the selection");
         Ok(())
     }
 

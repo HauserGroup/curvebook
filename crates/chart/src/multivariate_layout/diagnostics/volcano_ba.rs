@@ -217,6 +217,12 @@ pub(in crate::multivariate_layout) fn compile_volcano(graph: &GraphSheet, doc: &
     Ok(())
 }
 
+/// `true` when an effect-column header names a log2 fold change (`log2FC`, `log2 fold change`, `logFC`).
+fn is_log2_fold_change_header(header: &str) -> bool {
+    let l = header.to_ascii_lowercase();
+    l.contains("log2") || l.contains("logfc") || l.contains("log fc") || (l.contains("log") && l.contains("fold"))
+}
+
 fn volcano_thresholds(spec: &GraphSpec, is_difference_units: bool) -> (Option<(f64, f64)>, f64) {
     let mut fc_cuts: Vec<f64> = spec.x_axis.thresholds.iter().map(|t| t.value).filter(|v| v.is_finite()).collect();
     fc_cuts.sort_by(f64::total_cmp);
@@ -264,6 +270,9 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
         let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
         let default_col = graph.spec.series.first().map_or(0, |s| s.data_set_index);
         let is_mr = matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_));
+        // `PairwiseComparisonRecord::estimate_diff` is an additive contrast on the data scale (mean
+        // difference, Hodges-Lehmann shift, ...) for every producer, never a log2 fold change, so
+        // these points always use difference units (no +/-1 log2FC cut lines or wording).
         let from_pairs: Vec<VolcanoPoint> = res
             .pairwise_comparisons
             .iter()
@@ -288,7 +297,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
             })
             .collect();
         if !from_pairs.is_empty() {
-            return VolcanoExtracted { points: from_pairs, is_difference_units: is_mr };
+            return VolcanoExtracted { points: from_pairs, is_difference_units: true };
         }
 
         if let Some(tab) = res
@@ -307,10 +316,9 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
             let sig_col = find_header_col(&tab.column_headers, |h| h == "significant" || h.contains("discover"));
             if let (Some(dc), Some(pc)) = (diff_col, p_col) {
                 let already_neg_log = tab.column_headers.get(pc).is_some_and(|h| h.to_ascii_lowercase().contains("-log10"));
-                let hdr_is_diff = tab.column_headers.get(dc).is_some_and(|h| {
-                    let l = h.to_ascii_lowercase();
-                    l.contains("diff") && !l.contains("log2") && !l.contains("fold")
-                });
+                // Only a column that is explicitly a log2 fold change gets log2FC wording and the
+                // default +/-1 cut lines; any other effect column is plotted in difference units.
+                let hdr_is_log2_fc = tab.column_headers.get(dc).is_some_and(|h| is_log2_fold_change_header(h));
                 let from_tab: Vec<VolcanoPoint> = tab
                     .rows
                     .iter()
@@ -345,7 +353,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
                     })
                     .collect();
                 if !from_tab.is_empty() {
-                    return VolcanoExtracted { points: from_tab, is_difference_units: is_mr || hdr_is_diff };
+                    return VolcanoExtracted { points: from_tab, is_difference_units: is_mr || !hdr_is_log2_fc };
                 }
             }
         }

@@ -365,6 +365,28 @@ fn docs_site_release_snapshot_pages_stage_and_negative_gates() -> Result<(), Str
     run_xtask_fail(sim, &["docs-site", "--check", "--manual-dir", m_str, "--output", &p_str], "must not be committed under docs/")?;
     fs::remove_file(sim.join("docs/llms-full.txt")).map_err(|e| e.to_string())?;
 
+    for (path, refresh, href, canonical) in [
+        (manual_out.join("index.html"), "latest/index.html", "v0.1/index.html", "https://curvebook.org/manual/latest/index.html"),
+        (
+            sim.join("docs/get-started.html"),
+            "manual/latest/get-started.html",
+            "manual/latest/get-started.html",
+            "https://curvebook.org/manual/latest/get-started.html",
+        ),
+        (
+            sim.join("docs/troubleshooting.html"),
+            "manual/latest/troubleshooting.html#known-issues",
+            "manual/latest/troubleshooting.html#known-issues",
+            "https://curvebook.org/manual/latest/troubleshooting.html",
+        ),
+    ] {
+        let html = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        assert!(!html.contains("name=\"robots\""), "redirect shims must not pair noindex with a cross-URL canonical");
+        assert!(html.contains(&format!("<link rel=\"canonical\" href=\"{canonical}\">")));
+        assert!(html.contains(&format!("<meta http-equiv=\"refresh\" content=\"0; url={refresh}\">")));
+        assert!(html.contains(&format!("href=\"{href}\"")));
+    }
+
     let ci_manual = sim.join("target/ci-manual");
     let ci_str = ci_manual.to_str().ok_or("utf8")?;
     run_xtask_ok(sim, &["docs-site", "--build-manual", ci_str, "--check"])?;

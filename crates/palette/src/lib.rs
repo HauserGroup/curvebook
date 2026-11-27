@@ -169,17 +169,24 @@ mod tests {
             if y > eps { 116.0 * y.cbrt() - 16.0 } else { (29.0_f64 / 3.0).powi(3) * y }
         }
 
-        // Exact published anchor stops (Nuñez, Anderton & Renslow 2018; van der Walt & Smith 2015):
-        assert_eq!(CIVIDIS_STOPS[0], Rgba8::rgb(0, 32, 77)); // #00204D
-        assert_eq!(CIVIDIS_STOPS[8], Rgba8::rgb(124, 123, 120)); // #7C7B78 (t = 0.50)
-        assert_eq!(CIVIDIS_STOPS[12], Rgba8::rgb(188, 175, 111)); // #BCAF6F (t = 0.75)
-        assert_eq!(CIVIDIS_STOPS[16], Rgba8::rgb(255, 234, 70)); // #FFEA46
+        // Published LUT anchor entries (Nuñez, Anderton & Renslow 2018; van der Walt & Smith 2015), read
+        // from R 4.5.2 `viridisLite` 0.4.2 `viridis.map` at 1-based row `idx + 1` with
+        // `idx = floor(i * 255 / 16 + 1/2)` (the index rule documented in `colormap.rs`), e.g.
+        // `d <- viridisLite::viridis.map; d <- d[d$opt == "C", ]; rgb(d$R[129], d$G[129], d$B[129])`.
+        // Cividis: only the stops that are exact LUT entries are anchored (see `colormap.rs` docs).
+        assert_eq!(CIVIDIS_STOPS[0], Rgba8::rgb(0, 32, 77)); // #00204D, LUT idx 0
+        assert_eq!(CIVIDIS_STOPS[3], Rgba8::rgb(45, 66, 108)); // #2D426C, LUT idx 48
+        assert_eq!(CIVIDIS_STOPS[12], Rgba8::rgb(188, 175, 111)); // #BCAF6F, LUT idx 191 (t = 0.75)
+        assert_eq!(CIVIDIS_STOPS[16], Rgba8::rgb(255, 234, 70)); // #FFEA46, LUT idx 255
 
-        assert_eq!(PLASMA_STOPS[0], Rgba8::rgb(13, 8, 135)); // #0D0887
-        assert_eq!(PLASMA_STOPS[4], Rgba8::rgb(126, 3, 168)); // #7E03A8 (t = 0.25)
-        assert_eq!(PLASMA_STOPS[8], Rgba8::rgb(203, 71, 120)); // #CB4778 (t = 0.50)
-        assert_eq!(PLASMA_STOPS[12], Rgba8::rgb(248, 149, 64)); // #F89540 (t = 0.75)
-        assert_eq!(PLASMA_STOPS[16], Rgba8::rgb(240, 249, 33)); // #F0F921
+        assert_eq!(PLASMA_STOPS[0], Rgba8::rgb(13, 8, 135)); // #0D0887, LUT idx 0
+        assert_eq!(PLASMA_STOPS[4], Rgba8::rgb(126, 3, 168)); // #7E03A8, LUT idx 64 (t = 0.25)
+        assert_eq!(PLASMA_STOPS[8], Rgba8::rgb(204, 71, 120)); // #CC4778, LUT idx 128 (t = 0.50)
+        assert_eq!(PLASMA_STOPS[12], Rgba8::rgb(248, 148, 65)); // #F89441, LUT idx 191 (t = 0.75)
+        assert_eq!(PLASMA_STOPS[16], Rgba8::rgb(240, 249, 33)); // #F0F921, LUT idx 255
+
+        assert_eq!(super::VIRIDIS_STOPS[8], Rgba8::rgb(33, 145, 140)); // #21918C, LUT idx 128
+        assert_eq!(super::VIRIDIS_STOPS[9], Rgba8::rgb(31, 159, 136)); // #1F9F88, LUT idx 143
 
         // Cividis CIE Delta L* smoothness across all 16 intervals (previously collapsed to 3.01 & 1.11 at stops 15-16).
         let civ_deltas: Vec<f64> = CIVIDIS_STOPS.windows(2).map(|w| cie_lstar(w[1]) - cie_lstar(w[0])).collect();

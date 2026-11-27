@@ -331,7 +331,10 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
             k_sweep_max: None,
         }),
     )?;
-    let cl_res = ResultSheet::new(cl_spec)?;
+    let mut cl_res = ResultSheet::new(cl_spec)?;
+    // A fresh (up-to-date) clustering result supplies the Euclidean/Ward metrics; a Dirty one is
+    // ignored and, since R0.36, never replaced by a chart-side default clustering.
+    cl_res.status = ResultStatus::UpToDate;
 
     let mut doc_mv = make_doc("MV Cluster HM")?;
     doc_mv.add_data_sheet(ds_mv)?;

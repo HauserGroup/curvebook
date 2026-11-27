@@ -265,13 +265,17 @@ where
         }
     }
 
-    let l_max = if !upper || k0 == 0 { l_0.max(l_star) } else { l_star };
+    // The peak search above only visits `k >= 1`, so `k_star >= 1` and the `k = 0` term is never
+    // reached by the backward sweep `k_star - 1, ..., 1` below; it is always added here exactly once
+    // (for both tails). Upper-tail mixtures such as `P(T_{df, delta} > t)` at large `t` or
+    // `P(F > f)` at large `f` carry a large share of their mass at `k = 0` (R0.36 audit).
+    let l_max = l_0.max(l_star);
     if !l_max.is_finite() || l_max < -755.0 {
         return Ok(f64::NEG_INFINITY);
     }
 
     let mut sum = (l_star - l_max).exp();
-    if (!upper || k0 == 0) && l_0 - l_max >= -42.0 {
+    if l_0 - l_max >= -42.0 {
         sum += (l_0 - l_max).exp();
     }
     for k in (1..k_star).rev() {
@@ -1383,9 +1387,67 @@ mod tests {
             let got = nct_cdf(t, df, delta).unwrap();
             let rel_err = (got - expected).abs() / expected;
             assert!(rel_err < 1e-11, "nct_cdf({t}, {df}, {delta}): got={got:.16e}, expected={expected:.16e}, rel_err={rel_err:.3e}");
-            // Symmetry check via negative t / negative delta: P(T_{df, -delta} > -t) == P(T_{df, delta} <= t).
-            let sym_sf = nct_sf(-t, df, -delta).unwrap();
-            assert!((sym_sf - got).abs() <= 1e-13 * got, "symmetry mismatch: {sym_sf:.16e} vs {got:.16e}");
+            // Cross-path relation (Johnson, Kotz & Balakrishnan 1995, ch. 31: `T^2 ~ F_{1, df}(delta^2)`), so
+            // `P(-t < T <= t) = ncf_cdf(t^2, 1, df, delta^2)`, i.e. `nct_cdf(t) - nct_cdf(-t)`, where
+            // `nct_cdf(-t)` runs the separate opposite-tail quadrature and the right side runs the
+            // noncentral `F` Poisson-beta mixture (even terms only); neither side calls the nct series
+            // used for `got`, so a wrong odd-term sum there breaks this relation. Tolerance 1e-12 relative (observed <= 3e-14): both sides are
+            // log-sum-exp mixtures of ~10^2 incomplete-beta log terms, each accurate to ~1e-14.
+            let lower_tail = nct_cdf(-t, df, delta).unwrap();
+            let two_sided = ncf_cdf(t * t, 1.0, df, delta * delta).unwrap();
+            let rel = ((got - lower_tail) - two_sided).abs() / two_sided;
+            assert!(rel <= 1e-12, "T^2 ~ F relation ({t}, {df}, {delta}): {got:.16e} - {lower_tail:.3e} vs {two_sided:.16e}, rel={rel:.3e}");
+        }
+    }
+
+    #[test]
+    fn r0_36_upper_tail_log_mixture_includes_k0_term_oracle() {
+        // D1 oracle (R0.36 audit): the log-space upper-tail mixture used to drop the `k = 0` Poisson
+        // term whenever `floor(lambda / 2) >= 1`, which at large `t` (or `f`) carries a large share of
+        // the tail (nct_sf(1e11, 2, 1.5) was 17% low, ncf_sf(1e12, 2, 4, 3) 4.4% low).
+        //
+        // Reference values: R 4.5.2, exact Poisson-beta series (Lenth 1989 AS 243 for `t`; Johnson,
+        // Kotz & Balakrishnan 1995 ch. 30 for `F`) summed in log space over k = 0..2000 with TOMS 708
+        // `pbeta(..., log.p = TRUE)` evaluated at the complement argument `df / (df + t^2)`:
+        //   lse <- function(v) { m <- max(v); m + log(sum(exp(v - m))) }
+        //   nct_sf <- function(t, df, d, K = 2000) { k <- 0:K; lh <- d*d/2; w <- df/(df + t*t)
+        //     lp <- -lh + k*log(lh) - lgamma(k+1); lq <- log(d) - 0.5*log(2) - lh + k*log(lh) - lgamma(k+1.5)
+        //     exp(lse(c(lp + pbeta(w, df/2, k+0.5, log.p=TRUE), lq + pbeta(w, df/2, k+1, log.p=TRUE))) - log(2)) }
+        //   ncf_sf <- function(f, d1, d2, lam, K = 2000) { k <- 0:K; w <- d2/(d1*f + d2)
+        //     exp(lse(dpois(k, lam/2, log=TRUE) + pbeta(w, d2/2, d1/2 + k, log.p=TRUE))) }
+        // Independently cross-checked for nct with R `integrate()` of `E[Phi(delta - t U)]`,
+        // `U = sqrt(chi^2_df / df)`, in log-scale `s = ln(U)` (agreement <= 5e-15 relative).
+        // (R's own `pt(lower.tail = FALSE)` / `pf(lower.tail = FALSE)` lose all accuracy here.)
+        // Tolerance 1e-12 relative (observed <= 7e-15; series vs quadrature agree to 5e-15): covers the
+        // per-term incomplete-beta log error and the log-sum-exp truncation at exp(-42) (~6e-19) of the
+        // largest term, and sits 10^9 below the dropped-`k = 0` error it guards against.
+        // (`nct_cdf(-t, df, -delta)` delegates to `nct_sf(t, df, delta)` verbatim, so it is covered here.)
+        let nct_oracles = [
+            // nct_sf(1000, 10, 1.45)
+            (1_000.0_f64, 10.0_f64, 1.45_f64, 8.222_655_080_424_325e-25_f64),
+            // nct_sf(1e5, 10, 1.45)
+            (1e5, 10.0, 1.45, 8.223_232_146_174_126e-45),
+            // nct_sf(1e11, 2, 1.5)
+            (1e11, 2.0, 1.5, 3.227_152_989_375_047e-22),
+            // nct_sf(1000, 10, 2.5)
+            (1_000.0, 10.0, 2.5, 1.003_897_011_681_470_1e-23),
+        ];
+        for (t, df, delta, expected) in nct_oracles {
+            let got = nct_sf(t, df, delta).unwrap();
+            let rel = (got - expected).abs() / expected;
+            assert!(rel <= 1e-12, "nct_sf({t}, {df}, {delta}): got={got:.16e}, expected={expected:.16e}, rel={rel:.3e}");
+        }
+
+        let ncf_oracles = [
+            // ncf_sf(1e12, 2, 4, 3)
+            (1e12_f64, 2.0_f64, 4.0_f64, 3.0_f64, 2.049_999_999_984_897e-23_f64),
+            // ncf_sf(1e6, 2, 4, 3)
+            (1e6, 2.0, 4.0, 3.0, 2.049_984_900_077_818e-11),
+        ];
+        for (f, df1, df2, lambda, expected) in ncf_oracles {
+            let got = ncf_sf(f, df1, df2, lambda).unwrap();
+            let rel = (got - expected).abs() / expected;
+            assert!(rel <= 1e-12, "ncf_sf({f}, {df1}, {df2}, {lambda}): got={got:.16e}, expected={expected:.16e}, rel={rel:.3e}");
         }
     }
 

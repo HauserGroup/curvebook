@@ -877,7 +877,7 @@ fn emit_x_ticks(
     }
 
     for seg in &axis.segments {
-        let (majors, minors) = compute_segment_tick_values(seg, None, false, warnings);
+        let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
         if let Some((o0, o1)) = minor_span {
             for m in minors {
                 if let Some(x_pt) = seg.map_strict(m) {
@@ -966,7 +966,7 @@ fn emit_y_ticks(primitives: &mut Vec<ScenePrimitive>, warnings: &mut Vec<ChartWa
     }
 
     for seg in &axis.segments {
-        let (majors, minors) = compute_segment_tick_values(seg, None, false, warnings);
+        let (majors, minors) = compute_segment_tick_values(seg, None, true, warnings);
         if let Some((o0, o1)) = minor_span {
             for m in minors {
                 if let Some(y_pt) = seg.map_strict(m) {

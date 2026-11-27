@@ -2475,10 +2475,12 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
         let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
         if app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet).is_some_and(|m| m.command_id == "table.excludeCells") {
-            if let Some(out) = toggle_exclude_active_grid_cells(app)? {
+            // A rebound exclude shortcut acts only on a grid selection and never while a text field
+            // has focus; otherwise skip this candidate and keep trying the others (`R0.36`).
+            if !text_focused && let Some(out) = toggle_exclude_active_grid_cells(app)? {
                 return Ok(out);
             }
-            return Ok(UiEventOutcome { handled: false, action: String::from("shortcut:grid.toggle_exclude_empty"), ..Default::default() });
+            continue;
         }
         if let Some(exec) = app.handle_key_combo_for_context(&candidate, on_result_sheet)? {
             if matches!(exec.command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {

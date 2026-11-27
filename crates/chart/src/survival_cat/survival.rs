@@ -467,6 +467,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
         let style = km_series_style(graph, fc.data_set_index, idx);
         let canonical_label = result_curve_label(res, fc, idx);
         let label = style.legend_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| canonical_label.clone());
+        let nar_rows = nar_tab.map_or_else(Vec::new, |tab| cohort_nar_rows(tab, res, idx, &canonical_label));
         let steps: Vec<KmPointStep> = fc
             .points
             .iter()
@@ -481,7 +482,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
                     greenwood_se: se,
                     ci_lower: ci_lo,
                     ci_upper: ci_hi,
-                    n_at_risk_before: nar_at_time_from_tab(nar_tab, &canonical_label, p.x).unwrap_or(0),
+                    n_at_risk_before: nar_at_time(&nar_rows, p.x).unwrap_or(0),
                 }
             })
             .collect();
@@ -494,9 +495,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
             .any(|p| p.x.is_finite() && p.y.is_finite() && p.ci_lower.is_some_and(f64::is_finite) && p.ci_upper.is_some_and(f64::is_finite));
         let n_total = steps.first().map_or(0, |s| s.n_at_risk_before);
         let mut censored_times = Vec::new();
-        if let Some(tab) = nar_tab {
-            extract_censored_from_nar_tab(tab, &canonical_label, fc.data_set_index, &mut censored_times);
-        }
+        extract_censored_from_nar_rows(&nar_rows, fc.data_set_index, &mut censored_times);
         out.push(KmCurveData {
             sheet_id: None,
             col_index: fc.data_set_index,
@@ -518,40 +517,83 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
     out
 }
 
-fn nar_at_time_from_tab(nar_tab: Option<&ResultTab>, cohort_label: &str, t: f64) -> Option<usize> {
-    let tab = nar_tab?;
-    for row in &tab.rows {
-        let Some(ResultCell::Text(lbl)) = row.first() else { continue };
-        if lbl != cohort_label {
-            continue;
-        }
-        let Some(ResultCell::Number { value: row_t, .. }) = row.get(1) else { continue };
-        let Some(ResultCell::Number { value: risk, .. }) = row.get(2) else { continue };
-        if row_t.is_finite() && *row_t >= t - 1e-9 && risk.is_finite() && *risk >= 0.0 {
-            return Some(*risk as usize);
-        }
+/// One parsed `NumberAtRisk` schedule row: `(time, at_risk_before, events)`.
+type NarRow = (f64, usize, usize);
+
+fn parse_nar_row(row: &[ResultCell]) -> Option<(&str, NarRow)> {
+    let Some(ResultCell::Text(lbl)) = row.first() else { return None };
+    let Some(ResultCell::Number { value: row_t, .. }) = row.get(1) else { return None };
+    let Some(ResultCell::Number { value: risk, .. }) = row.get(2) else { return None };
+    let Some(ResultCell::Number { value: events, .. }) = row.get(3) else { return None };
+    if !row_t.is_finite() || !risk.is_finite() || !events.is_finite() || *risk < 0.0 || *events < 0.0 {
+        return None;
     }
-    None
+    Some((lbl.as_str(), (*row_t, *risk as usize, *events as usize)))
 }
 
-fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, col_idx: usize, out: &mut Vec<(f64, Option<usize>, usize)>) {
+fn same_schedule_time(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0)
+}
+
+/// Rows of the `NumberAtRisk` schedule tab belonging to fitted curve `curve_idx`.
+///
+/// The Kaplan-Meier producer (`curvebook_stats::survival`) writes one schedule row per curve step,
+/// cohort after cohort in `fitted_curves` order, so cohort `k` occupies the rows after the steps of
+/// cohorts `0..k` (each curve stores a leading `(0, 1)` point plus one point per step). That
+/// positional slice is used when its labels and times agree with the curve, so two cohorts with the
+/// same title never share rows. Older or hand-edited tabs fall back to label matching, split into
+/// runs wherever the time stops increasing, and take the run whose rank among equally labelled
+/// curves matches this curve.
+fn cohort_nar_rows(tab: &ResultTab, res: &ResultSheet, curve_idx: usize, cohort_label: &str) -> Vec<NarRow> {
+    let Some(fc) = res.fitted_curves.get(curve_idx) else { return Vec::new() };
+    let offset: usize = res.fitted_curves.iter().take(curve_idx).map(|c| c.points.len().saturating_sub(1)).sum();
+    let n_steps = fc.points.len().saturating_sub(1);
+    if n_steps > 0
+        && let Some(slice) = offset.checked_add(n_steps).and_then(|end| tab.rows.get(offset..end))
+    {
+        let positional: Option<Vec<NarRow>> = slice
+            .iter()
+            .zip(fc.points.iter().skip(1))
+            .map(|(row, pt)| {
+                let (lbl, parsed) = parse_nar_row(row)?;
+                (lbl == cohort_label && same_schedule_time(parsed.0, pt.x)).then_some(parsed)
+            })
+            .collect();
+        if let Some(rows) = positional {
+            return rows;
+        }
+    }
+
+    let mut runs: Vec<Vec<NarRow>> = Vec::new();
+    let mut prev_matching = false;
+    for row in &tab.rows {
+        let Some((lbl, parsed)) = parse_nar_row(row) else { continue };
+        if lbl != cohort_label {
+            prev_matching = false;
+            continue;
+        }
+        let continues_run = prev_matching && runs.last().and_then(|r| r.last()).is_some_and(|&(t_prev, _, _)| parsed.0 > t_prev);
+        if continues_run {
+            if let Some(run) = runs.last_mut() {
+                run.push(parsed);
+            }
+        } else {
+            runs.push(vec![parsed]);
+        }
+        prev_matching = true;
+    }
+    let rank = res.fitted_curves.iter().enumerate().take(curve_idx).filter(|(j, c)| result_curve_label(res, c, *j) == cohort_label).count();
+    runs.into_iter().nth(rank).unwrap_or_default()
+}
+
+fn nar_at_time(rows: &[NarRow], t: f64) -> Option<usize> {
+    rows.iter().find(|&&(row_t, _, _)| row_t >= t - 1e-9).map(|&(_, risk, _)| risk)
+}
+
+fn extract_censored_from_nar_rows(rows: &[NarRow], col_idx: usize, out: &mut Vec<(f64, Option<usize>, usize)>) {
     // Each KM schedule row i records (t_i, n_i = at_risk_before, d_i = events at t_i)
     // with recurrence n_{i+1} = n_i - d_i - c_i (and n_m = 0 after the final row m - 1).
     // Therefore c_i = n_i - d_i - n_{i+1} subjects are censored at time t_i.
-    let mut rows: Vec<(f64, usize, usize)> = Vec::new();
-    for row in &tab.rows {
-        let Some(ResultCell::Text(lbl)) = row.first() else { continue };
-        if lbl != cohort_label {
-            continue;
-        }
-        let Some(ResultCell::Number { value: row_t, .. }) = row.get(1) else { continue };
-        let Some(ResultCell::Number { value: risk, .. }) = row.get(2) else { continue };
-        let Some(ResultCell::Number { value: events, .. }) = row.get(3) else { continue };
-        if !row_t.is_finite() || !risk.is_finite() || !events.is_finite() || *risk < 0.0 || *events < 0.0 {
-            continue;
-        }
-        rows.push((*row_t, *risk as usize, *events as usize));
-    }
     for (i, &(t_i, n_i, d_i)) in rows.iter().enumerate() {
         let next_n = rows.get(i + 1).map_or(0, |&(_, n_next, _)| n_next);
         if n_i > d_i.saturating_add(next_n) {

@@ -230,8 +230,10 @@ struct ScanIndex {
     sqrt_brackets: HashMap<usize, usize>,
     pipes: HashMap<usize, usize>,
     left_right: HashMap<usize, LeftRightMatch>,
-    last_dollar: Option<usize>,
-    last_double_dollar: Option<usize>,
+    /// Sorted byte offsets of every `$` (ascending, as scanned).
+    dollars: Vec<usize>,
+    /// Sorted byte offsets of every `$$` start.
+    double_dollars: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -352,9 +354,9 @@ impl ScanIndex {
 
             match ch {
                 '$' => {
-                    index.last_dollar = Some(i);
+                    index.dollars.push(i);
                     if rest.starts_with("$$") {
-                        index.last_double_dollar = Some(i);
+                        index.double_dollars.push(i);
                     }
                     i += 1;
                 }
@@ -515,9 +517,13 @@ impl ScanIndex {
         (matched.total_end <= slice_end && matched.body_start <= matched.body_end).then_some(matched)
     }
 
+    /// Whether a closing delimiter of `delim_len` could exist inside `[abs_pos + delim_len, slice_end]`.
+    /// Binary search over all recorded delimiter positions, so a `$` after the current group cannot hide one inside it.
     fn has_later_dollar(&self, delim_len: usize, abs_pos: usize, slice_end: usize) -> bool {
-        let last = if delim_len == 2 { self.last_double_dollar } else { self.last_dollar };
-        last.is_some_and(|idx| idx >= abs_pos + delim_len && idx + delim_len <= slice_end)
+        let positions = if delim_len == 2 { &self.double_dollars } else { &self.dollars };
+        let from = abs_pos + delim_len;
+        let first = positions.partition_point(|&idx| idx < from);
+        positions.get(first).is_some_and(|&idx| idx + delim_len <= slice_end)
     }
 }
 

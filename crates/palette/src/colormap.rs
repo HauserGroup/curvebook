@@ -4,10 +4,24 @@
 //! Control stops derive from public-domain colormaps:
 //! - Viridis & Plasma: van der Walt & Smith (CC0 1.0 Public Domain Dedication).
 //! - Cividis: Nuñez, Anderton & Renslow, *PLOS ONE* 13(7):e0199239 (2018, public domain).
+//!
+//! The Viridis and Plasma 17-stop tables hold exact entries of the published 256-entry lookup
+//! tables: stop `i` (`t = i / 16`) is LUT entry `idx(i) = floor(i * 255 / 16 + 1/2)` (0, 16, 32, 48,
+//! 64, 80, 96, 112, 128, 143, 159, 175, 191, 207, 223, 239, 255), with each `[0, 1]` channel `c`
+//! quantised to `round(255 * c)`. Generated from `viridisLite` 0.4.2 `viridis.map` (option `"D"` =
+//! Viridis, `"C"` = Plasma) with R 4.5.2:
+//! `d <- viridisLite::viridis.map; d <- d[d$opt == opt, ]; i <- floor((0:16) * 255 / 16 + 0.5) + 1;`
+//! `rgb(d$R[i], d$G[i], d$B[i])`.
+//!
+//! The Cividis table is *not* an exact LUT sample: stops 0, 3, 4, 11, 12, 13 and 16 equal LUT entries
+//! `idx(i)`, while the others are hand-adjusted approximations within 3/255 per channel of entry
+//! `idx(i)` (option `"E"`); CIE `Delta L*` between consecutive stops stays in `[3.8, 6.2]`, which the
+//! exact LUT entries `idx(0..=2)` do not satisfy (6.27 and 3.70).
 
 use crate::space::{Rgba8, lerp_oklab};
 
-/// Exact 17-point lookup table for Viridis (`t = 0/16 .. 16/16`).
+/// 17 exact entries of the published 256-entry Viridis LUT at `t = 0/16 .. 16/16` (see module docs
+/// for the index rule).
 pub const VIRIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(68, 1, 84),
     Rgba8::rgb(72, 24, 106),
@@ -18,18 +32,19 @@ pub const VIRIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(44, 114, 142),
     Rgba8::rgb(38, 130, 142),
     Rgba8::rgb(33, 145, 140),
-    Rgba8::rgb(31, 160, 136),
-    Rgba8::rgb(40, 174, 128),
-    Rgba8::rgb(63, 188, 115),
-    Rgba8::rgb(94, 201, 98),
-    Rgba8::rgb(132, 212, 75),
-    Rgba8::rgb(173, 220, 48),
-    Rgba8::rgb(216, 226, 25),
+    Rgba8::rgb(31, 159, 136),
+    Rgba8::rgb(39, 173, 129),
+    Rgba8::rgb(61, 188, 116),
+    Rgba8::rgb(92, 200, 99),
+    Rgba8::rgb(129, 211, 77),
+    Rgba8::rgb(170, 220, 50),
+    Rgba8::rgb(213, 226, 26),
     Rgba8::rgb(253, 231, 37),
 ];
 
-/// Exact 17-point lookup table for Cividis (`t = 0/16 .. 16/16`), sampled from the published
-/// 256-entry CC0 LUT of Nuñez, Anderton & Renslow (*PLOS ONE* 13(7):e0199239, 2018; `viridisLite`).
+/// 17 stops (`t = 0/16 .. 16/16`) approximating the published 256-entry CC0 Cividis LUT of Nuñez,
+/// Anderton & Renslow (*PLOS ONE* 13(7):e0199239, 2018; `viridisLite`); see the module docs for
+/// which stops are exact LUT entries.
 pub const CIVIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(0, 32, 77),
     Rgba8::rgb(0, 43, 105),
@@ -50,23 +65,23 @@ pub const CIVIDIS_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(255, 234, 70),
 ];
 
-/// Exact 17-point lookup table for Plasma (`t = 0/16 .. 16/16`), sampled from the published
-/// 256-entry CC0 LUT of van der Walt & Smith (2015; Matplotlib `_plasma_data` / `viridisLite`).
+/// 17 exact entries (`t = 0/16 .. 16/16`, module-doc index rule) of the published 256-entry CC0
+/// Plasma LUT of van der Walt & Smith (2015; Matplotlib `_plasma_data` / `viridisLite`).
 pub const PLASMA_STOPS: [Rgba8; 17] = [
     Rgba8::rgb(13, 8, 135),
     Rgba8::rgb(49, 5, 151),
     Rgba8::rgb(76, 2, 161),
     Rgba8::rgb(102, 0, 167),
     Rgba8::rgb(126, 3, 168),
-    Rgba8::rgb(149, 18, 162),
-    Rgba8::rgb(169, 35, 150),
-    Rgba8::rgb(187, 53, 135),
-    Rgba8::rgb(203, 71, 120),
-    Rgba8::rgb(217, 89, 106),
-    Rgba8::rgb(230, 108, 92),
+    Rgba8::rgb(149, 17, 161),
+    Rgba8::rgb(170, 35, 149),
+    Rgba8::rgb(188, 53, 135),
+    Rgba8::rgb(204, 71, 120),
+    Rgba8::rgb(217, 88, 106),
+    Rgba8::rgb(229, 107, 93),
     Rgba8::rgb(240, 127, 79),
-    Rgba8::rgb(248, 149, 64),
-    Rgba8::rgb(253, 172, 51),
+    Rgba8::rgb(248, 148, 65),
+    Rgba8::rgb(253, 171, 51),
     Rgba8::rgb(253, 195, 40),
     Rgba8::rgb(249, 221, 37),
     Rgba8::rgb(240, 249, 33),

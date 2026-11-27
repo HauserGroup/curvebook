@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
 //! Regression tests for UI & Inspector gap audit findings:
-//! - `GAP-06-02`: `UiApp::execute_command` surfaces non-fatal figure export warnings in `status_banner`.
+//! - `GAP-06-02`: `UiApp::execute_command` surfaces non-fatal figure export warnings in `figure_export_warning`,
+//!   which the shared shell renders in the status footer (`R0.36`).
 //! - `GAP-07-01`: Split-view Trailing Studio reads panel/annotation/media selection from the active canvas view (`primary` vs `secondary_canvas_view`).
 //! - `GAP-07-02`: `GridViewState` binds selection (`tool`/`selected_coords`) to its `SheetId`, preventing cross-sheet exclusion or styling in split view.
 //! - `GAP-07-04`: `UiApp::open_import_project_mode_dialog` refuses to overwrite an already-open modal dialog.
@@ -94,22 +95,43 @@ fn gap_06_02_ui_app_figure_export_surfaces_and_clears_warning_banner() -> BoxRes
     doc.add_graph_sheet(graph)?;
 
     let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.welcome.open = false;
+    app.egui_views.launcher_open = false;
     let out = app.execute_command("export.svg", json!({ "sheet_id": "g-1" }))?;
     assert!(out.warnings.iter().any(|w| w.contains("pending_regression_result")), "expected warning, got {:?}", out.warnings);
+    let notice = app.canvas_dialogs.figure_export_warning.clone();
     assert!(
-        app.canvas_dialogs.status_banner.as_deref().is_some_and(|b| b.contains("pending_regression_result")),
-        "status_banner must surface figure export warning, got {:?}",
-        app.canvas_dialogs.status_banner
+        notice.as_deref().is_some_and(|b| b.contains("pending_regression_result")),
+        "figure_export_warning must surface figure export warning, got {notice:?}"
     );
+    // `R0.36`: kept apart from `status_banner`, which the Welcome hub reads as an open-file error.
+    assert!(app.canvas_dialogs.status_banner.is_none(), "export warning must not land in status_banner");
 
-    // Mark fit UpToDate; subsequent clean export clears the figure export warning banner.
-    let mut clean_doc = app.document().clone();
+    // `R0.36`: the shared shell (the only surface the web build has) renders the warning.
+    let clean_doc_src = app.document().clone();
+    let tokens = default_tokens(&app);
+    let st = ShellTestState::new(app).with_commit_all().with_sync_raster();
+    let mut driver = make_shell_driver_with_state(st, ViewportMetrics::new(1440.0, 900.0, 1.0), tokens);
+    driver.run_settled();
+    let chip = driver.frame_meta().find_by_widget_id("status.figure_export_warning").ok_or("figure export warning is not rendered")?;
+    let rendered = chip.full_label.clone().unwrap_or_else(|| chip.label.clone());
+    assert!(rendered.contains("pending_regression_result"), "rendered warning text: {rendered:?}");
+    assert!(chip.enabled);
+
+    // Clicking the notice dismisses it.
+    driver.click_widget_id("status.figure_export_warning")?;
+    driver.run_settled();
+    assert!(driver.state().app.canvas_dialogs.figure_export_warning.is_none(), "click must dismiss the notice");
+    assert!(driver.frame_meta().find_by_widget_id("status.figure_export_warning").is_none(), "dismissed notice must not render");
+
+    // Mark fit UpToDate; subsequent clean export clears a prior figure export warning.
+    let mut clean_doc = clean_doc_src;
     clean_doc.result_sheet_mut(&SheetId::new("rs-fit")).expect("rs-fit").status = ResultStatus::UpToDate;
     let mut clean_app = UiApp::from_session(Session::from_document(clean_doc));
-    clean_app.canvas_dialogs.status_banner = app.canvas_dialogs.status_banner.clone();
+    clean_app.canvas_dialogs.figure_export_warning = notice;
     let clean = clean_app.execute_command("export.svg", json!({ "sheet_id": "g-1" }))?;
     assert!(clean.warnings.is_empty());
-    assert!(clean_app.canvas_dialogs.status_banner.is_none(), "clean export should clear prior export warning banner");
+    assert!(clean_app.canvas_dialogs.figure_export_warning.is_none(), "clean export should clear prior export warning");
     Ok(())
 }
 
@@ -439,5 +461,51 @@ fn gap_07_02_cross_sheet_cmd_e_and_row_gutter_exclude_respect_sheet_ownership() 
     assert!(b_after.cell(CellCoord::new(3, 0, 0)).is_some_and(|c| c.excluded), "clicked row 3 on ds-b must be excluded");
     assert!(b_after.cell(CellCoord::new(0, 1, 0)).is_some_and(|c| !c.excluded), "ds-b (0, 1, 0) matching ds-a selection must remain unexcluded");
     assert!(a_after.cell(CellCoord::new(0, 1, 0)).is_some_and(|c| !c.excluded), "ds-a (0, 1, 0) must remain unexcluded");
+    Ok(())
+}
+
+/// `R0.36`: the exclude shortcut handled in the generic shortcut loop (any rebound combo) never
+/// toggles exclusion while a text field has focus, and on a sheet without a grid selection it
+/// lets the remaining shortcut candidates run instead of swallowing the key.
+#[test]
+fn r0_36_rebound_exclude_shortcut_respects_text_focus_and_falls_through_on_non_data_sheet() -> BoxRes {
+    let mut doc = ProjectDocument::new("Exclude Shortcut Focus")?;
+    let ds = make_xy_sheet("xy-1", "Dose", &[(1.0, 2.0), (2.0, 4.0), (3.0, 6.0)])?;
+    doc.add_data_sheet(ds.clone())?;
+    doc.add_graph_sheet(GraphSheet::new_uninitialized_for_data("g-1", &ds)?)?;
+    doc.active_sheet_id = Some(SheetId::new("xy-1"));
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.welcome.open = false;
+    app.egui_views.launcher_open = false;
+    // Alt+Shift keeps the key away from the dedicated Cmd/Ctrl+E path, so only the shortcut loop sees it.
+    app.shortcuts.set_shortcut("table.excludeCells", "Cmd+Alt+Shift+E")?;
+    let cmd_shift_e =
+        || UiInputEvent::KeyDown { key: String::from("e"), modifiers: KeyModifiers { meta: true, alt: true, shift: true, ..Default::default() } };
+    let y_cell_excluded =
+        |app: &UiApp| app.document().data_sheet(&SheetId::new("xy-1")).and_then(|s| s.cell(CellCoord::new(1, 0, 0))).map(|c| c.excluded);
+
+    // 1. Text field focused: no exclusion.
+    app.grid.select_single_for_sheet(&SheetId::new("xy-1"), GridCellCoord::new(1, 0, 0));
+    app.focus_widget_id = Some(String::from("info.notes"));
+    let focused = dispatch_ui_event(&mut app, cmd_shift_e(), ViewportMetrics::default())?;
+    assert_eq!(y_cell_excluded(&app), Some(false), "exclude shortcut must not act while a text field has focus (outcome {focused:?})");
+
+    // 2. Grid focused: the rebound shortcut excludes the selected cell (the binding is live).
+    app.focus_widget_id = None;
+    let grid = dispatch_ui_event(&mut app, cmd_shift_e(), ViewportMetrics::default())?;
+    assert!(grid.handled, "{grid:?}");
+    assert_eq!(y_cell_excluded(&app), Some(true));
+
+    // 3. Non-data sheet: `Ctrl+J` tries `Ctrl+J` (exclude, nothing to act on) then `Cmd+J`, which must still run.
+    app.shortcuts.set_shortcut("table.excludeCells", "Ctrl+J")?;
+    app.shortcuts.set_shortcut("ui.rulers.toggle", "Cmd+J")?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "g-1" }))?;
+    let out = dispatch_ui_event(
+        &mut app,
+        UiInputEvent::KeyDown { key: String::from("j"), modifiers: KeyModifiers { ctrl: true, ..Default::default() } },
+        ViewportMetrics::default(),
+    )?;
+    assert!(out.handled, "later shortcut candidate must run on a non-data sheet: {out:?}");
+    assert_eq!(out.command_id.as_deref(), Some("ui.rulers.toggle"));
     Ok(())
 }

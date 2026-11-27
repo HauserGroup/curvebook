@@ -408,7 +408,7 @@ pub fn render_release_redirect_index(version_dir: &str, version_label: &str, ava
             title: "Documentation",
             title_suffix: " — CurveBook",
             assets: "../",
-            robots: Some("noindex, follow"),
+            robots: None,
             refresh: Some(&target),
             canonical_url: Some(&canonical),
             emit_social_meta: false,
@@ -446,7 +446,7 @@ pub fn render_root_redirect_shim(title: &str, description: &str, target_href: &s
             title,
             title_suffix: " — CurveBook",
             assets: "",
-            robots: Some("noindex, follow"),
+            robots: None,
             refresh: Some(target_href),
             canonical_url: Some(&canonical),
             emit_social_meta: false,
@@ -504,11 +504,13 @@ mod tests {
 
     #[test]
     fn redirects_escaping_toc_placement_and_release_banners() {
+        // Redirect shims must not pair `noindex` with a canonical pointing elsewhere (`R0.36`).
         let idx = render_release_redirect_index("latest", "v0.1.0", &[String::from("v0.1")]);
-        assert!(idx.contains("noindex, follow") && idx.contains("https://curvebook.org/manual/latest/index.html") && !idx.contains("og:image"));
+        assert!(!idx.contains("name=\"robots\"") && idx.contains("https://curvebook.org/manual/latest/index.html") && !idx.contains("og:image"));
         let shim = render_root_redirect_shim("Troubleshooting", "Desc", "manual/latest/troubleshooting.html#known-issues", "v0.1.0");
         assert!(
-            shim.contains("href=\"https://curvebook.org/manual/latest/troubleshooting.html\"")
+            !shim.contains("name=\"robots\"")
+                && shim.contains("href=\"https://curvebook.org/manual/latest/troubleshooting.html\"")
                 && shim.contains("url=manual/latest/troubleshooting.html#known-issues")
         );
         assert!(render_not_found_page("/curvebook/\" onclick=\"x/").contains("&quot; onclick=&quot;x"));

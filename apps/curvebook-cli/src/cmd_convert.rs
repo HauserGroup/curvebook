@@ -75,7 +75,7 @@ pub struct ExportOutcomeSummary {
     pub sheet_id: Option<String>,
     pub bytes_written: usize,
     /// Figure warnings as `code: message` lines (for example a fitted curve omitted because its fit
-    /// failed or is pending recalculation); each is also printed to stderr.
+    /// failed or is pending recalculation). Callers are responsible for printing them.
     pub warnings: Vec<String>,
 }
 
@@ -180,9 +180,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
                         }
                     }
                     Err(err) => {
-                        loaded.warnings.push(format!(
-                            "pending_recalculation_failed: could not recalculate pending analyses before export ({err}); stale results omitted"
-                        ));
+                        loaded.warnings.push(recalculation_failed_warning(format, &err));
                     }
                 }
             }
@@ -244,6 +242,17 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
         }
         Ok(())
     })
+}
+
+/// Warning for a failed pre-export recalculation; the consequence wording matches the export kind
+/// (tabular data exports still write the stale table, figure exports omit it).
+fn recalculation_failed_warning(format: ExportFormat, err: &dyn std::fmt::Display) -> String {
+    let consequence = if matches!(format, ExportFormat::Csv | ExportFormat::Tsv | ExportFormat::Json) {
+        "exported data may be stale"
+    } else {
+        "stale results omitted"
+    };
+    format!("pending_recalculation_failed: could not recalculate pending analyses before export ({err}); {consequence}")
 }
 
 /// Parse a PDF specification version string (`1.4` or `1.7`).
@@ -417,9 +426,6 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
                     }
                 }
             }
-        }
-        for w in &warnings {
-            eprintln!("warning: {w}");
         }
         Ok(ExportOutcomeSummary {
             out_path: req.out_path.to_string_lossy().into_owned(),
@@ -975,5 +981,14 @@ mod tests {
         assert!(converted_svg_text.contains("Mean") || converted_svg_text.contains("5"), "recalculated convert SVG should render fresh stats");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn r0_36_recalculation_failed_warning_wording_matches_export_kind() {
+        let data = super::recalculation_failed_warning(ExportFormat::Csv, &"boom");
+        assert!(data.ends_with("exported data may be stale"), "{data}");
+        assert!(!data.contains("omitted"), "{data}");
+        let fig = super::recalculation_failed_warning(ExportFormat::Svg, &"boom");
+        assert!(fig.ends_with("stale results omitted"), "{fig}");
     }
 }

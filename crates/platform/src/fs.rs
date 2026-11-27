@@ -30,6 +30,12 @@ const MAX_SYMLINK_HOPS: usize = 40;
 #[cfg(not(target_arch = "wasm32"))]
 pub const DEFAULT_STALE_TEMP_MAX_AGE: Duration = Duration::from_secs(300);
 
+/// Hard age limit for orphaned staging files: past this age a `.tmp.` sibling is removed even when
+/// its recorded PID looks alive, because after a reboot the PID is often reused by an unrelated
+/// long-lived process (so a liveness probe would keep the orphan forever).
+#[cfg(not(target_arch = "wasm32"))]
+pub const STALE_TEMP_HARD_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_AUTO_SWEEP_DIR_ENTRIES: usize = 1024;
 
@@ -279,8 +285,11 @@ fn create_unique_sibling_temp(parent: &Path, stem: &str, tag: &str, restrict_mod
 /// - Only regular files (never symlinks or directories, verified via `symlink_metadata`) matching
 ///   the exact `.{stem}.tmp.{pid}.{seq}` naming pattern are considered.
 /// - Files owned by the current process (`pid == std::process::id()`) are never removed.
-/// - On Unix, any candidate whose PID is still alive (or cannot be proven absent due to `EPERM`)
-///   is skipped.
+/// - A candidate is removed only when its PID is *proven* absent. If liveness cannot be determined
+///   (non-Unix targets, no `kill` binary, probe spawn failure/timeout) or the PID is alive (or
+///   `EPERM`), the file is skipped.
+/// - Exception: files older than [`STALE_TEMP_HARD_MAX_AGE`] (7 days) are removed regardless of
+///   PID liveness, since a PID recorded before a reboot is typically reused by an unrelated process.
 /// - Every candidate must have a modification timestamp at least `max_age` in the past.
 ///
 /// Returns the number of stale temp files removed.
@@ -327,15 +336,20 @@ fn is_pid_alive(pid: u32) -> Option<bool> {
     }
     let pid_str = pid.to_string();
     for bin in ["/bin/kill", "/usr/bin/kill", "/run/current-system/sw/bin/kill", "/run/current-system/profile/bin/kill"] {
-        let output = std::process::Command::new(bin)
-            .env_clear()
+        if !Path::new(bin).exists() {
+            continue;
+        }
+        // Bounded, cleaned-environment probe via the crate's process helper.
+        let result = crate::process::ProcessCommand::new(bin)
             .args(["-0", "--", &pid_str])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .output();
-        match output {
+            // Generous bound: a heavily loaded host can take seconds to spawn `kill`, and a timeout
+            // only makes the sweep keep the file (fail safe), never delete it.
+            .wall_timeout(Duration::from_secs(10))
+            .idle_timeout(Duration::from_secs(10))
+            .run();
+        match result {
             Ok(out) => {
-                if out.status.success() {
+                if out.success {
                     return Some(true);
                 }
                 let stderr = String::from_utf8_lossy(&out.stderr).to_ascii_lowercase();
@@ -345,7 +359,7 @@ fn is_pid_alive(pid: u32) -> Option<bool> {
                 }
                 return Some(true);
             }
-            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(PlatformError::ProgramNotFound { .. }) => continue,
             Err(_) => return None,
         }
     }
@@ -359,6 +373,18 @@ fn is_pid_alive(pid: u32) -> Option<bool> {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn sweep_stale_temp_files_inner(dir: &Path, stem_filter: Option<&str>, max_age: Duration, max_entries: usize) -> Result<usize, PlatformError> {
+    sweep_stale_temp_files_with(dir, stem_filter, max_age, max_entries, &is_pid_alive)
+}
+
+/// Sweep implementation with an injectable PID-liveness probe (test seam).
+#[cfg(not(target_arch = "wasm32"))]
+fn sweep_stale_temp_files_with(
+    dir: &Path,
+    stem_filter: Option<&str>,
+    max_age: Duration,
+    max_entries: usize,
+    pid_alive: &dyn Fn(u32) -> Option<bool>,
+) -> Result<usize, PlatformError> {
     let entries = std::fs::read_dir(dir).map_err(|err| io_err(&format!("read directory `{}`", dir.display()), &err))?;
     let now = SystemTime::now();
     let current_pid = std::process::id();
@@ -402,7 +428,8 @@ fn sweep_stale_temp_files_inner(dir: &Path, stem_filter: Option<&str>, max_age: 
         if elapsed < max_age {
             continue;
         }
-        if is_pid_alive(pid) == Some(true) {
+        // Delete only when the owner is proven dead, unless the file is past the hard age limit.
+        if elapsed < STALE_TEMP_HARD_MAX_AGE && pid_alive(pid) != Some(false) {
             continue;
         }
         if std::fs::remove_file(&path).is_ok() {
@@ -991,6 +1018,34 @@ mod tests {
         assert!(unrelated_hidden.exists());
         assert!(non_tmp_tag.exists());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn audit_sweep_deletes_only_when_pid_proven_dead_and_hard_age_overrides() {
+        use std::time::Duration;
+
+        use super::{STALE_TEMP_HARD_MAX_AGE, sweep_stale_temp_files_with};
+
+        let dir = temp_dir("stale-sweep-seam");
+        let other_pid = std::process::id().wrapping_add(7).max(2);
+        for (verdict, expect_removed) in [(None, 0usize), (Some(true), 0), (Some(false), 1)] {
+            let f = dir.join(format!(".p.curvebook.tmp.{other_pid}.1"));
+            std::fs::write(&f, b"x").unwrap();
+            let n = sweep_stale_temp_files_with(&dir, None, Duration::ZERO, 1024, &|_| verdict).unwrap();
+            assert_eq!(n, expect_removed, "verdict {verdict:?}");
+            assert_eq!(f.exists(), expect_removed == 0, "verdict {verdict:?}");
+            let _ = std::fs::remove_file(&f);
+        }
+
+        // Hard age limit removes even a "live" (reused) PID, but not a merely old-by-max_age file.
+        let f = dir.join(format!(".p.curvebook.tmp.{other_pid}.2"));
+        std::fs::write(&f, b"x").unwrap();
+        let ancient = std::time::SystemTime::now() - STALE_TEMP_HARD_MAX_AGE - Duration::from_secs(60);
+        std::fs::OpenOptions::new().write(true).open(&f).unwrap().set_modified(ancient).unwrap();
+        assert_eq!(sweep_stale_temp_files_with(&dir, None, Duration::ZERO, 1024, &|_| Some(true)).unwrap(), 1);
+        assert!(!f.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
