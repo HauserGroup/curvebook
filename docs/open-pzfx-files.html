@@ -58,8 +58,9 @@
             <p class="toc-title">On this page</p>
             <ul>
               <li><a href="#what-is-read">What is read &amp; written</a></li>
+              <li><a href="#archive-format-notes">What is actually inside a <code>.prism</code> file</a></li>
               <li><a href="#desktop">Open, merge, and export in the desktop app</a></li>
-              <li><a href="#convert">Convert to CSV from the command line</a></li>
+              <li><a href="#convert">Convert and export from the command line</a></li>
               <li><a href="#limits">Limits and privacy</a></li>
               <li><a href="#get">Get CurveBook</a></li>
             </ul>
@@ -71,6 +72,44 @@
         <section id="what-is-read" aria-labelledby="what-is-read-title" tabindex="-1">
           <p class="eyebrow">Import &amp; export scope</p>
           <h2 id="what-is-read-title">What CurveBook reads and writes</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Format</th>
+                  <th scope="col">Import (read)</th>
+                  <th scope="col">Export (write)</th>
+                  <th scope="col">Notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>.pzfx</code> (XML)</th>
+                  <td>All 8 table archetypes, info sheets, exclusions, rich text &amp; Symbol font, floating notes</td>
+                  <td>Data tables &amp; info sheets only</td>
+                  <td>Analyses, graphs, and layouts stay in <code>.curvebook</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>.prism</code> (ZIP)</th>
+                  <td>All 8 table archetypes, info sheets, exclusions, rich text, read-only preferred analysis snapshots, preview PNGs</td>
+                  <td>Import-only at Beta</td>
+                  <td>Opaque <code>PCFFGRA4</code> binary graphs/layouts and undocumented <code>.dt</code> digests block conformant write support.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>.pzf</code> / binary <code>PCFF</code></th>
+                  <td>Refused with clear error</td>
+                  <td>Not supported</td>
+                  <td>Legacy binary format (~15–18% of public <code>.pzfx</code>-named files); re-save as XML <code>.pzfx</code> or <code>.prism</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>.curvebook</code> / <code>.curvebook.d/</code></th>
+                  <td>Full project</td>
+                  <td>Full project</td>
+                  <td>Native published JSON Schema format; zero proprietary binary blobs; Git-friendly diffs.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <ul>
             <li><strong><code>.pzfx</code> files (XML import):</strong> all eight table archetypes (XY, Column, Grouped, Nested, Contingency, Survival, Parts of Whole, and Multiple Variables), including <code>&lt;HugeTable&gt;</code>, <code>&lt;Table1024&gt;</code>, and XSLT-wrapped files. Imports replicate subcolumns, parametric summary modes (mean with SD/SEM/%CV and N), two-subcolumn mean/SD and mean/SEM modes, Column asymmetric interval and quartile summary modes (mean with +/- error, upper/lower limits, median/IQR), row/column/subcolumn titles, display decimals, rich text and Symbol-font characters, excluded-value markers, floating notes, and top-level or per-table info sheets. Graphs, analyses, and layouts inside <code>.pzfx</code> files are not imported; rerun analyses in CurveBook (<a href="manual/latest/analyses.html">analyses reference</a>).</li>
             <li><strong>Legacy binary <code>.pzf</code> files (not supported):</strong> older binary <code>.pzf</code> files — including binary <code>PCFF</code>-prefixed files carrying a <code>.pzfx</code> extension (observed in roughly 15–18% of public <code>.pzfx</code>-named files) — are not supported. CurveBook refuses them with a clear error message; re-save them as XML <code>.pzfx</code> or <code>.prism</code> before opening.</li>
@@ -78,6 +117,19 @@
             <li><strong><code>.pzfx</code> data-only export:</strong> <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Every export is a separate copy (leaving your active <code>.curvebook</code> file path and unsaved state untouched) and reports every dropped non-tabular item. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications — structure-conformant files may still be rejected by other applications for non-structural reasons such as checksums, cross-references, or version gates.</li>
             <li><strong>Merging projects (<code>File › Merge Project…</code>):</strong> combine another <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file into your open project as a one-time copy with automatic sheet ID remapping and removable navigator origin badges (showing only the source filename and format, never full directory paths). Merged sheets have no live cross-file links.</li>
           </ul>
+
+          <aside class="callout callout-warning" id="archive-format-notes" aria-labelledby="archive-format-notes-title" tabindex="-1">
+            <p class="callout-title" id="archive-format-notes-title">What is actually inside a <code>.prism</code> file (why it is not FAIR)</p>
+            <p>The <code>.prism</code> ZIP container puts raw tables in CSV and metadata in JSON, and is often marketed as supporting the <a href="https://www.nature.com/articles/sdata201618">FAIR Guiding Principles</a> (Wilkinson et al., <em>Scientific Data</em> 3:160018, 2016) <span aria-hidden="true">↗</span> so every component can be located and reused. Standard encodings, however, are not a documented open schema. Across 983 public <code>.prism</code> files deposited on Zenodo (978 valid v10/v11 archives across 165 deposits), four structural barriers limit independent reuse:</p>
+            <ul>
+              <li><strong>No published schema &amp; headerless CSVs:</strong> every <code>data.csv</code> lacks column headers; column order is not self-describing (row titles precede X, generated X sequences occupy zero CSV columns, and trailing empty Y columns can be omitted), error-bar offsets store <code>[Y, +upper, -lower]</code> rather than limits, and analysis outputs sit behind undocumented internal keys and a three-hop JSON indirection chain.</li>
+              <li><strong>Exclusions are omitted from the CSV:</strong> <code>EXCLUDED</code> and <code>CENSORED</code> masks are stored separately in <code>data/sets/*.json</code> range tables. Reading <code>data.csv</code> directly in R, Python, or a spreadsheet silently includes excluded outliers.</li>
+              <li><strong>Graphs, layouts, and font tables remain opaque binary blobs:</strong> 979 readable archives contain 55,471 opaque binary entries. Every graph (6,978 <code>graphs/*/data.bin</code>) and layout (592 <code>layouts/*/data.bin</code>) is stored in a proprietary <code>PCFFGRA4</code> binary format rather than JSON, and font tables (933 <code>misc/used_fonts.bin</code>) use legacy <code>PCFF</code> binary records — only optional raster <code>preview.png</code> thumbnails are readable.</li>
+              <li><strong>Undocumented <code>.dt</code> digests block independent writers:</strong> every valid archive pairs data tables (20,872 <code>data.dt</code> entries) and analyses (7,021 <code>parameters.dt</code> entries) with undocumented 128-bit lowercase hex <code>.dt</code> files. Across the Zenodo corpus, <code>data.dt</code> is a strict 1-to-1 deterministic function of the exact raw bytes of <code>data.csv</code> alone (0 divergences across 15,097 distinct CSV payloads; all 1,483 empty tables share <code>130ab2f63ec643bee541b74c960e10db</code>), and <code>parameters.dt</code> is a strict 1-to-1 function of raw <code>parameters.json</code> bytes (0 divergences across 2,818 payloads) — yet neither matches any standard unkeyed cryptographic or non-cryptographic 128-bit hash tested (CRC32, MD2/4/5, RIPEMD-128, SHA-1/2/3, BLAKE2/3, SHAKE, XXH3, FNV-1a, CityHash, SpookyHash, SipHash, or MurmurHash3), indicating a keyed, salted, or custom proprietary external-edit digest. Without the undocumented algorithm, independent tools cannot guarantee conformant <code>.prism</code> write support.</li>
+            </ul>
+            <p><strong>Proprietary file formats slow down scientific progress.</strong> When experimental data, outlier exclusions, analysis settings, and figures are locked inside undocumented containers, publicly funded research cannot be audited, reproduced, or reused without purchasing a specific vendor’s license — and becomes harder to open the moment a subscription lapses or a platform changes. Scientific records belong to science, not to a file-format moat.</p>
+            <p>True interoperability requires a documented, open specification. Read <a href="pzfx-format-specification.html">the closest thing we have to an actual specification of <code>.prism</code> and <code>.pzfx</code> files</a> (derived clean-room from the Zenodo corpus). CurveBook’s native <code>.curvebook</code> and unpacked <code>.curvebook.d/</code> formats ship with a <a href="manual/latest/files.html">published JSON Schema</a>, zero proprietary binary blobs, and deterministic plain-text diffs.</p>
+          </aside>
         </section>
 
         <hr>
@@ -88,7 +140,7 @@
           <ol>
             <li><strong>Open or merge a file:</strong> choose <strong>File › Open…</strong> or <strong>File › Import</strong> to open a <code>.pzfx</code> or <code>.prism</code> file, or choose <strong>File › Merge Project…</strong> (or drag and drop a file onto an open project) to copy its sheets into the current workspace with automatic ID remapping and removable navigator origin badges.</li>
             <li><strong>Review skipped items and imported snapshots:</strong> when a file contains unsupported elements or opaque binary chunks, CurveBook opens the <strong>Import Warnings</strong> dialog (reopenable from the status bar or <strong>File › Import › Import Warnings…</strong>). Read-only analysis snapshots read from <code>.prism</code> files carry a banner and never enter CurveBook computations or hooks; click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh CurveBook results.</li>
-            <li><strong>Export tables:</strong> select any table and choose <strong>File › Export › CSV Table…</strong> (comma, semicolon, or tab delimiter), choose <strong>File › Export › Export All Data Tables…</strong> to write every data table to a folder, or export data tables and info sheets to <code>.pzfx</code> (reviewing the preflight summary of dropped non-tabular items before writing).</li>
+            <li><strong>Export tables:</strong> select any table and choose <strong>File › Export › CSV Table…</strong> (comma, semicolon, or tab delimiter), choose <strong>File › Export › Export All Data Tables…</strong> to write every data table to a folder, or choose <strong>File › Export › .pzfx file…</strong> to save data tables and info sheets to <code>.pzfx</code> (reviewing the preflight summary of dropped non-tabular items before writing).</li>
           </ol>
         </section>
 
@@ -96,7 +148,7 @@
 
         <section id="convert" aria-labelledby="convert-title" tabindex="-1">
           <p class="eyebrow">Command line · <code>curvebook-cli</code></p>
-          <h2 id="convert-title">Export the tables to CSV</h2>
+          <h2 id="convert-title">Convert and export from the command line</h2>
           <p>Every CurveBook download includes the <code>curvebook-cli</code> command-line tool next to the desktop app. Open a terminal in the folder that holds your file.</p>
           <h3>1. See which tables the file contains</h3>
           <pre><code>curvebook-cli info experiment.pzfx</code></pre>
@@ -106,9 +158,12 @@
           <p>Without further options, the first table is exported. Pick another table by its title or ID:</p>
           <pre><code>curvebook-cli convert experiment.pzfx groups.csv --sheet "Groups"</code></pre>
           <p>Replicate subcolumns appear as side-by-side columns, and an excluded value keeps its number with a trailing <code>*</code> (for example <code>55*</code>), so no data are silently dropped. Use a <code>.tsv</code> file name for tab-separated output.</p>
-          <h3>3. Or convert the whole file to a CurveBook project</h3>
+          <h3>3. Convert the whole file to a CurveBook project</h3>
           <pre><code>curvebook-cli convert experiment.pzfx experiment.curvebook</code></pre>
-          <p>The project keeps all tables together, ready for analyses, curve fits, and graphs. The same commands work for <code>.prism</code> files. The full option list is in the <a href="manual/latest/automation/cli.html">command-line reference</a>, and the <a href="manual/latest/files.html">files, import &amp; export reference</a> covers every supported format.</p>
+          <p>The project keeps all tables together, ready for analyses, curve fits, and graphs. The same commands work for <code>.prism</code> files.</p>
+          <h3>4. Export data tables and info sheets to <code>.pzfx</code></h3>
+          <pre><code>curvebook-cli convert experiment.curvebook export.pzfx</code></pre>
+          <p>Writes every data table and info sheet to a data-only <code>.pzfx</code> copy without modifying the source project, printing warnings to <code>stderr</code> for any dropped analyses, graphs, or layouts. The full option list is in the <a href="manual/latest/automation/cli.html">command-line reference</a>, and the <a href="manual/latest/files.html">files, import &amp; export reference</a> covers every supported format.</p>
           <p>Prefer to work through an AI assistant? CurveBook’s local MCP server can import these files too; see <a href="manual/latest/mcp-for-beginners.html">MCP setup</a>.</p>
         </section>
 

@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Clean-room empirical specification of .prism (ZIP/JSON/CSV + binary blobs and .dt digests) and .pzfx (XML + legacy PCFF) files, observed across 3,719 public Zenodo files.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Empirical specification of .prism and .pzfx files — CurveBook</title>
+  <link rel="canonical" href="https://curvebook.org/pzfx-format-specification.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="CurveBook">
+  <meta property="og:title" content="Empirical specification of .prism and .pzfx files — CurveBook">
+  <meta property="og:description" content="Clean-room empirical specification of .prism (ZIP/JSON/CSV + binary blobs and .dt digests) and .pzfx (XML + legacy PCFF) files, observed across 3,719 public Zenodo files.">
+  <meta property="og:url" content="https://curvebook.org/pzfx-format-specification.html">
+  <meta property="og:image" content="https://curvebook.org/images/workspace-layout-dark.png">
+  <meta property="og:image:alt" content="CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.">
+  <meta property="og:image:width" content="1440">
+  <meta property="og:image:height" content="900">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="icon" type="image/png" href="images/curvebook.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="site-shell">
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="wordmark" href="index.html">
+          <img src="images/curvebook.png" width="32" height="32" alt="">
+          <span>CurveBook</span>
+        </a>
+        <nav class="site-nav" aria-label="Main navigation">
+          <a href="index.html">Home</a>
+          <a href="manual/latest/index.html">Documentation</a>
+          <a href="open-pzfx-files.html" aria-current="page">.pzfx &amp; .prism</a>
+          <a href="linux.html">Linux</a>
+          <a href="faq.html">FAQ</a>
+          <a href="https://github.com/HauserGroup/curvebook">GitHub <span aria-hidden="true">↗</span></a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="overview doc-body">
+        <nav class="breadcrumbs" aria-label="Breadcrumb">
+          <a href="index.html">Home</a>
+          <span aria-hidden="true">/</span>
+          <a href="open-pzfx-files.html">.pzfx &amp; .prism</a>
+          <span aria-hidden="true">/</span>
+          <span aria-current="page">Empirical specification</span>
+        </nav>
+
+        <section id="summary" aria-labelledby="page-title" tabindex="-1">
+          <p class="eyebrow">Clean-room empirical reference · <code>.prism</code> · <code>.pzfx</code></p>
+          <h1 id="page-title">The closest thing we have to an actual specification<br><span>of .prism and .pzfx files.</span></h1>
+          <p class="lead">Neither <code>.prism</code> nor <code>.pzfx</code> ships with a published schema. This page documents every structural fact CurveBook relies on, observed directly from <strong>3,719 public CC-BY-4.0 and CC0-1.0 files on Zenodo</strong> (2,240 XML <code>.pzfx</code>, 496 legacy binary <code>PCFF</code>, and 983 <code>.prism</code> archives across v10 and v11) together with public standards — including the parts that remain a <strong>proprietary blob hidden by the vendor</strong>.</p>
+          <ul class="pill-row" aria-label="Corpus scope">
+            <li class="pill">3,719 Zenodo files</li>
+            <li class="pill">Clean-room</li>
+            <li class="pill">v10 &amp; v11 <code>.prism</code></li>
+            <li class="pill">v5.00 XML <code>.pzfx</code></li>
+          </ul>
+          <nav class="toc" aria-label="On this page">
+            <p class="toc-title">On this page</p>
+            <ul>
+              <li><a href="#archive-container"><code>.prism</code> ZIP container layout</a></li>
+              <li><a href="#archive-csv">Headerless <code>data.csv</code>, error offsets, and exclusions</a></li>
+              <li><a href="#archive-analyses-blobs">Analysis snapshots, <code>.dt</code> digests, and proprietary blobs</a></li>
+              <li><a href="#pzfx-container"><code>.pzfx</code> XML grammar and legacy <code>PCFF</code> detection</a></li>
+              <li><a href="#pzfx-tables"><code>.pzfx</code> table archetypes, summary modes, and rich text</a></li>
+              <li><a href="#evidence-and-alternative">Full evidence ledger &amp; open alternative</a></li>
+            </ul>
+          </nav>
+        </section>
+
+        <hr>
+
+        <section id="archive-container" aria-labelledby="archive-container-title" tabindex="-1">
+          <p class="eyebrow">Part 1 · <code>.prism</code> archive format</p>
+          <h2 id="archive-container-title"><code>.prism</code> ZIP container layout</h2>
+          <p>Every valid <code>.prism</code> archive observed on Zenodo (978 valid v10/v11 archives across 165 deposits; 979 readable ZIPs total; 4 missing ZIP EOCD) is a standard Deflate (method <code>8</code>) ZIP archive with UTF-8 entry names, forward slashes, and zero ZIP64 archives. Paths are indexed by opaque sheet and table UIDs declared in <code>document.json</code>:</p>
+          <pre><code>study.prism (ZIP, Deflate method 8)
+├── document.json                           # @class="Document", formatVersion, sheets.*, sheetAttributesMap
+├── data/
+│   ├── sheets/&lt;sheetUid&gt;/sheet.json        # @class="DataSheet", table.uid, format, dataFormat, xDataSetFormat, flags
+│   ├── tables/&lt;tableUid&gt;/
+│   │   ├── content.json                    # { $id, numberOfColumns, numberOfRows, version }
+│   │   ├── data.csv                        # headerless RFC-4180 CSV (no headers, no exclusion flags)
+│   │   └── data.dt                         # undocumented 128-bit raw-byte digest of data.csv (keyed, salted, or custom)
+│   └── sets/&lt;setUid&gt;.json                  # @class="DataSet" | "SubColumnTitlesDataSet"; titles, decimals, cellAttributes
+├── info/&lt;infoUid&gt;/sheet.json               # experimentDate, constants[], notesText (string or rich-text object)
+├── analyses/&lt;analysisUid&gt;/
+│   ├── sheet.json                          # analysisClass, inputSheets[], resultSheets[], preferredResultSheet
+│   ├── parameters.json                     # { version, content } analysis configuration
+│   ├── parameters.dt                       # undocumented 128-bit raw-byte digest of parameters.json (keyed, salted, or custom)
+│   ├── results.json                        # { version, content } structured raw analysis output
+│   └── result_sheets/&lt;rsUid&gt;.json          # indirection hop: { uid, name, dataSheet: &lt;viewSheetUid&gt; }
+├── graphs/&lt;graphUid&gt;/
+│   ├── sheet.json                          # sheet metadata only (inputDataSets, floatingNotes, mediaCollection)
+│   ├── data.bin                            # PCFFGRA4 — proprietary blob hidden by the vendor
+│   └── preview.png                         # optional raster thumbnail (200 observed across 6,978 graphs)
+├── layouts/&lt;layoutUid&gt;/
+│   ├── sheet.json                          # sheet metadata only (linkedGraphSheets, mediaCollection)
+│   ├── data.bin                            # PCFFGRA4 — proprietary blob hidden by the vendor
+│   └── preview.png                         # optional raster thumbnail (3 observed across 592 layouts)
+├── media/&lt;mediaUid&gt;.{pdf,emf,png,svg,wmf}  # embedded raster or vector media
+└── misc/
+    ├── used_fonts.bin                      # PCFF — proprietary blob hidden by the vendor (933 / 960 valid archives)
+    └── &lt;uid&gt;.bin                           # opaque binary struct (18 00 00 00 ...) — proprietary blob hidden by the vendor</code></pre>
+
+          <h3>Observed JSON schema keys</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Entry</th>
+                  <th scope="col">Key fields</th>
+                  <th scope="col">Observed values &amp; notes</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>document.json</code></th>
+                  <td><code>@class</code>, <code>formatVersion</code>, <code>minFormatVersion</code>, <code>sheets</code>, <code>sheetAttributesMap</code></td>
+                  <td><code>@class="Document"</code>; hyphenated <code>formatVersion</code> <code>1-0-0</code>..<code>1-6-1</code> and <code>minFormatVersion</code> <code>1-0-0</code>..<code>1-5-0</code>; <code>sheets.{data,info,analyses,graphs,layouts}</code> list sheet UIDs; <code>sheetAttributesMap.&lt;uid&gt;</code> holds <code>title</code>, optional <code>highlightColor</code>, and <code>isFrozen</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>data/sheets/&lt;uid&gt;/sheet.json</code></th>
+                  <td><code>table.uid</code>, <code>table.format</code>, <code>table.dataFormat</code>, <code>table.xDataSetFormat</code>, <code>table.dataSets[]</code>, <code>flags</code></td>
+                  <td><code>format</code>: <code>view</code>, <code>xy</code>, <code>column</code>, <code>grouped</code>, <code>survival</code>, <code>contingency</code>, <code>multivariable</code>, <code>nested</code>, <code>parts_of_whole</code>. <code>dataFormat</code>: <code>text</code>, <code>y_single</code>, <code>y_replicates</code>, <code>y_sd_n</code>, <code>y_plus_minus</code>, <code>y_se_n</code>, <code>y_high_low</code>, <code>text_replicates</code>, <code>y_sd</code>, <code>y_se</code> (<code>0</code> <code>y_cv</code> observed). <code>flags</code>: <code>ANALYSIS_VIEW</code>, <code>NOT_DATA_FOLDER</code>, <code>HIDE_ROW_TITLES</code>, <code>DATASETS_USES_OWN_TITLES</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>info/&lt;uid&gt;/sheet.json</code></th>
+                  <td><code>uid</code>, <code>title</code>, <code>experimentDate</code>, <code>constants[]</code>, <code>notesText</code>, <code>linkedDataSheetID</code></td>
+                  <td><code>1,306</code> info sheets across <code>715</code> files. <code>notesText</code> is a plain string in <code>1,286</code> sheets and a rich-text object in <code>20</code>; <code>constants[].{name,value}</code> is polymorphic (plain string or rich-text object).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="archive-csv" aria-labelledby="archive-csv-title" tabindex="-1">
+          <p class="eyebrow">Data decoding traps</p>
+          <h2 id="archive-csv-title">Headerless <code>data.csv</code>, error offsets, and exclusions</h2>
+          <p>Unzipping a <code>.prism</code> file and loading <code>data/tables/&lt;uid&gt;/data.csv</code> directly in R, Python, or a spreadsheet produces silently corrupted tables unless the companion JSON metadata is applied:</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Rule</th>
+                  <th scope="col">Observed behaviour across corpus</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">No column headers</th>
+                  <td>Every <code>data.csv</code> is headerless (<code>11,244</code> all-numeric row-0 tables; non-numeric row 0 is predominantly <code>dataFormat="text"</code> analysis views). Column titles live in <code>data/sets/&lt;setUid&gt;.json</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Column order</th>
+                  <td><code>[rowTitles? (0–1 col, before X)] → [X? (0, 1, or 2 cols)] → [Y datasets in table.dataSets order]</code>. Row titles precede X (<code>377</code> vs <code>3</code> reversed). Trailing empty Y columns may be omitted (<code>4 / 1,620</code> sampled tables) and must be padded.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Generated X series</th>
+                  <td>When <code>xDataSetFormat="series"</code>, X occupies <strong>zero columns</strong> in <code>data.csv</code> (<code>639 / 641</code> tables). Synthesize X from <code>data/sets/&lt;xUid&gt;.json</code> <code>replicates[0].{startValue, interval}</code>. <code>y_single</code> / <code>timeSpan</code> occupy 1 X column; <code>y_errorBar</code> / <code>date_se</code> occupy 2 X columns.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Asymmetric error offsets</th>
+                  <td><code>y_high_low</code> and <code>y_plus_minus</code> carry 3 subcolumns per Y dataset storing <strong>non-negative offsets from Y</strong> (<code>840 / 840</code> non-negative across <code>137</code> tables) in exact order <code>[Y, +upper_offset, -lower_offset]</code> — not absolute limits.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Compressed replicate ranges</th>
+                  <td>In <code>data/sets/&lt;uid&gt;.json</code> (<code>140,805</code> files), replicates appear in <code>replicates[]</code> and/or compressed <code>"replicate ranges": [{range: "N"|"N~M", replicate}]</code> using inclusive 0-based <code>~</code> ranges, carrying <code>valueType</code> (<code>string</code>/<code>real</code>/<code>int</code>/<code>timespan</code>/<code>date</code>) and <code>decimalsLength</code> (<code>1..=15</code>).</td>
+                </tr>
+                <tr>
+                  <th scope="row">Out-of-band exclusions</th>
+                  <td>Exclusions never appear in <code>data.csv</code>. They are stored in <code>data/sets/&lt;uid&gt;.json</code> under <code>cellAttributes: [{rows: "N"|"N~M", attributes: ["EXCLUDED", "CENSORED", "SECTION_TITLE", "SCI_NOTATION", ...]}]</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Polymorphic rich text</th>
+                  <td><code>title</code>, subcolumn titles (<code>SubColumnTitlesDataSet</code>), and info fields may be a plain string or <code>{string, version, formatting: [{range, attributes: {baseline: "superscript"|"subscript", fontWeight: "bold", italic, horizontalAlignment}}]}</code>.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="archive-analyses-blobs" aria-labelledby="archive-analyses-blobs-title" tabindex="-1">
+          <p class="eyebrow">Results, digests &amp; opaque payloads</p>
+          <h2 id="archive-analyses-blobs-title">Analysis snapshots, <code>.dt</code> digests, and proprietary blobs</h2>
+          <h3>Three-hop analysis result chain</h3>
+          <p>Stored analysis results are resolved through three JSON indirection hops (verified <code>784 / 784</code> across <code>7,021</code> analyses in <code>694</code> files; <code>32</code> distinct <code>analysisClass</code> values, including exact wire spellings <code>TRNSFORM</code> and <code>shaproWilks</code>):</p>
+          <pre><code>analyses/&lt;aUid&gt;/sheet.json              (preferredResultSheet: &lt;rsUid&gt;)
+  └─▶ analyses/&lt;aUid&gt;/result_sheets/&lt;rsUid&gt;.json   (dataSheet: &lt;viewSheetUid&gt;)
+        └─▶ data/sheets/&lt;viewSheetUid&gt;/sheet.json  (flags: ["ANALYSIS_VIEW"], table.format: "view")
+              └─▶ data/tables/&lt;tableUid&gt;/data.csv  (tabular display values; 38 empty views omit data.csv)</code></pre>
+
+          <h3>Proprietary binary blobs and undocumented <code>.dt</code> digests</h3>
+          <p>Zero checksum or signature keys exist inside any <code>.prism</code> JSON file. Instead, <code>979</code> readable archives contain <code>55,471</code> opaque non-CSV/JSON/image entries:</p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Archive entry</th>
+                  <th scope="col">Corpus prevalence</th>
+                  <th scope="col">Wire signature</th>
+                  <th scope="col">Specification status</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><code>graphs/&lt;uid&gt;/data.bin</code></th>
+                  <td><code>6,978</code> entries</td>
+                  <td><code>PCFFGRA4</code> binary</td>
+                  <td><strong>Proprietary blob hidden by the vendor</strong> — holds all graph styling and plot definitions; only optional <code>preview.png</code> (<code>200</code> observed) is readable.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>layouts/&lt;uid&gt;/data.bin</code></th>
+                  <td><code>592</code> entries</td>
+                  <td><code>PCFFGRA4</code> binary</td>
+                  <td><strong>Proprietary blob hidden by the vendor</strong> — holds all page-layout definitions; only optional <code>preview.png</code> (<code>3</code> observed) is readable.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>misc/used_fonts.bin</code></th>
+                  <td><code>933 / 960</code> valid archives</td>
+                  <td><code>PCFF </code> binary</td>
+                  <td><strong>Proprietary blob hidden by the vendor</strong> — legacy binary font record table.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>misc/&lt;uid&gt;.bin</code></th>
+                  <td><code>15,717</code> entries</td>
+                  <td><code>18 00 00 00 …</code> binary</td>
+                  <td><strong>Proprietary blob hidden by the vendor</strong> — undocumented binary auxiliary structs.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>data/tables/&lt;uid&gt;/data.dt</code></th>
+                  <td><code>20,872</code> entries (<code>960 / 960</code> valid archives)</td>
+                  <td>32-char lowercase hex (128-bit)</td>
+                  <td>Undocumented 128-bit external-edit digest (indicating a keyed, salted, or custom proprietary algorithm): strict 1-to-1 deterministic function of exact raw <code>data.csv</code> bytes alone (<code>0 / 15,097</code> divergences; all <code>1,483</code> 0-byte tables map to <code>130ab2f63ec643bee541b74c960e10db</code>). Matches no standard unkeyed cryptographic or non-cryptographic hash tested (including an exact algebraic inversion ruling out all 2<sup>64</sup> seeds of <code>MurmurHash3_x64_128</code>).</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>analyses/&lt;uid&gt;/parameters.dt</code></th>
+                  <td><code>7,021</code> entries (<code>686 / 686</code> with analyses)</td>
+                  <td>32-char lowercase hex (128-bit)</td>
+                  <td>Undocumented 128-bit digest (indicating a keyed, salted, or custom proprietary algorithm): strict 1-to-1 deterministic function of exact raw <code>parameters.json</code> bytes alone (<code>0 / 2,818</code> divergences). Matches no standard unkeyed hash tested (CRC32, MD2/4/5, RIPEMD-128, SHA-1/2/3, BLAKE2/3, SHAKE, XXH3, FNV-1a, CityHash, SpookyHash, SipHash, or MurmurHash3).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="pzfx-container" aria-labelledby="pzfx-container-title" tabindex="-1">
+          <p class="eyebrow">Part 2 · <code>.pzfx</code> XML format</p>
+          <h2 id="pzfx-container-title"><code>.pzfx</code> XML grammar and legacy <code>PCFF</code> detection</h2>
+          <p>Before invoking an XML parser on a <code>.pzfx</code> file, check its leading bytes:</p>
+          <ul>
+            <li><strong>Legacy binary <code>PCFF</code> files masquerading as <code>.pzfx</code>:</strong> <code>496</code> of <code>2,736</code> <code>.pzfx</code>-named files on Zenodo (<code>18.1%</code>) begin with the 4-byte ASCII header <code>PCFF</code> — an older legacy binary container (<strong>proprietary blob hidden by the vendor</strong>), not XML. Refuse before UTF-8 decoding.</li>
+            <li><strong>UTF-8 &amp; optional XSLT wrapper:</strong> all <code>2,240</code> XML <code>.pzfx</code> files are UTF-8 with zero <code>DOCTYPE</code> and zero non-whitespace trailing bytes. <code>22</code> files wrap the root element directly inside <code>&lt;xsl:stylesheet version="1.0"&gt;</code> (no intermediate <code>&lt;xsl:template&gt;</code>). <code>1,437</code> carry a default <code>xmlns</code> and <code>803</code> omit it — match tags by XML local name.</li>
+          </ul>
+
+          <h3>Unanimous XML element order (<code>2,178</code> direct corpus files)</h3>
+          <pre><code>&lt;Root *XMLVersion="5.00"&gt;                 &lt;!-- vendor root element; match by local name --&gt;
+  &lt;Created&gt;...&lt;/Created&gt;
+  &lt;DefGraphButton&gt;...&lt;/DefGraphButton&gt;     &lt;!-- optional --&gt;
+  &lt;InfoSequence&gt;
+    &lt;Ref ID="Info0" Selected="1"/&gt;         &lt;!-- always &lt;Ref&gt;; zero inline info sheets observed --&gt;
+  &lt;/InfoSequence&gt;
+  &lt;Info ID="Info0"&gt;                        &lt;!-- 0..N top-level info sheets --&gt;
+    &lt;Title&gt;...&lt;/Title&gt;
+    &lt;Notes&gt;...&lt;/Notes&gt;
+    &lt;Constant&gt;&lt;Name&gt;...&lt;/Name&gt;&lt;Value&gt;...&lt;/Value&gt;&lt;/Constant&gt;
+  &lt;/Info&gt;
+  &lt;TableSequence&gt;
+    &lt;Ref ID="Table0" Selected="1"/&gt;        &lt;!-- always &lt;Ref&gt;; zero inline tables observed --&gt;
+  &lt;/TableSequence&gt;
+  &lt;Table ID="Table0" TableType="XY" XFormat="numbers" YFormat="replicates"
+         Replicates="3" EVFormat="AsteriskAfterNumber"&gt;
+    &lt;Title&gt;...&lt;/Title&gt;
+    &lt;Info ID="..."/&gt;                       &lt;!-- optional embedded per-table info sheet (31 observed) --&gt;
+    &lt;FloatingNote Color="Yellow|Blue|Gray|Red"&gt;...&lt;/FloatingNote&gt;
+    &lt;RowTitlesColumn&gt;...&lt;/RowTitlesColumn&gt;
+    &lt;SubColumnTitles OwnSet="0|1"&gt;...&lt;/SubColumnTitles&gt;
+    &lt;XColumn Width="..." Decimals="0..15" Subcolumns="1|2"&gt;...&lt;/XColumn&gt;
+    &lt;XAdvancedColumn Version="1" ...&gt;...&lt;/XAdvancedColumn&gt;
+    &lt;YColumn Width="..." Decimals="0..15" Subcolumns="1..208"&gt;...&lt;/YColumn&gt;
+  &lt;/Table&gt;                                 &lt;!-- &lt;HugeTable&gt; and &lt;Table1024&gt; share identical grammar --&gt;
+  &lt;Template&gt;...&lt;/Template&gt;                 &lt;!-- opaque ASCII/base64-like payload (up to 89 MB) — proprietary blob hidden by the vendor --&gt;
+&lt;/Root&gt;</code></pre>
+          <p>Three interchangeable root-level table elements share identical attributes, child order, and <code>&lt;TableSequence&gt;&lt;Ref&gt;</code> linkage: <code>&lt;Table&gt;</code> (<code>12,790</code> tables), <code>&lt;HugeTable&gt;</code> (<code>120</code> tables, up to 256 Y columns / 208 subcolumns), and <code>&lt;Table1024&gt;</code> (<code>16</code> tables, up to 745 Y columns). The trailing <code>&lt;Template&gt;</code> block (present in <code>2,239 / 2,240</code> files; median <code>39.9 KB</code>, max <code>89.0 MB</code>, <code>657.7 MB</code> total across the corpus) stores analyses, graphs, and layouts as an opaque <strong>proprietary blob hidden by the vendor</strong> and must be skipped while streaming.</p>
+        </section>
+
+        <hr>
+
+        <section id="pzfx-tables" aria-labelledby="pzfx-tables-title" tabindex="-1">
+          <p class="eyebrow">Table grammar details</p>
+          <h2 id="pzfx-tables-title"><code>.pzfx</code> table archetypes, summary modes, and rich text</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Feature</th>
+                  <th scope="col">Exact wire encoding observed on Zenodo</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">8 table archetypes (<code>TableType</code> + <code>ExtTableType</code>)</th>
+                  <td><code>OneWay</code> (<code>5,073</code>), <code>XY</code> (<code>4,199</code>), <code>TwoWay</code> (<code>3,272</code>), <code>Contingency</code> (<code>118</code>), <code>PartsOfWhole</code> (<code>116</code>), <code>Survival</code> (<code>61</code>), <code>TwoWay</code> + <code>ExtTableType="Nested"</code> (<code>81</code>, <code>YFormat="replicates"</code>), and <code>OneWay</code> + <code>ExtTableType="MultipleVariables"</code> (<code>6</code>, optional <code>YColumn@MVType="Categorical"|"Continues"</code> [exact wire spelling]).</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>YFormat</code> modes</th>
+                  <td><code>replicates</code> (<code>6,883</code>, <code>Table@Replicates</code> <code>1..208</code>), omitted (<code>5,258</code>), <code>SDN</code> (<code>322</code>), <code>SD</code> (<code>288</code>), <code>SE</code> (<code>102</code>), <code>SEN</code> (<code>32</code>), <code>upper-lower-limits</code> (<code>29</code>), <code>low-high</code> (<code>7</code>), and <code>CV</code> (<code>5</code> tables: 2 subcolumns storing <code>(mean, %CV)</code> directly, verified across <code>162</code> pairs). <code>Subcolumns</code> sits on <code>&lt;YColumn&gt;</code>, <code>&lt;XColumn&gt;</code>, and <code>&lt;XAdvancedColumn&gt;</code>, never on <code>&lt;Table&gt;</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row"><code>XFormat</code> modes</th>
+                  <td><code>none</code> (<code>8,666</code>), <code>numbers</code> (<code>4,193</code>), <code>time</code> (<code>51</code>: numeric elapsed values in <code>&lt;XColumn&gt;</code>, <code>hh:mm:ss</code> strings in <code>&lt;XAdvancedColumn Version="1"&gt;</code>), <code>error</code> (<code>15</code>, never <code>"err"</code>: both columns carry <code>Subcolumns="2"</code> for X and X-error), and <code>date</code> (<code>1</code>). <code>&lt;XColumn&gt;</code> unanimously precedes <code>&lt;XAdvancedColumn&gt;</code>.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Exclusions &amp; subcolumn titles</th>
+                  <td><code>Table@EVFormat="AsteriskAfterNumber"</code> (<code>99.8%</code>) with <code>&lt;d Excluded="1"&gt;</code> (<code>2,055,926</code> excluded cells). <code>&lt;SubColumnTitles OwnSet="0|1"&gt;</code> (<code>428</code> tables) holds shared (<code>0</code>) or per-Y-column (<code>1</code>) subcolumn titles.</td>
+                </tr>
+                <tr>
+                  <th scope="row">Decimals, colors &amp; rich text</th>
+                  <td><code>Decimals</code> appears on column elements as integers <code>0..=15</code> (<code>-1</code> never observed), with optional <code>YColumn@Scientific="1"</code>. <code>Table@Highlighted</code> uses 1-based palette index strings <code>"1"</code>..<code>"7"</code>. Inline rich text uses <code>&lt;I&gt;</code>, <code>&lt;B&gt;</code>, <code>&lt;U&gt;</code>, <code>&lt;SUP&gt;</code>, <code>&lt;SUB&gt;</code>, <code>&lt;Font Color="#RRGGBB"&gt;</code>, and <code>&lt;Font Face="Symbol"&gt;</code> (plus Windows Symbol PUA <code>U+F020..=U+F0FE</code>, decoded via Unicode <code>SYMBOL.TXT</code>).</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <hr>
+
+        <section id="evidence-and-alternative" aria-labelledby="evidence-and-alternative-title" tabindex="-1">
+          <p class="eyebrow">Provenance &amp; open alternative</p>
+          <h2 id="evidence-and-alternative-title">Full evidence ledger &amp; open alternative</h2>
+          <aside class="callout callout-note" aria-labelledby="open-science-title">
+            <p class="callout-title" id="open-science-title">Why open formats matter for scientific progress</p>
+            <p>Reproducibility depends on being able to inspect the exact data, outlier exclusions, statistical settings, and figure definitions behind a published claim years later — without paying rent to a single software vendor. Undocumented binary blobs and proprietary integrity tokens turn public repositories into software-locked archives, forcing researchers to reverse-engineer their own field’s supplementary files instead of building on earlier work. Scientific records should outlive any single application through open, documented, schema-validated formats.</p>
+          </aside>
+          <ul>
+            <li><strong>Tracked evidence ledger:</strong> the full corpus-backed table of public-standard citations, observation counts, and dependent CurveBook modules is maintained in <a href="https://github.com/HauserGroup/curvebook/blob/main/docs/evidence/interop-format-notes.md"><code>docs/evidence/interop-format-notes.md</code> <span aria-hidden="true">↗</span></a> (containing zero corpus filenames, zero user values, and zero vendor prose).</li>
+            <li><strong>Open or convert these files offline:</strong> see the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> guide</a> for desktop GUI, CLI, and MCP workflows.</li>
+            <li><strong>Need a genuinely open format?</strong> CurveBook’s native <code>.curvebook</code> archive and unpacked <code>.curvebook.d/</code> directory ship with a <a href="manual/latest/files.html">published JSON Schema</a>, RFC-4180 CSVs with explicit headers, zero proprietary binary blobs, and deterministic plain-text diffs.</li>
+          </ul>
+        </section>
+      </div>
+    </main>
+
+    <footer class="site-footer">
+      <p><strong>License:</strong> MIT OR Apache-2.0. Clean-room implementation from published scientific references without commercial software or copied proprietary assets. CurveBook runs locally with zero telemetry; GitHub Pages logs visitor IP addresses for security.</p>
+      <p class="footer-links">
+        <a href="index.html">CurveBook home</a>
+        <a href="open-pzfx-files.html">.pzfx &amp; .prism guide</a>
+        <a href="privacy.html">Privacy Policy</a>
+        <a href="faq.html">FAQ</a>
+        <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+      </p>
+    </footer>
+  </div>
+</body>
+</html>
