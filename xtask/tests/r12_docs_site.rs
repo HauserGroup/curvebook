@@ -289,7 +289,7 @@ fn docs_site_release_snapshot_pages_stage_and_negative_gates() -> Result<(), Str
         ("fitting", "# Fitting\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Equations](registry/equations.html#eq-michaelis_menten).\n"),
         (
             "graphs",
-            "# Graphs\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n![Shot](../images/workspace-split-fit.png)\n\n## Families {#graph-families}\n\nPlots.\n\n## Layouts {#page-layouts}\n\nPanels.\n",
+            "# Graphs\n\n<!-- Audience: Tier 2 Technical Reference -->\n\n![Shot](../images/workspace-split-fit.png)\n\n## Families {#graph-families}\n\nPlots.\n\n## Layouts {#page-layouts}\n\nPanels.\n\n## Export {#export-capabilities}\n\nSVG.\n",
         ),
         ("qol", "# QoL\n\n<!-- Audience: Tier 2 Technical Reference -->\n\nSee [Graphs](graphs.md).\n"),
         (

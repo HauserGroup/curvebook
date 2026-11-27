@@ -32,6 +32,13 @@ const INTEROP_CORPUS_ALLOWLIST_FILE: &str = "xtask/src/interop_corpus.rs";
 const INTEROP_CORPUS_DEFAULT_DIR: &str = "corpus/third-party-prism";
 const PZFX_EXPORT_ALLOWLIST_FILE: &str = "crates/format/src/pzfx/export.rs";
 const PZFX_VENDOR_ROOT_ELEMENT: &str = "GraphPadPrismFile";
+const HOMEPAGE_HTML_PATH: &str = "docs/index.html";
+const HOMEPAGE_ALLOWED_PHRASES: &[&str] = &[
+    "Coming from GraphPad Prism",
+    "A GraphPad Prism Pro license costs $720 per year",
+    "*GraphPad Prism Pro annual pricing as listed in the EU on November 27, 2026.",
+    "not affiliated with GraphPad Prism, GraphPad Software, or Dotmatics",
+];
 const BINARY_ASSET_EXT: &str =
     "png jpg jpeg gif webp bmp tif tiff ico icns avif svgz pdf eps icc icm cur ani ase aco ttf otf ttc woff woff2 eot pfb mp4 wav mp3";
 const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
@@ -454,6 +461,19 @@ fn mask_generated_docs_html_tokens(path: &str, line: &str) -> Option<String> {
     }
     rep("crates/format/src/prism/", "crates/format/src/format_mod/");
     TOKENS.split_ascii_whitespace().for_each(|tok| rep(tok, "format_token"));
+    changed.then_some(work)
+}
+
+fn mask_homepage_html_phrases(source: &str, line: &str) -> Option<String> {
+    if norm_rel(source) != HOMEPAGE_HTML_PATH {
+        return None;
+    }
+    let (mut work, mut changed) = (line.to_owned(), false);
+    for &phrase in HOMEPAGE_ALLOWED_PHRASES {
+        if work.contains(phrase) {
+            (work, changed) = (work.replace(phrase, "homepage_allowed_phrase"), true);
+        }
+    }
     changed.then_some(work)
 }
 
@@ -913,7 +933,9 @@ fn scan_markup_metadata(source: &str, doc: &str, is_html: bool) -> Vec<BrandHit>
             return scan_xml_text_fragment(source, sl, raw, strict, out);
         }
         for (off, l) in decode_xml_html_entities(raw).lines().enumerate() {
-            let masked = (!strict && is_gen_docs).then(|| mask_generated_docs_html_tokens(source, l)).flatten();
+            let masked = (!strict)
+                .then(|| if is_gen_docs { mask_generated_docs_html_tokens(source, l) } else { mask_homepage_html_phrases(source, l) })
+                .flatten();
             check_single_string_with_extra(source, sl + off, masked.as_deref().unwrap_or(l), PrismPolicy::Strict, strict, out);
         }
     };
@@ -1713,6 +1735,30 @@ mod tests {
         let bad_wxs_hits = scan("packaging/windows/curvebook.wxs", bad_wxs);
         for line in 2..=6 {
             assert!(bad_wxs_hits.iter().any(|h| h.line == line), "expected .wxs rejection on line {line}, got {bad_wxs_hits:?}");
+        }
+    }
+
+    #[test]
+    fn homepage_migration_heading_and_disclaimer_allowlist() {
+        let ok_index = "\
+            <!doctype html><html><head><title>CurveBook</title></head><body>\n\
+            <main><h2>Coming from GraphPad Prism?</h2><ul><li><strong>A GraphPad Prism Pro license costs $720 per year<a href=\"#trademark-disclaimer\">*</a>.</strong></li></ul></main>\n\
+            <footer><p id=\"trademark-disclaimer\">*GraphPad Prism Pro annual pricing as listed in the EU on November 27, 2026. CurveBook is not affiliated with GraphPad Prism, GraphPad Software, or Dotmatics.</p></footer>\n\
+            </body></html>\n";
+        assert!(scan("docs/index.html", ok_index).is_empty(), "allowed homepage phrases must pass");
+
+        for (path, bad_html) in [
+            ("docs/index.html", "<html><head><title>Coming from GraphPad Prism</title></head></html>\n"),
+            ("docs/index.html", "<html><head><meta name=\"description\" content=\"Coming from GraphPad Prism\"></head></html>\n"),
+            ("docs/index.html", "<html><body><!-- Coming from GraphPad Prism --></body></html>\n"),
+            ("docs/index.html", "<html><body><p>Better than GraphPad Prism</p></body></html>\n"),
+            ("docs/index.html", "<html><body><p>Coming from GraphPad Prism and OriginPro</p></body></html>\n"),
+            ("docs/faq.html", "<html><body><h2>Coming from GraphPad Prism?</h2></body></html>\n"),
+            ("docs/open-pzfx-files.html", "<html><body><h2>Coming from GraphPad Prism?</h2></body></html>\n"),
+            ("docs-site/index.html", "<html><body><h2>Coming from GraphPad Prism?</h2></body></html>\n"),
+        ] {
+            let hits = scan(path, bad_html);
+            assert!(!hits.is_empty(), "expected rejection for {path}: {bad_html}");
         }
     }
 }

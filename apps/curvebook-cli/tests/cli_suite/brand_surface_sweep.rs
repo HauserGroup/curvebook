@@ -1231,7 +1231,7 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
             }
         }
     }
-    for rel in ["docs/commands.md", "docs/index.html", "docs/site.css"] {
+    for rel in ["docs/commands.md", "docs/site.css"] {
         let txt = fs::read_to_string(root.join(rel)).map_err(|e| e.to_string())?;
         let cleaned = txt.replace(&cmd_id, "table.import_ext").replace(&export_id, "project.export_ext").replace(&dot_ext, ".ext");
         for probe in banned_probe_tokens() {
@@ -1239,6 +1239,11 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
                 return Err(format!("{rel} leaked `{probe}`"));
             }
         }
+    }
+    let index_html = fs::read_to_string(root.join("docs/index.html")).map_err(|e| e.to_string())?;
+    let index_hits = check_html_metadata("docs/index.html", &index_html);
+    if let Some(first) = index_hits.first() {
+        return Err(format!("docs/index.html:{} leaked `{}`", first.line, first.brand));
     }
 
     let schemas_dir = root.join("docs/schemas");

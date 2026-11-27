@@ -596,6 +596,24 @@ main {
   margin: -26.81% 0 0 -36.23%;
 }
 
+.switching-section {
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--border);
+  scroll-margin-top: 1.5rem;
+}
+.switching-section > h2 { margin: 0 0 .75rem; }
+.switching-list {
+  margin: 0;
+  padding-left: 1.3rem;
+}
+.switching-list li {
+  margin-bottom: .75rem;
+  color: var(--ink);
+}
+.switching-list li:last-child { margin-bottom: 0; }
+.switching-list strong { color: var(--title); }
+
 .features-section {
   margin-top: 2rem;
   padding-top: 1.5rem;
@@ -745,6 +763,7 @@ main {
 .release-status p:first-child { color: var(--ink); }
 .release-status a { font-size: .875rem; }
 
+.switching-section:target,
 .features-section:target,
 .downloads:target {
   outline: 2px solid var(--title);
@@ -770,6 +789,7 @@ main {
 }
 .site-footer p:last-child { margin-bottom: 0; }
 .site-footer strong { color: var(--ink); }
+.site-footer .footer-disclaimer { font-size: .8rem; }
 .site-footer .footer-links {
   display: flex;
   flex-wrap: wrap;
@@ -1354,6 +1374,7 @@ details.toc[open] summary.toc-title { margin-bottom: .5rem; }
   .site-nav a[aria-current="page"] { border-bottom: 2px solid Highlight; }
   .sidebar-list a[aria-current="page"],
   .sidebar-list a.is-active { border-left: 3px solid Highlight; }
+  .switching-section:target,
   .features-section:target,
   .downloads:target,
   .doc-body :target { outline-color: Highlight; }
