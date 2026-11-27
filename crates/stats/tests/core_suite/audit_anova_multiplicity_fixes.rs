@@ -1888,3 +1888,41 @@ fn multiplicity_aud05_08_09_bky_sub_1e6_and_welch_posthoc_scaling() {
         Err(StatsError::InsufficientSampleSize { required: 2, .. })
     ));
 }
+
+#[test]
+fn one_way_all_data_skips_empty_data_sets_but_explicit_empty_selection_fails() {
+    let blank: [Option<f64>; 5] = [None; 5];
+    let ctrl = [Some(10.0), Some(10.4), Some(9.7), Some(10.1), Some(9.9)];
+    let mid = [Some(12.0), Some(13.1), Some(11.6), Some(12.7), Some(12.2)];
+    let high = [Some(15.2), Some(14.1), Some(16.0), Some(15.5), Some(14.8)];
+    let sheet =
+        col_sheet_opts("blank", ColumnDesignHint::default(), &[("Blank", &blank), ("Ctrl", &ctrl), ("Mid", &mid), ("High", &high), ("Tail", &blank)]);
+
+    // Blank leading and trailing data sets are ignored when every data set is analysed: the result
+    // equals an explicit selection of the non-empty ones, and the Dunnett control keeps its
+    // sheet index (1) although a blank data set precedes it.
+    for method in [OneWayMethod::OrdinaryAnova, OneWayMethod::KruskalWallis] {
+        for mult in [MultiplicityMethod::TukeyHsd, MultiplicityMethod::Dunnett { control_column: 1 }, MultiplicityMethod::DunnRankSum] {
+            if matches!(
+                (method, mult),
+                (OneWayMethod::OrdinaryAnova, MultiplicityMethod::DunnRankSum) | (OneWayMethod::KruskalWallis, MultiplicityMethod::TukeyHsd)
+            ) {
+                continue;
+            }
+            let kind = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method,
+                multiplicity: MultiplicitySpec { method: mult, threshold: 0.05, report_confidence_intervals: true },
+                ..Default::default()
+            });
+            let all = run_kind(&sheet, kind.clone()).unwrap_or_else(|e| panic!("{method:?}/{mult:?} all data: {e}"));
+            let sel = run_kind_sel(&sheet, kind.clone(), vec![1, 2, 3]).unwrap();
+            assert_eq!(all.scalars, sel.scalars, "{method:?}/{mult:?} scalars");
+            assert_eq!(all.pairwise_comparisons, sel.pairwise_comparisons, "{method:?}/{mult:?} pairwise");
+            if matches!(mult, MultiplicityMethod::Dunnett { .. }) {
+                assert!(all.pairwise_comparisons.iter().all(|p| p.label_a == "Ctrl" || p.label_b == "Ctrl"), "{method:?} Dunnett control");
+            }
+            // Asking for an empty data set explicitly is still an error.
+            assert!(run_kind_sel(&sheet, kind, vec![0, 1, 2]).is_err(), "{method:?}/{mult:?} explicit empty selection");
+        }
+    }
+}
