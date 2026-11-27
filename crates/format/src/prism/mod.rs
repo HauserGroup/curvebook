@@ -24,8 +24,10 @@ pub mod layouts;
 pub mod schema;
 
 pub use analyses::{
-    ANALYSIS_MAPPINGS, AnalysisMappingRow, AnalysisVerificationStatus, CachedResultDiagnostic, CachedScalarDiff, TranslatedAnalysis,
-    build_disagreement_checklist_item, compare_recomputed_against_cached_result, find_analysis_mapping, translate_analysis_parameters,
+    ANALYSIS_MAPPINGS, AnalysisMappingRow, AnalysisVerificationStatus, CACHED_SCALAR_LINKS, CachedResultDiagnostic, CachedScalarDiff,
+    CachedScalarLink, CrosswalkComparison, ExternalDataSetPositions, TranslatedAnalysis, build_disagreement_checklist_item, cached_values_for_link,
+    check_control_in_selection, compare_recomputed_against_cached_results, find_analysis_mapping, primary_input_data_sheet_uid,
+    resolve_selected_data_sets, translate_analysis_parameters,
 };
 pub use export::{ArchiveExportOptions, ArchiveExportReport, export_prism_bytes_experimental, export_prism_bytes_with_options};
 pub use import::{MAX_PROJECT_CELLS, import_prism_bytes, import_prism_bytes_with_limits};

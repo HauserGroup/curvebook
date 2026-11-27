@@ -51,10 +51,11 @@ pub use plate::{
 };
 pub use preamble::{PreambleInfo, build_preamble_info_sheet, extract_preamble_info, parse_preamble_constant_value, try_parse_preamble_kv};
 pub use prism::{
-    ANALYSIS_MAPPINGS, AnalysisMappingRow, AnalysisVerificationStatus, ArchiveExportOptions, ArchiveExportReport, CachedResultDiagnostic,
-    CachedScalarDiff, TranslatedAnalysis, build_disagreement_checklist_item, compare_recomputed_against_cached_result,
+    ANALYSIS_MAPPINGS, AnalysisMappingRow, AnalysisVerificationStatus, ArchiveExportOptions, ArchiveExportReport, CACHED_SCALAR_LINKS,
+    CachedResultDiagnostic, CachedScalarDiff, CachedScalarLink, CrosswalkComparison, ExternalDataSetPositions, TranslatedAnalysis,
+    build_disagreement_checklist_item, cached_values_for_link, check_control_in_selection, compare_recomputed_against_cached_results,
     export_prism_bytes_experimental, export_prism_bytes_with_options, find_analysis_mapping, import_prism_bytes, import_prism_bytes_with_limits,
-    translate_analysis_parameters,
+    primary_input_data_sheet_uid, resolve_selected_data_sets, translate_analysis_parameters,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use pzfx::export_pzfx_file;

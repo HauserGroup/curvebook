@@ -4,15 +4,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellValue, ChecklistStatus, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet,
-    DescriptiveSpec, GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument,
+    AnalysisKind, AnalysisSpec, Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DescriptiveSpec,
+    GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, MultiplicitySpec, NestedTable, PartsOfWholeTable, ProjectDocument,
     ResultCell, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId, SubcolumnMode, SurvivalTable,
     TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_format::{
-    ANALYSIS_MAPPINGS, AnalysisVerificationStatus, ArchiveExportOptions, FormatError, ImportWarningKind, ZipArchive,
-    build_disagreement_checklist_item, compare_recomputed_against_cached_result, export_prism_bytes_experimental, export_prism_bytes_with_options,
-    find_analysis_mapping, import_prism_bytes, translate_analysis_parameters, try_export_result_sheet_tidy_csv,
+    ANALYSIS_MAPPINGS, AnalysisVerificationStatus, ArchiveExportOptions, CACHED_SCALAR_LINKS, ExternalDataSetPositions, FormatError,
+    ImportWarningKind, ZipArchive, build_disagreement_checklist_item, cached_values_for_link, check_control_in_selection,
+    compare_recomputed_against_cached_results, export_prism_bytes_experimental, export_prism_bytes_with_options, find_analysis_mapping,
+    import_prism_bytes, resolve_selected_data_sets, translate_analysis_parameters, try_export_result_sheet_tidy_csv,
 };
 use curvebook_palette::Rgba8;
 use serde_json::json;
@@ -605,30 +606,157 @@ fn external_archive_analysis_mappings_translation_and_disagreement_diagnostics()
             .unwrap();
     assert!(!tr_nl_unmapped.blocking_options.is_empty());
 
-    // 3. Verify cached-vs-recomputed comparison & caution checklist item (never mutates CurveBook result).
-    let spec = AnalysisSpec::new("res-live", "d-src", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
-    let mut live_rs = ResultSheet::new(spec).unwrap();
-    live_rs.scalars.push(ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 12.25, units: None });
-    let diag_ok = compare_recomputed_against_cached_result(
-        &live_rs,
-        &[ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 12.25, units: None }],
-        1e-9,
-        1e-6,
-    );
-    assert_eq!(diag_ok.compared_count, 1);
-    assert!(diag_ok.disagreements.is_empty());
-    assert!(build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag_ok).is_none());
+    // The straight-line equation maps onto CurveBook's built-in `straight_line` model.
+    let tr_line =
+        translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({"content": {"model": {"equation": {"name": "Straight line"}}}})).unwrap();
+    assert!(matches!(&tr_line.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "straight_line"), "{:?}", tr_line.kind);
+}
 
-    let diag_bad = compare_recomputed_against_cached_result(
-        &live_rs,
-        &[ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 10.0, units: None }],
-        1e-9,
-        1e-6,
-    );
-    assert_eq!(diag_bad.disagreements.len(), 1);
-    let item = build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag_bad).unwrap();
-    assert_eq!(item.status, ChecklistStatus::Warn);
-    assert!(item.diagnostic_metric.as_deref().unwrap().contains("tStatistic"));
+#[test]
+fn external_archive_selected_data_sets_resolve_in_listed_order_or_block() {
+    let mut positions = ExternalDataSetPositions::new();
+    for (uid, sheet, pos) in [("ds-a", "sheet-1", 0), ("ds-b", "sheet-1", 1), ("ds-c", "sheet-1", 2), ("ds-x", "sheet-2", 0)] {
+        positions.insert(uid.to_owned(), (sheet.to_owned(), pos));
+    }
+    let subset = |uids: &[&str]| json!(uids.iter().map(|u| json!({"uid": u})).collect::<Vec<_>>());
+    type SelectionCase = (&'static str, serde_json::Value, Option<&'static str>, Result<Vec<usize>, ()>);
+    let cases: [SelectionCase; 8] = [
+        ("flag absent analyses all data", json!({"inputDataSets": subset(&["ds-b"])}), Some("sheet-1"), Ok(vec![])),
+        ("flag true analyses all data", json!({"isAllDataAnalyzed": true, "inputDataSets": subset(&["ds-b"])}), Some("sheet-1"), Ok(vec![])),
+        ("listed order is kept", json!({"isAllDataAnalyzed": false, "inputDataSets": subset(&["ds-c", "ds-a"])}), Some("sheet-1"), Ok(vec![2, 0])),
+        ("unknown uid blocks", json!({"isAllDataAnalyzed": false, "inputDataSets": subset(&["ds-a", "ds-zz"])}), Some("sheet-1"), Err(())),
+        ("foreign sheet blocks", json!({"isAllDataAnalyzed": false, "inputDataSets": subset(&["ds-a", "ds-x"])}), Some("sheet-1"), Err(())),
+        ("duplicate blocks", json!({"isAllDataAnalyzed": false, "inputDataSets": subset(&["ds-a", "ds-a"])}), Some("sheet-1"), Err(())),
+        ("empty subset blocks", json!({"isAllDataAnalyzed": false, "inputDataSets": []}), Some("sheet-1"), Err(())),
+        ("missing source blocks", json!({"isAllDataAnalyzed": false, "inputDataSets": subset(&["ds-a"])}), None, Err(())),
+    ];
+    for (label, sheet, source, expected) in cases {
+        let got = resolve_selected_data_sets(sheet.as_object().unwrap(), source, &positions).map_err(|_| ());
+        assert_eq!(got, expected, "{label}");
+    }
+}
+
+#[test]
+fn external_archive_post_tests_and_replicate_handling_translate_or_block() {
+    use curvebook_doc::{MultiplicityMethod, OneWayAnovaSpec, SubcolumnAggregation};
+
+    let post = |family: &str, mc_type: &str, test: &str| {
+        json!({"content": {"experimentalDesign": "ORDINARY_ANOVA", "postTests": {"type": "PAIRWISE_TESTS", "pairwiseTests": {
+            "pairwiseDesign": {"type": family, "controlID": {"col": {"idx": 2}}},
+            "multipleComparisons": {"type": mc_type, "statistical": {"test": test}, "fdr": {"test": test}},
+        }}}})
+    };
+    let one_way = |params: serde_json::Value| {
+        let tr = translate_analysis_parameters("ONE_WAY_ANOVA", &params).unwrap();
+        let AnalysisKind::OneWayAnova(OneWayAnovaSpec { multiplicity, .. }) = tr.kind.clone() else { panic!("not one-way") };
+        (multiplicity.method, tr)
+    };
+    let cases = [
+        ("Tukey all pairs", post("ALL_VS_ALL", "STATISTICAL", "TUKEY"), Some(MultiplicityMethod::TukeyHsd)),
+        ("Dunn all pairs", post("ALL_VS_ALL", "STATISTICAL", "DUNN"), Some(MultiplicityMethod::DunnRankSum)),
+        ("Bonferroni-Dunn is Bonferroni", post("ALL_VS_ALL", "STATISTICAL", "BONFERRONI_DUNN"), Some(MultiplicityMethod::Bonferroni)),
+        ("two-stage FDR", post("ALL_VS_ALL", "FDR", "BENJAMINI_KRIEGER_YEKUTIELI"), Some(MultiplicityMethod::TwoStageBkyFdr)),
+        ("no correction", post("ALL_VS_ALL", "NO_CORRECTION", "TUKEY"), Some(MultiplicityMethod::None)),
+        ("no test", post("ALL_VS_ALL", "STATISTICAL", "NO_TEST"), Some(MultiplicityMethod::None)),
+        ("Dunnett keeps sheet control", post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET"), Some(MultiplicityMethod::Dunnett { control_column: 2 })),
+        ("ambiguous name blocks", post("ALL_VS_ALL", "STATISTICAL", "BONFERRONI_SIDAK"), None),
+        ("selected pairs block", post("SELECTED_VS_SELECTED", "STATISTICAL", "HOLM_SIDAK"), None),
+        ("Tukey against control blocks", post("CONTROL_VS_ALL", "STATISTICAL", "TUKEY"), None),
+        ("unadjusted selected pairs block", post("SELECTED_VS_SELECTED", "NO_CORRECTION", "TUKEY"), None),
+        ("unadjusted control family blocks", post("CONTROL_VS_ALL", "STATISTICAL", "NO_TEST"), None),
+    ];
+    for (label, params, expected) in cases {
+        let (method, tr) = one_way(params);
+        match expected {
+            Some(m) => {
+                assert_eq!(method, m, "{label}");
+                assert!(tr.blocking_options.is_empty(), "{label}: {:?}", tr.blocking_options);
+            }
+            None => assert!(!tr.blocking_options.is_empty(), "{label}"),
+        }
+    }
+
+    // The Dunnett control keeps its sheet index and must be among the analysed data sets.
+    let (_, tr) = one_way(post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET"));
+    assert!(check_control_in_selection(&tr.kind, &[4, 2, 0]).is_ok());
+    assert!(matches!(
+        tr.kind,
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Dunnett { control_column: 2 }, .. },
+            ..
+        })
+    ));
+    assert!(check_control_in_selection(&tr.kind, &[0, 1]).is_err());
+    assert!(check_control_in_selection(&tr.kind, &[]).is_ok());
+
+    // Two-way Dunnett controls stay blocked.
+    let mut two_way = post("CONTROL_VS_ALL", "STATISTICAL", "DUNNET");
+    two_way["content"]["experimentalDesign"] = json!("ORDINARY_ANOVA");
+    assert!(!translate_analysis_parameters("TWO_WAY_ANOVA", &two_way).unwrap().blocking_options.is_empty());
+
+    // Replicate handling: corpus spellings map; per-subcolumn and unknown values block.
+    let descriptive =
+        |mode: &str| translate_analysis_parameters("DESCRIPTIVE_STATISTICS", &json!({"content": {"data": {"handleReplicatesAs": mode}}})).unwrap();
+    for (mode, agg, blocks) in [
+        ("AVERAGE", SubcolumnAggregation::RowMeans, false),
+        ("COLUMN", SubcolumnAggregation::PooledGrandSample, false),
+        ("SUB_COLUMN", SubcolumnAggregation::PerSubcolumn, true),
+        ("SOMETHING_NEW", SubcolumnAggregation::RowMeans, true),
+    ] {
+        let tr = descriptive(mode);
+        assert!(matches!(&tr.kind, AnalysisKind::DescriptiveStats(d) if d.aggregation == agg), "{mode}");
+        assert_eq!(!tr.blocking_options.is_empty(), blocks, "{mode}");
+    }
+}
+
+#[test]
+fn external_archive_cached_result_crosswalk_scopes_signs_and_skips_unmatched() {
+    // Every link names a known mapping row, a non-empty path, and a non-empty CurveBook key.
+    for l in CACHED_SCALAR_LINKS {
+        assert!(find_analysis_mapping(l.foreign_class).is_some(), "{}", l.cached_path);
+        assert!(!l.cached_path.is_empty() && !l.curvebook_key.is_empty());
+    }
+
+    // Per-data-set values inherit `id.col.idx` from the nearest enclosing entry.
+    let results = json!({"content": {
+        "samples": {
+            "u-1": {"id": {"col": {"idx": 2}}, "value": {"mean": 4.0, "n": 3}},
+            "u-2": {"id": {"col": {"idx": 0}}, "value": {"mean": 7.5, "n": 4}},
+        },
+        "unpairedTTestModel": {"unpairedTTest": {"t": -2.5, "pValue": {"value": 0.04}}},
+    }});
+    let mean_link = CACHED_SCALAR_LINKS.iter().find(|l| l.foreign_class == "DESCRIPTIVE_STATISTICS" && l.curvebook_key == "Mean").unwrap();
+    let mut means = cached_values_for_link(mean_link, &results);
+    means.sort_by_key(|m| m.0);
+    assert_eq!(means, vec![(Some(0), 7.5), (Some(2), 4.0)]);
+
+    let scalar = |key: &str, ds: Option<usize>, value: f64| ResultScalarEntry { key: key.to_owned(), data_set_index: ds, value, units: None };
+    let sheet = |scalars: Vec<ResultScalarEntry>| {
+        let spec = AnalysisSpec::new("res", "src", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+        let mut rs = ResultSheet::new(spec).unwrap();
+        rs.scalars = scalars;
+        rs
+    };
+
+    // Matching scope agrees; a scalar on a data set with no cached value is not compared.
+    let rs = sheet(vec![scalar("Mean", Some(0), 7.5), scalar("Mean", Some(2), 4.0), scalar("Mean", Some(5), 1.0)]);
+    let diag = compare_recomputed_against_cached_results(&rs, "DESCRIPTIVE_STATISTICS", &results, 1e-9, 1e-6);
+    assert_eq!(diag.compared_by_key.get("Mean"), Some(&2));
+    assert!(diag.disagreements.is_empty());
+
+    // A wrong data-set scope never borrows another column's value.
+    let rs = sheet(vec![scalar("Mean", Some(0), 4.0)]);
+    let diag = compare_recomputed_against_cached_results(&rs, "DESCRIPTIVE_STATISTICS", &results, 1e-9, 1e-6);
+    assert_eq!((diag.compared_count, diag.disagreements.len()), (1, 1));
+
+    // `t` is compared by magnitude (subtraction order), the p-value by signed value.
+    let rs = sheet(vec![scalar("t", None, 2.5), scalar("PValue", None, 0.04)]);
+    let diag = compare_recomputed_against_cached_results(&rs, "T_TESTS_AND_NONPARAMETRIC", &results, 1e-9, 1e-6);
+    assert_eq!((diag.compared_count, diag.disagreements.len()), (2, 0));
+    let rs = sheet(vec![scalar("PValue", None, 0.08)]);
+    let diag = compare_recomputed_against_cached_results(&rs, "T_TESTS_AND_NONPARAMETRIC", &results, 1e-9, 1e-6);
+    assert_eq!(diag.disagreements.len(), 1);
+    assert!(build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag).is_some());
 }
 
 #[test]
