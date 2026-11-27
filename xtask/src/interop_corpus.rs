@@ -4799,6 +4799,31 @@ fn clamp_utf8_bytes(s: &str, max_bytes: usize) -> &str {
     s.get(..end).unwrap_or("")
 }
 
+#[cfg(feature = "docs-site")]
+fn resolve_transform_output_dataset_indices(
+    sheet_obj: &serde_json::Map<String, Value>,
+    source_uid: Option<&str>,
+    selected_data_sets: &[usize],
+    positions: &curvebook_format::ExternalDataSetPositions,
+    cached_y_count: usize,
+) -> Vec<usize> {
+    if !selected_data_sets.is_empty() && selected_data_sets.len() == cached_y_count {
+        return selected_data_sets.to_vec();
+    }
+    if let Some(src) = source_uid
+        && let Some(items) = sheet_obj.get("inputDataSets").and_then(Value::as_array)
+    {
+        let mapped: Vec<usize> = items
+            .iter()
+            .filter_map(|item| item.as_str().or_else(|| item.get("uid").and_then(Value::as_str)))
+            .filter_map(|uid| positions.get(uid).and_then(|(owner, pos)| (owner == src).then_some(*pos)))
+            .collect();
+        if mapped.len() == cached_y_count {
+            return mapped;
+        }
+    }
+    (0..cached_y_count).collect()
+}
 /// Per-archive lookup tables shared by the analysis diagnostics pass.
 #[cfg(feature = "docs-site")]
 struct ArchiveSourceMaps<'a> {
@@ -4819,9 +4844,10 @@ fn run_archive_analysis_diagnostics(
     use curvebook_doc::{AnalysisSpec, ProjectDocument, ResultSheet, ResultStatus, SheetId};
     use curvebook_format::prism::schema::IdLookup;
     use curvebook_format::{
-        CACHED_SCALAR_LINKS, cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility,
-        compare_recomputed_against_cached_results, extract_analysis_design_key, find_analysis_mapping, primary_input_data_sheet_uid,
-        resolve_selected_data_sets, translate_analysis_parameters,
+        CACHED_SCALAR_LINKS, CachedTransformTable, cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility,
+        compare_recomputed_against_cached_results, compare_recomputed_transform_against_cached_table, count_analyzable_finite_cells,
+        extract_analysis_design_key, find_analysis_mapping, load_cached_transform_table, primary_input_data_sheet_uid, resolve_selected_data_sets,
+        translate_analysis_parameters,
     };
 
     for analysis_uid in &doc_index.analysis_sheet_ids {
@@ -4909,16 +4935,23 @@ fn run_archive_analysis_diagnostics(
             continue;
         }
 
+        let is_transform_math = class_key.eq_ignore_ascii_case("TRNSFORM");
+        let cached_transform_table =
+            if is_transform_math { load_cached_transform_table(zip_index, id_index, analysis_uid, sheet_obj).ok().flatten() } else { None };
         let results_val = match id_index.find_analysis_entry(analysis_uid, "results.json") {
             IdLookup::Found(p) => zip_index.read_entry(&p).ok().flatten().and_then(|b| serde_json::from_slice::<Value>(&b).ok()),
             _ => None,
         }
         .unwrap_or(Value::Null);
-        let cached_link_values: usize = CACHED_SCALAR_LINKS
-            .iter()
-            .filter(|l| l.foreign_class.eq_ignore_ascii_case(&class_key))
-            .map(|l| cached_values_for_link(l, &results_val).len())
-            .sum();
+        let cached_link_values: usize = if let Some(ref tbl) = cached_transform_table {
+            CachedTransformTable::finite_value_count(tbl)
+        } else {
+            CACHED_SCALAR_LINKS
+                .iter()
+                .filter(|l| l.foreign_class.eq_ignore_ascii_case(&class_key))
+                .map(|l| cached_values_for_link(l, &results_val).len())
+                .sum()
+        };
         diag_entry.cached_scalars_total = diag_entry.cached_scalars_total.saturating_add(cached_link_values);
 
         let recompute_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<ResultSheet, String> {
@@ -4943,14 +4976,32 @@ fn run_archive_analysis_diagnostics(
             Ok(Ok(recomputed)) => {
                 if recomputed.status == ResultStatus::UpToDate {
                     diag_entry.recomputed_ok += 1;
-                    diag_entry.recomputed_scalars_total = diag_entry.recomputed_scalars_total.saturating_add(recomputed.scalars.len());
-                    let cmp = compare_recomputed_against_cached_results(
-                        &recomputed,
-                        &class_key,
-                        &results_val,
-                        row.absolute_tolerance,
-                        row.relative_tolerance,
-                    );
+                    let recomputed_val_count = if is_transform_math { count_analyzable_finite_cells(&recomputed) } else { recomputed.scalars.len() };
+                    diag_entry.recomputed_scalars_total = diag_entry.recomputed_scalars_total.saturating_add(recomputed_val_count);
+                    let cmp = if let Some(ref tbl) = cached_transform_table {
+                        let out_indices = resolve_transform_output_dataset_indices(
+                            sheet_obj,
+                            source_uid,
+                            &selected_data_sets,
+                            source_maps.data_set_positions,
+                            tbl.y_data_sets.len(),
+                        );
+                        compare_recomputed_transform_against_cached_table(
+                            &recomputed,
+                            tbl,
+                            &out_indices,
+                            row.absolute_tolerance,
+                            row.relative_tolerance,
+                        )
+                    } else {
+                        compare_recomputed_against_cached_results(
+                            &recomputed,
+                            &class_key,
+                            &results_val,
+                            row.absolute_tolerance,
+                            row.relative_tolerance,
+                        )
+                    };
                     let pw_agreed = cmp.pairwise_compared_count.saturating_sub(cmp.pairwise_disagreements);
                     let design_key = extract_analysis_design_key(&class_key, &params_val);
                     let variant_label = design_key.canonical_label();
@@ -6545,5 +6596,107 @@ mod tests {
         let mut bad_mapping = summary;
         bad_mapping.pipeline.archive_analysis_diagnostics.remove("T_TESTS_AND_NONPARAMETRIC");
         assert!(enforce_strict_gates(&bad_mapping).unwrap_err().contains("ANALYSIS_MAPPINGS"));
+    }
+
+    #[cfg(feature = "docs-site")]
+    #[test]
+    fn issue_79_transform_diagnostics_recomputes_and_verifies_cached_values() {
+        let repo = TestDir::git_repo("interop-issue79");
+        repo.write(".gitignore", "/corpus\n/plan/*\n");
+        repo.git_add_all();
+
+        // Build an external `.prism` archive with one XY source table and two `TRNSFORM` analyses:
+        // 1. `an-div`: Y/K with K = 100.0 (all datasets)
+        // 2. `an-lb`: simultaneous 1/X & 1/Y (Lineweaver-Burk reciprocal)
+        let mut zw = TestZipWriter::new();
+        let doc = r#"{
+            "formatVersion":"1-6-0",
+            "createdBy":{"version":"10.4.1.627"},
+            "sheets":{"data":["s-xy"],"analyses":["an-div","an-lb"]},
+            "sheetAttributesMap":{"s-xy":{"title":"Kinetics"}}
+        }"#;
+        zw.add_file("document.json", doc.as_bytes().to_vec()).unwrap();
+        zw.add_file(
+            "data/sheets/s-xy/sheet.json",
+            br#"{"title":"Kinetics","table":{"uid":"t-xy","format":"xy","dataFormat":"y_single","xDataSetFormat":"y_single","xDataSet":"ds-x","dataSets":["ds-y1","ds-y2"]}}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file("data/sets/ds-x.json", br#"{"title":"X","replicates":[{"valueType":"real"}]}"#.to_vec()).unwrap();
+        zw.add_file("data/sets/ds-y1.json", br#"{"title":"Y1","replicates":[{"valueType":"real"}]}"#.to_vec()).unwrap();
+        zw.add_file("data/sets/ds-y2.json", br#"{"title":"Y2","replicates":[{"valueType":"real"}]}"#.to_vec()).unwrap();
+        zw.add_file("data/tables/t-xy/data.csv", b"2,100,200\n4,50,400\n".to_vec()).unwrap();
+
+        // Analysis 1: Y/K (K=100)
+        zw.add_file(
+            "analyses/an-div/sheet.json",
+            br#"{"uid":"an-div","title":"Div100","analysisClass":"TRNSFORM","isAllDataAnalyzed":true,"inputSheets":[{"uid":"s-xy"}],"resultSheets":[{"uid":"rs-div","title":"Transformed data"}]}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file(
+            "analyses/an-div/parameters.json",
+            br#"{"content":{"data":{"handleReplicatesAs":"INDIVIDUAL"},"calc":{"transformType":"STANDARD","standardFunction":{"interchangeXY":false,"xTransform":{"enabled":false,"function":"X*K","k":"undefined"},"yTransform":{"enabled":true,"function":"Y/K","kSameForAll":true,"k":100.0,"kList":[]},"handleSDAs":"DELETE"}}}}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file("analyses/an-div/results.json", br#"{"content":{"status":{"error":"VALID","warning":[]}}}"#.to_vec()).unwrap();
+        zw.add_file("analyses/an-div/result_sheets/rs-div.json", br#"{"uid":"rs-div","dataSheet":"v-div"}"#.to_vec()).unwrap();
+        zw.add_file(
+            "data/sheets/v-div/sheet.json",
+            br#"{"uid":"v-div","table":{"uid":"tv-div","format":"view","dataFormat":"y_single","rowTitlesDataSet":"rt-1","xDataSetFormat":"y_single","xDataSet":"vx-1","dataSets":["vy-1","vy-2"]}}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file("data/tables/tv-div/data.csv", b",2,1,2\n,4,0.5,4\n".to_vec()).unwrap();
+
+        // Analysis 2: 1/X & 1/Y
+        zw.add_file(
+            "analyses/an-lb/sheet.json",
+            br#"{"uid":"an-lb","title":"Reciprocal","analysisClass":"TRNSFORM","isAllDataAnalyzed":true,"inputSheets":[{"uid":"s-xy"}],"resultSheets":[{"uid":"rs-lb","title":"Transformed data"}]}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file(
+            "analyses/an-lb/parameters.json",
+            br#"{"content":{"data":{"handleReplicatesAs":"INDIVIDUAL"},"calc":{"transformType":"STANDARD","standardFunction":{"interchangeXY":false,"xTransform":{"enabled":true,"function":"1/X","k":"undefined"},"yTransform":{"enabled":true,"function":"1/Y","kSameForAll":true,"k":"undefined","kList":[]},"handleSDAs":"DELETE"}}}}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file("analyses/an-lb/results.json", br#"{"content":{"status":{"error":"VALID","warning":[]}}}"#.to_vec()).unwrap();
+        zw.add_file("analyses/an-lb/result_sheets/rs-lb.json", br#"{"uid":"rs-lb","dataSheet":"v-lb"}"#.to_vec()).unwrap();
+        zw.add_file(
+            "data/sheets/v-lb/sheet.json",
+            br#"{"uid":"v-lb","table":{"uid":"tv-lb","format":"view","dataFormat":"y_single","rowTitlesDataSet":"rt-2","xDataSetFormat":"y_single","xDataSet":"vx-2","dataSets":["vy-3","vy-4"]}}"#.to_vec(),
+        )
+        .unwrap();
+        zw.add_file("data/tables/tv-lb/data.csv", b",0.5,0.01,0.005\n,0.25,0.02,0.0025\n".to_vec()).unwrap();
+
+        let arc_bytes = zw.finish().unwrap();
+        repo.write_bytes("corpus/ext/rec1/transforms.prism", &arc_bytes);
+        let tsv = format!(
+            "source\tid\tdoi\tlicence\turl\tpath\tbytes\tsha256\n\
+             zenodo\t1\t10.5281/zenodo.79\tCC-BY-4.0\thttps://example.org/79\trec1/transforms.prism\t{}\t{}\n",
+            arc_bytes.len(),
+            sha256_hex(&arc_bytes),
+        );
+        repo.write("corpus/ext/provenance.tsv", &tsv);
+
+        let opts = InteropCorpusOptions {
+            strict: false,
+            observe: false,
+            structural_only: false,
+            help: false,
+            corpus_override: Some(repo.join("corpus/ext")),
+            ledger_dir_override: None,
+        };
+        let summary = run_with_options(repo.path(), &opts).unwrap();
+        let tr = summary.pipeline.archive_analysis_diagnostics.get("TRNSFORM").unwrap();
+        assert_eq!(tr.analyses_observed, 2);
+        assert_eq!(tr.translated_clean, 2);
+        assert_eq!(tr.translated_blocked, 0);
+        assert_eq!(tr.recomputed_ok, 2);
+        assert_eq!(tr.recompute_panics, 0);
+        assert_eq!(tr.scalars_compared, 12);
+        assert_eq!(tr.scalars_agreed, 12);
+        assert_eq!(tr.scalars_disagreed, 0);
+        assert_eq!(tr.compared_scalar_keys.get("TransformedX"), Some(&4));
+        assert_eq!(tr.compared_scalar_keys.get("TransformedY"), Some(&8));
+        assert_eq!(tr.variants.get("Y:Y/K"), Some(&[1, 1, 1]));
+        assert_eq!(tr.variants.get("X:1/X | Y:1/Y"), Some(&[1, 1, 1]));
     }
 }

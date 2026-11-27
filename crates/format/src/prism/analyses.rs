@@ -5,10 +5,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, ConvergenceStrictness, DataSheet, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, IdentifiabilityMode, MathTransformPreset, ModelComparisonMethod,
-    ModelComparisonQuestion, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ParameterRule, ParameterScope, ProjectDocument, RemlZeroVariancePolicy,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, ConvergenceStrictness, DataSheet, DescriptiveSpec,
+    ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, IdentifiabilityMode, MathTransformPreset,
+    ModelComparisonMethod, ModelComparisonQuestion, MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec,
+    OneWayMethod, OutlierHandling, OutlierSpec, PairwiseComparisonRecord, ParameterRule, ParameterScope, ProjectDocument, RemlZeroVariancePolicy,
     RepeatedMeasuresDesign, ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, RmSphericityCorrection, SheetId,
     SubcolumnAggregation, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
     WeightingSource, default_column_label,
@@ -466,6 +466,18 @@ pub fn extract_analysis_design_key(foreign_class: &str, params_json: &serde_json
                 get_str(get_obj(get_obj(content, "model"), "equation"), "name")
                     .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
                     .filter(|s| !s.is_empty())
+            } else if class == "TRNSFORM" {
+                let sf = get_obj(get_obj(content, "calc"), "standardFunction");
+                let mut parts = Vec::new();
+                for (axis, key) in [("X", "xTransform"), ("Y", "yTransform")] {
+                    if let Some(obj) = get_obj(sf, key)
+                        && get_bool(Some(obj), "enabled") == Some(true)
+                    {
+                        let func = get_str(Some(obj), "function").unwrap_or("?").trim();
+                        parts.push(format!("{axis}:{func}"));
+                    }
+                }
+                (!parts.is_empty()).then(|| parts.join(" | "))
             } else {
                 None
             }
@@ -2432,31 +2444,111 @@ fn translate_normality_tests(content: Option<&JsonMap>, blocking: &mut Vec<Strin
     })
 }
 
-fn parse_transform_fn(axis_obj: Option<&JsonMap>, blocking: &mut Vec<String>) -> Option<MathTransformPreset> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransformAxis {
+    X,
+    Y,
+}
+
+fn parse_transform_k(obj: &JsonMap, axis: TransformAxis, fn_label: &str, allow_zero: bool, blocking: &mut Vec<String>) -> Option<f64> {
+    if axis == TransformAxis::Y {
+        if get_bool(Some(obj), "kSameForAll") == Some(false) {
+            blocking.push(String::from("per-column transform constant `kSameForAll: false` is unsupported"));
+            return None;
+        }
+        if obj.get("kList").and_then(serde_json::Value::as_array).is_some_and(|list| !list.is_empty()) {
+            blocking.push(String::from("per-column transform constant `kList` is unsupported"));
+            return None;
+        }
+    }
+    let Some(k) = get_f64(Some(obj), "k") else {
+        blocking.push(format!("missing or non-finite transform constant `k` for `{fn_label}`"));
+        return None;
+    };
+    if !allow_zero && (k == 0.0 || !(1.0 / k).is_finite()) {
+        blocking.push(format!("zero or non-invertible transform divisor `k` for `{fn_label}`"));
+        return None;
+    }
+    Some(k)
+}
+
+fn normalize_transform_expr(raw: &str, axis: TransformAxis) -> String {
+    let compact: String = raw.chars().filter(|c| !c.is_ascii_whitespace()).map(|c| c.to_ascii_uppercase()).collect();
+    let assign_prefix = match axis {
+        TransformAxis::X => "X=",
+        TransformAxis::Y => "Y=",
+    };
+    compact.strip_prefix(assign_prefix).unwrap_or(&compact).to_owned()
+}
+
+fn parse_transform_fn(axis_obj: Option<&JsonMap>, axis: TransformAxis, blocking: &mut Vec<String>) -> Option<MathTransformPreset> {
     let obj = axis_obj?;
     if !get_bool(Some(obj), "enabled").unwrap_or(false) {
         return None;
     }
-    let fn_name = get_str(Some(obj), "function").unwrap_or("");
-    let k = get_f64(Some(obj), "k").unwrap_or(1.0);
-    match fn_name.to_ascii_uppercase().as_str() {
-        "LOG10" | "LOG" => Some(MathTransformPreset::Log10),
+    let raw_fn = get_str(Some(obj), "function").unwrap_or("").trim();
+    let norm = normalize_transform_expr(raw_fn, axis);
+
+    let canonical = match (axis, norm.as_str()) {
+        (_, "LOG10" | "LOG") | (TransformAxis::X, "LOG10(X)") | (TransformAxis::Y, "LOG10(Y)") => "LOG10",
+        (_, "LN") | (TransformAxis::X, "LN(X)") | (TransformAxis::Y, "LN(Y)") => "LN",
+        (_, "LOG2") | (TransformAxis::X, "LOG2(X)") | (TransformAxis::Y, "LOG2(Y)") => "LOG2",
+        (_, "EXP10" | "TEN_TO_X" | "ANTILOG10") | (TransformAxis::X, "10^X" | "10^(X)") | (TransformAxis::Y, "10^Y" | "10^(Y)") => "EXP10",
+        (_, "EXP" | "E_TO_X") | (TransformAxis::X, "EXP(X)" | "E^X" | "E^(X)") | (TransformAxis::Y, "EXP(Y)" | "E^Y" | "E^(Y)") => "EXP",
+        (_, "RECIPROCAL" | "ONE_OVER_X") | (TransformAxis::X, "1/X") | (TransformAxis::Y, "1/Y") => "RECIPROCAL",
+        (_, "SQRT") | (TransformAxis::X, "SQRT(X)") | (TransformAxis::Y, "SQRT(Y)") => "SQRT",
+        (_, "SQUARE" | "X_SQUARED") | (TransformAxis::X, "X^2" | "X*X") | (TransformAxis::Y, "Y^2" | "Y*Y") => "SQUARE",
+        (_, "LOGIT") | (TransformAxis::X, "LOGIT(X)") | (TransformAxis::Y, "LOGIT(Y)") => "LOGIT",
+        (_, "PROBIT") | (TransformAxis::X, "PROBIT(X)") | (TransformAxis::Y, "PROBIT(Y)") => "PROBIT",
+        (_, "ARCSIN_SQRT") | (TransformAxis::X, "ARCSIN(SQRT(X))" | "ASIN(SQRT(X))") | (TransformAxis::Y, "ARCSIN(SQRT(Y))" | "ASIN(SQRT(Y))") => {
+            "ARCSIN_SQRT"
+        }
+        (_, "MULTIPLY") | (TransformAxis::X, "X*K" | "K*X") | (TransformAxis::Y, "Y*K" | "K*Y") => "MULTIPLY",
+        (_, "DIVIDE") | (TransformAxis::X, "X/K") | (TransformAxis::Y, "Y/K") => "DIVIDE",
+        (_, "ADD") | (TransformAxis::X, "X+K" | "K+X") | (TransformAxis::Y, "Y+K" | "K+Y") => "ADD",
+        (_, "SUBTRACT") | (TransformAxis::X, "X-K") | (TransformAxis::Y, "Y-K") => "SUBTRACT",
+        (TransformAxis::X, "K-X") | (TransformAxis::Y, "K-Y") => "K_MINUS_V",
+        (TransformAxis::X, "-X") | (TransformAxis::Y, "-Y") => "NEGATE",
+        _ => {
+            blocking.push(format!("unmapped transform function `{raw_fn}`"));
+            return None;
+        }
+    };
+
+    match canonical {
+        "LOG10" => Some(MathTransformPreset::Log10),
         "LN" => Some(MathTransformPreset::Ln),
         "LOG2" => Some(MathTransformPreset::Log2),
-        "EXP10" | "TEN_TO_X" | "ANTILOG10" => Some(MathTransformPreset::Exp10),
-        "EXP" | "E_TO_X" => Some(MathTransformPreset::Exp),
-        "RECIPROCAL" | "ONE_OVER_X" => Some(MathTransformPreset::Reciprocal),
+        "EXP10" => Some(MathTransformPreset::Exp10),
+        "EXP" => Some(MathTransformPreset::Exp),
+        "RECIPROCAL" => Some(MathTransformPreset::Reciprocal),
         "SQRT" => Some(MathTransformPreset::Sqrt),
-        "SQUARE" | "X_SQUARED" => Some(MathTransformPreset::Square),
+        "SQUARE" => Some(MathTransformPreset::Square),
         "LOGIT" => Some(MathTransformPreset::Logit),
         "PROBIT" => Some(MathTransformPreset::Probit),
         "ARCSIN_SQRT" => Some(MathTransformPreset::ArcsinSqrt),
-        "MULTIPLY" => Some(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 }),
-        "ADD" => Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: k }),
-        other => {
-            blocking.push(format!("unmapped transform function `{other}`"));
-            None
+        "MULTIPLY" => {
+            let k = parse_transform_k(obj, axis, raw_fn, true, blocking)?;
+            Some(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 })
         }
+        "DIVIDE" => {
+            let k = parse_transform_k(obj, axis, raw_fn, false, blocking)?;
+            Some(MathTransformPreset::LinearScale { slope: 1.0 / k, intercept: 0.0 })
+        }
+        "ADD" => {
+            let k = parse_transform_k(obj, axis, raw_fn, true, blocking)?;
+            Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: k })
+        }
+        "SUBTRACT" => {
+            let k = parse_transform_k(obj, axis, raw_fn, true, blocking)?;
+            Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: -k })
+        }
+        "K_MINUS_V" => {
+            let k = parse_transform_k(obj, axis, raw_fn, true, blocking)?;
+            Some(MathTransformPreset::LinearScale { slope: -1.0, intercept: k })
+        }
+        "NEGATE" => Some(MathTransformPreset::LinearScale { slope: -1.0, intercept: 0.0 }),
+        _ => None,
     }
 }
 
@@ -2466,11 +2558,30 @@ fn translate_math_transform(content: Option<&JsonMap>, blocking: &mut Vec<String
     if get_str(calc, "transformType").is_some_and(|t| !t.eq_ignore_ascii_case("STANDARD")) {
         blocking.push(String::from("non-standard transformType"));
     }
-    let x_transform = parse_transform_fn(get_obj(std_fn, "xTransform"), blocking);
-    let y_transform = parse_transform_fn(get_obj(std_fn, "yTransform"), blocking);
-    let error_propagation = match get_str(std_fn, "handleSDAs") {
-        Some("DELTA_METHOD") => ErrorPropagationMode::FirstOrderDeltaMethod,
-        _ => ErrorPropagationMode::ReplicateEndpoints,
+    if let Some(rep_mode) = get_str(get_obj(content, "data"), "handleReplicatesAs")
+        && !rep_mode.eq_ignore_ascii_case("INDIVIDUAL")
+    {
+        blocking.push(format!("unmapped transform handleReplicatesAs `{rep_mode}`"));
+    }
+    if get_bool(std_fn, "interchangeXY") == Some(true) {
+        blocking.push(String::from("unsupported transform option `interchangeXY`"));
+    }
+    let x_transform = parse_transform_fn(get_obj(std_fn, "xTransform"), TransformAxis::X, blocking);
+    let y_transform = parse_transform_fn(get_obj(std_fn, "yTransform"), TransformAxis::Y, blocking);
+    if x_transform.is_none() && y_transform.is_none() && blocking.is_empty() {
+        blocking.push(String::from("no transform enabled on X or Y"));
+    }
+    let (error_propagation, asymmetric_ci_policy) = match get_str(std_fn, "handleSDAs").map(str::to_ascii_uppercase).as_deref() {
+        Some("DELETE") => (ErrorPropagationMode::ReplicateEndpoints, AsymmetricCiTransformPolicy::Omit),
+        Some("DELTA_METHOD") => (ErrorPropagationMode::FirstOrderDeltaMethod, AsymmetricCiTransformPolicy::Default),
+        Some("ASYMMETRIC" | "UPPER_LOWER" | "ENDPOINTS") => {
+            (ErrorPropagationMode::ReplicateEndpoints, AsymmetricCiTransformPolicy::AsymmetricEndpoints)
+        }
+        None => (ErrorPropagationMode::ReplicateEndpoints, AsymmetricCiTransformPolicy::Default),
+        Some(other) => {
+            blocking.push(format!("unmapped transform handleSDAs `{other}`"));
+            (ErrorPropagationMode::ReplicateEndpoints, AsymmetricCiTransformPolicy::Default)
+        }
     };
     AnalysisKind::Transform(TransformAnalysisSpec::Math {
         x_transform,
@@ -2479,7 +2590,7 @@ fn translate_math_transform(content: Option<&JsonMap>, blocking: &mut Vec<String
         pharmacology_preset: None,
         interchange_xy: false,
         zero_x_substitute: None,
-        asymmetric_ci_policy: Default::default(),
+        asymmetric_ci_policy,
     })
 }
 
@@ -3128,6 +3239,287 @@ fn parse_result_cell_token(token: &str) -> ResultCell {
         return ResultCell::Number { value: v, prefix: None, units: None };
     }
     ResultCell::Text(token.to_owned())
+}
+
+/// Cached numeric output grid extracted from an external `.prism` transform's 3-hop
+/// `result_sheets` view table (`data/sheets/<viewUid>/sheet.json` -> `data/tables/<tableUid>/data.csv`),
+/// used for corpus transformed-value verification (§5.2).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedTransformTable {
+    /// Cached finite numeric X values by row when the output view carries an explicit X column.
+    pub x_values: Option<Vec<Option<f64>>>,
+    /// Cached finite numeric Y values indexed by `[output_data_set][row][replicate]`.
+    pub y_data_sets: Vec<Vec<Vec<Option<f64>>>>,
+}
+
+impl CachedTransformTable {
+    /// Count finite numeric values present across cached X and Y cells.
+    #[must_use]
+    pub fn finite_value_count(&self) -> usize {
+        let x_cnt = self.x_values.as_ref().map_or(0, |xs| xs.iter().filter(|v| v.is_some()).count());
+        let y_cnt: usize = self.y_data_sets.iter().flat_map(|ds| ds.iter()).flat_map(|row| row.iter()).filter(|v| v.is_some()).count();
+        x_cnt.saturating_add(y_cnt)
+    }
+}
+
+/// Count finite numeric cells stored inside a recomputed transform's [`ResultSheet::analyzable_data`].
+#[must_use]
+pub fn count_analyzable_finite_cells(recomputed: &ResultSheet) -> usize {
+    let Some(ref ds) = recomputed.analyzable_data else {
+        return 0;
+    };
+    let count_cols = |cols: &[curvebook_doc::DataSetColumn]| -> usize {
+        cols.iter().flat_map(|c| c.cells.iter()).flat_map(|row| row.iter()).filter(|cell| cell.value.finite_f64().is_some()).count()
+    };
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            let x_cnt = (0..xy.row_count()).filter(|&r| xy.raw_x_value_at(r).is_some()).count();
+            x_cnt.saturating_add(count_cols(&xy.data_sets))
+        }
+        TableArchetype::Column(t) => count_cols(&t.data_sets),
+        TableArchetype::Grouped(t) => count_cols(&t.data_sets),
+        TableArchetype::Contingency(t) => count_cols(&t.data_sets),
+        TableArchetype::PartsOfWhole(t) => count_cols(&t.data_sets),
+        TableArchetype::Survival(t) => {
+            let t_cnt = t.times.iter().filter(|c| c.value.finite_f64().is_some()).count();
+            t_cnt.saturating_add(count_cols(&t.cohorts))
+        }
+        TableArchetype::MultipleVariables(t) => t.variables.iter().flat_map(|v| v.cells.iter()).filter(|c| c.value.finite_f64().is_some()).count(),
+        TableArchetype::Nested(t) => {
+            t.groups.iter().flat_map(|g| g.cells.iter()).flat_map(|row| row.iter()).filter(|c| c.value.finite_f64().is_some()).count()
+        }
+    }
+}
+
+fn read_dataset_replicate_width(zip_index: &mut ZipIndex<'_>, id_index: &ArchiveIdIndex, uid: &str, fallback: usize) -> Result<usize, FormatError> {
+    let IdLookup::Found(path) = id_index.find_dataset_json(uid) else {
+        return Ok(fallback);
+    };
+    let Some(bytes) = zip_index.read_entry(&path)? else {
+        return Ok(fallback);
+    };
+    match parse_bounded_json_outcome(&bytes) {
+        BoundedJsonOutcome::Value(val) => {
+            Ok(ExternalDataSetJson::from_json(&val).map(|ds| ds.replicates.len()).filter(|&n| n > 0).unwrap_or(fallback))
+        }
+        BoundedJsonOutcome::BudgetExceeded(err) => Err(err),
+        BoundedJsonOutcome::SyntaxOrType(_) => Ok(fallback),
+    }
+}
+
+/// Load the cached numeric output grid for an external `.prism` transform analysis by following its
+/// 3-hop `preferredResultSheet` / `resultSheets[0]` -> `dataSheet` -> `data/tables/<uid>/data.csv`
+/// chain. Returns `Ok(None)` when no readable tabular output exists.
+pub fn load_cached_transform_table(
+    zip_index: &mut ZipIndex<'_>,
+    id_index: &ArchiveIdIndex,
+    analysis_uid: &str,
+    sheet_obj: &JsonMap,
+) -> Result<Option<CachedTransformTable>, FormatError> {
+    let rs_uid = sheet_obj.get("preferredResultSheet").and_then(serde_json::Value::as_str).filter(|s| !s.trim().is_empty()).or_else(|| {
+        sheet_obj
+            .get("resultSheets")
+            .and_then(serde_json::Value::as_array)?
+            .iter()
+            .find_map(|item| item.as_str().or_else(|| item.get("uid").and_then(serde_json::Value::as_str)).filter(|s| !s.trim().is_empty()))
+    });
+    let Some(rs_uid) = rs_uid else {
+        return Ok(None);
+    };
+    let IdLookup::Found(rs_path) = id_index.find_analysis_result_sheet_json(analysis_uid, rs_uid) else {
+        return Ok(None);
+    };
+    let Some(rs_bytes) = zip_index.read_entry(&rs_path)? else {
+        return Ok(None);
+    };
+    let rs_val = match parse_bounded_json_outcome(&rs_bytes) {
+        BoundedJsonOutcome::Value(v) => v,
+        BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
+        BoundedJsonOutcome::SyntaxOrType(_) => return Ok(None),
+    };
+    let Some(view_uid) = rs_val.get("dataSheet").and_then(serde_json::Value::as_str).filter(|s| !s.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let IdLookup::Found(view_path) = id_index.find_data_sheet_json(view_uid) else {
+        return Ok(None);
+    };
+    let Some(view_bytes) = zip_index.read_entry(&view_path)? else {
+        return Ok(None);
+    };
+    let view_val = match parse_bounded_json_outcome(&view_bytes) {
+        BoundedJsonOutcome::Value(v) => v,
+        BoundedJsonOutcome::BudgetExceeded(err) => return Err(err),
+        BoundedJsonOutcome::SyntaxOrType(_) => return Ok(None),
+    };
+    let Some(view_sheet) = ExternalDataSheetJson::from_json(&view_val) else {
+        return Ok(None);
+    };
+    let Some(table_uid) = view_sheet.table.uid.as_deref() else {
+        return Ok(None);
+    };
+    let IdLookup::Found(csv_path) = id_index.find_table_csv(table_uid) else {
+        return Ok(None);
+    };
+    let Some(csv_bytes) = zip_index.read_entry(&csv_path)? else {
+        return Ok(None);
+    };
+    let Ok(csv_text) = std::str::from_utf8(&csv_bytes) else {
+        return Ok(None);
+    };
+    let opts = CsvOptions { header_rows: 0, parse_asterisk_exclusions: false, ..CsvOptions::csv() };
+    let Ok(records) = parse_delimited_records(csv_text, &opts) else {
+        return Ok(None);
+    };
+
+    let has_row_titles = view_sheet.table.row_titles_data_set.is_some();
+    let x_width = if view_sheet.table.x_data_set.is_some() {
+        match view_sheet.table.x_data_set_format.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("series") => 0,
+            Some("y_errorbar" | "date_se") => 2,
+            _ => 1,
+        }
+    } else {
+        0
+    };
+    let fallback_rep = view_sheet.table.replicates_count.unwrap_or(1).clamp(1, MAX_RESULT_TAB_COLS);
+    let mut ds_widths = Vec::with_capacity(view_sheet.table.data_sets.len().min(MAX_RESULT_TAB_COLS));
+    for ds_uid in view_sheet.table.data_sets.iter().take(MAX_RESULT_TAB_COLS) {
+        let w = read_dataset_replicate_width(zip_index, id_index, ds_uid, fallback_rep)?.clamp(1, MAX_RESULT_TAB_COLS);
+        ds_widths.push(w);
+    }
+
+    let x_col_idx = usize::from(has_row_titles);
+    let y_col_start = x_col_idx.saturating_add(x_width);
+    let row_limit = records.len().min(MAX_RESULT_TAB_ROWS);
+    let parse_opt_f64 = |rec: &[String], col: usize| -> Option<f64> {
+        let token = rec.get(col)?.trim();
+        if token.is_empty() {
+            return None;
+        }
+        token.parse::<f64>().ok().filter(|v| v.is_finite())
+    };
+
+    let x_values = if x_width > 0 {
+        let mut xs = Vec::with_capacity(row_limit);
+        for rec in records.iter().take(row_limit) {
+            xs.push(parse_opt_f64(rec, x_col_idx));
+        }
+        Some(xs)
+    } else {
+        None
+    };
+
+    let mut y_data_sets = Vec::with_capacity(ds_widths.len());
+    let mut cur_col = y_col_start;
+    for width in ds_widths {
+        let mut ds_rows = Vec::with_capacity(row_limit);
+        for rec in records.iter().take(row_limit) {
+            let mut reps = Vec::with_capacity(width);
+            for s in 0..width {
+                reps.push(parse_opt_f64(rec, cur_col.saturating_add(s)));
+            }
+            ds_rows.push(reps);
+        }
+        y_data_sets.push(ds_rows);
+        cur_col = cur_col.saturating_add(width);
+    }
+
+    Ok(Some(CachedTransformTable { x_values, y_data_sets }))
+}
+
+fn recomputed_x_value_at(ds: &DataSheet, row: usize) -> Option<f64> {
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => xy.raw_x_value_at(row),
+        TableArchetype::Survival(srv) => srv.times.get(row).and_then(|c| c.value.finite_f64()),
+        _ => None,
+    }
+}
+
+fn recomputed_y_value_at(ds: &DataSheet, ds_idx: usize, row: usize, rep: usize) -> Option<f64> {
+    match &ds.archetype {
+        TableArchetype::Xy(t) => t.data_sets.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::Column(t) => t.data_sets.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::Grouped(t) => t.data_sets.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::Contingency(t) => t.data_sets.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::Survival(t) => t.cohorts.get(ds_idx)?.cell(row, rep)?.value.finite_f64(),
+        TableArchetype::MultipleVariables(t) => {
+            if rep == 0 {
+                t.variables.get(ds_idx)?.cells.get(row)?.value.finite_f64()
+            } else {
+                None
+            }
+        }
+        TableArchetype::Nested(t) => t.groups.get(ds_idx)?.cells.get(row)?.get(rep)?.value.finite_f64(),
+    }
+}
+
+/// Compare a recomputed transform [`ResultSheet`] (`analyzable_data`) against a cached external
+/// `.prism` output table loaded via [`load_cached_transform_table`] within
+/// `max(abs_tol, rel_tol * max(|recomputed|, |cached|))` (§5.2).
+///
+/// `output_data_set_indices` maps each dataset position `0..cached.y_data_sets.len()` back to the
+/// corresponding dataset index in `recomputed.analyzable_data`. CurveBook never adjusts its own
+/// transform outputs to match cached values.
+#[must_use]
+pub fn compare_recomputed_transform_against_cached_table(
+    recomputed: &ResultSheet,
+    cached: &CachedTransformTable,
+    output_data_set_indices: &[usize],
+    abs_tol: f64,
+    rel_tol: f64,
+) -> CachedResultDiagnostic {
+    let Some(ref ds) = recomputed.analyzable_data else {
+        return CachedResultDiagnostic::default();
+    };
+    let mut diag = CachedResultDiagnostic::default();
+    let abs_t = if abs_tol.is_finite() && abs_tol >= 0.0 { abs_tol } else { 0.0 };
+    let rel_t = if rel_tol.is_finite() && rel_tol >= 0.0 { rel_tol } else { 0.0 };
+
+    let mut compare_pair = |key: &str, data_set_index: Option<usize>, rec_val: f64, cached_val: f64| {
+        diag.compared_count += 1;
+        *diag.compared_by_key.entry(key.to_owned()).or_insert(0) += 1;
+        let abs_diff = (rec_val - cached_val).abs();
+        let scale = rec_val.abs().max(cached_val.abs());
+        let rel_diff = if scale > 0.0 { abs_diff / scale } else { 0.0 };
+        if abs_diff > abs_t.max(rel_t * scale) {
+            let (symbol, quantity_label) = scalar_display_meta(key, data_set_index);
+            diag.disagreements.push(CachedScalarDiff {
+                key: key.to_owned(),
+                symbol,
+                quantity_label,
+                data_set_index,
+                recomputed: rec_val,
+                cached: cached_val,
+                bound: CachedBound::Equal,
+                abs_diff,
+                rel_diff,
+            });
+        }
+    };
+
+    if let Some(ref cached_xs) = cached.x_values {
+        for (r, maybe_cached_x) in cached_xs.iter().enumerate() {
+            if let (Some(rec_x), Some(cached_x)) = (recomputed_x_value_at(ds, r), *maybe_cached_x) {
+                compare_pair("TransformedX", None, rec_x, cached_x);
+            }
+        }
+    }
+
+    for (out_pos, &ds_idx) in output_data_set_indices.iter().enumerate() {
+        let Some(cached_rows) = cached.y_data_sets.get(out_pos) else {
+            break;
+        };
+        for (r, cached_reps) in cached_rows.iter().enumerate() {
+            for (s, maybe_cached_y) in cached_reps.iter().enumerate() {
+                if let (Some(rec_y), Some(cached_y)) = (recomputed_y_value_at(ds, ds_idx, r, s), *maybe_cached_y) {
+                    compare_pair("TransformedY", Some(ds_idx), rec_y, cached_y);
+                }
+            }
+        }
+    }
+
+    diag
 }
 
 /// Extract bounded finite numeric scalar entries from `analyses/<uid>/results.json` for read-only

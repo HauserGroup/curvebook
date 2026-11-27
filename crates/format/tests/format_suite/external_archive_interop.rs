@@ -4,18 +4,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DescriptiveSpec,
-    GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, MultiplicitySpec, NestedTable, PairwiseComparisonRecord,
-    PartsOfWholeTable, ProjectDocument, ResultCell, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId,
-    SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    AnalysisKind, AnalysisSpec, AsymmetricCiTransformPolicy, Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
+    DataSetColumn, DataSheet, DescriptiveSpec, ErrorPropagationMode, GroupedTable, InfoConstant, InfoSheet, LayoutItem, MathTransformPreset,
+    MultipleVariablesTable, MultiplicitySpec, NestedTable, PairwiseComparisonRecord, PartsOfWholeTable, ProjectDocument, ResultCell,
+    ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId, SubcolumnMode, SurvivalTable, TableArchetype,
+    TableKind, TransformAnalysisSpec, XColumnMode, XyTable,
 };
 use curvebook_format::{
     ANALYSIS_MAPPINGS, AnalysisDesignKey, AnalysisVerificationStatus, ArchiveExportOptions, CACHED_PAIRWISE_LINKS, CACHED_SCALAR_LINKS, CachedBound,
     CorpusDesignEvidence, DesignTail, ExternalDataSetPositions, FormatError, ImportWarningKind, MIN_VERIFIED_DESIGN_AGREEMENT_DEN,
     MIN_VERIFIED_DESIGN_AGREEMENT_NUM, MIN_VERIFIED_DESIGN_ANALYSES, MIN_VERIFIED_DESIGN_SOURCES, VERIFIED_ANALYSIS_DESIGNS, ZipArchive,
     cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility, compare_recomputed_against_cached_results,
-    compare_recomputed_against_reference, export_prism_bytes_experimental, export_prism_bytes_with_options, extract_analysis_design_key,
-    extract_cached_analysis_reference, find_analysis_mapping, find_verified_analysis_design, import_prism_bytes, resolve_selected_data_sets,
+    compare_recomputed_against_reference, compare_recomputed_transform_against_cached_table, count_analyzable_finite_cells,
+    export_prism_bytes_experimental, export_prism_bytes_with_options, extract_analysis_design_key, extract_cached_analysis_reference,
+    find_analysis_mapping, find_verified_analysis_design, import_prism_bytes, load_cached_transform_table, resolve_selected_data_sets,
     translate_analysis_parameters, try_export_result_sheet_tidy_csv,
 };
 use curvebook_palette::Rgba8;
@@ -3270,6 +3272,215 @@ fn issue_74_nonlinear_equation_mapping_and_blocking() {
 }
 
 #[test]
+fn issue_79_transform_expression_translation_and_edge_cases() {
+    let make_params = |x_obj: serde_json::Value, y_obj: serde_json::Value| {
+        json!({
+            "content": {
+                "data": { "handleReplicatesAs": "INDIVIDUAL" },
+                "calc": {
+                    "transformType": "STANDARD",
+                    "standardFunction": {
+                        "interchangeXY": false,
+                        "xTransform": x_obj,
+                        "yTransform": y_obj,
+                        "handleSDAs": "DELETE"
+                    }
+                }
+            }
+        })
+    };
+    let disabled_x = || json!({"enabled": false, "function": "X*K", "k": "undefined"});
+    let disabled_y = || json!({"enabled": false, "function": "Y*K", "kSameForAll": true, "k": "undefined", "kList": []});
+
+    // 1. Table-driven coverage of all mapped Y-axis expressions, whitespace/case variants, and
+    //    assignment prefixes (plus inactive X-axis ignored even with `k: "undefined"`).
+    let y_cases: &[(&str, serde_json::Value, MathTransformPreset)] = &[
+        ("Y/K", json!(100.0), MathTransformPreset::LinearScale { slope: 0.01, intercept: 0.0 }),
+        (" y / k ", json!(4.0), MathTransformPreset::LinearScale { slope: 0.25, intercept: 0.0 }),
+        ("Y = Y / K", json!(-2.0), MathTransformPreset::LinearScale { slope: -0.5, intercept: 0.0 }),
+        ("Y*K", json!(100.0), MathTransformPreset::LinearScale { slope: 100.0, intercept: 0.0 }),
+        ("k * y", json!(0.0), MathTransformPreset::LinearScale { slope: 0.0, intercept: 0.0 }),
+        ("Y+K", json!(36.5), MathTransformPreset::LinearScale { slope: 1.0, intercept: 36.5 }),
+        ("K + Y", json!(-12.25), MathTransformPreset::LinearScale { slope: 1.0, intercept: -12.25 }),
+        ("Y-K", json!(5.0), MathTransformPreset::LinearScale { slope: 1.0, intercept: -5.0 }),
+        ("K-Y", json!(100.0), MathTransformPreset::LinearScale { slope: -1.0, intercept: 100.0 }),
+        ("-Y", json!("undefined"), MathTransformPreset::LinearScale { slope: -1.0, intercept: 0.0 }),
+        ("1/Y", json!("undefined"), MathTransformPreset::Reciprocal),
+        ("LOG10(Y)", json!("undefined"), MathTransformPreset::Log10),
+        (" log10( y ) ", json!("undefined"), MathTransformPreset::Log10),
+        ("LOG2(Y)", json!("undefined"), MathTransformPreset::Log2),
+        ("LN(Y)", json!("undefined"), MathTransformPreset::Ln),
+        ("10^Y", json!("undefined"), MathTransformPreset::Exp10),
+        ("10^(Y)", json!("undefined"), MathTransformPreset::Exp10),
+        ("EXP(Y)", json!("undefined"), MathTransformPreset::Exp),
+        ("E^Y", json!("undefined"), MathTransformPreset::Exp),
+        ("SQRT(Y)", json!("undefined"), MathTransformPreset::Sqrt),
+        ("Y^2", json!("undefined"), MathTransformPreset::Square),
+        ("Y*Y", json!("undefined"), MathTransformPreset::Square),
+        ("LOGIT(Y)", json!("undefined"), MathTransformPreset::Logit),
+        ("PROBIT(Y)", json!("undefined"), MathTransformPreset::Probit),
+        ("ARCSIN(SQRT(Y))", json!("undefined"), MathTransformPreset::ArcsinSqrt),
+        ("ASIN(SQRT(Y))", json!("undefined"), MathTransformPreset::ArcsinSqrt),
+        ("MULTIPLY", json!(2.5), MathTransformPreset::LinearScale { slope: 2.5, intercept: 0.0 }),
+        ("DIVIDE", json!(8.0), MathTransformPreset::LinearScale { slope: 0.125, intercept: 0.0 }),
+        ("ADD", json!(3.0), MathTransformPreset::LinearScale { slope: 1.0, intercept: 3.0 }),
+        ("SUBTRACT", json!(7.0), MathTransformPreset::LinearScale { slope: 1.0, intercept: -7.0 }),
+    ];
+    for (expr, k_val, expected_preset) in y_cases {
+        let params = make_params(disabled_x(), json!({"enabled": true, "function": expr, "kSameForAll": true, "k": k_val, "kList": []}));
+        let tr = translate_analysis_parameters("TRNSFORM", &params).unwrap();
+        assert!(tr.blocking_options.is_empty(), "expr={expr:?} unexpectedly blocked: {:?}", tr.blocking_options);
+        let AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, asymmetric_ci_policy, .. }) = tr.kind
+        else {
+            panic!("expected Transform::Math for {expr:?}, got {:?}", tr.kind);
+        };
+        assert_eq!(x_transform, None, "expr={expr:?}");
+        assert_eq!(y_transform, Some(*expected_preset), "expr={expr:?}");
+        assert_eq!(error_propagation, ErrorPropagationMode::ReplicateEndpoints);
+        assert_eq!(asymmetric_ci_policy, AsymmetricCiTransformPolicy::Omit);
+    }
+
+    // 2. Table-driven X-axis expressions and simultaneous X + Y transforms (Lineweaver-Burk `1/X` & `1/Y`).
+    let x_cases: &[(&str, serde_json::Value, MathTransformPreset)] = &[
+        ("LOG10(X)", json!("undefined"), MathTransformPreset::Log10),
+        ("X = log10( x )", json!("undefined"), MathTransformPreset::Log10),
+        ("LOG2(X)", json!("undefined"), MathTransformPreset::Log2),
+        ("LN(X)", json!("undefined"), MathTransformPreset::Ln),
+        ("10^X", json!("undefined"), MathTransformPreset::Exp10),
+        ("EXP(X)", json!("undefined"), MathTransformPreset::Exp),
+        ("1/X", json!("undefined"), MathTransformPreset::Reciprocal),
+        ("X*K", json!(1000.0), MathTransformPreset::LinearScale { slope: 1000.0, intercept: 0.0 }),
+        ("X/K", json!(10.0), MathTransformPreset::LinearScale { slope: 0.1, intercept: 0.0 }),
+        ("X+K", json!(2.0), MathTransformPreset::LinearScale { slope: 1.0, intercept: 2.0 }),
+        ("X-K", json!(2.0), MathTransformPreset::LinearScale { slope: 1.0, intercept: -2.0 }),
+        ("K-X", json!(2.0), MathTransformPreset::LinearScale { slope: -1.0, intercept: 2.0 }),
+        ("-X", json!("undefined"), MathTransformPreset::LinearScale { slope: -1.0, intercept: 0.0 }),
+        ("SQRT(X)", json!("undefined"), MathTransformPreset::Sqrt),
+        ("X^2", json!("undefined"), MathTransformPreset::Square),
+    ];
+    for (expr, k_val, expected_preset) in x_cases {
+        let params = make_params(json!({"enabled": true, "function": expr, "k": k_val}), disabled_y());
+        let tr = translate_analysis_parameters("TRNSFORM", &params).unwrap();
+        assert!(tr.blocking_options.is_empty(), "x expr={expr:?} blocked: {:?}", tr.blocking_options);
+        assert!(matches!(
+            tr.kind,
+            AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: Some(xp), y_transform: None, .. }) if xp == *expected_preset
+        ));
+    }
+
+    let both = make_params(
+        json!({"enabled": true, "function": "1/X", "k": "undefined"}),
+        json!({"enabled": true, "function": "1/Y", "kSameForAll": true, "k": "undefined", "kList": []}),
+    );
+    let tr_both = translate_analysis_parameters("TRNSFORM", &both).unwrap();
+    assert!(tr_both.blocking_options.is_empty());
+    assert!(matches!(
+        tr_both.kind,
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: Some(MathTransformPreset::Reciprocal),
+            y_transform: Some(MathTransformPreset::Reciprocal),
+            ..
+        })
+    ));
+
+    // 3. Blocking cases: zero/non-invertible K, missing/non-finite K, per-column K, wrong-axis &
+    //    unmapped expressions, and unsupported transform options.
+    let blocking_cases: &[(&str, serde_json::Value, &str)] = &[
+        (
+            "Y/K with K=0",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y/K", "kSameForAll": true, "k": 0.0, "kList": []})),
+            "divisor",
+        ),
+        ("X/K with K=0", make_params(json!({"enabled": true, "function": "X/K", "k": 0.0}), disabled_y()), "divisor"),
+        (
+            "Y/K with subnormal non-invertible K",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y/K", "kSameForAll": true, "k": 1e-320, "kList": []})),
+            "divisor",
+        ),
+        (
+            "Y/K with undefined K",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y/K", "kSameForAll": true, "k": "undefined", "kList": []})),
+            "constant `k`",
+        ),
+        (
+            "Y*K with missing K",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y*K", "kSameForAll": true, "kList": []})),
+            "constant `k`",
+        ),
+        (
+            "Y+K with null K",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y+K", "kSameForAll": true, "k": null, "kList": []})),
+            "constant `k`",
+        ),
+        ("MULTIPLY with non-numeric K", make_params(disabled_x(), json!({"enabled": true, "function": "MULTIPLY", "k": "NaN"})), "constant `k`"),
+        (
+            "per-column kSameForAll false",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y/K", "kSameForAll": false, "k": 10.0, "kList": [10.0, 20.0]})),
+            "kSameForAll",
+        ),
+        (
+            "per-column non-empty kList",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y*K", "kSameForAll": true, "k": 10.0, "kList": [10.0, 20.0]})),
+            "kList",
+        ),
+        (
+            "unmapped K/Y",
+            make_params(disabled_x(), json!({"enabled": true, "function": "K/Y", "kSameForAll": true, "k": 10.0, "kList": []})),
+            "unmapped transform function",
+        ),
+        (
+            "unmapped Y/X",
+            make_params(disabled_x(), json!({"enabled": true, "function": "Y/X", "kSameForAll": true, "k": "undefined", "kList": []})),
+            "unmapped transform function",
+        ),
+        (
+            "wrong axis LOG10(Y) on X",
+            make_params(json!({"enabled": true, "function": "LOG10(Y)", "k": "undefined"}), disabled_y()),
+            "unmapped transform function",
+        ),
+        (
+            "wrong axis EXP(X) on Y",
+            make_params(disabled_x(), json!({"enabled": true, "function": "EXP(X)", "k": "undefined"})),
+            "unmapped transform function",
+        ),
+        ("both axes disabled", make_params(disabled_x(), disabled_y()), "no transform enabled"),
+        (
+            "interchangeXY enabled",
+            json!({"content": {"calc": {"transformType": "STANDARD", "standardFunction": {
+                "interchangeXY": true,
+                "xTransform": {"enabled": true, "function": "LOG10(X)"},
+                "yTransform": {"enabled": false}
+            }}}}),
+            "interchangeXY",
+        ),
+        (
+            "handleReplicatesAs MEAN",
+            json!({"content": {"data": {"handleReplicatesAs": "MEAN"}, "calc": {"transformType": "STANDARD", "standardFunction": {
+                "xTransform": {"enabled": false},
+                "yTransform": {"enabled": true, "function": "LOG10(Y)"}
+            }}}}),
+            "handleReplicatesAs",
+        ),
+        (
+            "non-standard transformType",
+            json!({"content": {"calc": {"transformType": "USER_DEFINED", "standardFunction": {
+                "xTransform": {"enabled": false},
+                "yTransform": {"enabled": true, "function": "LOG10(Y)"}
+            }}}}),
+            "non-standard transformType",
+        ),
+    ];
+    for (label, params, expected_substr) in blocking_cases {
+        let tr = translate_analysis_parameters("TRNSFORM", params).unwrap();
+        assert!(
+            tr.blocking_options.iter().any(|b| b.contains(expected_substr)),
+            "case `{label}` expected blocking containing `{expected_substr}`, got {:?}",
+            tr.blocking_options
+        );
+    }
+}
+
+#[test]
 fn issue_74_nonlinear_constraints_initials_ranges_weighting_outliers_convergence_and_comparison() {
     use curvebook_doc::{
         ConvergenceStrictness, FitMethod, IdentifiabilityMode, ModelComparisonMethod, ModelComparisonQuestion, OutlierHandling, ParameterScope,
@@ -3531,4 +3742,114 @@ fn issue_74_nonlinear_crosswalk_model1_only_and_inhibitor_hill_slope_sign() {
     let rs_ag_flipped = nl_sheet("log_agonist_vs_response_4pl", vec![scalar("HillSlope", Some(0), -1.4)]);
     let diag_ag_bad = compare_recomputed_against_cached_results(&rs_ag_flipped, "NONLINEAR_REGRESSION", &results_ag, 1e-6, 1e-3);
     assert_eq!((diag_ag_bad.compared_count, diag_ag_bad.disagreements.len()), (1, 1));
+}
+
+#[test]
+fn issue_79_transform_cached_view_table_crosswalk_verification() {
+    use curvebook_format::prism::schema::ArchiveIdIndex;
+    use curvebook_format::zip::{ZipIndex, ZipLimits, ZipReadOptions};
+
+    // Build a synthetic external archive with an XY source sheet (2 replicates per dataset) and
+    // a `TRNSFORM` (`1/X` & `1/Y`) whose cached 3-hop `result_sheets` view table holds the exact
+    // reciprocal values for selected dataset index 1.
+    let archive_bytes = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Transform Crosswalk",
+                "sheets": { "data": ["s-in"], "analyses": ["an-tr"] }
+            })),
+        ),
+        (
+            "analyses/an-tr/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-tr",
+                "analysisClass": "TRNSFORM",
+                "isAllDataAnalyzed": false,
+                "inputSheets": [{"uid": "s-in"}],
+                "inputDataSets": [{"uid": "ds-b"}],
+                "resultSheets": [{"uid": "rs-tr", "title": "Transformed data"}]
+            })),
+        ),
+        ("analyses/an-tr/result_sheets/rs-tr.json".into(), json_bytes(json!({ "uid": "rs-tr", "dataSheet": "s-view" }))),
+        (
+            "data/sheets/s-view/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "s-view",
+                "table": {
+                    "uid": "t-view",
+                    "format": "view",
+                    "dataFormat": "y_replicates",
+                    "replicatesCount": 2,
+                    "rowTitlesDataSet": "rt-view",
+                    "xDataSetFormat": "y_single",
+                    "xDataSet": "x-view",
+                    "dataSets": ["ds-view-b"]
+                }
+            })),
+        ),
+        ("data/sets/ds-view-b.json".into(), json_bytes(json!({ "title": "B", "replicates": [{"valueType": "real"}, {"valueType": "real"}] }))),
+        // CSV order: [rowTitle, X=1/X, Y_rep0=1/Y, Y_rep1=1/Y]
+        // Source X = [2.0, 4.0], Source B = [[10.0, 20.0], [5.0, empty]]
+        ("data/tables/t-view/data.csv".into(), b"r1,0.5,0.1,0.05\nr2,0.25,0.2,\n".to_vec()),
+    ]);
+
+    let mut zip_index = ZipIndex::from_bytes_with_options(&archive_bytes, ZipLimits::default(), ZipReadOptions::external_interop()).unwrap();
+    let id_index = ArchiveIdIndex::from_zip_index(&zip_index);
+    let sheet_val: serde_json::Value = serde_json::from_slice(&zip_index.read_entry("analyses/an-tr/sheet.json").unwrap().unwrap()).unwrap();
+    let cached = load_cached_transform_table(&mut zip_index, &id_index, "an-tr", sheet_val.as_object().unwrap()).unwrap().unwrap();
+    assert_eq!(cached.finite_value_count(), 5);
+
+    // Construct matching recomputed `ResultSheet` (`analyzable_data` keeps all 2 input datasets,
+    // with dataset index 1 holding the exact transformed values).
+    let mut xy = XyTable {
+        x_title: String::from("X"),
+        x_mode: XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single },
+        x_subcolumn_titles: Vec::new(),
+        x_display_decimals: None,
+        x_cells: vec![vec![Cell::number(0.5)], vec![Cell::number(0.25)]],
+        row_titles: vec![String::from("r1"), String::from("r2")],
+        row_titles_expanded: true,
+        y_subcolumn_mode: SubcolumnMode::RawReplicates(2),
+        data_sets: vec![DataSetColumn::new("A (unselected)", 2, 2).unwrap(), DataSetColumn::new("B", 2, 2).unwrap()],
+    };
+    xy.data_sets[1].cells = vec![vec![Cell::number(0.1), Cell::number(0.05)], vec![Cell::number(0.2), Cell::empty()]];
+    let recomputed_ds = DataSheet::new("diag-res", "Transformed", TableArchetype::Xy(xy)).unwrap();
+    let spec = AnalysisSpec::new(
+        "diag-res",
+        "s-in",
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: Some(MathTransformPreset::Reciprocal),
+            y_transform: Some(MathTransformPreset::Reciprocal),
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: AsymmetricCiTransformPolicy::Omit,
+        }),
+    )
+    .unwrap();
+    let mut rs = ResultSheet::new(spec).unwrap();
+    rs.status = ResultStatus::UpToDate;
+    rs.analyzable_data = Some(recomputed_ds);
+    assert_eq!(count_analyzable_finite_cells(&rs), 5);
+
+    let row = find_analysis_mapping("TRNSFORM").unwrap();
+    let diag = compare_recomputed_transform_against_cached_table(&rs, &cached, &[1], row.absolute_tolerance, row.relative_tolerance);
+    assert_eq!(diag.compared_count, 5);
+    assert!(diag.disagreements.is_empty(), "unexpected disagreements: {:?}", diag.disagreements);
+    assert_eq!(diag.compared_by_key.get("TransformedX"), Some(&2));
+    assert_eq!(diag.compared_by_key.get("TransformedY"), Some(&3));
+
+    // Perturb one recomputed Y cell and verify the crosswalk reports a structured disagreement.
+    if let Some(ref mut ds) = rs.analyzable_data
+        && let TableArchetype::Xy(ref mut t) = ds.archetype
+    {
+        t.data_sets[1].cells[0][0] = Cell::number(0.15);
+    }
+    let diag_bad = compare_recomputed_transform_against_cached_table(&rs, &cached, &[1], row.absolute_tolerance, row.relative_tolerance);
+    assert_eq!(diag_bad.compared_count, 5);
+    assert_eq!(diag_bad.disagreements.len(), 1);
+    assert_eq!(diag_bad.disagreements[0].key, "TransformedY");
+    assert_eq!(diag_bad.disagreements[0].data_set_index, Some(1));
 }

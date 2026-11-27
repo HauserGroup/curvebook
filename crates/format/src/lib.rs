@@ -54,14 +54,14 @@ pub use preamble::{PreambleInfo, build_preamble_info_sheet, extract_preamble_inf
 pub use prism::{
     ANALYSIS_MAPPINGS, AnalysisDesignKey, AnalysisMappingRow, AnalysisVerificationStatus, ArchiveExportOptions, ArchiveExportReport,
     CACHED_PAIRWISE_LINKS, CACHED_SCALAR_LINKS, CachedAnalysisReference, CachedBound, CachedPairwiseLink, CachedPairwiseRef, CachedResultDiagnostic,
-    CachedScalarDiff, CachedScalarLink, CachedScalarRef, CorpusDesignEvidence, CrosswalkComparison, DesignTail, ExternalDataSetPositions,
-    ImportedAnalysisFallback, MIN_VERIFIED_DESIGN_AGREEMENT_DEN, MIN_VERIFIED_DESIGN_AGREEMENT_NUM, MIN_VERIFIED_DESIGN_ANALYSES,
-    MIN_VERIFIED_DESIGN_SOURCES, PromotedAnalysisRef, REBUILT_GRAPH_WARNING_LABEL, TranslatedAnalysis, VERIFIED_ANALYSIS_DESIGNS,
-    VerifiedAnalysisDesign, cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility,
-    compare_recomputed_against_cached_results, compare_recomputed_against_reference, export_prism_bytes_experimental,
-    export_prism_bytes_with_options, extract_analysis_design_key, extract_cached_analysis_reference, find_analysis_mapping,
-    find_verified_analysis_design, import_prism_bytes, import_prism_bytes_with_limits, primary_input_data_sheet_uid, resolve_selected_data_sets,
-    translate_analysis_parameters,
+    CachedScalarDiff, CachedScalarLink, CachedScalarRef, CachedTransformTable, CorpusDesignEvidence, CrosswalkComparison, DesignTail,
+    ExternalDataSetPositions, ImportedAnalysisFallback, MIN_VERIFIED_DESIGN_AGREEMENT_DEN, MIN_VERIFIED_DESIGN_AGREEMENT_NUM,
+    MIN_VERIFIED_DESIGN_ANALYSES, MIN_VERIFIED_DESIGN_SOURCES, PromotedAnalysisRef, REBUILT_GRAPH_WARNING_LABEL, TranslatedAnalysis,
+    VERIFIED_ANALYSIS_DESIGNS, VerifiedAnalysisDesign, cached_values_for_link, check_control_in_selection, check_source_sheet_option_compatibility,
+    compare_recomputed_against_cached_results, compare_recomputed_against_reference, compare_recomputed_transform_against_cached_table,
+    count_analyzable_finite_cells, export_prism_bytes_experimental, export_prism_bytes_with_options, extract_analysis_design_key,
+    extract_cached_analysis_reference, find_analysis_mapping, find_verified_analysis_design, import_prism_bytes, import_prism_bytes_with_limits,
+    load_cached_transform_table, primary_input_data_sheet_uid, resolve_selected_data_sets, translate_analysis_parameters,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use pzfx::export_pzfx_file;
