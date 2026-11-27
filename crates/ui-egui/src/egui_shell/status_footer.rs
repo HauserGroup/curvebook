@@ -17,6 +17,7 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::egui_shell::canvas_view::CanvasHoverReadout;
+use crate::egui_shell::ui_kit::{ActionMenuAnchor, ActionMenuEntry, ActionMenuItem, ActionMenuSpec, action_menu_popup};
 use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, doc_sheet_title,
 };
@@ -28,7 +29,6 @@ use crate::inspect::ZLayer;
 pub const QUICK_STATS_CELL_CAP: usize = 50_000;
 
 const FOOTER_CTRL_H: f32 = 24.0;
-const POPUP_ROW_H: f32 = 24.0;
 
 /// Cached summary statistics over the active sheet selection (`N`, `Mean`, `SD`, `SEM`, `Median`, `Range`).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -72,10 +72,10 @@ impl QuickStatsSummary {
             parts.push(format!("SEM={}", format_compact_stat(sem)));
         }
         if let Some(med) = self.median {
-            parts.push(format!("Med={}", format_compact_stat(med)));
+            parts.push(format!("Median={}", format_compact_stat(med)));
         }
         if let Some(range) = self.range {
-            parts.push(format!("Rng={}", format_compact_stat(range)));
+            parts.push(format!("Range={}", format_compact_stat(range)));
         }
         if self.excluded_count > 0 {
             parts.push(format!("Excl={}", self.excluded_count));
@@ -591,6 +591,10 @@ struct LinkHealthSummary {
     upstream_links: Vec<(String, String, Option<SheetId>, Color32)>,
 }
 
+fn non_blue_text_color(color: Color32, tokens: &Tokens) -> Option<Color32> {
+    (color != tokens.link_blue && color != tokens.accent).then_some(color)
+}
+
 fn summarize_sheet_links(app: &UiApp, tokens: &Tokens) -> Option<LinkHealthSummary> {
     let doc = app.document();
     let active_id = doc.active_sheet_id.as_ref()?;
@@ -604,7 +608,7 @@ fn summarize_sheet_links(app: &UiApp, tokens: &Tokens) -> Option<LinkHealthSumma
         let src_title = doc_sheet_title(doc, src_id).unwrap_or_else(|| src_id.as_str()).to_owned();
         let (accent, status_tag) = match rs.status {
             ResultStatus::UpToDate => (tokens.link_green, "Synced"),
-            ResultStatus::Dirty => (tokens.accent, "Dirty"),
+            ResultStatus::Dirty => (tokens.stale, "Dirty"),
             ResultStatus::Failed { .. } => (tokens.link_red, "Error"),
         };
         return Some(LinkHealthSummary {
@@ -775,26 +779,27 @@ fn draw_footer_chip(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterChipSpec<'_>
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, FOOTER_CTRL_H), if enabled { Sense::click() } else { Sense::hover() });
 
     let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
+        Color32::TRANSPARENT
+    } else if resp.is_pointer_button_down_on() || selected {
         tokens.active_bg
     } else if resp.hovered() {
         tokens.hover_bg
     } else {
-        tokens.button_bg
+        Color32::TRANSPARENT
     };
-    let border_c = if !enabled {
-        tokens.divider
-    } else if selected {
-        accent_override.unwrap_or(tokens.accent)
-    } else if resp.hovered() {
-        tokens.accent
+    let border_stroke = if enabled && resp.has_focus() {
+        Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring)
+    } else if enabled && (selected || resp.hovered()) && matches!(tokens.mode, crate::theme::UiThemeMode::HighContrast) {
+        let sc = if selected { accent_override.unwrap_or(tokens.accent) } else { tokens.hover_border };
+        Stroke::new(tokens.metrics.stroke_thin_pt, sc)
     } else {
-        tokens.button_border
+        Stroke::NONE
     };
 
     if ui.is_rect_visible(rect) {
-        ui.painter().rect(rect, 4.0, bg, Stroke::new(1.0, border_c), StrokeKind::Inside);
+        if bg != Color32::TRANSPARENT || border_stroke != Stroke::NONE {
+            ui.painter().rect(rect, f32::from(tokens.metrics.radius_md), bg, border_stroke, StrokeKind::Inside);
+        }
         let text_pos = Pos2::new(rect.min.x + ((rect.width() - galley.size().x) * 0.5).max(5.0), rect.center().y - galley.size().y * 0.5);
         let painter = ui.painter().with_clip_rect(rect.shrink2(Vec2::new(3.0, 1.0)));
         painter.galley(text_pos, galley, text_color);
@@ -909,94 +914,79 @@ fn doc_has_any_sheet(doc: &ProjectDocument) -> bool {
         || !doc.layout_sheets.is_empty()
 }
 
-struct FooterPopupSpec<'a> {
-    viewport: Rect,
-    anchor: Rect,
-    popup_id: &'a str,
-    min_width: f32,
-    max_width: f32,
-}
+fn show_stats_popover(ctx: &egui::Context, tokens: &Tokens, anchor: Rect, stats: &QuickStatsSummary) -> (Rect, bool) {
+    let m = tokens.metrics;
+    let viewport = ctx.content_rect();
+    let safe = viewport.shrink(m.space_xs);
+    let rows = [
+        ("N", stats.n.to_string()),
+        ("Selected", stats.selected_cells.to_string()),
+        ("Excluded", stats.excluded_count.to_string()),
+        ("Mean", stats.mean.map_or(String::from("—"), format_compact_stat)),
+        ("SD", stats.sd.map_or(String::from("—"), format_compact_stat)),
+        ("SEM", stats.sem.map_or(String::from("—"), format_compact_stat)),
+        ("Median", stats.median.map_or(String::from("—"), format_compact_stat)),
+        ("Range", stats.range.map_or(String::from("—"), format_compact_stat)),
+        ("Min", stats.min.map_or(String::from("—"), format_compact_stat)),
+        ("Max", stats.max.map_or(String::from("—"), format_compact_stat)),
+        ("Sum", stats.sum.map_or(String::from("—"), format_compact_stat)),
+    ];
 
-fn show_footer_popup<F>(ctx: &egui::Context, tokens: &Tokens, spec: FooterPopupSpec<'_>, add_contents: F) -> Rect
-where
-    F: FnOnce(&mut egui::Ui),
-{
-    let est_x = spec.anchor.min.x.clamp(spec.viewport.min.x + 4.0, (spec.viewport.max.x - spec.min_width - 4.0).max(spec.viewport.min.x + 4.0));
-    let area_resp = egui::Area::new(egui::Id::unique(spec.popup_id))
+    let font = egui::FontId::proportional(m.font_ui_small_pt);
+    let measured_inner_w = ctx.fonts_mut(|f| {
+        rows.iter()
+            .map(|(k, v)| {
+                let kw = f.layout_no_wrap((*k).to_owned(), font.clone(), tokens.text_muted).size().x.ceil();
+                let vw = f.layout_no_wrap(v.clone(), font.clone(), tokens.text_primary).size().x.ceil();
+                kw + m.space_xl + vw + m.space_md
+            })
+            .fold(0.0_f32, f32::max)
+    });
+    #[allow(clippy::cast_possible_truncation)]
+    let margin_i8 = m.space_sm.round() as i8;
+    let frame_pad = (f32::from(margin_i8) + m.stroke_thin_pt) * 2.0;
+    let max_outer_w = (viewport.width() - m.space_xl).clamp(120.0, 260.0);
+    let min_outer_w = 176.0_f32.min(max_outer_w);
+    let outer_w = (measured_inner_w + frame_pad).ceil().clamp(min_outer_w, max_outer_w);
+    let inner_w = (outer_w - frame_pad).max(96.0);
+    let est_h = (rows.len() as f32) * 18.0 + frame_pad;
+    let raw_x = if anchor.center().x > viewport.center().x { anchor.right() - outer_w } else { anchor.left() };
+    let est_x = raw_x.clamp(safe.left(), (safe.right() - outer_w).max(safe.left()));
+    let est_y = (anchor.top() - m.space_xs).max(safe.top() + est_h);
+
+    let area_resp = egui::Area::new(egui::Id::unique("egui_shell.footer.stats_popover"))
         .order(egui::Order::Foreground)
-        .fixed_pos(Pos2::new(est_x, (spec.anchor.min.y - 4.0).max(spec.viewport.min.y + 4.0)))
+        .fixed_pos(Pos2::new(est_x.round(), est_y.round()))
+        .default_size(Vec2::new(outer_w, est_h))
+        .fade_in(false)
         .pivot(egui::Align2::LEFT_BOTTOM)
         .show(ctx, |ui| {
             let frame = egui::Frame::NONE
                 .fill(tokens.surface_bg)
-                .stroke(Stroke::new(1.0, tokens.border))
-                .corner_radius(6.0)
-                .inner_margin(egui::Margin::same(6));
+                .stroke(Stroke::new(m.stroke_thin_pt, tokens.border))
+                .corner_radius(egui::CornerRadius::same(m.radius_lg))
+                .inner_margin(egui::Margin::same(margin_i8));
             frame.show(ui, |ui| {
-                ui.set_min_width(spec.min_width);
-                ui.set_max_width(spec.max_width);
-                add_contents(ui);
+                ui.set_width(inner_w);
+                ui.set_max_width(inner_w);
+                for (k, v) in &rows {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(*k).size(m.font_ui_small_pt).color(tokens.text_muted));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(v.as_str()).size(m.font_ui_small_pt).strong().color(tokens.text_primary));
+                        });
+                    });
+                }
             });
         });
-    area_resp.response.rect
-}
 
-struct PopupMenuItemSpec<'a> {
-    label: &'a str,
-    selected: bool,
-    accent: Option<Color32>,
-    widget_id: &'a str,
-    command_id: Option<&'a str>,
-}
-
-fn popup_menu_item(ui: &mut egui::Ui, tokens: &Tokens, spec: PopupMenuItemSpec<'_>, meta: &mut FrameInspectMeta) -> bool {
-    let PopupMenuItemSpec { label, selected, accent, widget_id, command_id } = spec;
-    let w = ui.available_width().max(80.0);
-    let font_id = egui::FontId::proportional(11.5);
-    let tc = accent.unwrap_or(if selected { tokens.text_strong } else { tokens.text_primary });
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
-    job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
-    job.wrap.max_width = (w - 14.0).max(16.0);
-    let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let ellipsized = galley.elided;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, POPUP_ROW_H), Sense::click());
-    let bg = if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        Color32::TRANSPARENT
-    };
-    if ui.is_rect_visible(rect) {
-        if bg != Color32::TRANSPARENT {
-            ui.painter().rect_filled(rect, 4.0, bg);
-        }
-        let tp = Pos2::new(rect.min.x + 6.0, rect.center().y - galley.size().y * 0.5);
-        let painter = ui.painter().with_clip_rect(rect.shrink2(Vec2::new(4.0, 1.0)));
-        painter.galley(tp, galley, tc);
-    }
-    let acc_item = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::MenuItem, true, acc_item.clone()));
-    let resp = if ellipsized { resp.on_hover_text(label) } else { resp };
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "menuitem",
-                label,
-                command_id,
-                value: None,
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::DropdownMenu,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp.clicked()
+    let popup_rect = area_resp.response.rect;
+    let esc_dismiss = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    let click_outside = ctx.input(|i| {
+        i.pointer.primary_clicked()
+            && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|p| !popup_rect.contains(p) && !anchor.contains(p))
+    });
+    (popup_rect, esc_dismiss || click_outside)
 }
 
 #[derive(Default)]
@@ -1246,7 +1236,15 @@ fn render_footer_center_readout(
     }
 
     let status_text = if gallery_open {
-        format!("Gallery ({} items)", app.nav.gallery.cards.len())
+        let shown = app.nav.gallery.cards.len();
+        let selected = app.nav.gallery.selected_ids.len();
+        let prefix = tr_or_fallback(locale, "w5.gallery.status_prefix", "Gallery");
+        let shown_lbl = tr_or_fallback(locale, "status.gallery.shown", "shown");
+        if selected > 0 {
+            format!("{prefix}: {shown} {shown_lbl} · {selected} {}", crate::i18n::tr(locale, "nav.selected_suffix"))
+        } else {
+            format!("{prefix}: {shown} {shown_lbl}")
+        }
     } else if is_welcome {
         String::from("Welcome Hub")
     } else if let Some(sid) = doc.active_sheet_id.as_ref() {
@@ -1297,6 +1295,30 @@ fn render_footer_trailing_controls(
 
         if flags.show_zoom && flags.gallery_open {
             let cur_w = views.center_stage.gallery_zoom_pt.clamp(GALLERY_MIN_ZOOM_PT, GALLERY_MAX_ZOOM_PT);
+            if draw_footer_chip(
+                ui,
+                ctx_in.tokens,
+                FooterChipSpec {
+                    label: tr_or_fallback(&app.locale, "status.zoom.fit", "Fit"),
+                    tooltip: tr_or_fallback(&app.locale, "status.gallery.zoom_fit.tip", "Fit gallery cards to stage width"),
+                    max_w: 36.0,
+                    min_w: 28.0,
+                    selected: false,
+                    enabled: ctx_in.enabled,
+                    accent_override: None,
+                    widget_id: "status.zoom.fit",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: None,
+                },
+                meta,
+            )
+            .clicked()
+            {
+                views.center_stage.gallery_zoom_pt =
+                    super::center_stage::compute_gallery_fit_zoom_pt(views.center_stage.gallery_last_stage_w_pt, app.nav.gallery.cards.len());
+            }
+
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
@@ -1509,55 +1531,53 @@ fn render_footer_popovers(
     let anchors = data.anchors;
     let doc = app.document();
     let gallery_open = app.nav.gallery.open;
-    let mut popup_rects: Vec<Rect> = Vec::new();
 
     if views.status_footer.sheet_switcher_open
         && let Some(anchor) = anchors.sheet
     {
-        let mut chosen_sheet: Option<SheetId> = None;
-        let popup_rect = show_footer_popup(
+        let sheet_rows: Vec<(SheetId, String, String, bool)> = doc
+            .data_sheets
+            .iter()
+            .map(|s| (s.id.clone(), s.title.clone(), "Data"))
+            .chain(doc.info_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Info")))
+            .chain(doc.result_sheets.iter().map(|s| (s.id.clone(), s.title().to_owned(), "Result")))
+            .chain(doc.graph_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Graph")))
+            .chain(doc.layout_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Layout")))
+            .map(|(sid, title, kind_tag)| {
+                let selected = !gallery_open && doc.active_sheet_id.as_ref() == Some(&sid);
+                let lbl = format!("[{kind_tag}] {title}");
+                let wid = format!("status.sheet_switcher.item.{}", sid.as_str());
+                (sid, wid, lbl, selected)
+            })
+            .collect();
+        let entries: Vec<ActionMenuEntry<'_>> = sheet_rows
+            .iter()
+            .map(|(_, wid, lbl, selected)| {
+                ActionMenuEntry::Item(ActionMenuItem::menu_item(wid, lbl).command_id(Some("sheet.select")).selected(*selected))
+            })
+            .collect();
+        let out = action_menu_popup(
             ui.ctx(),
             tokens,
-            FooterPopupSpec {
-                viewport: meta.viewport_rect,
-                anchor,
-                popup_id: "egui_shell.footer.sheet_switcher",
-                min_width: 180.0,
-                max_width: 260.0,
-            },
-            |ui| {
-                egui::ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
-                    let entries: Vec<(SheetId, String, &str)> = doc
-                        .data_sheets
-                        .iter()
-                        .map(|s| (s.id.clone(), s.title.clone(), "Data"))
-                        .chain(doc.info_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Info")))
-                        .chain(doc.result_sheets.iter().map(|s| (s.id.clone(), s.title().to_owned(), "Result")))
-                        .chain(doc.graph_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Graph")))
-                        .chain(doc.layout_sheets.iter().map(|s| (s.id.clone(), s.title.clone(), "Layout")))
-                        .collect();
-                    for (sid, title, kind_tag) in entries {
-                        let selected = !gallery_open && doc.active_sheet_id.as_ref() == Some(&sid);
-                        let lbl = format!("[{kind_tag}] {title}");
-                        let wid = format!("status.sheet_switcher.item.{}", sid.as_str());
-                        if popup_menu_item(
-                            ui,
-                            tokens,
-                            PopupMenuItemSpec { label: &lbl, selected, accent: None, widget_id: &wid, command_id: Some("sheet.select") },
-                            meta,
-                        ) {
-                            chosen_sheet = Some(sid);
-                        }
-                    }
-                });
-            },
+            Some(meta),
+            ActionMenuSpec::dropdown(
+                egui::Id::unique("egui_shell.footer.sheet_switcher"),
+                "popup.status.sheet_switcher",
+                "Switch Sheet",
+                ActionMenuAnchor::TriggerAbove(anchor),
+            )
+            .max_height(252.0),
+            &entries,
         );
-        popup_rects.push(popup_rect);
-        if let Some(sid) = chosen_sheet {
+        if let Some(hit) = out.clicked_entry
+            && let Some((sid, ..)) = sheet_rows.get(hit)
+        {
             if gallery_open {
                 intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
             }
             intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
+            views.status_footer.sheet_switcher_open = false;
+        } else if out.dismissed {
             views.status_footer.sheet_switcher_open = false;
         }
     } else {
@@ -1568,39 +1588,42 @@ fn render_footer_popovers(
         && let Some(anchor) = anchors.link
         && let Some(link_info) = data.link_summary
     {
-        let mut jump_target: Option<SheetId> = None;
-        let mut close_link = false;
-        let popup_rect = show_footer_popup(
+        let link_rows: Vec<(String, String, Option<SheetId>, Color32)> = link_info
+            .upstream_links
+            .iter()
+            .enumerate()
+            .map(|(idx, (name, st, up_id, clr))| (format!("status.link_indicator.item.{idx}"), format!("{name} ({st})"), up_id.clone(), *clr))
+            .collect();
+        let entries: Vec<ActionMenuEntry<'_>> = link_rows
+            .iter()
+            .map(|(wid, lbl, up_id, clr)| {
+                ActionMenuEntry::Item(
+                    ActionMenuItem::menu_item(wid, lbl)
+                        .command_id(up_id.as_ref().map(|_| "sheet.select"))
+                        .text_color(non_blue_text_color(*clr, tokens)),
+                )
+            })
+            .collect();
+        let out = action_menu_popup(
             ui.ctx(),
             tokens,
-            FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.link_popover", min_width: 210.0, max_width: 290.0 },
-            |ui| {
-                for (idx, (name, st, up_id, clr)) in link_info.upstream_links.iter().enumerate() {
-                    let lbl = format!("{name} ({st})");
-                    let wid = format!("status.link_indicator.item.{idx}");
-                    if popup_menu_item(
-                        ui,
-                        tokens,
-                        PopupMenuItemSpec {
-                            label: &lbl,
-                            selected: false,
-                            accent: Some(*clr),
-                            widget_id: &wid,
-                            command_id: up_id.as_ref().map(|_| "sheet.select"),
-                        },
-                        meta,
-                    ) {
-                        jump_target = up_id.clone();
-                        close_link = true;
-                    }
-                }
-            },
+            Some(meta),
+            ActionMenuSpec::dropdown(
+                egui::Id::unique("egui_shell.footer.link_popover"),
+                "popup.status.link_indicator",
+                "Upstream Links",
+                ActionMenuAnchor::TriggerAbove(anchor),
+            ),
+            &entries,
         );
-        popup_rects.push(popup_rect);
-        if let Some(sid) = jump_target {
-            intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
-        }
-        if close_link {
+        if let Some(hit) = out.clicked_entry
+            && let Some((_, _, up_id, _)) = link_rows.get(hit)
+        {
+            if let Some(sid) = up_id {
+                intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
+            }
+            views.status_footer.link_popover_open = false;
+        } else if out.dismissed {
             views.status_footer.link_popover_open = false;
         }
     } else {
@@ -1611,52 +1634,12 @@ fn render_footer_popovers(
         && let Some(anchor) = anchors.stats
         && let Some(stats) = data.active_stats
     {
-        let popup_rect = show_footer_popup(
-            ui.ctx(),
-            tokens,
-            FooterPopupSpec { viewport: meta.viewport_rect, anchor, popup_id: "egui_shell.footer.stats_popover", min_width: 200.0, max_width: 260.0 },
-            |ui| {
-                let rows = [
-                    ("N", stats.n.to_string()),
-                    ("Selected", stats.selected_cells.to_string()),
-                    ("Excluded", stats.excluded_count.to_string()),
-                    ("Mean", stats.mean.map_or(String::from("—"), format_compact_stat)),
-                    ("SD", stats.sd.map_or(String::from("—"), format_compact_stat)),
-                    ("SEM", stats.sem.map_or(String::from("—"), format_compact_stat)),
-                    ("Median", stats.median.map_or(String::from("—"), format_compact_stat)),
-                    ("Range", stats.range.map_or(String::from("—"), format_compact_stat)),
-                    ("Min", stats.min.map_or(String::from("—"), format_compact_stat)),
-                    ("Max", stats.max.map_or(String::from("—"), format_compact_stat)),
-                    ("Sum", stats.sum.map_or(String::from("—"), format_compact_stat)),
-                ];
-                for (k, v) in rows {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(k).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(egui::RichText::new(v).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_primary));
-                        });
-                    });
-                }
-            },
-        );
-        popup_rects.push(popup_rect);
+        let (_, dismissed) = show_stats_popover(ui.ctx(), tokens, anchor, stats);
+        if dismissed {
+            views.status_footer.stats_popover_open = false;
+        }
     } else {
         views.status_footer.stats_popover_open = false;
-    }
-
-    if !popup_rects.is_empty() {
-        let esc_dismiss = ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-        let click_outside = ui.ctx().input(|i| {
-            i.pointer.primary_clicked()
-                && i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()).is_some_and(|p| {
-                    let in_popup = popup_rects.iter().any(|r| r.contains(p));
-                    let in_anchor = [anchors.sheet, anchors.link, anchors.stats].into_iter().flatten().any(|r| r.contains(p));
-                    !in_popup && !in_anchor
-                })
-        });
-        if esc_dismiss || click_outside {
-            close_all_footer_popovers(&mut views.status_footer);
-        }
     }
 }
 
@@ -1684,13 +1667,19 @@ pub fn render_status_footer(
     report.zoom_controls_visible = show_zoom;
     report.rulers_toggle_visible = show_rulers;
 
-    let footer_frame =
-        egui::Frame::NONE.fill(ctx_in.tokens.app_bar).stroke(Stroke::new(1.0, ctx_in.tokens.border)).inner_margin(egui::Margin::symmetric(6, 1));
+    let footer_frame = egui::Frame::NONE.fill(ctx_in.tokens.app_bar).inner_margin(egui::Margin::symmetric(6, 1));
 
     let resp = egui::Panel::bottom("egui_shell.status_footer")
         .exact_size(ctx_in.layout.status_bar_h_pt.max(26.0))
         .frame(footer_frame)
         .show(ui, |ui| {
+            let seam_y = ui.max_rect().top() - 0.5;
+            let seam_left = ui.max_rect().left() - 6.0;
+            let seam_right = ui.max_rect().right() + 6.0;
+            ui.painter().line_segment(
+                [Pos2::new(seam_left, seam_y), Pos2::new(seam_right, seam_y)],
+                Stroke::new(ctx_in.tokens.metrics.stroke_thin_pt, ctx_in.tokens.divider),
+            );
             let total_w = ui.available_width().max(80.0);
             report.section_pills_shown = total_w >= 860.0;
 
@@ -1710,6 +1699,7 @@ pub fn render_status_footer(
                     && ui.available_width() > right_budget + 80.0
                 {
                     report.link_indicator_shown = true;
+                    let chip_accent = non_blue_text_color(link_info.accent, ctx_in.tokens);
                     let link_resp = draw_footer_chip(
                         ui,
                         ctx_in.tokens,
@@ -1720,7 +1710,7 @@ pub fn render_status_footer(
                             min_w: 36.0,
                             selected: views.status_footer.link_popover_open,
                             enabled: ctx_in.enabled,
-                            accent_override: Some(link_info.accent),
+                            accent_override: chip_accent,
                             widget_id: "status.link_indicator",
                             role: "button",
                             command_id: None,

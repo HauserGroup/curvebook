@@ -797,7 +797,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text (omit to auto-detect comma, tab, semicolon, and European decimal comma)." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV, TSV, XLSX, or external archive/XML files, append/merge sheets into the active project instead of replacing it." },
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, XLSX, .pzfx files, or .prism files, append/merge sheets into the active project instead of replacing it." },
                     "sheets": { "type": "array", "items": { "type": "string" }, "description": "Optional `.xlsx` worksheet names to import." },
                     "sheet_indices": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Optional zero-based `.xlsx` worksheet indices to import." },
                     "list_sheets": { "type": "boolean", "description": "When true for `.xlsx`, list workbook sheets without mutating the session." },
@@ -1821,6 +1821,7 @@ fn compact_result_cell_value(cell: &ResultCell) -> Value {
             let bound = |b: &CiBound| match b {
                 CiBound::Finite(v) => json!(v),
                 CiBound::Open => Value::String(String::from("open")),
+                CiBound::Unavailable => Value::String(String::from("unavailable")),
             };
             json!({ "ci": [bound(lower), bound(upper)] })
         }
@@ -1863,6 +1864,9 @@ fn summarize_result_sheet_direct(rs: &ResultSheet, deps: &[SheetId], detail: Ins
         m.insert(String::from("fitted_curves_count"), json!(rs.fitted_curves.len()));
     }
     m.insert(String::from("checklist_count"), json!(rs.checklist.len()));
+    if !rs.cell_details.is_empty() {
+        m.insert(String::from("cell_details"), json!(rs.cell_details));
+    }
     if full_detail || !deps.is_empty() {
         m.insert(String::from("upstream_dependencies"), json!(deps));
     }

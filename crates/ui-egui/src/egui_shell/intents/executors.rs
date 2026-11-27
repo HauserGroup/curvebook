@@ -110,6 +110,11 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
             Ok(UiIntentOutcome::ShellUpdated)
         }
+        UiIntent::SelectXCell { row, subcol } => {
+            app.grid.select_x_cell_sync(row, subcol);
+            app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
         UiIntent::ExtendGridSelection { sheet_id, coord } => {
             let mut grid = std::mem::take(&mut app.grid);
             let target_id = sheet_id.or_else(|| app.document().active_sheet_id.clone());
@@ -220,15 +225,20 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
 
 fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
-        UiIntent::SelectResultTab { index } => {
-            let max_idx = app
-                .session
-                .document()
-                .active_sheet_id
-                .as_ref()
-                .and_then(|id| app.session.document().result_sheet(id))
-                .map_or(0, |rs| rs.tabs.len().saturating_sub(1));
-            app.canvas_dialogs.result_view.active_tab_index = index.min(max_idx);
+        UiIntent::SelectResultTab { index, sheet_id } => {
+            let target_id = sheet_id.or_else(|| app.session.document().active_sheet_id.clone());
+            if let Some(id) = target_id {
+                let max_idx = app.session.document().result_sheet(&id).map_or(0, |rs| rs.tabs.len().saturating_sub(1));
+                let clamped = index.min(max_idx);
+                app.egui_views.results_view.per_sheet_active_tab.insert(id.clone(), clamped);
+                if app.session.document().active_sheet_id.as_ref() == Some(&id) {
+                    app.canvas_dialogs.result_view.active_tab_index = clamped;
+                }
+            }
+        }
+        UiIntent::SetResultReportOptions { format, scope } => {
+            app.canvas_dialogs.result_view.report_format = format;
+            app.canvas_dialogs.result_view.report_scope = scope;
         }
         UiIntent::SetActiveInspector { inspector } => {
             app.canvas_dialogs.active_inspector = inspector;
@@ -562,7 +572,12 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::UpdateRandomSampleRowsState(_)
         | UiIntent::UpdateSimulateDistributionsState(_)
         | UiIntent::SyncResultSelection { .. }
-        | UiIntent::SetGallerySelection { .. } => apply_wave4_modal_state_intent(app, intent),
+        | UiIntent::SetGallerySelection { .. }
+        | UiIntent::SetGalleryViewOptions { .. }
+        | UiIntent::OpenExportFigure { .. }
+        | UiIntent::OpenPrintForSheets { .. }
+        | UiIntent::OpenCsvExportForSheets { .. }
+        | UiIntent::PlaceSelectedOntoNewLayout { .. } => apply_wave4_modal_state_intent(app, intent),
         UiIntent::OpenPreferences { .. }
         | UiIntent::ClosePreferences { .. }
         | UiIntent::SetShortcutBinding { .. }
@@ -572,10 +587,6 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::OpenFindReplace { .. }
         | UiIntent::CloseFindReplace
         | UiIntent::ExecuteFindReplace { .. }
-        | UiIntent::UpdateFeedbackDraft(_)
-        | UiIntent::OpenFeedbackOnGitHub
-        | UiIntent::CopyFeedbackMarkdown
-        | UiIntent::ResetFeedbackDraft
         | UiIntent::CopyImportWarnings
         | UiIntent::UpdateCsvExportOptions(_) => apply_wave4_app_modal_intent(app, intent),
         UiIntent::OpenPaletteWithQuery { .. }
@@ -1208,13 +1219,105 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::SetGallerySelection { sheet_ids } => {
             app.nav.gallery.selected_ids = sheet_ids.into_iter().collect();
-            for card in &mut app.nav.gallery.cards {
-                card.selected = app.nav.gallery.selected_ids.contains(&card.sheet_id);
+            let doc = app.session.document().clone();
+            app.nav.sync_gallery(&doc);
+        }
+        UiIntent::SetGalleryViewOptions { search_query, sort_order, current_family_only } => {
+            let doc = app.session.document().clone();
+            if let Some(ref q) = search_query {
+                app.egui_views.center_stage.gallery_search = q.clone();
+                app.egui_views.center_stage.last_synced_gallery_search = q.clone();
             }
+            app.nav.set_gallery_view_options(&doc, search_query, sort_order, current_family_only);
+        }
+        UiIntent::OpenExportFigure { sheet_id, target_selected } => {
+            app.canvas_dialogs.open_export_figure(&sheet_id);
+            app.egui_views.app_modals.export_selected_gallery_scope = target_selected;
+        }
+        UiIntent::OpenPrintForSheets { sheet_ids } => {
+            let doc = app.session.document().clone();
+            let valid: Vec<SheetId> = sheet_ids.into_iter().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).collect();
+            if let Some(first) = valid.first() {
+                app.open_print_dialog_for(Some(first));
+                app.canvas_dialogs.print.job.sheet_ids = valid.clone();
+                if valid.len() > 1 {
+                    app.canvas_dialogs.print.job.title = Some(format!("{} sheets", valid.len()));
+                }
+            }
+        }
+        UiIntent::OpenCsvExportForSheets { sheet_ids } => {
+            let doc = app.session.document().clone();
+            let valid: Vec<SheetId> = sheet_ids.into_iter().filter(|id| doc.data_sheet(id).is_some()).collect();
+            if let Some(first) = valid.first().cloned() {
+                app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
+                let target = if valid.len() == 1 {
+                    crate::dialogs_canvas::CsvExportTargetKind::DataTable { sheet_id: first }
+                } else {
+                    crate::dialogs_canvas::CsvExportTargetKind::DataTables { sheet_ids: valid }
+                };
+                app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(target);
+            }
+        }
+        UiIntent::PlaceSelectedOntoNewLayout { graph_ids } => {
+            return apply_place_selected_onto_new_layout(app, &graph_ids);
         }
         _ => {}
     }
     Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn batch_layout_grid_dims(count: usize) -> (u8, u8) {
+    match count {
+        0 | 1 => (1, 1),
+        2 => (1, 2),
+        3 | 4 => (2, 2),
+        5 | 6 => (2, 3),
+        7..=9 => (3, 3),
+        _ => {
+            let cols = (count as f64).sqrt().ceil().clamp(1.0, 8.0) as u8;
+            let rows = count.div_ceil(usize::from(cols)).clamp(1, 8) as u8;
+            (rows, cols)
+        }
+    }
+}
+
+fn apply_place_selected_onto_new_layout(app: &mut UiApp, graph_ids: &[SheetId]) -> Result<UiIntentOutcome, EngineError> {
+    let valid: Vec<SheetId> = {
+        let doc = app.session.document();
+        graph_ids.iter().filter(|id| doc.graph_sheet(id).is_some()).cloned().collect()
+    };
+    if valid.is_empty() {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    }
+    let (rows, cols) = batch_layout_grid_dims(valid.len());
+    let create_out = app.execute_session_ui_cmd(
+        "layout.create",
+        serde_json::json!({
+            "grid_template": [rows, cols],
+            "title": format!("Layout ({})", valid.len()),
+        }),
+    )?;
+    let Some(created_raw) = create_out.payload.get("sheet_id").and_then(|v| v.as_str()) else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+    let layout_id = SheetId::new(created_raw);
+    let mut composer = crate::dialogs_canvas::PageLayoutComposerState { rows, cols, ..Default::default() };
+    composer.layout_sheet_id = Some(layout_id.clone());
+    composer.arrange_grid(&valid, 14.0, 10.0);
+    let _ = app.execute_session_ui_cmd(
+        "layout.setSpec",
+        serde_json::json!({
+            "sheet_id": layout_id.as_str(),
+            "spec": composer.to_layout_spec(),
+        }),
+    )?;
+    let _ = app.execute_session_ui_cmd("sheet.select", serde_json::json!({ "sheet_id": layout_id.as_str() }))?;
+    app.nav.gallery.open = false;
+    app.sync_views();
+    Ok(UiIntentOutcome::Ui {
+        command_id: String::from("ui.gallery.placeOnNewLayout"),
+        result: Some(serde_json::json!({ "sheet_id": layout_id.as_str(), "panel_count": valid.len() })),
+    })
 }
 
 fn sync_edit_params_from_power_wizard(app: &mut UiApp) {
@@ -1316,22 +1419,6 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::ExecuteFindReplace { replace_all, find_query, replace_with, match_case, match_entire_cell } => {
             return apply_find_replace_on_active_sheet(app, replace_all, &find_query, &replace_with, match_case, match_entire_cell);
-        }
-        UiIntent::UpdateFeedbackDraft(draft) => {
-            app.canvas_dialogs.feedback = *draft;
-        }
-        UiIntent::OpenFeedbackOnGitHub => {
-            if let Err(err) = app.open_feedback_on_github() {
-                app.canvas_dialogs.feedback.status_message = Some(format!("Could not open GitHub issue form: {err}"));
-            }
-        }
-        UiIntent::CopyFeedbackMarkdown => {
-            if let Err(err) = app.copy_feedback_markdown() {
-                app.canvas_dialogs.feedback.status_message = Some(format!("Could not copy Markdown report: {err}"));
-            }
-        }
-        UiIntent::ResetFeedbackDraft => {
-            app.canvas_dialogs.feedback.clear_fields();
         }
         UiIntent::CopyImportWarnings => {
             if let Err(err) = app.copy_import_warnings_to_clipboard() {

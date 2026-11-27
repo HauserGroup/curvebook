@@ -142,7 +142,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.excludeCellsWithReason",
         label: "Exclude Cells With Reason",
-        menu_path: "Change/Exclude Values With Reason...",
+        menu_path: "Change/Exclude Values With Reason",
         summary: "Exclude cells and attach a structured audit reason tag, note, and UTC timestamp.",
         beginner: "Exclude values while recording a reason tag and audit timestamp for review.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -153,7 +153,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.exclusionAuditReport",
         label: "Exclusion Audit Report",
-        menu_path: "Data/Exclusion Audit Report...",
+        menu_path: "Data/Exclusion Audit Report",
         summary: "Generate a read-only audit report of excluded cells and their reason annotations.",
         beginner: "Inspect all excluded values and audit reasons across one sheet or the entire project.",
         effects: Effects::NONE.with(Effects::IDEMPOTENT),
@@ -175,7 +175,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.paste",
         label: "Paste Special",
-        menu_path: "Edit/Paste Special...",
+        menu_path: "Edit/Paste Special",
         shortcut: "Cmd+V",
         summary: "Paste delimited clipboard text or a 2D cell grid into a table with placement, transpose, and filter options.",
         beginner: "Paste tabular data into a table starting at an anchor cell, optionally transposing or filtering.",
@@ -198,7 +198,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.importCsv",
         label: "Import CSV / TSV",
-        menu_path: "File/Import/CSV or TSV...",
+        menu_path: "File/Import/CSV or TSV",
         summary: "Import CSV or TSV data from a file path or inline text into a new or existing data table.",
         beginner: "Create a new data table or populate an existing one from a CSV or TSV file.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
@@ -209,7 +209,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.exportCsv",
         label: "Export Table CSV / TSV",
-        menu_path: "File/Export/Table CSV...",
+        menu_path: "File/Export/Table CSV",
         summary: "Export a data or result sheet to CSV/TSV text and optionally write atomically to disk.",
         beginner: "Save a data or result table as CSV or TSV without changing the project.",
         effects: Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT),
@@ -219,10 +219,10 @@ static SPECS: &[CommandSpec] = &command_specs!(
     },
     {
         id: "table.importPrism",
-        label: "Import External Archive",
-        menu_path: "File/Import/External Archive...",
-        summary: "Import an external ZIP-based project archive from disk, base64, or raw byte array.",
-        beginner: "Open or merge an external ZIP-format statistical archive into the project.",
+        label: "Import .prism files",
+        menu_path: "File/Import/.prism files",
+        summary: "Import .prism files from disk, base64, or raw byte array.",
+        beginner: "Open or merge .prism files into the project.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
         input_schema: command_schema::<ImportPrismParams>,
         enabled: always_enabled,
@@ -230,10 +230,10 @@ static SPECS: &[CommandSpec] = &command_specs!(
     },
     {
         id: "table.importPzfx",
-        label: "Import XML Project",
-        menu_path: "File/Import/XML Project...",
-        summary: "Import an XML project document from disk, inline XML string, or base64 payload.",
-        beginner: "Open or merge an XML-format project file into the workspace.",
+        label: "Import .pzfx files",
+        menu_path: "File/Import/.pzfx files",
+        summary: "Import .pzfx files from disk, inline XML string, or base64 payload.",
+        beginner: "Open or merge .pzfx files into the project.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
         input_schema: command_schema::<ImportPzfxParams>,
         enabled: always_enabled,
@@ -242,7 +242,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.importXlsx",
         label: "Import XLSX Workbook",
-        menu_path: "File/Import/XLSX Workbook...",
+        menu_path: "File/Import/XLSX Workbook",
         summary: "Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.",
         beginner: "Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
@@ -253,7 +253,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.setVariableRole",
         label: "Set Variable Role",
-        menu_path: "Data/Variable Properties...",
+        menu_path: "Data/Variable Properties",
         summary: "Lock or re-infer the analytical role of a column in a MultipleVariables table.",
         beginner: "Mark a variable column as continuous, categorical, label, calculated, or auto-inferred.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
@@ -264,7 +264,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.recodeLevels",
         label: "Recode Categorical Levels",
-        menu_path: "Data/Recode Levels...",
+        menu_path: "Data/Recode Levels",
         summary: "Map and rewrite categorical values in a MultipleVariables column.",
         beginner: "Rename or merge category labels within a MultipleVariables column.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -275,7 +275,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.setCategoricalOrder",
         label: "Set Categorical Order",
-        menu_path: "Data/Set Categorical Order...",
+        menu_path: "Data/Set Categorical Order",
         summary: "Configure display/reference ordering of categorical levels in a MultipleVariables column.",
         beginner: "Choose how categories are ordered (explicit list, alphabetical, entry order, or frequency).",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
@@ -286,7 +286,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.setCalculatedVariable",
         label: "Add / Update Calculated Variable",
-        menu_path: "Data/Calculated Variable...",
+        menu_path: "Data/Calculated Variable",
         summary: "Create or update a formula-driven variable column in a MultipleVariables table and evaluate it.",
         beginner: "Add a computed column whose values update automatically from other variables via a formula.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
@@ -297,7 +297,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.simulateXy",
         label: "Simulate XY Data",
-        menu_path: "Insert/Simulate Data...",
+        menu_path: "Insert/Simulate Data",
         summary: "Generate a synthetic XY data sheet from a built-in equation, parameter map, and noise model.",
         beginner: "Create synthetic XY curves with optional Gaussian, relative CV, or Poisson noise.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -307,8 +307,8 @@ static SPECS: &[CommandSpec] = &command_specs!(
     },
     {
         id: "table.convertArchetype",
-        label: "Convert Table Archetype",
-        menu_path: "Change/Convert Table Structure...",
+        label: "Convert Table Format",
+        menu_path: "Change/Convert Table Structure",
         summary: "Preview or convert a data table between Column, Grouped, XY, and MultipleVariables archetypes.",
         beginner: "Reshape a data table into another structure, previewing any lossy changes before applying.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA).with(Effects::IDEMPOTENT),
@@ -319,7 +319,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.importPlateMap",
         label: "Import Plate Map",
-        menu_path: "File/Import/Plate Map...",
+        menu_path: "File/Import/Plate Map",
         summary: "Map 96-well or 384-well microplate readings and well roles into a structured data sheet.",
         beginner: "Import 96-well or 384-well plate measurements using a plate template or role map.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -330,7 +330,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.importTidyLong",
         label: "Import Tidy Long Table",
-        menu_path: "File/Import/Tidy Long Table...",
+        menu_path: "File/Import/Tidy Long Table",
         summary: "Pivot a long-format table (rows/headers or CSV/TSV file) into a Column, Grouped, XY, or MultipleVariables sheet.",
         beginner: "Reshape long/tidy tabular records into a grouped or XY data table using column mappings.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
@@ -341,7 +341,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.randomizeGroups",
         label: "Randomize Subjects to Groups",
-        menu_path: "Data/Randomize Groups...",
+        menu_path: "Data/Randomize Groups",
         summary: "Deterministically allocate subjects across treatment groups (complete-balanced or permuted-block) and upsert ARRIVE constants on an InfoSheet.",
         beginner: "Randomizes subjects into balanced or blocked treatment arms and stores reproducibility metadata on an Info sheet.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -352,7 +352,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.randomSampleRows",
         label: "Random Sample Rows",
-        menu_path: "Data/Random Sample Rows...",
+        menu_path: "Data/Random Sample Rows",
         summary: "Draw a reproducible Fisher-Yates random sample of rows (optional stratification) into a new data sheet.",
         beginner: "Creates a new table containing a seeded simple or stratified random subset of rows from a source sheet.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -363,7 +363,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "table.simulateDistributions",
         label: "Simulate Distributions",
-        menu_path: "Insert/Simulate Distributions...",
+        menu_path: "Insert/Simulate Distributions",
         summary: "Generate a Column or MultipleVariables table with columns sampled from Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential distributions.",
         beginner: "Creates a new table of seeded random variates drawn from parametric statistical distributions.",
         effects: Effects::MUTATES_DOCUMENT,

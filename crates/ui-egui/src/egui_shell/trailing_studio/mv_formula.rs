@@ -132,7 +132,7 @@ fn render_mv_variable_selector(
                 meta,
                 &StudioChipSpec {
                     label: &var.title,
-                    tooltip: &var.title,
+                    tooltip: "",
                     max_w,
                     selected: idx == active_col,
                     enabled: ctx_in.enabled,
@@ -445,7 +445,7 @@ pub(super) fn render_mv_formula_studio(
 
         ui.add_space(4.0);
         widgets::subheader(ui, tr(locale, "mv.panel.func_ref"));
-        ui.add(egui::TextEdit::singleline(&mut state.mv_fn_filter).desired_width(ui.available_width()).hint_text("Search functions..."));
+        ui.add(egui::TextEdit::singleline(&mut state.mv_fn_filter).desired_width(ui.available_width()).hint_text("Search functions"));
         let filter_lower = state.mv_fn_filter.trim().to_ascii_lowercase();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
@@ -504,7 +504,7 @@ pub(super) fn render_mv_formula_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Manage All Variables…",
+            label: "Manage All Variables",
             tooltip: "Open full Variable Manager & Formula Bar",
             selected: false,
             enabled: ctx_in.enabled,

@@ -33,7 +33,7 @@ pub(super) fn render_table_selection_studio(
             tokens,
             meta,
             &StudioButtonSpec {
-                label: "Open Data Table…",
+                label: "Open Data Table",
                 tooltip: "Create or select a sheet from Navigator",
                 selected: false,
                 enabled: ctx_in.enabled && !doc.data_sheets.is_empty(),
@@ -49,7 +49,7 @@ pub(super) fn render_table_selection_studio(
         return;
     };
 
-    let arch_label = format!("{:?}", ds.kind());
+    let arch_label = ds.kind().label();
     ui.label(
         egui::RichText::new(format!("{}  •  {}×{}", arch_label, ds.archetype.row_count(), ds.archetype.column_count()))
             .size(11.5)
@@ -57,7 +57,7 @@ pub(super) fn render_table_selection_studio(
             .color(tokens.text_strong),
     );
     if ds.frozen {
-        ui.label(egui::RichText::new("Frozen (read-only)").size(tokens.metrics.font_ui_small_pt).color(tokens.accent));
+        ui.label(egui::RichText::new("Frozen (read-only)").size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
     }
 
     ui.add_space(4.0);
@@ -69,13 +69,18 @@ pub(super) fn render_table_selection_studio(
                 None => String::from("inspector.table.decimals.auto"),
                 Some(d) => format!("inspector.table.decimals.{d}"),
             };
+            let tip = match opt {
+                None => String::from("Show automatic decimal precision based on cell magnitude"),
+                Some(0) => String::from("Round displayed table values to whole numbers"),
+                Some(d) => format!("Display table values rounded to {d} decimal places"),
+            };
             if studio_chip(
                 ui,
                 tokens,
                 meta,
                 &StudioChipSpec {
                     label: lbl,
-                    tooltip: "Display decimal places",
+                    tooltip: &tip,
                     max_w: 46.0,
                     selected: state.table_decimals == opt,
                     enabled: ctx_in.enabled,
@@ -110,7 +115,7 @@ pub(super) fn render_table_selection_studio(
         meta,
         &StudioButtonSpec {
             label: "Exclude Selected Subset",
-            tooltip: "Exclude selected rows/columns from graphs and analyses (table.excludeCells)",
+            tooltip: "Exclude selected rows and cells from downstream graphs and analyses",
             selected: false,
             enabled: ctx_in.enabled && has_selection,
             primary: false,
@@ -129,7 +134,7 @@ pub(super) fn render_table_selection_studio(
         meta,
         &StudioButtonSpec {
             label: "Include Selected Subset",
-            tooltip: "Clear exclusion mask on selected cells (table.excludeCells)",
+            tooltip: "Restore excluded selected cells to downstream graphs and analyses",
             selected: false,
             enabled: ctx_in.enabled && has_selection,
             primary: false,
@@ -148,8 +153,8 @@ pub(super) fn render_table_selection_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Style Subset in Graph…",
-            tooltip: "Override marker color/size for selected rows on downstream graph",
+            label: "Style Subset in Graph",
+            tooltip: "Customize marker color, shape, and size for selected rows on downstream graph",
             selected: false,
             enabled: ctx_in.enabled && downstream_graph.is_some(),
             primary: false,
@@ -208,8 +213,8 @@ pub(super) fn render_table_selection_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Convert Table Archetype…",
-            tooltip: "Open Table Archetype Converter",
+            label: "Convert Table Format",
+            tooltip: "Open Table Format Converter",
             selected: false,
             enabled: ctx_in.enabled,
             primary: false,

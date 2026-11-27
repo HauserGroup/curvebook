@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use curvebook::desktop_host::{DesktopHostConfig, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession};
-use curvebook::gui_window::{CurveBookNativeApp, LiveControlChannel, build_egui_font_definitions};
+use curvebook::gui_window::{CurveBookNativeApp, LiveControlChannel, install_desktop_font_definitions};
 use curvebook::live_control::{LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop};
 use curvebook_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_engine::Session;
@@ -106,7 +106,7 @@ pub fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
 #[must_use]
 pub fn new_egui_context() -> egui::Context {
     let ctx = egui::Context::default();
-    ctx.set_fonts(build_egui_font_definitions(None));
+    install_desktop_font_definitions(&ctx, None);
     ctx
 }
 

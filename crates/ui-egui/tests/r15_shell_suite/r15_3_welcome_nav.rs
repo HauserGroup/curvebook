@@ -218,21 +218,21 @@ fn leading_dock_rail_collapse_filters_nested_toggle_and_inline_new() -> BoxRes {
     assert!((driver.state().leading_rect_pt.ok_or("rail missing")?.width() - 36.0).abs() <= 2.0);
     assert_clean_parity(&driver, "collapsed 36pt rail")?;
 
-    driver.press_egui_key(Key::N, Modifiers::COMMAND | Modifiers::SHIFT);
+    driver.press_egui_key(Key::B, Modifiers::COMMAND);
     assert!((driver.state().leading_rect_pt.ok_or("restored missing")?.width() - 240.0).abs() <= 4.0);
 
     assert!(driver.state().app.family_open);
-    driver.press_egui_key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+    driver.press_egui_key(Key::L, Modifiers::COMMAND | Modifiers::SHIFT);
     assert!(!driver.state().app.family_open);
-    driver.press_egui_key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+    driver.press_egui_key(Key::L, Modifiers::COMMAND | Modifiers::SHIFT);
     assert!(driver.state().app.family_open);
 
-    driver.click_widget_id("nav.chip.results")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.results")?;
     assert_eq!(driver.state().views.leading_dock.kind_chip, NavigatorKindChip::Results);
     assert!(
         driver.frame_meta().find_by_widget_id("nav.sheet.res-1").is_some() && driver.frame_meta().find_by_widget_id("nav.sheet.data-1").is_none()
     );
-    driver.click_widget_id("nav.chip.all")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.all")?;
     assert!(driver.frame_meta().find_by_widget_id("nav.sheet.data-1").is_some());
 
     driver.click_at(widget_center(&driver, "nav.search_input")?)?;
@@ -492,5 +492,157 @@ fn aud_08_13_and_09_01_07_27_45_welcome_policy_samples_clone_and_nested_nav() ->
     assert_eq!(collect_visible_sheet_ids(&nav_app, &ns), vec![SheetId::new("d1"), SheetId::new("r1"), SheetId::new("d2")]);
     ns.nested_collapsed_parents.insert(SheetId::new("d1"));
     assert_eq!(collect_visible_sheet_ids(&nav_app, &ns), vec![SheetId::new("d1"), SheetId::new("d2")]);
+    Ok(())
+}
+
+#[test]
+fn r10_36_collapsed_rail_vector_icons_and_kind_dropdown_themes_hidpi() -> BoxRes {
+    for mode in [UiThemeMode::Light, UiThemeMode::Dark, UiThemeMode::HighContrast] {
+        for scale in [1.0_f64, 1.5_f64] {
+            let mut app = create_pipeline_fixture_app()?;
+            app.set_theme_mode(mode);
+            let mut driver = make_shell_driver(app, ViewportMetrics::new(1440.0, 900.0, scale));
+
+            // Expanded Navigator has folder headers echoing section vector icons and labeled `nav.kind_filter` combobox.
+            for folder_wid in ["nav.section.data", "nav.section.info", "nav.section.results"] {
+                assert!(driver.frame_meta().find_by_widget_id(folder_wid).is_some(), "missing {folder_wid}");
+            }
+            driver.click_widget_id("nav.kind_filter")?;
+            for item_wid in ["nav.chip.all", "nav.chip.data", "nav.chip.info", "nav.chip.results", "nav.chip.graphs", "nav.chip.layouts"] {
+                let entry = driver.frame_meta().find_by_widget_id(item_wid).ok_or_else(|| format!("missing dropdown item `{item_wid}`"))?;
+                assert!(entry.clipped_rect.height() >= 24.0, "{item_wid} height < 24pt");
+            }
+            assert_clean_parity(&driver, &format!("open nav.kind_filter {mode:?}@{scale}x"))?;
+            driver.click_widget_id("nav.chip.graphs")?;
+            assert!(driver.frame_meta().find_by_widget_id("nav.section.graphs").is_some(), "missing nav.section.graphs");
+            crate::common::select_nav_kind_filter(&mut driver, "nav.chip.all")?;
+
+            // Collapsed 36pt rail uses vector icons (`nav.rail.*`, `family.rail.toggle`) cleanly across Light/Dark/HighContrast.
+            driver.click_widget_id("nav.collapse_rail")?;
+            for rail_wid in
+                ["nav.rail.expand", "nav.rail.data", "nav.rail.info", "nav.rail.results", "nav.rail.graphs", "nav.rail.layouts", "family.rail.toggle"]
+            {
+                let entry = driver.frame_meta().find_by_widget_id(rail_wid).ok_or_else(|| format!("missing rail btn `{rail_wid}`"))?;
+                assert!(entry.clipped_rect.width() >= 24.0 && entry.clipped_rect.height() >= 24.0, "{rail_wid} below 24pt");
+            }
+            assert_clean_parity(&driver, &format!("collapsed vector rail {mode:?}@{scale}x"))?;
+
+            // Clicking rail section vector icon expands Navigator filtered to Results.
+            driver.click_widget_id("nav.rail.results")?;
+            assert_eq!(driver.state().views.leading_dock.kind_chip, NavigatorKindChip::Results);
+            assert!(driver.frame_meta().find_by_widget_id("nav.sheet.res-1").is_some());
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn r20_12_disambiguation_two_line_rows_kind_dropdown_and_multi_select() -> BoxRes {
+    let mut app = create_pipeline_fixture_app()?;
+    // Create duplicate-titled Data (`Cohort`), duplicate-titled Graphs (`Summary`), plus unambiguous Layout (`Appendix Plate`).
+    app.execute_command("sheet.createData", json!({ "sheet_id": "dup-d1", "title": "Cohort", "kind": "xy", "cols": 2, "rows": 3, "auto_graph": true, "graph_sheet_id": "dup-g1", "auto_info": false }))?;
+    app.execute_command("sheet.createData", json!({ "sheet_id": "dup-d2", "title": "Cohort", "kind": "column", "cols": 3, "rows": 4, "auto_graph": true, "graph_sheet_id": "dup-g2", "auto_info": false }))?;
+    app.execute_command("sheet.rename", json!({ "sheet_id": "dup-g1", "title": "Summary" }))?;
+    app.execute_command("sheet.rename", json!({ "sheet_id": "dup-g2", "title": "Summary" }))?;
+    app.execute_command("layout.create", json!({ "sheet_id": "lay-1", "title": "Appendix Plate" }))?;
+    app.sync_views();
+
+    let mut driver = make_driver(app, 1440.0, 900.0);
+
+    // Locked Decision #6: two-line `38 pt` on Graphs, Results, and duplicate-titled rows; compact `26 pt` on unambiguous Data, Info, and Layouts.
+    let d_unique_h = driver.frame_meta().find_by_widget_id("nav.sheet.data-1").ok_or("missing data-1")?.clipped_rect.height();
+    let d_dup_h = driver.frame_meta().find_by_widget_id("nav.sheet.dup-d1").ok_or("missing dup-d1")?.clipped_rect.height();
+    assert!((d_unique_h - 26.0).abs() <= 1.0, "expected unambiguous Data row ~26pt, got {d_unique_h}");
+    assert!((d_dup_h - 38.0).abs() <= 1.0, "expected duplicate Data row ~38pt, got {d_dup_h}");
+
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.info")?;
+    let info_wid = format!("nav.sheet.{}", driver.state().app.document().info_sheets[0].id.as_str());
+    let info_h = driver.frame_meta().find_by_widget_id(&info_wid).ok_or("missing info row")?.clipped_rect.height();
+    assert!((info_h - 26.0).abs() <= 1.0, "expected unambiguous Info row ~26pt, got {info_h}");
+
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.results")?;
+    let res_h = driver.frame_meta().find_by_widget_id("nav.sheet.res-1").ok_or("missing res-1")?.clipped_rect.height();
+    assert!((res_h - 38.0).abs() <= 1.0, "expected Result row ~38pt, got {res_h}");
+
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.graphs")?;
+    let g_dup_h = driver.frame_meta().find_by_widget_id("nav.sheet.dup-g1").ok_or("missing dup-g1")?.clipped_rect.height();
+    assert!((g_dup_h - 38.0).abs() <= 1.0, "expected Graph row ~38pt, got {g_dup_h}");
+
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.layouts")?;
+    let lay_h = driver.frame_meta().find_by_widget_id("nav.sheet.lay-1").ok_or("missing lay-1")?.clipped_rect.height();
+    assert!((lay_h - 26.0).abs() <= 1.0, "expected unambiguous Layout row ~26pt, got {lay_h}");
+
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.all")?;
+
+    // Split View selector disambiguates identical sheet titles cleanly.
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.data_graph")?;
+    driver.click_widget_id("split.secondary_selector")?;
+    let g1_sub = driver
+        .state()
+        .app
+        .nav
+        .all_entries
+        .iter()
+        .find(|e| e.sheet_id.as_str() == "dup-g1")
+        .and_then(|e| e.subtitle.clone())
+        .ok_or("missing dup-g1 subtitle")?;
+    let expected_split_item = format!("[Graph] Summary \u{2014} {g1_sub}");
+    assert!(
+        driver
+            .accesskit_tree()
+            .ok_or("missing AccessKit tree")?
+            .nodes
+            .iter()
+            .any(|(_, n)| curvebook_ui_egui::egui_shell::driver::accesskit_accessible_name(n) == Some(expected_split_item.as_str())),
+        "expected split selector to disambiguate Summary with `{expected_split_item}`"
+    );
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.single")?;
+
+    // Search filters by disambiguation subtitle too.
+    driver.click_widget_id("nav.search_input")?;
+    driver.type_text("From Kinetic")?;
+    assert!(driver.frame_meta().find_by_widget_id("nav.sheet.res-1").is_some());
+    assert!(driver.frame_meta().find_by_widget_id("nav.sheet.data-1").is_none());
+    driver.click_widget_id("nav.search_clear")?;
+
+    // HIG multi-select: single click -> Cmd+Click discontinuous toggle -> right-click Compare in Split View -> Shift+Click range -> Duplicate batch.
+    driver.click_widget_id("nav.sheet.data-1")?;
+    assert_eq!(driver.state().views.leading_dock.selected_sheet_ids.len(), 1);
+
+    let mod_cmd =
+        curvebook_ui_egui::interaction::KeyModifiers { meta: cfg!(target_os = "macos"), ctrl: !cfg!(target_os = "macos"), ..Default::default() };
+    let d2_center = widget_center(&driver, "nav.sheet.data-2")?;
+    driver.click_at_button(d2_center, curvebook_ui_egui::interaction::PointerButton::Primary, mod_cmd)?;
+    assert_eq!(driver.state().views.leading_dock.selected_sheet_ids.len(), 2);
+
+    // Right-click on multi-selected row shows `Compare in Split View` and triggers split comparison.
+    let d2_pos = widget_center(&driver, "nav.sheet.data-2")?;
+    driver.click_at_button(d2_pos, curvebook_ui_egui::interaction::PointerButton::Secondary, Default::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("nav.ctx.compare_split").is_some());
+    driver.click_widget_id("nav.ctx.compare_split")?;
+    assert!(driver.state().app.split.enabled);
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.single")?;
+
+    // Shift+Click selects contiguous visible range from `data-1` to `dup-d2` (4 Data sheets) and duplicates atomically.
+    driver.click_widget_id("nav.sheet.data-1")?;
+    let dup2_center = widget_center(&driver, "nav.sheet.dup-d2")?;
+    driver.click_at_button(
+        dup2_center,
+        curvebook_ui_egui::interaction::PointerButton::Primary,
+        curvebook_ui_egui::interaction::KeyModifiers { shift: true, ..Default::default() },
+    )?;
+    assert_eq!(driver.state().views.leading_dock.selected_sheet_ids.len(), 4);
+
+    let data_before = driver.state().app.document().data_sheets.len();
+    let dup2_pos = widget_center(&driver, "nav.sheet.dup-d2")?;
+    driver.click_at_button(dup2_pos, curvebook_ui_egui::interaction::PointerButton::Secondary, Default::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("nav.ctx.compare_split").is_none());
+    driver.click_widget_id("nav.ctx.duplicate")?;
+    assert_eq!(driver.state().app.document().data_sheets.len(), data_before + 4);
+    assert_clean_parity(&driver, "r20_12 multi-select duplicate")?;
     Ok(())
 }

@@ -19,7 +19,7 @@ use crate::dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogSt
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeState, MoveDirection};
 use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeMode;
-use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
+use crate::workspace_nav::{ActiveWorkspacePane, GallerySortOrder, NavigatorNestingMode};
 
 /// Target CI method cycled inside the Contingency `EditAnalysisParameters` modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +107,10 @@ pub enum UiIntent {
         sheet_id: Option<SheetId>,
         coord: curvebook_tools::GridCellCoord,
     },
+    SelectXCell {
+        row: usize,
+        subcol: usize,
+    },
     ExtendGridSelection {
         sheet_id: Option<SheetId>,
         coord: curvebook_tools::GridCellCoord,
@@ -152,6 +156,11 @@ pub enum UiIntent {
     StatParams(StatParamsIntent),
     SelectResultTab {
         index: usize,
+        sheet_id: Option<SheetId>,
+    },
+    SetResultReportOptions {
+        format: String,
+        scope: String,
     },
     SetActiveInspector {
         inspector: ActiveInspector,
@@ -401,6 +410,24 @@ pub enum UiIntent {
     SetGallerySelection {
         sheet_ids: Vec<SheetId>,
     },
+    SetGalleryViewOptions {
+        search_query: Option<String>,
+        sort_order: Option<GallerySortOrder>,
+        current_family_only: Option<bool>,
+    },
+    OpenExportFigure {
+        sheet_id: SheetId,
+        target_selected: bool,
+    },
+    OpenPrintForSheets {
+        sheet_ids: Vec<SheetId>,
+    },
+    OpenCsvExportForSheets {
+        sheet_ids: Vec<SheetId>,
+    },
+    PlaceSelectedOntoNewLayout {
+        graph_ids: Vec<SheetId>,
+    },
     OpenPreferences {
         category: Option<app_modals::PreferencesCategory>,
     },
@@ -429,10 +456,6 @@ pub enum UiIntent {
         match_case: bool,
         match_entire_cell: bool,
     },
-    UpdateFeedbackDraft(Box<crate::feedback::FeedbackDraft>),
-    OpenFeedbackOnGitHub,
-    CopyFeedbackMarkdown,
-    ResetFeedbackDraft,
     CopyImportWarnings,
     UpdateCsvExportOptions(Box<crate::dialogs_canvas::CsvExportOptionsState>),
     SetFormulaBarInput {

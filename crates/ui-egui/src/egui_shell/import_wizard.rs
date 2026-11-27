@@ -530,6 +530,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
             }
         }
     });
+    ui.label(RichText::new("To import .pzfx files or .prism files, use File › Import.").small().color(tokens.text_muted));
 
     ui.horizontal(|row| {
         let can_link = !matches!(wiz.origin_kind, ImportOriginKind::Clipboard | ImportOriginKind::XlsxWorkbook);
@@ -681,7 +682,7 @@ fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
         });
         let tr_edit = ui.add(
             egui::TextEdit::multiline(&mut state.raw_source_draft)
-                .hint_text("Paste CSV / TSV table rows…")
+                .hint_text("Paste CSV / TSV table rows")
                 .desired_rows(5)
                 .desired_width((avail_w - 20.0).max(200.0)),
         );
@@ -1096,7 +1097,7 @@ fn render_step_preview(
     if prepared.split_blocks.len() > 1 {
         let joined = prepared.split_blocks.join(", ");
         let blk_msg = format!("Split into {} sheets: {joined}", prepared.split_blocks.len());
-        let br = ui.label(RichText::new(&blk_msg).small().color(tokens.accent));
+        let br = ui.label(RichText::new(&blk_msg).small().color(tokens.text_muted));
         meta.record_modal_response(
             ui,
             &br,
@@ -1265,7 +1266,7 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
             dirty = true;
         }
         row.label("Text filter:");
-        let fr = row.add(egui::TextEdit::singleline(&mut state.filter_predicate_draft).hint_text("substring…").desired_width(140.0));
+        let fr = row.add(egui::TextEdit::singleline(&mut state.filter_predicate_draft).hint_text("substring").desired_width(140.0));
         meta.record_modal_response(
             row,
             &fr,
@@ -1380,11 +1381,11 @@ fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         ui.label(RichText::new(err).color(tokens.error).small());
     }
     if let Some(warn) = &prepared.unstack_warning {
-        ui.label(RichText::new(warn).color(tokens.accent).small());
+        ui.label(RichText::new(warn).color(tokens.warning).small());
     }
     if prepared.split_blocks.len() > 1 {
         let joined = prepared.split_blocks.join(", ");
-        ui.label(RichText::new(format!("Split into {} sheets: {joined}", prepared.split_blocks.len())).small().color(tokens.accent));
+        ui.label(RichText::new(format!("Split into {} sheets: {joined}", prepared.split_blocks.len())).small().color(tokens.text_muted));
         ui.add_space(2.0);
     }
     render_preview_grid_table(ui, app, &prepared.grid, tokens);
@@ -1540,7 +1541,7 @@ fn render_step_placement(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
         ui.label(RichText::new(err).color(tokens.error).small());
     }
     if let Some(warn) = &prepared.unstack_warning {
-        ui.label(RichText::new(warn).color(tokens.accent).small());
+        ui.label(RichText::new(warn).color(tokens.warning).small());
     }
     render_preview_grid_table(ui, app, &prepared.grid, tokens);
 }
@@ -1568,7 +1569,7 @@ fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
     ui.label("Audit Note:");
     let nr = ui.add(
         egui::TextEdit::multiline(&mut wiz.provenance_note)
-            .hint_text("Optional provenance note…")
+            .hint_text("Optional provenance note")
             .desired_rows(3)
             .desired_width((ui.available_width() - 20.0).clamp(180.0, 480.0)),
     );
@@ -1834,7 +1835,7 @@ fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w:
                 let csv_ed = body.add(
                     egui::TextEdit::multiline(&mut state.reshape_tidy_csv_draft)
                         .id(egui::Id::unique("import_paste.input.csv"))
-                        .hint_text("Paste header + tidy-long rows (e.g. Group,Replicate,Value)...")
+                        .hint_text("Paste header + tidy-long rows (e.g. Group,Replicate,Value)")
                         .desired_rows(5)
                         .desired_width((avail_w - 28.0).clamp(180.0, 560.0)),
                 );
@@ -1866,9 +1867,13 @@ fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_
     let intents = &mut *cx.intents;
     let ca = &app.canvas_dialogs.convert_archetype;
     egui::ScrollArea::vertical().id_salt("convert_archetype_scroll").max_height(body_h).auto_shrink([false, false]).show(ui, |body| {
-        body.label(RichText::new(format!("Source Archetype: {:?}", ca.source_kind.unwrap_or(TableKind::Column))).strong().color(tokens.text_primary));
+        body.label(
+            RichText::new(format!("Source Table Format: {}", ca.source_kind.unwrap_or(TableKind::Column).label()))
+                .strong()
+                .color(tokens.text_primary),
+        );
         body.add_space(6.0);
-        body.label("Target Table Archetype:");
+        body.label("Target Table Format:");
         body.horizontal_wrapped(|row| {
             for (kind, slug, lbl) in [
                 (TableKind::Xy, "xy", "Coordinate (XY)"),
@@ -2474,15 +2479,21 @@ fn read_internal_result_sheet_grid(app: &UiApp, wiz: &ImportPasteWizardState, mi
                 ResultCell::Number { value, .. } => Cell::number(*value),
                 ResultCell::PValue { raw, .. } => Cell::number(*raw),
                 ResultCell::ConfidenceInterval { lower, upper } => {
-                    let lo = match lower {
-                        CiBound::Finite(v) => format!("{v}"),
-                        CiBound::Open => String::from("-inf"),
-                    };
-                    let hi = match upper {
-                        CiBound::Finite(v) => format!("{v}"),
-                        CiBound::Open => String::from("+inf"),
-                    };
-                    Cell::text(format!("[{lo}, {hi}]"))
+                    if matches!(lower, CiBound::Unavailable) && matches!(upper, CiBound::Unavailable) {
+                        Cell::text("Unavailable")
+                    } else {
+                        let lo = match lower {
+                            CiBound::Finite(v) => format!("{v}"),
+                            CiBound::Open => String::from("-inf"),
+                            CiBound::Unavailable => String::from("Unavailable"),
+                        };
+                        let hi = match upper {
+                            CiBound::Finite(v) => format!("{v}"),
+                            CiBound::Open => String::from("+inf"),
+                            CiBound::Unavailable => String::from("Unavailable"),
+                        };
+                        Cell::text(format!("[{lo}, {hi}]"))
+                    }
                 }
                 ResultCell::Text(s) => Cell::text(s.clone()),
                 ResultCell::Boolean(b) => Cell::text(b.to_string()),

@@ -39,12 +39,8 @@ impl ShortcutScope {
     }
 }
 
-fn default_scope_for_command(command_id: &str) -> ShortcutScope {
-    match command_id {
-        "ui.editParams.open" => ShortcutScope::ResultSheet,
-        "sheet.createData" => ShortcutScope::NonResultSheet,
-        _ => ShortcutScope::Global,
-    }
+const fn default_scope_for_command(_command_id: &str) -> ShortcutScope {
+    ShortcutScope::Global
 }
 
 /// A single command's default and currently active keyboard shortcut binding.
@@ -124,6 +120,22 @@ impl ShortcutRegistry {
                     active_combo: normalized,
                     is_ui: true,
                     scope: default_scope_for_command(spec.id),
+                },
+            );
+        }
+        for (id, label, shortcut) in
+            [("app.preferences", "Settings", "Cmd+,"), ("window.close", "Close Window", "Cmd+W"), ("app.quit", "Quit", "Cmd+Q")]
+        {
+            let normalized = normalize_shortcut_combo(shortcut).unwrap_or_else(|_| shortcut.to_owned());
+            bindings.insert(
+                id.to_owned(),
+                ShortcutBinding {
+                    command_id: id.to_owned(),
+                    label: label.to_owned(),
+                    default_combo: normalized.clone(),
+                    active_combo: normalized,
+                    is_ui: true,
+                    scope: ShortcutScope::Global,
                 },
             );
         }
@@ -458,6 +470,9 @@ fn canonical_key_token(token: &str) -> Result<String, String> {
         "left" | "arrowleft" => Some("Left"),
         "right" | "arrowright" => Some("Right"),
         "+" | "plus" => Some("+"),
+        "=" | "equal" | "equals" => Some("="),
+        "-" | "minus" => Some("-"),
+        "," | "comma" => Some(","),
         _ => None,
     };
     if let Some(canon) = named {
@@ -648,5 +663,31 @@ mod tests {
         assert_eq!(format_shortcut_for_os("Cmd++", false), "Ctrl++");
         assert_eq!(format_shortcut_for_os("F6", false), "F6");
         assert_eq!(format_shortcut_for_os("", true), "");
+    }
+
+    #[test]
+    fn r20_22_four_layer_shortcut_stack_bindings_have_zero_conflicts() {
+        let reg = ShortcutRegistry::new();
+        for (cmd_id, expected) in [
+            ("app.preferences", "Cmd+,"),
+            ("window.close", "Cmd+W"),
+            ("app.quit", "Cmd+Q"),
+            ("ui.navigator.toggle", "Cmd+B"),
+            ("ui.family.toggle", "Cmd+Shift+L"),
+            ("sheet.createData", "Cmd+Shift+T"),
+            ("ui.editParams.open", "Cmd+Shift+P"),
+            ("ui.zoom.in", "Cmd+="),
+            ("ui.zoom.out", "Cmd+-"),
+            ("ui.zoom.fitSheet", "Cmd+0"),
+            ("edit.redo", "Cmd+Shift+Z"),
+        ] {
+            assert_eq!(reg.active_combo(cmd_id), Some(expected), "unexpected shortcut for `{cmd_id}`");
+            assert_eq!(reg.find_conflict(expected, Some(cmd_id)), None, "conflict on `{cmd_id}` = `{expected}`");
+        }
+        assert_eq!(reg.handle_key_combo("Cmd+T"), None, "Cmd+T overload must remain retired");
+        assert_eq!(format_shortcut_for_os("Cmd+,", true), "⌘,");
+        assert_eq!(format_shortcut_for_os("Cmd+,", false), "Ctrl+,");
+        assert_eq!(format_shortcut_for_os("Cmd+Shift+P", true), "⇧⌘P");
+        assert_eq!(format_shortcut_for_os("Cmd+Shift+P", false), "Ctrl+Shift+P");
     }
 }

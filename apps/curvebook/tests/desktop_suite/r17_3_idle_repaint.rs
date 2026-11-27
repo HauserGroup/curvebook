@@ -342,7 +342,6 @@ fn idle_dialogs_and_progress_modal_schedule_zero_ongoing_repaints() -> Result<()
         ("export_figure", ActiveDialog::ExportFigure { sheet_id: SheetId::from("g-1") }),
         ("print", ActiveDialog::Print { sheet_id: Some(SheetId::from("g-1")) }),
         ("checkpoints", ActiveDialog::Checkpoints),
-        ("feedback", ActiveDialog::Feedback),
         ("randomize_groups", ActiveDialog::RandomizeGroups),
         ("simulate_dist", ActiveDialog::SimulateDistributions),
         ("create_graph", ActiveDialog::CreateGraph { source_sheet_id: Some(SheetId::from("col-1")) }),
@@ -433,5 +432,27 @@ fn stationary_navigator_hover_timer_settles_to_zero_idle_repaints() -> Result<()
         assert_settles_to_zero_idle_repaints("nav_stationary_hover", &ctx, &mut app, &count, &mut sim, 20, 8);
     }
 
+    Ok(())
+}
+
+#[test]
+fn portfolio_gallery_live_thumbnails_settle_to_zero_idle_repaints() -> Result<(), Box<dyn std::error::Error>> {
+    let mut s = Session::new();
+    s.execute("sheet.createData", json!({ "sheet_id": "xy-gal", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": false }))?;
+    s.execute("table.setXCells", json!({ "sheet_id": "xy-gal", "values": [1.0, 2.0, 3.0, 4.0] }))?;
+    s.execute("table.setCells", json!({ "sheet_id": "xy-gal", "rows": [[10.0], [20.0], [30.0], [40.0]] }))?;
+    s.execute("graph.create", json!({ "sheet_id": "g-gal", "data_sheet_id": "xy-gal", "title": "Gallery Curve" }))?;
+    s.execute("layout.create", json!({ "sheet_id": "lay-gal", "title": "Gallery Layout" }))?;
+
+    let mut doc = s.document().clone();
+    doc.select_in_navigator(&SheetId::from("g-gal"))?;
+    let (ctx, mut app, count, win_id, mut sim) = build_idle_app(Some(doc))?;
+    {
+        let ui_app = app.runtime_mut().window_mut(win_id)?.app_mut();
+        ui_app.nav.gallery.open = true;
+        ui_app.sync_views();
+    }
+    wait_for_async_worker_settle(&ctx, &mut app, win_id, &count, &mut sim);
+    assert_settles_to_zero_idle_repaints("portfolio_gallery_cached_thumbnails", &ctx, &mut app, &count, &mut sim, 10, 8);
     Ok(())
 }

@@ -29,8 +29,8 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 
 #[test]
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
-    assert_eq!((UI_COMMANDS.len(), catalog_len()), (61, 870));
-    assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
+    assert_eq!((UI_COMMANDS.len(), catalog_len()), (63, 963));
+    assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+Shift+P"));
     let ep_i18n = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open")?;
     assert_eq!(ep_i18n.translations.len(), LOCALES.len());
     assert!(ep_i18n.translations.iter().all(|s| !s.trim().is_empty()));
@@ -39,27 +39,31 @@ fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     let (edit_b, create_b) = (reg.get("ui.editParams.open").ok_or("edit_b")?, reg.get("sheet.createData").ok_or("create_b")?);
     assert_eq!(
         (edit_b.scope, create_b.scope, edit_b.active_combo.as_str(), create_b.active_combo.as_str()),
-        (ShortcutScope::ResultSheet, ShortcutScope::NonResultSheet, "Cmd+T", "Cmd+T")
+        (ShortcutScope::Global, ShortcutScope::Global, "Cmd+Shift+P", "Cmd+Shift+T")
     );
-    assert_eq!((reg.find_conflict("Cmd+T", Some("ui.editParams.open")), reg.find_conflict("Cmd+T", Some("sheet.createData"))), (None, None));
-    assert!(reg.find_conflict("Cmd+T", Some("ui.gallery.toggle")).is_some());
+    assert_eq!(
+        (reg.find_conflict("Cmd+Shift+P", Some("ui.editParams.open")), reg.find_conflict("Cmd+Shift+T", Some("sheet.createData"))),
+        (None, None)
+    );
+    assert!(reg.find_conflict("Cmd+Shift+P", Some("ui.gallery.toggle")).is_some());
+    assert!(reg.find_conflict("Cmd+Shift+T", Some("ui.gallery.toggle")).is_some());
 
     let (mut app, ds_id) = build_column_app(3, 6)?;
     let res = exec(&mut app, "analysis.run", json!({ "source_sheet_id": ds_id.as_str(), "kind": "one_way_anova" }))?;
     let res_id = SheetId::try_new(res.payload["sheet_id"].as_str().ok_or("res_id")?).map_err(|e| e.to_string())?;
 
-    // DataSheet: Cmd+T -> sheet.createData.
+    // Unscoped distinct defaults: Cmd+Shift+T -> sheet.createData regardless of active sheet.
     exec(&mut app, "sheet.select", json!({ "sheet_id": ds_id.as_str() }))?;
     let ds_before = app.document().data_sheets.len();
-    let out_data = key_down(&mut app, "t", KeyModifiers { meta: true, ..Default::default() })?;
+    let out_data = key_down(&mut app, "t", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
     assert_eq!(
         (out_data.command_id.as_deref(), app.document().data_sheets.len(), &app.canvas_dialogs.active_dialog),
         (Some("sheet.createData"), ds_before + 1, &ActiveDialog::None)
     );
 
-    // ResultSheet: Ctrl/Cmd+T -> ui.editParams.open, then rebind to Cmd+Alt+Shift+P.
+    // ResultSheet: Ctrl/Cmd+Shift+P -> ui.editParams.open, then rebind to Cmd+Alt+Shift+P.
     exec(&mut app, "sheet.select", json!({ "sheet_id": res_id.as_str() }))?;
-    let out_res = key_down(&mut app, "t", KeyModifiers { ctrl: true, ..Default::default() })?;
+    let out_res = key_down(&mut app, "p", KeyModifiers { ctrl: true, shift: true, ..Default::default() })?;
     assert!(
         out_res.command_id.as_deref() == Some("ui.editParams.open")
             && matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. })
@@ -67,7 +71,7 @@ fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
     app.canvas_dialogs.close_dialog();
 
     ui_cmd(&mut app, "ui.shortcut.set", json!({ "command_id": "ui.editParams.open", "combo": "Cmd+Alt+Shift+P" }))?;
-    assert!(!key_down(&mut app, "t", KeyModifiers { meta: true, ..Default::default() })?.handled);
+    assert!(!key_down(&mut app, "p", KeyModifiers { meta: true, shift: true, ..Default::default() })?.handled);
     let out_rebound = key_down(&mut app, "p", KeyModifiers { meta: true, alt: true, shift: true, ..Default::default() })?;
     assert!(
         out_rebound.command_id.as_deref() == Some("ui.editParams.open")

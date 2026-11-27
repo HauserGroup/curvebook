@@ -54,7 +54,7 @@ fn wcag_contrast_meets_aa_for_light_dark_and_high_contrast() {
 #[test]
 fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
-    assert_eq!((LOCALES, LOCALES.len(), catalog_len(), missing_translations().is_empty()), (&expected[..], 16, 870, true));
+    assert_eq!((LOCALES, LOCALES.len(), catalog_len(), missing_translations().is_empty()), (&expected[..], 16, 963, true));
 
     let keys: Vec<&'static str> = all_keys().collect();
     assert_eq!(keys.len(), keys.iter().copied().collect::<HashSet<_>>().len());

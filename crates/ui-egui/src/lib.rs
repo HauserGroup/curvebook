@@ -12,7 +12,6 @@ pub mod dialogs_canvas;
 pub mod dialogs_r9;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod egui_shell;
-pub mod feedback;
 pub mod grid_view;
 pub mod i18n;
 pub mod import_paste;
@@ -50,10 +49,6 @@ pub use dialogs_canvas::{
     ExcludeWithReasonDialogState, PrintDialogState, RemediationKind, SplitWorkspaceState,
 };
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
-pub use feedback::{
-    BuiltFeedbackUrl, FeedbackCategory, FeedbackDiagnostics, FeedbackDraft, FeedbackSurface, GITHUB_ISSUES_NEW_BASE, MAX_GITHUB_ISSUE_URL_BYTES,
-    build_feedback_markdown, build_github_issue_url, build_github_issue_url_capped, percent_encode_query_component, validate_github_issue_url,
-};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{
     BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
@@ -74,9 +69,10 @@ pub use menus::{
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
-    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener, SystemPlatformClipboardAdapter,
-    SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers, open_github_issue_url, open_os_print_preview_dialog,
-    open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+    ClipboardBundle, GITHUB_FEEDBACK_URL, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener,
+    SystemPlatformClipboardAdapter, SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers, open_github_issue_url,
+    open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+    validate_github_issue_url,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use os_integration::{StubPlatformClipboardAdapter, StubPlatformUrlOpener};
@@ -272,10 +268,18 @@ impl ImportWarningsState {
     #[must_use]
     pub fn format_plain_text(&self) -> String {
         let mut lines = Vec::with_capacity(self.warnings.len() + 2);
-        if !self.source_label.is_empty() {
-            lines.push(format!("Import warnings ({} — {}):", self.source_label, self.command_id));
-        } else if !self.command_id.is_empty() {
-            lines.push(format!("Import warnings ({}):", self.command_id));
+        let format_label = match self.command_id.as_str() {
+            "table.importPzfx" => ".pzfx files",
+            "table.importPrism" => ".prism files",
+            "table.importXlsx" => ".xlsx workbook",
+            other => other,
+        };
+        if !self.source_label.is_empty() && !format_label.is_empty() {
+            lines.push(format!("Import warnings ({} — {format_label}):", self.source_label));
+        } else if !self.source_label.is_empty() {
+            lines.push(format!("Import warnings ({}):", self.source_label));
+        } else if !format_label.is_empty() {
+            lines.push(format!("Import warnings ({format_label}):"));
         } else {
             lines.push(String::from("Import warnings:"));
         }
@@ -799,67 +803,31 @@ impl UiApp {
         self.url_opener.is_custom
     }
 
-    /// Capture strictly non-identifying environment diagnostics for the active feedback form.
-    #[must_use]
-    pub fn feedback_diagnostics(&self) -> FeedbackDiagnostics {
-        FeedbackDiagnostics::from_app(self)
-    }
-
-    /// Build the prefilled GitHub new-issue URL for the current `canvas_dialogs.feedback` draft.
-    #[must_use]
-    pub fn build_feedback_issue_url(&self) -> BuiltFeedbackUrl {
-        let diag = self.canvas_dialogs.feedback.include_diagnostics.then(|| self.feedback_diagnostics());
-        build_github_issue_url(&self.canvas_dialogs.feedback, diag.as_ref())
-    }
-
-    /// Build the complete, untruncated Markdown report for the current `canvas_dialogs.feedback` draft.
-    #[must_use]
-    pub fn build_feedback_markdown(&self) -> String {
-        let diag = self.canvas_dialogs.feedback.include_diagnostics.then(|| self.feedback_diagnostics());
-        build_feedback_markdown(&self.canvas_dialogs.feedback, diag.as_ref())
-    }
-
-    /// Validate and open the current feedback draft as a prefilled GitHub issue in the configured
-    /// [`PlatformUrlOpener`], updating `canvas_dialogs.feedback` status fields.
+    /// Open CurveBook's GitHub issue template chooser ([`GITHUB_FEEDBACK_URL`]) in the configured
+    /// [`PlatformUrlOpener`].
+    ///
+    /// Leaves `canvas_dialogs.active_dialog` untouched (keeping `About CurveBook` open when invoked
+    /// from its `Send Feedback` button), never writes to the clipboard, and records a concise
+    /// fallback message in `canvas_dialogs.status_banner` when the URL opener reports unavailable.
     ///
     /// # Errors
     /// Returns an error if URL validation fails or the configured opener returns an error.
-    pub fn open_feedback_on_github(&mut self) -> Result<(BuiltFeedbackUrl, OsAdapterStatus), String> {
-        let built = self.build_feedback_issue_url();
+    pub fn open_feedback_on_github(&mut self) -> Result<OsAdapterStatus, String> {
         let status = if !self.url_opener.is_custom && self.is_human_path_only() {
-            validate_github_issue_url(&built.url)?;
+            validate_github_issue_url(GITHUB_FEEDBACK_URL)?;
             OsAdapterStatus::unavailable("os-browser", "browser launch disabled under human_path_only without custom URL opener")
         } else {
-            self.url_opener.opener.open_external_url(&built.url)?
+            self.url_opener.opener.open_external_url(GITHUB_FEEDBACK_URL)?
         };
-        self.canvas_dialogs.feedback.last_built_url = Some(built.url.clone());
-        self.canvas_dialogs.feedback.last_url_truncated = built.truncated;
-        self.canvas_dialogs.feedback.status_message = Some(if status.available {
-            if built.truncated {
-                String::from("Opened GitHub issue form (trimmed for URL length — use Copy Markdown for full text).")
-            } else {
-                String::from("Opened GitHub issue form in your browser.")
+        let fallback = format!("Could not open browser. Visit {GITHUB_FEEDBACK_URL}");
+        if status.available {
+            if self.canvas_dialogs.status_banner.as_deref() == Some(fallback.as_str()) {
+                self.canvas_dialogs.status_banner = None;
             }
         } else {
-            format!("Browser unavailable ({}). Use Copy Markdown to paste into GitHub.", status.detail)
-        });
-        Ok((built, status))
-    }
-
-    /// Copy the complete Markdown feedback report to the configured [`PlatformClipboardAdapter`].
-    ///
-    /// # Errors
-    /// Returns an error if the clipboard adapter reports an error.
-    pub fn copy_feedback_markdown(&mut self) -> Result<(String, OsAdapterStatus), String> {
-        let markdown = self.build_feedback_markdown();
-        let status = self.write_clipboard_text(&markdown)?;
-        self.canvas_dialogs.feedback.copied_markdown = true;
-        self.canvas_dialogs.feedback.status_message = Some(if status.available {
-            String::from("Copied Markdown feedback report to clipboard.")
-        } else {
-            String::from("Prepared Markdown feedback report (host clipboard unavailable in this session).")
-        });
-        Ok((markdown, status))
+            self.canvas_dialogs.status_banner = Some(fallback);
+        }
+        Ok(status)
     }
 
     /// Record non-fatal warnings from an import command outcome, opening [`ActiveDialog::ImportWarnings`]
@@ -1739,7 +1707,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 61);
+        assert_eq!(UI_COMMANDS.len(), 63);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1758,6 +1726,8 @@ mod tests {
             "ui.gridOverlay.toggle",
             "ui.embeddedTable.format.open",
             "ui.image.format.open",
+            "ui.zoom.in",
+            "ui.zoom.out",
             "ui.zoom.fitSheet",
             "ui.gallery.toggle",
             "ui.rulers.toggle",

@@ -35,13 +35,35 @@ pub(super) struct SelectionFastLookup<'a> {
 }
 
 impl<'a> SelectionFastLookup<'a> {
-    pub(super) fn new(app: &'a UiApp, sheet_id: &SheetId, geom: &MultiGridGeom) -> Self {
+    pub(super) fn new_with_preview(
+        app: &'a UiApp,
+        sheet_id: &SheetId,
+        geom: &MultiGridGeom,
+        preview_range: Option<(GridCellCoord, GridCellCoord)>,
+    ) -> Self {
+        if let Some((anchor, active)) = preview_range {
+            let rect_bounds = if geom.row_count == 0 || geom.total_data_flat_cols == 0 {
+                None
+            } else {
+                let r0 = anchor.row.min(active.row).min(geom.row_count - 1);
+                let r1 = anchor.row.max(active.row).min(geom.row_count - 1);
+                let (min_c, max_c) = if (anchor.col, anchor.subcol) <= (active.col, active.subcol) { (anchor, active) } else { (active, anchor) };
+                let f0 = geom.coord_to_flat_all(false, min_c.col, min_c.subcol).saturating_sub(geom.x_subcols);
+                let f1 = geom.coord_to_flat_all(false, max_c.col, max_c.subcol).saturating_sub(geom.x_subcols);
+                if r0 <= r1 && f0.min(f1) < geom.total_data_flat_cols {
+                    Some((r0, r1, f0.min(f1), f0.max(f1).min(geom.total_data_flat_cols - 1)))
+                } else {
+                    None
+                }
+            };
+            return Self { active: Some(active), rect_bounds, discontig_slice: None, discontig_set: None };
+        }
         if !app.grid.selection_belongs_to(sheet_id) {
             return Self { active: None, rect_bounds: None, discontig_slice: None, discontig_set: None };
         }
         let active = app.grid.tool.active;
         let has_discontig =
-            app.grid.selected_coords.len() > 1 || (!app.grid.selected_coords.is_empty() && app.grid.tool.anchor == app.grid.tool.active);
+            app.grid.selected_coords.len() > 1 || (app.grid.selected_coords.len() == 1 && app.grid.tool.anchor != app.grid.tool.active);
         if has_discontig {
             if app.grid.selected_coords.len() > 8 {
                 let set = app.grid.selected_coords.iter().copied().collect();
@@ -57,6 +79,10 @@ impl<'a> SelectionFastLookup<'a> {
             let f0 = geom.coord_to_flat_all(false, min_c.col, min_c.subcol).saturating_sub(geom.x_subcols);
             let f1 = geom.coord_to_flat_all(false, max_c.col, max_c.subcol).saturating_sub(geom.x_subcols);
             if r0 <= r1 && f0 < geom.total_data_flat_cols { Some((r0, r1, f0.min(f1), f0.max(f1).min(geom.total_data_flat_cols - 1))) } else { None }
+        } else if app.grid.selected_coords.len() == 1 {
+            let c = app.grid.selected_coords[0];
+            let f = geom.coord_to_flat_all(false, c.col, c.subcol).saturating_sub(geom.x_subcols);
+            (c.row < geom.row_count && f < geom.total_data_flat_cols).then_some((c.row, c.row, f, f))
         } else {
             None
         };
@@ -74,6 +100,75 @@ impl<'a> SelectionFastLookup<'a> {
             return (r0..=r1).contains(&coord.row) && (f0..=f1).contains(&flat_data_col);
         }
         false
+    }
+
+    pub(super) fn contains_flat_cell(&self, geom: &MultiGridGeom, row: usize, flat_data_col: usize) -> bool {
+        if let Some((r0, r1, f0, f1)) = self.rect_bounds {
+            return (r0..=r1).contains(&row) && (f0..=f1).contains(&flat_data_col);
+        }
+        geom.flat_data_to_coord(flat_data_col).is_some_and(|(col, subcol)| self.contains(GridCellCoord::new(row, col, subcol), flat_data_col))
+    }
+
+    pub(super) fn contiguous_rect(&self) -> Option<(usize, usize, usize, usize)> {
+        self.rect_bounds
+    }
+
+    pub(super) fn has_discontiguous(&self) -> bool {
+        self.discontig_slice.is_some() || self.discontig_set.is_some()
+    }
+
+    pub(super) fn contains_row(&self, row: usize) -> bool {
+        if let Some((r0, r1, _, _)) = self.rect_bounds {
+            return (r0..=r1).contains(&row);
+        }
+        if let Some(set) = &self.discontig_set {
+            return set.iter().any(|c| c.row == row);
+        }
+        if let Some(slice) = self.discontig_slice {
+            return slice.iter().any(|c| c.row == row);
+        }
+        false
+    }
+
+    pub(super) fn contains_full_flat_col(&self, geom: &MultiGridGeom, flat_data_col: usize) -> bool {
+        self.rect_bounds
+            .is_some_and(|(r0, r1, f0, f1)| geom.row_count > 0 && r0 == 0 && r1 + 1 >= geom.row_count && (f0..=f1).contains(&flat_data_col))
+    }
+
+    pub(super) fn contains_flat_col(&self, geom: &MultiGridGeom, flat_data_col: usize) -> bool {
+        if let Some((_, _, f0, f1)) = self.rect_bounds {
+            return (f0..=f1).contains(&flat_data_col);
+        }
+        geom.flat_data_to_coord(flat_data_col).is_some_and(|(col, subcol)| {
+            self.discontig_set.as_ref().is_some_and(|s| s.iter().any(|c| c.col == col && c.subcol == subcol))
+                || self.discontig_slice.is_some_and(|s| s.iter().any(|c| c.col == col && c.subcol == subcol))
+        })
+    }
+
+    pub(super) fn contains_col(&self, geom: &MultiGridGeom, col: usize) -> bool {
+        let (start_all, span_subs) = geom.col_span_flat(col);
+        let col_f0 = start_all.saturating_sub(geom.x_subcols);
+        let col_f1 = col_f0 + span_subs.saturating_sub(1);
+        if let Some((_, _, f0, f1)) = self.rect_bounds {
+            return f0 <= col_f1 && col_f0 <= f1;
+        }
+        if let Some(set) = &self.discontig_set {
+            return set.iter().any(|c| c.col == col);
+        }
+        if let Some(slice) = self.discontig_slice {
+            return slice.iter().any(|c| c.col == col);
+        }
+        false
+    }
+
+    pub(super) fn contains_full_col(&self, geom: &MultiGridGeom, col: usize) -> bool {
+        if geom.row_count == 0 {
+            return false;
+        }
+        let (start_all, span_subs) = geom.col_span_flat(col);
+        let col_f0 = start_all.saturating_sub(geom.x_subcols);
+        let col_f1 = col_f0 + span_subs.saturating_sub(1);
+        self.rect_bounds.is_some_and(|(r0, r1, f0, f1)| r0 == 0 && r1 + 1 >= geom.row_count && f0 <= col_f0 && col_f1 <= f1)
     }
 }
 
@@ -105,10 +200,49 @@ pub(super) struct MultiGridAuxState {
     pub(super) sheet_id: Option<SheetId>,
     pub(super) aux_edit: Option<(AuxInlineTarget, String, bool)>,
     pub(super) selected_x_cell: Option<(usize, usize)>,
+    pub(super) selected_x_anchor: Option<(usize, usize)>,
     pub(super) last_app_x_cell: Option<(usize, usize)>,
     pub(super) last_app_y_selection: Option<(Option<GridCellCoord>, Option<GridCellCoord>, usize)>,
     pub(super) active_role_menu_col: Option<usize>,
     pub(super) suppress_loss_commit_once: bool,
+}
+
+impl MultiGridAuxState {
+    pub(super) fn set_single_x(&mut self, cell: (usize, usize)) {
+        self.selected_x_cell = Some(cell);
+        self.selected_x_anchor = Some(cell);
+    }
+
+    pub(super) fn extend_x_selection(&mut self, cell: (usize, usize)) {
+        if self.selected_x_anchor.is_none() {
+            self.selected_x_anchor = self.selected_x_cell.or(Some(cell));
+        }
+        self.selected_x_cell = Some(cell);
+    }
+
+    pub(super) fn clear_x_selection(&mut self) {
+        self.selected_x_cell = None;
+        self.selected_x_anchor = None;
+    }
+
+    pub(super) fn selected_x_bounds(&self) -> Option<(usize, usize, usize, usize)> {
+        let cur = self.selected_x_cell?;
+        let anchor = self.selected_x_anchor.unwrap_or(cur);
+        Some((anchor.0.min(cur.0), anchor.0.max(cur.0), anchor.1.min(cur.1), anchor.1.max(cur.1)))
+    }
+
+    pub(super) fn x_contains(&self, row: usize, subcol: usize) -> bool {
+        self.selected_x_bounds().is_some_and(|(r0, r1, s0, s1)| (r0..=r1).contains(&row) && (s0..=s1).contains(&subcol))
+    }
+
+    pub(super) fn x_contains_subcol(&self, subcol: usize) -> bool {
+        self.selected_x_bounds().is_some_and(|(_, _, s0, s1)| (s0..=s1).contains(&subcol))
+    }
+
+    pub(super) fn x_full_subcol_selected(&self, geom: &MultiGridGeom, subcol: usize) -> bool {
+        geom.row_count > 0
+            && self.selected_x_bounds().is_some_and(|(r0, r1, s0, s1)| r0 == 0 && r1 + 1 >= geom.row_count && (s0..=s1).contains(&subcol))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -199,6 +333,8 @@ pub(super) struct MultiGridCtx<'a> {
     pub(super) tokens: &'a Tokens,
     pub(super) metrics: LayoutMetrics,
     pub(super) blocked: bool,
+    pub(super) pane_focused: bool,
+    pub(super) pane_salt: &'static str,
     pub(super) locale: &'a str,
 }
 
@@ -841,8 +977,60 @@ pub(super) fn paint_exclusion_corner_marker(ui: &Ui, cell_rect: Rect, clipped: R
     ui.painter().with_clip_rect(clipped).add(egui::Shape::convex_polygon(tri, tag_color, Stroke::NONE));
 }
 
-/// Format the hover tooltip for a data cell combining elided text, microplate source well origin
-/// (`Source well: <well>`), exclusion reason note, and contingency validation hint (`R17.7`).
+/// Structured tooltip content (`Band 1` title + optional `Band 2` summary) for a data cell (`R20.21`).
+pub(super) struct StructuredCellTooltip {
+    pub(super) title: String,
+    pub(super) summary: Option<String>,
+}
+
+/// Build structured tooltip data for a grid cell combining elided text, microplate source well
+/// provenance (`Source well: <well>`), `cell_exclusion_tooltip`, and contingency validation hints (`R17.7` / `R20.21`).
+#[must_use]
+pub(super) fn build_data_cell_tooltip(
+    ds: &DataSheet,
+    coord: GridCellCoord,
+    excluded: bool,
+    contingency_invalid: bool,
+    elided_text: Option<&str>,
+    locale: &str,
+) -> Option<StructuredCellTooltip> {
+    let full_elided = elided_text.map(str::trim).filter(|s| !s.is_empty());
+    let well_line = ds.plate_well_origin(CellCoord::from(coord)).map(|well| {
+        let prefix = crate::i18n::tr_or_fallback(locale, "grid.tooltip.source_well", "Source well");
+        format!("{prefix}: {well}")
+    });
+    let excl_line = excluded.then(|| {
+        crate::grid_view::GridViewState::cell_exclusion_tooltip(ds, coord)
+            .unwrap_or_else(|| crate::i18n::tr_or_fallback(locale, "w5.grid_core.excluded_cell", "Excluded from analyses").to_owned())
+    });
+    let invalid_line = (!excluded && contingency_invalid).then(|| String::from("Contingency counts should be non-negative integers"));
+
+    if let Some(full) = full_elided {
+        let mut details = Vec::new();
+        if let Some(w) = well_line {
+            details.push(w);
+        }
+        if let Some(ex) = excl_line {
+            details.push(ex);
+        } else if let Some(inv) = invalid_line {
+            details.push(inv);
+        }
+        return Some(StructuredCellTooltip { title: full.to_owned(), summary: (!details.is_empty()).then(|| details.join("\n")) });
+    }
+    if let Some(excl) = excl_line {
+        return Some(StructuredCellTooltip { title: excl, summary: well_line });
+    }
+    if let Some(inv) = invalid_line {
+        return Some(StructuredCellTooltip {
+            title: String::from("Invalid Contingency Count"),
+            summary: Some(well_line.map_or(inv.clone(), |w| format!("{w}\n{inv}"))),
+        });
+    }
+    well_line.map(|well| StructuredCellTooltip { title: well, summary: None })
+}
+
+/// Format the hover tooltip string for a data cell (`format_data_cell_hover_tooltip` helper preserved for callers/tests).
+#[allow(dead_code)]
 #[must_use]
 pub(super) fn format_data_cell_hover_tooltip(
     ds: &DataSheet,
@@ -852,24 +1040,11 @@ pub(super) fn format_data_cell_hover_tooltip(
     elided_text: Option<&str>,
     locale: &str,
 ) -> Option<String> {
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(full) = elided_text
-        && !full.is_empty()
-    {
-        parts.push(full.to_owned());
-    }
-    if let Some(well) = ds.plate_well_origin(CellCoord::from(coord)) {
-        let prefix = crate::i18n::tr_or_fallback(locale, "grid.tooltip.source_well", "Source well");
-        parts.push(format!("{prefix}: {well}"));
-    }
-    if excluded {
-        let tip = crate::grid_view::GridViewState::cell_exclusion_tooltip(ds, coord)
-            .unwrap_or_else(|| crate::i18n::tr_or_fallback(locale, "w5.grid_core.excluded_cell", "Excluded cell").to_owned());
-        parts.push(tip);
-    } else if contingency_invalid {
-        parts.push(String::from("Contingency counts should be non-negative integers"));
-    }
-    (!parts.is_empty()).then(|| parts.join("\n"))
+    let tip = build_data_cell_tooltip(ds, coord, excluded, contingency_invalid, elided_text, locale)?;
+    Some(match tip.summary {
+        Some(body) => format!("{}\n{body}", tip.title),
+        None => tip.title,
+    })
 }
 
 pub(super) fn pending_commit_key(sheet_id: &SheetId) -> Id {
@@ -880,25 +1055,413 @@ pub(super) fn grid_focus_key(sheet_id: &SheetId) -> Id {
     Id::unique(("column_grid_focused", sheet_id.as_str()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum GridDragOrigin {
+    DataCells { anchor: GridCellCoord },
+    XCells { anchor: (usize, usize) },
+    RowHeaders { anchor_row: usize },
+    ColHeaders { anchor_col: usize, anchor_sub: usize, anchor_subs: usize, whole_col: bool },
+    XHeaders { anchor_sub: usize, whole_x: bool },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct GridDragAnchor {
-    coord: GridCellCoord,
+struct GridDragState {
+    origin: GridDragOrigin,
     press_pos: Pos2,
+    drag_activated: bool,
+    defer_select_until_drag: bool,
+    shift_started: bool,
+    last_emitted_pair: Option<(GridCellCoord, GridCellCoord)>,
+    last_emitted_x: Option<((usize, usize), (usize, usize))>,
+    last_commit_time_s: f64,
+    last_autoscroll_frame: u64,
 }
 
-fn grid_drag_anchor_key(sheet_id: &SheetId) -> Id {
-    Id::unique(("grid_drag_anchor", sheet_id.as_str()))
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct GridDragOutcome {
+    pub(super) preview_data_range: Option<(GridCellCoord, GridCellCoord)>,
+    pub(super) edge_scrolled: bool,
+    pub(super) suppress_click_this_frame: bool,
+    pub(super) press_selected_data: bool,
+    pub(super) press_selected_x: bool,
+    pub(super) click_already_selected_data: Option<GridCellCoord>,
 }
 
-pub(super) fn handle_cell_pointer_drag_select(
+fn grid_drag_state_key(pane_salt: &str, sheet_id: &SheetId) -> Id {
+    Id::unique(("grid_drag_state", pane_salt, sheet_id.as_str()))
+}
+
+fn clamp_row_at_y(geom: &MultiGridGeom, scroll_y: f32, y: f32) -> usize {
+    let min_y = geom.body_inner_clip.min.y;
+    let max_y = (geom.body_inner_clip.max.y - 0.5).max(min_y);
+    let origin_y = geom.body_inner_clip.min.y - scroll_y;
+    let rel_y = (y.clamp(min_y, max_y) - origin_y).max(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let row = (rel_y / geom.row_h).floor().max(0.0) as usize;
+    row.min(geom.row_count.saturating_sub(1))
+}
+
+fn clamp_flat_all_at_x(geom: &MultiGridGeom, scroll_x: f32, x: f32) -> usize {
+    let min_x = geom.body_inner_clip.min.x;
+    let max_x = (geom.body_inner_clip.max.x - 0.5).max(min_x);
+    let origin_x = geom.body_inner_clip.min.x - scroll_x;
+    let rel_x = (x.clamp(min_x, max_x) - origin_x).max(0.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let flat = (rel_x / geom.subcol_w).floor().max(0.0) as usize;
+    flat.min(geom.total_flat_cols.saturating_sub(1))
+}
+
+fn edge_autoscroll_axis_delta(pos: f32, min_edge: f32, max_edge: f32, band: f32, dt: f32) -> f32 {
+    let span = (max_edge - min_edge).max(0.0);
+    if span <= 0.0 {
+        return 0.0;
+    }
+    let inside_band = band.min(span * 0.25);
+    let min_speed = 96.0_f32;
+    let max_speed = 720.0_f32;
+    let ramp_span = 64.0_f32;
+    if pos < min_edge + inside_band {
+        let t = ((min_edge + inside_band - pos) / ramp_span).clamp(0.0, 1.0);
+        -(min_speed + t * (max_speed - min_speed)) * dt
+    } else if pos > max_edge - inside_band {
+        let t = ((pos - (max_edge - inside_band)) / ramp_span).clamp(0.0, 1.0);
+        (min_speed + t * (max_speed - min_speed)) * dt
+    } else {
+        0.0
+    }
+}
+
+fn classify_drag_start(
+    ui: &Ui,
+    mctx: &MultiGridCtx<'_>,
+    state: &ColumnGridEguiState,
+    aux: &MultiGridAuxState,
+    press_pos: Pos2,
+    shift: bool,
+) -> Option<(GridDragOrigin, bool)> {
+    let geom = mctx.geom;
+    let ds = mctx.ds;
+    if geom.row_count == 0 || geom.total_flat_cols == 0 {
+        return None;
+    }
+    if ui.ctx().layer_id_at(press_pos).is_some_and(|l| l.order > ui.layer_id().order) {
+        return None;
+    }
+    let scroll = state.scroll_offset_pt;
+    if geom.body_inner_clip.contains(press_pos) {
+        let origin_x = geom.body_inner_clip.min.x - scroll.x;
+        let origin_y = geom.body_inner_clip.min.y - scroll.y;
+        let rel_x = press_pos.x - origin_x;
+        let rel_y = press_pos.y - origin_y;
+        if rel_x < 0.0 || rel_x >= geom.content_w || rel_y < 0.0 || rel_y >= geom.content_h {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = ((rel_y / geom.row_h).floor() as usize).min(geom.row_count - 1);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let flat_all = ((rel_x / geom.subcol_w).floor() as usize).min(geom.total_flat_cols - 1);
+        if flat_all < geom.x_subcols {
+            let anchor = if shift { aux.selected_x_anchor.or(aux.selected_x_cell).unwrap_or((row, flat_all)) } else { (row, flat_all) };
+            return Some((GridDragOrigin::XCells { anchor }, false));
+        }
+        if let Some((col, subcol)) = geom.flat_data_to_coord(flat_all - geom.x_subcols) {
+            let coord = GridCellCoord::new(row, col, subcol);
+            let anchor = if shift { mctx.app.grid.tool.anchor.unwrap_or(coord) } else { coord };
+            return Some((GridDragOrigin::DataCells { anchor }, false));
+        }
+        return None;
+    }
+
+    let row_num_rect = Rect::from_min_max(geom.row_gutter_rect.min, pos2(geom.row_gutter_rect.min.x + geom.row_num_w, geom.row_gutter_rect.max.y))
+        .intersect(geom.row_gutter_rect);
+    if row_num_rect.contains(press_pos) && geom.col_count > 0 {
+        let rel_y = press_pos.y - (geom.row_gutter_rect.min.y - scroll.y);
+        if rel_y < 0.0 || rel_y >= geom.content_h {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = ((rel_y / geom.row_h).floor() as usize).min(geom.row_count - 1);
+        let anchor_row = if shift { mctx.app.grid.tool.anchor.map_or(row, |a| a.row).min(geom.row_count - 1) } else { row };
+        return Some((GridDragOrigin::RowHeaders { anchor_row }, false));
+    }
+
+    if geom.col_header_rect.contains(press_pos) {
+        let rel_x = press_pos.x - (geom.col_header_rect.min.x - scroll.x);
+        if rel_x < 0.0 || rel_x >= geom.content_w {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let flat_all = ((rel_x / geom.subcol_w).floor() as usize).min(geom.total_flat_cols - 1);
+        let y2 = geom.col_header_rect.min.y + geom.h_tier1;
+        let y3 = y2 + geom.h_tier2;
+        let is_tier1 = press_pos.y < y2;
+        let is_tier2 = !is_tier1 && press_pos.y < y3;
+        if flat_all < geom.x_subcols {
+            let defer = is_tier2 && flat_all == 0 && !ds.frozen;
+            return Some((GridDragOrigin::XHeaders { anchor_sub: if is_tier1 { 0 } else { flat_all }, whole_x: is_tier1 }, defer));
+        }
+        if let Some((col, subcol)) = geom.flat_data_to_coord(flat_all - geom.x_subcols) {
+            let is_mv = matches!(ds.archetype, TableArchetype::MultipleVariables(_));
+            if !is_tier1 && !is_tier2 && is_mv {
+                return None;
+            }
+            let (_, span_subs) = geom.col_span_flat(col);
+            if is_tier1 || is_tier2 {
+                let anchor_col = if shift && is_tier1 { mctx.app.grid.tool.anchor.map_or(col, |a| a.col).min(geom.col_count - 1) } else { col };
+                let (_, anchor_subs) = geom.col_span_flat(anchor_col);
+                return Some((GridDragOrigin::ColHeaders { anchor_col, anchor_sub: 0, anchor_subs, whole_col: true }, is_tier2 && !ds.frozen));
+            }
+            let is_nested = matches!(ds.archetype, TableArchetype::Nested(_));
+            return Some((
+                GridDragOrigin::ColHeaders { anchor_col: col, anchor_sub: subcol, anchor_subs: span_subs, whole_col: false },
+                is_nested && !ds.frozen,
+            ));
+        }
+    }
+    None
+}
+
+fn apply_drag_edge_autoscroll(
+    ui: &Ui,
+    mctx: &MultiGridCtx<'_>,
+    fstate: &mut MultiGridFrameState<'_>,
+    drag: &mut GridDragState,
+    pos: Pos2,
+    frame_nr: u64,
+) -> bool {
+    let geom = mctx.geom;
+    let prev_scroll = fstate.state.scroll_offset_pt;
+    let band_y = 12.0_f32;
+    let band_x = 16.0_f32;
+    let raw_dt = ui.input(|i| i.stable_dt);
+    let dt = if raw_dt > 0.0 { raw_dt.clamp(1.0 / 120.0, 0.05) } else { 1.0 / 60.0 };
+    let mut dx = 0.0_f32;
+    let mut dy = 0.0_f32;
+    match drag.origin {
+        GridDragOrigin::DataCells { .. } => {
+            if geom.need_v {
+                dy = edge_autoscroll_axis_delta(pos.y, geom.body_inner_clip.min.y, geom.body_inner_clip.max.y, band_y, dt);
+            }
+            if geom.need_h {
+                dx = edge_autoscroll_axis_delta(pos.x, geom.body_inner_clip.min.x, geom.body_inner_clip.max.x, band_x, dt);
+            }
+        }
+        GridDragOrigin::XCells { .. } => {
+            if geom.need_v {
+                dy = edge_autoscroll_axis_delta(pos.y, geom.body_inner_clip.min.y, geom.body_inner_clip.max.y, band_y, dt);
+            }
+            if geom.need_h && pos.x < geom.body_inner_clip.min.x + band_x {
+                dx = edge_autoscroll_axis_delta(pos.x, geom.body_inner_clip.min.x, geom.body_inner_clip.max.x, band_x, dt).min(0.0);
+            }
+        }
+        GridDragOrigin::RowHeaders { .. } => {
+            if geom.need_v {
+                dy = edge_autoscroll_axis_delta(pos.y, geom.row_gutter_rect.min.y, geom.row_gutter_rect.max.y, band_y, dt);
+            }
+        }
+        GridDragOrigin::ColHeaders { .. } => {
+            if geom.need_h {
+                dx = edge_autoscroll_axis_delta(pos.x, geom.col_header_rect.min.x, geom.col_header_rect.max.x, band_x, dt);
+            }
+        }
+        GridDragOrigin::XHeaders { .. } => {
+            if geom.need_h && pos.x < geom.col_header_rect.min.x + band_x {
+                dx = edge_autoscroll_axis_delta(pos.x, geom.col_header_rect.min.x, geom.col_header_rect.max.x, band_x, dt).min(0.0);
+            }
+        }
+    }
+    if dx == 0.0 && dy == 0.0 {
+        return false;
+    }
+    fstate.state.scroll_offset_pt.x += dx;
+    fstate.state.scroll_offset_pt.y += dy;
+    clamp_multi_scroll(fstate.state, geom);
+    drag.last_autoscroll_frame = frame_nr;
+    let scrolled = (fstate.state.scroll_offset_pt - prev_scroll).length_sq() > 0.01;
+    if scrolled && !ui.ctx().will_discard() {
+        ui.ctx().request_repaint();
+    }
+    scrolled
+}
+
+struct DragDataCommit {
+    anchor: GridCellCoord,
+    target: GridCellCoord,
+    span_cells: usize,
+    primary_released: bool,
+    time_s: f64,
+}
+
+fn commit_data_drag_selection(
     ui: &Ui,
     sheet_id: &SheetId,
-    coord: GridCellCoord,
-    resp: &egui::Response,
-    intents: &mut PendingUiIntents,
-) -> bool {
-    let key = grid_drag_anchor_key(sheet_id);
-    let (primary_pressed, primary_down, primary_released, shift, cmd_mod, ptr_pos) = ui.input(|i| {
+    fstate: &mut MultiGridFrameState<'_>,
+    outcome: &mut GridDragOutcome,
+    drag: &mut GridDragState,
+    c: DragDataCommit,
+) {
+    fstate.aux.clear_x_selection();
+    fstate.aux.active_role_menu_col = None;
+    fstate.state.context_menu = None;
+    set_grid_focus_active(ui, true);
+    outcome.preview_data_range = Some((c.anchor, c.target));
+    outcome.press_selected_data = true;
+    let pair = (c.anchor, c.target);
+    if drag.last_emitted_pair == Some(pair) {
+        return;
+    }
+    let anchor_changed = drag.last_emitted_pair.is_none_or(|(prev_a, _)| prev_a != c.anchor);
+    let throttled_ok = c.primary_released || c.span_cells <= 1024 || (c.time_s - drag.last_commit_time_s) >= 0.05;
+    if anchor_changed {
+        if drag.shift_started && matches!(drag.origin, GridDragOrigin::DataCells { .. }) {
+            fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(sheet_id.clone()), coord: c.target });
+        } else {
+            fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(sheet_id.clone()), coord: c.anchor });
+            if c.target != c.anchor || !matches!(drag.origin, GridDragOrigin::DataCells { .. }) {
+                fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(sheet_id.clone()), coord: c.target });
+            }
+        }
+        drag.last_emitted_pair = Some(pair);
+        drag.last_commit_time_s = c.time_s;
+    } else if throttled_ok {
+        fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(sheet_id.clone()), coord: c.target });
+        drag.last_emitted_pair = Some(pair);
+        drag.last_commit_time_s = c.time_s;
+    }
+}
+
+struct DragStepInput<'a> {
+    sheet_id: &'a SheetId,
+    cur_pos: Pos2,
+    primary_pressed: bool,
+    primary_released: bool,
+    time_s: f64,
+}
+
+fn step_active_drag_selection(
+    ui: &Ui,
+    app: &UiApp,
+    geom: &MultiGridGeom,
+    fstate: &mut MultiGridFrameState<'_>,
+    outcome: &mut GridDragOutcome,
+    drag: &mut GridDragState,
+    input: DragStepInput<'_>,
+) {
+    let DragStepInput { sheet_id, cur_pos, primary_pressed, primary_released, time_s } = input;
+    let scroll = fstate.state.scroll_offset_pt;
+    let last_row = geom.row_count.saturating_sub(1);
+    match drag.origin {
+        GridDragOrigin::XCells { anchor } => {
+            let row = clamp_row_at_y(geom, scroll.y, cur_pos.y);
+            let sx = clamp_flat_all_at_x(geom, scroll.x, cur_pos.x).min(geom.x_subcols.saturating_sub(1));
+            let pair = (anchor, (row, sx));
+            fstate.aux.selected_x_anchor = Some(anchor);
+            fstate.aux.selected_x_cell = Some((row, sx));
+            fstate.aux.active_role_menu_col = None;
+            fstate.state.context_menu = None;
+            set_grid_focus_active(ui, true);
+            outcome.press_selected_x = true;
+            if drag.last_emitted_x != Some(pair) {
+                drag.last_emitted_x = Some(pair);
+                push_select_x_if_needed(app, row, sx, fstate.intents);
+                if !ui.ctx().will_discard() {
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        GridDragOrigin::XHeaders { anchor_sub, whole_x } => {
+            let sx = clamp_flat_all_at_x(geom, scroll.x, cur_pos.x).min(geom.x_subcols.saturating_sub(1));
+            let pair = if whole_x { ((0, 0), (last_row, geom.x_subcols.saturating_sub(1))) } else { ((0, anchor_sub), (last_row, sx)) };
+            fstate.aux.selected_x_anchor = Some(pair.0);
+            fstate.aux.selected_x_cell = Some(pair.1);
+            fstate.aux.active_role_menu_col = None;
+            fstate.state.context_menu = None;
+            set_grid_focus_active(ui, true);
+            outcome.press_selected_x = true;
+            if drag.last_emitted_x != Some(pair) {
+                drag.last_emitted_x = Some(pair);
+                push_select_x_if_needed(app, pair.1.0, pair.1.1, fstate.intents);
+                if !ui.ctx().will_discard() {
+                    ui.ctx().request_repaint();
+                }
+            }
+        }
+        GridDragOrigin::DataCells { anchor } if geom.total_data_flat_cols > 0 => {
+            let row = clamp_row_at_y(geom, scroll.y, cur_pos.y);
+            let flat_data = clamp_flat_all_at_x(geom, scroll.x, cur_pos.x).saturating_sub(geom.x_subcols).min(geom.total_data_flat_cols - 1);
+            if let Some((col, subcol)) = geom.flat_data_to_coord(flat_data) {
+                let target = GridCellCoord::new(row, col, subcol);
+                if primary_pressed && !drag.shift_started && target == anchor {
+                    outcome.click_already_selected_data = Some(anchor);
+                }
+                let fa = geom.coord_to_flat_all(false, anchor.col, anchor.subcol).saturating_sub(geom.x_subcols);
+                let span_cells = (anchor.row.abs_diff(row) + 1).saturating_mul(fa.abs_diff(flat_data) + 1);
+                commit_data_drag_selection(
+                    ui,
+                    sheet_id,
+                    fstate,
+                    outcome,
+                    drag,
+                    DragDataCommit { anchor, target, span_cells, primary_released, time_s },
+                );
+            }
+        }
+        GridDragOrigin::RowHeaders { anchor_row } if geom.col_count > 0 => {
+            let row = clamp_row_at_y(geom, scroll.y, cur_pos.y);
+            let last_col = geom.col_count - 1;
+            let last_sub = geom.col_span_flat(last_col).1.saturating_sub(1);
+            let anchor = GridCellCoord::new(anchor_row, 0, 0);
+            let target = GridCellCoord::new(row, last_col, last_sub);
+            let span_cells = (anchor_row.abs_diff(row) + 1).saturating_mul(geom.total_data_flat_cols.max(1));
+            commit_data_drag_selection(ui, sheet_id, fstate, outcome, drag, DragDataCommit { anchor, target, span_cells, primary_released, time_s });
+        }
+        GridDragOrigin::ColHeaders { anchor_col, anchor_sub, anchor_subs, whole_col } if geom.total_data_flat_cols > 0 => {
+            let flat_data = clamp_flat_all_at_x(geom, scroll.x, cur_pos.x).saturating_sub(geom.x_subcols).min(geom.total_data_flat_cols - 1);
+            if let Some((t_col, t_sub)) = geom.flat_data_to_coord(flat_data) {
+                let (anchor, target) = if whole_col {
+                    let (_, t_subs) = geom.col_span_flat(t_col);
+                    if t_col >= anchor_col {
+                        (GridCellCoord::new(0, anchor_col, 0), GridCellCoord::new(last_row, t_col, t_subs.saturating_sub(1)))
+                    } else {
+                        (GridCellCoord::new(0, anchor_col, anchor_subs.saturating_sub(1)), GridCellCoord::new(last_row, t_col, 0))
+                    }
+                } else {
+                    (GridCellCoord::new(0, anchor_col, anchor_sub), GridCellCoord::new(last_row, t_col, t_sub))
+                };
+                let fa = geom.coord_to_flat_all(false, anchor.col, anchor.subcol).saturating_sub(geom.x_subcols);
+                let fb = geom.coord_to_flat_all(false, target.col, target.subcol).saturating_sub(geom.x_subcols);
+                let span_cells = geom.row_count.saturating_mul(fa.abs_diff(fb) + 1);
+                commit_data_drag_selection(
+                    ui,
+                    sheet_id,
+                    fstate,
+                    outcome,
+                    drag,
+                    DragDataCommit { anchor, target, span_cells, primary_released, time_s },
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn prepare_grid_drag_and_autoscroll(
+    ui: &Ui,
+    mctx: &MultiGridCtx<'_>,
+    fstate: &mut MultiGridFrameState<'_>,
+    factor_title_editing: bool,
+) -> GridDragOutcome {
+    let geom = mctx.geom;
+    let ds = mctx.ds;
+    let key = grid_drag_state_key(mctx.pane_salt, &ds.id);
+    let mut outcome = GridDragOutcome::default();
+
+    let frame_nr = ui.ctx().cumulative_frame_nr();
+    let (primary_pressed, primary_down, primary_released, shift, cmd_mod, ptr_pos, press_event_pos, time_s) = ui.input(|i| {
+        let ev_press_pos = i.events.iter().find_map(|ev| match ev {
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } => Some(*pos),
+            _ => None,
+        });
         (
             i.pointer.primary_pressed(),
             i.pointer.primary_down(),
@@ -906,38 +1469,252 @@ pub(super) fn handle_cell_pointer_drag_select(
             i.modifiers.shift,
             i.modifiers.command || i.modifiers.mac_cmd || i.modifiers.ctrl,
             i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
+            ev_press_pos,
+            i.time,
         )
     });
-    if primary_pressed && !shift && !cmd_mod && resp.is_pointer_button_down_on() {
-        if let Some(press_pos) = ptr_pos
-            && !ui.ctx().will_discard()
-        {
-            ui.ctx().data_mut(|d| d.insert_temp(key, Some(GridDragAnchor { coord, press_pos })));
-        }
-        intents.push(UiIntent::SelectGridCell { sheet_id: Some(sheet_id.clone()), coord });
-        set_grid_focus_active(ui, true);
-        return true;
+
+    if mctx.blocked || geom.row_count == 0 || geom.total_flat_cols == 0 {
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridDragState>>(key));
+        return outcome;
     }
-    let Some(pos) = ptr_pos.filter(|p| resp.rect.contains(*p)) else {
-        return false;
+
+    let can_start_drag = fstate.state.inline_edit.is_none()
+        && fstate.aux.aux_edit.is_none()
+        && !factor_title_editing
+        && fstate.state.context_menu.is_none()
+        && fstate.aux.active_role_menu_col.is_none()
+        && !egui::Popup::is_any_open(ui.ctx());
+
+    let mut drag_opt = ui.ctx().data(|d| d.get_temp::<Option<GridDragState>>(key).flatten());
+
+    if primary_pressed
+        && !cmd_mod
+        && can_start_drag
+        && let Some(start_pos) = press_event_pos.or(ptr_pos)
+        && let Some((origin, defer_select_until_drag)) = classify_drag_start(ui, mctx, fstate.state, fstate.aux, start_pos, shift)
+    {
+        drag_opt = Some(GridDragState {
+            origin,
+            press_pos: start_pos,
+            drag_activated: false,
+            defer_select_until_drag,
+            shift_started: shift,
+            last_emitted_pair: None,
+            last_emitted_x: None,
+            last_commit_time_s: -1.0,
+            last_autoscroll_frame: 0,
+        });
+    }
+
+    let Some(mut drag) = drag_opt else {
+        return outcome;
     };
-    if primary_down || primary_released {
-        let anchor = ui.ctx().data(|d| d.get_temp::<Option<GridDragAnchor>>(key).flatten());
-        if let Some(a) = anchor
-            && a.coord != coord
-            && pos.distance(a.press_pos) >= 4.0
-        {
-            intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(sheet_id.clone()), coord });
-            set_grid_focus_active(ui, true);
-            return true;
-        }
+    if !primary_down && !primary_released {
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridDragState>>(key));
+        return outcome;
     }
-    false
+    if !drag.drag_activated && ptr_pos.is_some_and(|pos| pos.distance(drag.press_pos) >= 4.0) {
+        drag.drag_activated = true;
+    }
+    if primary_down
+        && !primary_released
+        && drag.drag_activated
+        && drag.last_autoscroll_frame != frame_nr
+        && let Some(pos) = ptr_pos
+    {
+        outcome.edge_scrolled = apply_drag_edge_autoscroll(ui, mctx, fstate, &mut drag, pos, frame_nr);
+    }
+    if !drag.defer_select_until_drag || drag.drag_activated {
+        let cur_pos = ptr_pos.unwrap_or(drag.press_pos);
+        step_active_drag_selection(
+            ui,
+            mctx.app,
+            geom,
+            fstate,
+            &mut outcome,
+            &mut drag,
+            DragStepInput { sheet_id: &ds.id, cur_pos, primary_pressed, primary_released, time_s },
+        );
+    }
+    if primary_released {
+        if drag.drag_activated {
+            outcome.suppress_click_this_frame = true;
+        }
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridDragState>>(key));
+    } else {
+        ui.ctx().data_mut(|d| d.insert_temp(key, Some(drag)));
+    }
+    outcome
 }
 
-pub(super) fn clear_grid_drag_anchor_if_released(ui: &Ui, sheet_id: &SheetId) {
-    if !ui.input(|i| i.pointer.primary_down()) {
-        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridDragAnchor>>(grid_drag_anchor_key(sheet_id)));
+pub(super) fn push_select_x_if_needed(app: &UiApp, row: usize, subcol: usize, intents: &mut PendingUiIntents) {
+    if app.grid.active_x_cell != Some((row, subcol)) || app.grid.tool.active.is_some() || !app.grid.selected_coords.is_empty() {
+        intents.push(UiIntent::SelectXCell { row, subcol });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_discontig_selection_perimeter(
+    body_ui: &Ui,
+    geom: &MultiGridGeom,
+    tokens: &Tokens,
+    origin: Pos2,
+    vis_rows: &Range<usize>,
+    vis_all_flat: &Range<usize>,
+    sel: &SelectionFastLookup<'_>,
+    pane_focused: bool,
+    high_contrast: bool,
+) {
+    let (stroke, dashed) = if pane_focused {
+        (Stroke::new(1.5, tokens.accent), false)
+    } else if high_contrast {
+        (Stroke::new(1.0, tokens.border), true)
+    } else {
+        (Stroke::new(1.0, tokens.divider), false)
+    };
+    let draw_edge = |p0: Pos2, p1: Pos2| {
+        if dashed {
+            paint_dashed_segment(body_ui.painter(), p0, p1, stroke);
+        } else {
+            body_ui.painter().line_segment([p0, p1], stroke);
+        }
+    };
+    let inset = 0.75_f32;
+    for row in vis_rows.clone() {
+        #[allow(clippy::cast_precision_loss)]
+        let y0 = origin.y + (row as f32) * geom.row_h;
+        let y1 = y0 + geom.row_h;
+        for flat in vis_all_flat.clone() {
+            let Some(flat_data) = flat.checked_sub(geom.x_subcols) else { continue };
+            if !sel.contains_flat_cell(geom, row, flat_data) {
+                continue;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let x0 = origin.x + (flat as f32) * geom.subcol_w;
+            let x1 = x0 + geom.subcol_w;
+            if row == 0 || !sel.contains_flat_cell(geom, row - 1, flat_data) {
+                draw_edge(pos2(x0, y0 + inset), pos2(x1, y0 + inset));
+            }
+            if row + 1 >= geom.row_count || !sel.contains_flat_cell(geom, row + 1, flat_data) {
+                draw_edge(pos2(x0, y1 - inset), pos2(x1, y1 - inset));
+            }
+            if flat_data == 0 || !sel.contains_flat_cell(geom, row, flat_data - 1) {
+                draw_edge(pos2(x0 + inset, y0), pos2(x0 + inset, y1));
+            }
+            if flat_data + 1 >= geom.total_data_flat_cols || !sel.contains_flat_cell(geom, row, flat_data + 1) {
+                draw_edge(pos2(x1 - inset, y0), pos2(x1 - inset, y1));
+            }
+        }
+    }
+}
+
+pub(super) fn paint_selection_perimeter_overlay(
+    body_ui: &Ui,
+    mctx: &MultiGridCtx<'_>,
+    origin: Pos2,
+    vis_rows: &Range<usize>,
+    vis_all_flat: &Range<usize>,
+    sel: &SelectionFastLookup<'_>,
+    aux: &MultiGridAuxState,
+) {
+    let geom = mctx.geom;
+    let tokens = mctx.tokens;
+    let focused = mctx.pane_focused;
+    let high_contrast = tokens.mode == crate::theme::UiThemeMode::HighContrast;
+    let vis_clamp = geom.body_inner_clip.expand(8.0);
+    let safe_clipped_rect = |x0: f32, y0: f32, x1: f32, y1: f32| -> Option<Rect> {
+        let r = Rect::from_min_max(pos2(x0.max(vis_clamp.min.x), y0.max(vis_clamp.min.y)), pos2(x1.min(vis_clamp.max.x), y1.min(vis_clamp.max.y)));
+        (r.width() > 0.0 && r.height() > 0.0).then_some(r)
+    };
+    let paint_range_perim = |rect: Rect| {
+        if focused {
+            body_ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.5, tokens.accent), StrokeKind::Inside);
+        } else if high_contrast {
+            super::super::ui_kit::paint_dashed_rect_stroke(body_ui.painter(), rect, Stroke::new(1.0, tokens.border));
+        } else {
+            body_ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+        }
+    };
+    let paint_active_cell = |rect: Rect| {
+        if focused {
+            body_ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(2.0, tokens.focus_ring), StrokeKind::Inside);
+        } else if high_contrast {
+            super::super::ui_kit::paint_dashed_rect_stroke(body_ui.painter(), rect, Stroke::new(1.0, tokens.border));
+        } else {
+            body_ui.painter().rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+        }
+    };
+
+    if let Some((xr0, xr1, xs0, xs1)) = aux.selected_x_bounds() {
+        let is_multi_x = xr1 > xr0 || xs1 > xs0;
+        #[allow(clippy::cast_precision_loss)]
+        let x0 = origin.x + (xs0 as f32) * geom.subcol_w;
+        #[allow(clippy::cast_precision_loss)]
+        let x1 = origin.x + ((xs1 + 1) as f32) * geom.subcol_w;
+        #[allow(clippy::cast_precision_loss)]
+        let y0 = origin.y + (xr0 as f32) * geom.row_h;
+        #[allow(clippy::cast_precision_loss)]
+        let y1 = origin.y + ((xr1 + 1) as f32) * geom.row_h;
+        if is_multi_x && let Some(perim_r) = safe_clipped_rect(x0, y0, x1, y1) {
+            paint_range_perim(perim_r);
+        }
+        if let Some((ax_r, ax_s)) = aux.selected_x_cell
+            && vis_rows.contains(&ax_r)
+            && vis_all_flat.contains(&ax_s)
+        {
+            #[allow(clippy::cast_precision_loss)]
+            let ax_x0 = origin.x + (ax_s as f32) * geom.subcol_w;
+            #[allow(clippy::cast_precision_loss)]
+            let ax_y0 = origin.y + (ax_r as f32) * geom.row_h;
+            let raw_r = Rect::from_min_max(pos2(ax_x0, ax_y0), pos2(ax_x0 + geom.subcol_w, ax_y0 + geom.row_h));
+            let clipped = raw_r.intersect(geom.body_inner_clip);
+            if clipped.width() >= 1.0
+                && clipped.height() >= 1.0
+                && let Some(ax_rect) = safe_clipped_rect(raw_r.min.x, raw_r.min.y, raw_r.max.x, raw_r.max.y)
+            {
+                paint_active_cell(ax_rect);
+            }
+        }
+        return;
+    }
+
+    if let Some((r0, r1, f0, f1)) = sel.contiguous_rect() {
+        let all_f0 = geom.x_subcols + f0;
+        let all_f1 = geom.x_subcols + f1;
+        #[allow(clippy::cast_precision_loss)]
+        let x0 = origin.x + (all_f0 as f32) * geom.subcol_w;
+        #[allow(clippy::cast_precision_loss)]
+        let x1 = origin.x + ((all_f1 + 1) as f32) * geom.subcol_w;
+        #[allow(clippy::cast_precision_loss)]
+        let y0 = origin.y + (r0 as f32) * geom.row_h;
+        #[allow(clippy::cast_precision_loss)]
+        let y1 = origin.y + ((r1 + 1) as f32) * geom.row_h;
+        if (r1 > r0 || f1 > f0)
+            && let Some(perim_r) = safe_clipped_rect(x0, y0, x1, y1)
+        {
+            paint_range_perim(perim_r);
+        }
+    } else if sel.has_discontiguous() {
+        paint_discontig_selection_perimeter(body_ui, geom, tokens, origin, vis_rows, vis_all_flat, sel, focused, high_contrast);
+    }
+
+    if let Some(active) = sel.active {
+        let flat_all = geom.coord_to_flat_all(false, active.col, active.subcol);
+        if vis_rows.contains(&active.row) && vis_all_flat.contains(&flat_all) {
+            #[allow(clippy::cast_precision_loss)]
+            let ax0 = origin.x + (flat_all as f32) * geom.subcol_w;
+            #[allow(clippy::cast_precision_loss)]
+            let ay0 = origin.y + (active.row as f32) * geom.row_h;
+            let raw_r = Rect::from_min_max(pos2(ax0, ay0), pos2(ax0 + geom.subcol_w, ay0 + geom.row_h));
+            let clipped = raw_r.intersect(geom.body_inner_clip);
+            if clipped.width() >= 1.0
+                && clipped.height() >= 1.0
+                && let Some(active_r) = safe_clipped_rect(raw_r.min.x, raw_r.min.y, raw_r.max.x, raw_r.max.y)
+            {
+                paint_active_cell(active_r);
+            }
+        }
     }
 }
 

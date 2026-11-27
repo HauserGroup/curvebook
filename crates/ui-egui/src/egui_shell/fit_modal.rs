@@ -27,6 +27,7 @@ use super::stat_anova_modal::{
     render_modal_textbox_row, render_section_title, render_stepper_row,
 };
 use super::stats_modals::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, render_tex_equation_preview, show_wave4_modal};
+use super::ui_kit::{LinkButtonSpec, TooltipMode, TooltipSpec, link_button};
 use super::{FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
 /// Core tabs of the `Nonlinear Curve Fitting` parameter modal (`gui-layout-spec.md` §8.9).
@@ -117,6 +118,22 @@ pub struct FitModalEguiState {
     pub saved_default_spec: Option<AnalysisSpec>,
 }
 
+/// Reset transient per-session drafts on `FitModalEguiState` while preserving `saved_default_spec`.
+pub(crate) fn reset_session_drafts(state: &mut FitModalEguiState) {
+    state.open_session_sheet_id = None;
+    state.model_search.clear();
+    state.hook_search_draft.clear();
+    state.custom_dsl_enabled = false;
+    state.custom_equation_draft.clear();
+    state.r2_threshold_draft.clear();
+    state.x_min_draft.clear();
+    state.x_max_draft.clear();
+    state.initial_override_drafts.clear();
+    state.lower_bound_drafts.clear();
+    state.upper_bound_drafts.clear();
+    state.constant_drafts.clear();
+}
+
 /// Frame geometry and modal capture report emitted by `fit_modal`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FitModalFrameReport {
@@ -153,30 +170,21 @@ pub fn render_fit_modal(
     intents: &mut PendingUiIntents,
 ) -> FitModalFrameReport {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
-        state.open_session_sheet_id = None;
-        state.constant_drafts.clear();
-        state.model_search.clear();
-        state.hook_search_draft.clear();
+        reset_session_drafts(state);
         return FitModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
-        state.open_session_sheet_id = None;
-        state.constant_drafts.clear();
-        state.model_search.clear();
-        state.hook_search_draft.clear();
+        reset_session_drafts(state);
         return FitModalFrameReport::default();
     };
     let AnalysisKind::NonlinearRegression(nl) = &spec.kind else {
-        state.open_session_sheet_id = None;
-        state.constant_drafts.clear();
-        state.model_search.clear();
-        state.hook_search_draft.clear();
+        reset_session_drafts(state);
         return FitModalFrameReport::default();
     };
 
     sync_fit_modal_state(result_sheet_id, doc, &app.canvas_dialogs.edit_params, spec, nl, state, intents);
-    let is_mv = doc.data_sheet(&spec.source_sheet_id).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
+    let is_mv = resolve_fit_source_sheet(doc, spec).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     let mut tabs = Vec::with_capacity(8);
     if is_mv {
         tabs.push(FitModalTab::Data);
@@ -245,7 +253,7 @@ pub fn render_fit_modal(
                 ui.add_space(4.0);
                 egui::Frame::NONE
                     .fill(tokens.panel_bg)
-                    .stroke(Stroke::new(1.0, tokens.accent))
+                    .stroke(Stroke::new(1.0, tokens.warning))
                     .corner_radius(egui::CornerRadius::same(4))
                     .inner_margin(Vec2::new(8.0, 5.0))
                     .show(ui, |ui| {
@@ -263,7 +271,7 @@ pub fn render_fit_modal(
                                 role: "status",
                                 text: &msg,
                                 font_size: tokens.metrics.font_ui_small_pt,
-                                color: tokens.accent,
+                                color: tokens.warning,
                                 z_layer: ZLayer::ModalDialog,
                                 tooltip: Some(&msg),
                                 record_meta: true,
@@ -749,7 +757,7 @@ fn render_fit_mv_mapping_grid(
     intents: &mut PendingUiIntents,
 ) -> bool {
     let FitMvGridCtx { doc, spec, nl, id_salt } = *grid_ctx;
-    let Some(ds) = doc.data_sheet(&spec.source_sheet_id) else {
+    let Some(ds) = resolve_fit_source_sheet(doc, spec) else {
         return false;
     };
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
@@ -1010,7 +1018,7 @@ fn render_fit_model_tab(
                 ui.label(
                     egui::RichText::new(format!("Compiled OK ({kind_str}): params [{}]", compiled.param_names().join(", ")))
                         .small()
-                        .color(tokens.accent),
+                        .color(tokens.link_green),
                 );
             }
             Err(err) => {
@@ -1026,7 +1034,7 @@ fn render_fit_model_tab(
                 Vec2::new((ui.available_width() - 64.0).max(120.0), 22.0),
                 TextEdit::singleline(&mut state.model_search)
                     .id(Id::unique("fit.eq.search"))
-                    .hint_text("Search 117+ equations (EC50, Michaelis, exponential, NIST)…"),
+                    .hint_text("Search 117+ equations (EC50, Michaelis, exponential, NIST)"),
             );
             record_widget(
                 ui,
@@ -1434,7 +1442,26 @@ fn render_fit_constrain_tab(
                     }
                 });
             } else if let ParameterScope::HookedConstant(ref src) = rule.scope {
-                ui.label(egui::RichText::new(format!("Linked hook: {}", format_hook_source_short(src))).small().color(tokens.accent));
+                let link_lbl = format!("Linked hook: {}", format_hook_source_short(src));
+                let tip_summary = format!("Open constant hook browser for `{p}`");
+                let link_wid = format!("fit.con.linked_hook.{p}");
+                let link_resp = link_button(
+                    ui,
+                    tokens,
+                    meta,
+                    LinkButtonSpec {
+                        font_size: tokens.metrics.font_ui_small_pt,
+                        value: Some(serde_json::json!({ "parameter": p.as_str() })),
+                        tooltip: Some(TooltipSpec::new("Change Linked Constant").with_summary(&tip_summary)),
+                        tooltip_mode: TooltipMode::ModalAlwaysOpen,
+                        pad_x: 2.0,
+                        ..LinkButtonSpec::new(&link_wid, &link_lbl, ZLayer::ModalDialog)
+                    },
+                );
+                if link_resp.clicked() {
+                    hook_target = Some(p.clone());
+                    ctx.data_mut(|d| d.insert_temp(hook_target_key, hook_target.clone()));
+                }
             }
 
             render_param_bound_inputs(ui, tab_ctx, p, &rule, state, meta, intents);
@@ -2311,7 +2338,7 @@ pub fn render_hook_constant_modal(
                     Vec2::new((ui.available_width() - 64.0).max(120.0), 22.0),
                     TextEdit::singleline(&mut state.hook_search_draft)
                         .id(hook_search_id)
-                        .hint_text("Search Info Constants, Fit Parameters, Result Summaries…"),
+                        .hint_text("Search Info Constants, Fit Parameters, Result Summaries"),
                 );
                 record_widget(
                     ui,
@@ -2451,7 +2478,7 @@ pub fn render_hook_constant_modal(
                                 role: "status",
                                 text: &format!("Selected: {}  →  {}", sel.label, sel.preview_value),
                                 font_size: 11.5,
-                                color: tokens.accent,
+                                color: tokens.text_muted,
                                 z_layer: ZLayer::ModalDialog,
                                 tooltip: None,
                                 record_meta: true,

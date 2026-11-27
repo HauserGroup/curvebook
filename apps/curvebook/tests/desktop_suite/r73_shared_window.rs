@@ -228,7 +228,7 @@ fn shared_live_window_shares_human_and_agent_state() -> Result<(), Box<dyn std::
         assert_eq!(state["result"]["rulers_visible"], json!(true));
 
         let opened =
-            send_json_line(&mut w, &mut r, &json!({"id": "g3", "method": "ui.invoke_menu", "params": {"path": "Analyze/Power and Sample Size..."}}))
+            send_json_line(&mut w, &mut r, &json!({"id": "g3", "method": "ui.invoke_menu", "params": {"path": "Analyze/Power and Sample Size"}}))
                 .map_err(|e| e.to_string())?;
         assert_eq!(opened["ok"], json!(true), "ui.invoke_menu failed: {opened}");
         for step in 0..3 {

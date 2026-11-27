@@ -7,17 +7,17 @@
 use std::fmt::Write as _;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound,
-    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSheet,
-    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode, KappaWeighting,
-    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
-    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, Cell, ChecklistItem, ChecklistStatus, CiBound,
+    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSetColumn,
+    DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode,
+    KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
+    ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
     PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
     PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell,
     ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
-    SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
+    SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -55,12 +55,62 @@ impl ReportFormat {
     }
 }
 
-/// Generate a deterministic, clean-room ICMJE/ARRIVE statistical methods and summary report for
-/// `result_sheet_id` inside `doc` in the requested [`ReportFormat`].
+/// CurveBook software version interpolated into methods prose for reproducibility (`R20.7`).
+const CURVEBOOK_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Scope of the generated methods report (`R20.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ReportScope {
+    /// Concise, publication-ready manuscript Methods prose interpolating the exact test/model,
+    /// equation, weighting, multiplicity correction, sample sizes/exclusions, and CurveBook version.
+    Methods,
+    /// Complete four-section ARRIVE/ICMJE audit report (provenance, methods, stored results
+    /// summary tables, and assumption/quality diagnostics).
+    #[default]
+    FullReport,
+}
+
+impl ReportScope {
+    /// Parse a scope string case-insensitively (`"methods"`, `"manuscript"`, `"full"`, `"full_report"`).
+    #[must_use]
+    pub fn from_name(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "methods" | "manuscript" | "paragraph" | "methods_only" | "methods-only" => Some(Self::Methods),
+            "full" | "full_report" | "full-report" | "audit" | "complete" => Some(Self::FullReport),
+            _ => None,
+        }
+    }
+
+    /// Canonical lowercase scope identifier (`"methods"` or `"full"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Methods => "methods",
+            Self::FullReport => "full",
+        }
+    }
+}
+
+/// Generate a deterministic, clean-room ICMJE/ARRIVE statistical methods and summary report
+/// (full four-section audit scope) for `result_sheet_id` inside `doc` in the requested [`ReportFormat`].
 ///
 /// # Errors
 /// Returns [`EngineError`] if `result_sheet_id` is empty or does not match a [`ResultSheet`] in `doc`.
 pub fn generate_methods_report(doc: &ProjectDocument, result_sheet_id: &SheetId, format: ReportFormat) -> Result<String, EngineError> {
+    generate_methods_report_with_scope(doc, result_sheet_id, format, ReportScope::FullReport)
+}
+
+/// Generate a deterministic, clean-room statistical methods report for `result_sheet_id` inside
+/// `doc` in the requested [`ReportFormat`] and [`ReportScope`] (`R20.7`).
+///
+/// # Errors
+/// Returns [`EngineError`] if `result_sheet_id` is empty or does not match a [`ResultSheet`] in `doc`.
+pub fn generate_methods_report_with_scope(
+    doc: &ProjectDocument,
+    result_sheet_id: &SheetId,
+    format: ReportFormat,
+    scope: ReportScope,
+) -> Result<String, EngineError> {
     if result_sheet_id.as_str().trim().is_empty() {
         return Err(EngineError::new("result sheet identifier must not be empty"));
     }
@@ -68,7 +118,10 @@ pub fn generate_methods_report(doc: &ProjectDocument, result_sheet_id: &SheetId,
         .result_sheet(result_sheet_id)
         .ok_or_else(|| EngineError::with_code(curvebook_doc::ErrorCode::NotFound, format!("result sheet `{result_sheet_id}` not found")))?;
     let source_ds = resolve_source_data_sheet(doc, &res.analysis.source_sheet_id);
-    let blocks = build_report_blocks(doc, res, source_ds);
+    let blocks = match scope {
+        ReportScope::Methods => build_manuscript_methods_blocks(doc, res, source_ds),
+        ReportScope::FullReport => build_report_blocks(doc, res, source_ds),
+    };
     Ok(render_blocks(&blocks, format))
 }
 
@@ -145,6 +198,301 @@ where
 // ---------------------------------------------------------------------------
 // Report Assembly
 // ---------------------------------------------------------------------------
+
+fn build_manuscript_methods_blocks(doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+    let mut blocks = Vec::new();
+    let spec = &res.analysis;
+    let (eff_conf_pct, eff_alpha) = effective_report_alpha(doc, res);
+    let conf_pct = format_exact_float(eff_conf_pct);
+    let alpha = format_exact_float(eff_alpha);
+
+    let lead_runs = match &spec.kind {
+        AnalysisKind::PowerAnalysis(_) => {
+            vec![plain(format!("Power and sample-size calculations were performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+        }
+        AnalysisKind::Transform(_) => {
+            vec![plain(format!("Data processing was performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+        }
+        AnalysisKind::NonlinearRegression(nl) if nl.method == FitMethod::RobustCauchy => {
+            vec![plain(format!("Statistical analyses were performed in CurveBook (version {CURVEBOOK_VERSION})."))]
+        }
+        _ => vec![
+            plain(format!("Statistical analyses were performed in CurveBook (version {CURVEBOOK_VERSION}) with ")),
+            math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")),
+            plain(" confidence intervals and a nominal significance threshold of "),
+            math(format!("alpha = {alpha}"), format!("alpha = {alpha}"), format!("\\alpha = {alpha}")),
+            plain("."),
+        ],
+    };
+    blocks.push(ReportBlock::Paragraph(lead_runs));
+
+    let mut method_blocks = match &spec.kind {
+        AnalysisKind::NonlinearRegression(nl) => describe_nonlinear_regression_manuscript(doc, nl, res),
+        _ => describe_analysis_kind(doc, spec, res, source_ds),
+    };
+    blocks.append(&mut method_blocks);
+
+    if let Some(sample_block) = build_manuscript_sample_size_paragraph(res, source_ds) {
+        blocks.push(sample_block);
+    }
+
+    blocks
+}
+
+fn build_manuscript_sample_size_paragraph(res: &ResultSheet, source_ds: Option<&DataSheet>) -> Option<ReportBlock> {
+    let mut sentences = Vec::new();
+    let accounting = res.paired_observation_accounting();
+    if let Some(acc) = &accounting {
+        sentences.push(paired_observations_sentence(acc));
+    } else if let Some(ds) = source_ds
+        && let Some(summary) = describe_manuscript_sample_sizes(ds, &res.analysis.selected_data_sets)
+    {
+        sentences.push(summary);
+    }
+
+    if let Some(ds) = source_ds {
+        let excluded_count = count_excluded_cells(ds);
+        let documented_count = count_active_exclusion_notes(ds);
+        if excluded_count == 0 {
+            if accounting.is_none() {
+                sentences.push(String::from("No observations were manually excluded prior to analysis."));
+            }
+        } else if documented_count > 0 {
+            sentences.push(format!(
+                "{excluded_count} observation(s) were manually excluded prior to analysis ({documented_count} with documented justification)."
+            ));
+        } else {
+            sentences.push(format!("{excluded_count} observation(s) were manually excluded prior to analysis."));
+        }
+    }
+
+    if sentences.is_empty() { None } else { Some(ReportBlock::Paragraph(vec![plain(sentences.join(" "))])) }
+}
+
+fn paired_observations_sentence(acc: &PairedObservationAccounting) -> String {
+    let pairs = acc.pairs_analyzed;
+    let omitted = acc.rows_omitted();
+    if omitted == 0 {
+        format!("Complete-case pairing analyzed {pairs} complete pair(s) with no omitted rows.")
+    } else {
+        let reasons: Vec<String> = [
+            (acc.omitted_missing_partner, "missing a partner value"),
+            (acc.omitted_excluded, "containing an excluded cell"),
+            (acc.omitted_non_numeric, "containing a non-numeric cell"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, why)| format!("{n} {why}"))
+        .collect();
+        format!("Complete-case pairing analyzed {pairs} complete pair(s); {omitted} row(s) were omitted ({}).", reasons.join(", "))
+    }
+}
+
+fn count_column_observations(col: &DataSetColumn, mode: SubcolumnMode) -> usize {
+    match mode {
+        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+            let mut total = 0_usize;
+            for row in &col.cells {
+                let mean_ok = row.first().and_then(Cell::active_number).is_some();
+                if !mean_ok {
+                    continue;
+                }
+                let n_val = row.get(2).and_then(Cell::active_number).filter(|v| *v >= 1.0 && *v <= 1e9);
+                if let Some(n) = n_val {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let count = n.round() as usize;
+                    total = total.saturating_add(count);
+                } else {
+                    total = total.saturating_add(1);
+                }
+            }
+            total
+        }
+        SubcolumnMode::Single
+        | SubcolumnMode::RawReplicates(_)
+        | SubcolumnMode::MeanLowHigh
+        | SubcolumnMode::UpperLowerLimits
+        | SubcolumnMode::MedianIqr => {
+            let count_sub0_only = matches!(mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr);
+            if count_sub0_only {
+                col.cells.iter().filter(|row| row.first().and_then(Cell::active_number).is_some()).count()
+            } else {
+                col.cells.iter().flat_map(|row| row.iter()).filter(|cell| cell.active_number().is_some()).count()
+            }
+        }
+    }
+}
+
+fn join_items_prose(parts: &[String]) -> String {
+    match parts {
+        [a, b] => format!("{a} and {b}"),
+        _ => parts.join(", "),
+    }
+}
+
+fn format_named_sample_counts(noun: &str, unit: &str, items: &[(String, usize)]) -> Option<String> {
+    if items.is_empty() {
+        return None;
+    }
+    let total: usize = items.iter().map(|(_, n)| *n).sum();
+    if total == 0 {
+        return None;
+    }
+    if items.len() <= 6 {
+        let parts: Vec<String> = items.iter().map(|(label, n)| format!("{label} (n = {n})")).collect();
+        let joined = join_items_prose(&parts);
+        Some(format!("{noun} comprised {joined}."))
+    } else {
+        let min_n = items.iter().map(|(_, n)| *n).min().unwrap_or(0);
+        let max_n = items.iter().map(|(_, n)| *n).max().unwrap_or(0);
+        Some(format!("The analysis spanned {} {unit} (N = {total} observations; range n = {min_n} to {max_n}).", items.len()))
+    }
+}
+
+fn selected_indices(total: usize, selected: &[usize]) -> Vec<usize> {
+    if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
+}
+
+fn describe_xy_sample_sizes(ds: &DataSheet, t: &curvebook_doc::XyTable, selected: &[usize]) -> Option<String> {
+    let items: Vec<(String, usize)> = selected_indices(t.data_sets.len(), selected)
+        .into_iter()
+        .filter_map(|idx| {
+            let col = t.data_sets.get(idx)?;
+            let mut n = 0_usize;
+            for (r, row) in col.cells.iter().enumerate() {
+                if t.x_value_at(r).is_none() {
+                    continue;
+                }
+                match t.y_subcolumn_mode {
+                    SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+                        if row.first().and_then(Cell::active_number).is_some() {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let row_n = row.get(2).and_then(Cell::active_number).filter(|v| *v >= 1.0 && *v <= 1e9).map_or(1, |v| v.round() as usize);
+                            n = n.saturating_add(row_n);
+                        }
+                    }
+                    SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+                        if row.first().and_then(Cell::active_number).is_some() {
+                            n = n.saturating_add(1);
+                        }
+                    }
+                    SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
+                        n = n.saturating_add(row.iter().filter(|c| c.active_number().is_some()).count());
+                    }
+                }
+            }
+            Some((column_title_at(Some(ds), idx), n))
+        })
+        .collect();
+    format_named_sample_counts("Sample sizes", "series", &items)
+}
+
+fn describe_manuscript_sample_sizes(ds: &DataSheet, selected: &[usize]) -> Option<String> {
+    match &ds.archetype {
+        TableArchetype::Column(t) => {
+            let items: Vec<(String, usize)> = selected_indices(t.data_sets.len(), selected)
+                .into_iter()
+                .filter_map(|idx| t.data_sets.get(idx).map(|c| (column_title_at(Some(ds), idx), count_column_observations(c, SubcolumnMode::Single))))
+                .collect();
+            format_named_sample_counts("Sample sizes", "groups", &items)
+        }
+        TableArchetype::Grouped(t) => {
+            let items: Vec<(String, usize)> = selected_indices(t.data_sets.len(), selected)
+                .into_iter()
+                .filter_map(|idx| t.data_sets.get(idx).map(|c| (column_title_at(Some(ds), idx), count_column_observations(c, t.subcolumn_mode))))
+                .collect();
+            format_named_sample_counts("Sample sizes", "groups", &items)
+        }
+        TableArchetype::Xy(t) => describe_xy_sample_sizes(ds, t, selected),
+        TableArchetype::Survival(t) => {
+            let items: Vec<(String, usize)> = selected_indices(t.cohorts.len(), selected)
+                .into_iter()
+                .filter_map(|idx| {
+                    let cohort = t.cohorts.get(idx)?;
+                    let n = cohort
+                        .cells
+                        .iter()
+                        .enumerate()
+                        .filter(|(r, row)| {
+                            t.times.get(*r).and_then(Cell::active_number).is_some() && row.first().and_then(Cell::active_number).is_some()
+                        })
+                        .count();
+                    Some((column_title_at(Some(ds), idx), n))
+                })
+                .collect();
+            format_named_sample_counts("Cohort sample sizes", "cohorts", &items)
+        }
+        TableArchetype::Nested(t) => {
+            let indices = selected_indices(t.groups.len(), selected);
+            let mut parts = Vec::new();
+            let mut total = 0_usize;
+            for idx in indices {
+                if let Some(group) = t.groups.get(idx) {
+                    let n_sub = group.cells.first().map_or(0, Vec::len);
+                    let mut clusters = 0_usize;
+                    let mut group_n = 0_usize;
+                    for s_idx in 0..n_sub {
+                        let c_n = group.cells.iter().filter(|row| row.get(s_idx).and_then(Cell::active_number).is_some()).count();
+                        if c_n > 0 {
+                            clusters += 1;
+                            group_n += c_n;
+                        }
+                    }
+                    total += group_n;
+                    parts.push(format!("{} ({clusters} clusters, n = {group_n})", column_title_at(Some(ds), idx)));
+                }
+            }
+            if total == 0 {
+                None
+            } else if parts.len() <= 6 {
+                let joined = join_items_prose(&parts);
+                Some(format!("Group sample sizes comprised {joined}."))
+            } else {
+                Some(format!("The nested design spanned {} groups (N = {total} replicate observations).", parts.len()))
+            }
+        }
+        TableArchetype::Contingency(t) => {
+            let indices = selected_indices(t.data_sets.len(), selected);
+            let mut total = 0.0_f64;
+            for idx in &indices {
+                if let Some(col) = t.data_sets.get(*idx) {
+                    for row in &col.cells {
+                        if let Some(v) = row.first().and_then(Cell::active_number).filter(|v| *v >= 0.0) {
+                            total += v;
+                        }
+                    }
+                }
+            }
+            (total > 0.0).then(|| {
+                format!(
+                    "The contingency table comprised {} x {} cells (total count N = {}).",
+                    t.row_count(),
+                    indices.len(),
+                    format_exact_float(total)
+                )
+            })
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            let indices = selected_indices(t.data_sets.len(), selected);
+            let mut total = 0.0_f64;
+            for idx in &indices {
+                if let Some(col) = t.data_sets.get(*idx) {
+                    for row in &col.cells {
+                        if let Some(v) = row.first().and_then(Cell::active_number).filter(|v| *v >= 0.0) {
+                            total += v;
+                        }
+                    }
+                }
+            }
+            (total > 0.0).then(|| format!("The dataset comprised {} categories (total N = {}).", t.row_count(), format_exact_float(total)))
+        }
+        TableArchetype::MultipleVariables(t) => {
+            let rows = t.row_count();
+            let cols = t.variables.len();
+            (rows > 0 && cols > 0).then(|| format!("The multivariable dataset comprised {rows} rows across {cols} variables."))
+        }
+    }
+}
 
 fn build_report_blocks(doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
     let mut blocks = Vec::new();
@@ -281,7 +629,7 @@ fn append_methods_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocument, 
     }
 
     blocks.push(ReportBlock::Paragraph(vec![
-        plain("Analyses were conducted in CurveBook with "),
+        plain(format!("Analyses were conducted in CurveBook (version {CURVEBOOK_VERSION}) with ")),
         math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")),
         plain(" confidence intervals and nominal significance threshold "),
         math(format!("alpha = {alpha}"), format!("alpha = {alpha}"), format!("\\alpha = {alpha}")),
@@ -1193,13 +1541,21 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
             };
             let prose = if let Some(outcome_col) = pcr_outcome_column {
                 let outcome_name = column_title_at(source_ds, *outcome_col);
-                format!(
-                    "Principal component regression (PCR) decomposed the predictor {matrix_kind} across complete multivariate rows while strictly excluding outcome `{outcome_name}` (column {outcome_col}) to prevent target leakage.{pa_note} Retained orthogonal component scores were then regressed on `{outcome_name}` by ordinary least squares and back-transformed onto the original predictor scale."
-                )
+                vec![
+                    plain(format!(
+                        "Principal component regression (PCR) decomposed the predictor {matrix_kind} across complete multivariate rows while strictly excluding outcome "
+                    )),
+                    code(&outcome_name),
+                    plain(format!(
+                        " (column {outcome_col}) to prevent target leakage.{pa_note} Retained orthogonal component scores were then regressed on "
+                    )),
+                    code(outcome_name),
+                    plain(" by ordinary least squares and back-transformed onto the original predictor scale."),
+                ]
             } else {
-                format!("Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}")
+                vec![plain(format!("Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}"))]
             };
-            vec![ReportBlock::Paragraph(vec![plain(prose)])]
+            vec![ReportBlock::Paragraph(prose)]
         }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
             let corr_kind = if *spearman_rank { "Spearman rank correlation (rho)" } else { "Pearson product-moment correlation (r)" };
@@ -1286,7 +1642,7 @@ fn describe_spline_lowess(s: &SplineLowessSpec) -> Vec<ReportBlock> {
                 format!("{} preset (f = {frac:.2})", s.lowess_preset.label())
             };
             format!(
-                "Cleveland (1979) LOWESS tricube-weighted local linear regression was fitted using the {preset_note} and {} Tukey bisquare robustness pass(es), enforcing at least 4*N sampled polyline vertices.",
+                "Cleveland (1979) LOWESS tricube-weighted local linear regression was fitted using the {preset_note} and {} Tukey bisquare robustness pass(es), enforcing at least 4 * N sampled polyline vertices.",
                 s.lowess_robustness_iters
             )
         }
@@ -1466,6 +1822,214 @@ fn partition_parameter_rules<'a>(rules: &'a [ParameterRule], known_params: &'a [
         applied.push((canonical.as_str(), rule));
     }
     PartitionedParameterRules { applied, ignored_unknown, ignored_duplicate }
+}
+
+fn describe_nonlinear_regression_manuscript(doc: &ProjectDocument, s: &NonlinearFitSpec, res: &ResultSheet) -> Vec<ReportBlock> {
+    let mut blocks = Vec::new();
+    let (model_name, model_params, formula_plain, formula_latex) = resolve_equation_description(s);
+    let mut fit_runs = vec![
+        plain(format!("Data were fitted to the {model_name} model (")),
+        math(formula_plain.clone(), formula_plain, formula_latex),
+        plain(if model_params.is_empty() { String::from("). ") } else { format!("; parameters: {}). ", model_params.join(", ")) }),
+    ];
+
+    let outlier_handling = s.effective_outlier_handling();
+    match s.method {
+        FitMethod::LeastSquares => {
+            fit_runs.push(plain("Parameters were estimated by trust-region Levenberg-Marquardt nonlinear regression"));
+            if outlier_handling == OutlierHandling::IdentifyAndCountOnly {
+                fit_runs.push(plain("; ROUT outlier detection (Q = 1%) identified and counted outliers without excluding them from the fit"));
+            } else if outlier_handling == OutlierHandling::Eliminate {
+                fit_runs.push(plain("; ROUT outlier detection (Q = 1%) identified and excluded outliers prior to least-squares refitting"));
+            }
+        }
+        FitMethod::PoissonDeviance => {
+            fit_runs.push(plain("Parameters were estimated by maximum-likelihood Poisson deviance iteratively reweighted least squares (IRLS)"));
+        }
+        FitMethod::RobustCauchy => {
+            fit_runs.push(plain(
+                "Parameters were estimated by robust nonlinear regression using Cauchy-loss IRLS weighting to down-weight extreme residuals",
+            ));
+        }
+        FitMethod::RoutOutlierElimination { fdr_q_percent } => {
+            let q_str = format_exact_float(fdr_q_percent);
+            if outlier_handling == OutlierHandling::IdentifyAndCountOnly {
+                fit_runs.push(plain(
+                    "Outliers were identified and counted (retained in the fit) using the ROUT method (robust Cauchy fit, RSDR scale, Benjamini-Hochberg FDR control at ",
+                ));
+                fit_runs.push(math(format!("Q = {q_str}%"), format!("Q = {q_str}%"), format!("Q = {q_str}\\%")));
+                fit_runs.push(plain(")"));
+            } else {
+                fit_runs.push(plain(
+                    "Outliers were identified and excluded using the ROUT method (robust Cauchy fit, RSDR scale, Benjamini-Hochberg FDR control at ",
+                ));
+                fit_runs.push(math(format!("Q = {q_str}%"), format!("Q = {q_str}%"), format!("Q = {q_str}\\%")));
+                fit_runs.push(plain("), followed by least-squares refitting on the retained observations"));
+            }
+        }
+    }
+    fit_runs.push(plain(". "));
+    fit_runs.extend(describe_weighting_runs(s.weighting, s.weighting_source));
+    if s.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+        fit_runs.push(plain(" Replicates within each row were collapsed to unweighted row means (1 observation per row)."));
+    }
+    if s.method == FitMethod::RobustCauchy {
+        fit_runs.push(plain(" Robust Cauchy regression reported best-fit parameter estimates, residuals, and RSDR without least-squares standard errors or confidence intervals."));
+    } else {
+        let conf_pct = format_exact_float(res.analysis.confidence_level.percent());
+        if s.profile_likelihood_ci {
+            fit_runs.push(plain(" Asymmetrical "));
+            fit_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
+            fit_runs.push(plain(" confidence intervals were computed by Venzon-Moolgavkar profile-likelihood root finding."));
+        } else {
+            fit_runs.push(plain(" Symmetric asymptotic "));
+            fit_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
+            fit_runs.push(plain(" confidence intervals were computed from the Jacobian covariance matrix and Student's t critical value."));
+        }
+    }
+    blocks.push(ReportBlock::Paragraph(fit_runs));
+
+    let mut details = Vec::new();
+    if !s.parameter_rules.is_empty() {
+        let part = partition_parameter_rules(&s.parameter_rules, &model_params);
+        if !part.applied.is_empty() {
+            details.push(plain("Parameter constraints and sharing rules: "));
+            for (idx, &(cname, rule)) in part.applied.iter().enumerate() {
+                if idx > 0 {
+                    details.push(plain("; "));
+                }
+                details.extend(describe_parameter_rule_manuscript(doc, cname, rule));
+            }
+            details.push(plain("."));
+        }
+    }
+    if let Some((method, question)) = s.effective_comparison()
+        && s.method != FitMethod::RobustCauchy
+    {
+        if !details.is_empty() {
+            details.push(plain(" "));
+        }
+        details.extend(describe_model_comparison_question_manuscript(method, &question));
+    }
+    if let Some((x_lo, x_hi)) = s.x_range_filter {
+        if !details.is_empty() {
+            details.push(plain(" "));
+        }
+        details.push(plain(format!("Observations were restricted to X in [{}, {}].", opt_bound_str(x_lo), opt_bound_str(x_hi))));
+    }
+    if let Some((y_lo, y_hi)) = s.y_range_filter {
+        if !details.is_empty() {
+            details.push(plain(" "));
+        }
+        details.push(plain(format!("Observations were restricted to Y in [{}, {}].", opt_bound_str(y_lo), opt_bound_str(y_hi))));
+    }
+    let mut checks = Vec::new();
+    if s.replicates_lack_of_fit_test && s.method != FitMethod::RobustCauchy {
+        checks.push("replicates lack-of-fit F-test");
+    }
+    if s.normality_of_residuals {
+        checks.push("residual normality testing (D'Agostino-Pearson, Shapiro-Wilk, Anderson-Darling, Lilliefors KS)");
+    }
+    if s.homoscedasticity_test {
+        checks.push("Spearman homoscedasticity testing");
+    }
+    if !checks.is_empty() {
+        if !details.is_empty() {
+            details.push(plain(" "));
+        }
+        details.push(plain(format!("Model adequacy was evaluated with {}.", checks.join(", "))));
+    }
+    if !details.is_empty() {
+        blocks.push(ReportBlock::Paragraph(details));
+    }
+    blocks
+}
+
+fn format_hook_source_manuscript(doc: &ProjectDocument, hook: &HookSource) -> String {
+    match hook {
+        HookSource::InfoConstant { info_sheet_id: Some(sheet_id), constant_name } => {
+            let label = doc.info_sheet(sheet_id).map_or("linked info sheet", |s| s.title.as_str());
+            format!("info constant '{constant_name}' from '{label}'")
+        }
+        HookSource::InfoConstant { info_sheet_id: None, constant_name } => {
+            format!("info constant '{constant_name}' from paired info sheet")
+        }
+        HookSource::ResultScalar { result_sheet_id, parameter_key, data_set_index: Some(idx) } => {
+            let label = doc.result_sheet(result_sheet_id).map_or("upstream analysis", ResultSheet::title);
+            format!("fitted scalar '{parameter_key}' (dataset {}) from '{label}'", idx + 1)
+        }
+        HookSource::ResultScalar { result_sheet_id, parameter_key, data_set_index: None } => {
+            let label = doc.result_sheet(result_sheet_id).map_or("upstream analysis", ResultSheet::title);
+            format!("fitted scalar '{parameter_key}' from '{label}'")
+        }
+        HookSource::ColumnTitleValue { data_sheet_id, data_set_index } => {
+            let label = doc.data_sheet(data_sheet_id).map_or("source table", |s| s.title.as_str());
+            format!("column {} title from '{label}'", data_set_index + 1)
+        }
+    }
+}
+
+fn describe_parameter_rule_manuscript(doc: &ProjectDocument, canonical_name: &str, rule: &ParameterRule) -> Vec<TextRun> {
+    let scope_desc = match &rule.scope {
+        ParameterScope::Local => String::from("fitted independently per dataset"),
+        ParameterScope::SharedGlobal => String::from("shared globally across all datasets"),
+        ParameterScope::Constant(v) => format!("fixed at {}", format_exact_float(*v)),
+        ParameterScope::HookedConstant(hook) => format!("fixed to {}", format_hook_source_manuscript(doc, hook)),
+        ParameterScope::PerDatasetConstant(pairs) => {
+            let parts: Vec<String> = pairs.iter().map(|(ds, v)| format!("DS{} = {}", ds + 1, format_exact_float(*v))).collect();
+            format!("fixed per dataset ({})", parts.join(", "))
+        }
+        ParameterScope::ColumnTitleConstant => String::from("fixed to the numeric dataset column title"),
+    };
+    let mut runs = vec![plain(format!("{canonical_name} {scope_desc}"))];
+    if let Some(lo) = rule.lower_bound {
+        let ls = format_exact_float(lo);
+        runs.push(plain(" with lower bound "));
+        runs.push(math(format!(">= {ls}"), format!(">= {ls}"), format!("\\ge {ls}")));
+    }
+    if let Some(hi) = rule.upper_bound {
+        let hs = format_exact_float(hi);
+        runs.push(plain(if rule.lower_bound.is_some() { " and upper bound " } else { " with upper bound " }));
+        runs.push(math(format!("<= {hs}"), format!("<= {hs}"), format!("\\le {hs}")));
+    }
+    runs
+}
+
+fn describe_model_comparison_question_manuscript(method: ModelComparisonMethod, question: &ModelComparisonQuestion) -> Vec<TextRun> {
+    let m_txt = match method {
+        ModelComparisonMethod::ExtraSumOfSquaresF => "the extra-sum-of-squares F-test",
+        ModelComparisonMethod::Aicc => "AICc",
+        ModelComparisonMethod::LikelihoodRatioTest => "the likelihood-ratio test",
+    };
+    match question {
+        ModelComparisonQuestion::AlternativeEquation { alternative_equation_id } => {
+            let alt_name = get_builtin_model(alternative_equation_id).map_or_else(|| alternative_equation_id.clone(), |m| m.name().to_owned());
+            match method {
+                ModelComparisonMethod::ExtraSumOfSquaresF => vec![plain(format!(
+                    "Nested model selection compared the primary model against {alt_name} using the extra-sum-of-squares F-test."
+                ))],
+                ModelComparisonMethod::Aicc => vec![
+                    plain(format!("Model selection compared the primary model against {alt_name} via ")),
+                    math("AICc", "AICc", "\\mathrm{AIC}_c"),
+                    plain(", Akaike weights, and evidence ratio."),
+                ],
+                ModelComparisonMethod::LikelihoodRatioTest => {
+                    vec![plain(format!("Nested model selection compared the primary model against {alt_name} using the likelihood-ratio test."))]
+                }
+            }
+        }
+        ModelComparisonQuestion::ParameterInvarianceAcrossDatasets { shared_params } => vec![plain(format!(
+            "Model comparison tested whether {} were invariant across datasets versus fitted separately using {m_txt}.",
+            shared_params.join(", ")
+        ))],
+        ModelComparisonQuestion::SingleGlobalCurveVsSeparate => vec![plain(format!(
+            "Model comparison tested whether a single global curve fitted all datasets versus separate per-dataset curves using {m_txt}."
+        ))],
+        ModelComparisonQuestion::ParameterEqualsTheoretical { param, theoretical_value } => vec![plain(format!(
+            "Model comparison tested whether {param} equaled {} versus an unconstrained estimate using {m_txt}.",
+            format_exact_float(*theoretical_value)
+        ))],
+    }
 }
 
 fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec<ReportBlock> {
@@ -1716,7 +2280,7 @@ fn append_nonlinear_identifiability_and_flags(s: &NonlinearFitSpec, extras: &mut
                 "Parameter identifiability used greedy Hessian condition-number reduction (kappa(H) > 10 / sqrt(eps_mach)), marking unstable parameters while preserving well-conditioned estimates and intervals."
             }
             IdentifiabilityMode::IdentifyAmbiguousFits => {
-                "Parameter identifiability used the dependency criterion (Dependency > 0.9999 or rank-deficient Jacobian), flagging ambiguous fits with `~` prefixes."
+                "Parameter identifiability used the dependency criterion (Dependency > 0.9999 or rank-deficient Jacobian), flagging ambiguous fits with '~' prefixes."
             }
             IdentifiabilityMode::ReportAll => "Parameter identifiability reporting was set to ReportAll (unconditional raw parameter reporting).",
         };
@@ -1799,10 +2363,14 @@ fn describe_model_comparison_question_runs(
                 ModelComparisonMethod::Aicc => "AICc",
                 ModelComparisonMethod::LikelihoodRatioTest => "the likelihood-ratio test",
             };
-            vec![plain(format!(
-                "Model comparison tested whether `{param}` equals theoretical value {} versus an unconstrained estimate using {m_txt}.",
-                format_exact_float(*theoretical_value)
-            ))]
+            vec![
+                plain("Model comparison tested whether "),
+                code(param),
+                plain(format!(
+                    " equals theoretical value {} versus an unconstrained estimate using {m_txt}.",
+                    format_exact_float(*theoretical_value)
+                )),
+            ]
         }
     };
     if prefer_well_defined_fit {
@@ -2206,13 +2774,18 @@ fn format_result_cell(cell: &ResultCell, p_format: PValueFormat, alpha: f64) -> 
             vec![plain(format!("{pre}{}{suf}", format_stat_value(*value)))]
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
+            if matches!(lower, CiBound::Unavailable) && matches!(upper, CiBound::Unavailable) {
+                return vec![plain("Unavailable")];
+            }
             let lo = match lower {
                 CiBound::Finite(v) => plain(format_stat_value(*v)),
                 CiBound::Open => math("-inf", "-inf", "-\\infty"),
+                CiBound::Unavailable => plain("Unavailable"),
             };
             let hi = match upper {
                 CiBound::Finite(v) => plain(format_stat_value(*v)),
                 CiBound::Open => math("+inf", "+inf", "+\\infty"),
+                CiBound::Unavailable => plain("Unavailable"),
             };
             vec![plain("["), lo, plain(", "), hi, plain("]")]
         }
@@ -2330,7 +2903,7 @@ fn builtin_formula_pair(canonical_id: &str) -> Option<(String, String)> {
         "michaelis_menten" => ("Y = Vmax * X / (Km + X)", "Y = \\frac{V_{\\max} X}{K_m + X}"),
         "one_phase_decay" => ("Y = (Y0 - Plateau) * exp(-K * X) + Plateau", "Y = (Y_0 - \\mathrm{Plateau}) e^{-K X} + \\mathrm{Plateau}"),
         "two_phase_decay" => (
-            "Y = Plateau + (Y0 - Plateau) * ((PercentFast/100)*exp(-KFast*X) + (1 - PercentFast/100)*exp(-KSlow*X))",
+            "Y = Plateau + (Y0 - Plateau) * ((PercentFast / 100) * exp(-KFast * X) + (1 - PercentFast / 100) * exp(-KSlow * X))",
             "Y = \\mathrm{Plateau} + (Y_0 - \\mathrm{Plateau})\\left(\\frac{\\%\\mathrm{Fast}}{100}e^{-K_{\\mathrm{fast}}X} + \\left(1 - \\frac{\\%\\mathrm{Fast}}{100}\\right)e^{-K_{\\mathrm{slow}}X}\\right)",
         ),
         "one_phase_association" => ("Y = Y0 + (Plateau - Y0) * (1 - exp(-K * X))", "Y = Y_0 + (\\mathrm{Plateau} - Y_0)(1 - e^{-K X})"),
@@ -2551,11 +3124,13 @@ fn collapse_line_breaks_to_space(input: &str) -> String {
     out
 }
 
-fn render_runs_markdown(runs: &[TextRun], escape_pipes: bool) -> String {
+fn render_runs_markdown(runs: &[TextRun], escape_pipes: bool, at_line_start: bool) -> String {
     let mut s = String::new();
+    let mut line_start = at_line_start;
     for run in runs {
+        let before_len = s.len();
         match run {
-            TextRun::Plain(t) => append_md_text(&mut s, t, escape_pipes),
+            TextRun::Plain(t) => append_md_text(&mut s, t, escape_pipes, line_start),
             TextRun::Bold(t) => {
                 let single = collapse_line_breaks_to_space(t);
                 let trimmed_start = single.trim_start_matches(' ');
@@ -2567,7 +3142,7 @@ fn render_runs_markdown(runs: &[TextRun], escape_pipes: bool) -> String {
                 }
                 if !core.is_empty() {
                     s.push_str("**");
-                    append_md_text(&mut s, core, escape_pipes);
+                    append_md_text(&mut s, core, escape_pipes, false);
                     s.push_str("**");
                 }
                 for _ in 0..trailing_spaces {
@@ -2575,24 +3150,214 @@ fn render_runs_markdown(runs: &[TextRun], escape_pipes: bool) -> String {
                 }
             }
             TextRun::Code(t) => append_md_code(&mut s, t, escape_pipes),
-            TextRun::Math { markdown, .. } => append_md_text(&mut s, markdown, escape_pipes),
+            TextRun::Math { markdown, .. } => append_md_text(&mut s, markdown, escape_pipes, line_start),
+        }
+        if s.get(before_len..).is_some_and(|tail| tail.chars().any(|c| !c.is_whitespace())) {
+            line_start = false;
         }
     }
     s
 }
 
-fn append_md_text(dst: &mut String, text: &str, escape_pipes: bool) {
+fn is_html_tag_start(next: Option<char>) -> bool {
+    next.is_some_and(|c| c.is_ascii_alphabetic() || matches!(c, '/' | '!' | '?'))
+}
+
+fn is_html_entity_start(chars: &[char], idx: usize) -> bool {
+    let Some(&first) = chars.get(idx + 1) else {
+        return false;
+    };
+    if first == '#' {
+        let mut j = idx + 2;
+        if chars.get(j).is_some_and(|c| matches!(c, 'x' | 'X')) {
+            j += 1;
+        }
+        let digit_start = j;
+        while j < idx + 12 && chars.get(j).is_some_and(char::is_ascii_hexdigit) {
+            j += 1;
+        }
+        return j > digit_start && chars.get(j) == Some(&';');
+    }
+    if first.is_ascii_alphabetic() {
+        let mut j = idx + 2;
+        while j < idx + 34 && chars.get(j).is_some_and(char::is_ascii_alphanumeric) {
+            j += 1;
+        }
+        return chars.get(j) == Some(&';');
+    }
+    false
+}
+
+fn find_link_bracket_close(chars: &[char], open_idx: usize, at_line_start: bool) -> Option<usize> {
+    let mut j = open_idx + 1;
+    while let Some(&c) = chars.get(j) {
+        match c {
+            '[' => return None,
+            ']' => {
+                let after = chars.get(j + 1).copied();
+                let is_link = matches!(after, Some('(' | '[')) || (at_line_start && after == Some(':'));
+                return is_link.then_some(j);
+            }
+            _ => j += 1,
+        }
+    }
+    None
+}
+
+fn should_escape_star_run(chars: &[char], start: usize, end: usize, at_line_start: bool, seen_opener: bool) -> (bool, bool) {
+    if at_line_start {
+        return (true, true);
+    }
+    let before = start.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let after = chars.get(end).copied();
+    if before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace) {
+        return (false, seen_opener);
+    }
+    if before == Some('(') && after == Some(')') && !seen_opener && !chars.get(end..).is_some_and(|rest| rest.contains(&'*')) {
+        return (false, false);
+    }
+    if before.is_some_and(char::is_alphanumeric)
+        && after.is_none_or(|c| c.is_whitespace() || matches!(c, '.' | ',' | ';' | ':' | ')'))
+        && !seen_opener
+    {
+        return (false, false);
+    }
+    let next_seen_opener = seen_opener || after.is_some_and(|c| !c.is_whitespace());
+    (true, next_seen_opener)
+}
+
+fn should_escape_underscore_run(chars: &[char], start: usize, end: usize, at_line_start: bool) -> bool {
+    if at_line_start {
+        return true;
+    }
+    let before = start.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let after = chars.get(end).copied();
+    if before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric) {
+        return false;
+    }
+    !(before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace))
+}
+
+fn should_escape_tilde_run(chars: &[char], start: usize, end: usize, at_line_start: bool) -> bool {
+    if at_line_start || end.saturating_sub(start) >= 2 {
+        return true;
+    }
+    let before = start.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let after = chars.get(end).copied();
+    !(before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace))
+}
+
+fn push_md_run(dst: &mut String, ch: char, count: usize, escape: bool) {
+    for _ in 0..count {
+        if escape {
+            dst.push('\\');
+        }
+        dst.push(ch);
+    }
+}
+
+fn append_md_text(dst: &mut String, text: &str, escape_pipes: bool, at_line_start: bool) {
     let clean = collapse_line_breaks_to_space(text);
-    for ch in clean.chars() {
+    let chars: Vec<char> = clean.chars().collect();
+    let mut in_html_tag = false;
+    let mut seen_star_opener = false;
+    let mut line_start = at_line_start;
+    let mut pending_close_bracket: Option<usize> = None;
+    let mut i = 0_usize;
+
+    while let Some(&ch) = chars.get(i) {
         match ch {
-            '\\' | '<' | '>' | '&' | '*' | '_' | '`' | '~' | '[' | ']' | '#' | '$' => {
+            '\\' | '`' => {
                 dst.push('\\');
                 dst.push(ch);
+                line_start = false;
+                i += 1;
             }
             '|' if escape_pipes => {
                 dst.push_str("\\|");
+                line_start = false;
+                i += 1;
             }
-            _ => dst.push(ch),
+            '<' => {
+                if is_html_tag_start(chars.get(i + 1).copied()) {
+                    dst.push_str("\\<");
+                    in_html_tag = true;
+                } else {
+                    dst.push('<');
+                }
+                line_start = false;
+                i += 1;
+            }
+            '>' => {
+                if in_html_tag || line_start {
+                    dst.push_str("\\>");
+                    in_html_tag = false;
+                } else {
+                    dst.push('>');
+                }
+                line_start = false;
+                i += 1;
+            }
+            '&' => {
+                if is_html_entity_start(&chars, i) {
+                    dst.push_str("\\&");
+                } else {
+                    dst.push('&');
+                }
+                line_start = false;
+                i += 1;
+            }
+            '#' | '-' | '+' if line_start => {
+                dst.push('\\');
+                dst.push(ch);
+                line_start = false;
+                i += 1;
+            }
+            '[' => {
+                if let Some(close_idx) = find_link_bracket_close(&chars, i, line_start) {
+                    dst.push_str("\\[");
+                    pending_close_bracket = Some(close_idx);
+                } else {
+                    dst.push('[');
+                }
+                line_start = false;
+                i += 1;
+            }
+            ']' => {
+                if pending_close_bracket == Some(i) {
+                    dst.push_str("\\]");
+                    pending_close_bracket = None;
+                } else {
+                    dst.push(']');
+                }
+                line_start = false;
+                i += 1;
+            }
+            '*' | '_' | '~' => {
+                let mut end = i + 1;
+                while chars.get(end) == Some(&ch) {
+                    end += 1;
+                }
+                let escape = match ch {
+                    '*' => {
+                        let (esc, next_opener) = should_escape_star_run(&chars, i, end, line_start, seen_star_opener);
+                        seen_star_opener = next_opener;
+                        esc
+                    }
+                    '_' => should_escape_underscore_run(&chars, i, end, line_start),
+                    _ => should_escape_tilde_run(&chars, i, end, line_start),
+                };
+                push_md_run(dst, ch, end - i, escape);
+                line_start = false;
+                i = end;
+            }
+            _ => {
+                dst.push(ch);
+                if !ch.is_whitespace() {
+                    line_start = false;
+                }
+                i += 1;
+            }
         }
     }
 }
@@ -2861,26 +3626,26 @@ fn render_block_plain(block: &ReportBlock, out: &mut String) {
 fn render_block_markdown(block: &ReportBlock, out: &mut String) {
     match block {
         ReportBlock::Title(runs) => {
-            let _ = writeln!(out, "# {}", render_runs_markdown(runs, false));
+            let _ = writeln!(out, "# {}", render_runs_markdown(runs, false, false));
         }
         ReportBlock::Section(runs) => {
-            let _ = writeln!(out, "## {}", render_runs_markdown(runs, false));
+            let _ = writeln!(out, "## {}", render_runs_markdown(runs, false, false));
         }
         ReportBlock::Paragraph(runs) => {
-            let _ = writeln!(out, "{}", render_runs_markdown(runs, false));
+            let _ = writeln!(out, "{}", render_runs_markdown(runs, false, true));
         }
         ReportBlock::Bullets(items) => {
             for item in items {
-                let _ = writeln!(out, "- {}", render_runs_markdown(item, false));
+                let _ = writeln!(out, "- {}", render_runs_markdown(item, false, false));
             }
         }
         ReportBlock::Table(tbl) => {
-            let _ = writeln!(out, "### {}", render_runs_markdown(&tbl.caption, false));
+            let _ = writeln!(out, "### {}", render_runs_markdown(&tbl.caption, false, false));
             let sep_row = format!("| {} |", vec!["---"; tbl.headers.len()].join(" | "));
             let style = TableRowStyle { prefix: "| ", sep: " | ", suffix: " |", after_header: Some(&sep_row) };
-            write_formatted_table_rows(out, &tbl.headers, &tbl.rows, &style, |_, c| render_runs_markdown(c, true));
+            write_formatted_table_rows(out, &tbl.headers, &tbl.rows, &style, |_, c| render_runs_markdown(c, true, false));
             for note in &tbl.footnotes {
-                let _ = writeln!(out, "*Note:* {}", render_runs_markdown(note, false));
+                let _ = writeln!(out, "*Note:* {}", render_runs_markdown(note, false, false));
             }
         }
     }
@@ -3273,13 +4038,122 @@ mod tests {
     #[test]
     fn methods_report_outputs_stay_byte_identical() {
         let corpus = match build_fixture_corpus() {
-            Ok(c) => c,
+            Ok(c) => c.replace(CURVEBOOK_VERSION, "<VERSION>"),
             Err(err) => {
                 assert_eq!(err.to_string(), "");
                 return;
             }
         };
         let digest = dual_fnv1a(corpus.as_bytes());
-        assert_eq!(digest, (77_365, 17_018_405_250_278_487_102, 7_477_326_593_824_657_170));
+        assert_eq!(digest, (77_440, 11_094_136_371_273_311_663, 5_022_623_331_152_115_581));
+    }
+
+    #[test]
+    fn r20_7_report_scope_parsing_and_methods_vs_full_report() -> Result<(), Box<dyn std::error::Error>> {
+        assert_eq!(ReportScope::from_name("methods"), Some(ReportScope::Methods));
+        assert_eq!(ReportScope::from_name("MANUSCRIPT"), Some(ReportScope::Methods));
+        assert_eq!(ReportScope::from_name("full"), Some(ReportScope::FullReport));
+        assert_eq!(ReportScope::from_name("full_report"), Some(ReportScope::FullReport));
+        assert_eq!(ReportScope::from_name("unknown"), None);
+        assert_eq!((ReportScope::Methods.as_str(), ReportScope::FullReport.as_str()), ("methods", "full"));
+
+        let mut xy = curvebook_doc::XyTable::new(SubcolumnMode::Single, 2, 4)?;
+        xy.data_sets[0].title = String::from("Vehicle");
+        xy.data_sets[1].title = String::from("Drug_A");
+        for r in 0..4 {
+            xy.x_cells[r][0] = Cell::number(-9.0 + r as f64);
+            xy.data_sets[0].cells[r][0] = Cell::number(10.0 + r as f64 * 25.0);
+            xy.data_sets[1].cells[r][0] = Cell::number(12.0 + r as f64 * 26.0);
+        }
+        xy.data_sets[1].cells[3][0] = Cell { excluded: true, ..Cell::number(999.0) };
+        let mut doc = ProjectDocument::new("Dose Study")?;
+        doc.add_data_sheet(DataSheet::new("ds-xy-1", "Dose Table", TableArchetype::Xy(xy))?)?;
+
+        let mut fit_spec = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+        fit_spec.weighting = WeightingScheme::RelativeSquare;
+        fit_spec.weighting_source = WeightingSource::PredictedY;
+        let mut res = ResultSheet::new(AnalysisSpec::new("res-4pl-1", "ds-xy-1", AnalysisKind::NonlinearRegression(fit_spec))?)?;
+        res.status = ResultStatus::UpToDate;
+        res.tabs.push(ResultTab {
+            id: String::from("best-fit"),
+            title: String::from("Best-fit values"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Vehicle")],
+            row_labels: vec![String::from("LogEC50")],
+            rows: vec![vec![ResultCell::Number { value: -7.5, prefix: None, units: None }]],
+            footnotes: Vec::new(),
+        });
+        res.checklist.push(ChecklistItem {
+            assumption: String::from("Residual normality"),
+            status: ChecklistStatus::Pass,
+            diagnostic_metric: Some(String::from("W = 0.98")),
+            explanation: String::from("Residuals passed normality screening."),
+            remediation: None,
+        });
+        doc.add_result_sheet(res)?;
+
+        for fmt in [ReportFormat::PlainText, ReportFormat::Markdown, ReportFormat::Latex] {
+            let full = generate_methods_report(&doc, &SheetId::new("res-4pl-1"), fmt)?;
+            let full_explicit = generate_methods_report_with_scope(&doc, &SheetId::new("res-4pl-1"), fmt, ReportScope::FullReport)?;
+            assert_eq!(full, full_explicit, "generate_methods_report must preserve FullReport default");
+
+            let methods = generate_methods_report_with_scope(&doc, &SheetId::new("res-4pl-1"), fmt, ReportScope::Methods)?;
+            assert!(methods.contains(CURVEBOOK_VERSION), "{fmt:?} methods must include CurveBook version:\n{methods}");
+            let drug_lbl = if fmt == ReportFormat::Latex { "Drug\\_A (n = 3)" } else { "Drug_A (n = 3)" };
+            assert!(methods.contains("Vehicle (n = 4)") && methods.contains(drug_lbl), "{fmt:?} sample sizes:\n{methods}");
+            assert!(methods.contains("1 observation(s) were manually excluded prior to analysis."), "{fmt:?} exclusions:\n{methods}");
+            for forbidden in [
+                "res-4pl-1",
+                "ds-xy-1",
+                "Study Context and Data Provenance",
+                "Recalculation status",
+                "Stored Results Summary",
+                "Assumption and Quality Diagnostics",
+                "Stored summary estimates use exact integer",
+                "0 cells masked as excluded",
+                "all finite active observations were included",
+            ] {
+                assert!(!methods.contains(forbidden), "{fmt:?} methods must omit `{forbidden}`:\n{methods}");
+            }
+            assert!(full.contains("Study Context and Data Provenance") && full.contains("Stored Results Summary"));
+        }
+
+        let md_methods = generate_methods_report_with_scope(&doc, &SheetId::new("res-4pl-1"), ReportFormat::Markdown, ReportScope::Methods)?;
+        assert!(md_methods.contains("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"), "{md_methods}");
+        assert!(md_methods.contains("1 / Y_curve^2"), "{md_methods}");
+        assert!(!md_methods.contains("| --- |") && !md_methods.contains("\\*") && !md_methods.contains("\\_"));
+
+        let tex_methods = generate_methods_report_with_scope(&doc, &SheetId::new("res-4pl-1"), ReportFormat::Latex, ReportScope::Methods)?;
+        assert!(tex_methods.contains("\\frac{\\mathrm{Top} - \\mathrm{Bottom}}") && !tex_methods.contains("\\begin{tabular}"));
+        Ok(())
+    }
+
+    #[test]
+    fn r20_7_markdown_escaping_preserves_benign_prose_and_escapes_hazards() {
+        let mut out = String::new();
+        let benign = "ns for p > 0.05, * for p <= 0.05, ** for p <= 0.01, *** for p <= 0.001, **** for p <= 0.0001; \
+                      Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope)); 1 / Y_curve^2; \
+                      Benjamini & Hochberg; Brown-Forsythe F* ANOVA; [0.1753, 0.9412]; [PASS]; d_z; $100";
+        append_md_text(&mut out, benign, false, true);
+        assert_eq!(out, benign, "Benign prose/math must not emit stray backslashes");
+
+        let mut cell_stars = String::new();
+        append_md_text(&mut cell_stars, "0.0012 (***)", true, false);
+        assert_eq!(cell_stars, "0.0012 (***)");
+
+        let mut cell_pipe = String::new();
+        append_md_text(&mut cell_pipe, "Dose | [uM] <script>x</script> *star* _em_ [link](url) `tick` ~wave~ &lt;", true, false);
+        assert!(cell_pipe.contains("Dose \\| [uM]"), "{cell_pipe}");
+        assert!(cell_pipe.contains("\\<script\\>x\\</script\\>"), "{cell_pipe}");
+        assert!(cell_pipe.contains("\\*star\\*") && cell_pipe.contains("\\_em\\_"), "{cell_pipe}");
+        assert!(cell_pipe.contains("\\[link\\](url)"), "{cell_pipe}");
+        assert!(cell_pipe.contains("\\`tick\\`") && cell_pipe.contains("\\~wave\\~") && cell_pipe.contains("\\&lt;"), "{cell_pipe}");
+
+        let mut leading = String::new();
+        append_md_text(&mut leading, "> quote", false, true);
+        assert_eq!(leading, "\\> quote");
+        let mut heading = String::new();
+        append_md_text(&mut heading, "# heading", false, true);
+        assert_eq!(heading, "\\# heading");
     }
 }

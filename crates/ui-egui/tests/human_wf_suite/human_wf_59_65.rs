@@ -318,7 +318,7 @@ fn wf60_human_subset_regression_decoupled_points_and_red_outlier_override() -> T
     run.click("toolbar.analyze")?;
     run.replace_textbox("analyze.search", "Linear")?;
     run.click("analyze.entry.fit.linear")?;
-    run.click("analyze.mv.var.0")?;
+    run.click("analyze.dataset.0")?;
     run.commit_modal_ok()?;
     ensure(run.document().result_sheets.len() == before_rs + 1, "WF-60 selective Linear must create ResultSheet")?;
     let lin_id = run.document().result_sheets.last().map(|r| r.id.clone()).ok_or("WF-60 missing linear fit")?;

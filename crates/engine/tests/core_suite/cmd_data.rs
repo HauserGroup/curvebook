@@ -482,13 +482,21 @@ fn table_csv_prism_pzfx_imports_and_export() {
     // Save archive bytes and import back via table.importPrism.
     ok_cmd(&mut session, "project.save", json!({ "path": prism_path.to_str() }));
     let mut prism_sess = Session::new();
-    ok_cmd(&mut prism_sess, "table.importPrism", json!({ "path": prism_path.to_str() }));
+    let archive_out = ok_cmd(&mut prism_sess, "table.importPrism", json!({ "path": prism_path.to_str() }));
+    assert_eq!(archive_out.message, "imported .prism file");
     assert!(prism_sess.document().data_sheet(&SheetId::new("csv-1")).is_some());
 
     // Import clean-room XML .pzfx string via table.importPzfx.
     let mut pzfx_sess = Session::new();
-    ok_cmd(&mut pzfx_sess, "table.importPzfx", json!({ "xml": cleanroom_pzfx_xml() }));
+    let pzfx_out = ok_cmd(&mut pzfx_sess, "table.importPzfx", json!({ "xml": cleanroom_pzfx_xml() }));
+    assert_eq!(pzfx_out.message, "imported .pzfx file");
     assert!(!pzfx_sess.document().data_sheets.is_empty());
+
+    let archive_spec = curvebook_engine::cmd::registry().get("table.importPrism").expect("table.importPrism spec");
+    let pzfx_spec = curvebook_engine::cmd::registry().get("table.importPzfx").expect("table.importPzfx spec");
+    assert_eq!((archive_spec.label, archive_spec.menu_path), ("Import .prism files", "File/Import/.prism files"));
+    assert_eq!((pzfx_spec.label, pzfx_spec.menu_path), ("Import .pzfx files", "File/Import/.pzfx files"));
+    assert!(archive_spec.summary.contains(".prism files") && pzfx_spec.summary.contains(".pzfx files"));
 }
 
 #[test]

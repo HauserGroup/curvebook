@@ -13,29 +13,12 @@ use crate::desktop_host::DesktopMenuChromeState;
 #[cfg(target_os = "macos")]
 use crate::desktop_host::{DesktopMenuItem, DesktopMenuNode};
 
-/// Return the localized macOS application submenu `(about, preferences, quit)` labels for `locale`.
+/// Return the localized macOS application submenu `(about, settings, quit)` labels for `locale`.
 #[must_use]
 pub fn localized_app_submenu_labels(locale: &str) -> (&'static str, &'static str, &'static str) {
     let norm = normalize_locale(locale);
     let about = tr(norm, "menu.help.about");
-    let prefs = match norm {
-        "de" => "Einstellungen…",
-        "es" => "Preferencias…",
-        "fr" => "Préférences…",
-        "it" => "Preferenze…",
-        "ja" => "環境設定…",
-        "ko" => "환경설정…",
-        "nl" => "Voorkeuren…",
-        "pl" => "Preferencje…",
-        "pt-BR" => "Preferências…",
-        "ru" => "Настройки…",
-        "tr" => "Tercihler…",
-        "zh-CN" => "首选项…",
-        "zh-TW" => "偏好設定…",
-        "ar" => "التفضيلات…",
-        "he" => "העדפות…",
-        _ => "Settings…",
-    };
+    let prefs = tr(norm, "prefs.title");
     let quit = match norm {
         "de" => "CurveBook beenden",
         "es" => "Salir de CurveBook",
@@ -56,6 +39,35 @@ pub fn localized_app_submenu_labels(locale: &str) -> (&'static str, &'static str
     };
     (about, prefs, quit)
 }
+
+/// Return the localized macOS `Window` submenu title for `locale`.
+#[must_use]
+pub fn localized_window_submenu_title(locale: &str) -> &'static str {
+    match normalize_locale(locale) {
+        "de" => "Fenster",
+        "es" => "Ventana",
+        "fr" => "Fenêtre",
+        "it" => "Finestra",
+        "ja" => "ウィンドウ",
+        "ko" => "창",
+        "nl" => "Venster",
+        "pl" => "Okno",
+        "pt-BR" => "Janela",
+        "ru" => "Окно",
+        "tr" => "Pencere",
+        "zh-CN" => "窗口",
+        "zh-TW" => "視窗",
+        "ar" => "النافذة",
+        "he" => "חלון",
+        _ => "Window",
+    }
+}
+
+/// Ordered macOS `Window` submenu predefined entry descriptors (`muda::PredefinedMenuItem`)
+/// inserted ahead of `Help` (`R20.22`).
+pub const MACOS_WINDOW_SUBMENU_ITEMS: [&str; 4] = ["Minimize", "Zoom", "Enter Full Screen", "Bring All to Front"];
+
+const MACOS_APP_SUBMENU_OWNED_COMMANDS: [&str; 3] = ["app.about", "app.preferences", "app.quit"];
 
 /// Canonical 8-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
 pub const NATIVE_MENU_BAR_TITLES: [&str; 8] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Help"];
@@ -539,11 +551,21 @@ impl MacNativeMenuHost {
         let mut next_items = Vec::new();
         let mut next_variants = Vec::new();
         let mut flat_idx = 0usize;
+        let mut window_inserted = false;
 
         for sec in &self.section_specs {
+            if !window_inserted && sec.menu_key == "menu.help" {
+                let win_sub = build_macos_window_submenu(locale)?;
+                menu.append(&win_sub).map_err(|err| format!("append Window submenu: {err}"))?;
+                window_inserted = true;
+            }
             let sub = muda::Submenu::with_id(muda::MenuId::new(&sec.menu_key), &sec.title, true);
-            append_muda_nodes(&sub, &sec.nodes, &mut next_items, &mut next_variants, &mut flat_idx)?;
+            append_muda_nodes_filtered(&sub, &sec.nodes, &mut next_items, &mut next_variants, &mut flat_idx)?;
             menu.append(&sub).map_err(|err| format!("append submenu `{}`: {err}", sec.menu_key))?;
+        }
+        if !window_inserted {
+            let win_sub = build_macos_window_submenu(locale)?;
+            menu.append(&win_sub).map_err(|err| format!("append Window submenu: {err}"))?;
         }
 
         self.live_menu = Some(menu);
@@ -554,28 +576,64 @@ impl MacNativeMenuHost {
 }
 
 #[cfg(target_os = "macos")]
-fn append_muda_nodes(
+fn build_macos_window_submenu(locale: &str) -> Result<muda::Submenu, String> {
+    muda::Submenu::with_id_and_items(
+        muda::MenuId::new("menu.window"),
+        localized_window_submenu_title(locale),
+        true,
+        &[
+            &muda::PredefinedMenuItem::minimize(None),
+            &muda::PredefinedMenuItem::maximize(None),
+            &muda::PredefinedMenuItem::fullscreen(None),
+            &muda::PredefinedMenuItem::separator(),
+            &muda::PredefinedMenuItem::bring_all_to_front(None),
+        ],
+    )
+    .map_err(|err| format!("build macOS Window submenu: {err}"))
+}
+
+#[cfg(target_os = "macos")]
+fn append_muda_nodes_filtered(
     parent: &muda::Submenu,
     nodes: &[MudaMenuNodeSpec],
     next_items: &mut Vec<(usize, muda::MenuItem)>,
     next_variants: &mut Vec<(String, muda::MenuItem)>,
     flat_idx: &mut usize,
 ) -> Result<(), String> {
+    let mut pending_separator = false;
+    let mut emitted_any = false;
+
     for node in nodes {
         match node {
             MudaMenuNodeSpec::Separator => {
-                parent.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
+                if emitted_any {
+                    pending_separator = true;
+                }
             }
             MudaMenuNodeSpec::Submenu { id: _, title, children } => {
+                if pending_separator {
+                    parent.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
+                    pending_separator = false;
+                }
                 let nested = muda::Submenu::new(title, true);
-                append_muda_nodes(&nested, children, next_items, next_variants, flat_idx)?;
+                append_muda_nodes_filtered(&nested, children, next_items, next_variants, flat_idx)?;
                 parent.append(&nested).map_err(|err| format!("append nested submenu `{title}`: {err}"))?;
+                emitted_any = true;
             }
             MudaMenuNodeSpec::Action(item) => {
+                let current_idx = *flat_idx;
+                *flat_idx += 1;
+                if MACOS_APP_SUBMENU_OWNED_COMMANDS.contains(&item.command_id.as_str()) {
+                    continue;
+                }
+                if pending_separator {
+                    parent.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
+                    pending_separator = false;
+                }
                 if item.variants.is_empty() {
                     let entry = muda::MenuItem::with_id(item.menu_id.clone(), &item.label, item.enabled, item.accelerator);
                     parent.append(&entry).map_err(|err| format!("append menu item `{}`: {err}", item.command_id))?;
-                    next_items.push((*flat_idx, entry));
+                    next_items.push((current_idx, entry));
                 } else {
                     let nested = muda::Submenu::new(&item.label, true);
                     for (v_label, v_cmd) in &item.variants {
@@ -587,7 +645,7 @@ fn append_muda_nodes(
                     }
                     parent.append(&nested).map_err(|err| format!("append submenu `{}`: {err}", item.command_id))?;
                 }
-                *flat_idx += 1;
+                emitted_any = true;
             }
         }
     }
@@ -747,5 +805,65 @@ mod tests {
         let mut broken_label = entries;
         broken_label[0].items[0].label = String::from("Other");
         assert!(verify_menu_parity(&chrome, &broken_label).is_err());
+    }
+
+    #[test]
+    fn r20_22_macos_window_menu_dot_free_settings_and_app_menu_dedup() -> Result<(), String> {
+        use crate::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
+        use curvebook_ui_egui::i18n::LOCALES;
+        use curvebook_ui_egui::interaction::ViewportMetrics;
+
+        assert_eq!(MACOS_WINDOW_SUBMENU_ITEMS, ["Minimize", "Zoom", "Enter Full Screen", "Bring All to Front"]);
+        for &loc in LOCALES {
+            let (_about, prefs, quit) = localized_app_submenu_labels(loc);
+            assert!(!prefs.contains("...") && !prefs.contains('…') && !prefs.contains("Preferences"), "`{loc}` prefs=`{prefs}`");
+            assert!(!quit.is_empty());
+            assert!(!localized_window_submenu_title(loc).is_empty());
+        }
+        assert_eq!(localized_app_submenu_labels("en").1, "Settings");
+        assert_eq!(localized_window_submenu_title("en"), "Window");
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut rt_native =
+                DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: false, recovery_root: None, ..DesktopHostConfig::default() });
+            let wid_native = rt_native.open_window(None, ViewportMetrics::default())?;
+            rt_native.window_mut(wid_native)?.app_mut().host_draws_menu_bar = true;
+            let chrome_native = rt_native.window(wid_native)?.chrome_state();
+            let mut mac_host = MacNativeMenuHost::new();
+            mac_host.sync_from_chrome(&chrome_native)?;
+            let section_keys: Vec<&str> = mac_host.muda_section_specs().iter().map(|s| s.menu_key.as_str()).collect();
+            assert_eq!(section_keys, ["menu.file", "menu.edit", "menu.view", "menu.insert", "menu.data", "menu.analyze", "menu.graph", "menu.help"]);
+            for forbidden in ["app.about", "app.preferences", "app.quit"] {
+                assert!(
+                    !mac_host.muda_section_specs().iter().flat_map(|s| s.items.iter()).any(|i| i.command_id == forbidden),
+                    "macOS top-level menu bar must not duplicate `{forbidden}`"
+                );
+            }
+            for item in mac_host.muda_section_specs().iter().flat_map(|s| s.items.iter()) {
+                assert!(
+                    !item.label.ends_with("...") && !item.label.ends_with('…'),
+                    "R20.15 violation on macOS menu `{}`: `{}`",
+                    item.command_id,
+                    item.label
+                );
+            }
+
+            let mut rt_in_win =
+                DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: true, recovery_root: None, ..DesktopHostConfig::default() });
+            let wid_in_win = rt_in_win.open_window(None, ViewportMetrics::default())?;
+            rt_in_win.window_mut(wid_in_win)?.app_mut().host_draws_menu_bar = false;
+            let chrome_in_win = rt_in_win.window(wid_in_win)?.chrome_state();
+            let in_win_entries = collect_menu_parity_entries(&chrome_in_win);
+            assert!(in_win_entries.iter().find(|s| s.menu_key == "menu.file").is_some_and(|s| s.items.iter().any(|i| i.command_id == "app.quit")));
+            assert!(
+                in_win_entries
+                    .iter()
+                    .find(|s| s.menu_key == "menu.edit")
+                    .is_some_and(|s| s.items.iter().any(|i| i.command_id == "app.preferences" && i.label == "Settings" && i.shortcut == "Cmd+,"))
+            );
+            assert!(in_win_entries.iter().find(|s| s.menu_key == "menu.help").is_some_and(|s| s.items.iter().any(|i| i.command_id == "app.about")));
+        }
+        Ok(())
     }
 }

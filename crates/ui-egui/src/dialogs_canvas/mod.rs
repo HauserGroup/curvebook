@@ -20,7 +20,7 @@ mod workspace_dialogs;
 mod tests;
 
 use curvebook_chart::{ChartScene, PreflightIssue};
-use curvebook_doc::{CanvasResizeMode, FigureCanvasPreset, GraphKind, ProjectDocument, SheetId};
+use curvebook_doc::{AnalysisSpec, CanvasResizeMode, FigureCanvasPreset, GraphKind, ProjectDocument, SheetId};
 use curvebook_engine::{EngineError, Session};
 use curvebook_tools::{CanvasToolState, GridCellCoord, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
@@ -148,7 +148,6 @@ pub enum ActiveDialog {
     CommandPalette,
     Checkpoints,
     About,
-    Feedback,
     ImportWarnings,
     ImportProjectMode {
         command_id: String,
@@ -264,8 +263,6 @@ pub struct CanvasDialogState {
     #[serde(default)]
     pub insert_model_equation: InsertModelEquationDialogState,
     #[serde(default)]
-    pub feedback: crate::feedback::FeedbackDraft,
-    #[serde(default)]
     pub create_graph: CreateGraphDialogState,
     #[serde(default)]
     pub equalize_scaling: EqualizeScalingDialogState,
@@ -320,7 +317,6 @@ impl Default for CanvasDialogState {
             random_sample_rows: RandomSampleRowsDialogState::default(),
             simulate_distributions: SimulateDistributionsDialogState::default(),
             insert_model_equation: InsertModelEquationDialogState::default(),
-            feedback: crate::feedback::FeedbackDraft::default(),
             create_graph: CreateGraphDialogState::default(),
             equalize_scaling: EqualizeScalingDialogState::default(),
             format_embedded_table: FormatEmbeddedTableDialogState::default(),
@@ -588,6 +584,38 @@ impl CanvasDialogState {
         }
         self.active_dialog = ActiveDialog::EditAnalysisParameters { result_sheet_id: rs.id.clone() };
         true
+    }
+
+    /// Stage an uncommitted first-run analysis in `EditAnalysisParameters` (`R20.20` item #4).
+    ///
+    /// Returns the transient non-colliding draft `SheetId` used as the modal session identifier.
+    pub fn open_edit_parameters_for_create(
+        &mut self,
+        doc: &ProjectDocument,
+        mut spec: AnalysisSpec,
+        pending_extract: Option<(SheetId, String)>,
+    ) -> SheetId {
+        let draft_id = if doc.sheet_section(&spec.id).is_none() {
+            spec.id.clone()
+        } else {
+            let mut n = 2_usize;
+            loop {
+                let candidate_str = format!("pending-nonlinear-fit-{n}");
+                if let Ok(cand) = SheetId::try_new(&candidate_str)
+                    && doc.sheet_section(&cand).is_none()
+                {
+                    break cand;
+                }
+                n += 1;
+            }
+        };
+        spec.id = draft_id.clone();
+        if let curvebook_doc::AnalysisKind::PowerAnalysis(ref pa) = spec.kind {
+            self.power_wizard.sync_from_doc_spec(pa);
+        }
+        self.edit_params.open_for_pending_create(spec, pending_extract);
+        self.active_dialog = ActiveDialog::EditAnalysisParameters { result_sheet_id: draft_id.clone() };
+        draft_id
     }
 
     /// Open `Change Data Analyzed` cross-table retargeting for `result_sheet_id`.

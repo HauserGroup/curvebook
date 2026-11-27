@@ -50,7 +50,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "export.svg",
         label: "Export SVG",
-        menu_path: "File/Export/SVG...",
+        menu_path: "File/Export/SVG",
         summary: "Render a graph or layout sheet to scalable vector graphics (SVG) and optionally write it atomically to disk.",
         beginner: "Exports the selected graph or layout as crisp SVG text, optionally saving it to a file path.",
         effects: EXPORT_EFFECTS,
@@ -61,7 +61,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "export.pdf",
         label: "Export PDF",
-        menu_path: "File/Export/PDF...",
+        menu_path: "File/Export/PDF",
         summary: "Render one or more graph or layout sheets to publication PDF (sRGB, print CMYK, or grayscale) and optionally write it atomically to disk.",
         beginner: "Creates a single-page or multi-page vector PDF from one or more graphs and layouts.",
         effects: EXPORT_EFFECTS,
@@ -72,7 +72,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "export.png",
         label: "Export PNG",
-        menu_path: "File/Export/PNG...",
+        menu_path: "File/Export/PNG",
         summary: "Rasterize a graph or layout sheet to a PNG image at the requested pixel dimensions or DPI.",
         beginner: "Renders a graph or layout to a high-DPI PNG image, returning base64 bytes and optionally saving to disk.",
         effects: EXPORT_EFFECTS,
@@ -83,7 +83,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "export.tiff",
         label: "Export TIFF",
-        menu_path: "File/Export/TIFF...",
+        menu_path: "File/Export/TIFF",
         summary: "Rasterize a graph or layout sheet to a TIFF image with selectable compression (`none`, `lzw`, `deflate`).",
         beginner: "Renders a publication TIFF image at custom DPI or resolution with lossless compression.",
         effects: EXPORT_EFFECTS,
@@ -127,7 +127,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.exportEmf",
         label: "Export Graph EMF",
-        menu_path: "File/Export/Graph EMF...",
+        menu_path: "File/Export/Graph EMF",
         summary: "Export a graph sheet as a Windows Enhanced Metafile (EMF) vector graphic.",
         beginner: "Exports a graph sheet to EMF for insertion into Office documents.",
         effects: EXPORT_EFFECTS,
@@ -138,7 +138,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.exportEmf",
         label: "Export Layout EMF",
-        menu_path: "File/Export/Layout EMF...",
+        menu_path: "File/Export/Layout EMF",
         summary: "Export a multi-panel layout sheet as a Windows Enhanced Metafile (EMF) vector graphic.",
         beginner: "Exports a multi-panel layout sheet to EMF for insertion into Office documents.",
         effects: EXPORT_EFFECTS,

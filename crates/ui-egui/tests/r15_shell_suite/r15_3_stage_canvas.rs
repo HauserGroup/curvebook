@@ -581,6 +581,9 @@ fn info_sheet_38_62_split_hook_badges_inline_edit_and_formatted_notes() -> BoxRe
     driver.click_widget_id("info.notes.save")?;
     assert!(driver.state().app.document().info_sheet(&SheetId::new("info-1")).unwrap().notes_markdown.contains("**bold**"));
 
+    let hook_node = driver.frame_meta().find_by_widget_id("info.hook_badge.0").ok_or("missing info.hook_badge.0")?;
+    assert_eq!(hook_node.role, "link");
+    assert!(hook_node.unclipped_rect.height() >= 24.0);
     driver.click_widget_id("info.hook_badge.0")?;
     assert_ne!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("info-1"));
     Ok(())
@@ -797,7 +800,9 @@ fn canvas_view_async_raster_hover_pairwise_cld_km_tex_layout_drilldown() -> BoxR
     driver.click_at(screen_pt)?;
     assert_eq!(driver.state().app.brushed_cell.as_ref().map(|c| c.row), Some(first_pt.source_cell.row));
 
-    assert!(driver.frame_meta().find_by_widget_id("canvas.pairwise_cld_recommend").is_some());
+    let cld_node = driver.frame_meta().find_by_widget_id("canvas.pairwise_cld_recommend").ok_or("missing canvas.pairwise_cld_recommend")?;
+    assert_eq!(cld_node.role, "link");
+    assert!(cld_node.unclipped_rect.height() >= 24.0);
     driver.click_widget_id("canvas.pairwise_cld_recommend")?;
     assert!(driver.state().app.document().graph_sheet(&SheetId::new("g-1")).unwrap().spec.compact_letter_display.is_some());
 
@@ -1006,7 +1011,14 @@ fn result_sheet_wide_tabs_many_sections_and_clipped_columns_pass_parity() -> Box
         assert_clean_parity(&driver, &format!("result sheet {vp:?}"))?;
         for entry in &driver.frame_meta().entries {
             if entry.widget_id.starts_with("result.tab.") && !entry.widget_id.starts_with("result.tab.overflow.") {
-                assert!(entry.clipped_rect.width() <= 140.0);
+                let is_active = entry.value.as_ref().and_then(|v| v.get("selected")).and_then(serde_json::Value::as_bool) == Some(true);
+                let max_expected = if is_active { ((vp.logical_width as f32) * 0.55).max(200.0) } else { 205.0_f32 };
+                assert!(
+                    entry.clipped_rect.width() <= max_expected,
+                    "tab {} width {} exceeded content cap {max_expected}",
+                    entry.widget_id,
+                    entry.clipped_rect.width()
+                );
             }
         }
         if driver.frame_meta().find_by_widget_id("result.tabs.overflow").is_some_and(|e| e.enabled) {
@@ -1057,7 +1069,7 @@ fn da_05_06_result_tabs_overflow_escape_disabled_reset_and_scroll() -> BoxRes {
 
     driver.click_widget_id("result.tabs.overflow")?;
     assert!(driver.state().views.results_view.tab_overflow_open);
-    driver.state_mut().app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
+    driver.state_mut().app.canvas_dialogs.active_dialog = ActiveDialog::About;
     driver.run_settled();
     assert!(!driver.state().views.results_view.tab_overflow_open);
     driver.state_mut().app.canvas_dialogs.active_dialog = ActiveDialog::None;
@@ -1092,7 +1104,7 @@ fn r20_4_fit_zoom_contract_and_wcag_258_spacing_equivalent_verification() -> Box
     driver.click_widget_id("status.zoom.fit")?;
     assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active);
 
-    driver.click_widget_id("nav.chip.layouts")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.layouts")?;
     driver.click_widget_id("nav.sheet.lay-1")?;
     assert!(driver.state().app.egui_views.canvas_view.fit_zoom_active);
     for wid in ["inspector.layout.panel.width_pt", "inspector.layout.panel.height_pt"] {
@@ -1100,7 +1112,8 @@ fn r20_4_fit_zoom_contract_and_wcag_258_spacing_equivalent_verification() -> Box
         assert!(r.width() >= 24.0 && r.height() >= 24.0, "{wid}: {r:?}");
     }
 
-    for wid in ["nav.chip.all", "nav.sheet.col-1", "toolbar.split", "toolbar.split.preset.data_graph"] {
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.all")?;
+    for wid in ["nav.sheet.col-1", "toolbar.split", "toolbar.split.preset.data_graph"] {
         driver.click_widget_id(wid)?;
     }
     let meta = driver.frame_meta();
@@ -1308,7 +1321,7 @@ fn aud_08_09_13_canvas_rulers_equation_tex_find_bar_and_split_results() -> BoxRe
             && find_matches_in_result_sheet(&rs, 1, false, "NaN", false, false).is_empty()
     );
     assert_eq!(
-        find_matches_in_result_sheet(&rs, 1, false, "??? (ambiguous)", false, true),
+        find_matches_in_result_sheet(&rs, 1, false, "Not bounded", false, true),
         vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 1 }]
     );
     assert_eq!(find_matches_in_result_sheet(&rs, 1, false, "Mean", true, true), vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 0, col_idx: 0 }]);
@@ -1316,7 +1329,7 @@ fn aud_08_09_13_canvas_rulers_equation_tex_find_bar_and_split_results() -> BoxRe
         find_matches_in_result_sheet_cached(1, &rs, 1, false, "12.3", false, true),
         vec![ResultSheetFindMatch { tab_idx: 1, row_idx: 1, col_idx: 1 }]
     );
-    assert_eq!(format_result_cell_display_text(&rs.tabs[1].rows[0][1], &rs, &rs.tabs[1]), "??? (ambiguous)");
+    assert_eq!(format_result_cell_display_text(&rs.tabs[1].rows[0][1], &rs, &rs.tabs[1]), "Not bounded");
 
     let sec = ResultTab {
         id: "sec".into(),
@@ -1482,4 +1495,1331 @@ fn aud_08_09_13_canvas_rulers_equation_tex_find_bar_and_split_results() -> BoxRe
     })?;
     assert!(views.sheet_find.last_match_count == 1 && views.column_grid.active_find_matches.is_some());
     Ok(())
+}
+
+struct SplitShortcutTarget<'a> {
+    pane_wid: &'a str,
+    focused_slot: SplitPaneSlot,
+    focused_sid: &'a str,
+    other_sid: &'a str,
+    focused_r0: f64,
+    focused_r1: f64,
+    focused_c1: f64,
+    other_r0: f64,
+    other_r1: f64,
+    other_c1: f64,
+}
+
+fn click_cell_in_pane(drv: &mut EguiHumanPathDriver<'_, ShellTestState>, pane_wid: &str, cell_wid: &str) -> Result<(), String> {
+    let pane_rect = drv.frame_meta().find_by_widget_id(pane_wid).ok_or_else(|| format!("missing split pane `{pane_wid}`"))?.clipped_rect;
+    let cell_pos = drv
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id == cell_wid && pane_rect.contains(e.clipped_rect.center()))
+        .map(|e| e.clipped_rect.center())
+        .ok_or_else(|| format!("missing `{cell_wid}` inside `{pane_wid}`"))?;
+    drv.click_at(cell_pos)
+}
+
+fn read_split_cell(drv: &EguiHumanPathDriver<'_, ShellTestState>, sid: &str, row: usize, col: usize) -> Cell {
+    drv.state().app.document().data_sheet(&SheetId::new(sid)).and_then(|ds| ds.cell(CellCoord::new(row, col, 0))).cloned().unwrap_or_default()
+}
+
+fn verify_split_pane_shortcuts(driver: &mut EguiHumanPathDriver<'_, ShellTestState>, t: &SplitShortcutTarget<'_>) -> BoxRes {
+    use curvebook_doc::CellValue;
+
+    let pane_wid = t.pane_wid;
+    // 1. Delete + single Undo.
+    click_cell_in_pane(driver, pane_wid, "grid.cell.0.0.0")?;
+    assert_eq!(driver.state().views.center_stage.focused_split_pane, t.focused_slot);
+    driver.press_egui_key(Key::Delete, Modifiers::NONE);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Empty, "{pane_wid} Delete must clear focused cell");
+    assert_eq!(read_split_cell(driver, t.other_sid, 0, 0).value, CellValue::Number(t.other_r0), "{pane_wid} Delete must not clear unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Number(t.focused_r0), "{pane_wid} single Undo must restore Delete");
+    assert_eq!(read_split_cell(driver, t.other_sid, 0, 0).value, CellValue::Number(t.other_r0));
+
+    // 2. Backspace + single Undo (cell (0,0,0) remains selected in the focused pane).
+    driver.press_egui_key(Key::Backspace, Modifiers::NONE);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Empty, "{pane_wid} Backspace must clear focused cell");
+    assert_eq!(
+        read_split_cell(driver, t.other_sid, 0, 0).value,
+        CellValue::Number(t.other_r0),
+        "{pane_wid} Backspace must not clear unfocused table"
+    );
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Number(t.focused_r0), "{pane_wid} single Undo must restore Backspace");
+    assert_eq!(read_split_cell(driver, t.other_sid, 0, 0).value, CellValue::Number(t.other_r0));
+
+    // 3. Cut (Cmd+X) + single Undo + Paste (Cmd+V) + single Undo.
+    driver.press_egui_key(Key::X, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Empty, "{pane_wid} Cut must clear focused cell");
+    assert_eq!(read_split_cell(driver, t.other_sid, 0, 0).value, CellValue::Number(t.other_r0), "{pane_wid} Cut must not clear unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Number(t.focused_r0), "{pane_wid} single Undo must restore Cut");
+
+    click_cell_in_pane(driver, pane_wid, "grid.cell.1.0.0")?;
+    driver.press_egui_key(Key::V, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 1, 0).value, CellValue::Number(t.focused_r0), "{pane_wid} Paste must write focused cell");
+    assert_eq!(read_split_cell(driver, t.other_sid, 1, 0).value, CellValue::Number(t.other_r1), "{pane_wid} Paste must not touch unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 1, 0).value, CellValue::Number(t.focused_r1), "{pane_wid} single Undo must restore Paste");
+    assert_eq!(read_split_cell(driver, t.other_sid, 1, 0).value, CellValue::Number(t.other_r1));
+
+    // 4. Exclude (Cmd+E) + single Undo on (0,1,0).
+    click_cell_in_pane(driver, pane_wid, "grid.cell.0.1.0")?;
+    driver.press_egui_key(Key::E, Modifiers::COMMAND);
+    assert!(read_split_cell(driver, t.focused_sid, 0, 1).excluded, "{pane_wid} Cmd+E must exclude focused cell");
+    assert!(!read_split_cell(driver, t.other_sid, 0, 1).excluded, "{pane_wid} Cmd+E must not exclude unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert!(!read_split_cell(driver, t.focused_sid, 0, 1).excluded, "{pane_wid} single Undo must restore Exclude");
+    assert!(!read_split_cell(driver, t.other_sid, 0, 1).excluded);
+
+    // 5. F2 inline edit targets only focused pane; typing + Enter commits only focused table; single Undo restores.
+    driver.press_egui_key(Key::F2, Modifiers::NONE);
+    let primary_open = driver.state().views.column_grid.inline_edit.is_some();
+    let secondary_open = driver.state().views.center_stage.secondary_column_grid.inline_edit.is_some();
+    assert_eq!((primary_open, secondary_open), (t.focused_slot == SplitPaneSlot::Primary, t.focused_slot == SplitPaneSlot::Secondary));
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+    driver.type_text("777")?;
+    driver.press_egui_key(Key::Enter, Modifiers::NONE);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 1).value, CellValue::Number(777.0), "{pane_wid} typing must update focused table");
+    assert_eq!(read_split_cell(driver, t.other_sid, 0, 1).value, CellValue::Number(t.other_c1), "{pane_wid} typing must not update unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 1).value, CellValue::Number(t.focused_c1), "{pane_wid} single Undo must restore typed edit");
+
+    // 6. Arrow navigation + Delete + single Undo.
+    click_cell_in_pane(driver, pane_wid, "grid.cell.0.0.0")?;
+    driver.press_egui_key(Key::ArrowDown, Modifiers::NONE);
+    driver.press_egui_key(Key::Delete, Modifiers::NONE);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 0, 0).value, CellValue::Number(t.focused_r0), "row 0 must stay untouched after ArrowDown");
+    assert_eq!(read_split_cell(driver, t.focused_sid, 1, 0).value, CellValue::Empty, "{pane_wid} ArrowDown+Delete must clear row 1");
+    assert_eq!(read_split_cell(driver, t.other_sid, 1, 0).value, CellValue::Number(t.other_r1), "{pane_wid} must not touch unfocused table");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(read_split_cell(driver, t.focused_sid, 1, 0).value, CellValue::Number(t.focused_r1), "{pane_wid} single Undo must restore row 1");
+    Ok(())
+}
+
+#[test]
+fn r20_19_split_two_table_keyboard_shortcuts_single_recipient_and_single_undo() -> BoxRes {
+    use std::sync::Arc;
+
+    use curvebook_ui_egui::StubPlatformClipboardAdapter;
+
+    let mut doc = ProjectDocument::new("R20.19 Split Two-Table Shortcuts")?;
+    let mut left_tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+    left_tbl.data_sets[0].title = String::from("Left A");
+    left_tbl.data_sets[1].title = String::from("Left B");
+    left_tbl.data_sets[0].cells[0][0] = Cell::number(1.0);
+    left_tbl.data_sets[0].cells[1][0] = Cell::number(11.0);
+    left_tbl.data_sets[1].cells[0][0] = Cell::number(2.0);
+    doc.add_data_sheet(DataSheet::new("tbl-left", "Left Table", TableArchetype::Column(left_tbl))?)?;
+
+    let mut right_tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+    right_tbl.data_sets[0].title = String::from("Right A");
+    right_tbl.data_sets[1].title = String::from("Right B");
+    right_tbl.data_sets[0].cells[0][0] = Cell::number(42.0);
+    right_tbl.data_sets[0].cells[1][0] = Cell::number(84.0);
+    right_tbl.data_sets[1].cells[0][0] = Cell::number(99.0);
+    doc.add_data_sheet(DataSheet::new("tbl-right", "Right Table", TableArchetype::Column(right_tbl))?)?;
+
+    doc.select_in_navigator(&SheetId::new("tbl-left"))?;
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::default()));
+    app.split.enabled = true;
+    app.split.primary_sheet_id = Some(SheetId::new("tbl-left"));
+    app.split.secondary_sheet_id = Some(SheetId::new("tbl-right"));
+    app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+    app.sync_views();
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1440.0, 820.0, 1.0));
+    for target in [
+        SplitShortcutTarget {
+            pane_wid: "center.pane.secondary",
+            focused_slot: SplitPaneSlot::Secondary,
+            focused_sid: "tbl-right",
+            other_sid: "tbl-left",
+            focused_r0: 42.0,
+            focused_r1: 84.0,
+            focused_c1: 99.0,
+            other_r0: 1.0,
+            other_r1: 11.0,
+            other_c1: 2.0,
+        },
+        SplitShortcutTarget {
+            pane_wid: "center.pane.primary",
+            focused_slot: SplitPaneSlot::Primary,
+            focused_sid: "tbl-left",
+            other_sid: "tbl-right",
+            focused_r0: 1.0,
+            focused_r1: 11.0,
+            focused_c1: 2.0,
+            other_r0: 42.0,
+            other_r1: 84.0,
+            other_c1: 99.0,
+        },
+    ] {
+        verify_split_pane_shortcuts(&mut driver, &target)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn r20_19_wf59_layout_panel_size_below_fold_scroll_into_view_and_edit() -> BoxRes {
+    let mut app = make_full_project_app()?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "lay-1" }))?;
+    app.sync_views();
+
+    // At 1440x520 (reproducing WF-59's short viewport where Selected Panel Size sits below the ScrollArea fold),
+    // `inspector.layout.panel.{width_pt,height_pt}` must NOT be recorded with empty/inverted bounds.
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1440.0, 520.0, 1.0));
+    driver.click_widget_id("canvas.layout_panel.0")?;
+
+    for entry in &driver.frame_meta().entries {
+        assert!(
+            entry.clipped_rect.is_positive(),
+            "widget `{}` must never be recorded with empty/inverted clipped bounds: {:?}",
+            entry.widget_id,
+            entry.clipped_rect
+        );
+    }
+    assert!(
+        driver.frame_meta().find_by_widget_id("inspector.layout.panel.width_pt").is_none(),
+        "below-the-fold width_pt spinbutton must not be recorded before scrolling into view"
+    );
+    assert!(
+        driver.frame_meta().find_by_widget_id("inspector.layout.panel.height_pt").is_none(),
+        "below-the-fold height_pt spinbutton must not be recorded before scrolling into view"
+    );
+
+    let dock_rect = driver.state().trailing_rect_pt.ok_or("missing trailing studio rect")?;
+    let scroll_pos = pos2(dock_rect.center().x, dock_rect.top() + 140.0);
+    let mut found_both = false;
+    for _ in 0..8 {
+        if driver.frame_meta().find_by_widget_id("inspector.layout.panel.width_pt").is_some()
+            && driver.frame_meta().find_by_widget_id("inspector.layout.panel.height_pt").is_some()
+        {
+            found_both = true;
+            break;
+        }
+        driver.wheel_at(scroll_pos, egui::vec2(0.0, -180.0))?;
+    }
+    assert!(found_both, "scrolling Trailing Studio must expose both layout panel size spinbuttons");
+
+    let initial_bounds = match &driver.state().app.document().layout_sheet(&SheetId::new("lay-1")).ok_or("missing lay-1")?.spec.items[0] {
+        LayoutItem::LiveGraph { bounds_pt, .. } => *bounds_pt,
+        other => return Err(format!("expected LiveGraph at panel 0, got {other:?}").into()),
+    };
+
+    for wid in ["inspector.layout.panel.width_pt", "inspector.layout.panel.height_pt"] {
+        let r = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("missing `{wid}` after scroll"))?.clipped_rect;
+        assert!(r.is_positive() && r.width() >= 24.0 && r.height() >= 20.0, "scrolled `{wid}` must have actionable bounds: {r:?}");
+    }
+
+    // Apply edits to both scrolled-into-view DragValues via click + type + Enter and verify LayoutSpec updates.
+    let w_pos = widget_center(&driver, "inspector.layout.panel.width_pt")?;
+    driver.click_at(w_pos)?;
+    driver.press_egui_key(Key::A, Modifiers::COMMAND);
+    driver.type_text("265")?;
+    driver.press_egui_key(Key::Enter, Modifiers::NONE);
+
+    let h_pos = widget_center(&driver, "inspector.layout.panel.height_pt")?;
+    driver.click_at(h_pos)?;
+    driver.press_egui_key(Key::A, Modifiers::COMMAND);
+    driver.type_text("195")?;
+    driver.press_egui_key(Key::Enter, Modifiers::NONE);
+
+    let edited_bounds = match &driver.state().app.document().layout_sheet(&SheetId::new("lay-1")).ok_or("missing lay-1")?.spec.items[0] {
+        LayoutItem::LiveGraph { bounds_pt, .. } => *bounds_pt,
+        other => return Err(format!("expected LiveGraph at panel 0 after edit, got {other:?}").into()),
+    };
+    assert!(
+        (edited_bounds.width - initial_bounds.width).abs() > 1.0 && (edited_bounds.width - 265.0).abs() < 0.5,
+        "width edit did not apply: {edited_bounds:?}"
+    );
+    assert!(
+        (edited_bounds.height - initial_bounds.height).abs() > 1.0 && (edited_bounds.height - 195.0).abs() < 0.5,
+        "height edit did not apply: {edited_bounds:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn r20_6_and_r20_20_nl_single_banner_compare_horizontal_per_sheet_tabs_and_right_click_copy() -> BoxRes {
+    let mut xy = curvebook_doc::XyTable::new(curvebook_doc::SubcolumnMode::Single, 2, 6)?;
+    xy.data_sets[0].title = String::from("VEHICLE");
+    xy.data_sets[1].title = String::from("DRUG_A");
+    let xs = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0];
+    let y0 = [10.0, 10.2, 9.8, 10.1, 9.9, 10.0];
+    let y1 = [10.0, 12.0, 25.0, 65.0, 92.0, 95.0];
+    for i in 0..xs.len() {
+        xy.x_cells[i][0] = Cell::number(xs[i]);
+        xy.data_sets[0].cells[i][0] = Cell::number(y0[i]);
+        xy.data_sets[1].cells[i][0] = Cell::number(y1[i]);
+    }
+    let mut doc = ProjectDocument::default();
+    doc.data_sheets.push(DataSheet::new("xy-nl", "Sparse DR", TableArchetype::Xy(xy))?);
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.execute_command(
+        "analysis.run",
+        json!({
+            "source_sheet_id": "xy-nl",
+            "sheet_id": "res-nl",
+            "kind": "nonlinear_regression",
+            "equation_id": "log_agonist_vs_response_4pl"
+        }),
+    )
+    .map_err(|e| format!("analysis.run: {e}"))?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "res-nl" })).map_err(|e| format!("sheet.select: {e}"))?;
+    app.nav.welcome.open = false;
+    app.sync_views();
+
+    let mut driver = make_stage_driver(StageHarness::new(app), ViewportMetrics::new(1280.0, 800.0, 1.0), Tokens::default());
+    assert_clean_parity(&driver, "r20_6 nl fit initial")?;
+
+    // R20.6: Exactly ONE warning banner on ambiguous/unstable NL fit, naming failing dataset, zero legacy ambiguity_callout.
+    assert!(driver.frame_meta().find_by_widget_id("result.ambiguity_callout").is_none());
+    let banner = driver.frame_meta().find_by_widget_id("result.diagnostic_banner").ok_or("missing unified result.diagnostic_banner")?;
+    assert!(banner.label.contains("VEHICLE") || banner.label.contains("Ambiguous"), "unexpected NL banner label: {}", banner.label);
+    assert!(!banner.label.contains("???"), "banner must not contain literal ???: {}", banner.label);
+
+    let constraints = driver.frame_meta().find_by_widget_id("result.diagnostic_banner.constraints").ok_or("missing Constraints button")?;
+    let cmp_btn = driver.frame_meta().find_by_widget_id("result.diagnostic_banner.compare_horizontal").ok_or("missing Compare button")?;
+    assert_eq!(constraints.label, "Constraints");
+    assert_eq!(cmp_btn.label, "Compare vs. Horizontal Line");
+
+    // R20.6: Clicking Compare vs. Horizontal Line invokes R19.7 service & opens comparison readout.
+    driver.click_widget_id("result.diagnostic_banner.compare_horizontal")?;
+    assert_clean_parity(&driver, "r20_6 compare horizontal readout")?;
+    assert!(
+        driver.frame_meta().find_by_widget_id("result.diagnostic_banner.compare_horizontal.summary").is_some(),
+        "expected horizontal-line comparison summary popup"
+    );
+    driver.click_widget_id("result.diagnostic_banner.compare_horizontal.close")?;
+
+    // R20.20 #3: Select range at row 0..=1, then right-click cell (2, 0) OUTSIDE range -> Copy Selection copies only (2, 0).
+    let tab0 = &driver.state().app.document().result_sheet(&SheetId::new("res-nl")).ok_or("missing res-nl")?.tabs[0];
+    let expected_2_0 = curvebook_ui_egui::egui_shell::results_view::format_result_cell_display_text(
+        &tab0.rows[2][0],
+        driver.state().app.document().result_sheet(&SheetId::new("res-nl")).unwrap(),
+        tab0,
+    );
+    driver.click_widget_id("result.cell.0.0")?;
+    let p_2_0 = widget_center(&driver, "result.cell.2.0")?;
+    driver.click_at_button(
+        p_2_0,
+        curvebook_ui_egui::interaction::PointerButton::Secondary,
+        curvebook_ui_egui::interaction::KeyModifiers::default(),
+    )?;
+    driver.click_widget_id("result.ctx.copy_selection")?;
+    assert_eq!(driver.state().app.canvas_dialogs.result_view.last_copied_tsv.as_deref(), Some(expected_2_0.as_str()));
+
+    // R20.20 #2: Sheet-scoped SelectResultTab updates target sheet independently without clobbering unrelated active sheet.
+    let mut intents = PendingUiIntents::new();
+    let other_id = SheetId::new("res-nl");
+    intents.push(curvebook_ui_egui::egui_shell::UiIntent::SelectResultTab { index: 1, sheet_id: Some(other_id.clone()) });
+    driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "xy-nl" }))?;
+    let batch = intents.commit_all_if_settled(&mut driver.state_mut().app, false);
+    assert!(batch.results.iter().all(Result::is_ok));
+    assert_eq!(driver.state().app.egui_views.results_view.per_sheet_active_tab.get(&other_id), Some(&1));
+
+    // Clicking Constraints opens EditAnalysisParameters dialog.
+    driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "res-nl" }))?;
+    driver.state_mut().app.sync_views();
+    driver.run_settled();
+    driver.click_widget_id("result.diagnostic_banner.constraints")?;
+    assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
+    Ok(())
+}
+
+fn collect_shell_shapes(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<egui::Shape>) {
+    fn push_sh(sh: &egui::Shape, out: &mut Vec<egui::Shape>) {
+        match sh {
+            egui::Shape::Vec(children) => {
+                for ch in children {
+                    push_sh(ch, out);
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    for cs in shapes {
+        push_sh(&cs.shape, out);
+    }
+}
+
+fn run_shell_raw_frame(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    size: egui::Vec2,
+    events: Vec<egui::Event>,
+    t: f64,
+) -> (Vec<egui::Shape>, curvebook_ui_egui::egui_shell::FrameInspectMeta, Option<std::time::Duration>) {
+    let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+    tokens.apply_to_ctx(ctx);
+    ctx.all_styles_mut(|style| {
+        style.visuals.text_cursor.blink = false;
+        style.scroll_animation = egui::style::ScrollAnimation::none();
+        style.animation_time = 0.0;
+    });
+    let mut raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        time: Some(t),
+        predicted_dt: 1.0 / 60.0,
+        focused: true,
+        events,
+        ..Default::default()
+    };
+    raw.viewports.entry(egui::ViewportId::ROOT).and_modify(|vp| vp.native_pixels_per_point = Some(1.0));
+    let mut meta = curvebook_ui_egui::egui_shell::FrameInspectMeta::new();
+    let mut views = app.egui_views.clone();
+    let mut intents = PendingUiIntents::new();
+    let output = ctx.run_ui(raw, |ui| {
+        let _ = curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame(ui, app, &mut views, &mut meta, &mut intents);
+    });
+    let will_discard = ctx.will_discard();
+    app.egui_views = views;
+    if !will_discard {
+        let _ = intents.commit_all_if_settled(app, false);
+    }
+    let mut shapes = Vec::new();
+    collect_shell_shapes(&output.shapes, &mut shapes);
+    let repaint_delay = output.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+    output.drop_without_applying_deltas();
+    (shapes, meta, repaint_delay)
+}
+
+fn settle_shell_raw_frames(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    size: egui::Vec2,
+    t0: f64,
+) -> (Vec<egui::Shape>, curvebook_ui_egui::egui_shell::FrameInspectMeta) {
+    let mut last = run_shell_raw_frame(ctx, app, size, Vec::new(), t0);
+    for step in 1..6 {
+        if !last.1.entries.is_empty() && last.2 != Some(std::time::Duration::ZERO) {
+            break;
+        }
+        last = run_shell_raw_frame(ctx, app, size, Vec::new(), t0 + f64::from(step) * 0.016);
+    }
+    (last.0, last.1)
+}
+
+fn find_widget_in_pane(meta: &curvebook_ui_egui::egui_shell::FrameInspectMeta, pane_wid: &str, widget_id: &str) -> Option<egui::Rect> {
+    let pane_rect = meta.find_by_widget_id(pane_wid)?.clipped_rect;
+    meta.entries.iter().find(|e| e.widget_id == widget_id && pane_rect.contains(e.clipped_rect.center())).map(|e| e.clipped_rect)
+}
+
+#[test]
+fn r20_11_split_data_and_results_focus_and_unemphasized_colors_on_click_f6_and_high_contrast() -> BoxRes {
+    use curvebook_ui_egui::UiThemeMode;
+
+    for mode in [UiThemeMode::Light, UiThemeMode::Dark, UiThemeMode::HighContrast] {
+        let mut app = make_full_project_app()?;
+        app.set_theme_mode(mode);
+        app.execute_command("sheet.select", json!({ "sheet_id": "col-1" }))?;
+        app.nav.welcome.open = false;
+        app.split.enabled = true;
+        app.split.primary_sheet_id = Some(SheetId::new("col-1"));
+        app.split.secondary_sheet_id = Some(SheetId::new("res-1"));
+        app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+        app.sync_views();
+
+        let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(build_driver_font_definitions());
+        let vp = egui::vec2(1360.0, 800.0);
+
+        let (_, meta0) = settle_shell_raw_frames(&ctx, &mut app, vp, 0.05);
+        let data_cell_rect = find_widget_in_pane(&meta0, "center.pane.primary", "grid.cell.1.0.0").ok_or("missing primary grid.cell.1.0.0")?;
+        let res_cell_rect = find_widget_in_pane(&meta0, "center.pane.secondary", "result.cell.1.0").ok_or("missing secondary result.cell.1.0")?;
+
+        // 1. Click Data cell in Primary -> Primary emphasized (active_bg + focus_ring), active_sheet_id = col-1.
+        let _ = run_shell_raw_frame(
+            &ctx,
+            &mut app,
+            vp,
+            vec![
+                egui::Event::PointerMoved(data_cell_rect.center()),
+                egui::Event::PointerButton {
+                    pos: data_cell_rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: data_cell_rect.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            0.12,
+        );
+        let (shapes1, meta1) = settle_shell_raw_frames(&ctx, &mut app, vp, 0.14);
+        assert_eq!(app.egui_views.center_stage.focused_split_pane, SplitPaneSlot::Primary);
+        assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+        let prim_rect = meta1.find_by_widget_id("center.pane.primary").unwrap().clipped_rect;
+        let sec_rect = meta1.find_by_widget_id("center.pane.secondary").unwrap().clipped_rect;
+        assert!(shapes1.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == tokens.active_bg && prim_rect.contains(r.rect.center()))));
+        assert!(shapes1.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.color == tokens.focus_ring && (r.stroke.width - 2.0).abs() < 0.05 && prim_rect.contains(r.rect.center()))));
+
+        // 2. Click Results cell in Secondary -> Secondary emphasized, Primary Data switches to selection_unemphasized_bg (no focus_ring!).
+        let res_cell_rect2 = find_widget_in_pane(&meta1, "center.pane.secondary", "result.cell.1.0").ok_or("missing secondary result.cell.1.0")?;
+        let _ = run_shell_raw_frame(
+            &ctx,
+            &mut app,
+            vp,
+            vec![
+                egui::Event::PointerMoved(res_cell_rect2.center()),
+                egui::Event::PointerButton {
+                    pos: res_cell_rect2.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: res_cell_rect2.center(),
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            0.18,
+        );
+        let (shapes2, meta2) = settle_shell_raw_frames(&ctx, &mut app, vp, 0.20);
+        assert_eq!(app.egui_views.center_stage.focused_split_pane, SplitPaneSlot::Secondary);
+        assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-1"));
+        let prim_body2 = meta2.find_by_widget_id("center.pane.primary").unwrap().clipped_rect;
+        let sec_body2 = meta2.find_by_widget_id("center.pane.secondary").unwrap().clipped_rect;
+        let data_cell_2 = find_widget_in_pane(&meta2, "center.pane.primary", "grid.cell.1.0.0").unwrap();
+        assert!(
+            shapes2
+                .iter()
+                .any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == tokens.selection_unemphasized_bg && data_cell_2.contains(r.rect.center()))),
+            "{mode:?}: unfocused Primary Data cell must paint selection_unemphasized_bg"
+        );
+        assert!(
+            !shapes2.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.stroke.color == tokens.focus_ring && (r.stroke.width - 2.0).abs() < 0.05 && prim_body2.contains(r.rect.center()))),
+            "{mode:?}: unfocused Primary Data pane must not paint blue focus_ring"
+        );
+        assert!(
+            shapes2.iter().any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == tokens.active_bg && sec_body2.contains(r.rect.center()))),
+            "{mode:?}: focused Secondary Results cell must paint active_bg"
+        );
+
+        // 3. Shift+F6 cycles back to Primary -> doc.active_sheet_id = col-1, Results switches to selection_unemphasized_bg (+ HighContrast dashed!).
+        let _ = run_shell_raw_frame(
+            &ctx,
+            &mut app,
+            vp,
+            vec![egui::Event::Key { key: Key::F6, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::SHIFT }],
+            0.24,
+        );
+        let (shapes3, meta3) = settle_shell_raw_frames(&ctx, &mut app, vp, 0.26);
+        assert_eq!(app.egui_views.center_stage.focused_split_pane, SplitPaneSlot::Primary);
+        assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+        assert_eq!(app.split.effective_inspector_target(app.document()).map(SheetId::as_str), Some("col-1"));
+        let res_cell_3 = find_widget_in_pane(&meta3, "center.pane.secondary", "result.cell.1.0").unwrap();
+        assert!(
+            shapes3
+                .iter()
+                .any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == tokens.selection_unemphasized_bg && res_cell_3.contains(r.rect.center()))),
+            "{mode:?}: unfocused Secondary Results cell must paint selection_unemphasized_bg"
+        );
+        if mode == UiThemeMode::HighContrast {
+            let hc_dashed_res = shapes3
+                .iter()
+                .filter(|s| matches!(s, egui::Shape::LineSegment { points, stroke } if stroke.color == tokens.border && (stroke.width - 1.0).abs() < 0.05 && res_cell_3.expand(2.0).contains(points[0])))
+                .count();
+            assert!(hc_dashed_res >= 4, "HighContrast unfocused Results cell must draw dashed border, got {hc_dashed_res}");
+        }
+
+        // 4. F6 cycles to Secondary -> doc.active_sheet_id = res-1, Inspector targets res-1, Primary Data shows unemphasized (+ HighContrast dashed!).
+        let _ = run_shell_raw_frame(
+            &ctx,
+            &mut app,
+            vp,
+            vec![egui::Event::Key { key: Key::F6, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE }],
+            0.30,
+        );
+        let (shapes4, meta4) = settle_shell_raw_frames(&ctx, &mut app, vp, 0.32);
+        assert_eq!(app.egui_views.center_stage.focused_split_pane, SplitPaneSlot::Secondary);
+        assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-1"));
+        assert_eq!(app.split.effective_inspector_target(app.document()).map(SheetId::as_str), Some("res-1"));
+        let data_cell_4 = find_widget_in_pane(&meta4, "center.pane.primary", "grid.cell.1.0.0").unwrap();
+        assert!(
+            shapes4
+                .iter()
+                .any(|s| matches!(s, egui::Shape::Rect(r) if r.fill == tokens.selection_unemphasized_bg && data_cell_4.contains(r.rect.center())))
+        );
+        if mode == UiThemeMode::HighContrast {
+            let hc_dashed_data = shapes4
+                .iter()
+                .filter(|s| matches!(s, egui::Shape::LineSegment { points, stroke } if stroke.color == tokens.border && (stroke.width - 1.0).abs() < 0.05 && data_cell_4.expand(2.0).contains(points[0])))
+                .count();
+            assert!(hc_dashed_data >= 4, "HighContrast unfocused Data cell must draw dashed border, got {hc_dashed_data}");
+        }
+        let _ = (res_cell_rect, sec_rect);
+    }
+    Ok(())
+}
+
+#[test]
+fn r20_11_header_coordinate_ownership_results_omission_and_graph_brush_pill() -> BoxRes {
+    let mut app = make_full_project_app()?;
+    let other_ds = make_column_sheet("col-other", "Unlinked Table", 2, 4)?;
+    {
+        let mut doc = app.document().clone();
+        doc.add_data_sheet(other_ds)?;
+        doc.select_in_navigator(&SheetId::new("col-1"))?;
+        *app.session_mut() = Session::from_document(doc);
+    }
+    app.nav.welcome.open = false;
+    app.split.enabled = true;
+    app.split.primary_sheet_id = Some(SheetId::new("col-1"));
+    app.split.secondary_sheet_id = Some(SheetId::new("res-1"));
+    app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+    app.sync_views();
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1360.0, 800.0, 1.0));
+    // 1. Data || Results: DataSheet owns its R{r}C{c} coordinate; ResultSheet header NEVER displays DataSheet/brushed coords.
+    click_cell_in_pane(&mut driver, "center.pane.primary", "grid.cell.2.1.0")?;
+    let coord_p = driver.frame_meta().find_by_widget_id("split.header.coord.primary").ok_or("missing DataSheet primary header coord")?;
+    assert_eq!(coord_p.label, "R3C2");
+    assert!(driver.frame_meta().find_by_widget_id("split.header.coord.secondary").is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.header.brush.secondary").is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.clear_brush").is_none());
+
+    driver.press_egui_key(Key::F6, Modifiers::NONE);
+    assert_eq!(driver.state().views.center_stage.focused_split_pane, SplitPaneSlot::Secondary);
+    let coord_p_unfocused =
+        driver.frame_meta().find_by_widget_id("split.header.coord.primary").ok_or("DataSheet header coord must stay on DataSheet")?;
+    assert_eq!(coord_p_unfocused.label, "R3C2");
+    assert!(driver.frame_meta().find_by_widget_id("split.header.coord.secondary").is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.header.brush.secondary").is_none());
+
+    // 2. Linked Data || Graph (`col-1` -> `g-1`): Graph header displays `Brushed: R{r}C{c}` + `split.clear_brush` `×`.
+    driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "col-1" }))?;
+    driver.state_mut().app.split.secondary_sheet_id = Some(SheetId::new("g-1"));
+    driver.state_mut().app.sync_views();
+    driver.run_settled();
+
+    click_cell_in_pane(&mut driver, "center.pane.primary", "grid.cell.1.1.0")?;
+    assert_eq!(driver.frame_meta().find_by_widget_id("split.header.coord.primary").ok_or("missing primary coord")?.label, "R2C2");
+    let brush_pill = driver.frame_meta().find_by_widget_id("split.header.brush.secondary").ok_or("missing linked Graph brushed pill")?;
+    assert_eq!(brush_pill.label, "Brushed: R2C2");
+    assert!(driver.frame_meta().find_by_widget_id("split.clear_brush").is_some());
+
+    driver.click_widget_id("split.clear_brush")?;
+    assert!(driver.state().app.brushed_cell.is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.header.brush.secondary").is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.clear_brush").is_none());
+
+    // 3. Unlinked Data || Graph (`col-other` not in `doc.upstream_dependencies("g-1")`): Graph header must NOT show `Brushed:`.
+    driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "col-other" }))?;
+    driver.state_mut().app.split.primary_sheet_id = Some(SheetId::new("col-other"));
+    driver.state_mut().app.sync_views();
+    driver.run_settled();
+    click_cell_in_pane(&mut driver, "center.pane.primary", "grid.cell.0.0.0")?;
+    assert_eq!(driver.frame_meta().find_by_widget_id("split.header.coord.primary").ok_or("missing col-other coord")?.label, "R1C1");
+    assert!(driver.frame_meta().find_by_widget_id("split.header.brush.secondary").is_none());
+    assert!(driver.frame_meta().find_by_widget_id("split.clear_brush").is_none());
+    Ok(())
+}
+
+#[test]
+fn r20_20_compact_split_f6_and_shift_f6_landmark_traversal() -> BoxRes {
+    let mut app = make_full_project_app()?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "col-1" }))?;
+    app.nav.welcome.open = false;
+    app.nav.navigator_open = true;
+    app.nav.inspector_open = true;
+    app.split.enabled = true;
+    app.split.primary_sheet_id = Some(SheetId::new("col-1"));
+    app.split.secondary_sheet_id = Some(SheetId::new("g-1"));
+    app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+    app.sync_views();
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(640.0, 420.0, 1.0));
+    assert!(
+        driver.frame_meta().find_by_widget_id("split.compact.primary").is_some()
+            && driver.frame_meta().find_by_widget_id("split.compact.secondary").is_some(),
+        "640x420 must render CompactSinglePane split header"
+    );
+
+    // Forward F6 must leave CenterStage immediately without stalling and traverse all visible landmarks back to MainCanvasOrGrid.
+    let expected_order = driver.state().app.visible_workspace_panes();
+    assert!(expected_order.len() >= 3);
+    let mut visited_fwd = Vec::new();
+    for _ in 0..expected_order.len() {
+        let prev = driver.state().app.nav.active_pane;
+        driver.press_egui_key(Key::F6, Modifiers::NONE);
+        let next = driver.state().app.nav.active_pane;
+        assert_ne!(next, prev, "compact split F6 stalled on {prev:?}");
+        visited_fwd.push(next);
+        assert_eq!(driver.state().app.split.primary_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+        assert_eq!(driver.state().app.split.secondary_sheet_id.as_ref().map(SheetId::as_str), Some("g-1"));
+        assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+    }
+    for pane in &expected_order {
+        assert!(visited_fwd.contains(pane), "compact F6 missed landmark {pane:?}");
+    }
+    assert_eq!(driver.state().app.nav.active_pane, ActiveWorkspacePane::MainCanvasOrGrid);
+
+    // Switch visible compact pane to Secondary (`g-1`) and verify reverse Shift+F6 traverses cleanly without stalling.
+    driver.click_widget_id("split.compact.secondary")?;
+    assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("g-1"));
+    let expected_rev = driver.state().app.visible_workspace_panes();
+    let mut visited_rev = Vec::new();
+    for _ in 0..expected_rev.len() {
+        let prev = driver.state().app.nav.active_pane;
+        driver.press_egui_key(Key::F6, Modifiers::SHIFT);
+        let next = driver.state().app.nav.active_pane;
+        assert_ne!(next, prev, "compact split Shift+F6 stalled on {prev:?}");
+        visited_rev.push(next);
+        assert_eq!(driver.state().app.split.primary_sheet_id.as_ref().map(SheetId::as_str), Some("col-1"));
+        assert_eq!(driver.state().app.split.secondary_sheet_id.as_ref().map(SheetId::as_str), Some("g-1"));
+        assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("g-1"));
+    }
+    for pane in &expected_rev {
+        assert!(visited_rev.contains(pane), "compact Shift+F6 missed landmark {pane:?}");
+    }
+    assert_eq!(driver.state().app.nav.active_pane, ActiveWorkspacePane::MainCanvasOrGrid);
+    Ok(())
+}
+
+#[test]
+fn r20_13_data_results_content_aware_initial_split_ratio_and_manual_drag_preservation() -> BoxRes {
+    let mut doc = ProjectDocument::default();
+    let ds = make_column_sheet("col-wide", "Multi-Group Assay", 6, 8)?;
+    let mut rs_narrow = ResultSheet::new(AnalysisSpec::new("res-narrow", "col-wide", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?)?;
+    rs_narrow.status = ResultStatus::UpToDate;
+    rs_narrow.tabs = vec![
+        ResultTab {
+            id: String::from("summary"),
+            title: String::from("Summary"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Val")],
+            row_labels: vec![String::from("Mean"), String::from("SD")],
+            rows: vec![vec![num_result_cell(4.2)], vec![num_result_cell(1.1)]],
+            footnotes: Vec::new(),
+        },
+        ResultTab {
+            id: String::from("details"),
+            title: String::from("Details"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("A"), String::from("B"), String::from("C"), String::from("D"), String::from("E")],
+            row_labels: vec![String::from("Metric 1")],
+            rows: vec![vec![num_result_cell(1.0); 5]],
+            footnotes: Vec::new(),
+        },
+    ];
+    let mut rs_wide = ResultSheet::new(AnalysisSpec::new("res-wide", "col-wide", AnalysisKind::DescriptiveStats(DescriptiveSpec::default()))?)?;
+    rs_wide.status = ResultStatus::UpToDate;
+    rs_wide.tabs = vec![ResultTab {
+        id: String::from("wide_ci"),
+        title: String::from("Wide Summary"),
+        kind: ResultTabKind::ParametersAndConfidenceIntervals,
+        column_headers: vec![
+            String::from("95% CI Group A"),
+            String::from("95% CI Group B"),
+            String::from("95% CI Group C"),
+            String::from("95% CI Group D"),
+            String::from("95% CI Group E"),
+        ],
+        row_labels: vec![String::from("Parameter Estimate")],
+        rows: vec![vec![ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.23), upper: CiBound::Finite(4.56) }; 5]],
+        footnotes: Vec::new(),
+    }];
+
+    doc.add_data_sheet(ds)?;
+    doc.add_result_sheet(rs_narrow)?;
+    doc.add_result_sheet(rs_wide)?;
+    doc.select_in_navigator(&SheetId::new("col-wide"))?;
+
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.welcome.open = false;
+    app.sync_views();
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1360.0, 800.0, 1.0));
+    driver.click_widget_id("toolbar.split")?;
+    driver.click_widget_id("toolbar.split.preset.data_results")?;
+
+    // 1. Narrow Results table gets capped to content width (< 50%), giving surplus width (> 50%, <= 72%) to wide Data table.
+    let initial_ratio = driver.state().app.split.ratio;
+    assert!(initial_ratio > 0.52 && initial_ratio <= 0.72, "expected content-aware Data || res-narrow ratio in (0.52, 0.72], got {initial_ratio}");
+    let prim_rect = driver.frame_meta().find_by_widget_id("center.pane.primary").unwrap().clipped_rect;
+    let sec_rect = driver.frame_meta().find_by_widget_id("center.pane.secondary").unwrap().clipped_rect;
+    assert!(prim_rect.width() > sec_rect.width(), "Primary Data pane must receive surplus width over narrow Results");
+
+    // 2. Manual divider drag updates ratio and is NEVER overridden on subsequent frames, tab switches, or F6 cycling.
+    let div_pt = widget_center(&driver, "split.divider")?;
+    let stage_left = prim_rect.left();
+    let total_stage_w = sec_rect.right() - prim_rect.left();
+    let target_x = stage_left + total_stage_w * 0.44;
+    driver.drag(div_pt, pos2(target_x, div_pt.y))?;
+    let manual_ratio = driver.state().app.split.ratio;
+    assert!((manual_ratio - 0.44).abs() < 0.04, "expected manual ratio ~0.44, got {manual_ratio}");
+
+    driver.click_widget_id("result.tab.details")?;
+    driver.press_egui_key(Key::F6, Modifiers::NONE);
+    driver.run_settled();
+    assert!(
+        (driver.state().app.split.ratio - manual_ratio).abs() < 1e-4,
+        "manual user split ratio {manual_ratio} must not be auto-overridden after tab switch or F6 (got {})",
+        driver.state().app.split.ratio
+    );
+
+    // 3. Switching sheet pair to wide Results (`res-wide`) computes new initial ratio within [0.35, 0.72] favoring wide Results (< 0.50).
+    driver.click_widget_id("split.secondary_selector")?;
+    let wide_entry = driver.frame_meta().entries.iter().find(|e| e.label.contains("res-wide")).map(|e| e.clipped_rect.center());
+    if let Some(p) = wide_entry {
+        driver.click_at(p)?;
+    } else {
+        driver.state_mut().app.split.secondary_sheet_id = Some(SheetId::new("res-wide"));
+        driver.state_mut().app.sync_views();
+        driver.run_settled();
+    }
+    let wide_ratio = driver.state().app.split.ratio;
+    assert!((0.35..0.50).contains(&wide_ratio), "expected wide Results pair ratio in [0.35, 0.50), got {wide_ratio}");
+    Ok(())
+}
+
+mod r10_35_portfolio_gallery {
+    use curvebook_doc::{
+        AnalysisKind, Cell, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, DescriptiveSpec, GraphKind, GraphSheet, InfoSheet, LayoutItem,
+        LayoutSheet, LayoutSpec, ProjectDocument, RectPt, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    };
+    use curvebook_engine::Session;
+    use curvebook_palette::Rgba8;
+    use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, CsvExportTargetKind};
+    use curvebook_ui_egui::egui_shell::Tokens;
+    use curvebook_ui_egui::egui_shell::driver::extract_rendered_text_runs;
+    use curvebook_ui_egui::interaction::KeyModifiers;
+    use curvebook_ui_egui::theme::{UiThemeMode, UiThemeSpec};
+    use curvebook_ui_egui::workspace_nav::GallerySortOrder;
+    use curvebook_ui_egui::{PointerButton, UiApp};
+    use egui::{Color32, Key, Modifiers, Shape};
+    use serde_json::json;
+
+    use crate::common::{ShellTestState, ensure, make_default_driver, make_shell_driver_with_state};
+
+    type BoxRes = Result<(), String>;
+
+    fn seed_rich_gallery_app() -> Result<UiApp, String> {
+        let mut col = ColumnTable::new(ColumnDesignHint::default(), 2, 2).map_err(|e| e.to_string())?;
+        col.data_sets[0].title = String::from("Dose");
+        col.data_sets[1].title = String::from("Response");
+        col.data_sets[0].cells[0][0] = Cell::number(10.0);
+        col.data_sets[1].cells[0][0] = Cell::number(95.5);
+        col.data_sets[0].cells[1][0] = Cell::number(20.0);
+        col.data_sets[1].cells[1][0] = Cell::number(82.0);
+        let mut ds_frozen =
+            DataSheet::new(SheetId::new("ds-frozen"), "Bravo Frozen Table", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        ds_frozen.frozen = true;
+        ds_frozen.color_tag = Some(Rgba8::rgb(220, 38, 38));
+
+        let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, 1, 3)
+            .map_err(|e| e.to_string())?;
+        xy.x_title = String::from("Time");
+        xy.data_sets[0].title = String::from("Signal");
+        for (r, (x, y)) in [(1.0, 4.0), (2.0, 9.0), (3.0, 15.0)].into_iter().enumerate() {
+            xy.x_cells[r][0] = Cell::number(x);
+            xy.data_sets[0].cells[r][0] = Cell::number(y);
+        }
+        let mut ds_live = DataSheet::new(SheetId::new("ds-live"), "Alpha Live XY", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?;
+        ds_live.color_tag = Some(Rgba8::rgb(22, 163, 74));
+
+        let mut info = InfoSheet::new_preseeded(SheetId::new("info-exp"), "Echo Assay Info").map_err(|e| e.to_string())?;
+        info.linked_data_sheets.push(SheetId::new("ds-live"));
+        info.constants[0].name = String::from("Concentration");
+        info.constants[0].value = ConstantValue::Number(50.0);
+        info.notes_markdown = String::from("Assay temperature 37C");
+        info.color_tag = Some(Rgba8::rgb(234, 88, 12));
+
+        let mut gs_init = GraphSheet::new_uninitialized_for_data(SheetId::new("gs-init"), &ds_live).map_err(|e| e.to_string())?;
+        gs_init.title = String::from("Delta Dose Curve");
+        gs_init.initialized = true;
+        gs_init.spec.kind = GraphKind::Xy;
+        gs_init.color_tag = Some(Rgba8::rgb(147, 51, 234));
+
+        let mut gs_uninit = GraphSheet::new_uninitialized_for_data(SheetId::new("gs-uninit"), &ds_frozen).map_err(|e| e.to_string())?;
+        gs_uninit.title = String::from("Foxtrot Pending Graph");
+        gs_uninit.initialized = false;
+
+        let mut lay_spec = LayoutSpec::default();
+        lay_spec.items.push(LayoutItem::LiveGraph {
+            id: String::from("panel-1"),
+            graph_sheet_id: SheetId::new("gs-init"),
+            bounds_pt: RectPt::new(16.0, 16.0, 180.0, 120.0),
+            scale_percent: 100.0,
+            badge_override: Some(String::from("A")),
+        });
+        let mut lay = LayoutSheet::new(SheetId::new("lay-main"), "Gamma Summary Layout", lay_spec).map_err(|e| e.to_string())?;
+        lay.color_tag = Some(Rgba8::rgb(13, 148, 136));
+
+        let mut doc = ProjectDocument::new("Portfolio Gallery Workspace").map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds_frozen).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds_live).map_err(|e| e.to_string())?;
+        doc.add_info_sheet(info).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(gs_init).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(gs_uninit).map_err(|e| e.to_string())?;
+        doc.add_layout_sheet(lay).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-live"));
+        doc.family_anchor_sheet_id = Some(SheetId::new("ds-live"));
+
+        let mut session = Session::from_document(doc);
+        let kind_val = serde_json::to_value(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).map_err(|e| e.to_string())?;
+        session
+            .execute("analysis.run", json!({ "sheet_id": "res-ok", "source_sheet_id": "ds-frozen", "kind": kind_val }))
+            .map_err(|e| e.to_string())?;
+        let mut res_doc = session.document().clone();
+        if let Some(rs) = res_doc.result_sheet_mut(&SheetId::new("res-ok")) {
+            rs.color_tag = Some(Rgba8::rgb(217, 119, 6));
+        }
+        res_doc.select_in_navigator(&SheetId::new("ds-live")).map_err(|e| e.to_string())?;
+        let mut app = UiApp::from_session(Session::from_document(res_doc));
+        app.sync_views();
+        Ok(app)
+    }
+
+    fn collect_mesh_count(shapes: &[egui::epaint::ClippedShape]) -> usize {
+        fn walk(shape: &Shape, out: &mut usize) {
+            match shape {
+                Shape::Mesh(_) => *out += 1,
+                Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut n = 0;
+        for cs in shapes {
+            walk(&cs.shape, &mut n);
+        }
+        n
+    }
+
+    fn collect_circle_fills(shapes: &[egui::epaint::ClippedShape]) -> Vec<Color32> {
+        fn walk(shape: &Shape, out: &mut Vec<Color32>) {
+            match shape {
+                Shape::Circle(c) if c.fill.a() > 0 => out.push(c.fill),
+                Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    fn collect_rect_strokes_and_fills(shapes: &[egui::epaint::ClippedShape]) -> Vec<(egui::Rect, Color32, Color32, f32)> {
+        fn walk(shape: &Shape, out: &mut Vec<(egui::Rect, Color32, Color32, f32)>) {
+            match shape {
+                Shape::Rect(r) => out.push((r.rect, r.fill, r.stroke.color, r.stroke.width)),
+                Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    fn collect_rendered_text_colors(shapes: &[egui::epaint::ClippedShape]) -> Vec<(String, Color32)> {
+        fn walk(shape: &Shape, out: &mut Vec<(String, Color32)>) {
+            match shape {
+                Shape::Text(t) => {
+                    let text = t.galley.job.text.clone();
+                    if let Some(col) = t.override_text_color.filter(|c| *c != Color32::PLACEHOLDER) {
+                        out.push((text, col));
+                    } else {
+                        for sec in &t.galley.job.sections {
+                            out.push((text.clone(), sec.format.color));
+                        }
+                    }
+                }
+                Shape::Vec(v) => {
+                    for s in v {
+                        walk(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for cs in shapes {
+            walk(&cs.shape, &mut out);
+        }
+        out
+    }
+
+    #[test]
+    fn r10_35_live_thumbnails_color_tags_and_status_badges_all_five_kinds() -> BoxRes {
+        let mut app = seed_rich_gallery_app()?;
+        app.nav.gallery.open = true;
+        app.sync_views();
+        let mut st = ShellTestState::new(app);
+        st.synchronous_raster = true;
+        let mut driver =
+            make_shell_driver_with_state(st, Default::default(), Tokens::from_theme_spec(&UiThemeSpec::for_mode(UiThemeMode::Light), "en"));
+
+        let initial_parity = driver.verify_pixel_to_hit_box_parity();
+        ensure(initial_parity.is_clean(), format!("gallery initial parity failed: {:?}", initial_parity.violations))?;
+
+        // Collapse Navigator & flatten via Sort = Name A-Z so all 5 sheet kinds and 7 cards fit simultaneously on screen.
+        driver.click_widget_id("nav.collapse_rail")?;
+        driver.click_widget_id("gallery.sort")?;
+        driver.click_widget_id("gallery.sort.name_az")?;
+
+        let parity = driver.verify_pixel_to_hit_box_parity();
+        ensure(parity.is_clean(), format!("gallery flat parity failed: {:?}", parity.violations))?;
+
+        let runs = extract_rendered_text_runs(driver.clipped_shapes());
+        let joined: String = runs.iter().map(|r| r.full_text.as_str()).collect::<Vec<_>>().join(" | ");
+        for expected in ["Dose", "95.5", "2 × 2", "Concentration: 50", "Assay temperature", "Warn", "Frozen", "Uninitialized", "Active"] {
+            ensure(joined.contains(expected), format!("missing live thumbnail or badge text `{expected}` in rendered gallery: {joined}"))?;
+        }
+
+        ensure(collect_mesh_count(driver.clipped_shapes()) >= 2, "expected textured raster meshes for GraphSheet & LayoutSheet thumbnails")?;
+
+        let circles = collect_circle_fills(driver.clipped_shapes());
+        for (label, col) in [
+            ("Data", Color32::from_rgb(220, 38, 38)),
+            ("Info", Color32::from_rgb(234, 88, 12)),
+            ("Result", Color32::from_rgb(217, 119, 6)),
+            ("Graph", Color32::from_rgb(147, 51, 234)),
+            ("Layout", Color32::from_rgb(13, 148, 136)),
+        ] {
+            ensure(circles.contains(&col), format!("missing color_tag circle for {label}"))?;
+        }
+
+        // R20.14: zero blue non-link text inside gallery text runs.
+        let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(UiThemeMode::Light), "en");
+        for (txt, col) in collect_rendered_text_colors(driver.clipped_shapes()) {
+            ensure(col != tokens.accent && col != tokens.link_blue, format!("R20.14 violation: found blue text `{txt}` ({col:?})"))?;
+        }
+
+        // R20.15: zero trailing ellipsis on toolbar/batch action buttons.
+        for entry in driver.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("gallery.") && e.role == "button") {
+            ensure(
+                !entry.label.ends_with('…') && !entry.label.ends_with("..."),
+                format!("R20.15 violation: gallery button `{}` ends with ellipsis (`{}`)", entry.widget_id, entry.label),
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn r10_35_corner_checkbox_shift_click_and_active_vs_selected_across_all_themes() -> BoxRes {
+        for mode in UiThemeMode::ALL {
+            let mut app = seed_rich_gallery_app()?;
+            app.nav.gallery.open = true;
+            app.sync_views();
+            let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(mode), "en");
+            let mut st = ShellTestState::new(app);
+            st.synchronous_raster = true;
+            let mut driver = make_shell_driver_with_state(st, Default::default(), tokens);
+            driver.click_widget_id("nav.collapse_rail")?;
+            driver.click_widget_id("gallery.sort")?;
+            driver.click_widget_id("gallery.sort.name_az")?;
+
+            // Corner checkbox toggles selection without closing Gallery.
+            driver.click_widget_id("gallery.card.select.gs-init")?;
+            ensure(driver.state().app.nav.gallery.open, "corner checkbox click must keep Gallery open")?;
+            ensure(
+                driver.state().app.nav.selected_gallery_ids() == vec![SheetId::new("gs-init")],
+                format!("expected gs-init selected via corner checkbox in {mode:?}"),
+            )?;
+
+            driver.click_widget_id("gallery.card.select.lay-main")?;
+            let selected_two = driver.state().app.nav.selected_gallery_ids();
+            ensure(
+                selected_two == vec![SheetId::new("gs-init"), SheetId::new("lay-main")],
+                format!("expected [gs-init, lay-main] selected in {mode:?}, got {selected_two:?}"),
+            )?;
+
+            // Shift+Click range selection on card body agrees with unified visual card order.
+            let p_target = driver.frame_meta().find_by_widget_id("gallery.card.ds-frozen").ok_or("missing ds-frozen")?.clipped_rect.center();
+            driver.click_at_button(p_target, PointerButton::Primary, KeyModifiers { shift: true, ..Default::default() })?;
+            ensure(driver.state().app.nav.selected_gallery_ids().len() >= 4, format!("Shift+Click should expand range selection in {mode:?}"))?;
+
+            // Clear then select only gs-init (`!active && selected`) while ds-live remains `active && !selected`.
+            driver.click_widget_id("gallery.clear_selection")?;
+            driver.click_widget_id("gallery.card.select.gs-init")?;
+            let active_rect = driver.frame_meta().find_by_widget_id("gallery.card.ds-live").ok_or("missing active card")?.clipped_rect;
+            let selected_rect = driver.frame_meta().find_by_widget_id("gallery.card.gs-init").ok_or("missing selected card")?.clipped_rect;
+            let rects = collect_rect_strokes_and_fills(driver.clipped_shapes());
+            let active_style = rects
+                .iter()
+                .find(|(r, _, _, w)| (*r == active_rect) && *w >= 1.4)
+                .ok_or_else(|| format!("missing active card frame rect in {mode:?}"))?;
+            let selected_style = rects
+                .iter()
+                .find(|(r, _, _, w)| (*r == selected_rect) && *w >= 1.9)
+                .ok_or_else(|| format!("missing selected card frame rect in {mode:?}"))?;
+            ensure(
+                active_style.2 != selected_style.2 || active_style.1 != selected_style.1,
+                format!("active and selected cards must be visually distinct in {mode:?}"),
+            )?;
+
+            let parity = driver.verify_pixel_to_hit_box_parity();
+            ensure(parity.is_clean(), format!("theme {mode:?} parity failed: {:?}", parity.violations))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn r10_35_sort_collapsible_sections_folder_counts_and_current_family_filter() -> BoxRes {
+        let mut app = seed_rich_gallery_app()?;
+        app.nav.gallery.open = true;
+        app.sync_views();
+        let mut driver = make_default_driver(app);
+
+        // Filter pills show per-folder counts.
+        let all_lbl = &driver.frame_meta().find_by_widget_id("gallery.filter.all").ok_or("all pill")?.label;
+        ensure(all_lbl.contains("(7)"), format!("expected `All (7)` pill label, got `{all_lbl}`"))?;
+        let graphs_lbl = &driver.frame_meta().find_by_widget_id("gallery.filter.graphs").ok_or("graphs pill")?.label;
+        ensure(graphs_lbl.contains("(2)"), format!("expected `Graphs (2)` pill label, got `{graphs_lbl}`"))?;
+
+        // Locked Decision #1: collapsible section headers appear in All + NavigatorOrder.
+        for sec in ["gallery.section.data", "gallery.section.info"] {
+            ensure(driver.frame_meta().find_by_widget_id(sec).is_some(), format!("missing visible header `{sec}`"))?;
+        }
+        // Collapse Data, Info, then Results so Graphs and Layouts scroll into view cleanly.
+        driver.click_widget_id("gallery.section.data")?;
+        driver.click_widget_id("gallery.section.info")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.section.results").is_some(), "missing visible header `gallery.section.results`")?;
+        driver.click_widget_id("gallery.section.results")?;
+        for sec in ["gallery.section.graphs", "gallery.section.layouts"] {
+            ensure(driver.frame_meta().find_by_widget_id(sec).is_some(), format!("missing collapsible header `{sec}`"))?;
+        }
+        // Collapsing Graphs hides graph cards without affecting other folders.
+        driver.click_widget_id("gallery.section.graphs")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_none(), "collapsed Graphs section must hide cards")?;
+        driver.click_widget_id("gallery.section.graphs")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_some(), "re-expanding Graphs must restore cards")?;
+        // Re-expand sections bottom-up so each header remains in view when clicked.
+        driver.click_widget_id("gallery.section.results")?;
+        driver.click_widget_id("gallery.section.info")?;
+        driver.click_widget_id("gallery.section.data")?;
+
+        // Sort -> Type preserves collapsible section headers.
+        driver.click_widget_id("gallery.sort")?;
+        driver.click_widget_id("gallery.sort.type")?;
+        ensure(driver.state().app.nav.gallery.sort_order == GallerySortOrder::Type, "expected Sort = Type")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.section.graphs").is_some(), "Type sort keeps collapsible headers")?;
+
+        // Sort -> Name A-Z flattens to one continuous grid with zero section headers.
+        driver.click_widget_id("gallery.sort")?;
+        driver.click_widget_id("gallery.sort.name_az")?;
+        ensure(driver.state().app.nav.gallery.sort_order == GallerySortOrder::NameAsc, "expected Sort = NameAsc")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.section.graphs").is_none(), "NameAsc must flatten away section headers")?;
+
+        // Select All + selected_gallery_ids() agrees with alphabetical A-Z visual order.
+        driver.click_widget_id("gallery.select_all")?;
+        let selected = driver.state().app.nav.selected_gallery_ids();
+        ensure(selected.first() == Some(&SheetId::new("ds-live")), format!("expected `Alpha Live XY` first in Name A-Z order, got {selected:?}"))?;
+
+        // Current Family filter restricts gallery to active sheet `ds-live`'s DAG family (`ds-live`, `info-exp`, `gs-init`, `lay-main`).
+        driver.click_widget_id("gallery.filter.current_family")?;
+        ensure(driver.state().app.nav.gallery.current_family_only, "Current Family filter must be active")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_some(), "family member gs-init must be visible")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.ds-frozen").is_none(), "unrelated ds-frozen must be filtered out")?;
+        Ok(())
+    }
+
+    #[test]
+    fn r10_35_batch_split_layout_export_print_csv_dup_freeze_and_cascade_delete() -> BoxRes {
+        // 1. Compare in Split View
+        {
+            let mut app = seed_rich_gallery_app()?;
+            app.nav.gallery.open = true;
+            app.sync_views();
+            let mut driver = make_default_driver(app);
+            driver.click_widget_id("gallery.sort")?;
+            driver.click_widget_id("gallery.sort.name_az")?;
+            driver.click_widget_id("gallery.card.select.ds-frozen")?;
+            driver.click_widget_id("gallery.card.select.gs-init")?;
+            driver.click_widget_id("gallery.batch.compare_split")?;
+            let app = &driver.state().app;
+            ensure(app.split.enabled && !app.nav.gallery.open, "Compare in Split View must enable split and close gallery")?;
+            ensure(
+                app.split.primary_sheet_id == Some(SheetId::new("ds-frozen")) && app.split.secondary_sheet_id == Some(SheetId::new("gs-init")),
+                "split pair mismatch",
+            )?;
+        }
+
+        // 2. Place on New Layout + Export Selected (Target Scope) + Print Selected
+        {
+            let mut app = seed_rich_gallery_app()?;
+            app.nav.gallery.open = true;
+            app.sync_views();
+            let mut driver = make_default_driver(app);
+            driver.click_widget_id("gallery.filter.graphs")?;
+            driver.click_widget_id("gallery.card.select.gs-init")?;
+            driver.click_widget_id("gallery.card.select.gs-uninit")?;
+
+            // Print Selected
+            driver.click_widget_id("gallery.batch.print")?;
+            ensure(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::Print { .. }), "expected Print modal")?;
+            ensure(driver.state().app.canvas_dialogs.print.job.sheet_ids.len() == 2, "Print job must carry 2 selected sheets")?;
+            driver.click_widget_id("modal.cancel")?;
+
+            // Export Selected + Target Scope toggle
+            driver.click_widget_id("gallery.batch.export")?;
+            ensure(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }), "expected ExportFigure modal")?;
+            ensure(driver.state().app.egui_views.app_modals.export_selected_gallery_scope, "Target Scope should default to Selected gallery sheets")?;
+            driver.click_widget_id("export.scope.active")?;
+            ensure(!driver.state().app.egui_views.app_modals.export_selected_gallery_scope, "toggle Active sheet failed")?;
+            driver.click_widget_id("export.scope.selected")?;
+            ensure(driver.state().app.egui_views.app_modals.export_selected_gallery_scope, "toggle Selected gallery sheets failed")?;
+            driver.click_widget_id("export.fmt.pdf")?;
+            driver.click_widget_id("modal.ok")?;
+            ensure(
+                !matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }),
+                "ExportFigure should close after batch PDF",
+            )?;
+
+            // Place Selected onto New Layout
+            let before_layouts = driver.state().app.document().layout_sheets.len();
+            driver.click_widget_id("gallery.batch.place_layout")?;
+            let app = &driver.state().app;
+            ensure(!app.nav.gallery.open, "Place on New Layout must close gallery")?;
+            ensure(app.document().layout_sheets.len() == before_layouts + 1, "expected new LayoutSheet created")?;
+            let new_lay = app.document().layout_sheets.last().ok_or("missing created layout")?;
+            ensure(new_lay.spec.items.len() == 2, "new LayoutSheet must contain 2 graph panels")?;
+        }
+
+        // 3. Batch CSV Export, Duplicate, Freeze/Unfreeze, and Cascade Delete Confirmation
+        {
+            let mut app = seed_rich_gallery_app()?;
+            app.nav.gallery.open = true;
+            app.sync_views();
+            let mut driver = make_default_driver(app);
+            driver.click_widget_id("gallery.card.select.ds-frozen")?;
+            driver.click_widget_id("gallery.card.select.ds-live")?;
+
+            // Batch CSV Export
+            driver.click_widget_id("gallery.batch.export_csv")?;
+            ensure(
+                matches!(
+                    &driver.state().app.canvas_dialogs.active_dialog,
+                    ActiveDialog::CsvExportOptions(CsvExportTargetKind::DataTables { sheet_ids }) if sheet_ids.len() == 2
+                ),
+                "expected CsvExportOptions(DataTables) for 2 selected data tables",
+            )?;
+            driver.click_widget_id("modal.ok")?;
+            ensure(driver.state().app.canvas_dialogs.active_dialog == ActiveDialog::None, "CSV batch export modal should close after OK")?;
+
+            // Freeze selected DataSheets (`ds-live` transitions false -> true)
+            driver.click_widget_id("gallery.batch.freeze")?;
+            ensure(driver.state().app.document().data_sheet(&SheetId::new("ds-live")).is_some_and(|d| d.frozen), "batch Freeze must freeze ds-live")?;
+            // Unfreeze all frozen DataSheets
+            driver.click_widget_id("gallery.batch.freeze")?;
+            ensure(
+                !driver.state().app.document().data_sheet(&SheetId::new("ds-live")).is_some_and(|d| d.frozen),
+                "batch Unfreeze must unfreeze ds-live",
+            )?;
+
+            // Duplicate selected
+            let prev_data_count = driver.state().app.document().data_sheets.len();
+            driver.click_widget_id("gallery.batch.duplicate")?;
+            ensure(driver.state().app.document().data_sheets.len() == prev_data_count + 2, "batch Duplicate must duplicate both data tables")?;
+
+            // Cascade delete confirmation when deleting root sheets with dependents
+            driver.click_widget_id("gallery.batch.delete")?;
+            ensure(
+                driver.state().views.leading_dock.delete_confirm.is_some(),
+                "deleting sheets with downstream dependents must open cascade confirmation modal",
+            )?;
+            driver.click_widget_id("nav.delete_confirm.confirm")?;
+            ensure(driver.state().app.document().data_sheet(&SheetId::new("ds-live")).is_none(), "ds-live must be deleted after confirm")?;
+            ensure(driver.state().app.document().graph_sheet(&SheetId::new("gs-init")).is_none(), "downstream gs-init must cascade delete")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn r10_35_context_menu_keyboard_nav_footer_fit_and_navigator_folder_gallery() -> BoxRes {
+        let mut app = seed_rich_gallery_app()?;
+        app.nav.gallery.open = true;
+        app.sync_views();
+        let mut driver = make_default_driver(app);
+
+        // Footer filtered + selected readout & Fit zoom
+        driver.click_widget_id("gallery.card.select.ds-live")?;
+        let summary = &driver.frame_meta().find_by_widget_id("status.summary").ok_or("status.summary")?.label;
+        ensure(
+            summary.contains("shown") && summary.contains("selected"),
+            format!("footer summary must report filtered and selected counts, got `{summary}`"),
+        )?;
+        ensure(driver.frame_meta().find_by_widget_id("status.zoom.fit").is_some(), "footer Fit zoom must be shown in gallery")?;
+        driver.click_widget_id("status.zoom.fit")?;
+
+        // Card right-click context menu (`action_menu_popup`, R20.16, dot-free labels R20.15)
+        let card_pt = driver.frame_meta().find_by_widget_id("gallery.card.ds-live").ok_or("missing ds-live card")?.clipped_rect.center();
+        driver.click_at_button(card_pt, PointerButton::Secondary, KeyModifiers::default())?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.context_menu").is_some(), "expected card right-click context menu")?;
+        for entry in driver.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("gallery.ctx.") && e.role == "menuitem") {
+            ensure(
+                !entry.label.ends_with('…') && !entry.label.ends_with("..."),
+                format!("R20.15 violation: context item `{}` ends with ellipsis (`{}`)", entry.widget_id, entry.label),
+            )?;
+        }
+        let ctx_parity = driver.verify_pixel_to_hit_box_parity();
+        ensure(ctx_parity.is_clean(), format!("card context menu parity failed: {:?}", ctx_parity.violations))?;
+
+        // Trigger inline Rename from card context menu
+        driver.click_widget_id("gallery.ctx.rename")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.rename_input").is_some(), "expected inline rename textbox")?;
+        driver.type_text("Renamed XY Sheet")?;
+        driver.press_egui_key(Key::Enter, Modifiers::NONE);
+        ensure(
+            driver.state().app.document().data_sheet(&SheetId::new("ds-live")).is_some_and(|s| s.title == "Renamed XY Sheet"),
+            "inline card rename must commit sheet.rename",
+        )?;
+
+        // Keyboard grid navigation: Cmd+A -> ArrowRight -> Space -> Enter
+        driver.press_egui_key(Key::A, Modifiers::COMMAND);
+        ensure(driver.state().app.nav.selected_gallery_ids().len() == 7, "Cmd+A must select all 7 visible gallery cards")?;
+        driver.click_widget_id("gallery.clear_selection")?;
+        driver.press_egui_key(Key::ArrowRight, Modifiers::NONE);
+        driver.press_egui_key(Key::Space, Modifiers::NONE);
+        ensure(!driver.state().app.nav.selected_gallery_ids().is_empty(), "Space after ArrowRight must toggle selection")?;
+        driver.press_egui_key(Key::Enter, Modifiers::NONE);
+        ensure(!driver.state().app.nav.gallery.open, "Enter on focused card must open sheet and close Gallery")?;
+
+        // Navigator Folder Gallery quick-launch opens Gallery filtered to that folder!
+        driver.click_widget_id("nav.section.data")?;
+        driver.click_widget_id("nav.section.info")?;
+        driver.click_widget_id("nav.folder.gallery.graphs")?;
+        ensure(
+            driver.state().app.nav.gallery.open && driver.state().app.nav.gallery.filter_folder == Some(SheetFolderKind::Graphs),
+            "Navigator Folder Gallery button must open Gallery filtered to Graphs",
+        )?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_some(), "Graphs card missing after Folder Gallery launch")?;
+        ensure(
+            driver.frame_meta().find_by_widget_id("gallery.card.ds-live").is_none(),
+            "non-Graph cards must be filtered out after Folder Gallery launch",
+        )?;
+
+        Ok(())
+    }
 }

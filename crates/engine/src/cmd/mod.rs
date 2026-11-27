@@ -456,7 +456,7 @@ mod tests {
             id: "sheet.freeze",
             label: "Freeze Sheet",
             menu_path: "Sheet > Freeze",
-            shortcut: "Ctrl+L",
+            shortcut: "Cmd+L",
             summary: "Lock cells against accidental edits.",
             beginner: "Frozen tables keep analyses active while preventing edits.",
             group: CommandGroup::Sheet,

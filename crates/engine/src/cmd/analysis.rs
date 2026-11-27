@@ -30,7 +30,7 @@ use super::params::{
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::dag;
-use crate::methods_report::{ReportFormat, generate_methods_report};
+use crate::methods_report::{ReportFormat, ReportScope, generate_methods_report_with_scope};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +69,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "transform.run",
         label: "Run Transformation",
-        menu_path: "Analyze/Transform...",
+        menu_path: "Analyze/Transform",
         summary: "Create and execute a mathematical, normalization, baseline, transpose, prune, select, or simulation transformation sheet.",
         beginner: "Runs a reproducible data transformation pipeline on a data sheet and writes the output to a linked result sheet.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -80,7 +80,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "stats.run",
         label: "Run Statistical Test",
-        menu_path: "Analyze/Statistical Test...",
+        menu_path: "Analyze/Statistical Test",
         summary: "Create and execute a hypothesis test, ANOVA, contingency, survival, ROC, GLM, or multivariate analysis.",
         beginner: "Runs a statistical test on a compatible data sheet and stores tables, P values, and assumption checks.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -91,7 +91,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "fit.run",
         label: "Run Curve Fit / Regression",
-        menu_path: "Analyze/Fit Curve...",
+        menu_path: "Analyze/Fit Curve",
         summary: "Create and execute linear, Deming, built-in nonlinear, global shared-parameter, or custom DSL regression.",
         beginner: "Fits a linear or nonlinear dose-response/kinetic curve with confidence bands and model comparisons.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -102,7 +102,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.add",
         label: "Add Analysis",
-        menu_path: "Analyze/Add Analysis...",
+        menu_path: "Analyze/Add Analysis",
         summary: "Attach and compute a new analysis of any domain (transform, stats, or regression) for a data sheet.",
         beginner: "Adds a new live analysis sheet linked to an input table and computes its initial results.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -113,7 +113,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.run",
         label: "New / Run Analysis",
-        menu_path: "Analyze/Analyze Data...",
+        menu_path: "Analyze/Analyze Data",
         summary: "Create and run a new analysis sheet, recalculate an existing result sheet by ID, or recalculate the project when empty.",
         beginner: "Runs a new analysis when source and kind are provided, or refreshes an existing analysis sheet.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -124,7 +124,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.updateParams",
         label: "Change Analysis Parameters",
-        menu_path: "Change/Analysis Parameters...",
+        menu_path: "Change/Analysis Parameters",
         summary: "Update analysis kind, confidence level, dataset selection, P-value formatting, or parameter rules and recalculate.",
         beginner: "Modifies settings on an existing result sheet without recreating it and refreshes downstream sheets.",
         effects: MUTATE_AND_IDEMPOTENT,
@@ -135,7 +135,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.retargetData",
         label: "Change Data Analyzed",
-        menu_path: "Change/Data Analyzed...",
+        menu_path: "Change/Data Analyzed",
         summary: "Rebind an existing analysis result sheet to a different compatible data sheet or subset of datasets.",
         beginner: "Points an existing analysis at a different data table and recalculates it immediately.",
         effects: MUTATE_AND_IDEMPOTENT,
@@ -146,7 +146,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.exportJson",
         label: "Export Result Sheet JSON",
-        menu_path: "File/Export/Results JSON...",
+        menu_path: "File/Export/Results JSON",
         summary: "Serialize a result sheet (tables, scalars, parameters, checklist) to JSON and optionally save it atomically.",
         beginner: "Exports an analysis result sheet as structured JSON text or saves it to a `.json` file.",
         effects: EXPORT_EFFECTS,
@@ -157,7 +157,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "analysis.exportCsv",
         label: "Export Result Sheet CSV",
-        menu_path: "File/Export/Results CSV...",
+        menu_path: "File/Export/Results CSV",
         summary: "Export a specific tab or tidy combined CSV representation of a result sheet and optionally save it atomically.",
         beginner: "Exports result tables to CSV/TSV text with configurable delimiter and decimal separator.",
         effects: EXPORT_EFFECTS,
@@ -168,7 +168,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "result.generateReport",
         label: "Generate Methods Report",
-        menu_path: "File/Export/Methods Report...",
+        menu_path: "File/Export/Methods Report",
         summary: "Generate a publication-ready statistical methods prose report in `plain`, `markdown`, or `latex`, optionally saving to disk.",
         beginner: "Creates a narrative methods paragraph describing the statistical test, sample sizes, and options used.",
         effects: EXPORT_EFFECTS,
@@ -179,7 +179,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "stats.pvalueStack",
         label: "Analyze a Stack of P Values",
-        menu_path: "Analyze/Column Analyses/Analyze a Stack of P Values...",
+        menu_path: "Analyze/Column Analyses/Analyze a Stack of P Values",
         summary: "Adjust a column stack of raw P values across 7 FWER/FDR multiplicity procedures and report discoveries.",
         beginner: "Adjusts a column of P values using Bonferroni, Holm, Šídák, Holm-Šídák, Benjamini-Hochberg, BKY two-stage, or Benjamini-Yekutieli.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -629,6 +629,7 @@ fn schema_analysis_export_csv() -> Value {
 struct GenerateReportParams {
     result_sheet_id: String,
     format: Option<String>,
+    scope: Option<String>,
     path: Option<String>,
 }
 
@@ -637,6 +638,7 @@ fn schema_result_generate_report() -> Value {
         vec![
             ("result_sheet_id", non_empty_str_schema("Result sheet ID to document")),
             ("format", nullable_schema(non_empty_str_schema("Report output format (`plain`, `markdown`, or `latex`)"))),
+            ("scope", nullable_schema(non_empty_str_schema("Report scope (`methods` manuscript prose or `full` ARRIVE/ICMJE audit report)"))),
             ("path", nullable_schema(non_empty_str_schema("Optional output file path"))),
         ],
         &["result_sheet_id"],
@@ -1169,10 +1171,19 @@ fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
                 .with_details(json!({ "pointer": "/format", "format": raw_fmt }))
         })?,
     };
-    let report = generate_methods_report(ctx.session.document(), &id, format)?;
+    let scope = match params.scope.as_deref() {
+        None => ReportScope::FullReport,
+        Some(raw_scope) => ReportScope::from_name(raw_scope).ok_or_else(|| {
+            bad_input(format!("unknown report scope `{raw_scope}`"))
+                .with_remediation("Use `methods` or `full`.")
+                .with_details(json!({ "pointer": "/scope", "scope": raw_scope }))
+        })?,
+    };
+    let report = generate_methods_report_with_scope(ctx.session.document(), &id, format, scope)?;
     let payload = json!({
         "sheet_id": id.as_str(),
         "format": format.as_str(),
+        "scope": scope.as_str(),
         "path": params.path,
         "report": report,
     });
@@ -1197,7 +1208,30 @@ fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
     }
 }
 
-fn collect_nonlinear_diagnostics(res: &ResultSheet) -> (bool, &'static str, Vec<String>, Vec<String>) {
+struct NonlinearDiagnosticsSummary {
+    ambiguous: bool,
+    fit_status: &'static str,
+    identifiability_warnings: Vec<String>,
+    scale_warnings: Vec<String>,
+    failing_datasets: Vec<String>,
+    converged_datasets_count: usize,
+    ambiguous_datasets_count: usize,
+    failing_datasets_summary: Option<String>,
+}
+
+fn nonlinear_dataset_labels(res: &ResultSheet) -> Vec<(usize, String)> {
+    let total = res.fitted_curves.len();
+    let gof_headers = res.tabs.iter().find(|t| t.id == "nonlinear_gof").map(|t| t.column_headers.as_slice());
+    if let Some(headers) = gof_headers
+        && total > 1
+        && headers.len() == total
+    {
+        return res.fitted_curves.iter().zip(headers.iter()).map(|(fc, h)| (fc.data_set_index, h.clone())).collect();
+    }
+    res.fitted_curves.iter().map(|fc| (fc.data_set_index, format!("DS{}", fc.data_set_index.saturating_add(1)))).collect()
+}
+
+fn collect_nonlinear_diagnostics(res: &ResultSheet) -> NonlinearDiagnosticsSummary {
     let mut scale_warnings = Vec::new();
     let mut identifiability_warnings = Vec::new();
     let mut checklist_ambiguous = false;
@@ -1220,6 +1254,21 @@ fn collect_nonlinear_diagnostics(res: &ResultSheet) -> (bool, &'static str, Vec<
             identifiability_warnings.push(formatted);
         }
     }
+    let labels = nonlinear_dataset_labels(res);
+    let mut failing_datasets = Vec::new();
+    let mut converged_datasets_count = 0_usize;
+    let mut ambiguous_datasets_count = 0_usize;
+    for (fc, (_, lbl)) in res.fitted_curves.iter().zip(labels.iter()) {
+        if fc.ambiguous || !fc.converged {
+            ambiguous_datasets_count += 1;
+            failing_datasets.push(lbl.clone());
+        } else {
+            converged_datasets_count += 1;
+        }
+    }
+    let total = res.fitted_curves.len();
+    let failing_datasets_summary = (!failing_datasets.is_empty())
+        .then(|| format!("Ambiguous / unbounded fits in {} of {total} datasets ({})", failing_datasets.len(), failing_datasets.join(", ")));
     let ambiguous = checklist_ambiguous || res.fitted_curves.iter().any(|fc| fc.ambiguous);
     let fit_status = if ambiguous {
         "Ambiguous"
@@ -1230,16 +1279,26 @@ fn collect_nonlinear_diagnostics(res: &ResultSheet) -> (bool, &'static str, Vec<
     } else {
         "Converged"
     };
-    (ambiguous, fit_status, identifiability_warnings, scale_warnings)
+    NonlinearDiagnosticsSummary {
+        ambiguous,
+        fit_status,
+        identifiability_warnings,
+        scale_warnings,
+        failing_datasets,
+        converged_datasets_count,
+        ambiguous_datasets_count,
+        failing_datasets_summary,
+    }
 }
 
 fn result_outcome_warnings(res: &ResultSheet) -> Vec<String> {
     if !matches!(&res.analysis.kind, AnalysisKind::NonlinearRegression(_)) {
         return Vec::new();
     }
-    let (_, _, identifiability_warnings, mut scale_warnings) = collect_nonlinear_diagnostics(res);
-    scale_warnings.extend(identifiability_warnings);
-    scale_warnings
+    let diag = collect_nonlinear_diagnostics(res);
+    let mut warnings = diag.scale_warnings;
+    warnings.extend(diag.identifiability_warnings);
+    warnings
 }
 
 fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
@@ -1260,12 +1319,23 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
     if let AnalysisKind::NonlinearRegression(nl) = &res.analysis.kind
         && let Some(obj) = payload.as_object_mut()
     {
-        let (ambiguous, fit_status, identifiability_warnings, scale_warnings) = collect_nonlinear_diagnostics(res);
+        let diag = collect_nonlinear_diagnostics(res);
         obj.insert(String::from("equation_id"), Value::String(nl.equation_id.clone()));
-        obj.insert(String::from("fit_status"), Value::String(String::from(fit_status)));
-        obj.insert(String::from("ambiguous"), Value::Bool(ambiguous));
-        obj.insert(String::from("identifiability_warnings"), Value::Array(identifiability_warnings.into_iter().map(Value::String).collect()));
-        obj.insert(String::from("scale_warnings"), Value::Array(scale_warnings.into_iter().map(Value::String).collect()));
+        obj.insert(String::from("fit_status"), Value::String(String::from(diag.fit_status)));
+        obj.insert(String::from("ambiguous"), Value::Bool(diag.ambiguous));
+        obj.insert(String::from("identifiability_warnings"), Value::Array(diag.identifiability_warnings.into_iter().map(Value::String).collect()));
+        obj.insert(String::from("scale_warnings"), Value::Array(diag.scale_warnings.into_iter().map(Value::String).collect()));
+        obj.insert(String::from("converged_datasets_count"), json!(diag.converged_datasets_count));
+        obj.insert(String::from("ambiguous_datasets_count"), json!(diag.ambiguous_datasets_count));
+        if !diag.failing_datasets.is_empty() {
+            obj.insert(String::from("failing_datasets"), json!(diag.failing_datasets));
+        }
+        if let Some(summary) = diag.failing_datasets_summary {
+            obj.insert(String::from("failing_datasets_summary"), Value::String(summary));
+        }
+        if !res.cell_details.is_empty() {
+            obj.insert(String::from("cell_details"), json!(res.cell_details));
+        }
         if nl.method == FitMethod::RobustCauchy {
             obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
         }
@@ -4223,7 +4293,22 @@ mod tests {
             .expect("report write must succeed");
         assert!(report_path.exists());
         assert_eq!(rep.payload["format"], json!("markdown"));
+        assert_eq!(rep.payload["scope"], json!("full"));
+        assert!(rep.payload["report"].as_str().unwrap_or_default().contains("Study Context and Data Provenance"));
         let _ = std::fs::remove_dir_all(&out_dir);
+
+        let methods_rep = session
+            .execute("result.generateReport", json!({ "result_sheet_id": "t1", "format": "markdown", "scope": "methods" }))
+            .expect("methods scope report must succeed");
+        assert_eq!(methods_rep.payload["scope"], json!("methods"));
+        let methods_text = methods_rep.payload["report"].as_str().unwrap_or_default();
+        assert!(methods_text.contains(env!("CARGO_PKG_VERSION")));
+        assert!(!methods_text.contains("Study Context and Data Provenance") && !methods_text.contains("t1"));
+
+        let bad_scope = session
+            .execute("result.generateReport", json!({ "result_sheet_id": "t1", "scope": "bogus" }))
+            .expect_err("unknown report scope must fail");
+        assert_eq!(bad_scope.code, ErrorCode::BadInput);
 
         let bad_fmt = session
             .execute("result.generateReport", json!({ "result_sheet_id": "t1", "format": "docx" }))

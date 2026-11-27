@@ -1335,7 +1335,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use curvebook::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
-    use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
+    use curvebook::gui_window::{CurveBookNativeApp, install_desktop_font_definitions};
     use curvebook_doc::{CellCoord, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
     use curvebook_format::save_project_file;
     use curvebook_ui_egui::{ControlAuth, ViewportMetrics, bind_control_tcp_listener, serve_control_stream_with_quit_and_hook};
@@ -2024,7 +2024,7 @@ mod tests {
         let (guards, channel) = super::start_live_window_control_on_listener(listener, auth.clone(), &app_paths, false, token_guard)?;
 
         let ctx = egui::Context::default();
-        ctx.set_fonts(build_egui_font_definitions(None));
+        install_desktop_font_definitions(&ctx, None);
         let mut native_app = CurveBookNativeApp::new(rt, win_id, None).with_live_control(channel);
 
         let token_owned = auth.as_str().to_owned();

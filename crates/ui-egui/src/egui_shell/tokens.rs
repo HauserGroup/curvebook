@@ -129,7 +129,10 @@ pub struct Tokens {
     pub role_cat: Color32,
     pub role_lbl: Color32,
     pub role_fx: Color32,
+    /// Structural border/dot color for linked data regions (never rendered as foreground text).
     pub link_blue: Color32,
+    /// Clickable text link color (strictly reserved for `ui_kit::link_button`).
+    pub text_link: Color32,
     pub link_green: Color32,
     pub link_red: Color32,
     pub excluded_cell_text: Color32,
@@ -203,6 +206,7 @@ impl Tokens {
             role_lbl: rgba8_to_color32(p.role_lbl),
             role_fx: rgba8_to_color32(p.role_fx),
             link_blue: rgba8_to_color32(spec.link_blue),
+            text_link: rgba8_to_color32(spec.accent),
             link_green: rgba8_to_color32(spec.link_green),
             link_red: rgba8_to_color32(spec.link_red),
             excluded_cell_text: rgba8_to_color32(spec.excluded_cell_text),
@@ -230,6 +234,7 @@ impl Tokens {
         visuals.faint_bg_color = self.header_bg;
         visuals.window_stroke = Stroke::new(thin, self.border);
         visuals.window_corner_radius = CornerRadius::same(self.metrics.radius_lg);
+        visuals.popup_shadow = egui::epaint::Shadow { offset: [0, 3], blur: 10, spread: 0, color: self.scrim.linear_multiply(0.18) };
         visuals.selection.bg_fill = self.active_bg;
         visuals.selection.stroke = Stroke::new(focus, self.focus_ring);
         let md_radius = CornerRadius::same(self.metrics.radius_md);
@@ -280,6 +285,7 @@ impl Tokens {
         style.spacing.scroll.bar_outer_margin = 2.0;
         style.spacing.interact_size.y = self.metrics.min_hit_target_pt;
         style.spacing.tooltip_width = 320.0;
+        style.interaction.tooltip_delay = 0.45;
     }
 
     /// Synchronize the currently executing [`egui::Ui`] style immediately (including pass-0 frames).
@@ -362,10 +368,15 @@ impl Tokens {
             ("warning on panel_bg", self.warning, self.panel_bg),
             ("stale on surface_bg", self.stale, self.surface_bg),
             ("stale on panel_bg", self.stale, self.panel_bg),
+            ("role_num on surface_recessed", self.role_num, self.surface_recessed),
+            ("text_link on surface_bg", self.text_link, self.surface_bg),
+            ("text_link on panel_bg", self.text_link, self.panel_bg),
             ("link_blue on surface_bg", self.link_blue, self.surface_bg),
             ("link_green on surface_bg", self.link_green, self.surface_bg),
             ("link_red on surface_bg", self.link_red, self.surface_bg),
             ("excluded_cell_text on surface_bg", self.excluded_cell_text, self.surface_bg),
+            ("excluded_cell_text on panel_bg", self.excluded_cell_text, self.panel_bg),
+            ("excluded_cell_text on active_bg", self.excluded_cell_text, self.active_bg),
         ];
         let ui_pairs = [
             ("border on surface_bg", self.border, self.surface_bg),
@@ -444,7 +455,9 @@ mod tests {
             assert_eq!(visuals.widgets.active.weak_bg_fill, tokens.active_bg);
             assert_eq!(visuals.widgets.open.weak_bg_fill, tokens.hover_bg);
         }
-        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(), 70.0);
+        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(), 66.0);
+        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height_for_host(true), 38.0);
+        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height_for_host(false), 66.0);
         assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(), 26.0);
         assert_eq!(LayoutMetrics::CANONICAL.grid_header_total_height(), 72.0);
         assert_eq!(ScientificPaletteTokens::okabe_ito_series().len(), 8);
@@ -482,5 +495,15 @@ mod tests {
                 assert!(ratio >= 3.0, "{mode:?} SC 1.4.11 failed for {name}: {ratio:.2}:1 < 3.0:1");
             }
         }
+    }
+
+    #[test]
+    fn r20_21_configure_style_sets_450ms_tooltip_delay_and_popup_shadow() {
+        let t = Tokens::for_mode(UiThemeMode::Light);
+        let mut style = egui::Style::default();
+        t.configure_style(&mut style);
+        assert!((style.interaction.tooltip_delay - 0.45).abs() <= f32::EPSILON);
+        assert!((style.spacing.tooltip_width - 320.0).abs() <= f32::EPSILON);
+        assert!(style.visuals.popup_shadow.color.a() > 0);
     }
 }

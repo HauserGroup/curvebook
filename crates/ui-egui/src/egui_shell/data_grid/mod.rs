@@ -144,19 +144,28 @@ pub struct ColumnGridRenderContext<'a> {
     pub metrics: LayoutMetrics,
     pub modal_blocked: bool,
     pub pane_salt: &'static str,
+    pub pane_focused: bool,
 }
 
 impl<'a> ColumnGridRenderContext<'a> {
     /// Construct render options inheriting `tokens.metrics`.
     #[must_use]
     pub const fn new(tokens: &'a Tokens, modal_blocked: bool) -> Self {
-        Self { tokens, metrics: tokens.metrics, modal_blocked, pane_salt: "primary" }
+        Self { tokens, metrics: tokens.metrics, modal_blocked, pane_salt: "primary", pane_focused: true }
     }
 
     /// Scope egui transient IDs to an explicit split-pane slot (`"primary"` / `"secondary"`).
     #[must_use]
     pub const fn with_pane_salt(mut self, pane_salt: &'static str) -> Self {
         self.pane_salt = pane_salt;
+        self
+    }
+
+    /// Control whether this grid pane owns keyboard shortcuts (`true` for standalone views,
+    /// computed per split slot in `center_stage.rs`).
+    #[must_use]
+    pub const fn with_pane_focused(mut self, pane_focused: bool) -> Self {
+        self.pane_focused = pane_focused;
         self
     }
 }

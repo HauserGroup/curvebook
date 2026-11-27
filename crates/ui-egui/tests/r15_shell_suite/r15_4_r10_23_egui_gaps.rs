@@ -202,9 +202,9 @@ fn r15_4_r10_23_egui_pane_toggle_shortcuts_and_rtl_hidpi() -> TestRes {
 
     let (cmd_shift, ctrl_shift) = (Modifiers::COMMAND | Modifiers::SHIFT, Modifiers::CTRL | Modifiers::SHIFT);
 
-    driver.press_egui_key(Key::N, cmd_shift);
+    driver.press_egui_key(Key::B, Modifiers::COMMAND);
     assert!(driver.state().views.leading_collapsed_rail && driver.frame_meta().find_by_widget_id("nav.search_input").is_none());
-    driver.press_egui_key(Key::N, ctrl_shift);
+    driver.press_egui_key(Key::B, Modifiers::CTRL);
     assert!(!driver.state().views.leading_collapsed_rail && driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
 
     assert!(!driver.state().views.trailing_collapsed_rail);
@@ -214,18 +214,18 @@ fn r15_4_r10_23_egui_pane_toggle_shortcuts_and_rtl_hidpi() -> TestRes {
     assert!(!driver.state().views.trailing_collapsed_rail && driver.state().trailing_rect_pt.ok_or("restored trail")?.width() >= 200.0);
 
     assert!(driver.state().app.family_open);
-    driver.press_egui_key(Key::F, cmd_shift);
+    driver.press_egui_key(Key::L, cmd_shift);
     assert!(!driver.state().app.family_open);
-    driver.press_egui_key(Key::F, ctrl_shift);
+    driver.press_egui_key(Key::L, ctrl_shift);
     assert!(driver.state().app.family_open);
 
     assert_eq!(driver.state_mut().app.set_locale("ar"), "ar");
     driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
     assert!(driver.state().leading_rect_pt.is_some() && driver.state().trailing_rect_pt.is_some());
-    driver.press_egui_key(Key::N, cmd_shift);
+    driver.press_egui_key(Key::B, Modifiers::COMMAND);
     driver.press_egui_key(Key::I, cmd_shift);
     assert_clean_section_9_4(&driver, "ar closed panes 1.5x")?;
-    driver.press_egui_key(Key::N, ctrl_shift);
+    driver.press_egui_key(Key::B, Modifiers::CTRL);
     driver.press_egui_key(Key::I, ctrl_shift);
     assert_clean_section_9_4(&driver, "ar restored panes 1.5x")
 }
@@ -265,13 +265,13 @@ fn r15_4_r10_23_egui_portfolio_gallery_f6_cycling_and_quick_stats_footer() -> Te
         assert!(visited.contains(&pane), "F6 missed {pane:?}");
     }
 
-    driver.press_egui_key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+    driver.press_egui_key(Key::L, Modifiers::COMMAND | Modifiers::SHIFT);
     assert!(!driver.state().app.family_open);
     for _ in 0..5 {
         driver.press_egui_key(Key::F6, Modifiers::NONE);
         assert_ne!(driver.state().app.nav.active_pane, ActiveWorkspacePane::FamilyStrip);
     }
-    driver.press_egui_key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+    driver.press_egui_key(Key::L, Modifiers::COMMAND | Modifiers::SHIFT);
     assert!(driver.state().app.family_open);
 
     let (start_pos, end_pos) = (widget_center(&driver, "grid.cell.0.0.0")?, widget_center(&driver, "grid.cell.3.0.0")?);
@@ -284,7 +284,7 @@ fn r15_4_r10_23_egui_portfolio_gallery_f6_cycling_and_quick_stats_footer() -> Te
     ]);
     driver.dispatch_events(vec![egui::Event::ModifiersChanged(Modifiers::NONE)]);
     let summary = driver.frame_meta().find_by_widget_id("status.summary").ok_or("missing status.summary")?;
-    for tok in ["N=4", "Mean=25", "SD=12.91", "SEM=6.455", "Med=25", "Rng=30"] {
+    for tok in ["N=4", "Mean=25", "SD=12.91", "SEM=6.455", "Median=25", "Range=30"] {
         assert!(summary.label.contains(tok), "missing `{tok}` in `{}`", summary.label);
     }
     assert_clean_section_9_4(&driver, "gallery/F6/footer parity")
@@ -373,7 +373,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     let (c0, c2) = (widget_center(&driver, "grid.cell.0.0.0")?, widget_center(&driver, "grid.cell.2.0.0")?);
     driver.drag(c0, c2)?;
     let summary = driver.frame_meta().find_by_widget_id("status.summary").ok_or("missing status.summary")?;
-    for tok in ["N=3", "Mean=20", "Med=20", "Rng=20"] {
+    for tok in ["N=3", "Mean=20", "Median=20", "Range=20"] {
         assert!(summary.label.contains(tok), "drag-select missing `{tok}`");
     }
 
@@ -383,14 +383,14 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     driver.press_egui_key(Key::V, Modifiers::COMMAND);
     assert_eq!(col1_cell(&driver, 0, 1), Some(20.0));
 
-    driver.click_widget_id("nav.chip.graphs")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.graphs")?;
     driver.click_widget_id("nav.sheet.graph-1")?;
     driver.press_egui_key(Key::C, Modifiers::COMMAND);
     assert_eq!(clipboard.captured_bundles().len(), 1);
     let g_bundle = clipboard.last_bundle().ok_or("missing graph bundle")?;
     assert!(!g_bundle.svg.is_empty() && !g_bundle.png_bytes.is_empty() && g_bundle.pdf_bytes.starts_with(b"%PDF"));
 
-    driver.click_widget_id("nav.chip.layouts")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.layouts")?;
     driver.click_widget_id("nav.sheet.layout-1")?;
     driver.press_egui_key(Key::C, Modifiers::COMMAND);
     assert_eq!(clipboard.captured_bundles().len(), 2);
@@ -421,7 +421,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     assert_eq!(driver.state_mut().app.set_locale("en"), "en");
     driver.run_settled();
 
-    driver.click_widget_id("nav.chip.data")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.data")?;
     driver.click_widget_id("nav.sheet.xy-1")?;
     driver.click_widget_id("grid.cell.1.0.0")?;
     driver.press_egui_key(Key::C, Modifiers::COMMAND);
@@ -440,7 +440,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
         assert_eq!(xy.x_cells[0][0].active_number(), Some(7.5));
     }
 
-    driver.click_widget_id("nav.chip.results")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.results")?;
     driver.click_widget_id("nav.sheet.res-gap")?;
     for &(loc, mode, scale) in &[
         ("en", UiThemeMode::Light, 1.0),
@@ -460,7 +460,7 @@ fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids
     assert_eq!(driver.state_mut().app.set_locale("en"), "en");
     driver.state_mut().app.set_theme_mode(UiThemeMode::Light);
     driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    driver.click_widget_id("nav.chip.data")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.data")?;
     driver.click_widget_id("nav.sheet.mv-1")?;
     assert!(driver.frame_meta().find_by_widget_id("mv_formula.role_badge.0").is_some());
     driver.click_widget_id("mv_formula.role_badge.0")?;

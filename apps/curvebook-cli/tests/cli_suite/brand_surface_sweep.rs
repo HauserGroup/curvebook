@@ -900,12 +900,43 @@ fn contains_ascii_word(haystack: &str, needle: &str) -> bool {
     false
 }
 
+fn mask_allowed_dot_ext(text: &str) -> String {
+    let dot_ext = format!(".{}", join(&["pr", "ism"]));
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if text.get(i..i + dot_ext.len()) == Some(dot_ext.as_str()) {
+            let end = i + dot_ext.len();
+            let followed_by_alnum = bytes.get(end).is_some_and(u8::is_ascii_alphanumeric);
+            let followed_by_domain = bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_alphanumeric);
+            let mut host_i = i;
+            while host_i > 0 && (bytes[host_i - 1].is_ascii_alphanumeric() || matches!(bytes[host_i - 1], b'-' | b'.')) {
+                host_i -= 1;
+            }
+            let in_url_host = host_i >= 3 && bytes.get(host_i - 3..host_i) == Some(b"://");
+            if !followed_by_alnum && !followed_by_domain && !in_url_host {
+                out.push_str(".ext");
+                i = end;
+                continue;
+            }
+        }
+        let Some(ch) = text.get(i..).and_then(|s| s.chars().next()) else {
+            break;
+        };
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn assert_clean_ui_string(ctx: &str, text: &str, locale: &str, allow_palette_cmd_id: bool) -> Result<(), String> {
+    let dot_masked = mask_allowed_dot_ext(text);
     let normalized_text = if allow_palette_cmd_id {
         let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
-        text.replace(&cmd_id, "table.import_ext")
+        dot_masked.replace(&cmd_id, "table.import_ext")
     } else {
-        text.to_owned()
+        dot_masked
     };
     let check_str = if locale == "it" {
         let ital_word = join(&["stat", "is", "ti", "ca"]);
@@ -1354,7 +1385,7 @@ fn check_mcp_json_strict(ctx: &str, method: &str, called_tool: Option<&str>, res
     let mcp_tool_id = join(&["table_im", "port_pr", "ism"]);
     let serialized = serde_json::to_string(resp).map_err(|e| e.to_string())?;
 
-    let mut masked = serialized;
+    let mut masked = mask_allowed_dot_ext(&serialized);
     if method == "tools/list" {
         if let Some(tools) = resp.pointer("/result/tools").and_then(serde_json::Value::as_array) {
             for tool in tools {

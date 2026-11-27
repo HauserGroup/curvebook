@@ -103,6 +103,13 @@ pub fn build_egui_font_definitions(extra_ttf: Option<&[u8]>) -> egui::FontDefini
     defs
 }
 
+/// Build and install CurveBook's desktop font definitions (including `BOLD_FONT_FAMILY` and
+/// `ALIGNED_NUMERAL_FONT_FAMILY` metadata) into `ctx`.
+pub fn install_desktop_font_definitions(ctx: &egui::Context, extra_ttf: Option<&[u8]>) {
+    let fonts = build_egui_font_definitions(extra_ttf);
+    curvebook_ui_egui::egui_shell::fonts::install_font_definitions(ctx, fonts);
+}
+
 struct DeferredLiveRequest {
     req: LiveControlRequest,
     scroll_attempted: bool,
@@ -1693,7 +1700,11 @@ impl CurveBookNativeApp {
         }
 
         let frame_had_scroll_input = ctx.input(|i| i.smooth_scroll_delta.length_sq() > 0.01);
-        let prev_grid_scroll = self.runtime.window(input_window_id).ok().map(|w| w.app().egui_views.column_grid.scroll_offset_pt);
+        let prev_grid_scroll = self
+            .runtime
+            .window(input_window_id)
+            .ok()
+            .map(|w| (w.app().egui_views.column_grid.scroll_offset_pt, w.app().egui_views.center_stage.secondary_column_grid.scroll_offset_pt));
         let mut next_intents = PendingUiIntents::default();
         let mut next_meta = FrameInspectMeta::default();
         let report = if let Ok(win) = self.runtime.window_mut(input_window_id) {
@@ -1711,7 +1722,11 @@ impl CurveBookNativeApp {
         } else {
             inspect_bridge::ShellAboutFrameReport::default()
         };
-        let post_grid_scroll = self.runtime.window(input_window_id).ok().map(|w| w.app().egui_views.column_grid.scroll_offset_pt);
+        let post_grid_scroll = self
+            .runtime
+            .window(input_window_id)
+            .ok()
+            .map(|w| (w.app().egui_views.column_grid.scroll_offset_pt, w.app().egui_views.center_stage.secondary_column_grid.scroll_offset_pt));
         let scroll_active_this_frame = frame_had_scroll_input || (prev_grid_scroll.is_some() && post_grid_scroll != prev_grid_scroll);
         self.inspect_meta = next_meta;
         self.last_regions = report.regions;
@@ -2167,7 +2182,7 @@ impl CurveBookNativeApp {
             .map(|w| w.hovered_files().iter().filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(str::to_owned)).collect())
             .unwrap_or_default();
         let detail = if hovered_names.is_empty() {
-            String::from("Drop file to open or import (.curvebook, .cbtemplate, .prism, .pzfx, .xlsx, .csv, .tsv)")
+            String::from("Drop .curvebook, .cbtemplate, .pzfx, .prism, .xlsx, .csv, or .tsv files to open or import")
         } else {
             format!("Drop to open or import: {}", hovered_names.join(", "))
         };
@@ -2946,8 +2961,7 @@ pub fn run_native_desktop_with_control(
             if let Some(ref render_state) = cc.wgpu_render_state {
                 install_wgpu_device_error_handlers(render_state, cc.egui_ctx.clone(), Arc::clone(&pending_device_lost));
             }
-            let fonts = build_egui_font_definitions(font_bytes.as_deref());
-            cc.egui_ctx.set_fonts(fonts);
+            install_desktop_font_definitions(&cc.egui_ctx, font_bytes.as_deref());
             let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup))
                 .with_device_lost_slot(pending_device_lost, interactive_dialogs);
             #[cfg(target_os = "macos")]
@@ -3028,7 +3042,7 @@ mod tests {
                 None
             };
             let ctx = egui::Context::default();
-            ctx.set_fonts(build_egui_font_definitions(None));
+            install_desktop_font_definitions(&ctx, None);
             let auth = ControlAuth::from_token("test-token-gui-harness").map_err(|e| e.to_string())?;
             Ok(Self { app, win_id, ctx, size: egui::vec2(w, h), req_tx, auth })
         }
@@ -3434,7 +3448,10 @@ mod tests {
         let active_rs = h.app.runtime().window(h.win_id)?.app().document().active_sheet_id.clone().ok_or("expected ResultSheet")?;
         assert!(h.app.runtime().window(h.win_id)?.app().document().result_sheet(&active_rs).is_some());
 
-        let _ = h.step(vec![key_evt(egui::Key::T, true, egui::Modifiers::COMMAND), key_evt(egui::Key::T, false, egui::Modifiers::COMMAND)]);
+        let _ = h.step(vec![
+            key_evt(egui::Key::P, true, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
+            key_evt(egui::Key::P, false, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT),
+        ]);
         let _ = h.step(Vec::new());
         assert!(matches!(h.app.runtime().window(h.win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
         Ok(())
@@ -3728,11 +3745,11 @@ mod tests {
         );
         h.app.runtime_mut().window_mut(h.win_id)?.app_mut().set_human_path_only(false);
 
-        // 4. `FitModal` -> `ui.switch_tab("fit.tab.output")` -> `"0.95"` -> Enter -> Enter.
-        let nl_rs_id = h.open_edit_modal("ds-fit-w5", "fit.nonlinear")?;
+        // 4. `FitModal` -> `ui.switch_tab("fit.tab.output")` -> `"0.95"` -> Enter -> Enter (`R20.20` defers creation until commit).
+        let _pending_nl_id = h.open_edit_modal("ds-fit-w5", "fit.nonlinear")?;
         h.send_ok(json!({ "id": "ft1", "method": "ui.switch_tab", "params": { "tab_id": "fit.tab.output" } }), "fit.tab.output")?;
         h.verify_two_enter_textbox_commit("fit.diagnostics.r2.input", "0.95", false)?;
-        let committed_r2 = h.app.runtime().window(h.win_id)?.app().document().result_sheet(&nl_rs_id).and_then(|rs| match &rs.analysis.kind {
+        let committed_r2 = h.app.runtime().window(h.win_id)?.app().document().result_sheets.last().and_then(|rs| match &rs.analysis.kind {
             curvebook_doc::AnalysisKind::NonlinearRegression(fit) => fit.flag_r_squared_below,
             _ => None,
         });
@@ -3821,5 +3838,102 @@ mod tests {
         let meta_err = super::finalize_live_screenshot_payload_with_limit(&req_id, "full_window", 640, 480, 144, &png, Some("/tmp/out.png"), 64)
             .expect_err("metadata overflow must fail before write");
         assert_eq!(meta_err.code, curvebook_doc::ErrorCode::ResourceLimit);
+    }
+
+    #[test]
+    fn r20_8_gui_window_grid_drag_commit_repaints_immediately_and_settles_zero_idle() -> Result<(), String> {
+        let mut h = GuiHarness::new(1024.0, 640.0, true, |rt, id| {
+            let win = rt.window_mut(id)?;
+            win.execute_and_journal(
+                "sheet.createData",
+                json!({ "sheet_id": "ds-r208", "kind": "column", "cols": 3, "rows": 6, "auto_graph": false }),
+            )?;
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-r208" }))
+        })?;
+        let mut sim_time = 1.0_f64;
+        let step_at = |h: &mut GuiHarness, sim_time: &mut f64, dt: f64, events: Vec<egui::Event>| -> egui::FullOutput {
+            *sim_time += dt;
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, h.size)),
+                time: Some(*sim_time),
+                predicted_dt: dt as f32,
+                focused: true,
+                events,
+                ..Default::default()
+            };
+            h.app.drain_synthetic_events_into(&mut raw);
+            let mut out = h.ctx.run_ui(raw, |ui| h.app.step_ui(ui));
+            out.textures_delta.clear();
+            out
+        };
+        for _ in 0..20 {
+            let out = step_at(&mut h, &mut sim_time, 0.05, Vec::new());
+            if out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::MAX) {
+                break;
+            }
+        }
+
+        let c0 = h.app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing cell 0,0")?.clipped_rect.center();
+        let c1 = h.app.inspect_meta().find_by_widget_id("grid.cell.2.1.0").ok_or("missing cell 2,1")?.clipped_rect.center();
+
+        let out = step_at(
+            &mut h,
+            &mut sim_time,
+            1.0 / 60.0,
+            vec![
+                egui::Event::PointerMoved(c0),
+                egui::Event::PointerButton { pos: c0, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerMoved(c1),
+            ],
+        );
+        let immediate_repaint = out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::ZERO);
+        assert!(immediate_repaint, "grid drag intent commit must request immediate repaint");
+
+        let bounds = h.app.runtime().window(h.win_id)?.app().grid.tool.selection_bounds();
+        assert_eq!(bounds.map(|(a, b)| ((a.row, a.col, a.subcol), (b.row, b.col, b.subcol))), Some(((0, 0, 0), (2, 1, 0))));
+
+        let _ = step_at(
+            &mut h,
+            &mut sim_time,
+            1.0 / 60.0,
+            vec![egui::Event::PointerButton { pos: c1, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+        );
+        for _ in 0..24 {
+            let settle_out = step_at(&mut h, &mut sim_time, 0.05, Vec::new());
+            if settle_out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay == std::time::Duration::MAX) {
+                break;
+            }
+        }
+        let idle_out = step_at(&mut h, &mut sim_time, 0.1, Vec::new());
+        let idle_delay = idle_out.viewport_output.get(&egui::ViewportId::ROOT).map(|v| v.repaint_delay);
+        assert_eq!(idle_delay, Some(std::time::Duration::MAX), "settled grid selection must request zero idle repaints");
+        Ok(())
+    }
+
+    #[test]
+    fn r20_13_gui_harness_installs_bold_and_numeral_font_metadata() -> Result<(), String> {
+        let mut h = GuiHarness::new(1024.0, 640.0, false, |_, _| Ok(()))?;
+        let _ = h.step(Vec::new());
+        let expected_report = curvebook_ui_egui::egui_shell::fonts::build_egui_font_definitions().report;
+        assert_eq!(
+            curvebook_ui_egui::egui_shell::fonts::has_bold_font(&h.ctx),
+            expected_report.bold_face_loaded,
+            "live GuiHarness context must mirror BOLD_FONT_FAMILY availability"
+        );
+        assert!(
+            curvebook_ui_egui::egui_shell::fonts::has_aligned_numeral_font(&h.ctx),
+            "live GuiHarness context must register ALIGNED_NUMERAL_FONT_FAMILY"
+        );
+        if cfg!(target_os = "macos") {
+            assert!(curvebook_ui_egui::egui_shell::fonts::has_bold_font(&h.ctx));
+        }
+        let tokens = curvebook_ui_egui::egui_shell::Tokens::default();
+        let numeral_font = curvebook_ui_egui::egui_shell::fonts::aligned_numeral_font_id(&h.ctx, &tokens);
+        assert_eq!(numeral_font.family, egui::FontFamily::Name(Arc::from(curvebook_ui_egui::egui_shell::fonts::ALIGNED_NUMERAL_FONT_FAMILY)));
+        if expected_report.bold_face_loaded {
+            let heading_font = curvebook_ui_egui::egui_shell::fonts::section_heading_font_id(&h.ctx, &tokens);
+            assert_eq!(heading_font.family, egui::FontFamily::Name(Arc::from(curvebook_ui_egui::egui_shell::fonts::BOLD_FONT_FAMILY)));
+        }
+        Ok(())
     }
 }

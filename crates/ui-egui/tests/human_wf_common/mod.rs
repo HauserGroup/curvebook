@@ -308,7 +308,12 @@ impl EguiWfHarness {
         self.app().document().data_sheets.last().map(|s| s.id.clone()).ok_or_else(|| String::from("missing created sheet"))
     }
 
-    /// Select `id` via the Project Navigator filter chip and sheet tree row.
+    /// Open the Navigator kind-filter dropdown (`nav.kind_filter`) and pick `chip_wid` (`nav.chip.*`).
+    pub fn select_nav_kind_filter(&mut self, chip_wid: &str) -> TestRes {
+        crate::common::select_nav_kind_filter(&mut self.driver, chip_wid)
+    }
+
+    /// Select `id` via the Project Navigator kind-filter dropdown and sheet tree row.
     pub fn select_sheet(&mut self, id: &SheetId) -> TestRes {
         if self.app().document().active_sheet_id.as_ref() == Some(id)
             && matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. })
@@ -325,7 +330,7 @@ impl EguiWfHarness {
                 Some(SheetSection::Layouts) => "nav.chip.layouts",
                 None => "nav.chip.all",
             };
-            self.click(chip)?;
+            self.select_nav_kind_filter(chip)?;
         }
         self.click(&wid)
     }
@@ -371,14 +376,14 @@ impl EguiWfHarness {
         Ok(sid)
     }
 
-    /// Open `EditAnalysisParameters` via `Cmd+T` (no-op if already open, e.g. auto-opened after Nonlinear Fit creation).
+    /// Open `EditAnalysisParameters` via `Cmd+Shift+P` (no-op if already open, e.g. auto-opened after Nonlinear Fit creation).
     pub fn open_cmd_t(&mut self) -> TestRes {
         if matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
             return Ok(());
         }
-        self.driver.press_key("T", KeyModifiers { meta: true, ..Default::default() })?;
+        self.driver.press_key("P", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
         if !matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
-            return Err(format!("Cmd+T failed to open EditAnalysisParameters: {:?}", self.app().canvas_dialogs.active_dialog));
+            return Err(format!("Cmd+Shift+P failed to open EditAnalysisParameters: {:?}", self.app().canvas_dialogs.active_dialog));
         }
         Ok(())
     }
@@ -396,6 +401,18 @@ impl EguiWfHarness {
         self.click("modal.ok")?;
         if matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
             self.click("analyze_picker.dup.create_new")?;
+            self.click("modal.ok")?;
+        }
+        // R20.20 item #4: first-run nonlinear fits stage Parameters without creating a ResultSheet until Parameters > OK.
+        if self.app().canvas_dialogs.edit_params.pending_create
+            && matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. })
+        {
+            if self.app().document().result_sheets.len() != before {
+                return Err(format!(
+                    "Analyze `{entry_wid}` must not commit a ResultSheet before Parameters > OK (had {before}, got {})",
+                    self.app().document().result_sheets.len()
+                ));
+            }
             self.click("modal.ok")?;
         }
         if self.app().document().result_sheets.len() <= before {
@@ -482,7 +499,7 @@ pub fn assert_zero_shortcut_compliance(h: &mut EguiWfHarness) -> TestRes {
     assert_bypass_blocked("ui.answer_dialog", dispatch_gui_action(&mut probe, "ui.answer_dialog", json!({ "action": "ok", "fields": {} })))?;
     assert_bypass_blocked(
         "ui.pointer_gesture(widget_id)",
-        dispatch_gui_action(&mut probe, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.button.ok" })),
+        dispatch_gui_action(&mut probe, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "dialog.about.close" })),
     )?;
     probe.focus_widget_id = Some(String::from("probe.focus.a"));
     assert_bypass_blocked(
@@ -664,18 +681,20 @@ fn resolve_export_sheet_id(doc: &ProjectDocument, kind: HostExportTargetKind, hi
 fn build_host_export_params(command: &str, target_sheet_id: &SheetId, path: &Path, path_str: &str, caller_params: &Value) -> Value {
     let mut map = serde_json::Map::new();
     if command == "result.generateReport" {
-        let report_fmt = caller_params
-            .get("format")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| matches!(*s, "plain" | "markdown" | "latex"))
-            .unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-                Some("tex") => "latex",
-                Some("txt") => "plain",
-                _ => "markdown",
-            });
+        let ext_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+            Some("tex") => Some("latex"),
+            Some("txt") => Some("plain"),
+            Some("md" | "markdown") => Some("markdown"),
+            _ => None,
+        };
+        let report_fmt = ext_fmt
+            .or_else(|| caller_params.get("format").and_then(Value::as_str).map(str::trim).filter(|s| matches!(*s, "plain" | "markdown" | "latex")))
+            .unwrap_or("markdown");
         map.insert(String::from("result_sheet_id"), Value::String(target_sheet_id.as_str().to_owned()));
         map.insert(String::from("format"), Value::String(report_fmt.to_owned()));
+        if let Some(scope) = caller_params.get("scope").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+            map.insert(String::from("scope"), Value::String(scope.to_owned()));
+        }
         map.insert(String::from("path"), Value::String(path_str.to_owned()));
         return Value::Object(map);
     }
@@ -717,7 +736,7 @@ fn execute_intercepted_host_file_command(
             let req = NativeFileDialogRequest {
                 command_id: command_id.to_owned(),
                 kind: NativeFileDialogKind::OpenFile,
-                filter_label: String::from("CurveBook / Data"),
+                filter_label: String::from("CurveBook, .pzfx, .prism & Data files"),
                 extensions: ["curvebook", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"].into_iter().map(str::to_owned).collect(),
                 default_file_name: None,
             };

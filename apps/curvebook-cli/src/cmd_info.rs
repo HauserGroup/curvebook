@@ -236,7 +236,7 @@ fn result_cell_json(cell: &ResultCell) -> Value {
 fn format_ci_bound(bound: curvebook_doc::CiBound) -> Value {
     match bound {
         curvebook_doc::CiBound::Finite(v) => json!(v),
-        curvebook_doc::CiBound::Open => Value::Null,
+        curvebook_doc::CiBound::Open | curvebook_doc::CiBound::Unavailable => Value::Null,
     }
 }
 

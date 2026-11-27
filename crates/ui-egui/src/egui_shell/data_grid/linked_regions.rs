@@ -8,6 +8,7 @@ use crate::grid_view::grid_tr;
 use crate::inspect::ZLayer;
 
 use super::super::FrameInspectEntryInput;
+use super::super::ui_kit::{LinkButtonSpec, TooltipMode, TooltipSpec, link_button};
 use super::shared::{
     CellTextStyle, MultiGridCtx, MultiGridFrameState, is_linked_region_broken, link_border_color32, paint_broken_link_glyph,
     paint_dashed_rect_stroke, record_meta_if_enabled, render_ellipsized_text,
@@ -152,23 +153,20 @@ pub(super) fn render_linked_region_guard_popover(ui: &mut Ui, mctx: &MultiGridCt
                     ui.horizontal(|ui| {
                         let goto_lbl = grid_tr(mctx.locale, "w5.grid_core.go_to_source", "Go To Source");
                         let has_upstream = pop.upstream_sheet_id.is_some();
-                        let goto_resp = ui.add_enabled(has_upstream, egui::Button::new(goto_lbl));
-                        record_meta_if_enabled(
+                        let goto_resp = link_button(
                             ui,
+                            tokens,
                             fstate.meta,
-                            fstate.state.record_inspect_meta,
-                            &goto_resp,
-                            FrameInspectEntryInput {
-                                widget_id: "grid.link_popover.goto",
-                                role: "button",
-                                label: goto_lbl,
+                            LinkButtonSpec {
+                                font_size: tokens.metrics.font_ui_body_pt,
                                 command_id: Some("sheet.select"),
-                                value: None,
                                 enabled: has_upstream,
                                 disabled_reason: (!has_upstream).then_some("External source"),
-                                z_layer: ZLayer::ModalDialog,
-                                ellipsized: false,
-                                full_label: None,
+                                tooltip: has_upstream.then(|| TooltipSpec::new("Go To Source").with_summary("Jump to the upstream source sheet")),
+                                record_in_meta: fstate.state.record_inspect_meta,
+                                tooltip_mode: TooltipMode::ModalAlwaysOpen,
+                                pad_x: 4.0,
+                                ..LinkButtonSpec::new("grid.link_popover.goto", goto_lbl, ZLayer::ModalDialog)
                             },
                         );
                         if goto_resp.clicked()

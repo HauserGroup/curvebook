@@ -170,7 +170,7 @@ fn verify_anova_unequal_and_reml(metrics: ViewportMetrics) -> Result<(), Box<dyn
 fn egui_cmd_t_opens_anova_modal_and_predicates_r1_to_r9_behave_cleanly() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
 
-    // 1. Cmd+T over ResultSheet: "Update Analysis" label, backdrop capture, Kruskal-Wallis + R2 disabled Tukey tooltip + commit.
+    // 1. Cmd+Shift+P over ResultSheet: "Update Analysis" label, backdrop capture, Kruskal-Wallis + R2 disabled Tukey tooltip + commit.
     let (mut app, col_id) = seed_column_anova_app(true)?;
     let _ = app.execute_command(
         "analysis.run",
@@ -180,7 +180,7 @@ fn egui_cmd_t_opens_anova_modal_and_predicates_r1_to_r9_behave_cleanly() -> Resu
     app.sync_views();
     let mut driver = make_shell_driver(app, metrics);
 
-    driver.press_key("t", KeyModifiers { meta: true, ..Default::default() })?;
+    driver.press_key("P", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
     let da = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
     assert_eq!(
         (da.sheet_surface, da.modal_surface, da.renders_egui_anova_modal),

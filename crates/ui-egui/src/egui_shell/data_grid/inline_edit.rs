@@ -12,7 +12,7 @@ use crate::inspect::ZLayer;
 use super::super::{FrameInspectEntryInput, PendingUiIntents, UiIntent};
 use super::shared::{
     AuxInlineTarget, MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, ParsedInlineCell, parse_inline_cell_with_exclusion,
-    pending_commit_key, pressed_key_event_modifiers, record_meta_if_enabled,
+    pending_commit_key, pressed_key_event_modifiers, push_select_x_if_needed, record_meta_if_enabled,
 };
 use super::shortcuts::{extract_multiline_or_tab_x_input, push_x_cell_text_paste_intents, step_cell_horiz};
 use super::{ColumnGridEguiState, GridInlineEditBuffer, GridInlineEditTarget};
@@ -201,9 +201,12 @@ fn render_standard_inline_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
                 } else if let Some(mods) = tab {
                     let (is_x, nc_opt, nx_opt) = step_cell_horiz(mctx.geom, Some(coord), None, mods.shift);
                     if is_x {
-                        fstate.aux.selected_x_cell = nx_opt;
+                        if let Some((xr, xs)) = nx_opt {
+                            fstate.aux.set_single_x((xr, xs));
+                            push_select_x_if_needed(mctx.app, xr, xs, fstate.intents);
+                        }
                     } else if let Some(nc) = nc_opt {
-                        fstate.aux.selected_x_cell = None;
+                        fstate.aux.clear_x_selection();
                         fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(mctx.ds.id.clone()), coord: nc });
                     }
                 }
@@ -267,15 +270,21 @@ fn render_aux_inline_editor(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut M
                     && mctx.geom.row_count > 0
                 {
                     let next_row = if mods.shift { row.saturating_sub(1) } else { (row + 1).min(mctx.geom.row_count - 1) };
-                    fstate.aux.selected_x_cell = Some((next_row, subcol));
+                    fstate.aux.set_single_x((next_row, subcol));
+                    push_select_x_if_needed(mctx.app, next_row, subcol, fstate.intents);
                 } else if let Some(mods) = tab {
                     let (is_x, nc_opt, nx_opt) = step_cell_horiz(mctx.geom, None, Some((row, subcol)), mods.shift);
                     if is_x {
-                        fstate.aux.selected_x_cell = nx_opt;
+                        if let Some((xr, xs)) = nx_opt {
+                            fstate.aux.set_single_x((xr, xs));
+                            push_select_x_if_needed(mctx.app, xr, xs, fstate.intents);
+                        }
                     } else if let Some(nc) = nc_opt {
-                        fstate.aux.selected_x_cell = None;
+                        fstate.aux.clear_x_selection();
                         fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(mctx.ds.id.clone()), coord: nc });
                     }
+                } else if fstate.aux.selected_x_cell == Some((row, subcol)) {
+                    push_select_x_if_needed(mctx.app, row, subcol, fstate.intents);
                 }
             }
             if retry_discard {
@@ -423,8 +432,8 @@ fn commit_aux_inline_edit(
                 .intents()
                 .iter()
                 .any(|it| matches!(it, UiIntent::SelectGridCell { .. } | UiIntent::ExtendGridSelection { .. } | UiIntent::ToggleGridCell { .. }));
-            if !selecting_y_grid {
-                aux.selected_x_cell = Some((row, subcol));
+            if !selecting_y_grid && aux.selected_x_cell.is_some() {
+                aux.set_single_x((row, subcol));
             }
         }
         AuxInlineTarget::XTitle { .. } => {

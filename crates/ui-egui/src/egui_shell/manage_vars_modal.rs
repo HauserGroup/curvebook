@@ -390,7 +390,7 @@ fn render_master_pane(
 ) {
     let ManageVarsSheetCtx { ds, mv, col: sel_col, tokens } = sheet;
     ui.label(RichText::new("Variables").strong().color(tokens.text_primary));
-    let sr = ui.add(egui::TextEdit::singleline(&mut state.search_query).hint_text("Search variables…").desired_width(avail_w));
+    let sr = ui.add(egui::TextEdit::singleline(&mut state.search_query).hint_text("Search variables").desired_width(avail_w));
     meta.record_modal_response(
         ui,
         &sr,
@@ -435,7 +435,7 @@ fn render_master_pane(
         };
         let resp = ui.add_sized(
             vec2(avail_w, 24.0),
-            egui::Button::new(RichText::new(&text).color(if selected { tokens.accent } else { tokens.text_primary })).selected(selected),
+            egui::Button::new(RichText::new(&text).color(if selected { tokens.text_strong } else { tokens.text_primary })).selected(selected),
         );
         let wid = format!("mv_formula.vars.col.{idx}");
         meta.record_modal_response(ui, &resp, FrameInspectEntryInput::modal_button(&wid, &text, true));
@@ -563,7 +563,7 @@ fn render_detail_pane(
             ui.add_space(4.0);
             ui.horizontal_wrapped(|row| {
                 row.label(RichText::new(format!("FX= {formula}")).monospace().color(tokens.role_fx));
-                let fr = widgets::secondary_button(row, "Edit Formula…");
+                let fr = widgets::secondary_button(row, "Edit Formula");
                 meta.record_modal_response(row, &fr, FrameInspectEntryInput::modal_button("mv_formula.vars.edit_formula", "Edit Formula", true));
                 if fr.clicked() {
                     intents.push(UiIntent::CloseManageVariables);
@@ -930,10 +930,5 @@ fn render_levels_inspector(
 }
 
 fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enabled: bool) -> egui::Response {
-    let mut text = RichText::new(label);
-    if selected {
-        text = text.color(tokens.accent).strong();
-    }
-    let btn = egui::Button::new(text).selected(selected);
-    ui.add_enabled(enabled, btn)
+    super::ui_kit::choice_pill(ui, tokens, label, selected, enabled)
 }

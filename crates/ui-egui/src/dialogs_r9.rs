@@ -77,6 +77,14 @@ pub(crate) fn is_inconclusive_info_item(item: &ChecklistItem) -> bool {
 /// tests, data transforms, or outlier exclusion (`QOL-7` policy).
 #[must_use]
 pub(crate) fn sanitize_diagnostics_only_text(item: &ChecklistItem) -> String {
+    let default_combo = crate::menus::ui_commands::UI_COMMANDS.iter().find(|s| s.id == "ui.editParams.open").map_or("", |s| s.shortcut);
+    sanitize_diagnostics_only_text_for_shortcut(item, default_combo)
+}
+
+/// Format statistical limitations strictly as neutral diagnostics using the caller's platform-formatted
+/// shortcut for `ui.editParams.open` (`R20.13`).
+#[must_use]
+pub(crate) fn sanitize_diagnostics_only_text_for_shortcut(item: &ChecklistItem, edit_params_combo: &str) -> String {
     let raw = item.explanation.trim();
     if raw.is_empty() {
         return format!("Diagnostic status for {} ({:?}); inspect the Diagnostics tab on this ResultSheet.", item.assumption, item.status);
@@ -103,8 +111,10 @@ pub(crate) fn sanitize_diagnostics_only_text(item: &ChecklistItem) -> String {
     .any(|kw| lower.contains(kw));
     if prescriptive {
         let metric_part = item.diagnostic_metric.as_deref().map(|m| format!(" ({m})")).unwrap_or_default();
+        let plat_sc = crate::menus::format_shortcut_for_platform(edit_params_combo);
+        let shortcut_suffix = if plat_sc.is_empty() { String::from("explicitly") } else { format!("explicitly via {plat_sc}") };
         return format!(
-            "{} flagged {}{}: statistical assumptions may not hold as tested; review Residuals / Normal Q-Q / Diagnostics tabs or adjust parameters explicitly via Cmd+T.",
+            "{} flagged {}{}: statistical assumptions may not hold as tested; review Residuals / Normal Q-Q / Diagnostics tabs or adjust parameters {shortcut_suffix}.",
             item.assumption,
             match item.status {
                 ChecklistStatus::Violated => "violation",
@@ -682,6 +692,10 @@ mod tests {
         assert!(!cleaned.to_ascii_lowercase().contains("consider"));
         assert!(!cleaned.to_ascii_lowercase().contains("switch to"));
         assert!(cleaned.contains("F(1, 14) = 8.42, p = 0.011"));
+        assert!(!cleaned.contains("Cmd+T"), "must use platform-formatted shortcut, got `{cleaned}`");
+        let expected_sc = crate::menus::format_shortcut_for_platform("Cmd+Shift+P");
+        let custom_cleaned = super::sanitize_diagnostics_only_text_for_shortcut(&violated, "Cmd+Shift+P");
+        assert!(custom_cleaned.contains(&expected_sc), "expected `{expected_sc}` in `{custom_cleaned}`");
         let info_small_n = ChecklistItem {
             assumption: String::from("Normality"),
             status: ChecklistStatus::Info,

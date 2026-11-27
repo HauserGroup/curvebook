@@ -536,8 +536,350 @@ pub fn verify_egui_frame_parity(
     let text_runs = extract_rendered_text_runs(shapes);
     let checked_text_runs = text_runs.len();
     violations.extend(check_rendered_text_bleed(&text_runs, viewport_rect, policy));
+    violations.extend(check_popup_geometry_invariants(meta, &text_runs, viewport_rect));
+    violations.extend(check_button_no_trailing_ellipsis(meta));
 
     ParityReport { checked_nodes, checked_text_runs, violations }
+}
+
+fn is_in_progress_ellipsis_label(label: &str) -> bool {
+    let trimmed = label.trim();
+    matches!(trimmed, "Listening…" | "Listening..." | "Solving…" | "Solving..." | "Solving design parameters…" | "Solving design parameters...")
+}
+
+/// Enforce `R20.15` Option B: non-ellipsized action buttons and menu items must not end in
+/// trailing `"…"` or `"..."`, reserving `…` strictly for truncated text (`ellipsized == true`),
+/// overflow triggers (`"⋯"`), and active progress copy (`"Listening…"`, `"Solving…"`).
+#[must_use]
+pub fn check_button_no_trailing_ellipsis(meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let mut violations = Vec::new();
+    for entry in &meta.entries {
+        let role_low = entry.role.to_ascii_lowercase();
+        if !matches!(role_low.as_str(), "button" | "menuitem") {
+            continue;
+        }
+        if entry.ellipsized {
+            continue;
+        }
+        let trimmed = entry.label.trim();
+        if trimmed.starts_with('⋯') || is_in_progress_ellipsis_label(trimmed) {
+            continue;
+        }
+        if trimmed.ends_with('…') || trimmed.ends_with("...") {
+            violations.push(ParityViolation {
+                widget_id: entry.widget_id.clone(),
+                check: String::from("button_trailing_ellipsis"),
+                detail: format!(
+                    "non-ellipsized {} `{}` has prohibited trailing ellipsis in label `{}` (`R20.15`)",
+                    entry.role, entry.widget_id, entry.label
+                ),
+            });
+        }
+    }
+    violations
+}
+
+const POPUP_WIDTH_BLOAT_PAD_PT: f32 = 96.0;
+const POPUP_WIDTH_BLOAT_FLOOR_PT: f32 = 180.0;
+const POPUP_BOTTOM_DEAD_SPACE_MAX_PT: f32 = 24.0;
+const POPUP_NEEDLESS_ELLIPSIS_VIEWPORT_MARGIN_PT: f32 = 48.0;
+const POPUP_ROW_WIDTH_TOL_PT: f32 = 2.0;
+const POPUP_CHILD_CONTAINMENT_TOL_PT: f32 = 2.0;
+const POPUP_ANCHOR_VERTICAL_MAX_GAP_PT: f32 = 12.0;
+const POPUP_TWO_FRAME_STABILITY_TOL_PT: f32 = 0.5;
+
+fn point_to_rect_dist_sq(p: Pos2, r: Rect) -> f32 {
+    let cx = p.x.clamp(r.left(), r.right());
+    let cy = p.y.clamp(r.top(), r.bottom());
+    let dx = p.x - cx;
+    let dy = p.y - cy;
+    dx * dx + dy * dy
+}
+
+fn parse_menu_anchor_rect(menu: &FrameInspectNodeMeta, meta: &FrameInspectMeta) -> Option<Rect> {
+    if let Some(arr) = menu.value.as_ref().and_then(|v| v.get("anchor_rect")).and_then(serde_json::Value::as_array)
+        && arr.len() == 4
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let vals: Option<[f32; 4]> =
+            (|| Some([arr.first()?.as_f64()? as f32, arr.get(1)?.as_f64()? as f32, arr.get(2)?.as_f64()? as f32, arr.get(3)?.as_f64()? as f32]))();
+        if let Some([x0, y0, x1, y1]) = vals {
+            let rect = Rect::from_min_max(Pos2::new(x0, y0), Pos2::new(x1, y1));
+            if rect.is_positive() {
+                return Some(rect);
+            }
+        }
+    }
+    if menu.z_layer != ZLayer::DropdownMenu {
+        return None;
+    }
+    let trigger_id = if menu.widget_id == "toolbar.search_dropdown" { "toolbar.search_input" } else { menu.widget_id.strip_prefix("popup.")? };
+    let trigger = meta.find_by_widget_id(trigger_id)?;
+    (trigger.z_layer == ZLayer::Workspace && trigger.clipped_rect.is_positive()).then_some(trigger.clipped_rect)
+}
+
+fn partition_menu_children<'a>(menus: &[&'a FrameInspectNodeMeta], meta: &'a FrameInspectMeta) -> Vec<Vec<&'a FrameInspectNodeMeta>> {
+    let mut grouped: Vec<Vec<&'a FrameInspectNodeMeta>> = vec![Vec::new(); menus.len()];
+    for entry in &meta.entries {
+        if entry.role == "menu" || !matches!(entry.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu) || !entry.clipped_rect.is_positive() {
+            continue;
+        }
+        let same_layer: Vec<usize> =
+            menus.iter().enumerate().filter(|(_, m)| m.z_layer == entry.z_layer && m.egui_id != entry.egui_id).map(|(i, _)| i).collect();
+        let owner = match same_layer.as_slice() {
+            [] => None,
+            [only] => Some(*only),
+            many => {
+                let center = entry.clipped_rect.center();
+                many.iter().copied().find(|&idx| menus.get(idx).is_some_and(|m| m.unclipped_rect.expand(2.0).contains(center))).or_else(|| {
+                    many.iter().copied().min_by(|&a, &b| {
+                        let da = menus.get(a).map_or(f32::INFINITY, |m| point_to_rect_dist_sq(center, m.unclipped_rect));
+                        let db = menus.get(b).map_or(f32::INFINITY, |m| point_to_rect_dist_sq(center, m.unclipped_rect));
+                        da.total_cmp(&db)
+                    })
+                })
+            }
+        };
+        if let Some(idx) = owner
+            && let Some(bucket) = grouped.get_mut(idx)
+        {
+            bucket.push(entry);
+        }
+    }
+    grouped
+}
+
+fn max_popup_text_width(
+    menu_idx: usize,
+    menus: &[&FrameInspectNodeMeta],
+    children: &[&FrameInspectNodeMeta],
+    text_runs: &[RenderedTextRun],
+) -> Option<f32> {
+    let menu = *menus.get(menu_idx)?;
+    let popup_rect = menu.unclipped_rect;
+    let menu_runs: Vec<&RenderedTextRun> = text_runs
+        .iter()
+        .filter(|run| {
+            let center = run.text_rect.center();
+            if !popup_rect.expand(2.0).contains(center) {
+                return false;
+            }
+            !menus.iter().enumerate().any(|(other_idx, other)| {
+                other_idx != menu_idx
+                    && other.z_layer == menu.z_layer
+                    && other.unclipped_rect.contains(center)
+                    && !other.unclipped_rect.contains_rect(popup_rect)
+            })
+        })
+        .collect();
+    if menu_runs.is_empty() {
+        return None;
+    }
+    let mut max_w = 0.0_f32;
+    let mut matched = vec![false; menu_runs.len()];
+    for child in children {
+        let mut row_text_w = 0.0_f32;
+        for (ri, run) in menu_runs.iter().enumerate() {
+            if child.clipped_rect.expand(2.0).contains(run.text_rect.center()) {
+                row_text_w += run.text_rect.width();
+                if let Some(flag) = matched.get_mut(ri) {
+                    *flag = true;
+                }
+            }
+        }
+        max_w = max_w.max(row_text_w);
+    }
+    for (ri, run) in menu_runs.iter().enumerate() {
+        if !matched.get(ri).copied().unwrap_or(false) {
+            max_w = max_w.max(run.text_rect.width());
+        }
+    }
+    Some(max_w)
+}
+
+fn check_single_popup_geometry(
+    menu_idx: usize,
+    menus: &[&FrameInspectNodeMeta],
+    children: &[&FrameInspectNodeMeta],
+    meta: &FrameInspectMeta,
+    text_runs: &[RenderedTextRun],
+    viewport_rect: Rect,
+    violations: &mut Vec<ParityViolation>,
+) {
+    let Some(&menu) = menus.get(menu_idx) else {
+        return;
+    };
+    let popup_rect = menu.unclipped_rect;
+
+    // 1a. No runaway width bloat: popup_w <= max(max_child_text_w + 96.0, 180.0).
+    if let Some(max_child_text_w) = max_popup_text_width(menu_idx, menus, children, text_runs) {
+        let max_allowed_w = (max_child_text_w + POPUP_WIDTH_BLOAT_PAD_PT).max(POPUP_WIDTH_BLOAT_FLOOR_PT);
+        if popup_rect.width() > max_allowed_w + 0.5 {
+            violations.push(ParityViolation {
+                widget_id: menu.widget_id.clone(),
+                check: String::from("popup_width_bloat"),
+                detail: format!(
+                    "popup `{}` width {:.1} pt exceeds max(max_child_text_w {:.1} + {:.0}, {:.0}) = {:.1} pt",
+                    menu.widget_id,
+                    popup_rect.width(),
+                    max_child_text_w,
+                    POPUP_WIDTH_BLOAT_PAD_PT,
+                    POPUP_WIDTH_BLOAT_FLOOR_PT,
+                    max_allowed_w,
+                ),
+            });
+        }
+    }
+
+    // 1b. No bottom dead space > 24.0 pt.
+    if !children.is_empty() {
+        let last_bottom = children.iter().map(|c| c.clipped_rect.bottom()).fold(f32::NEG_INFINITY, f32::max);
+        let dead_space = popup_rect.bottom() - last_bottom;
+        if dead_space > POPUP_BOTTOM_DEAD_SPACE_MAX_PT {
+            violations.push(ParityViolation {
+                widget_id: menu.widget_id.clone(),
+                check: String::from("popup_bottom_dead_space"),
+                detail: format!(
+                    "popup `{}` has {:.1} pt bottom dead space below last item (max {:.1} pt)",
+                    menu.widget_id, dead_space, POPUP_BOTTOM_DEAD_SPACE_MAX_PT,
+                ),
+            });
+        }
+    }
+
+    // 2. No needless item ellipsization when viewport width permits wider popup.
+    if viewport_rect.is_positive() && popup_rect.width() < viewport_rect.width() - POPUP_NEEDLESS_ELLIPSIS_VIEWPORT_MARGIN_PT {
+        for child in children {
+            if child.ellipsized {
+                violations.push(ParityViolation {
+                    widget_id: child.widget_id.clone(),
+                    check: String::from("popup_needless_ellipsis"),
+                    detail: format!(
+                        "popup `{}` item `{}` (`{}`) ellipsized at popup_w {:.1} pt < viewport_w {:.1} - {:.0} pt",
+                        menu.widget_id,
+                        child.widget_id,
+                        child.label,
+                        popup_rect.width(),
+                        viewport_rect.width(),
+                        POPUP_NEEDLESS_ELLIPSIS_VIEWPORT_MARGIN_PT,
+                    ),
+                });
+            }
+        }
+    }
+
+    // 3. Child-in-container containment & uniform row widths (+/- 2 pt).
+    let mut min_row_w = f32::INFINITY;
+    let mut max_row_w = 0.0_f32;
+    for child in children {
+        if !rect_contains_with_tol(popup_rect, child.clipped_rect, POPUP_CHILD_CONTAINMENT_TOL_PT) {
+            violations.push(ParityViolation {
+                widget_id: child.widget_id.clone(),
+                check: String::from("popup_child_containment"),
+                detail: format!(
+                    "popup item `{}` ({:?}) extends outside container `{}` ({:?})",
+                    child.widget_id, child.clipped_rect, menu.widget_id, popup_rect,
+                ),
+            });
+        }
+        let rw = child.unclipped_rect.width();
+        if rw > 0.0 {
+            min_row_w = min_row_w.min(rw);
+            max_row_w = max_row_w.max(rw);
+        }
+    }
+    if children.len() >= 2 && (max_row_w - min_row_w) > POPUP_ROW_WIDTH_TOL_PT {
+        violations.push(ParityViolation {
+            widget_id: menu.widget_id.clone(),
+            check: String::from("popup_uniform_row_width"),
+            detail: format!(
+                "popup `{}` child row widths span {:.1}..{:.1} pt (spread {:.1} pt > {:.1} pt)",
+                menu.widget_id,
+                min_row_w,
+                max_row_w,
+                max_row_w - min_row_w,
+                POPUP_ROW_WIDTH_TOL_PT,
+            ),
+        });
+    }
+
+    // 4. Viewport containment & trigger-anchor attachment.
+    if viewport_rect.is_positive() && !rect_contains_with_tol(viewport_rect, popup_rect, 1.5) {
+        violations.push(ParityViolation {
+            widget_id: menu.widget_id.clone(),
+            check: String::from("popup_viewport_containment"),
+            detail: format!("popup `{}` unclipped rect {:?} overflows viewport {:?}", menu.widget_id, popup_rect, viewport_rect),
+        });
+    }
+    if let Some(anchor) = parse_menu_anchor_rect(menu, meta) {
+        let v_gap = if popup_rect.top() >= anchor.bottom() {
+            popup_rect.top() - anchor.bottom()
+        } else if popup_rect.bottom() <= anchor.top() {
+            anchor.top() - popup_rect.bottom()
+        } else {
+            0.0
+        };
+        if v_gap > POPUP_ANCHOR_VERTICAL_MAX_GAP_PT {
+            violations.push(ParityViolation {
+                widget_id: menu.widget_id.clone(),
+                check: String::from("popup_anchor_vertical_attachment"),
+                detail: format!(
+                    "dropdown `{}` sits {:.1} pt vertically from trigger anchor {:?} (max {:.1} pt)",
+                    menu.widget_id, v_gap, anchor, POPUP_ANCHOR_VERTICAL_MAX_GAP_PT,
+                ),
+            });
+        }
+        let h_overlap = popup_rect.right().min(anchor.right()) - popup_rect.left().max(anchor.left());
+        if h_overlap < -0.5 {
+            violations.push(ParityViolation {
+                widget_id: menu.widget_id.clone(),
+                check: String::from("popup_anchor_horizontal_overlap"),
+                detail: format!("dropdown `{}` ({:?}) does not horizontally overlap its trigger anchor {:?}", menu.widget_id, popup_rect, anchor,),
+            });
+        }
+    }
+}
+
+/// Enforce the generic `R20.16` popup geometry invariants across every recorded `role == "menu"`
+/// node on [`ZLayer::DropdownMenu`] or [`ZLayer::ContextMenu`]:
+/// 1. No runaway width bloat (`popup_w <= max(max_child_text_w + 96, 180)`) or bottom dead space (`> 24 pt`).
+/// 2. No needless child ellipsization while `popup_w < viewport_w - 48 pt`.
+/// 3. Child-in-container containment and uniform row widths (`±2 pt`).
+/// 4. Viewport containment and trigger-anchor vertical (`<= 12 pt`) / horizontal overlap attachment.
+#[must_use]
+pub fn check_popup_geometry_invariants(meta: &FrameInspectMeta, text_runs: &[RenderedTextRun], viewport_rect: Rect) -> Vec<ParityViolation> {
+    let menus: Vec<&FrameInspectNodeMeta> = meta
+        .entries
+        .iter()
+        .filter(|e| e.role == "menu" && matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu) && e.unclipped_rect.is_positive())
+        .collect();
+    if menus.is_empty() {
+        return Vec::new();
+    }
+    let grouped = partition_menu_children(&menus, meta);
+    let mut violations = Vec::new();
+    for (idx, children) in grouped.iter().enumerate() {
+        check_single_popup_geometry(idx, &menus, children, meta, text_runs, viewport_rect, &mut violations);
+    }
+    violations
+}
+
+/// Verify two-frame popup rect stability (`|rect_frame1 - rect_frame2| <= 0.5 pt` on all four edges) (`R20.16` #5).
+#[must_use]
+pub fn check_popup_two_frame_stability(widget_id: &str, frame1: Rect, frame2: Rect) -> Option<ParityViolation> {
+    let dx0 = (frame1.min.x - frame2.min.x).abs();
+    let dy0 = (frame1.min.y - frame2.min.y).abs();
+    let dx1 = (frame1.max.x - frame2.max.x).abs();
+    let dy1 = (frame1.max.y - frame2.max.y).abs();
+    let max_delta = dx0.max(dy0).max(dx1).max(dy1);
+    (max_delta > POPUP_TWO_FRAME_STABILITY_TOL_PT).then(|| ParityViolation {
+        widget_id: widget_id.to_owned(),
+        check: String::from("popup_two_frame_stability"),
+        detail: format!(
+            "popup `{widget_id}` shifted by {max_delta:.2} pt between Frame 1 ({frame1:?}) and Frame 2 ({frame2:?}) (max {:.1} pt)",
+            POPUP_TWO_FRAME_STABILITY_TOL_PT,
+        ),
+    })
 }
 
 const INTERACTIVE_OVERLAP_TOL_PT: f32 = 1.0;
@@ -1139,6 +1481,7 @@ pub struct EguiHumanPathDriver<'a, State = ()> {
     ui_fn: DriverUiFn<'a, State>,
     post_frame_hook: Option<PostFrameHook<'a, State>>,
     meta: FrameInspectMeta,
+    last_dispatch_menu_rects: Vec<std::collections::BTreeMap<String, Rect>>,
     last_accesskit: Option<AccessKitTreeUpdate>,
     last_shapes: Vec<ClippedShape>,
     last_ime_output: Option<IMEOutput>,
@@ -1181,6 +1524,7 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
             ui_fn: Box::new(ui_fn),
             post_frame_hook: None,
             meta: FrameInspectMeta::new(),
+            last_dispatch_menu_rects: Vec::new(),
             last_accesskit: None,
             last_shapes: Vec::new(),
             last_ime_output: None,
@@ -1315,8 +1659,15 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         self.last_accesskit.as_ref().map_or_else(Vec::new, |u| collect_tooltip_texts_from_accesskit(&u.nodes))
     }
 
+    /// Borrow all tessellated [`ClippedShape`] primitives from the most recent settled frame.
+    #[must_use]
+    pub fn clipped_shapes(&self) -> &[ClippedShape] {
+        &self.last_shapes
+    }
+
     /// Advance the UI without new events until immediate repaint requests settle (up to `MAX_SETTLE_FRAMES` passes).
     pub fn run_settled(&mut self) {
+        self.last_dispatch_menu_rects.clear();
         self.step_events(Vec::new(), 1.0 / 60.0);
         for _ in 0..MAX_SETTLE_FRAMES {
             if !self.last_immediate_repaint {
@@ -1326,9 +1677,22 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         }
     }
 
+    /// Run a single `1/60s` frame pass without looping to settle, appending observed menu rects.
+    pub fn step_single_frame(&mut self) {
+        self.step_events(Vec::new(), 1.0 / 60.0);
+    }
+
+    /// Return the first `unclipped_rect` recorded for `role == "menu"` `widget_id` across the most
+    /// recent `dispatch_events`/`run_settled` sequence (Frame 1 when opened), along with the latest.
+    #[must_use]
+    pub fn observed_menu_rects(&self, widget_id: &str) -> Vec<Rect> {
+        self.last_dispatch_menu_rects.iter().filter_map(|frame| frame.get(widget_id).copied()).collect()
+    }
+
     /// Run a single `egui` frame with `events`, advancing simulation time by `1/60s`, and settle follow-ups.
     pub fn dispatch_events(&mut self, events: Vec<Event>) {
         let t0 = std::time::Instant::now();
+        self.last_dispatch_menu_rects.clear();
         self.step_events(events, 1.0 / 60.0);
         for _ in 0..MAX_SETTLE_FRAMES {
             if !self.last_immediate_repaint {
@@ -1370,6 +1734,13 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         });
 
         self.frame_seq = self.frame_seq.saturating_add(1);
+        let menu_rects: std::collections::BTreeMap<String, Rect> = pass_meta
+            .entries
+            .iter()
+            .filter(|e| e.role == "menu" && matches!(e.z_layer, ZLayer::DropdownMenu | ZLayer::ContextMenu) && e.unclipped_rect.is_positive())
+            .map(|e| (e.widget_id.clone(), e.unclipped_rect))
+            .collect();
+        self.last_dispatch_menu_rects.push(menu_rects);
         self.meta = pass_meta;
         self.last_accesskit = output.platform_output.accesskit_update.clone();
         self.last_ime_output = output.platform_output.ime;
@@ -1823,5 +2194,221 @@ mod tests {
 
         let tight_budget = RegionBudgets { status_footer: 1, ..RegionBudgets::CANONICAL };
         assert_eq!(check_region_control_budgets(&meta_ok, &tight_budget).len(), 1);
+    }
+
+    #[test]
+    fn r20_16_popup_geometry_invariants_catch_all_five_defect_classes_and_pass_clean_menus() {
+        use super::{FrameInspectMeta, FrameInspectNodeMeta, RenderedTextRun, check_popup_geometry_invariants, check_popup_two_frame_stability};
+        use egui::{Pos2, Rect, Vec2};
+        use serde_json::json;
+
+        let vp = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let mk_node = |id: &str, role: &str, rect: Rect, z: ZLayer, ellip: bool, val: Option<serde_json::Value>| FrameInspectNodeMeta {
+            egui_id: egui::Id::unique(id),
+            accesskit_id: egui::Id::unique(id).accesskit_id(),
+            widget_id: String::from(id),
+            role: String::from(role),
+            label: String::from(id),
+            command_id: None,
+            value: val,
+            enabled: true,
+            disabled_reason: None,
+            unclipped_rect: rect,
+            clipped_rect: rect.intersect(vp),
+            z_layer: z,
+            ellipsized: ellip,
+            full_label: ellip.then(|| String::from(id)),
+            action_rank: None,
+        };
+        let mk_run = |text: &str, rect: Rect| RenderedTextRun { full_text: String::from(text), ellipsized: false, text_rect: rect, clip_rect: rect };
+
+        // Clean baseline dropdown attached 4pt below trigger with uniform rows, tight width, no ellipsis.
+        let trigger_r = Rect::from_min_size(Pos2::new(620.0, 12.0), Vec2::new(60.0, 24.0));
+        let popup_r = Rect::from_min_size(Pos2::new(520.0, 40.0), Vec2::new(160.0, 62.0));
+        let row0 = Rect::from_min_size(Pos2::new(526.0, 46.0), Vec2::new(148.0, 24.0));
+        let row1 = Rect::from_min_size(Pos2::new(526.0, 72.0), Vec2::new(148.0, 24.0));
+        let mut clean_meta = FrameInspectMeta::new();
+        clean_meta.record(mk_node("toolbar.split", "button", trigger_r, ZLayer::Workspace, false, None));
+        clean_meta.record(mk_node(
+            "popup.toolbar.split",
+            "menu",
+            popup_r,
+            ZLayer::DropdownMenu,
+            false,
+            Some(json!({ "open": true, "anchor_rect": [trigger_r.min.x, trigger_r.min.y, trigger_r.max.x, trigger_r.max.y] })),
+        ));
+        clean_meta.record(mk_node("toolbar.split.preset.a", "button", row0, ZLayer::DropdownMenu, false, None));
+        clean_meta.record(mk_node("toolbar.split.preset.b", "button", row1, ZLayer::DropdownMenu, false, None));
+        let clean_runs = vec![
+            mk_run("Single Pane", Rect::from_min_size(Pos2::new(534.0, 52.0), Vec2::new(82.0, 12.0))),
+            mk_run("Data + Graph", Rect::from_min_size(Pos2::new(534.0, 78.0), Vec2::new(92.0, 12.0))),
+        ];
+        assert!(check_popup_geometry_invariants(&clean_meta, &clean_runs, vp).is_empty());
+        assert!(check_popup_two_frame_stability("popup.toolbar.split", popup_r, popup_r).is_none());
+
+        // Invariant 1a + 1b: runaway width bloat (> max(60 + 96, 180) = 180) and bottom dead space (> 24 pt).
+        let bloated_r = Rect::from_min_size(Pos2::new(100.0, 40.0), Vec2::new(420.0, 140.0));
+        let mut bloat_meta = FrameInspectMeta::new();
+        bloat_meta.record(mk_node("popup.bloated", "menu", bloated_r, ZLayer::ContextMenu, false, None));
+        bloat_meta.record(mk_node(
+            "ctx.short",
+            "menuitem",
+            Rect::from_min_size(Pos2::new(106.0, 46.0), Vec2::new(408.0, 24.0)),
+            ZLayer::ContextMenu,
+            false,
+            None,
+        ));
+        let bloat_runs = vec![mk_run("Copy", Rect::from_min_size(Pos2::new(114.0, 52.0), Vec2::new(40.0, 12.0)))];
+        let v1 = check_popup_geometry_invariants(&bloat_meta, &bloat_runs, vp);
+        assert!(v1.iter().any(|v| v.check == "popup_width_bloat"), "expected width bloat: {v1:?}");
+        assert!(v1.iter().any(|v| v.check == "popup_bottom_dead_space"), "expected dead space: {v1:?}");
+
+        // Invariant 2: needless ellipsization while popup_w < viewport_w - 48.
+        let mut ellip_meta = FrameInspectMeta::new();
+        ellip_meta.record(mk_node(
+            "popup.ellip",
+            "menu",
+            Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::new(140.0, 36.0)),
+            ZLayer::ContextMenu,
+            false,
+            None,
+        ));
+        ellip_meta.record(mk_node(
+            "ctx.trunc",
+            "menuitem",
+            Rect::from_min_size(Pos2::new(46.0, 46.0), Vec2::new(128.0, 24.0)),
+            ZLayer::ContextMenu,
+            true,
+            None,
+        ));
+        let v2 = check_popup_geometry_invariants(&ellip_meta, &[], vp);
+        assert!(v2.iter().any(|v| v.check == "popup_needless_ellipsis"), "expected needless ellipsis: {v2:?}");
+
+        // Invariant 3: child overflow + mismatched row widths (> 2 pt).
+        let mut bad_rows = FrameInspectMeta::new();
+        bad_rows.record(mk_node(
+            "popup.rows",
+            "menu",
+            Rect::from_min_size(Pos2::new(40.0, 40.0), Vec2::new(150.0, 62.0)),
+            ZLayer::ContextMenu,
+            false,
+            None,
+        ));
+        bad_rows.record(mk_node(
+            "ctx.r0",
+            "menuitem",
+            Rect::from_min_size(Pos2::new(46.0, 46.0), Vec2::new(120.0, 24.0)),
+            ZLayer::ContextMenu,
+            false,
+            None,
+        ));
+        bad_rows.record(mk_node(
+            "ctx.r1",
+            "menuitem",
+            Rect::from_min_size(Pos2::new(46.0, 72.0), Vec2::new(170.0, 24.0)),
+            ZLayer::ContextMenu,
+            false,
+            None,
+        ));
+        let v3 = check_popup_geometry_invariants(&bad_rows, &[], vp);
+        assert!(v3.iter().any(|v| v.check == "popup_child_containment"), "expected containment violation: {v3:?}");
+        assert!(v3.iter().any(|v| v.check == "popup_uniform_row_width"), "expected uniform row width violation: {v3:?}");
+
+        // Invariant 4: off-viewport popup + detached trigger anchor (vertical gap > 12 pt & no horizontal overlap).
+        let detached_r = Rect::from_min_size(Pos2::new(720.0, 120.0), Vec2::new(140.0, 36.0));
+        let mut bad_anchor = FrameInspectMeta::new();
+        bad_anchor.record(mk_node(
+            "toolbar.trig",
+            "button",
+            Rect::from_min_size(Pos2::new(100.0, 10.0), Vec2::new(60.0, 24.0)),
+            ZLayer::Workspace,
+            false,
+            None,
+        ));
+        bad_anchor.record(mk_node("popup.toolbar.trig", "menu", detached_r, ZLayer::DropdownMenu, false, None));
+        let v4 = check_popup_geometry_invariants(&bad_anchor, &[], vp);
+        assert!(v4.iter().any(|v| v.check == "popup_viewport_containment"), "expected viewport violation: {v4:?}");
+        assert!(v4.iter().any(|v| v.check == "popup_anchor_vertical_attachment"), "expected vertical gap violation: {v4:?}");
+        assert!(v4.iter().any(|v| v.check == "popup_anchor_horizontal_overlap"), "expected horizontal overlap violation: {v4:?}");
+
+        // Invariant 5: two-frame size jump > 0.5 pt.
+        let jumped = Rect::from_min_size(popup_r.min, popup_r.size() + Vec2::new(8.0, 0.0));
+        let v5 = check_popup_two_frame_stability("popup.toolbar.split", popup_r, jumped);
+        assert!(v5.is_some_and(|v| v.check == "popup_two_frame_stability"));
+    }
+
+    #[test]
+    fn r20_15_button_trailing_ellipsis_guardrail_rejects_dots_and_allows_truncation_overflow_and_progress() {
+        use super::{FrameInspectMeta, FrameInspectNodeMeta, check_button_no_trailing_ellipsis};
+        use egui::{Pos2, Rect, Vec2};
+
+        let r = Rect::from_min_size(Pos2::new(10.0, 10.0), Vec2::new(120.0, 28.0));
+        let mk_entry = |id: &str, role: &str, label: &str, ellipsized: bool| FrameInspectNodeMeta {
+            egui_id: egui::Id::unique(id),
+            accesskit_id: egui::Id::unique(id).accesskit_id(),
+            widget_id: String::from(id),
+            role: String::from(role),
+            label: String::from(label),
+            command_id: None,
+            value: None,
+            enabled: true,
+            disabled_reason: None,
+            unclipped_rect: r,
+            clipped_rect: r,
+            z_layer: ZLayer::Workspace,
+            ellipsized,
+            full_label: ellipsized.then(|| String::from(label)),
+            action_rank: None,
+        };
+
+        // Positive cases: clean action labels, runtime truncation, overflow indicators, and active progress copy.
+        let mut clean = FrameInspectMeta::new();
+        clean.record(mk_entry("btn.format", "button", "Format Graph", false));
+        clean.record(mk_entry("menu.open", "menuitem", "Open", false));
+        clean.record(mk_entry("btn.trunc", "button", "Long Sheet Name…", true));
+        clean.record(mk_entry("toolbar.overflow", "button", "⋯", false));
+        clean.record(mk_entry("results.overflow", "button", "⋯ +4", false));
+        clean.record(mk_entry("prefs.shortcuts.capture", "button", "Listening…", false));
+        clean.record(mk_entry("pw.solve", "button", "Solving…", false));
+        clean.record(mk_entry("input.search", "textbox", "Search...", false));
+        assert!(check_button_no_trailing_ellipsis(&clean).is_empty());
+
+        // Negative cases: non-ellipsized button and menuitem with Unicode `…` or ASCII `...` fail closed.
+        let mut bad = FrameInspectMeta::new();
+        bad.record(mk_entry("btn.bad_unicode", "button", "Format Graph…", false));
+        bad.record(mk_entry("btn.bad_ascii", "Button", "Analyze...", false));
+        bad.record(mk_entry("menu.bad_ascii", "menuitem", "Save As...", false));
+        let violations = check_button_no_trailing_ellipsis(&bad);
+        assert_eq!(violations.len(), 3);
+        assert!(violations.iter().all(|v| v.check == "button_trailing_ellipsis"));
+
+        // Integrated driver pass: verify_egui_frame_parity catches a rendered button ending in `…`.
+        let driver = EguiHumanPathDriver::new((), ViewportMetrics::new(640.0, 420.0, 1.0), |ui, meta, _| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let btn = ui.button("Export Figure…");
+                meta.record_response(
+                    ui,
+                    &btn,
+                    FrameInspectEntryInput {
+                        widget_id: "btn.bad_rendered",
+                        role: "button",
+                        label: "Export Figure…",
+                        command_id: None,
+                        value: None,
+                        enabled: true,
+                        disabled_reason: None,
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+            });
+        });
+        let report = driver.verify_pixel_to_hit_box_parity();
+        assert!(
+            report.violations.iter().any(|v| v.check == "button_trailing_ellipsis" && v.widget_id == "btn.bad_rendered"),
+            "verify_egui_frame_parity must fail on non-ellipsized button ending in `…`: {:?}",
+            report.violations
+        );
     }
 }

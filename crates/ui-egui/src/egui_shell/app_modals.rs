@@ -19,7 +19,7 @@ use crate::menus::shortcuts::{ShortcutBinding, ShortcutRegistry, normalize_short
 use crate::theme::UiThemeMode;
 use crate::workspace_nav::NavigatorNestingMode;
 
-use super::inspect_bridge::ModalCaptureReport;
+use super::inspect_bridge::{ModalCaptureReport, ModalCaptureSpec, finalize_egui_modal_response};
 use super::ui_kit::{self, ModalButtonSpec, ScrolledModalCfg, show_scrolled_modal};
 use super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
 use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
@@ -178,6 +178,7 @@ pub struct AppModalsEguiState {
     pub export_height_spinner: ScrubUnitFieldState,
     pub export_dpi_spinner: ScrubUnitFieldState,
     pub export_emf_selected: bool,
+    pub export_selected_gallery_scope: bool,
     pub print_copies_spinner: ScrubUnitFieldState,
     pub print_scale_spinner: ScrubUnitFieldState,
     pub print_bleed_spinner: ScrubUnitFieldState,
@@ -197,6 +198,7 @@ impl Default for AppModalsEguiState {
             export_height_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Generic),
             export_dpi_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Generic),
             export_emf_selected: false,
+            export_selected_gallery_scope: false,
             print_copies_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Generic),
             print_scale_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Percent),
             print_bleed_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
@@ -232,6 +234,7 @@ impl AppModalsEguiState {
         self.find_replace.match_count = 0;
         self.find_replace.status_message = None;
         self.export_emf_selected = false;
+        self.export_selected_gallery_scope = false;
         self.checkpoint_pending_restore_id = None;
     }
 }
@@ -308,6 +311,7 @@ pub fn render_app_modal(
     }
     if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::ExportFigure { .. }) {
         state.export_emf_selected = false;
+        state.export_selected_gallery_scope = false;
     }
 
     match &app.canvas_dialogs.active_dialog {
@@ -315,7 +319,6 @@ pub fn render_app_modal(
         ActiveDialog::Print { .. } => render_print_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
-        ActiveDialog::Feedback => render_feedback_modal(ctx, app, tokens, meta, intents),
         ActiveDialog::ImportWarnings => render_import_warnings_modal(ctx, app, tokens, meta, intents),
         ActiveDialog::ImportProjectMode { command_id, path, has_unsaved_changes } => {
             render_import_project_mode_modal(ctx, app, command_id, path, *has_unsaved_changes, tokens, meta, intents)
@@ -369,60 +372,73 @@ fn render_unsaved_modal(
             ui.add(egui::Label::new(tr(locale, "w6.view.shell.unsaved_prompt")).wrap());
         },
         |ui, meta, intents| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "dialog.button.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Cancel });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "dialog.button.dont_save",
-                        label: tr(locale, "w6.view.shell.dont_save"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::DontSave });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "dialog.button.save",
-                        label: tr(locale, "menu.file.save"),
-                        command_id: Some("project.save"),
-                        selected: true,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Save });
-                }
-            });
+            let dont_save_lbl = tr(locale, "w6.view.shell.dont_save");
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let save_lbl = tr(locale, "menu.file.save");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[dont_save_lbl],
+                &[cancel_lbl, save_lbl],
+                tokens,
+                intents,
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "dialog.button.dont_save",
+                            label: dont_save_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::DontSave });
+                    }
+                },
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "dialog.button.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Cancel });
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "dialog.button.save",
+                            label: save_lbl,
+                            command_id: Some("project.save"),
+                            selected: true,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::ResolveUnsavedChanges { action: UnsavedCloseAction::Save });
+                    }
+                },
+            );
         },
     );
 
@@ -520,46 +536,50 @@ fn render_preferences_modal(
             }
         },
         |ui, meta, (state, intents)| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    state.preferences.shortcut_capture_armed = false;
-                    intents.push(UiIntent::ClosePreferences { save: false });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.ok",
-                        label: tr(locale, "btn.ok"),
-                        command_id: None,
-                        selected: true,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    state.preferences.shortcut_capture_armed = false;
-                    intents.push(UiIntent::UpdatePreferencesDraft(Box::new(state.preferences.clone())));
-                    intents.push(UiIntent::ClosePreferences { save: true });
-                }
-            });
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let ok_lbl = tr(locale, "btn.ok");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[],
+                &[cancel_lbl, ok_lbl],
+                tokens,
+                &mut (&mut **state, &mut **intents),
+                |_, _, _| {},
+                |ui, meta, (state, intents)| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        state.preferences.shortcut_capture_armed = false;
+                        intents.push(UiIntent::ClosePreferences { save: false });
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn { widget_id: "modal.ok", label: ok_lbl, command_id: None, selected: true, enabled: true, disabled_reason: None },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        state.preferences.shortcut_capture_armed = false;
+                        intents.push(UiIntent::UpdatePreferencesDraft(Box::new(state.preferences.clone())));
+                        intents.push(UiIntent::ClosePreferences { save: true });
+                    }
+                },
+            );
         },
     );
 
@@ -1103,73 +1123,86 @@ fn render_find_replace_modal(
             app_text(ui, &s_resp, meta, "find_replace.status", &status_txt);
         },
         |ui, meta, (state, intents)| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                let can_search = !state.find_replace.find_query.is_empty();
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::CloseFindReplace);
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "find_replace.find",
-                        label: tr(locale, "find.btn.next"),
-                        command_id: None,
-                        selected: false,
-                        enabled: can_search,
-                        disabled_reason: (!can_search).then_some("Enter search text first"),
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::ExecuteFindReplace {
-                        replace_all: false,
-                        find_query: state.find_replace.find_query.clone(),
-                        replace_with: state.find_replace.replace_with.clone(),
-                        match_case: state.find_replace.match_case,
-                        match_entire_cell: state.find_replace.match_entire_cell,
-                    });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "find_replace.replace_all",
-                        label: tr(locale, "find.btn.replace_all"),
-                        command_id: None,
-                        selected: true,
-                        enabled: can_search,
-                        disabled_reason: (!can_search).then_some("Enter search text first"),
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::ExecuteFindReplace {
-                        replace_all: true,
-                        find_query: state.find_replace.find_query.clone(),
-                        replace_with: state.find_replace.replace_with.clone(),
-                        match_case: state.find_replace.match_case,
-                        match_entire_cell: state.find_replace.match_entire_cell,
-                    });
-                }
-            });
+            let can_search = !state.find_replace.find_query.is_empty();
+            let find_lbl = tr(locale, "find.btn.next");
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let replace_lbl = tr(locale, "find.btn.replace_all");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[find_lbl],
+                &[cancel_lbl, replace_lbl],
+                tokens,
+                &mut (&mut **state, &mut **intents),
+                |ui, meta, (state, intents)| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "find_replace.find",
+                            label: find_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: can_search,
+                            disabled_reason: (!can_search).then_some("Enter search text first"),
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::ExecuteFindReplace {
+                            replace_all: false,
+                            find_query: state.find_replace.find_query.clone(),
+                            replace_with: state.find_replace.replace_with.clone(),
+                            match_case: state.find_replace.match_case,
+                            match_entire_cell: state.find_replace.match_entire_cell,
+                        });
+                    }
+                },
+                |ui, meta, (state, intents)| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::CloseFindReplace);
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "find_replace.replace_all",
+                            label: replace_lbl,
+                            command_id: None,
+                            selected: true,
+                            enabled: can_search,
+                            disabled_reason: (!can_search).then_some("Enter search text first"),
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::ExecuteFindReplace {
+                            replace_all: true,
+                            find_query: state.find_replace.find_query.clone(),
+                            replace_with: state.find_replace.replace_with.clone(),
+                            match_case: state.find_replace.match_case,
+                            match_entire_cell: state.find_replace.match_entire_cell,
+                        });
+                    }
+                },
+            );
         },
     );
 
@@ -1194,6 +1227,44 @@ fn render_find_replace_modal(
 // 4. Conditional Export Figure / Layout Modal (§8.14)
 // ============================================================================
 
+pub(crate) fn gallery_selected_renderable_ids(app: &UiApp) -> Vec<SheetId> {
+    let doc = app.document();
+    app.nav.selected_gallery_ids().into_iter().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).collect()
+}
+
+fn emit_export_figure_commits(
+    app: &UiApp,
+    state: &AppModalsEguiState,
+    sheet_id: &SheetId,
+    is_layout: bool,
+    selected_renderables: &[SheetId],
+    intents: &mut PendingUiIntents,
+) {
+    let doc = app.document();
+    let ef = &app.canvas_dialogs.export_figure;
+    if state.export_selected_gallery_scope && !selected_renderables.is_empty() {
+        if !state.export_emf_selected && matches!(ef.format, ExportFigureFormat::Pdf) && selected_renderables.len() >= 2 {
+            let (_, mut params) = export_figure_command_and_params(app, false, &selected_renderables[0], false);
+            if let Some(obj) = params.as_object_mut() {
+                obj.remove("sheet_id");
+                let ids: Vec<&str> = selected_renderables.iter().map(SheetId::as_str).collect();
+                obj.insert(String::from("sheet_ids"), json!(ids));
+            }
+            intents.push_engine("export.pdf", params);
+        } else {
+            for sid in selected_renderables {
+                let sid_is_layout = doc.layout_sheet(sid).is_some();
+                let (cmd, params) = export_figure_command_and_params(app, sid_is_layout, sid, state.export_emf_selected);
+                intents.push_engine(cmd, params);
+            }
+        }
+    } else {
+        let (cmd, params) = export_figure_command_and_params(app, is_layout, sheet_id, state.export_emf_selected);
+        intents.push_engine(cmd, params);
+    }
+    intents.push(UiIntent::CloseAllModals);
+}
+
 fn render_export_modal(
     ctx: &Context,
     app: &UiApp,
@@ -1205,14 +1276,17 @@ fn render_export_modal(
 ) -> AppModalFrameReport {
     let locale = normalize_locale(&app.locale);
     let doc = app.document();
+    let selected_renderables = gallery_selected_renderable_ids(app);
     let is_graph = doc.graph_sheet(&sheet_id).is_some();
     let is_layout = doc.layout_sheet(&sheet_id).is_some();
-    let target_valid = is_graph || is_layout;
-    let title = if is_layout { tr(locale, "export.title.layout") } else { tr(locale, "w6.view.modal.export_figure") };
+    let scope_batch = state.export_selected_gallery_scope && !selected_renderables.is_empty();
+    let target_valid = is_graph || is_layout || scope_batch;
+    let title = if is_layout && !scope_batch { tr(locale, "export.title.layout") } else { tr(locale, "w6.view.modal.export_figure") };
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 620.0);
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         state.export_emf_selected = false;
+        state.export_selected_gallery_scope = false;
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
@@ -1244,61 +1318,64 @@ fn render_export_modal(
             );
         },
         |ui, meta, (state, intents)| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    state.export_emf_selected = false;
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-                }
-                let ef = &app.canvas_dialogs.export_figure;
-                let is_vector = state.export_emf_selected || matches!(ef.format, ExportFigureFormat::Pdf | ExportFigureFormat::Svg);
-                let raster_dims_valid = is_vector || (ef.width_px > 0 && ef.height_px > 0 && ef.dpi > 0);
-                let can_export = target_valid && raster_dims_valid;
-                let disabled_reason = if !target_valid {
-                    Some("Select a Graph or Layout sheet to export")
-                } else if !raster_dims_valid {
-                    Some("Raster export requires positive width, height, and DPI")
-                } else {
-                    None
-                };
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.ok",
-                        label: tr(locale, "btn.export"),
-                        command_id: None,
-                        selected: true,
-                        enabled: can_export,
-                        disabled_reason,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    // Keep emitting host-routed `EngineCommand` + `CloseAllModals` so desktop
-                    // `gui_window.rs` routes exports through the OS Save File dialog (and preserves
-                    // `audit_w1_sec18_01_export` / `audit_w1_sec19_s1` / `r15_6_phase1_pipeline`
-                    // contracts); `export_emf_selected` is cleared on actual modal close.
-                    let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
-                    intents.push_engine(cmd, params);
-                    intents.push(UiIntent::CloseAllModals);
-                }
-            });
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let export_lbl = tr(locale, "btn.export");
+            let ef = &app.canvas_dialogs.export_figure;
+            let is_vector = state.export_emf_selected || matches!(ef.format, ExportFigureFormat::Pdf | ExportFigureFormat::Svg);
+            let raster_dims_valid = is_vector || (ef.width_px > 0 && ef.height_px > 0 && ef.dpi > 0);
+            let can_export = target_valid && raster_dims_valid;
+            let disabled_reason = if !target_valid {
+                Some("Select a Graph or Layout sheet to export")
+            } else if !raster_dims_valid {
+                Some("Raster export requires positive width, height, and DPI")
+            } else {
+                None
+            };
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[],
+                &[cancel_lbl, export_lbl],
+                tokens,
+                &mut (&mut **state, &mut **intents),
+                |_, _, _| {},
+                |ui, meta, (state, intents)| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        state.export_emf_selected = false;
+                        state.export_selected_gallery_scope = false;
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn { widget_id: "modal.ok", label: export_lbl, command_id: None, selected: true, enabled: can_export, disabled_reason },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        // Keep emitting host-routed `EngineCommand` + `CloseAllModals` so desktop
+                        // `gui_window.rs` routes exports through the OS Save File dialog (and preserves
+                        // `audit_w1_sec18_01_export` / `audit_w1_sec19_s1` / `r15_6_phase1_pipeline`
+                        // contracts); `export_emf_selected` is cleared on actual modal close.
+                        emit_export_figure_commits(app, state, &sheet_id, is_layout, &selected_renderables, intents);
+                    }
+                },
+            );
         },
     );
 
@@ -1306,15 +1383,13 @@ fn render_export_modal(
     let is_vector = state.export_emf_selected || matches!(ef.format, ExportFigureFormat::Pdf | ExportFigureFormat::Svg);
     let can_export = target_valid && (is_vector || (ef.width_px > 0 && ef.height_px > 0 && ef.dpi > 0));
     if can_export && !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
-        let (cmd, params) = export_figure_command_and_params(app, is_layout, &sheet_id, state.export_emf_selected);
-        intents.push_engine(cmd, params);
-        intents.push(UiIntent::CloseAllModals);
+        emit_export_figure_commits(app, state, &sheet_id, is_layout, &selected_renderables, intents);
     }
 
     report_from_capture(capture)
 }
 
-pub(super) fn export_figure_command_and_params(
+pub(crate) fn export_figure_command_and_params(
     app: &UiApp,
     is_layout: bool,
     sheet_id: &SheetId,
@@ -1387,8 +1462,55 @@ fn render_export_body(
     intents: &mut PendingUiIntents,
 ) {
     let ExportBodyCtx { app, sheet_id, is_graph, is_layout, target_valid, body_w, tokens } = ctx;
+    let locale = normalize_locale(&app.locale);
     let ef = &app.canvas_dialogs.export_figure;
-    let target_kind_lbl = if is_layout {
+    let selected_renderables = gallery_selected_renderable_ids(app);
+    if !selected_renderables.is_empty() && (app.nav.gallery.open || state.export_selected_gallery_scope || selected_renderables.len() > 1) {
+        ui.label(egui::RichText::new(tr(locale, "export.scope.label")).strong());
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(body_w);
+            if app_button(
+                ui,
+                meta,
+                AppBtn {
+                    widget_id: "export.scope.active",
+                    label: tr(locale, "export.scope.active"),
+                    command_id: None,
+                    selected: !state.export_selected_gallery_scope,
+                    enabled: is_graph || is_layout,
+                    disabled_reason: (!(is_graph || is_layout)).then_some("No active Graph or Layout sheet"),
+                },
+                tokens,
+            )
+            .clicked()
+            {
+                state.export_selected_gallery_scope = false;
+            }
+            let sel_lbl = format!("{} ({})", tr(locale, "export.scope.selected"), selected_renderables.len());
+            if app_button(
+                ui,
+                meta,
+                AppBtn {
+                    widget_id: "export.scope.selected",
+                    label: &sel_lbl,
+                    command_id: None,
+                    selected: state.export_selected_gallery_scope,
+                    enabled: !selected_renderables.is_empty(),
+                    disabled_reason: None,
+                },
+                tokens,
+            )
+            .clicked()
+            {
+                state.export_selected_gallery_scope = true;
+            }
+        });
+        ui.add_space(4.0);
+    }
+
+    let target_kind_lbl = if state.export_selected_gallery_scope && !selected_renderables.is_empty() {
+        format!("{}: {}", tr(locale, "export.scope.selected"), selected_renderables.len())
+    } else if is_layout {
         format!("Target Layout Sheet: {}", sheet_id.as_str())
     } else if is_graph {
         format!("Target Graph Sheet: {}", sheet_id.as_str())
@@ -1689,6 +1811,11 @@ fn render_print_modal(
         &mut (&mut *state, &mut *intents),
         |_, _, _| {},
         |ui, meta, (state, intents)| {
+            if pd.job.sheet_ids.len() > 1 {
+                let sheet_summary = format!("{} ({})", tr(locale, "print.selected_sheets"), pd.job.sheet_ids.len());
+                ui.label(egui::RichText::new(sheet_summary).color(tokens.text_muted));
+                ui.add_space(4.0);
+            }
             ui.label(egui::RichText::new("Printer Queue").strong());
             ui.horizontal_wrapped(|ui| {
                 ui.set_max_width(body_w);
@@ -1848,43 +1975,47 @@ fn render_print_modal(
             }
         },
         |ui, meta, (_, intents)| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.ok",
-                        label: tr(locale, "print.commit"),
-                        command_id: None,
-                        selected: true,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
-                }
-            });
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let print_lbl = tr(locale, "print.commit");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[],
+                &[cancel_lbl, print_lbl],
+                tokens,
+                &mut **intents,
+                |_, _, _| {},
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn { widget_id: "modal.ok", label: print_lbl, command_id: None, selected: true, enabled: true, disabled_reason: None },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+                    }
+                },
+            );
         },
     );
 
@@ -1925,78 +2056,122 @@ pub(crate) fn render_about_modal(
 ) -> AppModalFrameReport {
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "menu.help.about");
+    let close_lbl = tr(locale, "btn.close");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 400.0);
     let build_sha = option_env!("CURVEBOOK_BUILD_SHA");
     let version_line = format_about_version_line(env!("CARGO_PKG_VERSION"), build_sha);
     let copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.about.copied"));
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        ctx.data_mut(|d| d.insert_temp(copied_id, false));
         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
-    let wants_kb_before = ctx.egui_wants_keyboard_input();
-    let capture = show_scrolled_modal(
-        ctx,
-        meta,
-        ScrolledModalCfg {
-            tokens,
-            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.about")),
-            scroll_id: "app_modal.about.scroll",
-            widget_id: "dialog.about",
-            title,
-            inner_w,
-            max_h,
-            body_w,
-            body_max_h: (max_h - 108.0).max(80.0),
-            footer_separator: true,
-        },
-        intents,
-        |_, _, _| {},
-        |ui, _, _| {
-            ui.horizontal(|ui| {
-                let (mark_rect, _) = ui.allocate_exact_size(egui::Vec2::splat(44.0), egui::Sense::hover());
-                crate::egui_shell::brand::paint_mark(ui, mark_rect);
-                let text_w = (body_w - 44.0 - ui.spacing().item_spacing.x).max(80.0);
-                ui.vertical(|ui| {
-                    ui.set_max_width(text_w);
-                    ui.label(egui::RichText::new(&version_line).strong());
-                    ui.add(egui::Label::new("Native scientific biostatistics, curve fitting, and publication graphing suite.").wrap());
-                });
-            });
-            ui.add_space(8.0);
-            ui.add(egui::Label::new("Copyright © 2026 CurveBook Contributors").wrap());
-            ui.add(egui::Label::new("Licensed under MIT OR Apache-2.0.").wrap());
-            ui.add(egui::Label::new("Developed by the Hauser Group · hausergroup.org").wrap());
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new("See NOTICE and ATTRIBUTION.md in the distribution for third-party licenses and clean-room notices.")
-                        .color(tokens.text_muted),
-                )
-                .wrap(),
+    let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.about"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
+        ui.set_min_width(inner_w);
+        ui.set_max_width(inner_w);
+        ui.set_max_height(max_h);
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+
+        ui.horizontal(|ui| {
+            ui.set_width(inner_w);
+            ui.heading(title);
+            let close_dim = tokens.metrics.min_hit_target_pt;
+            let spacer = (ui.available_width() - close_dim).max(tokens.metrics.space_sm);
+            ui.add_space(spacer);
+            let (close_rect, close_resp) = ui.allocate_exact_size(egui::Vec2::splat(close_dim), egui::Sense::click());
+            if close_resp.hovered() || close_resp.has_focus() {
+                let border = if close_resp.has_focus() { Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring) } else { Stroke::NONE };
+                ui.painter().rect(close_rect, egui::CornerRadius::same(tokens.metrics.radius_md), tokens.hover_bg, border, egui::StrokeKind::Inside);
+            }
+            let fg = if close_resp.hovered() { tokens.text_primary } else { tokens.text_muted };
+            ui.painter().text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(tokens.metrics.font_ui_title_pt), fg);
+            let close_a11y = close_lbl.to_owned();
+            close_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, true, close_a11y.clone()));
+            app_record_visible(
+                ui,
+                &close_resp,
+                meta,
+                FrameInspectEntryInput {
+                    widget_id: "dialog.about.close",
+                    role: "button",
+                    label: close_lbl,
+                    command_id: None,
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::ModalDialog,
+                    ellipsized: false,
+                    full_label: None,
+                },
             );
-        },
-        |ui, meta, intents| {
-            ui.horizontal_wrapped(|ui| {
+            if close_resp.clicked() {
+                ctx.data_mut(|d| d.insert_temp(copied_id, false));
+                intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+            }
+        });
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("app_modal.about.scroll")
+            .max_height((max_h - 108.0).max(80.0))
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+            .show(ui, |ui| {
+                ui.set_width(body_w);
                 ui.set_max_width(body_w);
-                let copied = ctx.data(|d| d.get_temp::<bool>(copied_id).unwrap_or(false));
-                let copy_lbl = if copied { "Copied" } else { "Copy version info" };
-                let copy_resp = ui.button(copy_lbl);
-                app_record_visible(
+                ui.horizontal(|ui| {
+                    let mark_size = crate::egui_shell::brand::ABOUT_MARK_SIZE;
+                    let (mark_rect, _) = ui.allocate_exact_size(mark_size, egui::Sense::hover());
+                    crate::egui_shell::brand::paint_mark(ui, mark_rect);
+                    let text_w = (body_w - mark_size.x - ui.spacing().item_spacing.x).max(80.0);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(text_w);
+                        ui.label(egui::RichText::new(&version_line).strong());
+                        ui.add(egui::Label::new("Native scientific biostatistics, curve fitting, and publication graphing suite.").wrap());
+                    });
+                });
+                ui.add_space(8.0);
+                ui.add(egui::Label::new("Copyright © 2026 CurveBook Contributors").wrap());
+                ui.add(egui::Label::new("Licensed under MIT OR Apache-2.0.").wrap());
+                ui.add(egui::Label::new("Developed by the Hauser Group · hausergroup.org").wrap());
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("See NOTICE and ATTRIBUTION.md in the distribution for third-party licenses and clean-room notices.")
+                            .color(tokens.text_muted),
+                    )
+                    .wrap(),
+                );
+            });
+
+        ui.add_space(6.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        let copied = ctx.data(|d| d.get_temp::<bool>(copied_id).unwrap_or(false));
+        let copy_lbl = if copied { "Copied" } else { "Copy version info" };
+        let feedback_lbl = tr(locale, "menu.help.feedback");
+        render_trailing_modal_footer(
+            ui,
+            meta,
+            body_w,
+            &[copy_lbl],
+            &[feedback_lbl],
+            tokens,
+            intents,
+            |ui, meta, _intents| {
+                let copy_resp = app_button(
                     ui,
-                    &copy_resp,
                     meta,
-                    FrameInspectEntryInput {
+                    AppBtn {
                         widget_id: "dialog.about.copy_version",
-                        role: "button",
                         label: copy_lbl,
                         command_id: None,
-                        value: None,
+                        selected: false,
                         enabled: true,
                         disabled_reason: None,
-                        z_layer: ZLayer::ModalDialog,
-                        ellipsized: false,
-                        full_label: None,
                     },
+                    tokens,
                 );
                 if copy_resp.clicked() {
                     let summary = format_about_diagnostic_summary(app, build_sha);
@@ -2008,66 +2183,40 @@ pub(crate) fn render_about_modal(
                         d.insert_temp(egui::Id::unique("about.copy_version.unavailable"), !status.available);
                     });
                 }
-                if ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("about.copy_version.unavailable")).unwrap_or(false)) {
-                    ui.label(egui::RichText::new("Host clipboard unavailable in this session.").small().color(tokens.text_muted));
-                }
-
-                let feedback_lbl = tr(locale, "menu.help.feedback");
-                let feedback_resp = ui.button(feedback_lbl);
-                app_record_visible(
+            },
+            |ui, meta, intents| {
+                let feedback_resp = app_button(
                     ui,
-                    &feedback_resp,
                     meta,
-                    FrameInspectEntryInput {
+                    AppBtn {
                         widget_id: "dialog.about.send_feedback",
-                        role: "button",
                         label: feedback_lbl,
                         command_id: Some("app.feedback"),
-                        value: None,
+                        selected: false,
                         enabled: true,
                         disabled_reason: None,
-                        z_layer: ZLayer::ModalDialog,
-                        ellipsized: false,
-                        full_label: None,
                     },
+                    tokens,
                 );
                 if feedback_resp.clicked() {
                     ctx.data_mut(|d| d.insert_temp(copied_id, false));
                     intents.push_ui("app.feedback", json!({}));
                 }
+            },
+        );
+        if ctx.data(|d| d.get_temp::<bool>(egui::Id::unique("about.copy_version.unavailable")).unwrap_or(false)) {
+            ui.label(egui::RichText::new("Host clipboard unavailable in this session.").small().color(tokens.text_muted));
+        }
+    });
 
-                let ok_lbl = tr(locale, "btn.ok");
-                let ok_resp = ui.button(ok_lbl);
-                app_record_visible(
-                    ui,
-                    &ok_resp,
-                    meta,
-                    FrameInspectEntryInput {
-                        widget_id: "dialog.button.ok",
-                        role: "button",
-                        label: ok_lbl,
-                        command_id: None,
-                        value: None,
-                        enabled: true,
-                        disabled_reason: None,
-                        z_layer: ZLayer::ModalDialog,
-                        ellipsized: false,
-                        full_label: None,
-                    },
-                );
-                if ok_resp.clicked() {
-                    ctx.data_mut(|d| d.insert_temp(copied_id, false));
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
-                }
-            });
-        },
-    );
-
-    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
+    if modal_resp.backdrop_response.clicked() {
         ctx.data_mut(|d| d.insert_temp(copied_id, false));
-        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
     }
 
+    modal_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Dialog, true, title));
+    let capture =
+        finalize_egui_modal_response(ctx, &modal_resp, ModalCaptureSpec { widget_id: "dialog.about", title, z_dialog: ZLayer::ModalDialog }, meta);
     report_from_capture(capture)
 }
 
@@ -2297,298 +2446,6 @@ fn render_checkpoints_modal(
     report_from_capture(capture)
 }
 
-fn render_feedback_modal(
-    ctx: &Context,
-    app: &UiApp,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) -> AppModalFrameReport {
-    let locale = normalize_locale(&app.locale);
-    let title = tr(locale, "menu.help.feedback");
-    let (inner_w, max_h, body_w) = modal_bounds(ctx, 560.0);
-    let draft = app.canvas_dialogs.feedback.clone();
-    let changed = false;
-    let diag = app.feedback_diagnostics();
-
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-    }
-
-    let wants_kb_before = ctx.egui_wants_keyboard_input();
-    let capture = show_scrolled_modal(
-        ctx,
-        meta,
-        ScrolledModalCfg {
-            tokens,
-            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.feedback")),
-            scroll_id: "app_modal.feedback.scroll",
-            widget_id: "dialog.feedback",
-            title,
-            inner_w,
-            max_h,
-            body_w,
-            body_max_h: (max_h - 116.0).max(120.0),
-            footer_separator: false,
-        },
-        &mut (draft, changed, &mut *intents),
-        |_, _, _| {},
-        |ui, meta, (draft, changed, _)| {
-            if render_feedback_category_row(ui, draft, tokens, meta) {
-                *changed = true;
-            }
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(egui::RichText::new(draft.category.guidance()).color(tokens.text_muted).small()).wrap());
-            ui.add_space(8.0);
-
-            if render_feedback_fields(ui, draft, body_w, meta) {
-                *changed = true;
-            }
-            ui.add_space(8.0);
-            if render_feedback_diagnostics_section(ui, draft, &diag, body_w, tokens, meta) {
-                *changed = true;
-            }
-        },
-        |ui, meta, (draft, changed, intents)| {
-            if *changed {
-                draft.copied_markdown = false;
-                intents.push(UiIntent::UpdateFeedbackDraft(Box::new(draft.clone())));
-            }
-            let active_diag = draft.include_diagnostics.then_some(&diag);
-            let preview = crate::feedback::build_github_issue_url(draft, active_diag);
-            render_feedback_footer(ui, &FeedbackFooterInput { locale, draft, active_diag, preview: &preview, body_w, tokens }, meta, intents);
-        },
-    );
-
-    if !wants_kb_before && !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter)) {
-        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
-    }
-
-    report_from_capture(capture)
-}
-
-fn render_feedback_category_row(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, tokens: &Tokens, meta: &mut FrameInspectMeta) -> bool {
-    let mut changed = false;
-    ui.horizontal_wrapped(|ui| {
-        for cat in crate::feedback::FeedbackCategory::ALL {
-            let selected = draft.category == cat;
-            let widget_id = format!("feedback.category.{}", cat.slug());
-            if app_tab(ui, meta, &widget_id, cat.label(), selected, tokens).clicked() && !selected {
-                draft.category = cat;
-                draft.status_message = None;
-                changed = true;
-            }
-        }
-    });
-    changed
-}
-
-fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, body_w: f32, meta: &mut FrameInspectMeta) -> bool {
-    let mut changed = false;
-
-    let title_lbl_resp = ui.label("Title");
-    let title_resp = ui
-        .add(
-            egui::TextEdit::singleline(&mut draft.title)
-                .id_salt("feedback.title")
-                .desired_width(body_w)
-                .hint_text("Short summary of the issue or request"),
-        )
-        .labelled_by(title_lbl_resp.id);
-    record_feedback_text_edit(ui, &title_resp, meta, "feedback.title", "Title", &draft.title);
-    if title_resp.changed() {
-        changed = true;
-    }
-
-    ui.add_space(6.0);
-    let summary_lbl = draft.category.summary_label();
-    let summary_lbl_resp = ui.label(summary_lbl);
-    let summary_resp = ui
-        .add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3))
-        .labelled_by(summary_lbl_resp.id);
-    record_feedback_text_edit(ui, &summary_resp, meta, "feedback.summary", summary_lbl, &draft.summary);
-    if summary_resp.changed() {
-        changed = true;
-    }
-
-    ui.add_space(6.0);
-    let details_lbl = draft.category.details_label();
-    let details_lbl_resp = ui.label(details_lbl);
-    let details_resp = ui
-        .add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3))
-        .labelled_by(details_lbl_resp.id);
-    record_feedback_text_edit(ui, &details_resp, meta, "feedback.details", details_lbl, &draft.details);
-    if details_resp.changed() {
-        changed = true;
-    }
-
-    ui.add_space(6.0);
-    let extra_lbl = draft.category.extra_label();
-    let extra_lbl_resp = ui.label(extra_lbl);
-    let extra_resp = ui
-        .add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2))
-        .labelled_by(extra_lbl_resp.id);
-    record_feedback_text_edit(ui, &extra_resp, meta, "feedback.extra", extra_lbl, &draft.extra);
-    if extra_resp.changed() {
-        changed = true;
-    }
-
-    changed
-}
-
-fn render_feedback_diagnostics_section(
-    ui: &mut Ui,
-    draft: &mut crate::feedback::FeedbackDraft,
-    diag: &crate::feedback::FeedbackDiagnostics,
-    body_w: f32,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-) -> bool {
-    let diag_lbl = "Include sanitized environment diagnostics (no project data or file paths)";
-    let diag_resp = ui.checkbox(&mut draft.include_diagnostics, diag_lbl);
-    app_checkbox(ui, &diag_resp, meta, "feedback.include_diagnostics", diag_lbl, draft.include_diagnostics);
-    if draft.include_diagnostics {
-        egui::Frame::group(ui.style()).fill(tokens.surface_bg).stroke(Stroke::new(1.0, tokens.border)).show(ui, |ui| {
-            ui.set_max_width((body_w - 16.0).max(120.0));
-            ui.add(egui::Label::new(egui::RichText::new(diag.preview_text()).monospace().small()).wrap());
-        });
-    }
-    diag_resp.changed()
-}
-
-struct FeedbackFooterInput<'a> {
-    locale: &'a str,
-    draft: &'a crate::feedback::FeedbackDraft,
-    active_diag: Option<&'a crate::feedback::FeedbackDiagnostics>,
-    preview: &'a crate::feedback::BuiltFeedbackUrl,
-    body_w: f32,
-    tokens: &'a Tokens,
-}
-
-fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
-    let locale = input.locale;
-    let draft = input.draft;
-    let active_diag = input.active_diag;
-    let preview = input.preview;
-    let body_w = input.body_w;
-    let tokens = input.tokens;
-    ui.add_space(6.0);
-    let length_note = if preview.truncated {
-        format!("GitHub URL capped at {} bytes ({} characters omitted — use Copy Markdown for full text).", preview.url.len(), preview.omitted_chars)
-    } else {
-        format!(
-            "Prefilled GitHub URL: {} / {} bytes · template: {}",
-            preview.url.len(),
-            crate::feedback::MAX_GITHUB_ISSUE_URL_BYTES,
-            draft.category.template_filename()
-        )
-    };
-    ui.add(egui::Label::new(egui::RichText::new(length_note).color(tokens.text_muted).small()).wrap());
-    if let Some(status) = draft.status_message.as_deref() {
-        ui.add(egui::Label::new(egui::RichText::new(status).color(tokens.accent).small()).wrap());
-    }
-    ui.add_space(4.0);
-    ui.separator();
-    ui.add_space(4.0);
-
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(body_w);
-        if app_button(
-            ui,
-            meta,
-            AppBtn {
-                widget_id: "dialog.button.cancel",
-                label: tr(locale, "btn.cancel"),
-                command_id: None,
-                selected: false,
-                enabled: true,
-                disabled_reason: None,
-            },
-            tokens,
-        )
-        .clicked()
-        {
-            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
-        }
-
-        if app_button(
-            ui,
-            meta,
-            AppBtn {
-                widget_id: "dialog.feedback.reset",
-                label: tr(locale, "modal.btn.clear"),
-                command_id: None,
-                selected: false,
-                enabled: true,
-                disabled_reason: None,
-            },
-            tokens,
-        )
-        .clicked()
-        {
-            intents.push(UiIntent::ResetFeedbackDraft);
-        }
-
-        let copy_lbl = if draft.copied_markdown { "Copied Markdown" } else { "Copy Markdown" };
-        if app_button(
-            ui,
-            meta,
-            AppBtn {
-                widget_id: "dialog.feedback.copy_markdown",
-                label: copy_lbl,
-                command_id: None,
-                selected: false,
-                enabled: true,
-                disabled_reason: None,
-            },
-            tokens,
-        )
-        .clicked()
-        {
-            let _ = active_diag;
-            intents.push(UiIntent::CopyFeedbackMarkdown);
-        }
-
-        if app_button(
-            ui,
-            meta,
-            AppBtn {
-                widget_id: "dialog.feedback.open_github",
-                label: tr(locale, "feedback.open_github"),
-                command_id: None,
-                selected: true,
-                enabled: true,
-                disabled_reason: None,
-            },
-            tokens,
-        )
-        .clicked()
-        {
-            intents.push(UiIntent::OpenFeedbackOnGitHub);
-        }
-    });
-}
-
-fn record_feedback_text_edit(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, value: &str) {
-    app_record_visible(
-        ui,
-        resp,
-        meta,
-        FrameInspectEntryInput {
-            widget_id,
-            role: "textbox",
-            label,
-            command_id: None,
-            value: Some(json!(value)),
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
-}
-
 // ============================================================================
 // Shared Layout Bounds, Recording & Localization Helpers
 // ============================================================================
@@ -2616,8 +2473,7 @@ fn app_record_visible(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, inp
 }
 
 fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, tokens: &Tokens) -> Response {
-    let primary =
-        entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "dialog.feedback.open_github" | "import_project_mode.merge");
+    let primary = entry.selected && matches!(entry.widget_id, "modal.ok" | "dialog.button.save" | "import_project_mode.merge");
     ui_kit::modal_button(
         ui,
         meta,
@@ -2633,6 +2489,71 @@ fn app_button(ui: &mut Ui, meta: &mut FrameInspectMeta, entry: AppBtn<'_>, token
         },
         tokens,
     )
+}
+
+fn estimate_egui_button_width(ui: &egui::Ui, label: &str) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text_w = ui.painter().layout_no_wrap(label.to_owned(), font, ui.visuals().text_color()).size().x;
+    (text_w + ui.spacing().button_padding.x * 2.0).max(ui.spacing().interact_size.x)
+}
+
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+fn render_trailing_modal_footer<S>(
+    ui: &mut Ui,
+    meta: &mut FrameInspectMeta,
+    body_w: f32,
+    leading_labels: &[&str],
+    trailing_labels: &[&str],
+    tokens: &Tokens,
+    state: &mut S,
+    render_leading: impl FnOnce(&mut Ui, &mut FrameInspectMeta, &mut S),
+    render_trailing: impl FnOnce(&mut Ui, &mut FrameInspectMeta, &mut S),
+) {
+    let item_gap = ui.spacing().item_spacing.x;
+    let group_width = |labels: &[&str]| -> f32 {
+        if labels.is_empty() {
+            0.0
+        } else {
+            let sum: f32 = labels.iter().map(|lbl| estimate_egui_button_width(ui, lbl)).sum();
+            sum + item_gap * (labels.len().saturating_sub(1) as f32)
+        }
+    };
+    let leading_w = group_width(leading_labels);
+    let trailing_w = group_width(trailing_labels);
+    let min_sep = if leading_labels.is_empty() { 0.0 } else { tokens.metrics.space_lg.max(item_gap) };
+    let fits_single_row = leading_labels.is_empty() || (leading_w + min_sep + trailing_w <= body_w);
+    if fits_single_row {
+        ui.allocate_ui(egui::Vec2::new(body_w, tokens.metrics.min_hit_target_pt), |ui| {
+            ui.horizontal(|ui| {
+                if !leading_labels.is_empty() {
+                    render_leading(ui, meta, state);
+                }
+                let spacer = (ui.available_width() - trailing_w).max(min_sep);
+                if spacer > 0.0 {
+                    ui.add_space(spacer);
+                }
+                render_trailing(ui, meta, state);
+            });
+        });
+    } else {
+        ui.vertical(|ui| {
+            ui.set_max_width(body_w);
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                render_leading(ui, meta, state);
+            });
+            ui.add_space(tokens.metrics.space_sm);
+            ui.allocate_ui(egui::Vec2::new(body_w, tokens.metrics.min_hit_target_pt), |ui| {
+                ui.horizontal(|ui| {
+                    let spacer = (ui.available_width() - trailing_w).max(0.0);
+                    if spacer > 0.0 {
+                        ui.add_space(spacer);
+                    }
+                    render_trailing(ui, meta, state);
+                });
+            });
+        });
+    }
 }
 
 fn app_tab(ui: &mut Ui, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, selected: bool, tokens: &Tokens) -> Response {
@@ -2698,10 +2619,17 @@ fn render_import_warnings_modal(
                 return;
             }
 
-            let summary = if state.source_label.is_empty() {
+            let fallback_source = match state.command_id.as_str() {
+                "table.importPzfx" => tr(locale, "w6.view.shell.filter_xml_project"),
+                "table.importPrism" => tr(locale, "w6.view.shell.filter_archive"),
+                "table.importXlsx" => tr(locale, "cmd.table.importXlsx"),
+                _ => "",
+            };
+            let source_display = if state.source_label.is_empty() { fallback_source } else { state.source_label.as_str() };
+            let summary = if source_display.is_empty() {
                 format!("{count} warning{}", if count == 1 { "" } else { "s" })
             } else {
-                format!("{count} warning{} — {}", if count == 1 { "" } else { "s" }, state.source_label)
+                format!("{count} warning{} — {source_display}", if count == 1 { "" } else { "s" })
             };
             let sum_resp = ui.add(egui::Label::new(egui::RichText::new(&summary).strong().color(tokens.text_primary)).wrap());
             app_text(ui, &sum_resp, meta, "import_warnings.summary", &summary);
@@ -2725,43 +2653,55 @@ fn render_import_warnings_modal(
             }
         },
         |ui, meta, intents| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "import_warnings.copy_all",
-                        label: tr(locale, "import.warnings.copy_all"),
-                        command_id: None,
-                        selected: false,
-                        enabled: count > 0,
-                        disabled_reason: (count == 0).then_some("No warnings to copy"),
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::CopyImportWarnings);
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.close"),
-                        command_id: None,
-                        selected: true,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::CloseAllModals);
-                }
-            });
+            let copy_lbl = tr(locale, "import.warnings.copy_all");
+            let close_lbl = tr(locale, "btn.close");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[copy_lbl],
+                &[close_lbl],
+                tokens,
+                intents,
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "import_warnings.copy_all",
+                            label: copy_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: count > 0,
+                            disabled_reason: (count == 0).then_some("No warnings to copy"),
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::CopyImportWarnings);
+                    }
+                },
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: close_lbl,
+                            command_id: None,
+                            selected: true,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::CloseAllModals);
+                    }
+                },
+            );
         },
     );
 
@@ -2784,16 +2724,21 @@ fn render_import_project_mode_modal(
     intents: &mut PendingUiIntents,
 ) -> AppModalFrameReport {
     let locale = normalize_locale(&app.locale);
-    let title = tr(locale, "import.mode.title");
+    let title = match command_id {
+        "table.importPzfx" => tr(locale, "cmd.table.importPzfx"),
+        "table.importPrism" => tr(locale, "cmd.table.importPrism"),
+        "table.importXlsx" => tr(locale, "cmd.table.importXlsx"),
+        _ => tr(locale, "import.mode.title"),
+    };
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 540.0);
+    let cmd_owned = command_id.to_owned();
+    let path_owned = path.to_owned();
 
     if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
         intents.push(UiIntent::CloseAllModals);
     }
 
     let file_display = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path);
-    let cmd_owned = command_id.to_owned();
-    let path_owned = path.to_owned();
 
     let capture = show_scrolled_modal(
         ctx,
@@ -2832,78 +2777,92 @@ fn render_import_project_mode_modal(
             }
         },
         |ui, meta, intents| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::CloseAllModals);
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "import_project_mode.new_window",
-                        label: crate::i18n::tr_or_fallback(locale, "import.mode.open_in_new_window", "Open in new window"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push_ui(cmd_owned.clone(), json!({ "path": path_owned, "new_window": true }));
-                    intents.push(UiIntent::CloseAllModals);
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "import_project_mode.replace",
-                        label: tr(locale, "import.mode.open_as_new"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_replace") });
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "import_project_mode.merge",
-                        label: tr(locale, "import.mode.add_to_project"),
-                        command_id: None,
-                        selected: true,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_merge") });
-                }
-            });
+            let new_window_lbl = crate::i18n::tr_or_fallback(locale, "import.mode.open_in_new_window", "Open in new window");
+            let open_new_lbl = tr(locale, "import.mode.open_as_new");
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let add_lbl = tr(locale, "import.mode.add_to_project");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[new_window_lbl, open_new_lbl],
+                &[cancel_lbl, add_lbl],
+                tokens,
+                intents,
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "import_project_mode.new_window",
+                            label: new_window_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push_ui(cmd_owned.clone(), json!({ "path": path_owned, "new_window": true }));
+                        intents.push(UiIntent::CloseAllModals);
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "import_project_mode.replace",
+                            label: open_new_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_replace") });
+                    }
+                },
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::CloseAllModals);
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "import_project_mode.merge",
+                            label: add_lbl,
+                            command_id: None,
+                            selected: true,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("__import_project_mode_merge") });
+                    }
+                },
+            );
         },
     );
 
@@ -2976,20 +2935,41 @@ fn render_export_all_tables_existing_files_modal(
             app_text(ui, &hint_resp, meta, "export_existing_files.hint", hint);
         },
         |ui, meta, intents| {
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                let buttons = [
-                    ("modal.cancel", tr(locale, "btn.cancel"), false, "cancel"),
-                    ("export_existing_files.replace", tr(locale, "export.csv.existing_replace"), false, "replace"),
-                    ("export_existing_files.keep_both", tr(locale, "export.csv.existing_keep_both"), true, "keep_both"),
-                ];
-                for (widget_id, label, selected, choice) in buttons {
-                    let btn = AppBtn { widget_id, label, command_id: None, selected, enabled: true, disabled_reason: None };
+            let replace_lbl = tr(locale, "export.csv.existing_replace");
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let keep_lbl = tr(locale, "export.csv.existing_keep_both");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[replace_lbl],
+                &[cancel_lbl, keep_lbl],
+                tokens,
+                intents,
+                |ui, meta, intents| {
+                    let btn = AppBtn {
+                        widget_id: "export_existing_files.replace",
+                        label: replace_lbl,
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    };
                     if app_button(ui, meta, btn, tokens).clicked() {
-                        push_export_existing_files_choice(intents, choice);
+                        push_export_existing_files_choice(intents, "replace");
                     }
-                }
-            });
+                },
+                |ui, meta, intents| {
+                    for (widget_id, label, selected, choice) in
+                        [("modal.cancel", cancel_lbl, false, "cancel"), ("export_existing_files.keep_both", keep_lbl, true, "keep_both")]
+                    {
+                        let btn = AppBtn { widget_id, label, command_id: None, selected, enabled: true, disabled_reason: None };
+                        if app_button(ui, meta, btn, tokens).clicked() {
+                            push_export_existing_files_choice(intents, choice);
+                        }
+                    }
+                },
+            );
         },
     );
 
@@ -3024,6 +3004,18 @@ fn emit_csv_export_intent(target: &CsvExportTargetKind, opts: &crate::dialogs_ca
                 }),
             });
         }
+        CsvExportTargetKind::DataTables { sheet_ids } => {
+            for sheet_id in sheet_ids {
+                intents.push(UiIntent::EngineCommand {
+                    command_id: String::from("table.exportCsv"),
+                    params: json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "delimiter": delimiter,
+                        "decimal_separator": decimal_separator,
+                    }),
+                });
+            }
+        }
         CsvExportTargetKind::AllDataTables => {
             intents.push(UiIntent::UiCommand {
                 command_id: String::from("ui.export.allTablesCsv"),
@@ -3050,6 +3042,9 @@ fn render_csv_export_options_modal(
     let (title, target_valid) = match target {
         CsvExportTargetKind::ResultSheet { sheet_id } => (tr(locale, "export.csv.title_results"), doc.result_sheet(sheet_id).is_some()),
         CsvExportTargetKind::DataTable { sheet_id } => (tr(locale, "export.csv.title_table"), doc.data_sheet(sheet_id).is_some()),
+        CsvExportTargetKind::DataTables { sheet_ids } => {
+            (tr(locale, "export.csv.title_selected_tables"), !sheet_ids.is_empty() && sheet_ids.iter().all(|id| doc.data_sheet(id).is_some()))
+        }
         CsvExportTargetKind::AllDataTables => (tr(locale, "export.csv.title_all_tables"), !doc.data_sheets.is_empty()),
     };
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 480.0);
@@ -3149,43 +3144,54 @@ fn render_csv_export_options_modal(
                 intents.push(UiIntent::UpdateCsvExportOptions(Box::new(opts.clone())));
             }
             **enter_export_opts = Some(opts.clone());
-            ui.horizontal_wrapped(|ui| {
-                ui.set_max_width(body_w);
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.cancel",
-                        label: tr(locale, "btn.cancel"),
-                        command_id: None,
-                        selected: false,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    intents.push(UiIntent::CloseAllModals);
-                }
-                if app_button(
-                    ui,
-                    meta,
-                    AppBtn {
-                        widget_id: "modal.ok",
-                        label: tr(locale, "btn.export"),
-                        command_id: None,
-                        selected: true,
-                        enabled: target_valid,
-                        disabled_reason: (!target_valid).then_some("No eligible sheet available to export"),
-                    },
-                    tokens,
-                )
-                .clicked()
-                {
-                    emit_csv_export_intent(target, opts, intents);
-                }
-            });
+            let cancel_lbl = tr(locale, "btn.cancel");
+            let export_lbl = tr(locale, "btn.export");
+            render_trailing_modal_footer(
+                ui,
+                meta,
+                body_w,
+                &[],
+                &[cancel_lbl, export_lbl],
+                tokens,
+                intents,
+                |_, _, _| {},
+                |ui, meta, intents| {
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.cancel",
+                            label: cancel_lbl,
+                            command_id: None,
+                            selected: false,
+                            enabled: true,
+                            disabled_reason: None,
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        intents.push(UiIntent::CloseAllModals);
+                    }
+                    if app_button(
+                        ui,
+                        meta,
+                        AppBtn {
+                            widget_id: "modal.ok",
+                            label: export_lbl,
+                            command_id: None,
+                            selected: true,
+                            enabled: target_valid,
+                            disabled_reason: (!target_valid).then_some("No eligible sheet available to export"),
+                        },
+                        tokens,
+                    )
+                    .clicked()
+                    {
+                        emit_csv_export_intent(target, opts, intents);
+                    }
+                },
+            );
         },
     );
 

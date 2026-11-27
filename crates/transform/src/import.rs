@@ -352,6 +352,7 @@ fn format_ci_bound(bound: CiBound, is_lower: bool) -> String {
             if clean.fract() == 0.0 && clean.abs() < 1e12 { format!("{clean:.0}") } else { clean.to_string() }
         }
         CiBound::Open => String::from(if is_lower { "-inf" } else { "+inf" }),
+        CiBound::Unavailable => String::from("Unavailable"),
     }
 }
 

@@ -1,8 +1,8 @@
 //! Desktop `egui_shell` modal button execution and dialog widget click/toggle handlers (`F6`).
 
 use curvebook_doc::{
-    AnalysisKind, DiagnosticPlotKind, ErrorCode, GraphKind, MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayMethod, ProjectDocument,
-    ResidualCovariance, SheetId, TransformAnalysisSpec,
+    AnalysisKind, AnalysisSpec, DiagnosticPlotKind, ErrorCode, GraphKind, MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayMethod,
+    ProjectDocument, ResidualCovariance, SheetId, TransformAnalysisSpec,
 };
 use curvebook_engine::EngineError;
 use serde_json::{Map, Value, json};
@@ -49,6 +49,8 @@ pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Res
         app.egui_views.app_modals.export_emf_selected = false;
         app.egui_views.stats_modals.open_session_sheet_id = None;
         app.egui_views.stats_modals.numeric_field_errors.clear();
+        super::fit_modal::reset_session_drafts(&mut app.egui_views.fit_modal);
+        clear_modal_text_buffers(app);
         close_active_modal(app);
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
@@ -397,9 +399,9 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                     Ok(res)
                 }
                 ActiveDialog::ExportFigure { sheet_id } => {
-                    let is_layout = app.document().layout_sheet(&sheet_id).is_some();
+                    let selected_renderables = super::app_modals::gallery_selected_renderable_ids(app);
+                    let batch_scope = app.egui_views.app_modals.export_selected_gallery_scope && !selected_renderables.is_empty();
                     let export_emf = app.egui_views.app_modals.export_emf_selected;
-                    let (cmd, params) = super::app_modals::export_figure_command_and_params(app, is_layout, &sheet_id, export_emf);
                     let export_opts = &app.canvas_dialogs.export_figure;
                     let opts_snapshot = json!({
                         "transparent_bg": export_opts.transparent_bg,
@@ -407,9 +409,36 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                         "unit": export_opts.unit,
                         "emf": export_emf,
                     });
-                    let intent = curvebook_tools::ToolCommandIntent::new(cmd, params);
-                    let mut res = commit_single_intent(app, Some(intent), true)?;
+                    let mut res = if batch_scope {
+                        let is_multi_pdf = !export_emf
+                            && matches!(app.canvas_dialogs.export_figure.format, crate::dialogs_canvas::ExportFigureFormat::Pdf)
+                            && selected_renderables.len() >= 2;
+                        if is_multi_pdf {
+                            let (_, mut params) = super::app_modals::export_figure_command_and_params(app, false, &selected_renderables[0], false);
+                            if let Some(obj) = params.as_object_mut() {
+                                obj.remove("sheet_id");
+                                let ids: Vec<&str> = selected_renderables.iter().map(SheetId::as_str).collect();
+                                obj.insert(String::from("sheet_ids"), json!(ids));
+                            }
+                            commit_single_intent(app, Some(curvebook_tools::ToolCommandIntent::new("export.pdf", params)), true)?
+                        } else {
+                            let cmds = selected_renderables
+                                .iter()
+                                .map(|sid| {
+                                    let is_layout = app.document().layout_sheet(sid).is_some();
+                                    let (cmd, params) = super::app_modals::export_figure_command_and_params(app, is_layout, sid, export_emf);
+                                    curvebook_tools::ToolCommandIntent::new(cmd, params)
+                                })
+                                .collect();
+                            commit_many_intents_opt_close(app, cmds, true)?
+                        }
+                    } else {
+                        let is_layout = app.document().layout_sheet(&sheet_id).is_some();
+                        let (cmd, params) = super::app_modals::export_figure_command_and_params(app, is_layout, &sheet_id, export_emf);
+                        commit_single_intent(app, Some(curvebook_tools::ToolCommandIntent::new(cmd, params)), true)?
+                    };
                     app.egui_views.app_modals.export_emf_selected = false;
+                    app.egui_views.app_modals.export_selected_gallery_scope = false;
                     if let Some(obj) = res.as_object_mut() {
                         obj.insert(String::from("export_options"), opts_snapshot);
                     }
@@ -467,7 +496,6 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 }
                 ActiveDialog::ResultViewer { .. }
                 | ActiveDialog::About
-                | ActiveDialog::Feedback
                 | ActiveDialog::ImportWarnings
                 | ActiveDialog::ImportProjectMode { .. }
                 | ActiveDialog::CsvExportOptions(_)
@@ -534,10 +562,17 @@ fn maybe_open_nonlinear_fit_params(app: &mut UiApp, sheet_id_str: &str, from_phy
     }
 }
 
-fn apply_ext01_default_nonlinear_equation(doc: &ProjectDocument, analyze: &AnalyzeDialogState, intent: &mut curvebook_tools::ToolCommandIntent) {
+fn resolve_ext01_equation(doc: &ProjectDocument, analyze: &AnalyzeDialogState, src_id: &SheetId, mv_x_columns: &[usize]) -> Option<String> {
     let eq_trimmed = analyze.equation_id.trim();
-    if intent.command_id != "analysis.run" || (!eq_trimmed.is_empty() && eq_trimmed != "log_agonist_vs_response_4pl") || analyze.custom_dsl.is_some()
-    {
+    if (!eq_trimmed.is_empty() && eq_trimmed != "log_agonist_vs_response_4pl") || analyze.custom_dsl.is_some() {
+        return None;
+    }
+    let xs = super::fit_modal::collect_sheet_active_x_values(doc, src_id, None, mv_x_columns);
+    Some(curvebook_fit::suggested_default_dose_response_equation(&xs).to_owned())
+}
+
+fn apply_ext01_default_nonlinear_equation(doc: &ProjectDocument, analyze: &AnalyzeDialogState, intent: &mut curvebook_tools::ToolCommandIntent) {
+    if intent.command_id != "analysis.run" {
         return;
     }
     let Some(src_str) = intent.params.get("source_sheet_id").and_then(Value::as_str) else {
@@ -546,23 +581,78 @@ fn apply_ext01_default_nonlinear_equation(doc: &ProjectDocument, analyze: &Analy
     let Ok(src_id) = SheetId::try_new(src_str) else {
         return;
     };
-    let xs = super::fit_modal::collect_sheet_active_x_values(doc, &src_id, None, &analyze.mv_x_columns);
-    let suggested = curvebook_fit::suggested_default_dose_response_equation(&xs);
+    let Some(suggested) = resolve_ext01_equation(doc, analyze, &src_id, &analyze.mv_x_columns) else {
+        return;
+    };
     if let Some(nl_obj) =
         intent.params.get_mut("kind").and_then(Value::as_object_mut).and_then(|k| k.get_mut("NonlinearRegression")).and_then(Value::as_object_mut)
     {
         let eq = nl_obj.get("equation_id").and_then(Value::as_str).unwrap_or("");
         if eq.is_empty() || eq == "log_agonist_vs_response_4pl" {
-            nl_obj.insert(String::from("equation_id"), Value::String(suggested.to_owned()));
+            nl_obj.insert(String::from("equation_id"), Value::String(suggested));
         }
     } else if intent.params.get("kind").and_then(Value::as_str) == Some("nonlinear_regression")
         && let Some(obj) = intent.params.as_object_mut()
     {
         let eq = obj.get("equation_id").and_then(Value::as_str).unwrap_or("");
         if eq.is_empty() || eq == "log_agonist_vs_response_4pl" {
-            obj.insert(String::from("equation_id"), Value::String(suggested.to_owned()));
+            obj.insert(String::from("equation_id"), Value::String(suggested));
         }
     }
+}
+
+fn stage_pending_nonlinear_create(app: &mut UiApp, pending_extract: Option<(SheetId, String)>) -> Result<Value, EngineError> {
+    let doc = app.document().clone();
+    let src_id = app.canvas_dialogs.analyze.source_sheet_id.clone().ok_or_else(|| bad_input("Analyze selection incomplete"))?;
+    let mut kind = app.canvas_dialogs.analyze.build_analysis_kind().ok_or_else(|| bad_input("Analyze selection incomplete"))?;
+    if let AnalysisKind::NonlinearRegression(nl) = &mut kind
+        && let Some(suggested) = resolve_ext01_equation(&doc, &app.canvas_dialogs.analyze, &src_id, &nl.mv_x_columns)
+    {
+        nl.equation_id = suggested;
+    }
+    let seed_id = SheetId::try_new("pending-nonlinear-fit").map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+    let mut spec = AnalysisSpec::new(seed_id, src_id, kind).map_err(|e| bad_input(e.to_string()))?;
+    spec.selected_data_sets.clone_from(&app.canvas_dialogs.analyze.selected_data_sets);
+
+    super::fit_modal::reset_session_drafts(&mut app.egui_views.fit_modal);
+    clear_modal_text_buffers(app);
+    crate::dialogs_canvas::clear_fit_parameter_inputs(app);
+    app.egui_views.stats_modals.open_session_sheet_id = None;
+    app.egui_views.stats_modals.numeric_field_errors.clear();
+    app.canvas_dialogs.analyze.extracted_result_tab_id = None;
+    app.canvas_dialogs.analyze.duplicate_choice = crate::dialogs_canvas::DuplicateChoice::CreateNew;
+    app.canvas_dialogs.analyze.duplicate_target_id = None;
+
+    let draft_id = app.canvas_dialogs.open_edit_parameters_for_create(&doc, spec, pending_extract);
+    Ok(json!({
+        "action": "ok",
+        "mutated": false,
+        "deferred_create": true,
+        "dialog": "edit_analysis_parameters",
+        "draft_sheet_id": draft_id.as_str(),
+    }))
+}
+
+fn should_defer_nonlinear_create(app: &UiApp, from_physical_gui: bool, kind: Option<&AnalysisKind>) -> bool {
+    from_physical_gui && !app.canvas_dialogs.suppress_auto_open_fit_params && matches!(kind, Some(AnalysisKind::NonlinearRegression(_)))
+}
+
+fn execute_result_tab_extract_for_fit(app: &mut UiApp, src_id: &SheetId, tab_id: &str) -> Result<SheetId, EngineError> {
+    let ext = app.execute_command(
+        "sheet.extractResultTab",
+        json!({
+            "result_sheet_id": src_id.as_str(),
+            "tab_id": tab_id,
+            "archetype": "auto",
+            "auto_graph": false,
+        }),
+    )?;
+    let extracted_id = ext
+        .payload
+        .get("sheet_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "extractResultTab did not return `sheet_id`"))?;
+    SheetId::try_new(extracted_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))
 }
 
 fn execute_analyze_intent_atomically(
@@ -575,21 +665,7 @@ fn execute_analyze_intent_atomically(
         if let Some((src_id, tab_id)) = pending_extract
             && app.document().result_sheet(&src_id).is_some_and(|rs| rs.analyzable_data.is_none())
         {
-            let ext = app.execute_command(
-                "sheet.extractResultTab",
-                json!({
-                    "result_sheet_id": src_id.as_str(),
-                    "tab_id": tab_id,
-                    "archetype": "auto",
-                    "auto_graph": false,
-                }),
-            )?;
-            let extracted_id = ext
-                .payload
-                .get("sheet_id")
-                .and_then(Value::as_str)
-                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "extractResultTab did not return `sheet_id`"))?;
-            let sid = SheetId::try_new(extracted_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+            let sid = execute_result_tab_extract_for_fit(app, &src_id, &tab_id)?;
             if let Some(obj) = intent.params.as_object_mut() {
                 obj.insert(String::from("source_sheet_id"), Value::String(sid.as_str().to_owned()));
             }
@@ -636,6 +712,19 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
     let transient_force = std::mem::take(&mut app.canvas_dialogs.analyze.force_create_new_once);
     let force_new = transient_force || params.get("force_create_new").and_then(Value::as_bool).unwrap_or(false);
     let prev_dialog = app.canvas_dialogs.active_dialog.clone();
+    let planned_kind = app.canvas_dialogs.analyze.build_analysis_kind();
+    let defer_nonlinear = should_defer_nonlinear_create(app, from_physical_gui, planned_kind.as_ref());
+
+    if !force_new && defer_nonlinear && !app.canvas_dialogs.analyze.matching_existing_analyses(app.session.document()).is_empty() {
+        let _ = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document());
+        if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
+            return Ok(json!({ "action": "ok", "dialog": "duplicate_analysis_prompt", "pending_confirmation": true }));
+        }
+    }
+    if defer_nonlinear && planned_kind.is_some() {
+        return stage_pending_nonlinear_create(app, pending_extract);
+    }
+
     if !force_new && let Some(intent) = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document()) {
         let out = match execute_analyze_intent_atomically(app, intent, pending_extract, spawn_corr_heatmap) {
             Ok(o) => o,
@@ -701,6 +790,12 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
         }
     };
     let is_create_new = intent.command_id == "analysis.run";
+    if is_create_new {
+        let planned_kind = app.canvas_dialogs.analyze.build_analysis_kind();
+        if should_defer_nonlinear_create(app, from_physical_gui, planned_kind.as_ref()) {
+            return stage_pending_nonlinear_create(app, pending_extract);
+        }
+    }
     let cmd_id = intent.command_id.clone();
     let outcome = execute_analyze_intent_atomically(app, intent, is_create_new.then_some(pending_extract).flatten(), spawn_corr_heatmap)?;
     app.canvas_dialogs.analyze.extracted_result_tab_id = None;
@@ -724,9 +819,12 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
     sync_edit_params_text_buffers(app);
     crate::dialogs_canvas::sync_fit_parameter_inputs(app).map_err(bad_input)?;
     let close = action == "ok";
+    let was_pending_create = app.canvas_dialogs.edit_params.pending_create;
+    let pending_extract = app.canvas_dialogs.edit_params.pending_extract.clone();
     let doc = app.document().clone();
     let mut intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
-    if app.egui_views.transform_modals.create_new_graph
+    if !was_pending_create
+        && app.egui_views.transform_modals.create_new_graph
         && let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog
         && app
             .canvas_dialogs
@@ -749,7 +847,16 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
     }
     let primary_out = app.execute_atomic_group(|app| {
         let mut iter = intents.into_iter();
-        let primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
+        let mut primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
+        if was_pending_create
+            && let Some((src_id, tab_id)) = pending_extract
+            && app.document().result_sheet(&src_id).is_some_and(|rs| rs.analyzable_data.is_none())
+        {
+            let sid = execute_result_tab_extract_for_fit(app, &src_id, &tab_id)?;
+            if let Some(obj) = primary.params.as_object_mut() {
+                obj.insert(String::from("source_sheet_id"), Value::String(sid.as_str().to_owned()));
+            }
+        }
         let out = app.execute_command(&primary.command_id, primary.params)?;
         for extra in iter {
             let _ = app.execute_command(&extra.command_id, extra.params)?;
@@ -757,10 +864,18 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
         Ok::<curvebook_engine::CommandOutcome, EngineError>(out)
     })?;
     if close {
+        super::fit_modal::reset_session_drafts(&mut app.egui_views.fit_modal);
         close_active_modal(app);
         clear_modal_text_buffers(app);
         app.egui_views.stats_modals.open_session_sheet_id = None;
         app.egui_views.stats_modals.numeric_field_errors.clear();
+    }
+    if was_pending_create && let Some(new_id) = primary_out.payload.get("sheet_id").and_then(Value::as_str) {
+        let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+        if let Ok(sid) = SheetId::try_new(new_id) {
+            let doc_after = app.document().clone();
+            app.canvas_dialogs.on_sheet_selected_with_auto_modal(&doc_after, &sid, false);
+        }
     }
     Ok(json!({ "action": action, "mutated": primary_out.mutated, "closed": close, "payload": primary_out.payload }))
 }

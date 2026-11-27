@@ -184,7 +184,7 @@ fn r10_23_mv_data_tab_variable_picker_filter_badges_and_matrix_parity() -> TestR
     h.click("modal.cancel")?;
 
     // 2. EditAnalysisParameters (`Cmd+T` on GLM result sheet) + 3 themes × 2 locales × 3 HiDPI matrix parity.
-    h.click("nav.chip.results")?;
+    h.select_nav_kind_filter("nav.chip.results")?;
     h.click("nav.sheet.res-glm")?;
     h.open_cmd_t()?;
     h.click("edit.tab.data")?;
@@ -276,7 +276,7 @@ fn r10_23_portfolio_gallery_f6_visible_pane_cycling_and_quick_stats_footer() -> 
         ensure(visited.contains(&pane), format!("F6 must visit {pane:?}"))?;
     }
     h.driver.press_egui_key(Key::I, Modifiers::COMMAND | Modifiers::SHIFT);
-    h.driver.press_egui_key(Key::F, Modifiers::COMMAND | Modifiers::SHIFT);
+    h.driver.press_egui_key(Key::L, Modifiers::COMMAND | Modifiers::SHIFT);
     assert!(!h.app().family_open);
     for _ in 0..5 {
         h.driver.press_egui_key(Key::F6, Modifiers::NONE);
@@ -287,7 +287,7 @@ fn r10_23_portfolio_gallery_f6_visible_pane_cycling_and_quick_stats_footer() -> 
     let (c0, c3) = (h.widget_center("grid.cell.0.0.0")?, h.widget_center("grid.cell.3.0.0")?);
     h.driver.drag(c0, c3)?;
     let status_lbl = h.driver.frame_meta().find_by_widget_id("status.summary").ok_or("missing status.summary")?.label.clone();
-    for expected in ["N=4", "Mean=25", "Med=25", "SD=12.9", "SEM=6.45"] {
+    for expected in ["N=4", "Mean=25", "Median=25", "SD=12.9", "SEM=6.45"] {
         ensure(status_lbl.contains(expected), format!("status.summary missing `{expected}` in `{status_lbl}`"))?;
     }
     h.assert_parity_and_layout("gallery/F6/footer")?;

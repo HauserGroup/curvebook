@@ -1491,6 +1491,40 @@
       "title": "RemediationKind",
       "type": "string"
     },
+    "ResultCellDetail": {
+      "additionalProperties": false,
+      "properties": {
+        "col": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "raw_value": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "row": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tab_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "tab_id",
+        "row",
+        "col",
+        "detail"
+      ],
+      "title": "ResultCellDetail",
+      "type": "object"
+    },
     "ResultScalarEntry": {
       "additionalProperties": false,
       "properties": {
@@ -1539,6 +1573,12 @@
               "type": "null"
             }
           ]
+        },
+        "cell_details": {
+          "items": {
+            "$ref": "#/$defs/ResultCellDetail"
+          },
+          "type": "array"
         },
         "checklist": {
           "items": {

@@ -260,7 +260,7 @@ fn schema_open_file_docs_url_append_and_export_parity() -> TestResult {
     assert!(open_file.description.contains(&expected_open_docs), "open_file must link to {expected_open_docs}, got: {}", open_file.description);
     let append_desc =
         open_file.input_schema.pointer("/properties/append/description").and_then(Value::as_str).ok_or("missing open_file.append description")?;
-    for needle in ["CSV", "TSV", "external archive/XML"] {
+    for needle in ["CSV", "TSV", ".pzfx", ".prism"] {
         assert!(append_desc.contains(needle), "open_file.append description missing '{needle}': {append_desc}");
     }
 

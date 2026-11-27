@@ -25,6 +25,7 @@ pub mod layout;
 pub mod leading_dock;
 pub mod manage_vars_modal;
 pub mod plate_editor;
+pub mod portfolio_gallery;
 pub mod power_studio;
 pub mod rasterizer;
 pub mod results_view;

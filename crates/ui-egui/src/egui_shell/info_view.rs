@@ -7,6 +7,7 @@ use egui::{CornerRadius, FontId, Id, Key, Rect, RichText, Sense, Stroke, StrokeK
 use serde_json::json;
 
 use crate::UiApp;
+use crate::egui_shell::ui_kit::{LinkButtonSpec, TooltipSpec, link_button};
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::{LocalePreset, tr_or_fallback};
@@ -557,29 +558,32 @@ fn render_constants_pane(
                     // Type pill & 🔗 Hook Badge inside trailing cell
                     if !refs.is_empty() {
                         let hook_lbl = format!("🔗 {}", refs.len());
-                        let hook_resp = ui.put(
-                            badge_rect.shrink2(vec2(2.0, 3.0)),
-                            egui::Button::new(RichText::new(&hook_lbl).small().color(tokens.link_blue)).fill(tokens.panel_bg),
-                        );
                         let tip = refs.iter().map(|r| format!("{} — {}", r.target_title, r.context)).collect::<Vec<_>>().join("\n");
                         let hook_wid = format!("info.hook_badge.{idx}");
-                        meta.record_response(
-                            ui,
-                            &hook_resp,
-                            FrameInspectEntryInput {
-                                widget_id: &hook_wid,
-                                role: "button",
-                                label: &hook_lbl,
-                                command_id: Some("sheet.select"),
-                                value: Some(json!({ "constant": constant.name, "ref_count": refs.len() })),
-                                enabled,
-                                disabled_reason: (!enabled).then_some("modal dialog is active"),
-                                z_layer: ZLayer::Workspace,
-                                ellipsized: false,
-                                full_label: None,
-                            },
-                        );
-                        hook_resp.clone().on_hover_text(tip);
+                        let slot = badge_rect.shrink2(vec2(2.0, 1.0));
+                        let hook_resp = ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(slot), |ui| {
+                                ui.set_clip_rect(slot.intersect(ui.clip_rect()));
+                                link_button(
+                                    ui,
+                                    tokens,
+                                    meta,
+                                    LinkButtonSpec {
+                                        font_size: tokens.metrics.font_ui_small_pt,
+                                        command_id: Some("sheet.select"),
+                                        value: Some(json!({ "constant": constant.name, "ref_count": refs.len() })),
+                                        enabled,
+                                        disabled_reason: (!enabled).then_some("modal dialog is active"),
+                                        tooltip: Some(TooltipSpec::new(&hook_lbl).with_summary(&tip)),
+                                        max_width: Some(slot.width()),
+                                        min_height: slot.height().max(24.0),
+                                        pad_x: 4.0,
+                                        center_text: true,
+                                        ..LinkButtonSpec::new(&hook_wid, &hook_lbl, ZLayer::Workspace)
+                                    },
+                                )
+                            })
+                            .inner;
                         if hook_resp.clicked() && enabled {
                             if let Some((draft_id, draft_text)) = state.notes_draft.clone()
                                 && draft_id == info.id
@@ -1024,7 +1028,7 @@ fn render_notes_pane(
                         .id(Id::unique(("info_notes_editor", info.id.as_str())))
                         .desired_width(avail_w)
                         .desired_rows(10)
-                        .hint_text("Protocol conditions, reagent lots, notebook references...");
+                        .hint_text("Protocol conditions, reagent lots, notebook references");
                     let resp = ui.add_enabled(enabled, edit);
                     if resp.changed() {
                         state.notes_dirty = true;

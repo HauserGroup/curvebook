@@ -34,7 +34,7 @@ pub use page_layout::arrange_layout_grid_items;
 
 use drill_back::render_data_point_drill_back_studio;
 use graph_inspector::render_graph_inspector_studio;
-use helpers::{SCROLL_BAR_RESERVE_PT, STUDIO_INNER_PAD, StudioChipSpec, render_collapsed_rail, studio_chip, surface_localized_title};
+use helpers::{SCROLL_BAR_RESERVE_PT, STUDIO_INNER_PAD, StudioChipSpec, render_collapsed_rail, surface_localized_title};
 use metadata_hooks::render_metadata_hooks_studio;
 use mv_formula::render_mv_formula_studio;
 use page_layout::render_page_layout_composer_studio;
@@ -184,8 +184,11 @@ pub struct TrailingStudioEguiState {
     pub info_synced_key: Option<(SheetId, String)>,
     pub results_severity_flagged_only: bool,
     pub methods_format: String,
+    pub methods_scope: String,
+    pub methods_synced_app_format: Option<String>,
+    pub methods_synced_app_scope: Option<String>,
     pub last_copied_methods_text: String,
-    pub methods_cache_key: Option<(SheetId, u64, String)>,
+    pub methods_cache_key: Option<(SheetId, u64, String, String)>,
     pub methods_cached_text: String,
     pub graph_series_index: usize,
     pub graph_axis_target: u8,
@@ -225,6 +228,9 @@ impl Default for TrailingStudioEguiState {
             info_synced_key: None,
             results_severity_flagged_only: false,
             methods_format: String::from("markdown"),
+            methods_scope: String::from("methods"),
+            methods_synced_app_format: None,
+            methods_synced_app_scope: None,
             last_copied_methods_text: String::new(),
             methods_cache_key: None,
             methods_cached_text: String::new(),
@@ -268,11 +274,8 @@ pub(crate) fn set_studio_panel_size_preview(ctx: &egui::Context, preview: Option
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(STUDIO_PANEL_SIZE_PREVIEW_KEY), preview));
 }
 
-pub(super) fn format_studio_toggle_tooltip(app: &UiApp, verb: &str) -> String {
-    match app.shortcuts.active_combo("ui.inspector.toggle") {
-        Some(combo) if !combo.trim().is_empty() => format!("{verb} ({})", crate::menus::format_shortcut_for_platform(combo)),
-        _ => verb.to_owned(),
-    }
+pub(super) fn studio_toggle_shortcut(app: &UiApp) -> Option<String> {
+    app.shortcuts.active_combo("ui.inspector.toggle").filter(|combo| !combo.trim().is_empty()).map(crate::menus::format_shortcut_for_platform)
 }
 
 /// Input context bundle for [`render_trailing_studio`] (`<= 7` function arguments).
@@ -449,7 +452,11 @@ pub fn render_trailing_studio(
             }
             let acc_title = title_owned.clone();
             t_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Heading, true, acc_title.clone()));
-            let t_resp = if elided { t_resp.on_hover_text(title_owned.as_str()) } else { t_resp };
+            let t_resp = if elided {
+                crate::egui_shell::ui_kit::show_tooltip(&t_resp, ctx_in.tokens, crate::egui_shell::ui_kit::TooltipSpec::new(title_owned.as_str()))
+            } else {
+                t_resp
+            };
             if t_rect.intersect(hdr_ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
                 meta.record_response(
                     &hdr_ui,
@@ -471,14 +478,14 @@ pub fn render_trailing_studio(
 
             hdr_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = ctx_in.tokens.metrics.space_xs;
-                let collapse_tip = format_studio_toggle_tooltip(app, "Collapse Studio");
-                let c_resp = studio_chip(
+                let collapse_sc = studio_toggle_shortcut(app);
+                let c_resp = helpers::studio_chip_with_shortcut(
                     ui,
                     ctx_in.tokens,
                     meta,
                     &StudioChipSpec {
                         label: if is_rtl_locale(ctx_in.tokens.locale) { "«" } else { "»" },
-                        tooltip: &collapse_tip,
+                        tooltip: "Collapse Studio",
                         max_w: 24.0,
                         selected: false,
                         enabled: ctx_in.enabled,
@@ -488,6 +495,7 @@ pub fn render_trailing_studio(
                         command_id: Some("ui.inspector.toggle"),
                         disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
                     },
+                    collapse_sc.as_deref(),
                 );
                 if c_resp && ctx_in.enabled {
                     intents.push(UiIntent::ToggleTrailingCollapsedRail);
@@ -677,4 +685,120 @@ fn render_trailing_dock_splitter(
             },
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egui_shell::layout::ShellLayoutInput;
+    use curvebook_doc::{DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use egui::{Pos2, Rect, Vec2};
+
+    #[test]
+    fn r20_21_inspector_tooltips_structured_with_shortcut_pill_and_no_echo() {
+        let mut doc = ProjectDocument::new("Studio").expect("doc");
+        let ds =
+            DataSheet::new(SheetId::new("ds-1"), "Table 1", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 4).expect("xy"))).expect("ds");
+        doc.data_sheets.push(ds);
+        doc.active_sheet_id = Some(SheetId::new("ds-1"));
+        let app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        let tokens = Tokens::default();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| tokens.configure_style(s));
+        crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+
+        let mut state = TrailingStudioEguiState::default();
+
+        fn collect_shape_texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+            for cs in shapes {
+                collect_rec(&cs.shape, out);
+            }
+        }
+        fn collect_rec(s: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(v) => {
+                    for c in v {
+                        collect_rec(c, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut run_pass = |events: Vec<egui::Event>, time: f64| -> (Vec<String>, Rect, Rect) {
+            let mut c_rect = Rect::NOTHING;
+            let mut d_rect = Rect::NOTHING;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let mut meta = FrameInspectMeta::new();
+                    let mut intents = PendingUiIntents::new();
+                    meta.begin_pass(ui.ctx());
+                    let layout = tokens.metrics.solve_shell_layout(ShellLayoutInput {
+                        viewport_w_pt: 1280.0,
+                        viewport_h_pt: 720.0,
+                        empty_workspace: false,
+                        navigator_open: true,
+                        inspector_open: true,
+                        family_open: true,
+                        leading_user_collapsed: false,
+                        trailing_user_collapsed: false,
+                        leading_width_override_pt: None,
+                        trailing_width_override_pt: None,
+                        host_draws_menu_bar: false,
+                        is_rtl: false,
+                    });
+                    let _ = render_trailing_studio(
+                        ui,
+                        &app,
+                        &mut state,
+                        TrailingStudioContext {
+                            tokens: &tokens,
+                            layout,
+                            enabled: true,
+                            focused: false,
+                            selected_panel_index: None,
+                            selected_graph_annotation: None,
+                        },
+                        &mut meta,
+                        &mut intents,
+                    );
+                    if let Some(c) = meta.find_by_widget_id("inspector.collapse_rail") {
+                        c_rect = c.clipped_rect;
+                    }
+                    if let Some(d) = meta.find_by_widget_id("inspector.table.decimals.auto") {
+                        d_rect = d.clipped_rect;
+                    }
+                },
+            );
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            collect_shape_texts(&out.shapes, &mut texts);
+            (texts, c_rect, d_rect)
+        };
+
+        let (_, collapse_rect, auto_dec_rect) = run_pass(Vec::new(), 0.0);
+        let _ = run_pass(vec![egui::Event::PointerMoved(collapse_rect.center())], 1.0);
+        let _ = run_pass(Vec::new(), 1.50);
+        let (col_tips, _, _) = run_pass(Vec::new(), 1.55);
+        assert!(col_tips.iter().any(|t| t == "Collapse Studio"), "missing Collapse Studio title: {col_tips:?}");
+        assert!(
+            col_tips.iter().any(|t| t.contains('I') && !t.contains('(')),
+            "Inspector shortcut should render in structured keycap pill rather than inline parens: {col_tips:?}"
+        );
+
+        let _ = run_pass(vec![egui::Event::PointerMoved(auto_dec_rect.center())], 2.0);
+        let _ = run_pass(Vec::new(), 2.50);
+        let (dec_tips, _, _) = run_pass(Vec::new(), 2.55);
+        assert!(
+            dec_tips.iter().any(|t| t.to_ascii_lowercase().contains("automatic decimal precision")),
+            "missing Display Decimals tooltip: {dec_tips:?}"
+        );
+    }
 }

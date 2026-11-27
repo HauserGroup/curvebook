@@ -178,7 +178,7 @@ pub struct LayoutMetrics {
 impl LayoutMetrics {
     /// Canonical `1.0x` logical-point metrics from `docs/planning/gui-layout-spec.md` §9.1 & §10.
     pub const CANONICAL: Self = Self {
-        app_bar_h: 32.0,
+        app_bar_h: 28.0,
         action_strip_h: 38.0,
         panel_header_h: 32.0,
         status_bar_h: 26.0,
@@ -243,10 +243,16 @@ impl LayoutMetrics {
         (safe_pt * safe_scale).round()
     }
 
-    /// Total top chrome height (`70 pt`).
+    /// Total top chrome height with in-window menu bar (`66 pt`: `28 pt` menu bar + `38 pt` unified toolbar).
     #[must_use]
     pub const fn top_chrome_height(self) -> f32 {
         self.app_bar_h + self.action_strip_h
+    }
+
+    /// Total top chrome height conditioned on whether the host OS renders the menu bar (`R20.9`).
+    #[must_use]
+    pub const fn top_chrome_height_for_host(self, host_draws_menu_bar: bool) -> f32 {
+        if host_draws_menu_bar { self.action_strip_h } else { self.app_bar_h + self.action_strip_h }
     }
 
     /// Bottom status footer height (`26 pt`).
@@ -283,7 +289,7 @@ impl LayoutMetrics {
             ViewportTier::NarrowHeadless
         };
 
-        let tier1_app_bar_h_pt = self.app_bar_h.min(h * 0.45).max(0.0);
+        let tier1_app_bar_h_pt = if input.host_draws_menu_bar { 0.0 } else { self.app_bar_h.min(h * 0.45).max(0.0) };
         let tier2_action_strip_h_pt = self.action_strip_h.min((h - tier1_app_bar_h_pt).max(0.0) * 0.65).max(0.0);
         let top_chrome_h_pt = tier1_app_bar_h_pt + tier2_action_strip_h_pt;
         let status_bar_h_pt = self.status_bar_h.min((h - top_chrome_h_pt).max(0.0)).max(0.0);
@@ -557,6 +563,11 @@ mod tests {
         assert!(tablet_640.trailing_collapsed_to_rail);
         assert_eq!(tablet_640.split_orientation, SplitOrientation::Vertical);
         assert!(tablet_640.center_stage_w_pt >= 360.0);
+
+        assert_eq!((wide.tier1_app_bar_h_pt, wide.tier2_action_strip_h_pt, wide.top_chrome_h_pt), (28.0, 38.0, 66.0));
+        let host_menu_wide = metrics.solve_shell_layout(ShellLayoutInput { host_draws_menu_bar: true, ..base_in });
+        assert_eq!((host_menu_wide.tier1_app_bar_h_pt, host_menu_wide.tier2_action_strip_h_pt, host_menu_wide.top_chrome_h_pt), (0.0, 38.0, 38.0));
+        assert_eq!(host_menu_wide.center_stage_h_pt - wide.center_stage_h_pt, 28.0);
 
         for preset in WorkspacePreset::ALL {
             assert_eq!(WorkspacePreset::parse(preset.as_str()), Some(preset));

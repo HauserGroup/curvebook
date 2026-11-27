@@ -417,7 +417,7 @@ fn fa_sec14_08_command_palette_ui_metadata_enablement_schema_and_activation() {
 
     let pal_ui = CommandPaletteState { query: "ui.graph.axes.open".into(), ..Default::default() };
     let ui_entry = pal_ui.matches_for_session(&empty_sess).into_iter().find(|e| e.id == "ui.graph.axes.open").unwrap();
-    assert_eq!((ui_entry.menu_path, ui_entry.enabled), ("Format/Format Axes...", false));
+    assert_eq!((ui_entry.menu_path, ui_entry.enabled), ("Format/Format Axes", false));
     assert!(pal_ui.activate_selected_for_session(Some(&empty_sess)).is_none());
 
     let mut doc = ProjectDocument::new("SEC14-08 Palette").unwrap();

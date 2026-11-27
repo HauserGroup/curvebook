@@ -248,7 +248,7 @@ pub(in crate::egui_shell) fn render_formula_bar(
                     role: "status",
                     text: formula,
                     font_size: 11.5,
-                    color: tokens.accent,
+                    color: tokens.text_strong,
                     z_layer: ZLayer::ModalDialog,
                     tooltip: Some(formula),
                     record_meta: true,
@@ -376,16 +376,16 @@ fn paint_equation_segments(ui: &Ui, painter: &egui::Painter, origin: Pos2, segme
 
 /// Render an Okabe-Ito-derived variable role tag (`NUM`, `CAT`, `LBL`, `FX=`).
 pub(in crate::egui_shell) fn render_mv_role_badge(ui: &mut Ui, tokens: &Tokens, role: VariableRole, inferred: bool) {
-    let (tag, col) = match role {
-        VariableRole::Continuous => ("NUM", tokens.role_num),
-        VariableRole::Categorical => ("CAT", tokens.role_cat),
-        VariableRole::Label => ("LBL", tokens.role_lbl),
-        VariableRole::Calculated => ("FX=", tokens.role_fx),
+    let (tag, col, fill, stroke_col) = match role {
+        VariableRole::Continuous => ("NUM", tokens.role_num, tokens.surface_recessed, tokens.border),
+        VariableRole::Categorical => ("CAT", tokens.role_cat, tokens.panel_bg, tokens.role_cat),
+        VariableRole::Label => ("LBL", tokens.role_lbl, tokens.panel_bg, tokens.role_lbl),
+        VariableRole::Calculated => ("FX=", tokens.role_fx, tokens.panel_bg, tokens.role_fx),
     };
     let text = if inferred { format!("{tag}*") } else { String::from(tag) };
     egui::Frame::NONE
-        .fill(tokens.panel_bg)
-        .stroke(Stroke::new(1.0, col))
+        .fill(fill)
+        .stroke(Stroke::new(1.0, stroke_col))
         .corner_radius(CornerRadius::same(tokens.metrics.radius_sm))
         .inner_margin(Vec2::new(4.0, 1.0))
         .show(ui, |ui| {

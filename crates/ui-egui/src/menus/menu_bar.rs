@@ -63,24 +63,29 @@ fn drain_actions_from_nodes(nodes: Vec<CuratedMenuNode>, out: &mut Vec<CommandTo
     }
 }
 
-fn localized_preferences_label(locale: &str) -> &'static str {
-    match i18n::normalize_locale(locale) {
-        "ar" => "التفضيلات...",
-        "de" => "Einstellungen...",
-        "es" => "Preferencias...",
-        "fr" => "Préférences...",
-        "he" => "העדפות...",
-        "it" => "Preferenze...",
-        "ja" => "環境設定...",
-        "ko" => "환경설정...",
-        "nl" => "Voorkeuren...",
-        "pl" => "Preferencje...",
-        "pt-BR" => "Preferências...",
-        "ru" => "Настройки...",
-        "tr" => "Tercihler...",
-        "zh-CN" => "首选项...",
-        "zh-TW" => "偏好設定...",
-        _ => "Preferences...",
+/// OS-adaptive menu placement helper (`R20.22`): omit `app.about`, `app.preferences`, and
+/// `app.quit` from top-level menus when the host OS menu bar (`CurveBook` app menu on macOS) owns
+/// them, while surfacing `File › Quit`, `Edit › Settings`, and `Help › About CurveBook` in
+/// in-window Windows/Linux menu bars.
+#[must_use]
+pub const fn include_app_menu_items_in_top_menus(host_draws_menu_bar: bool) -> bool {
+    !host_draws_menu_bar
+}
+
+fn push_os_adaptive_app_item(
+    nodes: &mut Vec<CuratedMenuNode>,
+    app: &UiApp,
+    command_id: &'static str,
+    label_key: Option<&'static str>,
+    with_leading_separator: bool,
+) {
+    if include_app_menu_items_in_top_menus(app.host_draws_menu_bar)
+        && let Some(node) = action_node(app, command_id, label_key)
+    {
+        if with_leading_separator && !nodes.is_empty() && !matches!(nodes.last(), Some(CuratedMenuNode::Separator)) {
+            nodes.push(CuratedMenuNode::Separator);
+        }
+        nodes.push(node);
     }
 }
 
@@ -94,7 +99,7 @@ fn host_routed_tooltip(app: &UiApp, command_id: &'static str) -> Option<CommandT
             shortcut: String::new(),
             summary: "Open an unpacked `.curvebook.d` directory project.",
             beginner: "Browse for a plain-text directory-backed CurveBook project.",
-            menu_path: "File/Open Unpacked Folder...",
+            menu_path: "File/Open Unpacked Folder",
             enabled: true,
             read_only: true,
             destructive: false,
@@ -107,7 +112,7 @@ fn host_routed_tooltip(app: &UiApp, command_id: &'static str) -> Option<CommandT
             shortcut: app.shortcuts.active_combo("file.save_as").unwrap_or("Cmd+Shift+S").to_owned(),
             summary: "Save a copy of the project to a new path or format.",
             beginner: "Choose a new file name or location for the active CurveBook project.",
-            menu_path: "File/Save As...",
+            menu_path: "File/Save As",
             enabled: true,
             read_only: false,
             destructive: false,
@@ -154,14 +159,40 @@ fn host_routed_tooltip(app: &UiApp, command_id: &'static str) -> Option<CommandT
         }),
         "app.preferences" => Some(CommandTooltip {
             command_id: "app.preferences",
-            label: "Preferences...",
-            localized_label: localized_preferences_label(&app.locale),
-            shortcut: app.shortcuts.active_combo("app.preferences").unwrap_or("").to_owned(),
-            summary: "Open application preferences (appearance, language, defaults, shortcuts).",
+            label: i18n::tr("en", "prefs.title"),
+            localized_label: app.tr("prefs.title"),
+            shortcut: app.shortcuts.active_combo("app.preferences").unwrap_or("Cmd+,").to_owned(),
+            summary: "Open application settings (appearance, language, defaults, shortcuts).",
             beginner: "Configure interface theme, language, figure defaults, and keyboard shortcuts.",
-            menu_path: "Edit/Preferences...",
+            menu_path: "Edit/Settings",
             enabled: true,
             read_only: true,
+            destructive: false,
+            needs_consent: false,
+        }),
+        "window.close" => Some(CommandTooltip {
+            command_id: "window.close",
+            label: i18n::tr("en", "menu.file.close_window"),
+            localized_label: app.tr("menu.file.close_window"),
+            shortcut: app.shortcuts.active_combo("window.close").unwrap_or("Cmd+W").to_owned(),
+            summary: "Close the active project window.",
+            beginner: "Closes the active CurveBook window after prompting to save unsaved changes.",
+            menu_path: "File/Close Window",
+            enabled: true,
+            read_only: false,
+            destructive: false,
+            needs_consent: false,
+        }),
+        "app.quit" => Some(CommandTooltip {
+            command_id: "app.quit",
+            label: i18n::tr("en", "menu.file.quit"),
+            localized_label: app.tr("menu.file.quit"),
+            shortcut: app.shortcuts.active_combo("app.quit").unwrap_or("Cmd+Q").to_owned(),
+            summary: "Quit CurveBook.",
+            beginner: "Closes all CurveBook windows after prompting to save unsaved changes.",
+            menu_path: "File/Quit",
+            enabled: true,
+            read_only: false,
             destructive: false,
             needs_consent: false,
         }),
@@ -235,6 +266,9 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "project.instantiateTemplate", None);
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "ui.print.open", Some("menu.file.print"));
+    nodes.push(CuratedMenuNode::Separator);
+    push_action(&mut nodes, app, "window.close", Some("menu.file.close_window"));
+    push_os_adaptive_app_item(&mut nodes, app, "app.quit", Some("menu.file.quit"), false);
 
     CuratedMenuSection { menu_key: "menu.file", title: app.tr("menu.file"), nodes }
 }
@@ -257,8 +291,7 @@ fn build_edit_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "table.excludeCells", None);
     push_action(&mut nodes, app, "ui.grid.excludeWithReason", None);
     push_action(&mut nodes, app, "table.exclusionAuditReport", None);
-    nodes.push(CuratedMenuNode::Separator);
-    push_action(&mut nodes, app, "app.preferences", None);
+    push_os_adaptive_app_item(&mut nodes, app, "app.preferences", None, true);
     CuratedMenuSection { menu_key: "menu.edit", title: app.tr("menu.edit"), nodes }
 }
 
@@ -276,7 +309,12 @@ fn build_view_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "ui.rulers.toggle", None);
     push_action(&mut nodes, app, "ui.gridOverlay.toggle", None);
     push_action(&mut nodes, app, "ui.view.rowTitles.toggle", None);
-    push_action(&mut nodes, app, "ui.zoom.fitSheet", Some("menu.view.zoom_fit"));
+    let mut zoom_children = Vec::new();
+    push_action(&mut zoom_children, app, "ui.zoom.in", None);
+    push_action(&mut zoom_children, app, "ui.zoom.out", None);
+    zoom_children.push(CuratedMenuNode::Separator);
+    push_action(&mut zoom_children, app, "ui.zoom.fitSheet", Some("menu.view.zoom_fit"));
+    nodes.push(submenu_node("menu.view.zoom", "menu.view.zoom", app, zoom_children));
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "ui.theme.set", Some("menu.view.theme"));
     push_action(&mut nodes, app, "ui.previewFilter.set", None);
@@ -359,7 +397,7 @@ fn build_graph_menu(app: &UiApp) -> CuratedMenuSection {
 
 fn build_help_menu(app: &UiApp) -> CuratedMenuSection {
     let mut nodes = Vec::new();
-    push_action(&mut nodes, app, "app.about", Some("menu.help.about"));
+    push_os_adaptive_app_item(&mut nodes, app, "app.about", Some("menu.help.about"), false);
     push_action(&mut nodes, app, "app.feedback", Some("menu.help.feedback"));
     CuratedMenuSection { menu_key: "menu.help", title: app.tr("menu.help"), nodes }
 }

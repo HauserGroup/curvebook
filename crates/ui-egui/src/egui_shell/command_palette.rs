@@ -441,8 +441,13 @@ pub(crate) fn layout_highlighted_search_title(
 ) -> (Arc<egui::Galley>, bool) {
     let mut job = egui::text::LayoutJob::default();
     let base_fmt = egui::TextFormat::simple(FontId::proportional(font_size), base_color);
-    let mut hi_fmt = egui::TextFormat::simple(FontId::proportional(font_size), highlight_color);
-    hi_fmt.background = highlight_color.gamma_multiply(0.16);
+    let hi_font = if super::fonts::has_bold_font(painter.ctx()) {
+        FontId::new(font_size, egui::FontFamily::Name(Arc::from(super::fonts::BOLD_FONT_FAMILY)))
+    } else {
+        FontId::proportional(font_size)
+    };
+    let mut hi_fmt = egui::TextFormat::simple(hi_font, highlight_color);
+    hi_fmt.background = highlight_color.gamma_multiply(0.14);
 
     let mut cursor = 0_usize;
     for span in spans {
@@ -480,7 +485,7 @@ pub(crate) fn layout_highlighted_search_title(
 fn category_badge_colors(kind: UnifiedSearchKind, tokens: &Tokens) -> (Color32, Color32) {
     match kind {
         UnifiedSearchKind::Recent => (tokens.panel_bg, tokens.text_muted),
-        UnifiedSearchKind::Sheet => (tokens.accent.gamma_multiply(0.16), tokens.accent),
+        UnifiedSearchKind::Sheet => (tokens.surface_recessed, tokens.text_strong),
         UnifiedSearchKind::Analysis | UnifiedSearchKind::Equation => (tokens.link_green.gamma_multiply(0.16), tokens.link_green),
         UnifiedSearchKind::Column => (tokens.warning.gamma_multiply(0.18), tokens.warning),
         UnifiedSearchKind::Command => (tokens.hover_bg, tokens.text_primary),
@@ -510,9 +515,9 @@ pub(crate) fn paint_unified_search_row_content(ui: &egui::Ui, rect: Rect, item: 
     let mut right_limit = rect.right() - 8.0;
     if !item.shortcut.is_empty() {
         let plat_sc = format_shortcut_for_platform(&item.shortcut);
-        let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 86.0, tokens.text_muted, 10.5);
+        let (sc_galley, _) = layout_palette_line(ui.painter(), &plat_sc, 96.0, tokens.text_muted, crate::egui_shell::fonts::SHORTCUT_PILL_FONT_PT);
         let pill_w = sc_galley.size().x + 10.0;
-        let pill_h = 18.0;
+        let pill_h = 20.0;
         let pill_rect = Rect::from_min_size(
             Pos2::new((right_limit - pill_w).max(badge_rect.right() + 40.0), rect.center().y - pill_h * 0.5),
             Vec2::new(pill_w, pill_h),
@@ -531,7 +536,7 @@ pub(crate) fn paint_unified_search_row_content(ui: &egui::Ui, rect: Rect, item: 
     let text_left = badge_rect.right() + 8.0;
     let avail_w = (right_limit - text_left).max(40.0);
     let title_color = if item.enabled { tokens.text_strong } else { tokens.text_disabled };
-    let hi_color = if item.enabled { tokens.accent } else { tokens.text_disabled };
+    let hi_color = if item.enabled { tokens.text_strong } else { tokens.text_disabled };
     let (title_galley, ellipsized) =
         layout_highlighted_search_title(ui.painter(), &item.title, &item.match_spans, avail_w, title_color, hi_color, tokens.metrics.font_ui_body_pt);
     let title_w = title_galley.size().x;
@@ -1329,6 +1334,74 @@ mod unified_search_integration_tests {
 
         // Verify SearchRecents is wired cleanly on EguiShellViewState.
         let _recents: &SearchRecents = &app.egui_views.search_recents;
+        Ok(())
+    }
+
+    #[test]
+    fn r20_13_shortcut_pills_render_at_least_11_5_pt_in_search_capsule_and_palette() -> Result<(), String> {
+        let (app, _) = app_with_populated_data_sheet()?;
+        let tokens = Tokens::default();
+        let ctx = egui::Context::default();
+        crate::egui_shell::fonts::install_egui_fonts(&ctx);
+
+        let mut views = crate::egui_shell::EguiShellViewState::default();
+        let mut intents = PendingUiIntents::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), ..Default::default() },
+            |ui| {
+                let mut meta = FrameInspectMeta::default();
+                let _ = crate::egui_shell::inspect_bridge::render_egui_shell_frame(ui, &app, &mut views, &mut meta, &mut intents);
+            },
+        );
+        out.textures_delta.clear();
+
+        let expected_palette_sc = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
+        let mut found_capsule_sc = false;
+        fn walk_shapes(shapes: &[egui::Shape], target: &str, found: &mut bool) {
+            for shape in shapes {
+                match shape {
+                    egui::Shape::Text(t) if t.galley.text() == target => {
+                        let min_pt = t.galley.job.sections.iter().map(|s| s.format.font_id.size).fold(f32::INFINITY, f32::min);
+                        assert!(min_pt >= 11.5, "search capsule shortcut pill `{target}` font size {min_pt} < 11.5 pt");
+                        *found = true;
+                    }
+                    egui::Shape::Vec(v) => walk_shapes(v, target, found),
+                    _ => {}
+                }
+            }
+        }
+        for clipped in &out.shapes {
+            walk_shapes(std::slice::from_ref(&clipped.shape), &expected_palette_sc, &mut found_capsule_sc);
+        }
+        assert!(found_capsule_sc, "expected search capsule shortcut pill `{expected_palette_sc}` in painted shapes");
+
+        // Also check Command Palette row shortcut pill font size directly.
+        let mut found_row_sc = false;
+        let item = UnifiedSearchItem {
+            kind: UnifiedSearchKind::Command,
+            title: String::from("Command Palette"),
+            subtitle: String::from("Search"),
+            category_badge: String::from("Command"),
+            shortcut: String::from("Cmd+Shift+P"),
+            match_spans: Vec::new(),
+            enabled: true,
+            score: 100,
+            action: UnifiedSearchAction::RunCommand { command_id: String::from("ui.palette.open"), is_ui_command: true },
+            completion_text: String::from("Command Palette"),
+        };
+        let expected_row_sc = format_shortcut_for_platform("Cmd+Shift+P");
+        let mut row_out = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 100.0))), ..Default::default() },
+            |ui| {
+                let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(560.0, 32.0));
+                let _ = paint_unified_search_row_content(ui, rect, &item, &tokens);
+            },
+        );
+        row_out.textures_delta.clear();
+        for clipped in &row_out.shapes {
+            walk_shapes(std::slice::from_ref(&clipped.shape), &expected_row_sc, &mut found_row_sc);
+        }
+        assert!(found_row_sc, "expected command palette row shortcut pill `{expected_row_sc}` in painted shapes");
         Ok(())
     }
 }

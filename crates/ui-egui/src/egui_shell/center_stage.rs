@@ -6,10 +6,7 @@
 use std::collections::BTreeMap;
 
 use curvebook_chart::preflight_check_scene;
-use curvebook_doc::{
-    FloatingNote, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, ProjectDocument, ResultSheet, SheetFolderKind, SheetId, TableArchetype,
-};
-use curvebook_palette::Rgba8;
+use curvebook_doc::{FloatingNote, GraphSheet, InfoSheet, LayoutSheet, ProjectDocument, ResultSheet, SheetFolderKind, SheetId, TableArchetype};
 use curvebook_text::expand_template_hooks;
 use curvebook_tools::GridCellCoord;
 use egui::{Color32, CornerRadius, FontId, Id, Key, Order, Rect, RichText, Sense, Stroke, StrokeKind, Vec2, pos2, vec2};
@@ -21,7 +18,9 @@ use crate::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, ren
 use crate::egui_shell::data_grid::{ColumnGridEguiState, ColumnGridRenderContext, DataGridScrollTarget, render_data_grid_for_sheet};
 use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
-use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
+use crate::egui_shell::results_view::{
+    ResultsViewEguiState, render_horizontal_line_comparison_popup, render_results_view_for_sheet_with_options, trigger_horizontal_line_comparison,
+};
 use crate::egui_shell::sheet_find_bar::{
     DataSheetFindMatch, DataSheetFindOverlay, ResultSheetFindOverlay, find_matches_in_data_sheet_cached, find_matches_in_result_sheet_cached,
     render_sheet_find_bar, set_active_find_locale,
@@ -29,24 +28,29 @@ use crate::egui_shell::sheet_find_bar::{
 use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::widgets::dropdown;
 use crate::egui_shell::{
-    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens, UiIntent,
-    color32_to_rgba8, doc_sheet_title, rgba8_to_color32,
+    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens,
+    UiIntent, color32_to_rgba8, doc_sheet_title, rgba8_to_color32,
 };
-use crate::i18n::{tr, tr_or_fallback};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
-use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
+use crate::workspace_nav::ActiveWorkspacePane;
+
+use super::portfolio_gallery::GALLERY_DEFAULT_CARD_W_PT;
+pub(super) use super::portfolio_gallery::compute_gallery_fit_zoom_pt;
+pub use super::portfolio_gallery::{GalleryContextMenuState, GalleryInlineRenameState};
 
 const MIN_SPLIT_RATIO: f32 = 0.15;
 const MAX_SPLIT_RATIO: f32 = 0.85;
 const DEFAULT_SPLIT_RATIO: f32 = 0.50;
+const DATA_RESULTS_MIN_SPLIT_RATIO: f64 = 0.35;
+const DATA_RESULTS_MAX_SPLIT_RATIO: f64 = 0.72;
+const DATA_RESULTS_PADDING_PT: f32 = 16.0;
 const SPLITTER_VISUAL_PT: f32 = 4.0;
 const BOTTOM_BANNER_HEIGHT_PT: f32 = 32.0;
 const FLOATING_NOTE_HEADER_H_PT: f32 = 26.0;
 const FLOATING_NOTE_MIN_W_PT: f32 = 160.0;
 const FLOATING_NOTE_MIN_H_PT: f32 = 76.0;
 const FLOATING_NOTE_MARGIN_PT: f32 = 6.0;
-const GALLERY_DEFAULT_CARD_W_PT: f32 = 168.0;
-
 /// Resolved presentation mode for the primary `CenterStage` pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CenterStageMode {
@@ -142,6 +146,26 @@ pub struct CenterStageEguiState {
     pub gallery_anchor_id: Option<SheetId>,
     /// Tracks whether `app.grid.formula_bar.active` was open on the previous pass (for initial focus).
     pub last_formula_bar_active: bool,
+    /// Last `(primary, secondary)` sheet pair rendered in Split Comparison (`R20.13` initial ratio).
+    pub last_split_pair: Option<(SheetId, SheetId)>,
+    /// Split pair awaiting content-aware initial `Data || Results` split ratio computation.
+    pub auto_ratio_pending_pair: Option<(SheetId, SheetId)>,
+    /// Split pair whose ratio was manually adjusted by the user (preserved against auto-sizing).
+    pub manual_ratio_pair: Option<(SheetId, SheetId)>,
+    /// Most recent `DataSheet` ID active in the workspace (disambiguates `app.grid` header coordinate ownership).
+    pub last_active_data_sheet_id: Option<SheetId>,
+    /// Last synced gallery search string used to reconcile direct test/intent mutations cleanly.
+    pub last_synced_gallery_search: String,
+    /// Folders collapsed inside `Portfolio Gallery` `All` view (`NavigatorOrder` / `Type` sorts).
+    pub gallery_collapsed_sections: Vec<SheetFolderKind>,
+    /// Keyboard-focused card sheet ID inside `Portfolio Gallery`.
+    pub gallery_focused_id: Option<SheetId>,
+    /// Last measured stage width in points for footer `Fit` zoom calculations.
+    pub gallery_last_stage_w_pt: f32,
+    /// Open right-click card context menu inside `Portfolio Gallery`.
+    pub gallery_context_menu: Option<GalleryContextMenuState>,
+    /// Active inline rename editor for a gallery card.
+    pub gallery_renaming: Option<GalleryInlineRenameState>,
 }
 
 impl Default for CenterStageEguiState {
@@ -170,6 +194,16 @@ impl Default for CenterStageEguiState {
             last_synced_grid_coord: None,
             gallery_anchor_id: None,
             last_formula_bar_active: false,
+            last_split_pair: None,
+            auto_ratio_pending_pair: None,
+            manual_ratio_pair: None,
+            last_active_data_sheet_id: None,
+            last_synced_gallery_search: String::new(),
+            gallery_collapsed_sections: Vec::new(),
+            gallery_focused_id: None,
+            gallery_last_stage_w_pt: 720.0,
+            gallery_context_menu: None,
+            gallery_renaming: None,
         }
     }
 }
@@ -210,7 +244,7 @@ fn record_region_meta(meta: &mut FrameInspectMeta, ui: &egui::Ui, resp: &egui::R
     meta.record_response(ui, resp, input);
 }
 
-fn inspect_input<'a>(
+pub(super) fn inspect_input<'a>(
     widget_id: &'a str,
     role: &'a str,
     label: &'a str,
@@ -301,13 +335,23 @@ pub fn render_center_stage(
 
     let doc = app.document();
     let active_sheet_id = doc.active_sheet_id.clone();
-    let split_active = app.split.enabled && !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery);
+    if let Some(aid) = active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        views.center_stage.last_active_data_sheet_id = Some(aid.clone());
+    } else if let Some(prev_ds) = views.center_stage.last_active_data_sheet_id.as_ref()
+        && doc.data_sheet(prev_ds).is_none()
+    {
+        views.center_stage.last_active_data_sheet_id = None;
+    }
 
-    handle_f6_split_and_note_focus(ui, app, views, &ctx_in, split_active, active_sheet_id.as_ref(), intents);
+    let split_active = app.split.enabled && !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery);
+    if !split_active {
+        views.center_stage.last_split_pair = None;
+        views.center_stage.auto_ratio_pending_pair = None;
+        views.center_stage.manual_ratio_pair = None;
+    }
 
     let modal_blocked = !ctx_in.enabled || views.progress_modal.is_some();
     let stage_enabled = !modal_blocked;
-    let sheet_find_sync = sync_sheet_find_before_stage(app, views, mode, active_sheet_id.as_ref(), intents);
 
     // Reserve bottom 32 pt for QOL-7 banner when visible so scrollbars and footer stay unoccluded.
     // In split view, the primary pane's sheet owns the singleton bottom banner.
@@ -327,11 +371,15 @@ pub fn render_center_stage(
         (stage_rect, None)
     };
 
+    let split_orientation = resolve_split_orientation(work_rect, &ctx_in.tokens.metrics);
+    handle_f6_split_and_note_focus(ui, app, views, &ctx_in, split_active, split_orientation, active_sheet_id.as_ref(), intents);
+    let sheet_find_sync = sync_sheet_find_before_stage(app, views, mode, active_sheet_id.as_ref(), intents);
+
     if mode == CenterStageMode::Gallery {
         report.primary_rect_pt = Some(work_rect);
         report.handled_natively = true;
-        let mut io = StageFrameIo { views, meta, intents, report: &mut report };
-        render_portfolio_gallery(ui, app, work_rect, ctx_in.tokens, stage_enabled, &mut io);
+        let mut gal_io = super::portfolio_gallery::GalleryFrameIo { views, meta, intents };
+        report.scrollbar_rect_pt = super::portfolio_gallery::render_portfolio_gallery(ui, app, work_rect, ctx_in.tokens, stage_enabled, &mut gal_io);
         draw_focus_ring_if_active(ui, work_rect, ctx_in.tokens, ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid);
         render_progress_modal_if_open(ui, app, views, ctx_in.tokens, meta);
         return report;
@@ -341,6 +389,15 @@ pub fn render_center_stage(
         let mut io = StageFrameIo { views, meta, intents, report: &mut report };
         render_split_stage(ui, app, &ctx_in, work_rect, stage_enabled, &mut io);
     } else {
+        let single_click_in_pane = stage_enabled
+            && mode != CenterStageMode::Welcome
+            && ui
+                .input(|i| (i.pointer.primary_pressed() || i.pointer.primary_clicked()).then(|| i.pointer.interact_pos()).flatten())
+                .is_some_and(|p| work_rect.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l.order <= ui.layer_id().order));
+        if single_click_in_pane && ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
+            intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
+        }
+        let pane_focused = stage_enabled && (ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid || single_click_in_pane);
         report.primary_rect_pt = Some(work_rect);
         let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(work_rect).layout(egui::Layout::top_down(egui::Align::Min)));
         pane_ui.set_clip_rect(work_rect);
@@ -348,7 +405,7 @@ pub fn render_center_stage(
         render_single_pane_mode(
             &mut pane_ui,
             app,
-            SinglePaneTarget { mode, sheet_id: active_sheet_id.as_ref(), slot: SplitPaneSlot::Primary, enabled: stage_enabled },
+            SinglePaneTarget { mode, sheet_id: active_sheet_id.as_ref(), slot: SplitPaneSlot::Primary, enabled: stage_enabled, pane_focused },
             &ctx_in,
             &mut io,
         );
@@ -356,7 +413,7 @@ pub fn render_center_stage(
             ui,
             work_rect,
             ctx_in.tokens,
-            ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid && mode != CenterStageMode::Welcome,
+            (ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid || single_click_in_pane) && mode != CenterStageMode::Welcome,
         );
     }
 
@@ -464,7 +521,7 @@ fn sync_sheet_find_before_stage(
     }
 
     if is_result && let Some(rs) = doc.result_sheet(sheet_id) {
-        let active_tab_idx = app.canvas_dialogs.result_view.active_tab_index.min(rs.tabs.len().saturating_sub(1));
+        let active_tab_idx = views.results_view.active_tab_for_sheet(sheet_id, rs.tabs.len(), app.canvas_dialogs.result_view.active_tab_index);
         let matches = find_matches_in_result_sheet_cached(
             app.mutation_seq(),
             rs,
@@ -481,7 +538,8 @@ fn sync_sheet_find_before_stage(
         if views.sheet_find.pending_scroll_to_active {
             if let Some(active) = matches.get(views.sheet_find.active_match_index) {
                 if active.tab_idx != active_tab_idx {
-                    intents.push(UiIntent::SelectResultTab { index: active.tab_idx });
+                    views.results_view.per_sheet_active_tab.insert(sheet_id.clone(), active.tab_idx);
+                    intents.push(UiIntent::SelectResultTab { index: active.tab_idx, sheet_id: Some(sheet_id.clone()) });
                 }
                 views.results_view.scroll_to_match(sheet_id.clone(), active.tab_idx, active.row_idx, active.col_idx);
             }
@@ -513,18 +571,46 @@ fn draw_focus_ring_if_active(ui: &egui::Ui, rect: Rect, tokens: &Tokens, focused
     }
 }
 
+fn resolve_split_orientation(work_rect: Rect, metrics: &LayoutMetrics) -> SplitOrientation {
+    if work_rect.width() >= metrics.split_vertical_breakpoint_w {
+        SplitOrientation::Horizontal
+    } else if work_rect.height() >= metrics.split_vertical_min_h {
+        SplitOrientation::Vertical
+    } else {
+        SplitOrientation::CompactSinglePane
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_f6_split_and_note_focus(
     ui: &egui::Ui,
     app: &UiApp,
     views: &mut EguiShellViewState,
     ctx_in: &CenterStageContext<'_>,
     split_active: bool,
+    split_orientation: SplitOrientation,
     active_sheet_id: Option<&SheetId>,
     intents: &mut PendingUiIntents,
 ) {
     if !ctx_in.enabled {
         return;
     }
+
+    let doc = app.document();
+    let (primary_id, secondary_resolved) = app.split.resolve_sheets(doc);
+    let secondary_id = secondary_resolved.or_else(|| pick_fallback_secondary_sheet(doc, primary_id.as_ref())).or_else(|| primary_id.clone());
+    let sync_active_sheet_for_slot = |slot: SplitPaneSlot, intents: &mut PendingUiIntents| {
+        let target = match slot {
+            SplitPaneSlot::Primary => primary_id.as_ref(),
+            SplitPaneSlot::Secondary => secondary_id.as_ref(),
+        };
+        if let Some(sid) = target
+            && doc.active_sheet_id.as_ref() != Some(sid)
+        {
+            intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str(), "mode": "family" }));
+        }
+    };
+    let both_panes_visible = split_active && split_orientation != SplitOrientation::CompactSinglePane;
 
     let mut cycle_reverse: Option<bool> = None;
     let mut found_cycle = false;
@@ -538,15 +624,22 @@ fn handle_f6_split_and_note_focus(
     }
 
     if found_cycle && split_active {
+        if !both_panes_visible {
+            return;
+        }
         let reverse = cycle_reverse.unwrap_or(false);
         if ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid {
             let consume_internal = match (views.center_stage.focused_split_pane, reverse) {
                 (SplitPaneSlot::Primary, false) => {
                     views.center_stage.focused_split_pane = SplitPaneSlot::Secondary;
+                    sync_active_sheet_for_slot(SplitPaneSlot::Secondary, intents);
+                    ui.ctx().request_repaint();
                     true
                 }
                 (SplitPaneSlot::Secondary, true) => {
                     views.center_stage.focused_split_pane = SplitPaneSlot::Primary;
+                    sync_active_sheet_for_slot(SplitPaneSlot::Primary, intents);
+                    ui.ctx().request_repaint();
                     true
                 }
                 _ => false,
@@ -556,8 +649,15 @@ fn handle_f6_split_and_note_focus(
             }
         } else if reverse && ctx_in.focused_pane == ActiveWorkspacePane::Inspector {
             views.center_stage.focused_split_pane = SplitPaneSlot::Secondary;
-        } else if !reverse && matches!(ctx_in.focused_pane, ActiveWorkspacePane::Navigator | ActiveWorkspacePane::FamilyStrip) {
+            sync_active_sheet_for_slot(SplitPaneSlot::Secondary, intents);
+            ui.ctx().request_repaint();
+        } else if !reverse
+            && (ctx_in.focused_pane == ActiveWorkspacePane::FamilyStrip
+                || (ctx_in.focused_pane == ActiveWorkspacePane::Navigator && !app.is_workspace_pane_visible(ActiveWorkspacePane::FamilyStrip)))
+        {
             views.center_stage.focused_split_pane = SplitPaneSlot::Primary;
+            sync_active_sheet_for_slot(SplitPaneSlot::Primary, intents);
+            ui.ctx().request_repaint();
         }
         return;
     }
@@ -568,26 +668,36 @@ fn handle_f6_split_and_note_focus(
         return;
     }
 
-    let doc = app.document();
     let has_notes = active_sheet_id.is_some_and(|id| !active_sheet_floating_notes(doc, id).is_empty());
     if ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid {
-        if split_active {
+        if both_panes_visible {
             if !shift_held && views.center_stage.focused_split_pane == SplitPaneSlot::Primary {
                 views.center_stage.focused_split_pane = SplitPaneSlot::Secondary;
+                sync_active_sheet_for_slot(SplitPaneSlot::Secondary, intents);
+                ui.ctx().request_repaint();
             } else if shift_held && views.center_stage.focused_split_pane == SplitPaneSlot::Secondary {
                 views.center_stage.focused_split_pane = SplitPaneSlot::Primary;
-            } else if has_notes {
+                sync_active_sheet_for_slot(SplitPaneSlot::Primary, intents);
+                ui.ctx().request_repaint();
+            } else if !shift_held && has_notes {
                 intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
             } else {
-                views.center_stage.focused_split_pane = if shift_held { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
+                intents.push_ui("ui.pane.cycle", json!({ "reverse": shift_held }));
             }
-        } else if has_notes {
+        } else if !shift_held && has_notes {
             intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
-        } else {
+        } else if !shift_held {
             intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::Inspector });
+        } else {
+            intents.push_ui("ui.pane.cycle", json!({ "reverse": true }));
         }
     } else if ctx_in.focused_pane == ActiveWorkspacePane::FloatingNotes {
-        views.center_stage.focused_split_pane = if shift_held && split_active { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
+        if both_panes_visible {
+            let target = if shift_held { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
+            views.center_stage.focused_split_pane = target;
+            sync_active_sheet_for_slot(target, intents);
+            ui.ctx().request_repaint();
+        }
         intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
     }
 }
@@ -605,12 +715,43 @@ fn strip_pane_cycle_intent(intents: &mut PendingUiIntents) {
     }
 }
 
-fn resolve_effective_split_ratio(app: &UiApp, state: &mut CenterStageEguiState) -> f32 {
+fn resolve_effective_split_ratio(app: &UiApp, state: &mut CenterStageEguiState, current_pair: Option<&(SheetId, SheetId)>) -> f32 {
     if state.last_seen_app_split_ratio != Some(app.split.ratio) {
+        if state.last_seen_app_split_ratio.is_some() && state.auto_ratio_pending_pair.as_ref() != current_pair {
+            state.manual_ratio_pair = current_pair.cloned();
+            state.auto_ratio_pending_pair = None;
+        }
         state.last_seen_app_split_ratio = Some(app.split.ratio);
         state.split_ratio_override = Some((app.split.ratio as f32).clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO));
     }
     state.split_ratio_override.unwrap_or(app.split.ratio as f32).clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
+}
+
+fn resolve_data_results_pair(doc: &ProjectDocument, primary_id: Option<&SheetId>, secondary_id: Option<&SheetId>) -> Option<(SheetId, bool)> {
+    let (Some(p), Some(s)) = (primary_id, secondary_id) else {
+        return None;
+    };
+    if doc.data_sheet(p).is_some() && doc.result_sheet(s).is_some() {
+        Some((s.clone(), false))
+    } else if doc.result_sheet(p).is_some() && doc.data_sheet(s).is_some() {
+        Some((p.clone(), true))
+    } else {
+        None
+    }
+}
+
+fn compute_data_results_initial_split_ratio(
+    natural_table_width_pt: f32,
+    work_width_pt: f32,
+    scrollbar_w_pt: f32,
+    padding_pt: f32,
+    results_is_primary: bool,
+) -> f64 {
+    let avail_w = f64::from((work_width_pt - SPLITTER_VISUAL_PT).max(1.0));
+    let needed_results_w = f64::from((natural_table_width_pt + scrollbar_w_pt + padding_pt).max(0.0));
+    let results_frac = needed_results_w / avail_w;
+    let raw_primary = if results_is_primary { results_frac } else { 1.0 - results_frac };
+    raw_primary.clamp(DATA_RESULTS_MIN_SPLIT_RATIO, DATA_RESULTS_MAX_SPLIT_RATIO)
 }
 
 struct StageFrameIo<'a> {
@@ -625,6 +766,7 @@ struct SplitPaneSpec<'a> {
     pane_rect: Rect,
     sheet_id: Option<&'a SheetId>,
     other_sheet_id: Option<&'a SheetId>,
+    last_active_data_sheet_id: Option<&'a SheetId>,
     locale: &'a str,
     enabled: bool,
     focused: bool,
@@ -635,6 +777,7 @@ struct SplitPaneHeaderSpec<'a> {
     header_rect: Rect,
     sheet_id: Option<&'a SheetId>,
     other_sheet_id: Option<&'a SheetId>,
+    last_active_data_sheet_id: Option<&'a SheetId>,
     locale: &'a str,
     tokens: &'a Tokens,
     enabled: bool,
@@ -646,67 +789,204 @@ struct SinglePaneTarget<'a> {
     sheet_id: Option<&'a SheetId>,
     slot: SplitPaneSlot,
     enabled: bool,
+    pane_focused: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_compact_split_stage(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ctx_in: &CenterStageContext<'_>,
+    work_rect: Rect,
+    enabled: bool,
+    primary_id: Option<&SheetId>,
+    secondary_id: Option<&SheetId>,
+    io: &mut StageFrameIo<'_>,
+) {
+    let doc = app.document();
+    let show_secondary = if doc.active_sheet_id.as_ref() == secondary_id && primary_id != secondary_id {
+        true
+    } else if doc.active_sheet_id.as_ref() == primary_id {
+        false
+    } else {
+        io.views.center_stage.focused_split_pane == SplitPaneSlot::Secondary
+    };
+    let visible_slot = if show_secondary { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
+    let visible_sheet = if show_secondary { secondary_id } else { primary_id };
+    io.views.center_stage.focused_split_pane = visible_slot;
+    io.report.primary_rect_pt = Some(work_rect);
+    io.report.secondary_rect_pt = None;
+
+    let header_h = ctx_in.tokens.metrics.panel_header_h.min(work_rect.height());
+    let header_rect = Rect::from_min_max(work_rect.min, pos2(work_rect.right(), work_rect.top() + header_h));
+    let body_rect = Rect::from_min_max(pos2(work_rect.left(), header_rect.bottom()), work_rect.max);
+    let compact_click_in_pane = enabled
+        && ui
+            .input(|i| (i.pointer.primary_pressed() || i.pointer.primary_clicked()).then(|| i.pointer.interact_pos()).flatten())
+            .is_some_and(|p| body_rect.contains(p) && ui.ctx().layer_id_at(p).is_none_or(|l| l.order <= ui.layer_id().order));
+    if compact_click_in_pane && ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
+        io.intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
+    }
+    let compact_pane_focused = enabled && (ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid || compact_click_in_pane);
+    render_compact_split_flip_header(
+        ui,
+        doc,
+        header_rect,
+        primary_id,
+        secondary_id,
+        show_secondary,
+        ctx_in.tokens,
+        enabled,
+        compact_pane_focused,
+        io.meta,
+        io.intents,
+    );
+    let pane_mode = visible_sheet.map_or(CenterStageMode::Welcome, |id| mode_for_sheet(doc, id));
+    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+    body_ui.set_clip_rect(body_rect);
+    render_single_pane_mode(
+        &mut body_ui,
+        app,
+        SinglePaneTarget { mode: pane_mode, sheet_id: visible_sheet, slot: visible_slot, enabled, pane_focused: compact_pane_focused },
+        ctx_in,
+        io,
+    );
+    sync_two_way_split_brushing(app, io.views, primary_id, secondary_id, io.intents);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_apply_data_results_initial_ratio(
+    ui: &egui::Ui,
+    app: &UiApp,
+    views: &mut EguiShellViewState,
+    intents: &mut PendingUiIntents,
+    work_width_pt: f32,
+    current_pair: Option<&(SheetId, SheetId)>,
+    data_results_config: Option<&(SheetId, bool)>,
+    pre_render: bool,
+) -> Option<f32> {
+    let pair = current_pair?;
+    let (rs_id, results_is_primary) = data_results_config?;
+    if views.center_stage.auto_ratio_pending_pair.as_ref() != Some(pair) || views.center_stage.manual_ratio_pair.as_ref() == Some(pair) {
+        return None;
+    }
+    let doc = app.document();
+    let res_state = if *results_is_primary { &views.results_view } else { &views.center_stage.secondary_results_view };
+    let active_tab_idx =
+        doc.result_sheet(rs_id).map_or(0, |rs| res_state.active_tab_for_sheet(rs_id, rs.tabs.len(), app.canvas_dialogs.result_view.active_tab_index));
+    let nat_w = if pre_render {
+        res_state
+            .natural_table_width_for_sheet(rs_id, active_tab_idx)
+            .or_else(|| views.results_view.natural_table_width_for_sheet(rs_id, active_tab_idx))
+            .or_else(|| views.center_stage.secondary_results_view.natural_table_width_for_sheet(rs_id, active_tab_idx))
+    } else {
+        res_state.natural_table_width_for_sheet(rs_id, active_tab_idx)
+    };
+    let Some(nat_w) = nat_w.filter(|w| w.is_finite() && *w > 0.0) else {
+        if !pre_render {
+            views.center_stage.auto_ratio_pending_pair = None;
+        }
+        return None;
+    };
+    let scroll_w = ui.spacing().scroll.allocated_width().max(14.0);
+    let init_ratio = compute_data_results_initial_split_ratio(nat_w, work_width_pt, scroll_w, DATA_RESULTS_PADDING_PT, *results_is_primary);
+    views.center_stage.split_ratio_override = Some(init_ratio as f32);
+    views.center_stage.last_seen_app_split_ratio = Some(init_ratio);
+    views.center_stage.auto_ratio_pending_pair = None;
+    if (app.split.ratio - init_ratio).abs() > 1e-4 {
+        intents.push(UiIntent::SetSplitRatio { ratio: init_ratio });
+    }
+    if !pre_render {
+        ui.ctx().request_repaint();
+    }
+    Some(init_ratio as f32)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sync_split_pane_click_focus(
+    ui: &egui::Ui,
+    doc: &ProjectDocument,
+    ctx_in: &CenterStageContext<'_>,
+    views: &mut CenterStageEguiState,
+    intents: &mut PendingUiIntents,
+    primary_id: Option<&SheetId>,
+    secondary_id: Option<&SheetId>,
+    primary_rect: Rect,
+    secondary_rect: Rect,
+    divider_hit_rect: Rect,
+    enabled: bool,
+) -> Option<SplitPaneSlot> {
+    if !enabled {
+        return None;
+    }
+    let panel_h = ctx_in.tokens.metrics.panel_header_h;
+    let body_of = |r: Rect| Rect::from_min_max(pos2(r.left(), r.top() + panel_h.min(r.height())), r.max);
+    let click_pos = ui
+        .input(|i| (i.pointer.primary_pressed() || i.pointer.primary_clicked()).then(|| i.pointer.interact_pos()).flatten())
+        .filter(|p| !divider_hit_rect.contains(*p) && ui.ctx().layer_id_at(*p).is_none_or(|l| l.order <= ui.layer_id().order))?;
+    let slot = if body_of(primary_rect).contains(click_pos) {
+        SplitPaneSlot::Primary
+    } else if body_of(secondary_rect).contains(click_pos) {
+        SplitPaneSlot::Secondary
+    } else {
+        return None;
+    };
+    let slot_changed = views.focused_split_pane != slot;
+    views.focused_split_pane = slot;
+    if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
+        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
+    }
+    let target_sid = match slot {
+        SplitPaneSlot::Primary => primary_id,
+        SplitPaneSlot::Secondary => secondary_id,
+    };
+    if let Some(sid) = target_sid
+        && doc.active_sheet_id.as_ref() != Some(sid)
+    {
+        intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str(), "mode": "family" }));
+    }
+    if slot_changed {
+        ui.ctx().request_repaint();
+    }
+    Some(slot)
 }
 
 fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, work_rect: Rect, enabled: bool, io: &mut StageFrameIo<'_>) {
-    let StageFrameIo { views, meta, intents, report } = io;
     let doc = app.document();
-    let orientation = if work_rect.width() >= ctx_in.tokens.metrics.split_vertical_breakpoint_w {
-        SplitOrientation::Horizontal
-    } else if work_rect.height() >= ctx_in.tokens.metrics.split_vertical_min_h {
-        SplitOrientation::Vertical
-    } else {
-        SplitOrientation::CompactSinglePane
-    };
-
+    let orientation = resolve_split_orientation(work_rect, &ctx_in.tokens.metrics);
     let (primary_id, secondary_resolved) = app.split.resolve_sheets(doc);
     let secondary_id = secondary_resolved.or_else(|| pick_fallback_secondary_sheet(doc, primary_id.as_ref())).or_else(|| primary_id.clone());
 
     if orientation == SplitOrientation::CompactSinglePane {
-        let show_secondary = if doc.active_sheet_id.as_ref() == secondary_id.as_ref() && primary_id != secondary_id {
-            true
-        } else if doc.active_sheet_id.as_ref() == primary_id.as_ref() {
-            false
-        } else {
-            views.center_stage.focused_split_pane == SplitPaneSlot::Secondary
-        };
-        let visible_slot = if show_secondary { SplitPaneSlot::Secondary } else { SplitPaneSlot::Primary };
-        let visible_sheet = if show_secondary { secondary_id.as_ref() } else { primary_id.as_ref() };
-        views.center_stage.focused_split_pane = visible_slot;
-        report.primary_rect_pt = Some(work_rect);
-        report.secondary_rect_pt = None;
-
-        let header_h = ctx_in.tokens.metrics.panel_header_h.min(work_rect.height());
-        let header_rect = Rect::from_min_max(work_rect.min, pos2(work_rect.right(), work_rect.top() + header_h));
-        let body_rect = Rect::from_min_max(pos2(work_rect.left(), header_rect.bottom()), work_rect.max);
-        render_compact_split_flip_header(
-            ui,
-            doc,
-            header_rect,
-            primary_id.as_ref(),
-            secondary_id.as_ref(),
-            show_secondary,
-            ctx_in.tokens,
-            enabled,
-            meta,
-            intents,
-        );
-        let pane_mode = visible_sheet.map_or(CenterStageMode::Welcome, |id| mode_for_sheet(doc, id));
-        let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-        body_ui.set_clip_rect(body_rect);
-        let mut pane_io = StageFrameIo { views, meta, intents, report };
-        render_single_pane_mode(
-            &mut body_ui,
-            app,
-            SinglePaneTarget { mode: pane_mode, sheet_id: visible_sheet, slot: visible_slot, enabled },
-            ctx_in,
-            &mut pane_io,
-        );
-        sync_two_way_split_brushing(app, pane_io.views, primary_id.as_ref(), secondary_id.as_ref(), pane_io.intents);
+        render_compact_split_stage(ui, app, ctx_in, work_rect, enabled, primary_id.as_ref(), secondary_id.as_ref(), io);
         return;
     }
 
-    let mut ratio = resolve_effective_split_ratio(app, &mut views.center_stage);
+    let StageFrameIo { views, meta, intents, report } = io;
+    let current_pair = primary_id.clone().zip(secondary_id.clone());
+    let data_results_config = resolve_data_results_pair(doc, primary_id.as_ref(), secondary_id.as_ref());
+    if views.center_stage.last_split_pair != current_pair {
+        views.center_stage.last_split_pair = current_pair.clone();
+        views.center_stage.manual_ratio_pair = None;
+        views.center_stage.auto_ratio_pending_pair =
+            if orientation == SplitOrientation::Horizontal && data_results_config.is_some() { current_pair.clone() } else { None };
+    }
+
+    let mut ratio = resolve_effective_split_ratio(app, &mut views.center_stage, current_pair.as_ref());
+    if orientation == SplitOrientation::Horizontal
+        && let Some(init_ratio) = try_apply_data_results_initial_ratio(
+            ui,
+            app,
+            views,
+            intents,
+            work_rect.width(),
+            current_pair.as_ref(),
+            data_results_config.as_ref(),
+            true,
+        )
+    {
+        ratio = init_ratio;
+    }
 
     let (mut primary_rect, mut divider_visual_rect, divider_hit_rect, mut secondary_rect) =
         compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
@@ -726,6 +1006,8 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
             let is_data_graph = primary_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some())
                 && secondary_id.as_ref().is_some_and(|id| doc.graph_sheet(id).is_some());
             ratio = if is_data_graph { 0.40 } else { DEFAULT_SPLIT_RATIO };
+            views.center_stage.manual_ratio_pair = current_pair.clone();
+            views.center_stage.auto_ratio_pending_pair = None;
             views.center_stage.split_ratio_override = Some(ratio);
             views.center_stage.last_seen_app_split_ratio = Some(f64::from(ratio).clamp(0.15, 0.85));
             intents.push(UiIntent::SetSplitRatio { ratio: f64::from(ratio) });
@@ -733,6 +1015,8 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
                 compute_split_geometries(work_rect, orientation, ratio, ctx_in.tokens.metrics.splitter_hit_slop_w);
         } else if divider_resp.dragged() {
             views.center_stage.split_dragging = true;
+            views.center_stage.manual_ratio_pair = current_pair.clone();
+            views.center_stage.auto_ratio_pending_pair = None;
             if let Some(pointer) = divider_resp.interact_pointer_pos() {
                 let raw = match orientation {
                     SplitOrientation::Horizontal => (pointer.x - work_rect.left()) / work_rect.width().max(1.0),
@@ -780,8 +1064,23 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
     report.primary_rect_pt = Some(primary_rect);
     report.secondary_rect_pt = Some(secondary_rect);
 
-    let stage_has_focus = ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid;
+    let clicked_slot = sync_split_pane_click_focus(
+        ui,
+        doc,
+        ctx_in,
+        &mut views.center_stage,
+        intents,
+        primary_id.as_ref(),
+        secondary_id.as_ref(),
+        primary_rect,
+        secondary_rect,
+        divider_hit_rect,
+        enabled,
+    );
+
+    let stage_has_focus = ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid || clicked_slot.is_some();
     let locale = app.locale.as_str();
+    let last_ds_id = views.center_stage.last_active_data_sheet_id.clone();
 
     {
         let primary_focused = stage_has_focus && views.center_stage.focused_split_pane == SplitPaneSlot::Primary;
@@ -795,6 +1094,7 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
                 pane_rect: primary_rect,
                 sheet_id: primary_id.as_ref(),
                 other_sheet_id: secondary_id.as_ref(),
+                last_active_data_sheet_id: last_ds_id.as_ref(),
                 locale,
                 enabled,
                 focused: primary_focused,
@@ -812,11 +1112,25 @@ fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContex
                 pane_rect: secondary_rect,
                 sheet_id: secondary_id.as_ref(),
                 other_sheet_id: primary_id.as_ref(),
+                last_active_data_sheet_id: last_ds_id.as_ref(),
                 locale,
                 enabled,
                 focused: secondary_focused,
             },
             &mut pane_io,
+        );
+    }
+
+    if orientation == SplitOrientation::Horizontal {
+        let _ = try_apply_data_results_initial_ratio(
+            ui,
+            app,
+            views,
+            intents,
+            work_rect.width(),
+            current_pair.as_ref(),
+            data_results_config.as_ref(),
+            false,
         );
     }
 
@@ -833,12 +1147,15 @@ fn render_compact_split_flip_header(
     show_secondary: bool,
     tokens: &Tokens,
     enabled: bool,
+    focused: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
     ui.painter().rect_filled(header_rect, CornerRadius::ZERO, tokens.panel_bg);
     ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.divider));
-    ui.painter().hline(header_rect.x_range(), header_rect.top() + 1.0, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.accent));
+    if focused {
+        ui.painter().hline(header_rect.x_range(), header_rect.top() + 1.0, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.accent));
+    }
 
     let p_title = primary_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("Sheet 1");
     let s_title = secondary_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("Sheet 2");
@@ -886,7 +1203,7 @@ fn render_compact_split_flip_header(
 }
 
 fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, pane: SplitPaneSpec<'_>, io: &mut StageFrameIo<'_>) {
-    let SplitPaneSpec { slot, pane_rect, sheet_id, other_sheet_id, locale, enabled, focused } = pane;
+    let SplitPaneSpec { slot, pane_rect, sheet_id, other_sheet_id, last_active_data_sheet_id, locale, enabled, focused } = pane;
     let doc = app.document();
     let header_h = ctx_in.tokens.metrics.panel_header_h.min(pane_rect.height());
     let header_rect = Rect::from_min_max(pane_rect.min, pos2(pane_rect.right(), pane_rect.top() + header_h));
@@ -895,32 +1212,27 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
     render_split_pane_header(
         ui,
         app,
-        SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, locale, tokens: ctx_in.tokens, enabled, focused },
+        SplitPaneHeaderSpec {
+            slot,
+            header_rect,
+            sheet_id,
+            other_sheet_id,
+            last_active_data_sheet_id,
+            locale,
+            tokens: ctx_in.tokens,
+            enabled,
+            focused,
+        },
         io.meta,
         io.intents,
     );
 
-    let click_in_pane = ui.input(|i| {
-        (i.pointer.primary_pressed() || i.pointer.primary_clicked() || i.pointer.secondary_clicked())
-            && i.pointer.interact_pos().is_some_and(|p| body_rect.contains(p))
-    });
-    if enabled && click_in_pane {
-        io.views.center_stage.focused_split_pane = slot;
-        if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
-            io.intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::MainCanvasOrGrid });
-        }
-        if let Some(sid) = sheet_id
-            && doc.active_sheet_id.as_ref() != Some(sid)
-        {
-            io.intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str(), "mode": "family" }));
-        }
-    }
-
     let pane_mode = sheet_id.map_or(CenterStageMode::Welcome, |id| mode_for_sheet(doc, id));
-    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+    let mut body_ui =
+        ui.new_child(egui::UiBuilder::new().id_salt(("split_pane_body", slot)).max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
     body_ui.set_clip_rect(body_rect);
 
-    render_single_pane_mode(&mut body_ui, app, SinglePaneTarget { mode: pane_mode, sheet_id, slot, enabled }, ctx_in, io);
+    render_single_pane_mode(&mut body_ui, app, SinglePaneTarget { mode: pane_mode, sheet_id, slot, enabled, pane_focused: focused }, ctx_in, io);
 
     let meta = &mut *io.meta;
 
@@ -937,6 +1249,48 @@ fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterSt
     record_region_meta(meta, ui, &pane_a11y, inspect_input(pane_wid, "region", pane_lbl, None, None, enabled, ZLayer::Workspace));
 }
 
+enum SplitHeaderBadge {
+    DataCoord { label: String },
+    LinkedBrush { label: String, clear_widget_id: &'static str },
+}
+
+fn resolve_split_header_badge(
+    doc: &ProjectDocument,
+    app: &UiApp,
+    slot: SplitPaneSlot,
+    sheet_id: Option<&SheetId>,
+    other_sheet_id: Option<&SheetId>,
+    last_active_data_sheet_id: Option<&SheetId>,
+) -> Option<SplitHeaderBadge> {
+    let sid = sheet_id?;
+    if doc.data_sheet(sid).is_some() {
+        let data_sheet_owns_grid = doc.active_sheet_id.as_ref() == Some(sid)
+            || (!doc.active_sheet_id.as_ref().is_some_and(|aid| doc.data_sheet(aid).is_some())
+                && (last_active_data_sheet_id == Some(sid)
+                    || (last_active_data_sheet_id.is_none() && !other_sheet_id.is_some_and(|oid| doc.data_sheet(oid).is_some()))));
+        let coord = if data_sheet_owns_grid {
+            if let Some((xr, xs)) = app.grid.active_x_cell {
+                Some(format!("R{}X{}", xr + 1, xs + 1))
+            } else {
+                app.grid.tool.active.map(|c| format!("R{}C{}", c.row + 1, c.col + 1))
+            }
+        } else {
+            app.brushed_cell.as_ref().filter(|b| &b.sheet_id == sid).map(|b| format!("R{}C{}", b.row + 1, b.col + 1))
+        };
+        return coord.map(|label| SplitHeaderBadge::DataCoord { label });
+    }
+    if doc.graph_sheet(sid).is_some()
+        && let Some(brushed) = app.brushed_cell.as_ref()
+        && doc.upstream_dependencies(sid).contains(&brushed.sheet_id)
+    {
+        let other_also_linked =
+            other_sheet_id.is_some_and(|oid| doc.graph_sheet(oid).is_some() && doc.upstream_dependencies(oid).contains(&brushed.sheet_id));
+        let clear_widget_id = if slot == SplitPaneSlot::Primary && other_also_linked { "split.clear_brush.primary" } else { "split.clear_brush" };
+        return Some(SplitHeaderBadge::LinkedBrush { label: format!("Brushed: R{}C{}", brushed.row + 1, brushed.col + 1), clear_widget_id });
+    }
+    None
+}
+
 fn render_split_pane_header(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -944,7 +1298,7 @@ fn render_split_pane_header(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, locale, tokens, enabled, focused } = spec;
+    let SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, last_active_data_sheet_id, locale, tokens, enabled, focused } = spec;
     let doc = app.document();
     ui.painter().rect_filled(header_rect, CornerRadius::ZERO, tokens.panel_bg);
     ui.painter().hline(header_rect.x_range(), header_rect.bottom(), Stroke::new(1.0, tokens.divider));
@@ -967,14 +1321,35 @@ fn render_split_pane_header(
     );
     hdr_ui.set_clip_rect(header_rect);
 
-    let current_title = sheet_id.and_then(|id| doc_sheet_title(doc, id)).unwrap_or("(None)");
+    let disambig = crate::workspace_nav::compute_sheet_disambiguation(doc);
+    let current_display: String = sheet_id
+        .and_then(|id| doc_sheet_title(doc, id).map(|t| format_split_selector_label(id, t, &disambig)))
+        .unwrap_or_else(|| String::from("(None)"));
+    let current_title = current_display.as_str();
     let sel_wid = match slot {
         SplitPaneSlot::Primary => "split.primary_selector",
         SplitPaneSlot::Secondary => "split.secondary_selector",
     };
-    let all_sheets = collect_all_sheet_ids(doc);
-    let combo = dropdown(("split_pane_sheet", slot), RichText::new(current_title).size(tokens.metrics.font_ui_body_pt))
-        .width((header_rect.width() * 0.52).clamp(96.0, 240.0))
+    let header_badge = resolve_split_header_badge(doc, app, slot, sheet_id, other_sheet_id, last_active_data_sheet_id);
+    let small_font = FontId::proportional(tokens.metrics.font_ui_small_pt);
+    let badge_needed_w = match &header_badge {
+        Some(SplitHeaderBadge::DataCoord { label }) => {
+            hdr_ui.painter().layout_no_wrap(label.clone(), small_font.clone(), tokens.text_primary).size().x + 6.0
+        }
+        Some(SplitHeaderBadge::LinkedBrush { label, .. }) => {
+            let text_w = hdr_ui.painter().layout_no_wrap(label.clone(), small_font.clone(), tokens.text_primary).size().x;
+            text_w + 14.0 + tokens.metrics.min_hit_target_pt + tokens.metrics.space_xs
+        }
+        None => 0.0,
+    };
+    let right_reserve = if slot == SplitPaneSlot::Secondary { 104.0 } else { 0.0 };
+    let badge_reserve = if badge_needed_w > 0.0 { badge_needed_w + tokens.metrics.space_sm } else { 0.0 };
+    let combo_cap_w = (hdr_ui.available_width() - right_reserve - badge_reserve - tokens.metrics.space_xs).max(88.0);
+    let combo_w = (header_rect.width() * 0.52).clamp(88.0, 240.0).min(combo_cap_w);
+    let title_color = if focused { tokens.text_strong } else { tokens.text_muted };
+    let all_sheets = collect_all_sheet_ids(doc, &disambig);
+    let combo = dropdown(("split_pane_sheet", slot), RichText::new(current_title).size(tokens.metrics.font_ui_body_pt).color(title_color))
+        .width(combo_w)
         .enabled(enabled)
         .show_ui(&mut hdr_ui, |combo_ui| {
             for (cand_id, cand_title, kind_badge) in &all_sheets {
@@ -996,25 +1371,46 @@ fn render_split_pane_header(
     inspect.full_label = combo.ellipsized.then_some(current_title);
     meta.record_response(&hdr_ui, &combo.response, inspect);
 
-    if let Some(brushed) = app.brushed_cell.as_ref()
-        && header_rect.width() >= 280.0
+    if let Some(badge) = header_badge
+        && (hdr_ui.available_width() - right_reserve) >= badge_needed_w - 1.0
     {
-        let brush_label = format!("R{}C{}", brushed.row + 1, brushed.col + 1);
-        hdr_ui.label(RichText::new(brush_label).small().color(tokens.text_muted));
-        if slot == SplitPaneSlot::Secondary {
-            let (_, clicked) = crate::egui_shell::ui_kit::ghost_action_button(
-                &mut hdr_ui,
-                tokens,
-                meta,
-                "split.clear_brush",
-                "×",
-                None,
-                false,
-                enabled,
-                ZLayer::Workspace,
-            );
-            if clicked {
-                intents.push(UiIntent::ClearBrush);
+        match badge {
+            SplitHeaderBadge::DataCoord { label } => {
+                let coord_wid = match slot {
+                    SplitPaneSlot::Primary => "split.header.coord.primary",
+                    SplitPaneSlot::Secondary => "split.header.coord.secondary",
+                };
+                let mut rt = RichText::new(&label).small();
+                rt = if focused { rt.strong().color(tokens.text_strong) } else { rt.color(tokens.text_muted) };
+                let resp = hdr_ui.label(rt);
+                meta.record_response(&hdr_ui, &resp, inspect_input(coord_wid, "label", &label, None, None, true, ZLayer::Workspace));
+            }
+            SplitHeaderBadge::LinkedBrush { label, clear_widget_id } => {
+                let brush_wid = match slot {
+                    SplitPaneSlot::Primary => "split.header.brush.primary",
+                    SplitPaneSlot::Secondary => "split.header.brush.secondary",
+                };
+                let pill = egui::Frame::NONE
+                    .fill(tokens.surface_recessed)
+                    .stroke(Stroke::new(1.0, tokens.divider))
+                    .corner_radius(CornerRadius::same(tokens.metrics.radius_sm))
+                    .inner_margin(egui::Margin::symmetric(6, 2))
+                    .show(&mut hdr_ui, |pill_ui| pill_ui.label(RichText::new(&label).small().color(tokens.text_primary)));
+                meta.record_response(&hdr_ui, &pill.inner, inspect_input(brush_wid, "label", &label, None, None, true, ZLayer::Workspace));
+                let (_, clicked) = crate::egui_shell::ui_kit::ghost_action_button(
+                    &mut hdr_ui,
+                    tokens,
+                    meta,
+                    clear_widget_id,
+                    "×",
+                    None,
+                    false,
+                    enabled,
+                    ZLayer::Workspace,
+                );
+                if clicked {
+                    intents.push(UiIntent::ClearBrush);
+                }
             }
         }
     }
@@ -1089,7 +1485,7 @@ fn compute_split_geometries(work_rect: Rect, orientation: SplitOrientation, rati
 }
 
 fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTarget<'_>, ctx_in: &CenterStageContext<'_>, io: &mut StageFrameIo<'_>) {
-    let SinglePaneTarget { mode, sheet_id, slot, enabled } = target;
+    let SinglePaneTarget { mode, sheet_id, slot, enabled, pane_focused } = target;
     let StageFrameIo { views, meta, intents, report } = io;
     match mode {
         CenterStageMode::Welcome => {
@@ -1110,7 +1506,9 @@ fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTar
                 app,
                 sheet_id,
                 grid_state,
-                ColumnGridRenderContext::new(ctx_in.tokens, !enabled || ctx_in.decision.blocks_egui_grid).with_pane_salt(pane_salt),
+                ColumnGridRenderContext::new(ctx_in.tokens, !enabled || ctx_in.decision.blocks_egui_grid)
+                    .with_pane_salt(pane_salt)
+                    .with_pane_focused(pane_focused),
                 meta,
                 intents,
             );
@@ -1130,7 +1528,8 @@ fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTar
                 SplitPaneSlot::Primary => &mut views.results_view,
                 SplitPaneSlot::Secondary => &mut views.center_stage.secondary_results_view,
             };
-            let res_rep = render_results_view_for_sheet(ui, app, sheet_id, res_state, ctx_in.tokens, enabled, meta, intents);
+            let res_rep =
+                render_results_view_for_sheet_with_options(ui, app, sheet_id, res_state, ctx_in.tokens, enabled, pane_focused, true, meta, intents);
             if report.scrollbar_rect_pt.is_none() {
                 report.scrollbar_rect_pt = res_rep.scrollbar_rect_pt;
             }
@@ -1203,7 +1602,7 @@ fn render_mv_formula_bar_if_active(
     egui::Frame::NONE.fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.border)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |bar| {
         bar.horizontal(|row| {
             let target_lbl = if fb.target_title.trim().is_empty() { "fx" } else { fb.target_title.as_str() };
-            row.label(RichText::new(format!("fx ({target_lbl}) =")).small().strong().color(tokens.accent));
+            row.label(RichText::new(format!("fx ({target_lbl}) =")).small().strong().color(tokens.text_strong));
 
             let mut draft = fb.input.clone();
             let edit_w = (row.available_width() - 150.0).max(120.0);
@@ -1318,7 +1717,12 @@ fn sync_two_way_split_brushing(
     intents: &mut PendingUiIntents,
 ) {
     let doc = app.document();
-    let grid_sheet_id = [primary_id, secondary_id].into_iter().flatten().find(|id| doc.data_sheet(id).is_some()).cloned();
+    let grid_sheet_id = doc
+        .active_sheet_id
+        .as_ref()
+        .filter(|id| doc.data_sheet(id).is_some())
+        .cloned()
+        .or_else(|| [primary_id, secondary_id].into_iter().flatten().find(|id| doc.data_sheet(id).is_some()).cloned());
     let Some(grid_id) = grid_sheet_id else {
         return;
     };
@@ -1357,395 +1761,42 @@ fn sync_two_way_split_brushing(
 }
 
 fn pick_fallback_secondary_sheet(doc: &ProjectDocument, primary_id: Option<&SheetId>) -> Option<SheetId> {
-    let all = collect_all_sheet_ids(doc);
+    let disambig = BTreeMap::new();
+    let all = collect_all_sheet_ids(doc, &disambig);
     all.into_iter().map(|(id, _, _)| id).find(|id| Some(id) != primary_id)
 }
 
-fn collect_all_sheet_ids(doc: &ProjectDocument) -> Vec<(SheetId, String, &'static str)> {
+fn format_split_selector_label(id: &SheetId, title: &str, disambig: &BTreeMap<SheetId, crate::workspace_nav::SheetDisambiguation>) -> String {
+    match disambig.get(id) {
+        Some(info) if info.has_duplicate_title => match info.subtitle.as_deref() {
+            Some(sub) => format!("{title} \u{2014} {sub}"),
+            None => title.to_owned(),
+        },
+        _ => title.to_owned(),
+    }
+}
+
+fn collect_all_sheet_ids(
+    doc: &ProjectDocument,
+    disambig: &BTreeMap<SheetId, crate::workspace_nav::SheetDisambiguation>,
+) -> Vec<(SheetId, String, &'static str)> {
     let mut out = Vec::with_capacity(doc.total_sheet_count());
     for s in &doc.data_sheets {
-        out.push((s.id.clone(), s.title.clone(), "Data"));
+        out.push((s.id.clone(), format_split_selector_label(&s.id, &s.title, disambig), "Data"));
     }
     for s in &doc.info_sheets {
-        out.push((s.id.clone(), s.title.clone(), "Info"));
+        out.push((s.id.clone(), format_split_selector_label(&s.id, &s.title, disambig), "Info"));
     }
     for s in &doc.result_sheets {
-        out.push((s.id.clone(), s.title().to_owned(), "Result"));
+        out.push((s.id.clone(), format_split_selector_label(&s.id, s.title(), disambig), "Result"));
     }
     for s in &doc.graph_sheets {
-        out.push((s.id.clone(), s.title.clone(), "Graph"));
+        out.push((s.id.clone(), format_split_selector_label(&s.id, &s.title, disambig), "Graph"));
     }
     for s in &doc.layout_sheets {
-        out.push((s.id.clone(), s.title.clone(), "Layout"));
+        out.push((s.id.clone(), format_split_selector_label(&s.id, &s.title, disambig), "Layout"));
     }
     out
-}
-
-fn render_portfolio_gallery(ui: &mut egui::Ui, app: &UiApp, rect: Rect, tokens: &Tokens, enabled: bool, io: &mut StageFrameIo<'_>) {
-    let StageFrameIo { views, meta, intents, report } = io;
-    let doc = app.document();
-    let locale = app.locale.as_str();
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, tokens.surface_bg);
-
-    let inner_rect = rect.shrink(8.0);
-    let mut gal_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner_rect).layout(egui::Layout::top_down(egui::Align::Min)));
-    gal_ui.set_clip_rect(rect);
-
-    gal_ui.horizontal_wrapped(|bar| {
-        bar.spacing_mut().item_spacing = vec2(6.0, 4.0);
-        bar.label(RichText::new(tr_or_fallback(locale, "w5.gallery.title", "Portfolio Gallery")).strong().color(tokens.text_strong));
-
-        let search_hint = tr_or_fallback(locale, "w5.gallery.search", "Search sheets...");
-        let search_resp = bar.add_enabled(
-            enabled,
-            egui::TextEdit::singleline(&mut views.center_stage.gallery_search)
-                .id(Id::unique("gallery.search_input"))
-                .desired_width((rect.width() * 0.24).clamp(110.0, 220.0))
-                .hint_text(search_hint),
-        );
-        meta.record_response(
-            bar,
-            &search_resp,
-            inspect_input("gallery.search_input", "textbox", search_hint, None, None, enabled, ZLayer::Workspace),
-        );
-
-        let filters: [(Option<SheetFolderKind>, &str, &str, &str); 6] = [
-            (None, "all", "gallery.filter.all", "All"),
-            (Some(SheetFolderKind::Graphs), "graphs", "gallery.filter.graphs", "Graphs"),
-            (Some(SheetFolderKind::Layouts), "layouts", "gallery.filter.layouts", "Layouts"),
-            (Some(SheetFolderKind::Data), "data", "gallery.filter.data", "Data"),
-            (Some(SheetFolderKind::Results), "results", "gallery.filter.results", "Results"),
-            (Some(SheetFolderKind::Info), "info", "gallery.filter.info", "Info"),
-        ];
-        for (folder_opt, folder_param, wid, fallback_lbl) in filters {
-            let active = app.nav.gallery.filter_folder == folder_opt;
-            let btn = egui::Button::new(RichText::new(fallback_lbl).small().color(if active { tokens.paper_white } else { tokens.text_primary }))
-                .fill(if active { tokens.accent } else { tokens.panel_bg })
-                .stroke(Stroke::new(1.0, if active { tokens.accent } else { tokens.border }));
-            let resp = bar.add_enabled(enabled, btn);
-            meta.record_response(
-                bar,
-                &resp,
-                inspect_input(
-                    wid,
-                    "button",
-                    fallback_lbl,
-                    Some("ui.gallery.toggle"),
-                    Some(json!({ "folder": folder_param })),
-                    enabled,
-                    ZLayer::Workspace,
-                ),
-            );
-            if resp.clicked() && enabled {
-                intents.push_ui("ui.gallery.toggle", json!({ "open": true, "folder": folder_param }));
-            }
-        }
-
-        let slider =
-            bar.add_enabled(enabled, egui::Slider::new(&mut views.center_stage.gallery_zoom_pt, 120.0..=260.0).show_value(false).text("Size"));
-        meta.record_response(bar, &slider, inspect_input("gallery.zoom_slider", "slider", "Thumbnail Zoom", None, None, enabled, ZLayer::Workspace));
-
-        let selected_graph_ids: Vec<SheetId> = app.nav.selected_gallery_ids().into_iter().filter(|id| doc.graph_sheet(id).is_some()).collect();
-        let style_enabled = enabled && !selected_graph_ids.is_empty() && doc.graph_sheets.len() >= 2;
-        let style_lbl = tr(locale, "r13.gallery.apply_style_from");
-        let style_resp = bar.add_enabled(style_enabled, egui::Button::new(RichText::new(style_lbl).small()));
-        meta.record_response(
-            bar,
-            &style_resp,
-            inspect_input("gallery.apply_style_from", "button", style_lbl, Some("ui.applyStyleFrom.open"), None, style_enabled, ZLayer::Workspace),
-        );
-        if style_resp.clicked() && style_enabled {
-            let target_ids: Vec<&str> = selected_graph_ids.iter().map(SheetId::as_str).collect();
-            intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
-            intents.push_ui("ui.applyStyleFrom.open", json!({ "target_sheet_ids": target_ids }));
-        }
-
-        let close_lbl = tr_or_fallback(locale, "w5.gallery.close", "Close Gallery");
-        let close_resp = bar.add_enabled(enabled, egui::Button::new(RichText::new(close_lbl).small()));
-        meta.record_response(
-            bar,
-            &close_resp,
-            inspect_input("gallery.close", "button", close_lbl, Some("ui.gallery.toggle"), None, enabled, ZLayer::Workspace),
-        );
-        if close_resp.clicked() && enabled {
-            intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
-        }
-    });
-
-    gal_ui.add_space(6.0);
-    gal_ui.separator();
-    gal_ui.add_space(6.0);
-
-    let cards = build_filtered_gallery_cards(doc, app, &views.center_stage.gallery_search);
-    if cards.is_empty() {
-        gal_ui.label(RichText::new(tr_or_fallback(locale, "w5.gallery.empty", "No matching sheets in this view.")).color(tokens.text_muted));
-        return;
-    }
-
-    let selected_ids_snapshot = app.nav.gallery.selected_ids.clone();
-    let visible_ids: Vec<SheetId> = cards.iter().map(|c| c.sheet_id.clone()).collect();
-    let mut gallery_anchor = views.center_stage.gallery_anchor_id.clone();
-
-    let scroll = egui::ScrollArea::vertical().id_salt("center_stage.gallery.scroll").auto_shrink([false, false]).show(&mut gal_ui, |grid_ui| {
-        let inner_w = (grid_ui.available_width() - 16.0).max(140.0);
-        let spacing = 10.0;
-        let desired_card_w = views.center_stage.gallery_zoom_pt.clamp(120.0, inner_w);
-        let cols = ((inner_w + spacing) / (desired_card_w + spacing)).floor().max(1.0) as usize;
-        let card_w = ((inner_w - spacing * (cols.saturating_sub(1) as f32)) / (cols as f32)).max(110.0);
-        let card_h = (card_w * 0.72).clamp(96.0, 190.0);
-
-        for row_cards in cards.chunks(cols) {
-            grid_ui.horizontal(|row_ui| {
-                row_ui.spacing_mut().item_spacing.x = spacing;
-                for card in row_cards {
-                    render_gallery_card(
-                        row_ui,
-                        doc,
-                        GalleryCardSpec {
-                            card,
-                            visible_ids: &visible_ids,
-                            selected_ids_snapshot: &selected_ids_snapshot,
-                            gallery_anchor: &mut gallery_anchor,
-                            size: vec2(card_w, card_h),
-                            tokens,
-                            enabled,
-                        },
-                        meta,
-                        intents,
-                    );
-                }
-            });
-            grid_ui.add_space(spacing);
-        }
-    });
-    views.center_stage.gallery_anchor_id = gallery_anchor;
-
-    if scroll.content_size.y > scroll.inner_rect.height() + 0.5 {
-        let bar_w = gal_ui.spacing().scroll.bar_width.max(10.0);
-        report.scrollbar_rect_pt = Some(Rect::from_min_max(
-            pos2((scroll.inner_rect.right() + 2.0).min(inner_rect.right()), scroll.inner_rect.top()),
-            pos2((scroll.inner_rect.right() + 2.0 + bar_w).min(inner_rect.right()), scroll.inner_rect.bottom()),
-        ));
-    }
-}
-
-fn build_filtered_gallery_cards(doc: &ProjectDocument, app: &UiApp, search: &str) -> Vec<PortfolioCard> {
-    let query = search.trim().to_ascii_lowercase();
-    let filter = app.nav.gallery.filter_folder;
-    let active_id = doc.active_sheet_id.as_ref();
-
-    let mut out = Vec::new();
-    let push_if_match =
-        |out: &mut Vec<PortfolioCard>, id: &SheetId, title: &str, folder: SheetFolderKind, badge: &str, subtitle: String, color: Option<Rgba8>| {
-            if filter.is_some_and(|f| f != folder) {
-                return;
-            }
-            if !query.is_empty()
-                && !title.to_ascii_lowercase().contains(&query)
-                && !id.as_str().to_ascii_lowercase().contains(&query)
-                && !badge.to_ascii_lowercase().contains(&query)
-            {
-                return;
-            }
-            out.push(PortfolioCard {
-                sheet_id: id.clone(),
-                title: title.to_owned(),
-                folder,
-                badge_label: badge.to_owned(),
-                subtitle,
-                color_tag: color,
-                active: active_id == Some(id),
-                selected: app.nav.gallery.selected_ids.contains(id),
-            });
-        };
-
-    for g in &doc.graph_sheets {
-        push_if_match(&mut out, &g.id, &g.title, SheetFolderKind::Graphs, "Graph", format!("{} series", g.spec.series.len()), g.color_tag);
-    }
-    for l in &doc.layout_sheets {
-        push_if_match(&mut out, &l.id, &l.title, SheetFolderKind::Layouts, "Layout", format!("{} panels", l.spec.items.len()), l.color_tag);
-    }
-    for d in &doc.data_sheets {
-        push_if_match(&mut out, &d.id, &d.title, SheetFolderKind::Data, "Data", format!("{:?}", d.archetype.kind()), d.color_tag);
-    }
-    for r in &doc.result_sheets {
-        push_if_match(&mut out, &r.id, r.title(), SheetFolderKind::Results, "Result", format!("{} tabs", r.tabs.len()), r.color_tag);
-    }
-    for i in &doc.info_sheets {
-        push_if_match(&mut out, &i.id, &i.title, SheetFolderKind::Info, "Info", format!("{} constants", i.constants.len()), i.color_tag);
-    }
-    out
-}
-
-struct GalleryCardSpec<'a> {
-    card: &'a PortfolioCard,
-    visible_ids: &'a [SheetId],
-    selected_ids_snapshot: &'a std::collections::BTreeSet<SheetId>,
-    gallery_anchor: &'a mut Option<SheetId>,
-    size: Vec2,
-    tokens: &'a Tokens,
-    enabled: bool,
-}
-
-fn render_gallery_card(
-    ui: &mut egui::Ui,
-    doc: &ProjectDocument,
-    spec: GalleryCardSpec<'_>,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let GalleryCardSpec { card, visible_ids, selected_ids_snapshot, gallery_anchor, size, tokens, enabled } = spec;
-    let (card_rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if card.active || card.selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.panel_bg
-    };
-    let highlighted = card.active || card.selected;
-    let border_col = if highlighted { tokens.accent } else { tokens.border };
-    ui.painter().rect(card_rect, CornerRadius::same(4), bg, Stroke::new(if highlighted { 1.5 } else { 1.0 }, border_col), StrokeKind::Inside);
-
-    let thumb_rect = Rect::from_min_max(card_rect.min + vec2(8.0, 8.0), pos2(card_rect.right() - 8.0, card_rect.bottom() - 38.0));
-    paint_gallery_thumbnail(ui, doc, card, thumb_rect, tokens);
-
-    let text_clip = card_rect.shrink(4.0).intersect(ui.clip_rect());
-    if text_clip.is_positive() && text_clip.width() >= 20.0 {
-        let title_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 32.0);
-        let max_title_w = (text_clip.right() - title_pos.x - 4.0).min(card_rect.width() - 16.0).max(16.0);
-        let mut title_job = egui::text::LayoutJob::single_section(
-            card.title.clone(),
-            egui::text::TextFormat::simple(FontId::proportional(11.5), tokens.text_primary),
-        );
-        title_job.wrap = egui::text::TextWrapping { max_width: max_title_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-        let galley = ui.painter().layout_job(title_job);
-        ui.painter().with_clip_rect(text_clip).galley(title_pos, galley, tokens.text_primary);
-
-        let sub_pos = pos2(card_rect.left() + 8.0, card_rect.bottom() - 16.0);
-        let sub_text = format!("{} · {}", card.badge_label, card.subtitle);
-        let mut sub_job = egui::text::LayoutJob::single_section(
-            sub_text,
-            egui::text::TextFormat::simple(FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted),
-        );
-        sub_job.wrap = egui::text::TextWrapping { max_width: max_title_w, max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
-        let sub_galley = ui.painter().layout_job(sub_job);
-        ui.painter().with_clip_rect(text_clip).galley(sub_pos, sub_galley, tokens.text_muted);
-    }
-
-    let wid = format!("gallery.card.{}", card.sheet_id.as_str());
-    meta.record_response(
-        ui,
-        &resp,
-        inspect_input(
-            &wid,
-            "button",
-            &card.title,
-            Some("sheet.select"),
-            Some(json!({ "sheet_id": card.sheet_id.as_str() })),
-            enabled,
-            ZLayer::Workspace,
-        ),
-    );
-
-    if resp.clicked() && enabled {
-        let modifiers = ui.input(|i| {
-            i.events
-                .iter()
-                .rev()
-                .find_map(|ev| match ev {
-                    egui::Event::PointerButton { pressed: false, modifiers, .. } => Some(*modifiers),
-                    _ => None,
-                })
-                .unwrap_or(i.modifiers)
-        });
-        if modifiers.command || modifiers.ctrl {
-            let mut next = selected_ids_snapshot.clone();
-            if !next.remove(&card.sheet_id) {
-                next.insert(card.sheet_id.clone());
-            }
-            *gallery_anchor = Some(card.sheet_id.clone());
-            intents.push(UiIntent::SetGallerySelection { sheet_ids: next.into_iter().collect() });
-        } else if modifiers.shift {
-            let anchor_pos = gallery_anchor
-                .as_ref()
-                .and_then(|aid| visible_ids.iter().position(|id| id == aid))
-                .or_else(|| visible_ids.iter().position(|id| selected_ids_snapshot.contains(id)))
-                .or_else(|| doc.active_sheet_id.as_ref().and_then(|aid| visible_ids.iter().position(|id| id == aid)))
-                .unwrap_or(0);
-            let click_pos = visible_ids.iter().position(|id| id == &card.sheet_id).unwrap_or(anchor_pos);
-            let (lo, hi) = if anchor_pos <= click_pos { (anchor_pos, click_pos) } else { (click_pos, anchor_pos) };
-            let range_ids: Vec<SheetId> = visible_ids[lo..=hi].to_vec();
-            if gallery_anchor.is_none() {
-                *gallery_anchor = visible_ids.get(anchor_pos).cloned();
-            }
-            intents.push(UiIntent::SetGallerySelection { sheet_ids: range_ids });
-        } else {
-            *gallery_anchor = Some(card.sheet_id.clone());
-            intents.push(UiIntent::SetGallerySelection { sheet_ids: vec![card.sheet_id.clone()] });
-            intents.push_engine("sheet.select", json!({ "sheet_id": card.sheet_id.as_str() }));
-            intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
-        }
-    }
-}
-
-fn paint_gallery_thumbnail(ui: &egui::Ui, doc: &ProjectDocument, card: &PortfolioCard, rect: Rect, tokens: &Tokens) {
-    if !rect.is_positive() {
-        return;
-    }
-    let painter = ui.painter().with_clip_rect(rect);
-    painter.rect(rect, CornerRadius::same(2), tokens.surface_bg, Stroke::new(0.8, tokens.border), StrokeKind::Inside);
-
-    match card.folder {
-        SheetFolderKind::Graphs => {
-            let origin = pos2(rect.left() + 14.0, rect.bottom() - 10.0);
-            painter.line_segment([pos2(rect.left() + 14.0, rect.top() + 8.0), origin], Stroke::new(1.0, tokens.text_primary));
-            painter.line_segment([origin, pos2(rect.right() - 8.0, origin.y)], Stroke::new(1.0, tokens.text_primary));
-            let pts = [
-                pos2(rect.left() + 18.0, rect.bottom() - 14.0),
-                pos2(rect.center().x - 8.0, rect.center().y - 2.0),
-                pos2(rect.center().x + 12.0, rect.top() + 14.0),
-                pos2(rect.right() - 12.0, rect.top() + 12.0),
-            ];
-            for seg in pts.windows(2) {
-                painter.line_segment([seg[0], seg[1]], Stroke::new(1.5, tokens.accent));
-            }
-        }
-        SheetFolderKind::Layouts => {
-            if let Some(ls) = doc.layout_sheet(&card.sheet_id) {
-                let page = ls.spec.page_size_pt();
-                let page_w = page.width.max(1.0) as f32;
-                let page_h = page.height.max(1.0) as f32;
-                for item in ls.spec.items.iter().take(6) {
-                    let b = match item {
-                        LayoutItem::LiveGraph { bounds_pt, .. }
-                        | LayoutItem::LiveTable { bounds_pt, .. }
-                        | LayoutItem::TextCallout { bounds_pt, .. }
-                        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
-                    };
-                    let sub = Rect::from_min_max(
-                        pos2(rect.left() + (b.x as f32 / page_w) * rect.width(), rect.top() + (b.y as f32 / page_h) * rect.height()),
-                        pos2(
-                            rect.left() + ((b.x + b.width) as f32 / page_w) * rect.width(),
-                            rect.top() + ((b.y + b.height) as f32 / page_h) * rect.height(),
-                        ),
-                    );
-                    painter.rect_stroke(sub.intersect(rect.shrink(3.0)), CornerRadius::same(1), Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
-                }
-            }
-        }
-        SheetFolderKind::Data | SheetFolderKind::Results | SheetFolderKind::Info => {
-            for r in 0..4 {
-                let y = rect.top() + 10.0 + (r as f32) * 11.0;
-                if y < rect.bottom() - 4.0 {
-                    painter.line_segment([pos2(rect.left() + 8.0, y), pos2(rect.right() - 8.0, y)], Stroke::new(1.0, tokens.border));
-                }
-            }
-            if let Some(tag) = card.color_tag {
-                painter.circle_filled(pos2(rect.right() - 10.0, rect.top() + 10.0), 4.0, rgba8_to_color32(tag));
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1763,7 +1814,7 @@ fn detect_bottom_banner(ctx: &egui::Context, app: &UiApp, views: &EguiShellViewS
     let doc = app.document();
 
     if let Some(rs) = doc.result_sheet(sheet_id)
-        && let Some(banner) = AssumptionDiagnosticBanner::from_result(rs)
+        && let Some(banner) = AssumptionDiagnosticBanner::from_result_localized(rs, app.locale.as_str())
     {
         return Some(BottomBannerKind::ResultDiagnostic { sheet_id: sheet_id.clone(), banner });
     }
@@ -1852,19 +1903,36 @@ fn render_bottom_banner(
     let mut bar_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::left_to_right(egui::Align::Center)));
     bar_ui.set_clip_rect(rect);
 
-    let text_budget = (inner.width() - 250.0).max(90.0);
-    let lbl_resp = bar_ui.add_sized([text_budget, inner.height()], egui::Label::new(RichText::new(&summary).small().color(text_color)).truncate());
+    let is_nl_result = match kind {
+        BottomBannerKind::ResultDiagnostic { sheet_id, .. } => {
+            app.document().result_sheet(sheet_id).is_some_and(|rs| matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(_)))
+        }
+        _ => false,
+    };
+    let text_reserve = if is_nl_result { 410.0 } else { 250.0 };
+    let text_budget = (inner.width() - text_reserve).max(90.0);
+    let lbl_resp = bar_ui
+        .add_sized([text_budget, inner.height()], egui::Label::new(RichText::new(&summary).small().color(text_color)).truncate())
+        .on_hover_text(&summary);
     let banner_cmd = (wid_prefix == "result.diagnostic_banner").then_some("ui.result.inspectDiagnostics");
     meta.record_response(&bar_ui, &lbl_resp, inspect_input(wid_prefix, "status", &summary, banner_cmd, None, enabled, ZLayer::FloatingOverlay));
 
+    let btn_min_h = 22.0_f32;
     bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |btns| {
-        let dismiss_lbl = tr_or_fallback(locale, "w5.banner.dismiss", "Dismiss");
-        let dismiss_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(dismiss_lbl).small()).min_size(vec2(54.0, 22.0)));
+        let dismiss_lbl = if is_nl_result {
+            tr_or_fallback(locale, "results.banner.dismiss", "Dismiss")
+        } else {
+            tr_or_fallback(locale, "w5.banner.dismiss", "Dismiss")
+        };
+        let dismiss_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(dismiss_lbl).small()).min_size(vec2(54.0_f32, btn_min_h)));
         let dismiss_wid = format!("{wid_prefix}.dismiss");
         meta.record_response(btns, &dismiss_resp, inspect_input(&dismiss_wid, "button", dismiss_lbl, None, None, enabled, ZLayer::FloatingOverlay));
         if dismiss_resp.clicked() && enabled {
             if views.center_stage.banner_details_open.as_ref() == Some(sheet_id) {
                 views.center_stage.banner_details_open = None;
+            }
+            if views.results_view.compare_horizontal_open_sheet.as_ref() == Some(sheet_id) {
+                views.results_view.compare_horizontal_open_sheet = None;
             }
             if !views.center_stage.dismissed_banner_sheets.contains(sheet_id) {
                 views.center_stage.dismissed_banner_sheets.push(sheet_id.clone());
@@ -1874,37 +1942,78 @@ fn render_bottom_banner(
 
         if why_text.is_some() {
             let why_open = views.center_stage.banner_details_open.as_ref() == Some(sheet_id);
-            let why_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new("Why?").small()).min_size(vec2(42.0, 22.0)));
+            let why_lbl = tr_or_fallback(locale, "results.banner.why", "Why?");
+            let why_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(why_lbl).small()).min_size(vec2(42.0_f32, btn_min_h)));
             let why_wid = format!("{wid_prefix}.why");
-            meta.record_response(btns, &why_resp, inspect_input(&why_wid, "button", "Why?", None, None, enabled, ZLayer::FloatingOverlay));
+            meta.record_response(btns, &why_resp, inspect_input(&why_wid, "button", why_lbl, None, None, enabled, ZLayer::FloatingOverlay));
             if why_resp.clicked() && enabled {
+                if views.results_view.compare_horizontal_open_sheet.as_ref() == Some(sheet_id) {
+                    views.results_view.compare_horizontal_open_sheet = None;
+                }
                 views.center_stage.banner_details_open = if why_open { None } else { Some(sheet_id.clone()) };
             }
         }
 
         match kind {
             BottomBannerKind::ResultDiagnostic { sheet_id, banner } => {
-                let insp_lbl = tr_or_fallback(locale, "w5.banner.inspect", "Inspect Details");
-                let insp_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(insp_lbl).small()).min_size(vec2(86.0, 22.0)));
-                meta.record_response(
-                    btns,
-                    &insp_resp,
-                    inspect_input(
-                        "result.diagnostic_banner.inspect",
-                        "button",
-                        insp_lbl,
-                        Some("ui.result.inspectDiagnostics"),
-                        None,
-                        enabled,
-                        ZLayer::FloatingOverlay,
-                    ),
-                );
-                if insp_resp.clicked() && enabled {
-                    let mut params = json!({ "result_sheet_id": sheet_id.as_str() });
-                    if let Some(tab_id) = banner.detail_tab_ids.first() {
-                        params["tab_id"] = json!(tab_id);
+                if is_nl_result {
+                    let cmp_lbl = tr_or_fallback(locale, "results.banner.compare_horizontal", "Compare vs. Horizontal Line");
+                    let cmp_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(cmp_lbl).small()).min_size(vec2(148.0_f32, btn_min_h)));
+                    meta.record_response(
+                        btns,
+                        &cmp_resp,
+                        inspect_input("result.diagnostic_banner.compare_horizontal", "button", cmp_lbl, None, None, enabled, ZLayer::FloatingOverlay),
+                    );
+                    if cmp_resp.clicked() && enabled {
+                        if views.center_stage.banner_details_open.as_ref() == Some(sheet_id) {
+                            views.center_stage.banner_details_open = None;
+                        }
+                        trigger_horizontal_line_comparison(app.document(), app.mutation_seq(), sheet_id, &mut views.results_view, locale);
                     }
-                    intents.push_ui("ui.result.inspectDiagnostics", params);
+
+                    let constraints_lbl = tr_or_fallback(locale, "results.banner.constraints", "Constraints");
+                    let constraints_resp =
+                        btns.add_enabled(enabled, egui::Button::new(RichText::new(constraints_lbl).small()).min_size(vec2(74.0_f32, btn_min_h)));
+                    meta.record_ranked_response(
+                        btns,
+                        &constraints_resp,
+                        inspect_input(
+                            "result.diagnostic_banner.constraints",
+                            "button",
+                            constraints_lbl,
+                            Some("ui.editParams.open"),
+                            None,
+                            enabled,
+                            ZLayer::FloatingOverlay,
+                        ),
+                        crate::menus::ActionRank::Secondary,
+                    );
+                    if constraints_resp.clicked() && enabled {
+                        intents.push_ui("ui.editParams.open", json!({ "sheet_id": sheet_id.as_str() }));
+                    }
+                } else {
+                    let insp_lbl = tr_or_fallback(locale, "w5.banner.inspect", "Inspect Details");
+                    let insp_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(insp_lbl).small()).min_size(vec2(86.0_f32, btn_min_h)));
+                    meta.record_response(
+                        btns,
+                        &insp_resp,
+                        inspect_input(
+                            "result.diagnostic_banner.inspect",
+                            "button",
+                            insp_lbl,
+                            Some("ui.result.inspectDiagnostics"),
+                            None,
+                            enabled,
+                            ZLayer::FloatingOverlay,
+                        ),
+                    );
+                    if insp_resp.clicked() && enabled {
+                        let mut params = json!({ "result_sheet_id": sheet_id.as_str() });
+                        if let Some(tab_id) = banner.detail_tab_ids.first() {
+                            params["tab_id"] = json!(tab_id);
+                        }
+                        intents.push_ui("ui.result.inspectDiagnostics", params);
+                    }
                 }
             }
             BottomBannerKind::GraphClipping { sheet_id, .. } => {
@@ -1993,6 +2102,9 @@ fn render_bottom_banner(
                 },
             );
         }
+    }
+    if is_nl_result {
+        render_horizontal_line_comparison_popup(ui, tokens, rect, true, sheet_id, &mut views.results_view, enabled, meta);
     }
 }
 

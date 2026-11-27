@@ -645,7 +645,7 @@ fn render_find_bar_controls(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
 
-        let query_resp = ui.add(TextEdit::singleline(&mut state.query).id(flags.query_id).desired_width(156.0).hint_text("Find in sheet…"));
+        let query_resp = ui.add(TextEdit::singleline(&mut state.query).id(flags.query_id).desired_width(156.0).hint_text("Find in sheet"));
         if state.request_focus {
             query_resp.request_focus();
             state.request_focus = false;
@@ -712,13 +712,13 @@ fn render_find_bar_controls(
             out.query_or_toggle_changed = true;
         }
         if flags.is_data_sheet {
-            let repl_resp = ui.add_sized(vec2(0.0, 24.0), egui::Button::new(RichText::new("Replace…").small()));
+            let repl_resp = ui.add_sized(vec2(0.0, 24.0), egui::Button::new(RichText::new("Replace").small()));
             repl_resp.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, String::from("Replace")));
             record_find_widget(
                 ui,
                 meta,
                 &repl_resp,
-                FindWidgetMeta { widget_id: "sheet_find.replace", role: "button", label: "Replace…", value: None, enabled: true },
+                FindWidgetMeta { widget_id: "sheet_find.replace", role: "button", label: "Replace", value: None, enabled: true },
             );
             if repl_resp.clicked() {
                 let initial_query = (!state.query.is_empty()).then(|| state.query.clone());

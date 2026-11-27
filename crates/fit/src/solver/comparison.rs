@@ -8,20 +8,20 @@ use std::collections::BTreeSet;
 
 use curvebook_doc::{
     FitFlagRules, FitMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, OutlierHandling, ParameterRule, ParameterScope,
-    ReplicateFitMode,
+    ReplicateFitMode, WeightingScheme,
 };
 
 use crate::diagnostics::{
     compare_models_aicc, compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compare_models_lrt_from_neg2ll,
-    gaussian_neg2_ll_core,
+    compute_information_criteria, compute_information_criteria_with_log_weight_penalty, gaussian_neg2_ll_core,
 };
 use crate::error::{FitError, FitStatus};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::solver::fit::fit_nonlinear;
 use crate::solver::identifiability::is_fit_well_defined;
-use crate::solver::inference::compare_poisson_aicc;
+use crate::solver::inference::{compare_poisson_aicc, information_criteria_from_poisson_ll};
 use crate::solver::results::{InferenceAvailability, ModelComparisonOutcome, ModelComparisonResult, NonlinearFitResult, SolverConfig};
-use crate::types::{DataPoint, DatasetSeries, HookContext, collapse_datasets_to_row_means, filter_datasets_by_range};
+use crate::types::{DataPoint, DatasetSeries, EquationCategory, HookContext, collapse_datasets_to_row_means, filter_datasets_by_range};
 
 pub(in crate::solver) fn comparison_test_label(spec: &ModelComparisonSpec) -> &'static str {
     match spec {
@@ -674,5 +674,449 @@ pub fn compare_models_question(
         model_b_fit,
         inference_availability: outcome.inference_availability(),
         outcome,
+    })
+}
+
+/// Diagnostics-only constant null-hypothesis model `Y = Mean` (Motulsky & Christopoulos 2004).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct HorizontalLineModel;
+
+impl ParametricModel for HorizontalLineModel {
+    fn id(&self) -> &str {
+        "horizontal_line"
+    }
+
+    fn name(&self) -> &str {
+        "Horizontal line (Y = Mean)"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::StandardCurve
+    }
+
+    fn param_names(&self) -> &[String] {
+        static PARAMS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| vec![String::from("Mean")]);
+        &PARAMS
+    }
+
+    fn eval(&self, _x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        params.first().copied().filter(|v| v.is_finite())
+    }
+
+    fn grad(&self, _x: &[f64], _params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        if let Some(first) = out.first_mut() {
+            *first = 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let mut sum = 0.0_f64;
+        let mut count = 0_usize;
+        for pt in points {
+            if pt.y.is_finite() {
+                sum += pt.y;
+                count += 1;
+            }
+        }
+        vec![if count > 0 { sum / (count as f64) } else { 0.0 }]
+    }
+}
+
+/// Classification produced by [`compare_vs_horizontal_line`] (`R19.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum HorizontalLineClassification {
+    /// Constant model `Y = Mean` wins (`AICc`) or is not rejected by extra-SS *F* / deviance LRT.
+    NotDistinguishableFromHorizontalLine,
+    /// Fitted model significantly improves over `Y = Mean`, indicating a real trend whose plateau or EC50 may lie outside the tested range.
+    IncompleteOrUnboundedCurve,
+    /// Parametric comparison is undefined under `FitMethod::RobustCauchy`.
+    NotApplicableInRobustMode,
+}
+
+/// Per-dataset diagnostic entry comparing a fitted curve against `Y = Mean`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HorizontalLineDatasetDiagnostic {
+    /// Zero-based dataset column index (`0 = A`, `1 = B`, ...).
+    pub data_set_index: usize,
+    /// Dataset display label.
+    pub label: String,
+    /// Whether this dataset's primary nonlinear fit was flagged ambiguous or unstable.
+    pub primary_ambiguous: bool,
+    /// Fitted constant mean `Y = Mean` for this dataset under the same weighting scheme.
+    pub horizontal_mean: f64,
+    /// Two-sided nested extra-SS *F* or Poisson deviance LRT *P* value (`None` when not nested).
+    pub p_value: Option<f64>,
+    /// Nested *F* statistic when extra-SS *F*-test ran (`None` for Poisson LRT or non-nested DF).
+    pub f_statistic: Option<f64>,
+    /// `AICc(primary) - AICc(horizontal)` (`> 0` favors horizontal line; `< 0` favors primary curve).
+    pub delta_aicc: Option<f64>,
+    /// Primary model `AICc` when estimable.
+    pub aicc_primary: Option<f64>,
+    /// Horizontal null model `AICc` when estimable.
+    pub aicc_horizontal: Option<f64>,
+    /// Diagnostic distinction between flat null response and incomplete/unbounded curve.
+    pub classification: HorizontalLineClassification,
+    /// Human-readable summary matching `R19.7` diagnostics copy.
+    pub summary: String,
+}
+
+/// Complete diagnostics-only report comparing a fitted nonlinear regression against `Y = Mean` (`R19.7`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HorizontalLineComparisonReport {
+    /// Equation identifier of the primary fitted curve model.
+    pub equation_id: String,
+    /// Equation display name of the primary fitted curve model.
+    pub equation_name: String,
+    /// Per-dataset diagnostics (`1` pooled entry when shared parameters couple datasets).
+    pub per_dataset: Vec<HorizontalLineDatasetDiagnostic>,
+    /// Overall dataset/fit classification.
+    pub overall_classification: HorizontalLineClassification,
+    /// Concise overall diagnostic summary text.
+    pub overall_summary: String,
+    /// Overall extra-SS *F* / deviance LRT *P* value when pooled/single-dataset applies.
+    pub p_value: Option<f64>,
+    /// Overall `AICc(primary) - AICc(horizontal)` when estimable.
+    pub delta_aicc: Option<f64>,
+}
+
+fn horizontal_null_solver_config(config: &SolverConfig) -> SolverConfig {
+    let mut null_cfg = SolverConfig {
+        method: if config.method == FitMethod::PoissonDeviance { FitMethod::PoissonDeviance } else { FitMethod::LeastSquares },
+        weighting: config.weighting,
+        parameter_rules: Vec::new(),
+        confidence: config.confidence,
+        max_iters: config.max_iters,
+        compute_profile_ci: false,
+        identify_unstable_parameters: false,
+        identifiability_mode: None,
+        compute_hougaard: false,
+        compute_bands: false,
+        compute_prediction_bands: false,
+        curve_overlay_segments: 0,
+        interpolate_unknowns: false,
+        compute_runs_test: false,
+        compute_lack_of_fit: false,
+        compute_normality: false,
+        compute_homoscedasticity: false,
+        x_range_filter: None,
+        y_range_filter: None,
+        weighting_source: config.weighting_source,
+        outlier_handling: OutlierHandling::None,
+        replicate_fit_mode: ReplicateFitMode::IndividualReplicates,
+        convergence_strictness: config.convergence_strictness,
+        ..SolverConfig::default()
+    };
+    if null_cfg.method == FitMethod::PoissonDeviance {
+        null_cfg.weighting = WeightingScheme::None;
+    }
+    null_cfg
+}
+
+fn format_diag_p_value(p: Option<f64>) -> String {
+    match p {
+        Some(v) if v.is_finite() => {
+            if v < 0.0001 {
+                format!("{v:.2e}")
+            } else {
+                format!("{v:.4}")
+            }
+        }
+        _ => String::from("N/A"),
+    }
+}
+
+fn format_diag_delta_aicc(delta: Option<f64>) -> String {
+    match delta {
+        Some(v) if v.is_finite() => format!("{v:.2}"),
+        _ => String::from("N/A"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_vs_horizontal(
+    data_set_index: usize,
+    label: String,
+    primary_ambiguous: bool,
+    primary_ss: f64,
+    primary_k: usize,
+    primary_df: usize,
+    primary_n_obs: usize,
+    primary_aicc: Option<f64>,
+    primary_pred_y_nlw: Option<f64>,
+    primary_poisson_ll: Option<f64>,
+    horiz_fit: &NonlinearFitResult,
+    method: FitMethod,
+    alpha: f64,
+) -> HorizontalLineDatasetDiagnostic {
+    let horiz_mean = horiz_fit.parameters.first().map_or(f64::NAN, |p| p.estimate);
+    if method == FitMethod::RobustCauchy || horiz_fit.is_robust_cauchy() {
+        return HorizontalLineDatasetDiagnostic {
+            data_set_index,
+            label,
+            primary_ambiguous,
+            horizontal_mean: horiz_mean,
+            p_value: None,
+            f_statistic: None,
+            delta_aicc: None,
+            aicc_primary: None,
+            aicc_horizontal: None,
+            classification: HorizontalLineClassification::NotApplicableInRobustMode,
+            summary: String::from("Not applicable in Robust (Cauchy) mode"),
+        };
+    }
+
+    let is_poisson = method == FitMethod::PoissonDeviance;
+    let aicc_primary = primary_aicc.or_else(|| {
+        if is_poisson {
+            primary_poisson_ll.and_then(|ll| information_criteria_from_poisson_ll(ll, primary_n_obs, primary_k).map(|ic| ic.aicc))
+        } else if let Some(nlw) = primary_pred_y_nlw {
+            compute_information_criteria_with_log_weight_penalty(primary_ss, nlw, primary_n_obs, primary_k).ok().map(|ic| ic.aicc)
+        } else {
+            compute_information_criteria(primary_ss, primary_n_obs, primary_k).ok().map(|ic| ic.aicc)
+        }
+    });
+    let aicc_horizontal = horiz_fit.aic_c;
+    let delta_aicc = match (aicc_primary, aicc_horizontal) {
+        (Some(ap), Some(ah)) if ap.is_finite() && ah.is_finite() => Some(ap - ah),
+        _ => None,
+    };
+
+    let (f_statistic, p_value) = if horiz_fit.df > primary_df {
+        if primary_ss >= horiz_fit.weighted_ss - 1e-12 * horiz_fit.weighted_ss.abs().max(1.0) {
+            (if is_poisson { None } else { Some(0.0) }, Some(1.0))
+        } else if is_poisson {
+            match compare_models_lrt_deviance(horiz_fit.weighted_ss, horiz_fit.df, primary_ss, primary_df, alpha) {
+                Ok(lrt) => (None, Some(lrt.p_value)),
+                Err(_) => (None, None),
+            }
+        } else if primary_df > 0 {
+            match compare_models_f_test(horiz_fit.weighted_ss, horiz_fit.df, primary_ss, primary_df, alpha) {
+                Ok(f_res) => (Some(f_res.f_stat), Some(f_res.p_value)),
+                Err(_) => (None, None),
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let horiz_preferred_or_not_rejected = match p_value {
+        Some(p) if p.is_finite() => p >= alpha || primary_ss >= horiz_fit.weighted_ss,
+        _ => delta_aicc.is_some_and(|d| d >= 0.0),
+    };
+
+    let (classification, summary) = if horiz_preferred_or_not_rejected {
+        (
+            HorizontalLineClassification::NotDistinguishableFromHorizontalLine,
+            format!(
+                "Not distinguishable from horizontal line (P = {}, ΔAICc = {})",
+                format_diag_p_value(p_value),
+                format_diag_delta_aicc(delta_aicc)
+            ),
+        )
+    } else {
+        (
+            HorizontalLineClassification::IncompleteOrUnboundedCurve,
+            format!(
+                "Incomplete / unbounded curve (plateau or EC50 outside tested range; P = {}, ΔAICc = {})",
+                format_diag_p_value(p_value),
+                format_diag_delta_aicc(delta_aicc)
+            ),
+        )
+    };
+
+    HorizontalLineDatasetDiagnostic {
+        data_set_index,
+        label,
+        primary_ambiguous,
+        horizontal_mean: horiz_mean,
+        p_value,
+        f_statistic,
+        delta_aicc,
+        aicc_primary,
+        aicc_horizontal,
+        classification,
+        summary,
+    }
+}
+
+/// Compare an existing nonlinear regression fit against a horizontal-line (`Y = Mean`) null model
+/// without modifying or auto-excluding any datasets (`R19.7`).
+///
+/// For independent multi-dataset fits (no shared parameters), evaluates each dataset separately
+/// against its own `Y = Mean` null model via nested extra-SS *F* (or Poisson deviance LRT) and
+/// $\Delta\text{AIC}_c$. For single-dataset or shared-parameter global fits, compares pooled fits.
+pub fn compare_vs_horizontal_line(
+    primary_fit: &NonlinearFitResult,
+    datasets: &[DatasetSeries],
+    hooks: &HookContext,
+    config: &SolverConfig,
+) -> Result<HorizontalLineComparisonReport, FitError> {
+    if primary_fit.is_robust_cauchy() || config.method == FitMethod::RobustCauchy {
+        let mut per_dataset = Vec::with_capacity(primary_fit.datasets.len().max(1));
+        for ds in &primary_fit.datasets {
+            let y_mean = ds.y_hat.iter().zip(ds.residuals.iter()).map(|(&yh, &r)| yh + r).sum::<f64>() / (ds.residuals.len().max(1) as f64);
+            per_dataset.push(HorizontalLineDatasetDiagnostic {
+                data_set_index: ds.data_set_index,
+                label: ds.label.clone(),
+                primary_ambiguous: ds.ambiguous,
+                horizontal_mean: y_mean,
+                p_value: None,
+                f_statistic: None,
+                delta_aicc: None,
+                aicc_primary: None,
+                aicc_horizontal: None,
+                classification: HorizontalLineClassification::NotApplicableInRobustMode,
+                summary: String::from("Not applicable in Robust (Cauchy) mode"),
+            });
+        }
+        return Ok(HorizontalLineComparisonReport {
+            equation_id: primary_fit.equation_id.clone(),
+            equation_name: primary_fit.equation_name.clone(),
+            per_dataset,
+            overall_classification: HorizontalLineClassification::NotApplicableInRobustMode,
+            overall_summary: String::from("Not applicable in Robust (Cauchy) mode"),
+            p_value: None,
+            delta_aicc: None,
+        });
+    }
+
+    let cleaned_storage = if config.effective_outlier_handling() == OutlierHandling::Eliminate
+        && let Some(rout) = &primary_fit.rout
+        && !rout.outlier_indices.is_empty()
+    {
+        let set: BTreeSet<usize> = rout.outlier_indices.iter().copied().collect();
+        Some(remove_union_outliers(datasets, config, &set)?)
+    } else if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly || config.x_range_filter.is_some() || config.y_range_filter.is_some() {
+        let mut copy = datasets.to_vec();
+        if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+            collapse_datasets_to_row_means(&mut copy);
+        }
+        if config.x_range_filter.is_some() || config.y_range_filter.is_some() {
+            filter_datasets_by_range(&mut copy, config.x_range_filter, config.y_range_filter);
+        }
+        Some(copy)
+    } else {
+        None
+    };
+    let active_datasets = cleaned_storage.as_deref().unwrap_or(datasets);
+    let null_model = HorizontalLineModel;
+    let horiz_cfg = horizontal_null_solver_config(config);
+    let alpha = config.confidence.alpha();
+
+    let per_dataset = if !primary_fit.has_shared_parameters && active_datasets.len() == primary_fit.datasets.len() && !active_datasets.is_empty() {
+        let mut out = Vec::with_capacity(active_datasets.len());
+        for (ds, ds_fit) in active_datasets.iter().zip(&primary_fit.datasets) {
+            let horiz_fit = fit_nonlinear(&null_model, std::slice::from_ref(ds), hooks, &horiz_cfg)?;
+            let n_obs = if ds_fit.n_obs > 0 { ds_fit.n_obs } else { horiz_fit.n_obs };
+            let primary_ss = if ds_fit.weighted_ss.is_finite() { ds_fit.weighted_ss } else { ds_fit.ss_residual };
+            out.push(classify_vs_horizontal(
+                ds.data_set_index,
+                ds.label.clone(),
+                ds_fit.ambiguous,
+                primary_ss,
+                ds_fit.k_free,
+                ds_fit.df,
+                n_obs,
+                ds_fit.aic_c,
+                ds_fit.predicted_y_neg_log_weight_sum,
+                ds_fit.poisson_ll,
+                &horiz_fit,
+                primary_fit.fit_method,
+                alpha,
+            ));
+        }
+        out
+    } else {
+        let horiz_fit = fit_nonlinear(&null_model, active_datasets, hooks, &horiz_cfg)?;
+        let label = if active_datasets.len() == 1 { active_datasets[0].label.clone() } else { String::from("Pooled datasets") };
+        let ds_idx = active_datasets.first().map_or(0, |d| d.data_set_index);
+        let entry = classify_vs_horizontal(
+            ds_idx,
+            label,
+            primary_fit.covariance.ambiguous || matches!(primary_fit.identifiability, crate::error::FitIdentifiability::Ambiguous { .. }),
+            primary_fit.weighted_ss,
+            primary_fit.k_free,
+            primary_fit.df,
+            primary_fit.n_obs,
+            primary_fit.aic_c,
+            primary_fit.predicted_y_neg_log_weight_sum,
+            None,
+            &horiz_fit,
+            primary_fit.fit_method,
+            alpha,
+        );
+        vec![entry]
+    };
+
+    if per_dataset.len() == 1 {
+        let only = &per_dataset[0];
+        return Ok(HorizontalLineComparisonReport {
+            equation_id: primary_fit.equation_id.clone(),
+            equation_name: primary_fit.equation_name.clone(),
+            overall_classification: only.classification,
+            overall_summary: only.summary.clone(),
+            p_value: only.p_value,
+            delta_aicc: only.delta_aicc,
+            per_dataset,
+        });
+    }
+
+    let flat_labels: Vec<&str> = per_dataset
+        .iter()
+        .filter(|d| d.classification == HorizontalLineClassification::NotDistinguishableFromHorizontalLine)
+        .map(|d| d.label.as_str())
+        .collect();
+    let partial_labels: Vec<&str> = per_dataset
+        .iter()
+        .filter(|d| d.classification == HorizontalLineClassification::IncompleteOrUnboundedCurve && d.primary_ambiguous)
+        .map(|d| d.label.as_str())
+        .collect();
+
+    let (overall_classification, overall_summary) = if !flat_labels.is_empty() && partial_labels.is_empty() && flat_labels.len() == per_dataset.len()
+    {
+        (
+            HorizontalLineClassification::NotDistinguishableFromHorizontalLine,
+            format!("Not distinguishable from horizontal line in all {} datasets ({})", flat_labels.len(), flat_labels.join(", ")),
+        )
+    } else if !flat_labels.is_empty() || !partial_labels.is_empty() {
+        let mut parts = Vec::new();
+        if !flat_labels.is_empty() {
+            parts.push(format!("Not distinguishable from horizontal line in {} dataset(s) ({})", flat_labels.len(), flat_labels.join(", ")));
+        }
+        if !partial_labels.is_empty() {
+            parts.push(format!(
+                "Incomplete / unbounded curve (plateau or EC50 outside tested range) in {} ambiguous dataset(s) ({})",
+                partial_labels.len(),
+                partial_labels.join(", ")
+            ));
+        }
+        let overall = if flat_labels.is_empty() {
+            HorizontalLineClassification::IncompleteOrUnboundedCurve
+        } else {
+            HorizontalLineClassification::NotDistinguishableFromHorizontalLine
+        };
+        (overall, parts.join("; "))
+    } else {
+        (
+            HorizontalLineClassification::IncompleteOrUnboundedCurve,
+            format!("All {} datasets significantly outperform a horizontal line (P < {alpha:.2})", per_dataset.len()),
+        )
+    };
+
+    let (p_value, delta_aicc) = if per_dataset.len() == 1 { (per_dataset[0].p_value, per_dataset[0].delta_aicc) } else { (None, None) };
+
+    Ok(HorizontalLineComparisonReport {
+        equation_id: primary_fit.equation_id.clone(),
+        equation_name: primary_fit.equation_name.clone(),
+        per_dataset,
+        overall_classification,
+        overall_summary,
+        p_value,
+        delta_aicc,
     })
 }

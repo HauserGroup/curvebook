@@ -1,5 +1,5 @@
 //! `cargo xtask design-tokens`: ratcheting gate on raw colour constructors and raw size pairs
-//! inside `crates/ui-egui/src/` (`docs/design-language.md` §5).
+//! inside `crates/ui-egui/src/` (`docs/design-language.md` §5) plus `R20.16` popup sizing parity.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -12,8 +12,14 @@ pub const MAX_RAW_SIZE_PAIRS: usize = 232;
 
 const UI_SRC_PREFIX: &str = "crates/ui-egui/src/";
 const TOKENS_MOD_REL: &str = "crates/ui-egui/src/egui_shell/tokens.rs";
+const UI_KIT_REL: &str = "crates/ui-egui/src/egui_shell/ui_kit.rs";
 const EXEMPT_MARKER: &str = concat!("design-token-", "exempt:");
 const BARE_EXEMPT_MARKER: &str = concat!("design-token-", "exempt");
+const POPUP_EXEMPT_MARKER: &str = concat!("popup-size-", "exempt:");
+const BARE_POPUP_EXEMPT_MARKER: &str = concat!("popup-size-", "exempt");
+const BLUE_EXEMPT_MARKER: &str = concat!("blue-text-", "exempt:");
+const BARE_BLUE_EXEMPT_MARKER: &str = concat!("blue-text-", "exempt");
+const POPUP_PRIMITIVE_FILES: &str = "crates/ui-egui/src/egui_shell/widgets.rs crates/ui-egui/src/egui_shell/ui_kit.rs";
 const EXEMPT_FILES: &str = "crates/ui-egui/src/theme.rs crates/ui-egui/src/egui_shell/brand.rs crates/ui-egui/src/egui_shell/rasterizer.rs crates/ui-egui/src/egui_shell/driver.rs";
 const COLOR32_CTORS: &str = "from_rgb from_rgba_unmultiplied from_rgba_premultiplied from_gray from_black_alpha from_white_alpha from_rgb_additive from_rgba_unmultiplied_const from_hex";
 const COLOR32_CONSTS: &str = "WHITE BLACK RED GREEN BLUE YELLOW CYAN MAGENTA GRAY LIGHT_GRAY DARK_GRAY LIGHT_RED DARK_RED LIGHT_GREEN DARK_GREEN LIGHT_BLUE DARK_BLUE LIGHT_YELLOW GOLD BROWN KHAKI ORANGE PURPLE PLACEHOLDER";
@@ -32,6 +38,10 @@ pub struct DesignTokenScanReport {
     pub per_file_colors: BTreeMap<String, usize>,
     pub per_file_sizes: BTreeMap<String, usize>,
     pub invalid_exemptions: Vec<String>,
+    pub unconstrained_area_popups: Vec<String>,
+    pub invalid_popup_exemptions: Vec<String>,
+    pub unauthorized_blue_text: Vec<String>,
+    pub invalid_blue_exemptions: Vec<String>,
 }
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -53,7 +63,7 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
     enforce_ceilings(&report, MAX_RAW_COLORS, MAX_RAW_SIZE_PAIRS)?;
     println!(
-        "design-tokens: OK (raw_colors={}/{MAX_RAW_COLORS}, raw_size_pairs={}/{MAX_RAW_SIZE_PAIRS}, tokens_mod_raw_colors=0)",
+        "design-tokens: OK (raw_colors={}/{MAX_RAW_COLORS}, raw_size_pairs={}/{MAX_RAW_SIZE_PAIRS}, tokens_mod_raw_colors=0, unconstrained_area_popups=0, unauthorized_blue_text=0)",
         report.raw_colors, report.raw_size_pairs
     );
     Ok(())
@@ -71,12 +81,21 @@ pub fn scan_sources(sources: &[(String, String)]) -> DesignTokenScanReport {
         mask_cfg_test_items(blanked.as_bytes(), &mut [&mut prod_bytes, &mut raw_bytes]);
         let prod_code = String::from_utf8(prod_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
         let raw_prod = String::from_utf8(raw_bytes).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        let exempt_lines = collect_exemption_lines(rel, &raw_prod, &mut report.invalid_exemptions);
+        let exempt_lines = collect_marked_exemption_lines(rel, &raw_prod, EXEMPT_MARKER, BARE_EXEMPT_MARKER, &mut report.invalid_exemptions);
+        let popup_exempt_lines =
+            collect_marked_exemption_lines(rel, &raw_prod, POPUP_EXEMPT_MARKER, BARE_POPUP_EXEMPT_MARKER, &mut report.invalid_popup_exemptions);
+        let blue_exempt_lines =
+            collect_marked_exemption_lines(rel, &raw_prod, BLUE_EXEMPT_MARKER, BARE_BLUE_EXEMPT_MARKER, &mut report.invalid_blue_exemptions);
         let line_starts: Vec<usize> =
             std::iter::once(0).chain(prod_code.as_bytes().iter().enumerate().filter_map(|(i, &b)| (b == b'\n').then_some(i + 1))).collect();
         let toks = tokenize_blanked_code(&prod_code);
         let (file_colors, tokens_mod_colors) = count_color_calls(&prod_code, &raw_prod, &toks, &line_starts, &exempt_lines, rel == TOKENS_MOD_REL);
         let file_sizes = count_raw_size_calls(&prod_code, &toks, &line_starts, &exempt_lines);
+        if !has_word(POPUP_PRIMITIVE_FILES, rel) {
+            find_unconstrained_area_popups(rel, &prod_code, &toks, &line_starts, &popup_exempt_lines, &mut report.unconstrained_area_popups);
+        }
+        let link_button_span = (rel == UI_KIT_REL).then(|| find_fn_span(&prod_code, &toks, "link_button")).flatten();
+        find_unauthorized_blue_text(rel, &prod_code, &toks, &line_starts, &blue_exempt_lines, link_button_span, &mut report.unauthorized_blue_text);
         report.tokens_mod_raw_colors += tokens_mod_colors;
         if file_colors > 0 {
             report.raw_colors += file_colors;
@@ -96,6 +115,24 @@ pub fn enforce_ceilings(report: &DesignTokenScanReport, max_colors: usize, max_s
     if !report.invalid_exemptions.is_empty() {
         errors.push(format!("malformed design-token exemption comment(s):\n  {}", report.invalid_exemptions.join("\n  ")));
     }
+    if !report.invalid_popup_exemptions.is_empty() {
+        errors.push(format!("malformed popup-size exemption comment(s):\n  {}", report.invalid_popup_exemptions.join("\n  ")));
+    }
+    if !report.invalid_blue_exemptions.is_empty() {
+        errors.push(format!("malformed blue-text exemption comment(s):\n  {}", report.invalid_blue_exemptions.join("\n  ")));
+    }
+    if !report.unconstrained_area_popups.is_empty() {
+        errors.push(format!(
+            "unconstrained `egui::Area::new` popup anti-pattern(s) detected (R20.16):\n  {}",
+            report.unconstrained_area_popups.join("\n  ")
+        ));
+    }
+    if !report.unauthorized_blue_text.is_empty() {
+        errors.push(format!(
+            "unauthorized blue foreground text outside `ui_kit::link_button` (R20.14):\n  {}",
+            report.unauthorized_blue_text.join("\n  ")
+        ));
+    }
     if report.tokens_mod_raw_colors > 0 {
         errors.push(format!("`{TOKENS_MOD_REL}` contains {} raw colour literal(s); derive `Tokens` colours from `ThemeSeeds` in `crates/ui-egui/src/theme.rs` instead", report.tokens_mod_raw_colors));
     }
@@ -108,18 +145,24 @@ pub fn enforce_ceilings(report: &DesignTokenScanReport, max_colors: usize, max_s
     if errors.is_empty() { Ok(()) } else { Err(errors.join("\n\n")) }
 }
 
-fn collect_exemption_lines(rel: &str, raw_prod: &str, invalid_exemptions: &mut Vec<String>) -> BTreeSet<usize> {
+fn collect_marked_exemption_lines(
+    rel: &str,
+    raw_prod: &str,
+    marker: &str,
+    bare_marker: &str,
+    invalid_exemptions: &mut Vec<String>,
+) -> BTreeSet<usize> {
     let (mut exempt, mut lex) = (BTreeSet::new(), RustLexer::new(raw_prod));
     while !lex.is_eof() {
         if let Some((line_no, text)) = lex.try_read_comment() {
-            if let Some((_, tail)) = text.split_once(EXEMPT_MARKER) {
+            if let Some((_, tail)) = text.split_once(marker) {
                 if tail.trim().is_empty() {
-                    invalid_exemptions.push(format!("{rel}:{line_no}: `{EXEMPT_MARKER}` requires a non-empty reason"));
+                    invalid_exemptions.push(format!("{rel}:{line_no}: `{marker}` requires a non-empty reason"));
                 } else {
                     exempt.insert(line_no);
                 }
-            } else if text.contains(BARE_EXEMPT_MARKER) {
-                invalid_exemptions.push(format!("{rel}:{line_no}: use `{EXEMPT_MARKER} <reason>` with an explicit justification"));
+            } else if text.contains(bare_marker) {
+                invalid_exemptions.push(format!("{rel}:{line_no}: use `{marker} <reason>` with an explicit justification"));
             }
         } else if lex.try_read_raw_string().is_none() && !lex.try_skip_char_literal() && lex.try_read_quoted_string().is_none() {
             lex.advance_one();
@@ -128,8 +171,105 @@ fn collect_exemption_lines(rel: &str, raw_prod: &str, invalid_exemptions: &mut V
     exempt
 }
 
+fn line_of_offset(line_starts: &[usize], offset: usize) -> usize {
+    line_starts.partition_point(|&o| o <= offset)
+}
+
 fn is_call_exempt(line_starts: &[usize], exempt_lines: &BTreeSet<usize>, start_off: usize, end_off: usize) -> bool {
-    exempt_lines.range(line_starts.partition_point(|&o| o <= start_off)..=line_starts.partition_point(|&o| o <= end_off)).next().is_some()
+    exempt_lines.range(line_of_offset(line_starts, start_off)..=line_of_offset(line_starts, end_off)).next().is_some()
+}
+
+fn find_unconstrained_area_popups(
+    rel: &str,
+    code: &str,
+    toks: &[Tok<'_>],
+    line_starts: &[usize],
+    popup_exempt_lines: &BTreeSet<usize>,
+    violations: &mut Vec<String>,
+) {
+    let mut i = 0usize;
+    while i < toks.len() {
+        let is_area_new = matches!(toks[i].kind, TokKind::Ident("Area"))
+            && !(i > 0 && toks[i - 1].kind == TokKind::Dot)
+            && matches!(toks.get(i + 1).map(|t| t.kind), Some(TokKind::ColonColon))
+            && matches!(toks.get(i + 2).map(|t| t.kind), Some(TokKind::Ident("new")))
+            && matches!(toks.get(i + 3).map(|t| t.kind), Some(TokKind::LParen));
+        if !is_area_new {
+            i += 1;
+            continue;
+        }
+        let Some((_, new_close_off)) = balanced_body(code, toks[i + 3].start, b'(', b')') else {
+            i += 4;
+            continue;
+        };
+        let mut j = i + 4;
+        while j < toks.len() && toks[j].start <= new_close_off {
+            j += 1;
+        }
+        let mut show_span = None;
+        let (mut brace_depth, mut semicolons) = (0usize, 0usize);
+        while j < toks.len() {
+            match toks[j].kind {
+                TokKind::LBrace => brace_depth += 1,
+                TokKind::Other if code.as_bytes().get(toks[j].start) == Some(&b'}') => {
+                    if brace_depth == 0 {
+                        break;
+                    }
+                    brace_depth -= 1;
+                }
+                TokKind::Other if brace_depth == 0 && code.as_bytes().get(toks[j].start) == Some(&b';') => {
+                    semicolons += 1;
+                    if semicolons > 1 {
+                        break;
+                    }
+                }
+                TokKind::Dot
+                    if brace_depth == 0
+                        && matches!(toks.get(j + 1).map(|t| t.kind), Some(TokKind::Ident("show" | "show_open_close")))
+                        && matches!(toks.get(j + 2).map(|t| t.kind), Some(TokKind::LParen)) =>
+                {
+                    if let Some((body, close_off)) = balanced_body(code, toks[j + 2].start, b'(', b')') {
+                        show_span = Some((body, close_off));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+            j += 1;
+        }
+        if let Some((body, close_off)) = show_span {
+            let start_line = line_of_offset(line_starts, toks[i].start);
+            let exempt_start = start_line.saturating_sub(1);
+            let end_line = line_of_offset(line_starts, close_off);
+            if popup_exempt_lines.range(exempt_start..=end_line).next().is_none() {
+                let body_toks = tokenize_blanked_code(body);
+                let (mut has_min_width, mut has_width_bound, mut has_menu_z_layer) = (false, false, false);
+                for k in 0..body_toks.len() {
+                    if body_toks[k].kind == TokKind::Dot
+                        && matches!(body_toks.get(k + 2).map(|t| t.kind), Some(TokKind::LParen))
+                        && let Some(Tok { kind: TokKind::Ident(method), .. }) = body_toks.get(k + 1).copied()
+                    {
+                        match method {
+                            "set_min_width" => has_min_width = true,
+                            "set_width" | "set_max_width" => has_width_bound = true,
+                            _ => {}
+                        }
+                    } else if matches!(body_toks[k].kind, TokKind::Ident("ZLayer"))
+                        && matches!(body_toks.get(k + 1).map(|t| t.kind), Some(TokKind::ColonColon))
+                        && matches!(body_toks.get(k + 2).map(|t| t.kind), Some(TokKind::Ident("DropdownMenu" | "ContextMenu")))
+                    {
+                        has_menu_z_layer = true;
+                    }
+                }
+                if has_min_width && !has_width_bound {
+                    violations.push(format!("{rel}:{start_line}: `egui::Area::new` calls `set_min_width(` without `set_width`/`set_max_width`; use `ui_kit::action_menu_popup` or bound width (or `// {POPUP_EXEMPT_MARKER} <reason>`)"));
+                } else if has_menu_z_layer {
+                    violations.push(format!("{rel}:{start_line}: ad-hoc menu `egui::Area::new` uses `ZLayer::DropdownMenu`/`ContextMenu` outside `ui_kit::action_menu_popup` (or `// {POPUP_EXEMPT_MARKER} <reason>`)"));
+                }
+            }
+        }
+        i += 4;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +491,190 @@ fn has_nonzero_literal(body: &str, is_struct: bool) -> bool {
     body.get(start..).is_some_and(check_seg)
 }
 
+fn find_fn_span(code: &str, toks: &[Tok<'_>], fn_name: &str) -> Option<(usize, usize)> {
+    for (i, t) in toks.iter().enumerate() {
+        if matches!(t.kind, TokKind::Ident("fn")) && matches!(toks.get(i + 1).map(|x| x.kind), Some(TokKind::Ident(name)) if name == fn_name) {
+            let mut j = i + 2;
+            let mut paren_depth = 0usize;
+            while j < toks.len() {
+                match toks[j].kind {
+                    TokKind::LParen => paren_depth += 1,
+                    TokKind::Other if code.as_bytes().get(toks[j].start) == Some(&b')') => paren_depth = paren_depth.saturating_sub(1),
+                    TokKind::LBrace if paren_depth == 0 => {
+                        if let Some((_, close_off)) = balanced_body(code, toks[j].start, b'{', b'}') {
+                            return Some((t.start, close_off));
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+    }
+    None
+}
+
+fn comma_segments(body: &str) -> Vec<&str> {
+    let (mut depth, mut start, mut out) = (0usize, 0usize, Vec::new());
+    for (idx, ch) in body.char_indices() {
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                if let Some(s) = body.get(start..idx) {
+                    out.push(s);
+                }
+                start = idx + 1;
+            }
+            _ => {}
+        }
+    }
+    if let Some(tail) = body.get(start..)
+        && !tail.trim().is_empty()
+    {
+        out.push(tail);
+    }
+    out
+}
+
+fn expr_has_blue_text_token(expr: &str) -> bool {
+    let toks = tokenize_blanked_code(expr);
+    toks.windows(2).any(|w| w[0].kind == TokKind::Dot && matches!(w[1].kind, TokKind::Ident("accent" | "link_blue" | "text_link")))
+}
+
+fn find_unauthorized_blue_text(
+    rel: &str,
+    code: &str,
+    toks: &[Tok<'_>],
+    line_starts: &[usize],
+    exempt_lines: &BTreeSet<usize>,
+    link_button_span: Option<(usize, usize)>,
+    violations: &mut Vec<String>,
+) {
+    let in_link_button = |off: usize| link_button_span.is_some_and(|(s, e)| off >= s && off <= e);
+    let mut push_if_flagged = |start_off: usize, end_off: usize, msg: &str| {
+        if !in_link_button(start_off) && !is_call_exempt(line_starts, exempt_lines, start_off, end_off) {
+            violations.push(format!("{rel}:{}: {msg}", line_of_offset(line_starts, start_off)));
+        }
+    };
+
+    let mut i = 0usize;
+    while i < toks.len() {
+        if rel != TOKENS_MOD_REL
+            && toks[i].kind == TokKind::Dot
+            && let Some(Tok { kind: TokKind::Ident("text_link"), end, .. }) = toks.get(i + 1).copied()
+        {
+            push_if_flagged(toks[i].start, end, "`text_link` token is reserved strictly for `ui_kit::link_button`");
+            i += 2;
+            continue;
+        }
+
+        if toks[i].kind == TokKind::Dot
+            && let Some(Tok { kind: TokKind::Ident(method), .. }) = toks.get(i + 1).copied()
+            && let Some(Tok { kind: TokKind::LParen, start: open_pos, .. }) = toks.get(i + 2).copied()
+            && let Some((body, close_off)) = balanced_body(code, open_pos, b'(', b')')
+        {
+            let args = comma_segments(body);
+            let bad_arg_idx = match method {
+                "color" | "text_color" | "colored_label" => Some(0),
+                "galley" | "layout_no_wrap" => Some(2),
+                "text" if args.len() >= 5 => Some(4),
+                _ => None,
+            };
+            if let Some(idx) = bad_arg_idx
+                && args.get(idx).is_some_and(|expr| expr_has_blue_text_token(expr))
+            {
+                push_if_flagged(
+                    toks[i].start,
+                    close_off,
+                    &format!("blue text color passed to `.{method}(...)` outside `ui_kit::link_button` (or `// {BLUE_EXEMPT_MARKER} <reason>`)"),
+                );
+            }
+            i += 3;
+            continue;
+        }
+
+        if let TokKind::Ident(head) = toks[i].kind {
+            let not_method = !(i > 0 && toks[i - 1].kind == TokKind::Dot);
+            if matches!(toks.get(i + 1).map(|t| t.kind), Some(TokKind::ColonColon))
+                && let Some(Tok { kind: TokKind::Ident(member), .. }) = toks.get(i + 2).copied()
+                && let Some(Tok { kind: TokKind::LParen, start: open_pos, .. }) = toks.get(i + 3).copied()
+                && let Some((body, close_off)) = balanced_body(code, open_pos, b'(', b')')
+            {
+                let args = comma_segments(body);
+                let bad_arg_idx = match (head, member) {
+                    ("TextFormat", "simple") | ("CellTextStyle", "plain") => Some(1),
+                    ("LayoutJob", "simple" | "simple_singleline") => Some(2),
+                    _ => None,
+                };
+                if let Some(idx) = bad_arg_idx
+                    && args.get(idx).is_some_and(|expr| expr_has_blue_text_token(expr))
+                {
+                    push_if_flagged(
+                        toks[i].start,
+                        close_off,
+                        &format!(
+                            "blue text color passed to `{head}::{member}(...)` outside `ui_kit::link_button` (or `// {BLUE_EXEMPT_MARKER} <reason>`)"
+                        ),
+                    );
+                }
+                i += 4;
+                continue;
+            }
+
+            if not_method
+                && let Some(Tok { kind: TokKind::LParen, start: open_pos, .. }) = toks.get(i + 1).copied()
+                && let Some((body, close_off)) = balanced_body(code, open_pos, b'(', b')')
+            {
+                let args = comma_segments(body);
+                let flagged = match head {
+                    "multi_text_style" => args.get(2).is_some_and(|e| expr_has_blue_text_token(e)),
+                    "elided_galley" | "paint_ellipsized_cell_text" | "paint_outline_badge" | "layout_palette_line" => {
+                        args.get(3).is_some_and(|e| expr_has_blue_text_token(e))
+                    }
+                    "paint_pill_badge" => args.get(4).is_some_and(|e| expr_has_blue_text_token(e)),
+                    "layout_highlighted_search_title" => {
+                        args.get(4).is_some_and(|e| expr_has_blue_text_token(e)) || args.get(5).is_some_and(|e| expr_has_blue_text_token(e))
+                    }
+                    _ => false,
+                };
+                if flagged {
+                    push_if_flagged(
+                        toks[i].start,
+                        close_off,
+                        &format!("blue text color passed to `{head}(...)` outside `ui_kit::link_button` (or `// {BLUE_EXEMPT_MARKER} <reason>`)"),
+                    );
+                }
+                i += 2;
+                continue;
+            }
+
+            if matches!(head, "TextFormat" | "CellTextStyle" | "ClippedTextSpec" | "ClippedLabelSpec" | "FooterChipSpec")
+                && let Some(Tok { kind: TokKind::LBrace, start: open_pos, .. }) = toks.get(i + 1).copied()
+                && let Some((body, close_off)) = balanced_body(code, open_pos, b'{', b'}')
+            {
+                let target_field = if head == "FooterChipSpec" { "accent_override" } else { "color" };
+                let has_blue_field = comma_segments(body)
+                    .into_iter()
+                    .any(|seg| seg.split_once(':').is_some_and(|(lhs, rhs)| lhs.trim() == target_field && expr_has_blue_text_token(rhs)));
+                if has_blue_field {
+                    push_if_flagged(
+                        toks[i].start,
+                        close_off,
+                        &format!(
+                            "blue text color in `{head} {{ {target_field}: ... }}` outside `ui_kit::link_button` (or `// {BLUE_EXEMPT_MARKER} <reason>`)"
+                        ),
+                    );
+                }
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{TOKENS_MOD_REL, enforce_ceilings, scan_sources};
@@ -392,5 +716,77 @@ mod tests {
         {
             assert!(err.contains(needle), "missing `{needle}` in: {err}");
         }
+    }
+
+    #[test]
+    fn r20_16_flags_unconstrained_area_set_min_width_and_adhoc_menu_areas() {
+        let bad_min_width =
+            "pub fn f(ctx: &egui::Context) { let _ = egui::Area::new(egui::Id::unique(\"a\")).show(ctx, |ui| { ui.set_min_width(184.0); }); }\n";
+        let bad_split = "pub fn f(ctx: &egui::Context) { let a = Area::new(Id::unique(\"b\")); a.show(ctx, |ui| { ui.set_min_width(210.0); }); }\n";
+        let bad_z = "pub fn f(ctx: &egui::Context) { let _ = egui::Area::new(Id::unique(\"c\")).show(ctx, |ui| { ui.set_width(200.0); let _z = ZLayer::ContextMenu; }); }\n";
+        let ok_b = "pub fn f(ctx: &egui::Context) { let _ = egui::Area::new(Id::unique(\"d\")).show(ctx, |ui| { ui.set_min_width(180.0); ui.set_max_width(240.0); }); let _ = egui::Area::new(Id::unique(\"e\")).show(ctx, |ui| { ui.set_width(200.0); }); }\n";
+        let ok_ex = format!(
+            "// {} verified\npub fn f(ctx: &egui::Context) {{ let _ = egui::Area::new(Id::unique(\"f\")).show(ctx, |ui| {{ ui.set_min_width(180.0); }}); }}\n",
+            concat!("popup-size-", "exempt:")
+        );
+        let bad_ex = format!(
+            "// {}\npub fn f(ctx: &egui::Context) {{ let _ = egui::Area::new(Id::unique(\"g\")).show(ctx, |ui| {{ ui.set_width(180.0); }}); }}\n",
+            concat!("popup-size-", "exempt")
+        );
+
+        let report = scan_sources(&[
+            (String::from("crates/ui-egui/src/egui_shell/bad_one.rs"), bad_min_width.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/bad_two.rs"), bad_split.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/bad_three.rs"), bad_z.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/ok_bounded.rs"), ok_b.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/ok_exempt.rs"), ok_ex),
+            (String::from("crates/ui-egui/src/egui_shell/bad_exempt.rs"), bad_ex),
+            (String::from("crates/ui-egui/src/egui_shell/ui_kit.rs"), bad_min_width.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/widgets.rs"), bad_min_width.to_owned()),
+        ]);
+        assert_eq!((report.unconstrained_area_popups.len(), report.invalid_popup_exemptions.len()), (3, 1));
+        let err = enforce_ceilings(&report, 100, 100).unwrap_err();
+        assert!(err.contains("unconstrained `egui::Area::new` popup anti-pattern"), "{err}");
+        assert!(err.contains("malformed popup-size exemption"), "{err}");
+    }
+
+    #[test]
+    fn r20_14_flags_unauthorized_blue_foreground_text_outside_link_button() {
+        let bad = concat!(
+            "pub fn b(ui: &mut egui::Ui, tokens: &Tokens) {\n",
+            "  let _ = ui.label(egui::RichText::new(\"x\").color(tokens.accent));\n",
+            "  ui.colored_label(tokens.link_blue, \"y\");\n",
+            "  let _ = egui::TextFormat::simple(egui::FontId::proportional(12.0), tokens.accent);\n",
+            "  let _ = CellTextStyle::plain(egui::FontId::proportional(12.0), tokens.accent, egui::Align::LEFT);\n",
+            "  ui.painter().text(pos, egui::Align2::LEFT_TOP, \"z\", font, tokens.accent);\n",
+            "  let _ = ClippedTextSpec { color: tokens.accent };\n",
+            "  let _ = tokens.text_link;\n",
+            "}\n",
+        );
+        let ok = concat!(
+            "pub fn good(ui: &mut egui::Ui, tokens: &Tokens) {\n",
+            "  ui.painter().rect_stroke(r, 4.0, Stroke::new(1.0, tokens.accent), StrokeKind::Inside);\n",
+            "  let _ = egui::RichText::new(\"cta\").color(tokens.on_accent);\n",
+            "  let _ = egui::RichText::new(\"sel\").color(tokens.selected_accent_text());\n",
+            "}\n",
+        );
+        let ok_link_kit = "pub(crate) fn link_button(tokens: &Tokens) { let _ = RichText::new(\"l\").color(tokens.text_link); }\n";
+        let ok_ex = format!(
+            "pub fn ex(ui: &mut egui::Ui, tokens: &Tokens) {{\n  let _ = ui.label(egui::RichText::new(\"e\").color(tokens.accent)); // {} verified\n}}\n",
+            concat!("blue-text-", "exempt:")
+        );
+        let bad_ex = format!("// {}\npub fn bx() {{}}\n", concat!("blue-text-", "exempt"));
+
+        let report = scan_sources(&[
+            (String::from("crates/ui-egui/src/egui_shell/bad_blue.rs"), bad.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/ok_blue.rs"), ok.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/ui_kit.rs"), ok_link_kit.to_owned()),
+            (String::from("crates/ui-egui/src/egui_shell/ok_ex.rs"), ok_ex),
+            (String::from("crates/ui-egui/src/egui_shell/bad_ex.rs"), bad_ex),
+        ]);
+        assert_eq!((report.unauthorized_blue_text.len(), report.invalid_blue_exemptions.len()), (7, 1), "{report:?}");
+        let err = enforce_ceilings(&report, 100, 100).unwrap_err();
+        assert!(err.contains("unauthorized blue foreground text outside `ui_kit::link_button`"), "{err}");
+        assert!(err.contains("malformed blue-text exemption"), "{err}");
     }
 }

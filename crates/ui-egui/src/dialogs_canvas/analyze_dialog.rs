@@ -91,7 +91,7 @@ pub const fn variable_role_badge(role: VariableRole) -> &'static str {
 #[must_use]
 pub const fn variable_role_color(role: VariableRole, theme: &UiThemeSpec) -> Rgba8 {
     match role {
-        VariableRole::Continuous => theme.link_blue,
+        VariableRole::Continuous => theme.text_primary,
         VariableRole::Categorical => Rgba8::rgb(0xD5, 0x5E, 0x00),
         VariableRole::Label => Rgba8::rgb(0x88, 0x44, 0x99),
         VariableRole::Calculated => theme.link_green,
@@ -475,6 +475,7 @@ impl AnalyzeDialogState {
     /// Switch the selected catalog entry (`analyze.entry.<id>`), resetting PCR selection cleanly when entering `stats.pcr`.
     pub fn select_catalog_entry(&mut self, entry_id: &str) {
         let entering_pcr = entry_id == "stats.pcr" && self.selected_entry_id.as_deref() != Some("stats.pcr");
+        let leaving_pcr = self.selected_entry_id.as_deref() == Some("stats.pcr") && entry_id != "stats.pcr";
         self.selected_entry_id = Some(entry_id.to_owned());
         if entering_pcr {
             self.selected_data_sets.clear();
@@ -482,6 +483,10 @@ impl AnalyzeDialogState {
             self.pcr_outcome_column = None;
             for cand in &mut self.variable_candidates {
                 cand.selected = false;
+            }
+        } else if leaving_pcr && self.selected_data_sets.is_empty() {
+            for cand in &mut self.variable_candidates {
+                cand.selected = true;
             }
         }
     }
@@ -613,12 +618,20 @@ impl AnalyzeDialogState {
     }
 
     /// Toggle inclusion of column `col_index` in `variable_candidates` and `selected_data_sets`.
+    ///
+    /// For non-PCA/PCR analyses, enforces a minimum of one selected variable so unchecking the
+    /// last remaining candidate cannot collapse `selected_data_sets` to `[]` (which the engine
+    /// interprets as "All data sets").
     pub fn toggle_variable(&mut self, col_index: usize) {
-        if let Some(var) = self.variable_candidates.iter_mut().find(|v| v.col_index == col_index) {
+        let is_pca_or_pcr = self.is_pca_or_pcr_entry();
+        let selected_count = self.variable_candidates.iter().filter(|v| v.selected).count();
+        if let Some(var) = self.variable_candidates.iter_mut().find(|v| v.col_index == col_index)
+            && !(var.selected && !is_pca_or_pcr && selected_count <= 1)
+        {
             var.selected = !var.selected;
         }
         self.selected_data_sets = self.variable_candidates.iter().filter(|v| v.selected).map(|v| v.col_index).collect();
-        if self.is_pca_or_pcr_entry() {
+        if is_pca_or_pcr {
             self.pca_predictors = self.selected_data_sets.clone();
             self.clear_overlapping_pcr_outcome();
         }
@@ -976,42 +989,31 @@ fn same_analysis_family(a: &AnalysisKind, b: &AnalysisKind) -> bool {
 }
 
 pub(super) fn collect_variable_candidates(sheet: &DataSheet) -> Vec<VariableCandidate> {
-    match &sheet.archetype {
-        TableArchetype::MultipleVariables(mv) => {
-            let is_numeric_var = |v: &curvebook_doc::VariableColumn| !matches!(v.role, VariableRole::Label | VariableRole::Categorical);
-            let default_resp_col = mv
-                .variables
-                .iter()
-                .enumerate()
-                .rev()
-                .find(|(_, v)| is_numeric_var(v) && v.cells.iter().any(|c| c.active_number().is_some()))
-                .map(|(i, _)| i)
-                .or_else(|| mv.variables.iter().enumerate().rev().find(|(_, v)| is_numeric_var(v)).map(|(i, _)| i))
-                .unwrap_or(0);
-            mv.variables
-                .iter()
-                .enumerate()
-                .map(|(col_index, var)| VariableCandidate {
-                    col_index,
-                    title: var.title.clone(),
-                    role: var.role,
-                    role_inferred: var.role_inferred,
-                    selected: true,
-                    is_response: col_index == default_resp_col,
-                })
-                .collect()
-        }
-        _ => (0..sheet.archetype.column_count())
-            .map(|col_index| VariableCandidate {
-                col_index,
-                title: format!("Col {}", curvebook_doc::default_column_label(col_index)),
-                role: VariableRole::Continuous,
-                role_inferred: true,
-                selected: true,
-                is_response: false,
-            })
-            .collect(),
-    }
+    let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+        return Vec::new();
+    };
+    let is_numeric_var = |v: &curvebook_doc::VariableColumn| !matches!(v.role, VariableRole::Label | VariableRole::Categorical);
+    let default_resp_col = mv
+        .variables
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, v)| is_numeric_var(v) && v.cells.iter().any(|c| c.active_number().is_some()))
+        .map(|(i, _)| i)
+        .or_else(|| mv.variables.iter().enumerate().rev().find(|(_, v)| is_numeric_var(v)).map(|(i, _)| i))
+        .unwrap_or(0);
+    mv.variables
+        .iter()
+        .enumerate()
+        .map(|(col_index, var)| VariableCandidate {
+            col_index,
+            title: var.title.clone(),
+            role: var.role,
+            role_inferred: var.role_inferred,
+            selected: true,
+            is_response: col_index == default_resp_col,
+        })
+        .collect()
 }
 
 fn collect_result_tab_candidates(tab: &ResultTab) -> Vec<VariableCandidate> {

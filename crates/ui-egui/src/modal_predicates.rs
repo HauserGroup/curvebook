@@ -572,7 +572,7 @@ pub fn evaluate_dialog_widget(dialogs: &CanvasDialogState, doc: &ProjectDocument
 
     match &dialogs.active_dialog {
         ActiveDialog::EditAnalysisParameters { result_sheet_id } => {
-            let (rows, cols, max_sub) = source_table_shape(doc, Some(result_sheet_id));
+            let (rows, cols, max_sub) = edit_params_shape(dialogs, doc, result_sheet_id);
             evaluate_edit_params_widget(&dialogs.edit_params, doc, rows, cols, max_sub, id)
         }
         ActiveDialog::AnalyzeSheet { source_sheet_id } => evaluate_analyze_widget(&dialogs.analyze, doc, Some(source_sheet_id), id),
@@ -764,7 +764,6 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::CommandPalette
         | ActiveDialog::Checkpoints
         | ActiveDialog::About
-        | ActiveDialog::Feedback
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
         | ActiveDialog::CsvExportOptions(_)
@@ -888,6 +887,12 @@ fn evaluate_analyze_button(analyze: &AnalyzeDialogState, button: &str) -> Contro
     ControlEnablement::enabled()
 }
 
+fn edit_params_shape(dialogs: &CanvasDialogState, doc: &ProjectDocument, result_sheet_id: &SheetId) -> (usize, usize, usize) {
+    let target =
+        doc.result_sheet(result_sheet_id).map_or_else(|| dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id), |_| Some(result_sheet_id));
+    source_table_shape(doc, target)
+}
+
 fn evaluate_edit_params_button(
     edit: &EditAnalysisParametersState,
     doc: &ProjectDocument,
@@ -900,7 +905,11 @@ fn evaluate_edit_params_button(
     let Some(spec) = edit.draft.as_ref() else {
         return ControlEnablement::disabled("No active analysis specification loaded.");
     };
-    let (rows, cols, _max_sub) = source_table_shape(doc, Some(result_sheet_id));
+    if edit.pending_create && button == "apply" {
+        return ControlEnablement::disabled("Apply is only available after the analysis sheet has been created.");
+    }
+    let shape_id = doc.result_sheet(result_sheet_id).map_or(&spec.source_sheet_id, |_| result_sheet_id);
+    let (rows, cols, _max_sub) = source_table_shape(doc, Some(shape_id));
     if let AnalysisKind::Contingency(cont) = &spec.kind {
         if cont.method == curvebook_doc::ContingencyMethod::CochranArmitageTrend {
             let trend = r5_contingency_cochran_armitage_trend(rows, cols);

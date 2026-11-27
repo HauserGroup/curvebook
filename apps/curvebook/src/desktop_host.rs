@@ -2182,7 +2182,7 @@ impl DesktopHostRuntime {
                 let req = NativeFileDialogRequest {
                     command_id: command_id.to_owned(),
                     kind: NativeFileDialogKind::OpenFile,
-                    filter_label: String::from("CurveBook / Data"),
+                    filter_label: String::from("CurveBook, .pzfx, .prism & Data files"),
                     extensions: NATIVE_OPEN_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
                     default_file_name: None,
                 };
@@ -2330,12 +2330,21 @@ impl DesktopHostRuntime {
                     resolve_native_export_sheet_id_with_hint(win.app().document(), spec.target_kind, sheet_hint)
                         .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
                 };
+                let default_file_name = if spec.command == "result.generateReport" {
+                    match params.get("format").and_then(Value::as_str).map(str::trim) {
+                        Some("latex" | "tex") => String::from("methods-report.tex"),
+                        Some("plain" | "text" | "txt") => String::from("methods-report.txt"),
+                        _ => spec.default_name.to_owned(),
+                    }
+                } else {
+                    spec.default_name.to_owned()
+                };
                 let req = NativeFileDialogRequest {
                     command_id: spec.command.to_owned(),
                     kind: NativeFileDialogKind::SaveFile,
                     filter_label: spec.filter_label.to_owned(),
                     extensions: spec.extensions.iter().map(|s| (*s).to_owned()).collect(),
-                    default_file_name: Some(spec.default_name.to_owned()),
+                    default_file_name: Some(default_file_name),
                 };
                 match adapter.pick(&req)? {
                     Some(path) => {
@@ -2389,18 +2398,22 @@ impl DesktopHostRuntime {
     ) -> Value {
         let mut map = serde_json::Map::new();
         if command == "result.generateReport" {
-            let report_fmt = caller_params
-                .get("format")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| matches!(*s, "plain" | "markdown" | "latex"))
-                .unwrap_or_else(|| match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-                    Some("tex") => "latex",
-                    Some("txt") => "plain",
-                    _ => "markdown",
-                });
+            let ext_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                Some("tex") => Some("latex"),
+                Some("txt") => Some("plain"),
+                Some("md" | "markdown") => Some("markdown"),
+                _ => None,
+            };
+            let report_fmt = ext_fmt
+                .or_else(|| {
+                    caller_params.get("format").and_then(Value::as_str).map(str::trim).filter(|s| matches!(*s, "plain" | "markdown" | "latex"))
+                })
+                .unwrap_or("markdown");
             map.insert(String::from("result_sheet_id"), Value::String(target_sheet_id.as_str().to_owned()));
             map.insert(String::from("format"), Value::String(report_fmt.to_owned()));
+            if let Some(scope) = caller_params.get("scope").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                map.insert(String::from("scope"), Value::String(scope.to_owned()));
+            }
             map.insert(String::from("path"), Value::String(path_str.to_owned()));
             return Value::Object(map);
         }
@@ -4581,6 +4594,8 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
                 | "ui.editParams.open"
                 | "ui.print.open"
                 | "ui.changeGraphType.open"
+                | "ui.zoom.in"
+                | "ui.zoom.out"
                 | "ui.zoom.fitSheet"
                 | "app.preferences"
                 | "app.quit"
@@ -4602,6 +4617,16 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
         .is_some_and(|spec| (spec.input_schema)().get("required").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty()))
 }
 
+fn zoom_step_shortcut_targets_canvas(app: &UiApp, command_id: &str) -> bool {
+    let doc = app.document();
+    let active_is_canvas = !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && doc.active_sheet_id.as_ref().is_some_and(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some());
+    let default_combo = if command_id == "ui.zoom.in" { "Cmd+=" } else { "Cmd+-" };
+    let custom = app.shortcuts.active_combo(command_id).is_some_and(|c| c != default_combo);
+    active_is_canvas || custom
+}
+
 /// Match a customized key combination in `app.shortcuts` to a desktop-routed command ID.
 #[must_use]
 pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModifiers) -> Option<String> {
@@ -4614,6 +4639,9 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         if let Some(matched) = app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet)
             && shortcut_uses_desktop_routing(&matched.command_id)
         {
+            if matches!(matched.command_id.as_str(), "ui.zoom.in" | "ui.zoom.out") && !zoom_step_shortcut_targets_canvas(app, &matched.command_id) {
+                return None;
+            }
             return Some(matched.command_id);
         }
     }
@@ -4873,6 +4901,38 @@ mod wave_b_host_tests {
             .collect();
         assert!(leftover_temps.is_empty(), "staging/backup temp files leaked: {leftover_temps:?}");
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r20_22_zoom_shortcut_targets_canvas_only_on_graph_or_layout_unless_custom() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Zoom Routing").map_err(|e| e.to_string())?;
+        let ds = DataSheet::new(
+            "ds-1",
+            "Table",
+            TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).map_err(|e| e.to_string())?),
+        )
+        .map_err(|e| e.to_string())?;
+        let graph = GraphSheet::new_uninitialized_for_data("g-1", &ds).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(graph).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-1"));
+
+        let mut app = curvebook_ui_egui::UiApp::from_session(Session::from_document(doc));
+        let cmd_mods = curvebook_ui_egui::KeyModifiers { meta: true, ..Default::default() };
+        assert_eq!(super::match_routed_desktop_shortcut(&app, "=", cmd_mods), None);
+        assert_eq!(super::match_routed_desktop_shortcut(&app, "-", cmd_mods), None);
+
+        app.execute_command("sheet.select", json!({ "sheet_id": "g-1" })).map_err(|e| e.to_string())?;
+        assert_eq!(super::match_routed_desktop_shortcut(&app, "=", cmd_mods).as_deref(), Some("ui.zoom.in"));
+        assert_eq!(super::match_routed_desktop_shortcut(&app, "-", cmd_mods).as_deref(), Some("ui.zoom.out"));
+
+        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
+        app.shortcuts.set_shortcut("ui.zoom.in", "Alt+=")?;
+        assert_eq!(
+            super::match_routed_desktop_shortcut(&app, "=", curvebook_ui_egui::KeyModifiers { alt: true, ..Default::default() }).as_deref(),
+            Some("ui.zoom.in")
+        );
         Ok(())
     }
 }

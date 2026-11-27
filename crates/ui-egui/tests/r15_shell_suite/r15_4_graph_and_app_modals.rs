@@ -497,18 +497,20 @@ fn aud_07_09_and_10_13_15_17_18_22_31_43_44_and_13_16_17_graph_and_app_modals() 
     assert!(!cap.contains("CmdOrCtrl") && normalize_shortcut_combo(&cap).is_ok());
 
     let stub = Arc::new(StubPlatformClipboardAdapter::default());
+    let url_stub = Arc::new(curvebook_ui_egui::os_integration::StubPlatformUrlOpener::new());
     let mut aclip = UiApp::new();
     aclip.human_path_only = true;
     aclip.set_clipboard_adapter(stub.clone());
+    aclip.set_url_opener(url_stub.clone());
     aclip.canvas_dialogs.active_dialog = ActiveDialog::About;
     let mut dclip = make_commit_driver(aclip);
     dclip.click_widget_id("dialog.about.copy_version")?;
     assert!(stub.last_text().is_some_and(|t| t.contains("CurveBook")));
     stub.clear();
-    dclip.state_mut().app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
-    sync_app_to_driver(&mut dclip);
-    dclip.click_widget_id("dialog.feedback.copy_markdown")?;
-    assert!(stub.last_text().is_some_and(|t| t.contains("CurveBook")));
+    dclip.click_widget_id("dialog.about.send_feedback")?;
+    assert_eq!(dclip.state().app.canvas_dialogs.active_dialog, ActiveDialog::About);
+    assert_eq!(url_stub.last_url().as_deref(), Some(curvebook_ui_egui::GITHUB_FEEDBACK_URL));
+    assert!(stub.last_text().is_none(), "Send Feedback must not write unsolicited data to clipboard");
 
     let (mut aav, sav) = seed_column_app(&[("A", &[1.0, 2.0]), ("B", &[4.0, 5.0]), ("C", &[7.0, 8.0])], ColumnDesignHint::PairedRepeatedMeasures);
     let avid = SheetId::new(

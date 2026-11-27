@@ -1683,8 +1683,8 @@ pub struct NonlinearFitSpec {
     #[serde(default)]
     pub convergence_strictness: ConvergenceStrictness,
     /// Three-way identifiability reporting mode (`IdentifyUnstableParameters`, `IdentifyAmbiguousFits`,
-    /// or `ReportAll`; §2.5.1). `None` preserves legacy behavior (`IdentifyUnstableParameters` when
-    /// `identify_unstable_parameters == true`, otherwise unassessed).
+    /// or `ReportAll`; §2.5.1). `None` preserves legacy solver configuration while result formatting
+    /// still safely masks ambiguous/collinear parameters as `"Unstable"` by default (`R19.7`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifiability_mode: Option<IdentifiabilityMode>,
     /// Explicit override for `Std. Error` column visibility on the nonlinear parameter table (§2.5.1).

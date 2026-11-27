@@ -40,7 +40,7 @@ pub struct SolverConfig {
     /// `IdentifyAmbiguousFits`, or `ReportAll`; §2.5.1). `None` preserves legacy behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifiability_mode: Option<IdentifiabilityMode>,
-    /// Compute Hougaard skewness `|g1|` per free parameter (`Ratkowsky 1990`) via directional finite differences.
+    /// Compute signed Hougaard skewness `g1` per free parameter (`Hougaard 1985`; `Ratkowsky 1990`) via directional finite differences.
     pub compute_hougaard: bool,
     /// Compute smooth mean-response confidence bands along `FittedCurveOverlay`.
     pub compute_bands: bool,
@@ -278,7 +278,7 @@ pub struct FittedParameterSummary {
     /// Parameter multicollinearity dependency index $1 - 1 / ((J^\top J)^{-1}_{jj} (J^\top J)_{jj}) \in [0, 1]$ (`NaN` when unidentifiable / `RobustCauchy`).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub dependency: f64,
-    /// Absolute Hougaard skewness measure $|g_1|$ assessing nonlinearity bias (`NaN` if uncomputed or `RobustCauchy`; `|g1| < 0.1` close-to-linear per Ratkowsky 1990).
+    /// Signed Hougaard skewness measure $g_1$ assessing nonlinearity bias (`NaN` if uncomputed or `RobustCauchy`; $|g_1| < 0.1$ close-to-linear per Ratkowsky 1990; displayed as $|g_1|$ under `"Hougaard |g1|"` in result tables).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub hougaard_g1: f64,
     /// Diagnostic flags attached to this parameter (e.g. `HitLowerBound`, `Ambiguous`, `UnboundedCi`).
@@ -314,7 +314,7 @@ impl FittedParameterSummary {
         (self.inference_availability.is_available() && self.dependency.is_finite()).then_some(self.dependency)
     }
 
-    /// Typed Hougaard skewness `|g1|` (`None` in pure Robust Cauchy mode or when non-finite).
+    /// Typed signed Hougaard skewness `g1` (`None` in pure Robust Cauchy mode or when non-finite).
     #[must_use]
     pub fn hougaard_g1_option(&self) -> Option<f64> {
         (self.inference_availability.is_available() && self.hougaard_g1.is_finite()).then_some(self.hougaard_g1)
@@ -324,6 +324,16 @@ impl FittedParameterSummary {
 /// Default [`CiBound::Open`] helper for backwards-compatible deserialization of pre-R4.6 documents.
 pub(in crate::solver) const fn default_open_ci_bound() -> CiBound {
     CiBound::Open
+}
+
+/// Default [`FitStatus::Converged`] helper for backwards-compatible deserialization.
+pub(in crate::solver) const fn default_fit_status() -> FitStatus {
+    FitStatus::Converged
+}
+
+/// Default `NaN` helper for backwards-compatible deserialization of optional dataset metrics.
+pub(in crate::solver) const fn default_nan_f64() -> f64 {
+    f64::NAN
 }
 
 /// Interpolated unknown (`X` from `Y` or `Y` from `X`) with mean-response and calibration/prediction intervals.
@@ -421,6 +431,60 @@ pub struct FittedDatasetResult {
     /// Within-dataset Wald–Wolfowitz runs test computed in this dataset's own X order (`None` when disabled or plot-only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runs_test: Option<RunsTestResult>,
+    /// Solver convergence status for this dataset fit (equals the global status for shared/single fits).
+    #[serde(default = "default_fit_status")]
+    pub status: FitStatus,
+    /// Per-dataset parameter identifiability assessment.
+    #[serde(default)]
+    pub identifiability: FitIdentifiability,
+    /// Whether this dataset's covariance or parameter identifiability was flagged ambiguous.
+    #[serde(default)]
+    pub ambiguous: bool,
+    /// Optimizer iterations executed for this dataset fit.
+    #[serde(default)]
+    pub iterations: usize,
+    /// Active non-excluded observation count analyzed in this dataset.
+    #[serde(default)]
+    pub n_obs: usize,
+    /// Free parameter count for this dataset (for shared fits, effective rounded free parameter share).
+    #[serde(default)]
+    pub k_free: usize,
+    /// Residual degrees of freedom `n_obs.saturating_sub(k_free)` for this dataset.
+    #[serde(default)]
+    pub df: usize,
+    /// Objective value (weighted residual SS or Poisson deviance) for this dataset (`NaN` if unpopulated).
+    #[serde(default = "default_nan_f64", deserialize_with = "deserialize_f64_or_nan")]
+    pub weighted_ss: f64,
+    /// Per-dataset corrected Akaike Information Criterion (`None` when robust Cauchy or insufficient DF).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aic_c: Option<f64>,
+    /// Per-dataset Schwarz Bayesian Information Criterion (`None` when robust Cauchy or zero obs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bic: Option<f64>,
+    /// Per-dataset D'Agostino–Pearson / Shapiro–Wilk residual normality test (`None` when disabled/insufficient N).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normality: Option<NormalityTestResult>,
+    /// Per-dataset Anderson–Darling residual normality test (`None` when disabled/insufficient N).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normality_anderson_darling: Option<NormalityTestResult>,
+    /// Per-dataset Lilliefors (KS) residual normality test (`None` when disabled/insufficient N).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normality_lilliefors_ks: Option<NormalityTestResult>,
+    /// Per-dataset Spearman rank homoscedasticity test (`None` when disabled/insufficient N).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub homoscedasticity: Option<HomoscedasticityResult>,
+    /// Per-dataset pure-error lack-of-fit *F*-test (`None` when disabled/no replicates).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lack_of_fit: Option<LackOfFitResult>,
+    /// Count of ROUT outliers flagged/excluded in this dataset.
+    #[serde(default)]
+    pub n_outliers: usize,
+    /// Heteroscedastic `PredictedY` log-weight normalizing constant for this dataset (`None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_y_neg_log_weight_sum: Option<f64>,
+    /// Exact Poisson log-likelihood for this dataset when `FitMethod::PoissonDeviance` is active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poisson_ll: Option<f64>,
     /// Sampled fitted curve polyline and optional two-sided confidence/prediction bands (`None` when `compute_bands` is `false` and overlay omitted).
     pub curve_overlay: Option<FittedCurveOverlay>,
 }
@@ -577,9 +641,17 @@ pub struct NonlinearFitResult {
     pub interpolated_x: Vec<InterpolatedUnknown>,
     /// Unknown `Y` values predicted forward from observed `X` values when `interpolate_unknowns` is enabled.
     pub interpolated_y: Vec<InterpolatedUnknown>,
+    /// `true` when one or more parameters are shared globally across multiple datasets.
+    #[serde(default)]
+    pub has_shared_parameters: bool,
 }
 
 impl NonlinearFitResult {
+    /// Return `true` when multiple datasets were fitted independently without shared global parameters.
+    #[must_use]
+    pub fn is_independent_multi_dataset(&self) -> bool {
+        !self.has_shared_parameters && self.datasets.len() > 1
+    }
     /// Return `true` when parametric least-squares inference is suppressed due to Robust (Cauchy) fitting.
     #[must_use]
     pub fn is_robust_cauchy(&self) -> bool {

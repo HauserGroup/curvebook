@@ -113,6 +113,8 @@ pub struct ResultSheetViewState {
     pub checklist_filter: ChecklistSeverityFilter,
     #[serde(default = "default_report_format")]
     pub report_format: String,
+    #[serde(default = "default_report_scope")]
+    pub report_scope: String,
     #[serde(default)]
     pub last_methods_report: Option<String>,
     #[serde(default)]
@@ -129,6 +131,10 @@ pub struct ResultSheetViewState {
 
 fn default_report_format() -> String {
     String::from("markdown")
+}
+
+fn default_report_scope() -> String {
+    String::from("methods")
 }
 
 impl ResultSheetViewState {
@@ -235,16 +241,42 @@ impl ResultSheetViewState {
         (pass, warn, violated, info)
     }
 
-    /// Build a `result.generateReport` intent for `result_sheet_id` (`QOL-6`).
+    /// Canonical non-empty report format (`"plain"`, `"markdown"`, or `"latex"`).
+    #[must_use]
+    pub fn effective_report_format(&self) -> &str {
+        let trimmed = self.report_format.trim();
+        if trimmed.is_empty() { "markdown" } else { trimmed }
+    }
+
+    /// Canonical non-empty report scope (`"methods"` or `"full"`).
+    #[must_use]
+    pub fn effective_report_scope(&self) -> &str {
+        let trimmed = self.report_scope.trim();
+        if trimmed.is_empty() { "methods" } else { trimmed }
+    }
+
+    /// Build a `result.generateReport` intent for `result_sheet_id` (`QOL-6`, `R20.7`).
     #[must_use]
     pub fn generate_report_intent(&self, result_sheet_id: &SheetId) -> ToolCommandIntent {
-        let fmt = if self.report_format.trim().is_empty() { "markdown" } else { self.report_format.trim() };
-        ToolCommandIntent::new("result.generateReport", json!({ "result_sheet_id": result_sheet_id.as_str(), "format": fmt }))
+        ToolCommandIntent::new(
+            "result.generateReport",
+            json!({
+                "result_sheet_id": result_sheet_id.as_str(),
+                "format": self.effective_report_format(),
+                "scope": self.effective_report_scope(),
+            }),
+        )
     }
 
     /// Format a typed [`ResultCell`] cleanly without panicking on `CiBound::Open` or non-finite values.
     #[must_use]
     pub fn format_result_cell(cell: &ResultCell, p_format: PValueFormat) -> String {
+        Self::format_result_cell_with_survival(cell, p_format, false)
+    }
+
+    /// Format a typed [`ResultCell`] cleanly with explicit survival-median wording when `is_survival_summary` is true.
+    #[must_use]
+    pub fn format_result_cell_with_survival(cell: &ResultCell, p_format: PValueFormat, is_survival_summary: bool) -> String {
         match cell {
             ResultCell::Empty => String::new(),
             ResultCell::Number { value, prefix, units } => {
@@ -256,24 +288,37 @@ impl ResultSheetViewState {
                 }
             }
             ResultCell::ConfidenceInterval { lower, upper } => {
-                let lo = format_ci_bound(*lower);
-                let hi = format_ci_bound(*upper);
-                format!("[{lo}, {hi}]")
+                if matches!(lower, CiBound::Unavailable) && matches!(upper, CiBound::Unavailable) {
+                    String::from("Unavailable")
+                } else if matches!(lower, CiBound::Open) && matches!(upper, CiBound::Open) {
+                    String::from(if is_survival_summary { "Not reached" } else { "Not bounded" })
+                } else {
+                    let lo = format_ci_bound(*lower, is_survival_summary);
+                    let hi = format_ci_bound(*upper, is_survival_summary);
+                    format!("[{lo}, {hi}]")
+                }
             }
             ResultCell::PValue { raw, formatted, stars } => {
                 let p_text = if raw.is_finite() { p_format.format_p(*raw) } else { formatted.clone() };
                 if stars.is_empty() { p_text } else { format!("{p_text} {stars}") }
             }
-            ResultCell::Text(s) => s.clone(),
+            ResultCell::Text(s) => {
+                if s.contains("???") {
+                    String::from("Unstable")
+                } else {
+                    s.clone()
+                }
+            }
             ResultCell::Boolean(b) => String::from(if *b { "Yes" } else { "No" }),
         }
     }
 }
 
-fn format_ci_bound(bound: CiBound) -> String {
+fn format_ci_bound(bound: CiBound, is_survival_summary: bool) -> String {
     match bound {
         CiBound::Finite(v) if v.is_finite() => format_compact_f64(v),
-        CiBound::Finite(_) | CiBound::Open => String::from("Unbounded"),
+        CiBound::Finite(_) | CiBound::Open => String::from(if is_survival_summary { "Not reached" } else { "unbounded" }),
+        CiBound::Unavailable => String::from("Unavailable"),
     }
 }
 
@@ -568,7 +613,9 @@ pub fn copy_result_table_to_clipboard(app: &mut crate::UiApp, sheet_id: &str, fo
         };
         let sel =
             if force_full || (bound_tab.is_some() && bound_tab != Some(resolved_idx)) { None } else { rv.selection_bounds(sheet_id, resolved_idx) };
-        let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
+        let is_survival_summary =
+            matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::Survival(_)) && matches!(tab.kind, curvebook_doc::ResultTabKind::MainSummary);
+        let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, is_survival_summary, sel);
         (rs.id.clone(), tab.id.clone(), tsv, sel)
     };
     app.canvas_dialogs.result_view.last_copied_tsv = Some(tsv.clone());
@@ -591,7 +638,12 @@ pub fn copy_result_table_to_clipboard(app: &mut crate::UiApp, sheet_id: &str, fo
     }
 }
 
-fn format_tab_selection_tsv(tab: &ResultTab, p_fmt: curvebook_doc::PValueFormat, sel: Option<(usize, usize, usize, usize)>) -> String {
+fn format_tab_selection_tsv(
+    tab: &ResultTab,
+    p_fmt: curvebook_doc::PValueFormat,
+    is_survival_summary: bool,
+    sel: Option<(usize, usize, usize, usize)>,
+) -> String {
     let num_cols = tab_column_count(tab);
     if tab.rows.is_empty() || num_cols == 0 {
         return String::new();
@@ -602,7 +654,7 @@ fn format_tab_selection_tsv(tab: &ResultTab, p_fmt: curvebook_doc::PValueFormat,
 
     if r0 == r1 && c0 == c1 {
         let cell = tab.rows.get(r0).and_then(|row| row.get(c0)).unwrap_or(&ResultCell::Empty);
-        return ResultSheetViewState::format_result_cell(cell, p_fmt);
+        return ResultSheetViewState::format_result_cell_with_survival(cell, p_fmt, is_survival_summary);
     }
 
     let include_headers = r0 == 0 && r1 == max_r && c1 > c0;
@@ -628,7 +680,7 @@ fn format_tab_selection_tsv(tab: &ResultTab, p_fmt: curvebook_doc::PValueFormat,
         }
         for c in c0..=c1 {
             let cell = tab.rows.get(r).and_then(|row| row.get(c)).unwrap_or(&ResultCell::Empty);
-            parts.push(ResultSheetViewState::format_result_cell(cell, p_fmt));
+            parts.push(ResultSheetViewState::format_result_cell_with_survival(cell, p_fmt, is_survival_summary));
         }
         lines.push(parts.join("\t"));
     }

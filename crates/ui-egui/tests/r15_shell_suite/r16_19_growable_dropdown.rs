@@ -230,7 +230,7 @@ fn human_path_edit_multiplicity_method_dropdown() -> BoxRes {
     app.sync_views();
 
     let mut driver = make_default_driver(app);
-    driver.press_key("t", KeyModifiers { meta: true, ..Default::default() })?;
+    driver.press_key("P", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
 
     let entry = driver.frame_meta().find_by_widget_id("edit.multiplicity_method").ok_or("missing multiplicity")?.clone();

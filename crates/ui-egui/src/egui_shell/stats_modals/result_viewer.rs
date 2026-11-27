@@ -64,7 +64,7 @@ pub fn render_result_viewer_modal(
                             idx == eff_tab_idx,
                             &ControlEnablement::enabled(),
                         ) {
-                            intents.push(UiIntent::SelectResultTab { index: idx });
+                            intents.push(UiIntent::SelectResultTab { index: idx, sheet_id: None });
                         }
                     }
                 });

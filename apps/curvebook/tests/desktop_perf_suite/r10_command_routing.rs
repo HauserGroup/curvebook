@@ -312,14 +312,16 @@ fn keyboard_shortcuts_route_context_and_dialogs_correctly() -> Result<(), Box<dy
     let _ = h.key_down(egui::Key::L, ctrl_mods);
     assert!(h.app.runtime().window(wid)?.app().document().data_sheet(&SheetId::new("data-xy")).is_some_and(|s| s.frozen));
 
-    // 3. Cmd+T on DataSheet -> Welcome; on ResultSheet -> EditAnalysisParameters.
-    let _ = h.key_down(egui::Key::T, cmd_mods);
+    let cmd_shift_mods = egui::Modifiers { shift: true, ..cmd_mods };
+
+    // 3. Cmd+Shift+T on DataSheet -> Welcome; Cmd+Shift+P on ResultSheet -> EditAnalysisParameters.
+    let _ = h.key_down(egui::Key::T, cmd_shift_mods);
     assert!(h.app.runtime().window(wid)?.app().nav.welcome.open);
     h.app.runtime_mut().window_mut(wid)?.app_mut().nav.welcome.open = false;
 
     let rs_id = h.app.runtime().window(wid)?.app().document().result_sheets.first().ok_or("missing result")?.id.clone();
     let _ = h.app.runtime_mut().window_mut(wid)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": rs_id.as_str() }))?;
-    let _ = h.key_down(egui::Key::T, cmd_mods);
+    let _ = h.key_down(egui::Key::P, cmd_shift_mods);
     assert!(matches!(h.app.runtime().window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
     h.app.runtime_mut().window_mut(wid)?.app_mut().canvas_dialogs.close_dialog();
 

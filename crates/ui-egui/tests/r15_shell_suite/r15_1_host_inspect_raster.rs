@@ -202,7 +202,8 @@ fn modal_backdrop_captures_100pct_outside_clicks_and_wheels_and_scrollbars_never
         out.textures_delta.clear();
     }
     assert!(report.outside_click_captured && report.outside_wheel_captured);
-    assert!(meta.find_by_widget_id("modal.backdrop").is_some() && intents.is_empty());
+    assert!(meta.find_by_widget_id("modal.backdrop").is_some());
+    assert!(!intents.is_empty() && intents.intents().iter().all(|it| matches!(it, UiIntent::DialogButtonAction { action } if action == "cancel")));
     Ok(())
 }
 
@@ -389,7 +390,14 @@ fn aud_07_08_13_control_routing_batch_budget_raster_and_headless_guards() -> Res
         app.set_locale(&next);
     }
     assert!(visited.len() == 16 && visited.iter().any(|l| l == "ar") && visited.iter().any(|l| l == "he"));
-    for (loc, lbl) in [("ar", "التفضيلات..."), ("he", "העדפות...")] {
+    app.set_locale("en");
+    let en_edit: Vec<&str> = curated_menu_bar(&app)
+        .iter()
+        .find(|s| s.menu_key == "menu.edit")
+        .map(|s| s.flat_actions().iter().map(|i| i.localized_label).collect())
+        .unwrap_or_default();
+    assert!(en_edit.contains(&"Settings") && !en_edit.iter().any(|l| l.contains("Preferences") || l.contains("Settings...")));
+    for (loc, lbl) in [("ar", "التفضيلات"), ("he", "העדפות")] {
         app.set_locale(loc);
         assert!(format!("{:?}", curated_menu_bar(&app)).contains(lbl));
     }

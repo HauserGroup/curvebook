@@ -182,7 +182,6 @@ fn all_reachable_dialogs_pass_overlap_target_size_rank_and_budgets() {
         ("find_replace", Some("ds-xy"), DialogOp::FindReplace),
         ("change_data_analyzed", None, DialogOp::ChangeDataAnalyzed),
         ("about", None, DialogOp::Cmd("app.about")),
-        ("feedback", None, DialogOp::Cmd("app.feedback")),
     ];
     let configs = [("800x600_en", "en", 800.0, 600.0), ("1280x800_en", "en", 1280.0, 800.0), ("1024x700_de", "de", 1024.0, 700.0)];
 

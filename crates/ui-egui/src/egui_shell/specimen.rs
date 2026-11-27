@@ -553,7 +553,7 @@ fn render_tabular_and_badges_card(ui: &mut Ui, tokens: &Tokens) {
     specimen_card(ui, tokens, "4. Role Badges & Tabular Result Preview", |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = m.space_sm;
-            paint_outline_badge(ui, tokens, "NUM", tokens.role_num);
+            paint_neutral_role_badge(ui, tokens, "NUM");
             paint_outline_badge(ui, tokens, "CAT", tokens.role_cat);
             paint_outline_badge(ui, tokens, "LBL", tokens.role_lbl);
             paint_outline_badge(ui, tokens, "FX=", tokens.role_fx);
@@ -721,6 +721,17 @@ fn paint_pill_badge(ui: &mut Ui, tokens: &Tokens, text: &str, bg: Color32, fg: C
     let (rect, _) = ui.allocate_exact_size(sz, Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(m.radius_sm), bg);
     ui.painter().galley(Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5), galley, fg);
+}
+
+fn paint_neutral_role_badge(ui: &mut Ui, tokens: &Tokens, text: &str) {
+    let m = tokens.metrics;
+    let galley = ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(m.font_ui_small_pt), tokens.role_num);
+    let sz = vec2(galley.size().x + m.space_sm, (galley.size().y + m.space_xs).max(m.space_lg + m.space_xs));
+    let (rect, _) = ui.allocate_exact_size(sz, Sense::hover());
+    let radius = CornerRadius::same(m.radius_sm);
+    ui.painter().rect_filled(rect, radius, tokens.surface_recessed);
+    ui.painter().rect_stroke(rect, radius, Stroke::new(m.stroke_thin_pt, tokens.border), StrokeKind::Inside);
+    ui.painter().galley(Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5), galley, tokens.role_num);
 }
 
 fn paint_outline_badge(ui: &mut Ui, tokens: &Tokens, text: &str, color: Color32) {

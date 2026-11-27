@@ -66,15 +66,17 @@ pub use linear::{
     simple_linear_regression,
 };
 pub use result::{
-    RawXScaleWarning, detect_log_x_scale_mismatch, detect_log_x_scale_mismatch_datasets, detect_raw_non_log10_x_scale, execute_analysis,
-    execute_linear_analysis, execute_nonlinear_analysis, is_log_x_equation_id, non_log_counterpart_equation_id, resolve_model_from_spec,
-    suggested_default_dose_response_equation,
+    RawXScaleWarning, compare_nonlinear_analysis_vs_horizontal_line, detect_log_x_scale_mismatch, detect_log_x_scale_mismatch_datasets,
+    detect_raw_non_log10_x_scale, execute_analysis, execute_linear_analysis, execute_nonlinear_analysis, is_log_x_equation_id,
+    non_log_counterpart_equation_id, resolve_model_from_spec, suggested_default_dose_response_equation,
 };
 pub use solver::{
-    FitFlagOutcome, FittedDatasetResult, FittedParameterSummary, GreedyHessianReduction, InferenceAvailability, InterpolatedUnknown,
+    FitFlagOutcome, FittedDatasetResult, FittedParameterSummary, GreedyHessianReduction, HorizontalLineClassification,
+    HorizontalLineComparisonReport, HorizontalLineDatasetDiagnostic, HorizontalLineModel, InferenceAvailability, InterpolatedUnknown,
     ModelComparisonOutcome, ModelComparisonQuestionResult, ModelComparisonResult, NonlinearFitResult, SolverConfig, SynchronizedComparisonRequest,
-    assemble_objective_hessian, compare_models, compare_models_checked, compare_models_question, compare_models_synchronized, evaluate_fit_flags,
-    fit_nonlinear, greedy_hessian_reduction, hessian_condition_number, hessian_kappa_threshold, is_fit_well_defined, ordered_nested_roles,
+    assemble_objective_hessian, compare_models, compare_models_checked, compare_models_question, compare_models_synchronized,
+    compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, greedy_hessian_reduction, hessian_condition_number, hessian_kappa_threshold,
+    is_fit_well_defined, ordered_nested_roles,
 };
 pub use tex_format::{
     format_linear_regression_equation_tex, format_model_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs,

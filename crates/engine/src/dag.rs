@@ -1070,6 +1070,7 @@ pub(crate) fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCod
     target.fitted_curves.clear();
     target.eliminated_outliers.clear();
     target.checklist.clear();
+    target.cell_details.clear();
     // Preserve user-authored annotations (`floating_notes`, `color_tag`) across transient recomputation failures.
     target.status = ResultStatus::Failed { code, message };
 }
@@ -1082,7 +1083,7 @@ fn check_upstream_result_status(res: &ResultSheet, context_id: &SheetId) -> Resu
     }
 }
 
-fn resolve_source_table(doc: &ProjectDocument, source_id: &SheetId) -> Result<DataSheet, (ErrorCode, String)> {
+pub(crate) fn resolve_source_table(doc: &ProjectDocument, source_id: &SheetId) -> Result<DataSheet, (ErrorCode, String)> {
     if let Some(ds) = doc.data_sheet(source_id) {
         return Ok(ds.clone());
     }
@@ -1114,7 +1115,7 @@ fn walk_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, start_id: &SheetId) -
     None
 }
 
-fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a SheetId> {
+pub(crate) fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a SheetId> {
     if let Some(ref id) = source_ds.info_sheet_id
         && doc.info_sheet(id).is_some()
     {
@@ -1125,7 +1126,7 @@ fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a Dat
     walk_origin_info_sheet_id(doc, &analysis.source_sheet_id)
 }
 
-fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, primary_info_id: Option<&SheetId>) -> Result<(), String> {
+pub(crate) fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, primary_info_id: Option<&SheetId>) -> Result<(), String> {
     for hook in analysis.kind.hooked_sources() {
         if let HookSource::InfoConstant { info_sheet_id, constant_name } = hook {
             let target_id = info_sheet_id.as_ref().or(primary_info_id);
@@ -1418,6 +1419,11 @@ fn validate_result_sheet_finite(res: &ResultSheet, sheet_id: &SheetId) -> Result
             }
         }
     }
+    for (idx, detail) in res.cell_details.iter().enumerate() {
+        if detail.raw_value.is_some_and(|v| !v.is_finite()) {
+            return Err(format!("result sheet `{sheet_id}` produced non-finite value at cell_details[{idx}]"));
+        }
+    }
     if let Some(ref data) = res.analyzable_data
         && let Some(loc) = first_non_finite_data_location(data)
     {
@@ -1438,7 +1444,7 @@ fn result_cell_is_finite(cell: &ResultCell) -> bool {
 const fn ci_bound_is_finite(bound: CiBound) -> bool {
     match bound {
         CiBound::Finite(v) => v.is_finite(),
-        CiBound::Open => true,
+        CiBound::Open | CiBound::Unavailable => true,
     }
 }
 

@@ -1,5 +1,5 @@
-//! Wave 3 Two-Tier Top Chrome (`32 pt` Tier 1 Application Bar + `38 pt` Tier 2 Sheet-Adaptive
-//! Contextual Action Strip, `docs/planning/gui-layout-spec.md` §3, `R15.3`).
+//! Unified Top Chrome (`28 pt` optional in-window menu bar when `host_draws_menu_bar == false` +
+//! `38 pt` unified contextual toolbar, `R20.9` + `R20.18`).
 
 use std::sync::Arc;
 
@@ -10,7 +10,11 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
 use crate::egui_shell::command_palette::{commit_unified_search_item, paint_inline_ghost_completion, paint_unified_search_row_content};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
-use crate::egui_shell::top_bar_fit::{RankedToolbarSlot, RightWidths, SearchVisibility, fit_ranked_toolbar, fit_right_group};
+use crate::egui_shell::top_bar_fit::{RankedToolbarSlot, SearchVisibility, UnifiedToolbarFitInput, fit_unified_toolbar};
+use crate::egui_shell::ui_kit::{
+    ActionMenuAnchor, ActionMenuEntry, ActionMenuItem, ActionMenuSpec, LinkButtonSpec, TooltipSpec, action_menu_popup, link_button, show_tooltip,
+    show_tooltip_for_control,
+};
 use crate::egui_shell::{
     ActionRank, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent,
     WorkspacePreset,
@@ -18,7 +22,10 @@ use crate::egui_shell::{
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
-use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, default_command_action_rank, format_shortcut_for_platform};
+use crate::menus::{
+    CommandTooltip, CuratedMenuNode, command_disabled_reason_for_app, command_tooltip, curated_menu_bar, default_command_action_rank,
+    format_shortcut_for_platform,
+};
 use crate::search_engine::{SearchRecents, UnifiedSearchAction, compute_ghost_completion, query_unified};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, InfoSheet, MultivariateSpec, SheetId, TableArchetype};
@@ -230,6 +237,7 @@ enum Tier2SheetContext {
 struct Tier2ActionSpec {
     widget_id: String,
     label: String,
+    shortcut: String,
     tooltip: String,
     command_id: String,
     params: Value,
@@ -281,6 +289,7 @@ struct TopMenuButtonSpec<'a> {
 #[derive(Clone, Copy)]
 struct MenuRenderCtx<'a> {
     app: &'a UiApp,
+    tokens: &'a Tokens,
     locale: &'a str,
     workspace_preset: WorkspacePreset,
 }
@@ -300,25 +309,20 @@ struct ChromeButtonSpec<'a> {
     widget_id: &'a str,
     label: &'a str,
     command_id: Option<&'a str>,
+    shortcut: Option<&'a str>,
     selected: bool,
     enabled: bool,
     disabled_reason: Option<&'a str>,
+    tooltip_title: Option<&'a str>,
+    tooltip: Option<&'a str>,
     max_w: f32,
 }
 
-#[derive(Clone, Copy)]
-struct PopupActionButtonSpec<'a> {
-    widget_id: &'a str,
-    label: &'a str,
-    selected: bool,
-    enabled: bool,
-    disabled_reason: Option<&'a str>,
-}
-
-/// Render Tier 1 (`32 pt`) Application Bar and Tier 2 (`38 pt`) Contextual Action Strip cleanly.
+/// Render optional in-window menu bar (`28 pt`, strictly when `!host_draws_menu_bar`) and the
+/// unified toolbar (`38 pt`) cleanly (`R20.9` + `R20.18`).
 ///
-/// Preserves exact widget IDs (`toolbar.home`, `toolbar.command_palette`,
-/// `toolbar.split`, `toolbar.preset`, `toolbar.analyze`,
+/// Preserves exact widget IDs (`toolbar.home`, `toolbar.new`, `toolbar.undo`, `toolbar.redo`,
+/// `toolbar.command_palette`, `toolbar.search_input`, `toolbar.split`, `toolbar.analyze`,
 /// `toolbar.edit_params`, `toolbar.overflow`).
 pub fn render_top_chrome(
     ui: &mut egui::Ui,
@@ -341,8 +345,9 @@ pub fn render_top_chrome(
         state.close_all_popups();
     }
 
-    let tier1_h = ctx_in.layout.tier1_app_bar_h_pt.max(24.0);
-    let tier2_h = ctx_in.layout.tier2_action_strip_h_pt.max(26.0);
+    let show_menu_bar = !ctx_in.host_draws_menu_bar && ctx_in.layout.tier1_app_bar_h_pt > 0.0;
+    let tier1_h = if show_menu_bar { ctx_in.layout.tier1_app_bar_h_pt.max(24.0) } else { 0.0 };
+    let tier2_h = ctx_in.layout.tier2_action_strip_h_pt.max(tokens.metrics.min_toolbar_target_pt);
     let bar_input = Tier1BarInput { app, ctx_in, enabled };
     let mut tier1_anchors = Tier1Anchors::default();
     let mut tier2_overflow = Tier2OverflowState::default();
@@ -352,24 +357,30 @@ pub fn render_top_chrome(
         .frame(egui::Frame::NONE.fill(tokens.app_bar).inner_margin(egui::Margin::symmetric(8, 0)))
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            let tier1_resp = ui.allocate_ui(Vec2::new(ui.available_width(), tier1_h), |ui| {
-                render_tier1_bar(ui, bar_input, state, &mut tier1_anchors, meta, intents);
-            });
-            report.tier1_rect_pt = Some(tier1_resp.response.rect);
+            if show_menu_bar {
+                let tier1_resp = ui.allocate_ui(Vec2::new(ui.available_width(), tier1_h), |ui| {
+                    render_tier1_menu_bar(ui, bar_input, state, meta, intents);
+                });
+                report.tier1_rect_pt = Some(tier1_resp.response.rect);
 
-            let div_y = tier1_resp.response.rect.bottom();
-            let panel_w = tier1_resp.response.rect.width();
-            ui.painter().line_segment(
-                [Pos2::new(tier1_resp.response.rect.left() - 8.0, div_y), Pos2::new(tier1_resp.response.rect.left() + panel_w + 8.0, div_y)],
-                Stroke::new(1.0, tokens.divider),
-            );
+                let div_y = tier1_resp.response.rect.bottom();
+                let panel_w = tier1_resp.response.rect.width();
+                ui.painter().line_segment(
+                    [Pos2::new(tier1_resp.response.rect.left() - 8.0, div_y), Pos2::new(tier1_resp.response.rect.left() + panel_w + 8.0, div_y)],
+                    Stroke::new(1.0, tokens.divider),
+                );
+            } else {
+                state.active_in_window_menu = None;
+                report.tier1_rect_pt = None;
+            }
 
             let tier2_resp = ui.allocate_ui(Vec2::new(ui.available_width(), tier2_h), |ui| {
-                render_tier2_strip(ui, bar_input, state, &mut tier2_overflow, meta, intents);
+                render_unified_toolbar(ui, bar_input, state, &mut tier1_anchors, &mut tier2_overflow, meta, intents);
             });
             report.tier2_rect_pt = Some(tier2_resp.response.rect);
 
             let bottom_y = tier2_resp.response.rect.bottom();
+            let panel_w = tier2_resp.response.rect.width();
             ui.painter().line_segment(
                 [Pos2::new(tier2_resp.response.rect.left() - 8.0, bottom_y), Pos2::new(tier2_resp.response.rect.left() + panel_w + 8.0, bottom_y)],
                 Stroke::new(1.0, tokens.divider),
@@ -409,98 +420,51 @@ pub fn render_top_chrome(
     report
 }
 
-fn render_tier1_bar(
+fn render_tier1_menu_bar(
     ui: &mut egui::Ui,
     input: Tier1BarInput<'_>,
     state: &mut TopChromeEguiState,
-    anchors: &mut Tier1Anchors,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let Tier1BarInput { app, ctx_in, enabled } = input;
+    let Tier1BarInput { app, ctx_in, enabled: _ } = input;
     let tokens = ctx_in.tokens;
-    let home_label = localized_home_label(&app.locale);
     let total_w = ui.available_width().max(40.0);
 
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        let (brand_rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
-        crate::egui_shell::brand::paint_mark(ui, brand_rect);
-
-        let home_resp = chrome_button_fitted(
-            ui,
-            tokens,
-            meta,
-            ChromeButtonSpec {
-                widget_id: "toolbar.home",
-                label: home_label,
-                command_id: None,
-                selected: ctx_in.launcher_open,
-                enabled,
-                disabled_reason: modal_reason(enabled),
-                max_w: 84.0,
-            },
-        );
-        if home_resp.clicked() && enabled {
-            state.close_all_popups();
-            intents.push(UiIntent::SetLauncherOpen { open: !ctx_in.launcher_open });
-        }
-
-        // Compute compact right-group budget before placing middle menus/title so right cluster never clips.
-        let right_min_reserve = if total_w >= 540.0 { 196.0 } else { 112.0 };
-        let used_left = (brand_rect.width() + home_resp.rect.width() + 18.0).min(total_w);
-        let middle_budget = (total_w - used_left - right_min_reserve).max(0.0);
-
         state.active_in_window_menu = None;
-        if !ctx_in.host_draws_menu_bar && middle_budget >= 54.0 {
-            render_inline_menu_bar(ui, input, middle_budget, state, meta, intents);
-        }
+        let sections = collect_in_window_menu_sections(app);
+        let title = if ctx_in.dirty { format!("{} •", ctx_in.project_title) } else { ctx_in.project_title.to_owned() };
+        let (title_galley, _) = layout_single_line_job(ui.painter(), &title, 220.0, tokens.text_strong, 12.0);
+        let desired_title_w = (title_galley.size().x + 12.0).clamp(48.0, 220.0);
 
-        let remaining_after_menus = (ui.available_width() - 6.0).max(0.0);
-        let fitted = fit_right_group(&RightWidths {
-            room: remaining_after_menus,
-            has_pinned_badge: false,
-            switcher: 0.0,
-            field: 176.0,
-            icon: 48.0,
-            gap: 6.0,
-            trailing_extra: 56.0,
-        });
-        let right_w = estimate_tier1_right_width(&fitted);
-        let title_slack = (ui.available_width() - right_w - 8.0).max(0.0);
-        if title_slack >= 48.0 {
-            let title = if ctx_in.dirty { format!("{} •", ctx_in.project_title) } else { ctx_in.project_title.to_owned() };
+        let all_menus_w: f32 = sections
+            .iter()
+            .map(|sec| {
+                let (galley, _) = layout_single_line_job(ui.painter(), &sec.title, 96.0, tokens.text_primary, 12.0);
+                (galley.size().x + 14.0).clamp(32.0, 108.0) + 4.0
+            })
+            .sum();
+        let title_reserve = if total_w >= all_menus_w + 64.0 { (total_w - all_menus_w - 8.0).min(desired_title_w) } else { 0.0 };
+        let menu_budget = (total_w - title_reserve - if title_reserve > 0.0 { 8.0 } else { 0.0 }).max(54.0);
+        render_inline_menu_bar(ui, input, &sections, menu_budget, state, meta, intents);
+
+        let title_slack = (ui.available_width() - 4.0).max(0.0);
+        if title_reserve > 0.0 && title_slack >= 48.0 {
+            let filler = (ui.available_width() - title_slack.min(desired_title_w)).max(0.0);
+            if filler > 0.0 {
+                ui.add_space(filler);
+            }
             render_single_line_title_badge(ui, tokens, meta, &title, title_slack.min(220.0));
         }
-
-        let filler = (ui.available_width() - right_w).max(0.0);
-        if filler > 0.0 {
-            ui.add_space(filler);
-        }
-        render_tier1_right_group(ui, input, &fitted, state, anchors, meta, intents);
     });
-}
-
-fn estimate_tier1_right_width(fitted: &crate::egui_shell::top_bar_fit::RightGroup) -> f32 {
-    let search_w = match fitted.search {
-        SearchVisibility::Field => 176.0,
-        SearchVisibility::Icon => 48.0,
-        SearchVisibility::Hidden => 0.0,
-    };
-    let mut parts = Vec::new();
-    if search_w > 0.0 {
-        parts.push(search_w);
-    }
-    if fitted.split_toggle {
-        parts.push(58.0);
-    }
-    let gaps = parts.len().saturating_sub(1) as f32 * 6.0;
-    parts.into_iter().sum::<f32>() + gaps
 }
 
 fn render_inline_menu_bar(
     ui: &mut egui::Ui,
     input: Tier1BarInput<'_>,
+    sections: &[InWindowMenuSectionParity],
     budget_w: f32,
     state: &mut TopChromeEguiState,
     meta: &mut FrameInspectMeta,
@@ -508,7 +472,6 @@ fn render_inline_menu_bar(
 ) {
     let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
-    let sections = collect_in_window_menu_sections(app);
     if sections.is_empty() {
         return;
     }
@@ -518,7 +481,7 @@ fn render_inline_menu_bar(
     let mut visible_count = 0usize;
     let mut acc_w = 0.0_f32;
     let mut measured_widths = Vec::with_capacity(sections.len());
-    for sec in &sections {
+    for sec in sections {
         let (galley, _) = layout_single_line_job(ui.painter(), &sec.title, 96.0, tokens.text_primary, 12.0);
         measured_widths.push((galley.size().x + 14.0).clamp(32.0, 108.0));
     }
@@ -534,7 +497,7 @@ fn render_inline_menu_bar(
     }
 
     let actual_w = (acc_w + if visible_count < sections.len() { overflow_btn_w } else { 0.0 }).clamp(34.0, budget_w);
-    ui.allocate_ui(Vec2::new(actual_w, 24.0), |ui| {
+    ui.allocate_ui(Vec2::new(actual_w, tokens.metrics.min_hit_target_pt), |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             for (sec, &sec_w) in sections.iter().take(visible_count).zip(measured_widths.iter()) {
@@ -547,7 +510,11 @@ fn render_inline_menu_bar(
                 );
             }
             if visible_count < sections.len() {
-                let ov_resp = ui.add_enabled(enabled, egui::Button::new(overflow_lbl).min_size(Vec2::new(28.0, 22.0)));
+                let ov_btn = egui::Button::new(overflow_lbl)
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::NONE)
+                    .min_size(Vec2::splat(tokens.metrics.min_hit_target_pt));
+                let ov_resp = ui.add_enabled(enabled, ov_btn);
                 let ak_lbl = tr(&app.locale, "toolbar.overflow").to_owned();
                 ov_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_lbl.clone()));
                 meta.record_response(
@@ -567,7 +534,7 @@ fn render_inline_menu_bar(
                     },
                 );
                 if enabled {
-                    let mctx = MenuRenderCtx { app, locale: tokens.locale, workspace_preset: ctx_in.workspace_preset };
+                    let mctx = MenuRenderCtx { app, tokens, locale: tokens.locale, workspace_preset: ctx_in.workspace_preset };
                     egui::Popup::menu(&ov_resp).show(|ui| {
                         state.active_in_window_menu = Some(String::from("menu.bar.overflow"));
                         for sec in &sections[visible_count..] {
@@ -635,7 +602,7 @@ fn render_top_menu_button(
     }
 
     if enabled {
-        let mctx = MenuRenderCtx { app, locale: tokens.locale, workspace_preset };
+        let mctx = MenuRenderCtx { app, tokens, locale: tokens.locale, workspace_preset };
         egui::Popup::menu(&resp).show(|ui| {
             state.active_in_window_menu = Some(sec.menu_key.clone());
             render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
@@ -732,7 +699,10 @@ fn render_menu_leaf_item(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let tooltip = if item.beginner.is_empty() { item.summary.clone() } else { format!("{}\n{}", item.summary, item.beginner) };
+    // R20.21 Locked Decision #13: GUI tooltips surface CommandTooltip.summary only (preserving .beginner for MCP/docs).
+    let plat_shortcut = (!item.shortcut.is_empty()).then(|| format_shortcut_for_platform(&item.shortcut));
+    let summary = (!item.summary.trim().is_empty()).then_some(item.summary.as_str());
+    let disabled_reason = (!item.enabled).then(|| command_disabled_reason_for_app(mctx.app, &item.command_id));
     if let Some(variants) = submenu_variants_for_command(&item.command_id) {
         let sub = ui.menu_button(&item.label, |ui| {
             for &(v_label, variant) in variants {
@@ -741,10 +711,19 @@ fn render_menu_leaf_item(
                 if is_selected == Some(true) {
                     btn = btn.selected(true);
                 }
-                if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && variant == "SingleColumn88mm" {
-                    btn = btn.shortcut_text(format_shortcut_for_platform(&item.shortcut));
+                let opt_shortcut = (item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && variant == "SingleColumn88mm")
+                    .then(|| format_shortcut_for_platform(&item.shortcut));
+                if let Some(sc) = opt_shortcut.as_deref() {
+                    btn = btn.shortcut_text(sc);
                 }
-                let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+                let mut resp = ui.add_enabled(item.enabled, btn);
+                resp = show_tooltip_for_control(
+                    &resp,
+                    mctx.tokens,
+                    v_label,
+                    false,
+                    TooltipSpec { title: v_label, shortcut: opt_shortcut.as_deref(), summary, disabled_reason },
+                );
                 record_menu_popup_response(
                     ui,
                     &resp,
@@ -787,8 +766,14 @@ fn render_menu_leaf_item(
                         for (idx, &loc) in LOCALES.iter().enumerate() {
                             let canonical = normalize_locale(loc);
                             let caption = locale_picker_label(loc);
-                            let opt_resp =
-                                ui.add_enabled(item.enabled, egui::Button::new(&caption)).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+                            let mut opt_resp = ui.add_enabled(item.enabled, egui::Button::new(&caption));
+                            opt_resp = show_tooltip_for_control(
+                                &opt_resp,
+                                mctx.tokens,
+                                &caption,
+                                false,
+                                TooltipSpec { title: &caption, shortcut: None, summary, disabled_reason },
+                            );
                             record_menu_popup_response(
                                 ui,
                                 &opt_resp,
@@ -851,10 +836,17 @@ fn render_menu_leaf_item(
     }
 
     let mut btn = egui::Button::new(&item.label);
-    if !item.shortcut.is_empty() {
-        btn = btn.shortcut_text(format_shortcut_for_platform(&item.shortcut));
+    if let Some(sc) = plat_shortcut.as_deref() {
+        btn = btn.shortcut_text(sc);
     }
-    let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+    let mut resp = ui.add_enabled(item.enabled, btn);
+    resp = show_tooltip_for_control(
+        &resp,
+        mctx.tokens,
+        &item.label,
+        false,
+        TooltipSpec { title: &item.label, shortcut: plat_shortcut.as_deref(), summary, disabled_reason },
+    );
     record_menu_popup_response(
         ui,
         &resp,
@@ -916,23 +908,30 @@ fn push_menu_command_intent(app: &UiApp, command_id: &str, variant: Option<&str>
     }
 }
 
-fn render_tier1_right_group(
+#[derive(Clone, Copy)]
+struct UnifiedRightGroupSpec<'a> {
+    input: Tier1BarInput<'a>,
+    search_vis: SearchVisibility,
+    split_toggle: bool,
+    split_w: f32,
+}
+
+fn render_unified_right_group(
     ui: &mut egui::Ui,
-    input: Tier1BarInput<'_>,
-    fitted: &crate::egui_shell::top_bar_fit::RightGroup,
+    spec: UnifiedRightGroupSpec<'_>,
     state: &mut TopChromeEguiState,
     anchors: &mut Tier1Anchors,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let Tier1BarInput { app, ctx_in, enabled } = input;
+    let UnifiedRightGroupSpec { input: Tier1BarInput { app, ctx_in, enabled }, search_vis, split_toggle, split_w } = spec;
     let tokens = ctx_in.tokens;
-    if !matches!(fitted.search, SearchVisibility::Hidden) {
+    if !matches!(search_vis, SearchVisibility::Hidden) {
         let base_label = tr(&app.locale, "toolbar.palette");
         let plat_shortcut = format_shortcut_for_platform(app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
         let selected = matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
-        let tip_text = if enabled { format!("{base_label} ({plat_shortcut})") } else { String::from("modal dialog is active") };
-        match fitted.search {
+        let tip_text = command_tooltip(app, "ui.palette.open").map(|t| t.summary).unwrap_or("");
+        match search_vis {
             SearchVisibility::Field => {
                 let capsule_rect = render_inline_search_capsule(
                     ui,
@@ -942,7 +941,7 @@ fn render_tier1_right_group(
                         search_recents: ctx_in.search_recents,
                         base_label,
                         plat_shortcut: &plat_shortcut,
-                        tip_text: &tip_text,
+                        tip_text,
                         selected,
                         enabled,
                     },
@@ -954,17 +953,25 @@ fn render_tier1_right_group(
             }
             SearchVisibility::Icon | SearchVisibility::Hidden => {
                 state.search_dropdown_open = false;
-                let pal_resp = render_command_palette_icon_button(ui, tokens, meta, base_label, &tip_text, selected, enabled);
+                let pal_resp = render_command_palette_icon_button(
+                    ui,
+                    tokens,
+                    meta,
+                    CommandPaletteIconSpec { label: base_label, shortcut: &plat_shortcut, summary: tip_text, selected, enabled },
+                );
                 if pal_resp.clicked() && enabled {
                     state.close_all_popups();
                     intents.push(UiIntent::SetPaletteOpen { open: true });
                 }
             }
         }
+    } else {
+        state.search_dropdown_open = false;
     }
 
-    if fitted.split_toggle {
+    if split_toggle {
         let split_lbl = "Split";
+        let split_sc = app.shortcuts.active_combo("ui.split.toggle").filter(|s| !s.trim().is_empty()).map(format_shortcut_for_platform);
         let split_resp = chrome_button_fitted(
             ui,
             tokens,
@@ -973,10 +980,13 @@ fn render_tier1_right_group(
                 widget_id: "toolbar.split",
                 label: split_lbl,
                 command_id: Some("ui.split.toggle"),
+                shortcut: split_sc.as_deref(),
                 selected: app.split.enabled || state.split_menu_open,
                 enabled,
                 disabled_reason: modal_reason(enabled),
-                max_w: 68.0,
+                tooltip_title: None,
+                tooltip: Some(tr(&app.locale, "tooltip.split.summary")),
+                max_w: split_w.max(34.0),
             },
         );
         anchors.split = Some(split_resp.rect);
@@ -1015,13 +1025,14 @@ fn render_inline_search_capsule(
         consume_inline_search_keys(ui.ctx(), app, state, search_recents, search_input_id, intents);
     }
 
-    let (sc_galley, _) = layout_single_line_job(ui.painter(), plat_shortcut, 54.0, tokens.text_muted, 10.5);
-    let kbd_btn_w = (sc_galley.size().x + 12.0).clamp(32.0, 56.0);
+    let sc_font_pt = crate::egui_shell::fonts::SHORTCUT_PILL_FONT_PT;
+    let (sc_galley, _) = layout_single_line_job(ui.painter(), plat_shortcut, 64.0, tokens.text_muted, sc_font_pt);
+    let kbd_btn_w = (sc_galley.size().x + 12.0).clamp(32.0, 68.0);
     let capsule_w = 176.0;
-    let capsule_h = 24.0;
+    let capsule_h = tokens.metrics.min_toolbar_target_pt;
     let input_w = (capsule_w - kbd_btn_w - 10.0).max(72.0);
 
-    let frame_stroke = if input_focused && enabled { Stroke::new(1.5, tokens.focus_ring) } else { Stroke::new(1.0, tokens.border) };
+    let frame_stroke = if input_focused && enabled { Stroke::new(1.5, tokens.focus_ring) } else { Stroke::new(1.0, tokens.input_border) };
     let frame_fill = if enabled { tokens.surface_bg } else { tokens.panel_bg };
 
     let capsule_resp = egui::Frame::NONE
@@ -1030,7 +1041,7 @@ fn render_inline_search_capsule(
         .corner_radius(CornerRadius::same(tokens.metrics.radius_md))
         .inner_margin(egui::Margin::symmetric(4, 1))
         .show(ui, |ui| {
-            ui.set_height(capsule_h - 2.0);
+            ui.set_height(capsule_h - 4.0);
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let prev_query = state.search_query.clone();
@@ -1039,7 +1050,7 @@ fn render_inline_search_capsule(
                     egui::TextEdit::singleline(&mut state.search_query)
                         .id(search_input_id)
                         .frame(egui::Frame::NONE)
-                        .hint_text("Search sheets, analyses, commands…")
+                        .hint_text("Search sheets, analyses, commands")
                         .desired_width(input_w),
                 );
                 if enabled && (edit_resp.gained_focus() || edit_resp.changed() || edit_resp.clicked()) {
@@ -1072,22 +1083,58 @@ fn render_inline_search_capsule(
                     },
                 );
 
-                let btn_fill = if selected { tokens.active_bg } else { tokens.panel_bg };
-                let btn_stroke = if selected { Stroke::new(1.0, tokens.accent) } else { Stroke::new(1.0, tokens.border) };
-                let pal_resp = ui
-                    .add_enabled(
+                let pill_h = (capsule_h - tokens.metrics.space_md).max(20.0);
+                let (pal_rect, mut pal_resp) =
+                    ui.allocate_exact_size(Vec2::new(kbd_btn_w, pill_h), if enabled { Sense::click() } else { Sense::hover() });
+                if !enabled {
+                    pal_resp = pal_resp.on_hover_cursor(egui::CursorIcon::Default);
+                }
+                let pill_radius = CornerRadius::same(tokens.metrics.radius_sm);
+                super::widgets::paint_interactive_chrome(
+                    ui,
+                    pal_rect,
+                    tokens,
+                    super::widgets::InteractiveChromeSpec {
+                        radius: pill_radius,
+                        base_bg: if enabled { tokens.surface_recessed } else { tokens.panel_bg },
+                        base_border: matches!(tokens.mode, crate::theme::UiThemeMode::HighContrast).then_some(tokens.border),
+                        hovered: pal_resp.hovered(),
+                        selected,
+                        pressed: pal_resp.is_pointer_button_down_on(),
                         enabled,
-                        egui::Button::new(egui::RichText::new(plat_shortcut).size(10.5).color(if enabled {
-                            tokens.text_muted
-                        } else {
-                            tokens.text_disabled
-                        }))
-                        .fill(btn_fill)
-                        .stroke(btn_stroke)
-                        .corner_radius(CornerRadius::same(3))
-                        .min_size(Vec2::new(kbd_btn_w, 18.0)),
-                    )
-                    .on_hover_text(tip_text);
+                    },
+                );
+                if enabled && pal_resp.has_focus() {
+                    ui.painter().rect_stroke(
+                        pal_rect,
+                        pill_radius,
+                        Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring),
+                        StrokeKind::Inside,
+                    );
+                }
+                let pill_fg = if !enabled {
+                    tokens.text_disabled
+                } else if selected {
+                    tokens.text_strong
+                } else {
+                    tokens.text_muted
+                };
+                let (pill_galley, _) = layout_single_line_job(ui.painter(), plat_shortcut, (kbd_btn_w - 6.0).max(16.0), pill_fg, sc_font_pt);
+                ui.painter().with_clip_rect(pal_rect.shrink(1.0)).galley(
+                    Pos2::new(pal_rect.center().x - pill_galley.size().x * 0.5, pal_rect.center().y - pill_galley.size().y * 0.5),
+                    pill_galley,
+                    pill_fg,
+                );
+                let pal_resp = show_tooltip(
+                    &pal_resp,
+                    tokens,
+                    TooltipSpec {
+                        title: base_label,
+                        shortcut: Some(plat_shortcut),
+                        summary: (!tip_text.is_empty()).then_some(tip_text),
+                        disabled_reason: modal_reason(enabled),
+                    },
+                );
                 let ak_lbl = base_label.to_owned();
                 pal_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_lbl.clone()));
                 meta.record_response(
@@ -1182,14 +1229,49 @@ fn render_inline_search_dropdown(
     }
 
     let screen = ctx.content_rect();
-    let popup_w = if screen.width() >= 376.0 { (screen.width() - 16.0).clamp(360.0, 420.0) } else { (screen.width() - 16.0).max(200.0) };
-    let desired_x = (anchor.right() - popup_w).clamp(screen.left() + 8.0, (screen.right() - popup_w - 8.0).max(screen.left() + 8.0));
-    let desired_y = (anchor.bottom() + 4.0).clamp(screen.top() + 8.0, (screen.bottom() - 80.0).max(screen.top() + 8.0));
     let tokens = input.tokens;
     let plat_shortcut = format_shortcut_for_platform(input.app.shortcuts.active_combo("ui.palette.open").unwrap_or("Cmd+K"));
+    let footer_label = format!("Open full search ({plat_shortcut})");
+    let empty_label = "No matching sheets, analyses, or commands.";
+    let measured_w = ctx.fonts_mut(|f| {
+        let title_font = FontId::proportional(tokens.metrics.font_ui_body_pt);
+        let small_font = FontId::proportional(tokens.metrics.font_ui_small_pt);
+        let mut max_w = f.layout_no_wrap(footer_label.clone(), small_font.clone(), tokens.text_primary).size().x.ceil() + 24.0;
+        if items.is_empty() {
+            max_w = max_w.max(f.layout_no_wrap(empty_label.to_owned(), title_font.clone(), tokens.text_muted).size().x.ceil() + 24.0);
+        } else {
+            for item in &items {
+                let bw = (f.layout_no_wrap(item.category_badge.clone(), small_font.clone(), tokens.text_primary).size().x + 10.0).clamp(42.0, 72.0);
+                let tw = f.layout_no_wrap(item.title.clone(), title_font.clone(), tokens.text_strong).size().x.ceil();
+                let sw = if item.subtitle.is_empty() {
+                    0.0
+                } else {
+                    f.layout_no_wrap(format!("· {}", item.subtitle), small_font.clone(), tokens.text_muted).size().x.ceil() + 8.0
+                };
+                let scw = if item.shortcut.is_empty() {
+                    0.0
+                } else {
+                    let psc = format_shortcut_for_platform(&item.shortcut);
+                    f.layout_no_wrap(psc, small_font.clone(), tokens.text_muted).size().x.ceil() + 18.0
+                };
+                max_w = max_w.max(bw + tw + sw + scw + 36.0);
+            }
+        }
+        max_w
+    });
+    let max_popup_w = (screen.width() - 16.0).clamp(180.0, 420.0);
+    let min_popup_w = 180.0_f32.min(max_popup_w);
+    let popup_w = (measured_w + 14.0).ceil().clamp(min_popup_w, max_popup_w);
+    let inner_w = (popup_w - 14.0).max(120.0);
+    let est_h = (if items.is_empty() { 64.0 } else { (items.len() as f32) * 32.0 + 44.0 }).min((screen.height() - 16.0).max(80.0));
+    let desired_x = (anchor.right() - popup_w).clamp(screen.left() + 4.0, (screen.right() - popup_w - 4.0).max(screen.left() + 4.0));
+    let desired_y = (anchor.bottom() + 4.0).clamp(screen.top() + 4.0, (screen.bottom() - est_h - 4.0).max(screen.top() + 4.0));
 
+    // popup-size-exempt: bounded live-search results popover with custom badge/subtitle rows and explicit set_width
     let area_resp = egui::Area::new(Id::unique("egui_shell.toolbar.search_dropdown"))
-        .fixed_pos(Pos2::new(desired_x, desired_y))
+        .fixed_pos(Pos2::new(desired_x.round(), desired_y.round()))
+        .default_size(Vec2::new(popup_w, est_h))
+        .fade_in(false)
         .order(Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::NONE
@@ -1198,14 +1280,15 @@ fn render_inline_search_dropdown(
                 .corner_radius(CornerRadius::same(tokens.metrics.radius_lg))
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
-                    ui.set_width(popup_w - 12.0);
+                    ui.set_width(inner_w);
+                    ui.set_max_width(inner_w);
                     ui.spacing_mut().item_spacing.y = 2.0;
                     if items.is_empty() {
-                        ui.colored_label(tokens.text_muted, "No matching sheets, analyses, or commands.");
+                        ui.colored_label(tokens.text_muted, empty_label);
                     } else {
                         for (idx, item) in items.iter().enumerate() {
                             let is_selected = idx == state.search_selected_index;
-                            let row_w = ui.available_width().max(120.0);
+                            let row_w = inner_w;
                             let (rect, resp) =
                                 ui.allocate_exact_size(Vec2::new(row_w, 30.0), if item.enabled { Sense::click() } else { Sense::hover() });
                             let bg = if !item.enabled {
@@ -1228,6 +1311,11 @@ fn render_inline_search_dropdown(
                                 _ => None,
                             };
                             let wid = format!("toolbar.search_item.{idx}");
+                            let disabled_reason = (!item.enabled).then(|| {
+                                command_id_opt
+                                    .map(|cid| command_disabled_reason_for_app(input.app, cid))
+                                    .unwrap_or_else(|| tr(&input.app.locale, "tooltip.disabled.select_command_sheet"))
+                            });
                             meta.record_ranked_response(
                                 ui,
                                 &resp,
@@ -1238,7 +1326,7 @@ fn render_inline_search_dropdown(
                                     command_id: command_id_opt,
                                     value: Some(json!(item.enabled)),
                                     enabled: item.enabled,
-                                    disabled_reason: (!item.enabled).then_some("Unavailable"),
+                                    disabled_reason,
                                     z_layer: ZLayer::DropdownMenu,
                                     ellipsized,
                                     full_label: ellipsized.then_some(item.title.as_str()),
@@ -1254,27 +1342,17 @@ fn render_inline_search_dropdown(
                     }
 
                     ui.separator();
-                    let footer_label = format!("Open full search ({plat_shortcut})");
-                    let footer_resp = ui.add(
-                        egui::Button::new(egui::RichText::new(&footer_label).size(11.5).color(tokens.accent))
-                            .fill(Color32::TRANSPARENT)
-                            .stroke(Stroke::NONE)
-                            .min_size(Vec2::new(ui.available_width(), 24.0)),
-                    );
-                    meta.record_response(
+                    let footer_resp = link_button(
                         ui,
-                        &footer_resp,
-                        FrameInspectEntryInput {
-                            widget_id: "toolbar.search_open_palette",
-                            role: "button",
-                            label: &footer_label,
+                        tokens,
+                        meta,
+                        LinkButtonSpec {
+                            font_size: tokens.metrics.font_ui_small_pt,
                             command_id: Some("ui.palette.open"),
-                            value: None,
-                            enabled: true,
-                            disabled_reason: None,
-                            z_layer: ZLayer::DropdownMenu,
-                            ellipsized: false,
-                            full_label: None,
+                            min_width: Some(inner_w),
+                            center_text: true,
+                            pad_x: 6.0,
+                            ..LinkButtonSpec::new("toolbar.search_open_palette", &footer_label, ZLayer::DropdownMenu)
                         },
                     );
                     if footer_resp.clicked() {
@@ -1286,6 +1364,7 @@ fn render_inline_search_dropdown(
         });
 
     let popup_rect = area_resp.response.rect;
+    area_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Menu, true, "Search Suggestions"));
     meta.record(FrameInspectNodeMeta {
         egui_id: area_resp.response.id,
         accesskit_id: area_resp.response.id.accesskit_id(),
@@ -1293,7 +1372,7 @@ fn render_inline_search_dropdown(
         role: String::from("menu"),
         label: String::from("Search Suggestions"),
         command_id: None,
-        value: Some(json!(items.len())),
+        value: Some(json!({ "count": items.len(), "anchor_rect": [anchor.min.x, anchor.min.y, anchor.max.x, anchor.max.y] })),
         enabled: true,
         disabled_reason: None,
         unclipped_rect: popup_rect,
@@ -1329,126 +1408,99 @@ fn render_split_preset_popup(
     let (cur_primary, cur_secondary) = input.app.split.resolve_sheets(doc);
     let tokens = input.tokens;
 
-    let pos = clamp_popup_pos(ctx, Pos2::new(anchor.left(), anchor.bottom() + 4.0), 196.0, 176.0);
-    let area = egui::Area::new(Id::unique("egui_shell.split.preset_popup")).fixed_pos(pos).order(Order::Foreground).show(ctx, |ui| {
-        egui::Frame::NONE
-            .fill(tokens.panel_bg)
-            .stroke(Stroke::new(1.0, tokens.border))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(6))
-            .show(ui, |ui| {
-                ui.set_min_width(184.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                let single = popup_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    PopupActionButtonSpec {
-                        widget_id: "toolbar.split.preset.single",
-                        label: "Single Pane (Off)",
-                        selected: !input.app.split.enabled,
-                        enabled: true,
-                        disabled_reason: None,
-                    },
-                );
-                if single.clicked() {
-                    intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
-                    state.split_menu_open = false;
-                }
+    let single_sel = !input.app.split.enabled;
+    let dg_enabled = first_ds.is_some() && first_gs.is_some();
+    let dr_enabled = first_ds.is_some() && first_rs.is_some();
+    let two_enabled = two_up_pair.is_some();
+    let two_sel = input.app.split.enabled;
+    let swap_enabled = input.app.split.enabled && cur_primary.is_some() && cur_secondary.is_some();
 
-                let dg_enabled = first_ds.is_some() && first_gs.is_some();
-                let dg = popup_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    PopupActionButtonSpec {
-                        widget_id: "toolbar.split.preset.data_graph",
-                        label: "Data + Graph",
-                        selected: false,
-                        enabled: dg_enabled,
-                        disabled_reason: (!dg_enabled).then_some("Requires a DataSheet and a GraphSheet"),
-                    },
-                );
-                if dg.clicked()
-                    && let (Some(ds), Some(gs)) = (first_ds.as_ref(), first_gs.as_ref())
-                {
-                    intents.push_ui(
-                        "ui.split.toggle",
-                        json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": gs, "ratio": 0.4, "auto_pin_graph": true }),
-                    );
-                    state.split_menu_open = false;
-                }
+    let entries = [
+        ActionMenuEntry::Item(
+            ActionMenuItem::button_item("toolbar.split.preset.single", "Single Pane (Off)").selected(single_sel).value(Some(json!(single_sel))),
+        ),
+        ActionMenuEntry::Item(
+            ActionMenuItem::button_item("toolbar.split.preset.data_graph", "Data + Graph")
+                .enabled(dg_enabled)
+                .disabled_reason((!dg_enabled).then_some("Requires a DataSheet and a GraphSheet"))
+                .value(Some(json!(false))),
+        ),
+        ActionMenuEntry::Item(
+            ActionMenuItem::button_item("toolbar.split.preset.data_results", "Data + Results")
+                .enabled(dr_enabled)
+                .disabled_reason((!dr_enabled).then_some("Requires a DataSheet and a ResultSheet"))
+                .value(Some(json!(false))),
+        ),
+        ActionMenuEntry::Item(
+            ActionMenuItem::button_item("toolbar.split.preset.two_up", "2-Up (50 / 50)")
+                .selected(two_sel)
+                .enabled(two_enabled)
+                .disabled_reason((!two_enabled).then_some("Open at least two sheets for 2-Up view"))
+                .value(Some(json!(two_sel))),
+        ),
+        ActionMenuEntry::Item(
+            ActionMenuItem::button_item("toolbar.split.preset.swap", "Swap Panes")
+                .enabled(swap_enabled)
+                .disabled_reason((!swap_enabled).then_some("Enable split view with two sheets to swap"))
+                .value(Some(json!(false))),
+        ),
+    ];
 
-                let dr_enabled = first_ds.is_some() && first_rs.is_some();
-                let dr = popup_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    PopupActionButtonSpec {
-                        widget_id: "toolbar.split.preset.data_results",
-                        label: "Data + Results",
-                        selected: false,
-                        enabled: dr_enabled,
-                        disabled_reason: (!dr_enabled).then_some("Requires a DataSheet and a ResultSheet"),
-                    },
-                );
-                if dr.clicked()
-                    && let (Some(ds), Some(rs)) = (first_ds.as_ref(), first_rs.as_ref())
-                {
-                    intents.push_ui(
-                        "ui.split.toggle",
-                        json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": rs, "ratio": 0.5, "auto_pin_graph": false }),
-                    );
-                    state.split_menu_open = false;
-                }
+    let out = action_menu_popup(
+        ctx,
+        tokens,
+        Some(meta),
+        ActionMenuSpec::dropdown(
+            Id::unique("egui_shell.split.preset_popup"),
+            "popup.toolbar.split",
+            "Split View Presets",
+            ActionMenuAnchor::Trigger(anchor),
+        ),
+        &entries,
+    );
 
-                let two_enabled = two_up_pair.is_some();
-                let two = popup_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    PopupActionButtonSpec {
-                        widget_id: "toolbar.split.preset.two_up",
-                        label: "2-Up (50 / 50)",
-                        selected: input.app.split.enabled,
-                        enabled: two_enabled,
-                        disabled_reason: (!two_enabled).then_some("Open at least two sheets for 2-Up view"),
-                    },
+    match out.clicked_entry {
+        Some(0) => {
+            intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
+            state.split_menu_open = false;
+        }
+        Some(1) => {
+            if let (Some(ds), Some(gs)) = (first_ds.as_ref(), first_gs.as_ref()) {
+                intents.push_ui(
+                    "ui.split.toggle",
+                    json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": gs, "ratio": 0.4, "auto_pin_graph": true }),
                 );
-                if two.clicked()
-                    && let Some((p, s)) = two_up_pair.as_ref()
-                {
-                    intents.push_ui(
-                        "ui.split.toggle",
-                        json!({ "enabled": true, "primary_sheet_id": p, "secondary_sheet_id": s, "ratio": 0.5, "auto_pin_graph": false }),
-                    );
-                    state.split_menu_open = false;
-                }
-
-                let swap_enabled = input.app.split.enabled && cur_primary.is_some() && cur_secondary.is_some();
-                let swap = popup_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    PopupActionButtonSpec {
-                        widget_id: "toolbar.split.preset.swap",
-                        label: "Swap Panes",
-                        selected: false,
-                        enabled: swap_enabled,
-                        disabled_reason: (!swap_enabled).then_some("Enable split view with two sheets to swap"),
-                    },
+                state.split_menu_open = false;
+            }
+        }
+        Some(2) => {
+            if let (Some(ds), Some(rs)) = (first_ds.as_ref(), first_rs.as_ref()) {
+                intents.push_ui(
+                    "ui.split.toggle",
+                    json!({ "enabled": true, "primary_sheet_id": ds, "secondary_sheet_id": rs, "ratio": 0.5, "auto_pin_graph": false }),
                 );
-                if swap.clicked()
-                    && let (Some(p), Some(s)) = (cur_primary.as_ref(), cur_secondary.as_ref())
-                {
-                    intents.push_ui("ui.split.toggle", json!({ "enabled": true, "primary_sheet_id": s.as_str(), "secondary_sheet_id": p.as_str() }));
-                    state.split_menu_open = false;
-                }
-            });
-    });
-
-    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
-        state.split_menu_open = false;
+                state.split_menu_open = false;
+            }
+        }
+        Some(3) => {
+            if let Some((p, s)) = two_up_pair.as_ref() {
+                intents.push_ui(
+                    "ui.split.toggle",
+                    json!({ "enabled": true, "primary_sheet_id": p, "secondary_sheet_id": s, "ratio": 0.5, "auto_pin_graph": false }),
+                );
+                state.split_menu_open = false;
+            }
+        }
+        Some(4) => {
+            if let (Some(p), Some(s)) = (cur_primary.as_ref(), cur_secondary.as_ref()) {
+                intents.push_ui("ui.split.toggle", json!({ "enabled": true, "primary_sheet_id": s.as_str(), "secondary_sheet_id": p.as_str() }));
+                state.split_menu_open = false;
+            }
+        }
+        _ if !input.enabled || out.dismissed => {
+            state.split_menu_open = false;
+        }
+        _ => {}
     }
 }
 
@@ -1461,97 +1513,151 @@ fn render_tier2_overflow_popup(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let tokens = input.tokens;
-    let est_h = (items.len() as f32 * 28.0 + 16.0).clamp(48.0, 260.0);
-    let pos = clamp_popup_pos(ctx, Pos2::new(anchor.right() - 210.0, anchor.bottom() + 4.0), 216.0, est_h);
-    let area = egui::Area::new(Id::unique("egui_shell.tier2.overflow_popup")).fixed_pos(pos).order(Order::Foreground).show(ctx, |ui| {
-        egui::Frame::NONE
-            .fill(tokens.panel_bg)
-            .stroke(Stroke::new(1.0, tokens.border))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(egui::Margin::same(6))
-            .show(ui, |ui| {
-                ui.set_min_width(204.0);
-                ui.spacing_mut().item_spacing.y = 4.0;
-                for (idx, act) in items.iter().enumerate() {
-                    let wid = format!("toolbar.overflow.item.{idx}");
-                    let resp = popup_action_button(
-                        ui,
-                        tokens,
-                        meta,
-                        PopupActionButtonSpec {
-                            widget_id: &wid,
-                            label: &act.label,
-                            selected: false,
-                            enabled: act.enabled,
-                            disabled_reason: act.disabled_reason.as_deref(),
-                        },
-                    );
-                    if resp.clicked() && act.enabled {
-                        emit_tier2_action_intent(act, intents);
-                        state.overflow_menu_open = false;
-                    }
-                }
-            });
-    });
+    let wids: Vec<String> = (0..items.len()).map(|idx| format!("toolbar.overflow.item.{idx}")).collect();
+    let shortcuts: Vec<String> = items
+        .iter()
+        .map(|act| {
+            command_tooltip(input.app, &act.command_id)
+                .filter(|t| !t.shortcut.is_empty())
+                .map(|t| format_shortcut_for_platform(&t.shortcut))
+                .unwrap_or_default()
+        })
+        .collect();
+    let entries: Vec<ActionMenuEntry<'_>> = items
+        .iter()
+        .zip(wids.iter().zip(shortcuts.iter()))
+        .map(|(act, (wid, sc))| {
+            ActionMenuEntry::Item(
+                ActionMenuItem::button_item(wid, &act.label)
+                    .command_id(Some(&act.command_id))
+                    .shortcut((!sc.is_empty()).then_some(sc.as_str()))
+                    .tooltip((!act.tooltip.is_empty()).then_some(act.tooltip.as_str()))
+                    .enabled(act.enabled)
+                    .disabled_reason(act.disabled_reason.as_deref())
+                    .value(Some(json!(false))),
+            )
+        })
+        .collect();
 
-    if !input.enabled || popup_dismissed(ctx, area.response.rect, anchor) {
+    let out = action_menu_popup(
+        ctx,
+        input.tokens,
+        Some(meta),
+        ActionMenuSpec::dropdown(
+            Id::unique("egui_shell.tier2.overflow_popup"),
+            "popup.toolbar.overflow",
+            tr(&input.app.locale, "toolbar.overflow"),
+            ActionMenuAnchor::Trigger(anchor),
+        ),
+        &entries,
+    );
+
+    if let Some(hit) = out.clicked_entry
+        && let Some(act) = items.get(hit)
+        && act.enabled
+    {
+        emit_tier2_action_intent(act, intents);
+        state.overflow_menu_open = false;
+    } else if !input.enabled || out.dismissed {
         state.overflow_menu_open = false;
     }
 }
 
-fn render_tier2_strip(
+fn render_unified_toolbar(
     ui: &mut egui::Ui,
     input: Tier1BarInput<'_>,
     state: &mut TopChromeEguiState,
+    anchors: &mut Tier1Anchors,
     overflow: &mut Tier2OverflowState,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
     let Tier1BarInput { app, ctx_in, enabled } = input;
     let tokens = ctx_in.tokens;
+    let gap = tokens.metrics.space_xs;
+    let icon_pt = tokens.metrics.min_toolbar_target_pt;
     let actions = collect_tier2_actions(app, enabled);
-    let strip_w = ui.available_width().max(40.0);
-    let action_budget = strip_w.max(110.0);
-
-    let mut slots = Vec::with_capacity(actions.len());
-    for act in &actions {
-        let (galley, _) = layout_single_line_job(ui.painter(), &act.label, 152.0, tokens.text_primary, tokens.metrics.font_ui_body_pt);
-        let desired_width_pt = (galley.size().x + tokens.metrics.space_xl).clamp(tokens.metrics.min_toolbar_target_pt, 168.0);
-        slots.push(RankedToolbarSlot { rank: act.rank, desired_width_pt });
-    }
-
-    let overflow_btn_w = 34.0;
-    let plan = fit_ranked_toolbar(action_budget, tokens.metrics.space_xs, overflow_btn_w, tokens.metrics.min_toolbar_target_pt, 8, &slots);
 
     ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = tokens.metrics.space_xs;
-        for &idx in &plan.visible_indices {
+        ui.spacing_mut().item_spacing.x = gap;
+        let home_resp = render_brand_home_button(ui, app, tokens, ctx_in.launcher_open, enabled, meta);
+        if home_resp.clicked() && enabled {
+            state.close_all_popups();
+            intents.push(UiIntent::SetLauncherOpen { open: !ctx_in.launcher_open });
+        }
+        paint_toolbar_divider(ui, tokens);
+
+        let total_room_pt = ui.available_width().max(40.0);
+        let (split_galley, _) = layout_single_line_job(ui.painter(), "Split", 68.0, tokens.text_strong, 12.0);
+        let split_w = (split_galley.size().x + 14.0).clamp(34.0, 68.0);
+        let field_w = 176.0_f32;
+        let group_divider_w_pt = tokens.metrics.space_xs * 2.0 + tokens.metrics.stroke_thin_pt;
+
+        let mut slots = Vec::with_capacity(actions.len());
+        for act in &actions {
+            let desired_width_pt = if act.widget_id == "toolbar.undo" || act.widget_id == "toolbar.redo" {
+                icon_pt
+            } else {
+                let (galley, _) = layout_single_line_job(ui.painter(), &act.label, 152.0, tokens.text_primary, tokens.metrics.font_ui_body_pt);
+                (galley.size().x + tokens.metrics.space_xl).clamp(icon_pt, 168.0)
+            };
+            slots.push(RankedToolbarSlot { rank: act.rank, desired_width_pt });
+        }
+
+        let overflow_btn_w = 34.0;
+        let fit = fit_unified_toolbar(&UnifiedToolbarFitInput {
+            total_room_pt,
+            gap_pt: gap,
+            overflow_btn_w_pt: overflow_btn_w,
+            min_target_w_pt: icon_pt,
+            max_visible: 8,
+            right_field_group_w_pt: field_w + gap + split_w,
+            right_icon_group_w_pt: icon_pt + gap + split_w,
+            right_icon_only_w_pt: icon_pt,
+            flex_gap_pt: tokens.metrics.space_md,
+            group_divider_w_pt,
+            contextual_start_idx: 3,
+            slots: &slots,
+        });
+
+        let has_visible_anchor = fit.ranked.visible_indices.iter().any(|&idx| idx < 3);
+        let mut painted_contextual_divider = false;
+        for &idx in &fit.ranked.visible_indices {
+            if !painted_contextual_divider && idx >= 3 && has_visible_anchor {
+                paint_toolbar_divider(ui, tokens);
+                painted_contextual_divider = true;
+            }
             let act = &actions[idx];
-            let resp = chrome_button_fitted_with_rank(
-                ui,
-                tokens,
-                meta,
-                ChromeButtonSpec {
-                    widget_id: &act.widget_id,
-                    label: &act.label,
-                    command_id: Some(&act.command_id),
-                    selected: act.primary,
-                    enabled: act.enabled,
-                    disabled_reason: act.disabled_reason.as_deref(),
-                    max_w: 168.0,
-                },
-                Some(act.rank),
-            )
-            .on_hover_text(&act.tooltip);
+            let resp = if act.widget_id == "toolbar.undo" || act.widget_id == "toolbar.redo" {
+                render_undo_redo_icon_button(ui, tokens, meta, act, act.widget_id == "toolbar.redo")
+            } else {
+                chrome_button_fitted_with_rank(
+                    ui,
+                    tokens,
+                    meta,
+                    ChromeButtonSpec {
+                        widget_id: &act.widget_id,
+                        label: &act.label,
+                        command_id: Some(&act.command_id),
+                        shortcut: (!act.shortcut.is_empty()).then_some(act.shortcut.as_str()),
+                        selected: act.primary,
+                        enabled: act.enabled,
+                        disabled_reason: act.disabled_reason.as_deref(),
+                        tooltip_title: None,
+                        tooltip: (!act.tooltip.is_empty()).then_some(act.tooltip.as_str()),
+                        max_w: 168.0,
+                    },
+                    Some(act.rank),
+                )
+            };
             if resp.clicked() && act.enabled {
                 state.close_all_popups();
                 emit_tier2_action_intent(act, intents);
             }
         }
 
-        if !plan.overflow_indices.is_empty() {
-            overflow.items = plan.overflow_indices.iter().map(|&i| actions[i].clone()).collect();
+        if !fit.ranked.overflow_indices.is_empty() {
+            overflow.items = fit.ranked.overflow_indices.iter().map(|&i| actions[i].clone()).collect();
             let ov_resp = chrome_button_fitted_with_rank(
                 ui,
                 tokens,
@@ -1560,14 +1666,16 @@ fn render_tier2_strip(
                     widget_id: "toolbar.overflow",
                     label: "⋯",
                     command_id: None,
+                    shortcut: None,
                     selected: state.overflow_menu_open,
                     enabled,
                     disabled_reason: modal_reason(enabled),
+                    tooltip_title: Some(tr(&app.locale, "toolbar.overflow")),
+                    tooltip: Some(tr(&app.locale, "tooltip.overflow.summary")),
                     max_w: overflow_btn_w,
                 },
                 Some(ActionRank::Secondary),
-            )
-            .on_hover_text(tr(&app.locale, "toolbar.overflow"));
+            );
             overflow.anchor = Some(ov_resp.rect);
             if ov_resp.clicked() && enabled {
                 let next = !state.overflow_menu_open;
@@ -1575,6 +1683,30 @@ fn render_tier2_strip(
                 state.overflow_menu_open = next;
             }
         }
+
+        let search_w = match fit.search {
+            SearchVisibility::Field => field_w,
+            SearchVisibility::Icon => icon_pt,
+            SearchVisibility::Hidden => 0.0,
+        };
+        let right_w = match (search_w > 0.0, fit.split_toggle) {
+            (true, true) => search_w + gap + split_w,
+            (true, false) => search_w,
+            (false, true) => split_w,
+            (false, false) => 0.0,
+        };
+        let filler = (ui.available_width() - right_w).max(0.0);
+        if filler > 0.0 {
+            ui.add_space(filler);
+        }
+        render_unified_right_group(
+            ui,
+            UnifiedRightGroupSpec { input, search_vis: fit.search, split_toggle: fit.split_toggle, split_w },
+            state,
+            anchors,
+            meta,
+            intents,
+        );
     });
 }
 
@@ -1630,7 +1762,8 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
 
     let can_undo = app.session().undo_depth() > 0;
     let undo_ok = modal_enabled && can_undo;
-    actions.push(make_engine_action(
+    let undo_disabled_reason = (!undo_ok).then_some(if modal_enabled { "Nothing to undo" } else { "modal dialog is active" });
+    let undo_action = make_engine_action(
         app,
         Tier2ActionInput {
             widget_id: "toolbar.undo",
@@ -1638,15 +1771,17 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             command_id: "edit.undo",
             params: json!({}),
             enabled: undo_ok,
-            disabled_reason: Some(if modal_enabled { "Nothing to undo" } else { "modal dialog is active" }),
+            disabled_reason: undo_disabled_reason,
             primary: false,
         },
         can_undo,
-    ));
+    );
+    actions.push(undo_action);
 
     let can_redo = app.session().redo_depth() > 0;
     let redo_ok = modal_enabled && can_redo;
-    actions.push(make_engine_action(
+    let redo_disabled_reason = (!redo_ok).then_some(if modal_enabled { "Nothing to redo" } else { "modal dialog is active" });
+    let redo_action = make_engine_action(
         app,
         Tier2ActionInput {
             widget_id: "toolbar.redo",
@@ -1654,11 +1789,12 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             command_id: "edit.redo",
             params: json!({}),
             enabled: redo_ok,
-            disabled_reason: Some(if modal_enabled { "Nothing to redo" } else { "modal dialog is active" }),
+            disabled_reason: redo_disabled_reason,
             primary: false,
         },
         can_redo,
-    ));
+    );
+    actions.push(redo_action);
 
     let active_ds_id = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).map(|id| id.as_str().to_owned());
     let analyze_ready = modal_enabled && can_analyze_active(app);
@@ -1671,10 +1807,10 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
     };
 
     let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
-    let edit_reason = if !modal_enabled {
-        Some("modal dialog is active")
+    let edit_reason: Option<String> = if !modal_enabled {
+        Some(String::from("modal dialog is active"))
     } else if !on_result_sheet {
-        Some("Open a ResultSheet to edit analysis parameters (Cmd+T)")
+        Some(String::from("Open a ResultSheet to edit analysis parameters"))
     } else {
         None
     };
@@ -1769,7 +1905,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                         command_id: "ui.editParams.open",
                         params: json!({}),
                         enabled: modal_enabled && on_result_sheet,
-                        disabled_reason: edit_reason,
+                        disabled_reason: edit_reason.as_deref(),
                         primary: false,
                     },
                 ));
@@ -1834,7 +1970,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     command_id: "ui.editParams.open",
                     params: json!({}),
                     enabled: modal_enabled && on_result_sheet,
-                    disabled_reason: edit_reason,
+                    disabled_reason: edit_reason.as_deref(),
                     primary: true,
                 },
             ));
@@ -1847,7 +1983,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     command_id: "ui.analyze.open",
                     params: json!({}),
                     enabled: modal_enabled && rs_id.is_some(),
-                    disabled_reason: edit_reason,
+                    disabled_reason: edit_reason.as_deref(),
                     primary: false,
                 },
             );
@@ -1861,7 +1997,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     command_id: "ui.result.copyMethodsReport",
                     params: json!({}),
                     enabled: modal_enabled && on_result_sheet,
-                    disabled_reason: edit_reason,
+                    disabled_reason: edit_reason.as_deref(),
                     primary: false,
                 },
             ));
@@ -1873,7 +2009,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     command_id: "ui.result.inspectDiagnostics",
                     params: json!({}),
                     enabled: modal_enabled && on_result_sheet,
-                    disabled_reason: edit_reason,
+                    disabled_reason: edit_reason.as_deref(),
                     primary: false,
                 },
             ));
@@ -2084,11 +2220,20 @@ fn can_analyze_active(app: &UiApp) -> bool {
     })
 }
 
-fn format_command_tooltip(tip: Option<CommandTooltip>, fallback: &str) -> String {
+fn resolve_command_shortcut_for_platform(app: &UiApp, command_id: &str, tip: Option<&CommandTooltip>) -> String {
+    tip.map(|t| t.shortcut.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| app.shortcuts.active_combo(command_id))
+        .filter(|s| !s.trim().is_empty())
+        .map(format_shortcut_for_platform)
+        .unwrap_or_default()
+}
+
+fn format_command_tooltip(tip: Option<&CommandTooltip>) -> String {
+    // R20.21 Locked Decision #13: render CommandTooltip.summary only in the GUI; leave .beginner for MCP/docs.
     match tip {
-        Some(t) if !t.beginner.is_empty() => format!("{}\n{}", t.summary, t.beginner),
-        Some(t) if !t.summary.is_empty() => t.summary.to_owned(),
-        _ => fallback.to_owned(),
+        Some(t) if !t.summary.trim().is_empty() => t.summary.to_owned(),
+        _ => String::new(),
     }
 }
 
@@ -2100,10 +2245,13 @@ fn make_engine_action(app: &UiApp, input: Tier2ActionInput<'_>, base_enabled: bo
     let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
     let eff_enabled = enabled && base_enabled;
     let rank = slot_action_rank(command_id, primary);
+    let tip = command_tooltip(app, command_id);
+    let shortcut = resolve_command_shortcut_for_platform(app, command_id, tip.as_ref());
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
         label: label.to_owned(),
-        tooltip: format_command_tooltip(command_tooltip(app, command_id), label),
+        shortcut,
+        tooltip: format_command_tooltip(tip.as_ref()),
         command_id: command_id.to_owned(),
         params,
         is_engine: true,
@@ -2118,10 +2266,13 @@ fn make_engine_action(app: &UiApp, input: Tier2ActionInput<'_>, base_enabled: bo
 fn make_ui_action(app: &UiApp, input: Tier2ActionInput<'_>) -> Tier2ActionSpec {
     let Tier2ActionInput { widget_id, label, command_id, params, enabled, disabled_reason, primary } = input;
     let rank = slot_action_rank(command_id, primary);
+    let tip = command_tooltip(app, command_id);
+    let shortcut = resolve_command_shortcut_for_platform(app, command_id, tip.as_ref());
     Tier2ActionSpec {
         widget_id: widget_id.to_owned(),
         label: label.to_owned(),
-        tooltip: format_command_tooltip(command_tooltip(app, command_id), label),
+        shortcut,
+        tooltip: format_command_tooltip(tip.as_ref()),
         command_id: command_id.to_owned(),
         params,
         is_engine: false,
@@ -2167,22 +2318,6 @@ fn collect_two_up_pair(doc: &curvebook_doc::ProjectDocument, split: &SplitWorksp
     Some((primary, secondary))
 }
 
-fn clamp_popup_pos(ctx: &egui::Context, desired: Pos2, w: f32, h: f32) -> Pos2 {
-    let screen = ctx.content_rect();
-    let max_x = (screen.right() - w - 8.0).max(screen.left() + 4.0);
-    let max_y = (screen.bottom() - h - 8.0).max(screen.top() + 4.0);
-    Pos2::new(desired.x.clamp(screen.left() + 4.0, max_x), desired.y.clamp(screen.top() + 4.0, max_y))
-}
-
-fn popup_outside_clicked(ctx: &egui::Context, popup_rect: Rect, anchor_rect: Rect) -> bool {
-    ctx.input(|i| i.pointer.any_released() && i.pointer.interact_pos().is_some_and(|p| !popup_rect.contains(p) && !anchor_rect.contains(p)))
-}
-
-fn popup_dismissed(ctx: &egui::Context, popup_rect: Rect, anchor_rect: Rect) -> bool {
-    let esc = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
-    esc || popup_outside_clicked(ctx, popup_rect, anchor_rect)
-}
-
 fn localized_home_label(locale: &str) -> &'static str {
     match locale {
         "de" => "Start",
@@ -2198,8 +2333,173 @@ fn localized_home_label(locale: &str) -> &'static str {
         "ko" => "홈",
         "zh-CN" => "主页",
         "zh-TW" => "首頁",
+        "ar" => "الرئيسية",
+        "he" => "דף הבית",
         _ => "Home",
     }
+}
+
+fn paint_toolbar_divider(ui: &mut egui::Ui, tokens: &Tokens) {
+    let div_w = tokens.metrics.space_xs * 2.0 + tokens.metrics.stroke_thin_pt;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(div_w, tokens.metrics.min_toolbar_target_pt), Sense::hover());
+    let x = rect.center().x;
+    let inset = tokens.metrics.space_xs;
+    ui.painter().line_segment(
+        [Pos2::new(x, rect.top() + inset), Pos2::new(x, rect.bottom() - inset)],
+        Stroke::new(tokens.metrics.stroke_thin_pt, tokens.divider),
+    );
+}
+
+fn render_brand_home_button(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    tokens: &Tokens,
+    launcher_open: bool,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+) -> egui::Response {
+    let home_label = localized_home_label(&app.locale);
+    let mark_size = crate::egui_shell::brand::TOOLBAR_MARK_SIZE;
+    let btn_size = Vec2::new(mark_size.x + tokens.metrics.space_md, tokens.metrics.min_toolbar_target_pt);
+    let (rect, mut resp) = ui.allocate_exact_size(btn_size, if enabled { Sense::click() } else { Sense::hover() });
+    resp = resp.on_hover_cursor(if enabled { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Default });
+
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
+            hovered: resp.hovered(),
+            selected: launcher_open,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled,
+        },
+    );
+    if enabled && resp.has_focus() {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring), StrokeKind::Inside);
+    }
+
+    let mark_rect = Rect::from_center_size(rect.center(), mark_size);
+    crate::egui_shell::brand::paint_mark(ui, mark_rect);
+
+    let ak_label = home_label.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Button, enabled, launcher_open, ak_label.clone()));
+    resp = show_tooltip(
+        &resp,
+        tokens,
+        TooltipSpec {
+            title: home_label,
+            shortcut: None,
+            summary: Some(tr(&app.locale, "tooltip.home.summary")),
+            disabled_reason: modal_reason(enabled),
+        },
+    );
+
+    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+        meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: "toolbar.home",
+                role: "button",
+                label: home_label,
+                command_id: None,
+                value: Some(json!(launcher_open)),
+                enabled,
+                disabled_reason: modal_reason(enabled),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+    resp
+}
+
+fn render_undo_redo_icon_button(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    act: &Tier2ActionSpec,
+    is_redo: bool,
+) -> egui::Response {
+    let (rect, mut resp) =
+        ui.allocate_exact_size(Vec2::splat(tokens.metrics.min_toolbar_target_pt), if act.enabled { Sense::click() } else { Sense::hover() });
+    if !act.enabled {
+        resp = resp.on_hover_cursor(egui::CursorIcon::Default);
+    }
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    super::widgets::paint_interactive_chrome(
+        ui,
+        rect,
+        tokens,
+        super::widgets::InteractiveChromeSpec {
+            radius,
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
+            hovered: resp.hovered(),
+            selected: false,
+            pressed: resp.is_pointer_button_down_on(),
+            enabled: act.enabled,
+        },
+    );
+    if act.enabled && resp.has_focus() {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring), StrokeKind::Inside);
+    }
+
+    let fg = if act.enabled { tokens.text_strong } else { tokens.text_disabled };
+    paint_curved_history_arrow(ui.painter(), rect.center(), is_redo, fg);
+
+    let ak_label = act.label.clone();
+    let ak_enabled = act.enabled;
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, ak_enabled, ak_label.clone()));
+    resp = show_tooltip(
+        &resp,
+        tokens,
+        TooltipSpec {
+            title: &act.label,
+            shortcut: (!act.shortcut.is_empty()).then_some(act.shortcut.as_str()),
+            summary: (!act.tooltip.is_empty()).then_some(act.tooltip.as_str()),
+            disabled_reason: act.disabled_reason.as_deref(),
+        },
+    );
+
+    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+        meta.record_ranked_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: &act.widget_id,
+                role: "button",
+                label: &act.label,
+                command_id: Some(&act.command_id),
+                value: None,
+                enabled: act.enabled,
+                disabled_reason: act.disabled_reason.as_deref(),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+            act.rank,
+        );
+    }
+    resp
+}
+
+fn paint_curved_history_arrow(painter: &egui::Painter, c: Pos2, is_redo: bool, color: Color32) {
+    let sx = if is_redo { -1.0_f32 } else { 1.0_f32 };
+    let pt = |dx: f32, dy: f32| Pos2::new(c.x + dx * sx, c.y + dy);
+    let stroke = Stroke::new(1.5, color);
+    // Smooth open curved arc from lower tail around the side and top toward the tip.
+    let arc = [pt(-5.0, -1.5), pt(-2.5, -3.8), pt(0.8, -4.3), pt(3.8, -2.8), pt(5.1, 0.0), pt(4.1, 3.0), pt(1.4, 4.4), pt(-1.0, 4.4)];
+    painter.add(egui::Shape::line(arc.to_vec(), stroke));
+    let tip = pt(-5.2, -1.4);
+    painter.line_segment([pt(-4.7, -5.0), tip], stroke);
+    painter.line_segment([tip, pt(-1.4, -1.0)], stroke);
 }
 
 const fn modal_reason(enabled: bool) -> Option<&'static str> {
@@ -2222,7 +2522,7 @@ fn render_single_line_title_badge(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut
     );
     let ak_label = title.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, ak_label.clone()));
-    let resp = if ellipsized { resp.on_hover_text(title) } else { resp };
+    let resp = if ellipsized { show_tooltip(&resp, tokens, TooltipSpec::new(title)) } else { resp };
     if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
         meta.record_response(
             ui,
@@ -2254,7 +2554,7 @@ fn chrome_button_fitted_with_rank(
     spec: ChromeButtonSpec<'_>,
     rank: Option<ActionRank>,
 ) -> egui::Response {
-    let ChromeButtonSpec { widget_id, label, command_id, selected, enabled, disabled_reason, max_w } = spec;
+    let ChromeButtonSpec { widget_id, label, command_id, shortcut, selected, enabled, disabled_reason, tooltip_title, tooltip, max_w } = spec;
     let is_primary_cta = rank == Some(ActionRank::Primary) && enabled;
     let text_max = (max_w - 14.0).max(12.0);
     let fg = if is_primary_cta {
@@ -2267,7 +2567,8 @@ fn chrome_button_fitted_with_rank(
     let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, text_max, fg, 12.0);
     let min_w = max_w.min(34.0);
     let w = (galley.size().x + 14.0).clamp(min_w, max_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, tokens.metrics.min_hit_target_pt), if enabled { Sense::click() } else { Sense::hover() });
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(w, tokens.metrics.min_toolbar_target_pt), if enabled { Sense::click() } else { Sense::hover() });
     let radius = CornerRadius::same(tokens.metrics.radius_md);
     if is_primary_cta {
         let fill = if resp.is_pointer_button_down_on() || resp.hovered() { tokens.accent_hover } else { tokens.accent_strong };
@@ -2284,14 +2585,17 @@ fn chrome_button_fitted_with_rank(
             tokens,
             super::widgets::InteractiveChromeSpec {
                 radius,
-                base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
-                base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+                base_bg: Color32::TRANSPARENT,
+                base_border: None,
                 hovered: resp.hovered(),
                 selected,
                 pressed: resp.is_pointer_button_down_on(),
                 enabled,
             },
         );
+        if enabled && resp.has_focus() {
+            ui.painter().rect_stroke(rect, radius, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring), StrokeKind::Inside);
+        }
     }
     ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
         Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
@@ -2301,13 +2605,10 @@ fn chrome_button_fitted_with_rank(
 
     let ak_label = label.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
-    let resp = if let Some(reason) = disabled_reason {
-        resp.on_hover_text(reason)
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else {
-        resp
-    };
+    let tip_title = tooltip_title.unwrap_or(label);
+    let summary = tooltip.map(str::trim).filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case(tip_title));
+    let tip_spec = TooltipSpec { title: tip_title, shortcut, summary, disabled_reason };
+    let resp = show_tooltip_for_control(&resp, tokens, label, ellipsized, tip_spec);
 
     if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
         let input = FrameInspectEntryInput {
@@ -2331,69 +2632,23 @@ fn chrome_button_fitted_with_rank(
     resp
 }
 
-fn popup_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: PopupActionButtonSpec<'_>) -> egui::Response {
-    let PopupActionButtonSpec { widget_id, label, selected, enabled, disabled_reason } = spec;
-    let w = ui.available_width().max(120.0);
-    let (galley, ellipsized) = layout_single_line_job(ui.painter(), label, (w - 14.0).max(40.0), tokens.text_primary, 12.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
-    super::widgets::paint_interactive_chrome(
-        ui,
-        rect,
-        tokens,
-        super::widgets::InteractiveChromeSpec {
-            radius: CornerRadius::same(tokens.metrics.radius_md),
-            base_bg: if enabled { tokens.surface_bg } else { tokens.panel_bg },
-            base_border: None,
-            hovered: resp.hovered(),
-            selected,
-            pressed: resp.is_pointer_button_down_on(),
-            enabled,
-        },
-    );
-    let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    ui.painter().with_clip_rect(rect.shrink(4.0)).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5), galley, fg);
-
-    let ak_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
-    let resp = if let Some(reason) = disabled_reason {
-        resp.on_hover_text(reason)
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else {
-        resp
-    };
-
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "button",
-                label,
-                command_id: None,
-                value: Some(json!(selected)),
-                enabled,
-                disabled_reason,
-                z_layer: ZLayer::DropdownMenu,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
+struct CommandPaletteIconSpec<'a> {
+    label: &'a str,
+    shortcut: &'a str,
+    summary: &'a str,
+    selected: bool,
+    enabled: bool,
 }
 
 fn render_command_palette_icon_button(
     ui: &mut egui::Ui,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
-    label: &str,
-    tooltip: &str,
-    selected: bool,
-    enabled: bool,
+    spec: CommandPaletteIconSpec<'_>,
 ) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(28.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
+    let CommandPaletteIconSpec { label, shortcut, summary, selected, enabled } = spec;
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::splat(tokens.metrics.min_toolbar_target_pt), if enabled { Sense::click() } else { Sense::hover() });
     let radius = CornerRadius::same(tokens.metrics.radius_md);
     super::widgets::paint_interactive_chrome(
         ui,
@@ -2401,14 +2656,17 @@ fn render_command_palette_icon_button(
         tokens,
         super::widgets::InteractiveChromeSpec {
             radius,
-            base_bg: if enabled { tokens.button_bg } else { tokens.panel_bg },
-            base_border: Some(if enabled { tokens.button_border } else { tokens.divider }),
+            base_bg: Color32::TRANSPARENT,
+            base_border: None,
             hovered: resp.hovered(),
             selected,
             pressed: resp.is_pointer_button_down_on(),
             enabled,
         },
     );
+    if enabled && resp.has_focus() {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring), StrokeKind::Inside);
+    }
     let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
 
     // Monochrome vector magnifying-glass icon centered inside the button.
@@ -2436,5 +2694,14 @@ fn render_command_palette_icon_button(
             },
         );
     }
-    resp.on_hover_text(tooltip)
+    show_tooltip(
+        &resp,
+        tokens,
+        TooltipSpec {
+            title: label,
+            shortcut: (!shortcut.is_empty()).then_some(shortcut),
+            summary: (!summary.is_empty()).then_some(summary),
+            disabled_reason: modal_reason(enabled),
+        },
+    )
 }

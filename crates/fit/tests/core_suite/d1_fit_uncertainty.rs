@@ -422,3 +422,358 @@ fn shared_weighted_gaussian_covariance_and_pointwise_bands_match_independent_ora
     verify_band_variance_identity(&GAUSS_COV, GAUSS_SIGMA2, GAUSS_T_CRIT_95, 0, &res.fitted_curves[0]);
     verify_band_variance_identity(&GAUSS_COV, GAUSS_SIGMA2, GAUSS_T_CRIT_95, 1, &res.fitted_curves[1]);
 }
+
+mod hougaard_skewness_uncertainty {
+    use curvebook_doc::{ChecklistStatus, FitMethod, IdentifiabilityMode, NonlinearFitSpec, ResultCell, ResultStatus};
+    use curvebook_fit::diagnostics::compute_hougaard_skewness;
+    use curvebook_fit::{
+        DataPoint, EquationCategory, FitStatus, HookContext, ParameterNote, ParametricModel, SolverConfig, fit_nonlinear, get_builtin_model,
+    };
+    use curvebook_math::linalg::DenseMatrix;
+    use curvebook_testkit::assert_approx_eq;
+
+    use crate::common::{
+        cell_num, cfg_fast, dsl_compile, exec_nl, find_param, find_tab, fit_with, nl_fast, rule_local_bounds, rule_shared, series_xy, tab_row,
+        xy_sheet, xy_sheet_single,
+    };
+
+    fn hougaard_col_index(tab: &curvebook_doc::ResultTab) -> usize {
+        tab.column_headers.iter().position(|h| h == "Hougaard |g1|").expect("nonlinear_parameters tab must contain `Hougaard |g1|` header")
+    }
+
+    struct PerturbFailModel {
+        params: [String; 1],
+    }
+
+    impl PerturbFailModel {
+        fn new() -> Self {
+            Self { params: ["A".to_owned()] }
+        }
+    }
+
+    impl ParametricModel for PerturbFailModel {
+        fn id(&self) -> &str {
+            "perturb_fail_test"
+        }
+
+        fn name(&self) -> &str {
+            "Perturb Fail Test"
+        }
+
+        fn category(&self) -> EquationCategory {
+            EquationCategory::UserDefined
+        }
+
+        fn param_names(&self) -> &[String] {
+            &self.params
+        }
+
+        fn eval(&self, x: &[f64], params: &[f64], _data_set_index: usize) -> Option<f64> {
+            let a = params[0];
+            if (a - 2.0).abs() >= 1e-4 {
+                return None;
+            }
+            Some(a * a * x[0])
+        }
+
+        fn grad(&self, x: &[f64], params: &[f64], _data_set_index: usize, out: &mut [f64]) -> bool {
+            out[0] = 2.0 * params[0] * x[0];
+            true
+        }
+
+        fn initial_guess(&self, _points: &[DataPoint]) -> Vec<f64> {
+            vec![2.0]
+        }
+    }
+
+    #[test]
+    fn r19_6_compute_hougaard_skewness_returns_nan_on_uncomputed_and_exact_signed_g1() {
+        // Analytical oracle for f(x; theta) = theta^2 * x with unit weights:
+        //   f' = 2*theta*x, f'' = 2*x, J^T J = 4*theta^2*S2, L = 1/(4*theta^2*S2),
+        //   W_000 = 4*theta*S2  =>  g1 = -sigma * L^{3/2} * (3 * W_000) = -1.5 * sigma * sgn(theta) / (theta^2 * sqrt(S2)).
+        let xs = [1.0_f64, 2.0, 3.0];
+        let s2: f64 = xs.iter().map(|x| x * x).sum();
+        let sqrt_w = [1.0_f64; 3];
+
+        for (theta_val, sigma, expected_sign) in [(1.0_f64, 4.0_f64, -1.0_f64), (-1.0_f64, 4.0_f64, 1.0_f64)] {
+            let j_mat = DenseMatrix::from_row_major(3, 1, xs.iter().map(|&x| 2.0 * theta_val * x).collect()).unwrap();
+            let cov_u = DenseMatrix::from_row_major(1, 1, vec![1.0 / (4.0 * theta_val * theta_val * s2)]).unwrap();
+            let g1 =
+                compute_hougaard_skewness(&[theta_val], &sqrt_w, &j_mat, &cov_u, sigma, |th| Some(xs.iter().map(|&x| th[0] * th[0] * x).collect()));
+            let expected = -1.5 * sigma * theta_val.signum() / (theta_val * theta_val * s2.sqrt());
+            assert_eq!(g1.len(), 1);
+            assert!(g1[0] * expected_sign > 0.0, "expected sign {expected_sign}, got {}", g1[0]);
+            assert_approx_eq(g1[0], expected, 1e-8, 1e-8, "closed-form signed Hougaard g1");
+        }
+
+        let j_ok = DenseMatrix::from_row_major(3, 1, vec![2.0, 4.0, 6.0]).unwrap();
+        let cov_ok = DenseMatrix::from_row_major(1, 1, vec![1.0 / (4.0 * s2)]).unwrap();
+        let eval_ok = |th: &[f64]| Some(xs.iter().map(|&x| th[0] * th[0] * x).collect());
+
+        for bad_sigma in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+            let out = compute_hougaard_skewness(&[1.0], &sqrt_w, &j_ok, &cov_ok, bad_sigma, eval_ok);
+            assert_eq!(out.len(), 1);
+            assert!(out[0].is_nan(), "bad sigma {bad_sigma} must yield NaN, got {}", out[0]);
+        }
+
+        let fail_init = compute_hougaard_skewness(&[1.0], &sqrt_w, &j_ok, &cov_ok, 1.0, |_| None);
+        assert!(fail_init[0].is_nan(), "initial eval failure must yield NaN, got {}", fail_init[0]);
+
+        let fail_perturb = compute_hougaard_skewness(&[1.0], &sqrt_w, &j_ok, &cov_ok, 1.0, |th| {
+            if (th[0] - 1.0).abs() < 1e-12 { Some(xs.iter().map(|&x| th[0] * th[0] * x).collect()) } else { None }
+        });
+        assert!(fail_perturb[0].is_nan(), "perturbation eval failure must yield NaN, got {}", fail_perturb[0]);
+
+        let non_finite_eval = compute_hougaard_skewness(&[1.0], &sqrt_w, &j_ok, &cov_ok, 1.0, |_| Some(vec![1.0, f64::NAN, 3.0]));
+        assert!(non_finite_eval[0].is_nan(), "non-finite model eval must yield NaN, got {}", non_finite_eval[0]);
+
+        let j_two = DenseMatrix::from_row_major(3, 2, vec![2.0, 1.0, 4.0, 1.0, 6.0, 1.0]).unwrap();
+        for bad_diag in [0.0, -0.5, f64::NAN] {
+            let cov_mixed = DenseMatrix::from_row_major(2, 2, vec![0.25, 0.0, 0.0, bad_diag]).unwrap();
+            let out = compute_hougaard_skewness(&[1.0, 2.0], &sqrt_w, &j_two, &cov_mixed, 1.0, |th| {
+                Some(xs.iter().map(|&x| th[0] * th[0] * x + th[1]).collect())
+            });
+            assert_eq!(out.len(), 2);
+            assert!(out[0].is_finite(), "valid slot 0 should remain finite for bad slot-1 diag {bad_diag}, got {}", out[0]);
+            assert!(out[1].is_nan(), "non-positive/NaN covariance diagonal {bad_diag} must yield NaN, got {}", out[1]);
+        }
+    }
+
+    fn assert_all_hougaard_nan(fit: &curvebook_fit::NonlinearFitResult, ctx: &str) {
+        assert!(!fit.parameters.is_empty(), "{ctx}: expected at least one free parameter");
+        for p in &fit.parameters {
+            assert!(p.hougaard_g1.is_nan(), "{ctx}: expected NaN hougaard_g1 for {}, got {}", p.name, p.hougaard_g1);
+            assert!(p.hougaard_g1_option().is_none(), "{ctx}: expected None hougaard_g1_option for {}", p.name);
+        }
+    }
+
+    fn assert_all_hougaard_empty(res: &curvebook_doc::ResultSheet, ctx: &str) {
+        let ptab = find_tab(res, "nonlinear_parameters");
+        assert!(!ptab.rows.is_empty(), "{ctx}: expected parameter rows");
+        let hc = hougaard_col_index(ptab);
+        for (lbl, row) in ptab.row_labels.iter().zip(&ptab.rows) {
+            assert_eq!(row[hc], ResultCell::Empty, "{ctx}: row `{lbl}` must emit Empty Hougaard cell, got {:?}", row[hc]);
+        }
+    }
+
+    #[test]
+    fn r19_6_disabled_plot_only_df_zero_and_ambiguous_emit_nan_and_empty_never_zero() {
+        let line = get_builtin_model("straight_line").unwrap();
+
+        let ds_line = series_xy(0, "Line", &[0.0, 1.0, 2.0, 3.0, 4.0], &[1.1, 2.9, 5.2, 6.8, 9.1]);
+        let fit_disabled = fit_with(line.as_ref(), std::slice::from_ref(&ds_line), &cfg_fast());
+        assert_eq!(fit_disabled.status, FitStatus::Converged);
+        assert_all_hougaard_nan(&fit_disabled, "compute_hougaard=false");
+
+        let fit_plot_only = fit_with(
+            line.as_ref(),
+            std::slice::from_ref(&ds_line),
+            &SolverConfig { plot_function_only: true, compute_hougaard: true, ..SolverConfig::default() },
+        );
+        assert_all_hougaard_nan(&fit_plot_only, "plot_function_only");
+        let sheet_line = xy_sheet_single("xy-plot-only", "Plot Only", "A", &[0.0, 1.0, 2.0, 3.0, 4.0], &[1.1, 2.9, 5.2, 6.8, 9.1]);
+        let mut nl_plot_only = nl_fast("straight_line");
+        nl_plot_only.plot_function_only = true;
+        assert_all_hougaard_empty(&exec_nl(&sheet_line, nl_plot_only), "plot_function_only");
+
+        let ds_df0 = series_xy(0, "TwoPts", &[0.0, 1.0], &[1.0, 3.0]);
+        let fit_df0 = fit_with(
+            line.as_ref(),
+            std::slice::from_ref(&ds_df0),
+            &SolverConfig { compute_hougaard: true, compute_profile_ci: false, ..SolverConfig::default() },
+        );
+        assert_eq!(fit_df0.df, 0);
+        assert_all_hougaard_nan(&fit_df0, "df == 0");
+        let sheet_df0 = xy_sheet_single("xy-df0", "DF Zero", "A", &[0.0, 1.0], &[1.0, 3.0]);
+        assert_all_hougaard_empty(&exec_nl(&sheet_df0, nl_fast("straight_line")), "df == 0");
+
+        let xs_amb: Vec<f64> = (0..12).map(f64::from).collect();
+        let noise = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
+        let ys_amb: Vec<f64> = xs_amb.iter().zip(noise).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
+        let ds_amb = series_xy(0, "Amb", &xs_amb, &ys_amb);
+        let dead_dsl = "Y = A*X + B + C*0\n# Inits: A=2.0, B=1.0, C=1.0";
+        let dead_model = dsl_compile(dead_dsl);
+        let fit_amb = fit_with(
+            &dead_model,
+            std::slice::from_ref(&ds_amb),
+            &SolverConfig {
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                identifiability_mode: Some(IdentifiabilityMode::IdentifyAmbiguousFits),
+                ..SolverConfig::default()
+            },
+        );
+        assert!(fit_amb.covariance.ambiguous, "dead-parameter fit must be ambiguous");
+        assert_all_hougaard_nan(&fit_amb, "cov.ambiguous");
+        let sheet_amb = xy_sheet_single("xy-amb", "Ambiguous", "A", &xs_amb, &ys_amb);
+        for (mode, profile_ci) in [
+            (Some(IdentifiabilityMode::IdentifyAmbiguousFits), false),
+            (Some(IdentifiabilityMode::IdentifyUnstableParameters), false),
+            (Some(IdentifiabilityMode::IdentifyUnstableParameters), true),
+        ] {
+            let mut nl_amb = NonlinearFitSpec::new("dead_param");
+            nl_amb.custom_dsl = Some(dead_dsl.to_owned());
+            nl_amb.identifiability_mode = mode;
+            nl_amb.profile_likelihood_ci = profile_ci;
+            assert_all_hougaard_empty(&exec_nl(&sheet_amb, nl_amb), &format!("ambiguous ({mode:?}, profile={profile_ci})"));
+        }
+    }
+
+    #[test]
+    fn r19_6_global_k_gt_10_and_eval_failure_emit_nan_and_empty_never_zero() {
+        let line = get_builtin_model("straight_line").unwrap();
+
+        let xs_g = [0.0_f64, 1.0, 2.0, 3.0];
+        let n_ds = 10_usize;
+        let mut series_g = Vec::with_capacity(n_ds);
+        let mut col_names = Vec::with_capacity(n_ds);
+        let mut col_ys = Vec::with_capacity(n_ds);
+        for d in 0..n_ds {
+            let intercept = 1.0 + (d as f64) * 2.0;
+            let ys: Vec<f64> =
+                xs_g.iter().enumerate().map(|(i, &x)| intercept + 3.0 * x + if (i + d).is_multiple_of(2) { 0.15 } else { -0.15 }).collect();
+            let name = format!("DS{}", d + 1);
+            series_g.push(series_xy(d, &name, &xs_g, &ys));
+            col_names.push(name);
+            col_ys.push(ys);
+        }
+        let fit_global_11 = fit_with(
+            line.as_ref(),
+            &series_g,
+            &SolverConfig {
+                parameter_rules: vec![rule_shared("Slope")],
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                compute_bands: false,
+                ..SolverConfig::default()
+            },
+        );
+        assert_eq!(fit_global_11.status, FitStatus::Converged);
+        assert_eq!(fit_global_11.k_free, 11);
+        assert!(fit_global_11.df > 0 && !fit_global_11.covariance.ambiguous);
+        assert_all_hougaard_nan(&fit_global_11, "k_free > 10 global fit");
+
+        let cols_ref: Vec<(&str, &[f64])> = col_names.iter().zip(&col_ys).map(|(n, y)| (n.as_str(), y.as_slice())).collect();
+        let sheet_g11 = xy_sheet("xy-g11", "Global 11 Params", &xs_g, &cols_ref);
+        let mut nl_g11 = nl_fast("straight_line");
+        nl_g11.parameter_rules = vec![rule_shared("Slope")];
+        let res_g11 = exec_nl(&sheet_g11, nl_g11);
+        assert_eq!(find_tab(&res_g11, "nonlinear_parameters").rows.len(), 11);
+        assert_all_hougaard_empty(&res_g11, "k_free > 10 global fit");
+
+        let ds_pf = series_xy(0, "PF", &[1.0, 2.0, 3.0, 4.0], &[5.0, 7.0, 11.0, 17.0]);
+        let pf_model = PerturbFailModel::new();
+        let fit_pf = fit_nonlinear(
+            &pf_model,
+            &[ds_pf],
+            &HookContext::default(),
+            &SolverConfig {
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                compute_bands: false,
+                use_simplex_warm_start: false,
+                ..SolverConfig::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(fit_pf.status, FitStatus::Converged);
+        assert!(fit_pf.df > 0 && !fit_pf.covariance.ambiguous);
+        assert_all_hougaard_nan(&fit_pf, "perturbation eval failure");
+    }
+
+    #[test]
+    fn r19_6_negative_signed_g1_preserved_in_summary_and_rendered_as_abs_in_table_and_checklist() {
+        let xs = [1.0_f64, 2.0, 3.0, 4.0];
+        let errs = [4.0_f64, -5.0, -2.0, 3.0];
+        let ys: Vec<f64> = xs.iter().zip(errs).map(|(&x, e)| x + e).collect();
+        let dsl_pos = "Y = Theta * Theta * X\n# Inits: Theta=1.0";
+        let model_pos = dsl_compile(dsl_pos);
+
+        let ds = series_xy(0, "QuadParam", &xs, &ys);
+        let fit = fit_with(
+            &model_pos,
+            std::slice::from_ref(&ds),
+            &SolverConfig {
+                method: FitMethod::LeastSquares,
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                compute_bands: false,
+                ..SolverConfig::default()
+            },
+        );
+        assert_eq!(fit.status, FitStatus::Converged);
+        assert_eq!(fit.df, 3);
+        let p_theta = find_param(&fit, "Theta");
+        let expected_g1 = -1.5 * (18.0_f64 / 30.0).sqrt();
+        assert!(p_theta.estimate > 0.0, "expected positive Theta optimum, got {}", p_theta.estimate);
+        assert!(p_theta.hougaard_g1.is_finite() && p_theta.hougaard_g1 < -1.0, "expected signed g1 < -1.0, got {}", p_theta.hougaard_g1);
+        assert_approx_eq(p_theta.hougaard_g1, expected_g1, 1e-6, 1e-6, "signed g1 on FittedParameterSummary");
+        assert_eq!(p_theta.hougaard_g1_option(), Some(p_theta.hougaard_g1));
+
+        let sheet = xy_sheet_single("xy-neg-g1", "Negative g1", "QuadParam", &xs, &ys);
+        for (profile_ci, expected_cols) in [(false, 5_usize), (true, 4_usize)] {
+            let mut nl = NonlinearFitSpec::new("quad_param_neg_g1");
+            nl.custom_dsl = Some(dsl_pos.to_owned());
+            nl.profile_likelihood_ci = profile_ci;
+            let res = exec_nl(&sheet, nl);
+            assert_eq!(res.status, ResultStatus::UpToDate);
+            let ptab = find_tab(&res, "nonlinear_parameters");
+            assert_eq!(ptab.column_headers.len(), expected_cols);
+            let hc = hougaard_col_index(ptab);
+            let row = tab_row(&res, "nonlinear_parameters", "Theta");
+            let cell_val = cell_num(&row[hc]);
+            assert!(cell_val > 1.0, "table cell under `Hougaard |g1|` must be positive |g1|, got {cell_val}");
+            assert_approx_eq(cell_val, p_theta.hougaard_g1.abs(), 1e-6, 1e-6, "table cell matches |g1|");
+
+            let chk = res
+                .checklist
+                .iter()
+                .find(|c| c.assumption == "Hougaard's skewness (nonlinearity)")
+                .expect("expected Hougaard checklist warning when |g1| > 1");
+            assert_eq!(chk.status, ChecklistStatus::Warn);
+            assert_eq!(chk.diagnostic_metric.as_deref(), Some(format!("max |g1| = {:.3}", p_theta.hougaard_g1.abs()).as_str()));
+        }
+
+        let neg_rule = rule_local_bounds("Theta", Some(-1.0), None, Some(-0.1));
+        let fit_pos_g1 = fit_with(
+            &model_pos,
+            std::slice::from_ref(&ds),
+            &SolverConfig {
+                parameter_rules: vec![neg_rule.clone()],
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                compute_bands: false,
+                ..SolverConfig::default()
+            },
+        );
+        let p_neg = find_param(&fit_pos_g1, "Theta");
+        assert!(p_neg.estimate < 0.0 && p_neg.hougaard_g1 > 1.0, "expected positive g1 > 1, got {}", p_neg.hougaard_g1);
+        assert_approx_eq(p_neg.hougaard_g1, -expected_g1, 1e-6, 1e-6, "positive signed g1");
+        let mut nl_pos_g1 = nl_fast("quad_param_pos_g1");
+        nl_pos_g1.custom_dsl = Some(dsl_pos.to_owned());
+        nl_pos_g1.parameter_rules = vec![neg_rule];
+        let res_pos_g1 = exec_nl(&sheet, nl_pos_g1);
+        let ptab_pos = find_tab(&res_pos_g1, "nonlinear_parameters");
+        let cell_pos = cell_num(&tab_row(&res_pos_g1, "nonlinear_parameters", "Theta")[hougaard_col_index(ptab_pos)]);
+        assert_approx_eq(cell_pos, p_neg.hougaard_g1.abs(), 1e-6, 1e-6, "positive g1 table cell matches |g1|");
+
+        let xs_u: Vec<f64> = (0..12).map(f64::from).collect();
+        let noise_u = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
+        let ys_u: Vec<f64> = xs_u.iter().zip(noise_u).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
+        let dsl_u = "Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0";
+        let fit_u = fit_with(
+            &dsl_compile(dsl_u),
+            &[series_xy(0, "Col", &xs_u, &ys_u)],
+            &SolverConfig {
+                identifiability_mode: Some(IdentifiabilityMode::IdentifyUnstableParameters),
+                compute_hougaard: true,
+                compute_profile_ci: false,
+                ..SolverConfig::default()
+            },
+        );
+        let p_c = find_param(&fit_u, "C");
+        assert!(p_c.notes.contains(&ParameterNote::Unstable));
+        assert!(p_c.hougaard_g1.is_nan());
+        assert!(p_c.hougaard_g1_option().is_none());
+    }
+}

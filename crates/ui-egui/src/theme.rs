@@ -79,7 +79,7 @@ pub struct DerivedUiPalette {
     pub text_muted: Rgba8,
     pub text_disabled: Rgba8,
     pub icon: Rgba8,
-    /// Foreground accent color for labels, selected borders, focus/active indicators, and icons on `surface_bg`/`panel_bg`.
+    /// Accent color for clickable links ([`Self::text_link`]), selected borders, focus/active indicators, and active icons on `surface_bg`/`panel_bg`.
     pub accent: Rgba8,
     /// Solid primary CTA fill color reserved strictly for fills behind [`Self::on_accent`] (never dark-surface foreground text/borders).
     pub accent_strong: Rgba8,
@@ -90,13 +90,18 @@ pub struct DerivedUiPalette {
     pub error: Rgba8,
     pub warning: Rgba8,
     pub stale: Rgba8,
+    /// Neutral foreground color for numeric variable role badges (`blue` is reserved strictly for links).
     pub role_num: Rgba8,
     pub role_cat: Rgba8,
     pub role_lbl: Rgba8,
     pub role_fx: Rgba8,
+    /// Structural border/dot accent for linked data regions (never used as foreground text).
     pub link_blue: Rgba8,
+    /// Clickable text link color (strictly reserved for interactive link controls).
+    pub text_link: Rgba8,
     pub link_green: Rgba8,
     pub link_red: Rgba8,
+    /// Neutral muted slate foreground color for excluded table cells.
     pub excluded_cell_text: Rgba8,
 }
 
@@ -170,14 +175,15 @@ impl DerivedUiPalette {
                     error,
                     warning,
                     stale,
-                    role_num: accent,
+                    role_num: n[0],
                     role_cat: Oklch::new(0.48, 0.135, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
                     role_lbl: n[4],
                     role_fx: link_green,
                     link_blue: accent,
+                    text_link: accent,
                     link_green,
                     link_red: error,
-                    excluded_cell_text: accent,
+                    excluded_cell_text: n[4],
                 }
             }
             UiThemeMode::Dark => {
@@ -236,14 +242,15 @@ impl DerivedUiPalette {
                     error,
                     warning,
                     stale,
-                    role_num: accent,
+                    role_num: n[16],
                     role_cat: Oklch::new(0.77, 0.135, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
                     role_lbl: n[12],
                     role_fx: link_green,
                     link_blue: accent,
+                    text_link: accent,
                     link_green,
                     link_red: error,
-                    excluded_cell_text: Oklch::new(0.81, ac * 0.78, ah).to_rgba8_gamut_mapped(),
+                    excluded_cell_text: n[13],
                 }
             }
             UiThemeMode::HighContrast => {
@@ -298,14 +305,15 @@ impl DerivedUiPalette {
                     error,
                     warning,
                     stale,
-                    role_num: accent,
+                    role_num: Rgba8::WHITE,
                     role_cat: Oklch::new(0.85, 0.125, seeds.role_cat_hue_deg).to_rgba8_gamut_mapped(),
                     role_lbl: n[14],
                     role_fx: link_green,
                     link_blue: accent,
+                    text_link: accent,
                     link_green,
                     link_red: error,
-                    excluded_cell_text: Oklch::new(0.88, ac * 0.70, ah).to_rgba8_gamut_mapped(),
+                    excluded_cell_text: n[14],
                 }
             }
         }
@@ -368,12 +376,15 @@ pub struct UiThemeSpec {
     pub surface_bg: Rgba8,
     pub text_primary: Rgba8,
     pub text_muted: Rgba8,
+    /// Accent color for clickable text links, selected borders, focus/active indicators, and icons (never non-link text).
     pub accent: Rgba8,
     /// Crisp publication figure canvas background (kept white by default across all UI themes).
     pub paper_white: Rgba8,
     /// Subtle structural border meeting WCAG 2.2 AA UI boundary contrast (`>= 3.0:1`).
     pub border: Rgba8,
+    /// Neutral muted slate foreground color for excluded grid cells.
     pub excluded_cell_text: Rgba8,
+    /// Structural border/dot color for linked data regions (never rendered as foreground text).
     pub link_blue: Rgba8,
     pub link_green: Rgba8,
     pub link_red: Rgba8,
@@ -460,15 +471,26 @@ impl UiThemeSpec {
     /// (`>= 4.5:1`) on both [`Self::surface`] and [`Self::bg`].
     #[must_use]
     pub fn meets_wcag_aa(&self) -> bool {
-        [self.text_primary, self.text_muted, self.accent, self.error, self.warning, self.stale, self.link_blue, self.link_green, self.link_red]
-            .into_iter()
-            .all(|fg| fg.meets_wcag_aa(self.surface) && fg.meets_wcag_aa(self.bg))
+        [
+            self.text_primary,
+            self.text_muted,
+            self.excluded_cell_text,
+            self.accent,
+            self.error,
+            self.warning,
+            self.stale,
+            self.link_blue,
+            self.link_green,
+            self.link_red,
+        ]
+        .into_iter()
+        .all(|fg| fg.meets_wcag_aa(self.surface) && fg.meets_wcag_aa(self.bg))
     }
 
     /// Whether primary text, muted text, accent, and semantic status colors meet WCAG 2.2 AAA (`>= 7.0:1`).
     #[must_use]
     pub fn meets_wcag_aaa(&self) -> bool {
-        [self.text_primary, self.text_muted, self.accent, self.error, self.warning, self.stale]
+        [self.text_primary, self.text_muted, self.excluded_cell_text, self.accent, self.error, self.warning, self.stale]
             .into_iter()
             .all(|fg| fg.meets_wcag_aaa(self.surface) && fg.meets_wcag_aaa(self.bg))
     }
@@ -885,10 +907,29 @@ mod tests {
     fn derived_palette_keeps_chrome_neutral_and_accent_distinct_from_okabe_ito_series() {
         for mode in UiThemeMode::ALL {
             let p = super::DerivedUiPalette::for_mode(mode);
-            for neutral in [p.panel_bg, p.surface_recessed, p.surface_bg, p.app_bar, p.header_bg, p.divider, p.border, p.selection_unemphasized_bg] {
-                assert!(neutral.to_oklch().c <= 0.02, "{mode:?} chrome neutral {neutral:?} exceeded low-chroma cap");
+            for neutral in [
+                p.panel_bg,
+                p.surface_recessed,
+                p.surface_bg,
+                p.app_bar,
+                p.header_bg,
+                p.divider,
+                p.border,
+                p.selection_unemphasized_bg,
+                p.excluded_cell_text,
+                p.role_num,
+            ] {
+                assert!(neutral.to_oklch().c <= 0.02, "{mode:?} neutral {neutral:?} exceeded low-chroma cap");
             }
+            assert_eq!(p.text_link, p.accent, "{mode:?} text_link must match accent");
+            assert!(p.excluded_cell_text.meets_wcag_aa(p.surface_bg), "{mode:?} excluded_cell_text AA surface_bg");
+            assert!(p.excluded_cell_text.meets_wcag_aa(p.panel_bg), "{mode:?} excluded_cell_text AA panel_bg");
+            assert!(p.excluded_cell_text.meets_wcag_aa(p.active_bg), "{mode:?} excluded_cell_text AA active_bg");
+            assert!(p.role_num.meets_wcag_aa(p.surface_recessed), "{mode:?} role_num AA surface_recessed");
         }
+        let hc_p = super::DerivedUiPalette::for_mode(UiThemeMode::HighContrast);
+        assert!(hc_p.excluded_cell_text.meets_wcag_aaa(hc_p.surface_bg), "HighContrast excluded_cell_text AAA surface_bg");
+        assert!(hc_p.excluded_cell_text.meets_wcag_aaa(hc_p.panel_bg), "HighContrast excluded_cell_text AAA panel_bg");
         let dark = super::DerivedUiPalette::for_mode(UiThemeMode::Dark);
         assert!(
             dark.surface_recessed.to_oklab().l < dark.panel_bg.to_oklab().l && dark.panel_bg.to_oklab().l < dark.surface_bg.to_oklab().l,

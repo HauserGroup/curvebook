@@ -55,8 +55,9 @@ fn audit_51_runs_test_per_dataset_no_interleaving() {
     let sheet = xy_sheet("xy-51", "XY Runs", &xs, &[("CurveA", &ys_a), ("CurveB", &ys_b)]);
     let rs = exec_nl(&sheet, NonlinearFitSpec::new("straight_line"));
     let gof = find_tab(&rs, "nonlinear_gof");
-    assert!(gof.row_labels.contains(&"Runs test (CurveA) P value".to_owned()));
-    assert!(gof.row_labels.contains(&"Runs test (CurveB) P value".to_owned()));
+    assert_eq!(gof.column_headers, vec!["CurveA", "CurveB"]);
+    let runs_row_idx = gof.row_labels.iter().position(|l| l == "Runs test P value").expect("per-dataset Runs test P value row");
+    assert_eq!(gof.rows[runs_row_idx].len(), 2);
     let runs_checks: Vec<_> = rs.checklist.iter().filter(|c| c.assumption.starts_with("Runs test")).collect();
     assert_eq!(runs_checks.len(), 3);
     assert!(runs_checks.iter().all(|c| c.status == ChecklistStatus::Warn));
@@ -432,7 +433,9 @@ fn audit_121_issue_11_nearly_flat_3pl_open_upper_logec50_and_top() {
     }
 
     let sheet_11 = xy_sheet_replicates("xy-121", "Issue 11", &xs, &[("DataSetA", &reps_a), ("DataSetB", &reps_b)]);
-    let rs_11 = exec_nl(&sheet_11, NonlinearFitSpec::new("log_agonist_vs_response_3pl"));
+    let mut nl_11 = NonlinearFitSpec::new("log_agonist_vs_response_3pl");
+    nl_11.identifiability_mode = Some(curvebook_doc::IdentifiabilityMode::IdentifyAmbiguousFits);
+    let rs_11 = exec_nl(&sheet_11, nl_11);
     let ptab = find_tab(&rs_11, "nonlinear_parameters");
     let ci_col = ptab.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
     for needle in ["LogEC50", "Top"] {
@@ -647,4 +650,265 @@ fn ext_01_raw_x_scale_detection_and_nonlinear_checklist_warning() {
         nl_fast("log_agonist_vs_response_4pl"),
     );
     assert!(res_log.checklist.iter().all(|c| !c.assumption.contains("X-axis scale")));
+}
+
+mod fit_report_clarity_and_null_diag {
+    use curvebook_doc::{AnalysisKind, AnalysisSpec, ChecklistStatus, CiBound, IdentifiabilityMode, NonlinearFitSpec, ResultCell, ResultStatus};
+    use curvebook_fit::{
+        FitStatus, HookContext, HorizontalLineClassification, compare_nonlinear_analysis_vs_horizontal_line, execute_analysis, get_builtin_model,
+    };
+
+    use crate::common::{cell_num, exec_nl, find_tab, rule_shared, tab_row, xy_sheet, xy_sheet_single};
+
+    #[test]
+    fn r19_7_independent_vs_shared_gof_columns_and_clean_footnote() {
+        let model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+        let xs = [-9.0_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+        let noise_a = [0.4, -0.3, 0.25, -0.2, 0.35, -0.3, 0.2, -0.25, 0.3, -0.2];
+        let noise_b = [-0.3, 0.2, -0.25, 0.3, -0.2, 0.25, -0.3, 0.2, -0.2, 0.3];
+        let ys_a: Vec<f64> = xs.iter().zip(noise_a).map(|(&x, e)| model.eval(&[x], &[5.0, 95.0, -6.5, 1.0], 0).unwrap() + e).collect();
+        let ys_b: Vec<f64> = xs.iter().zip(noise_b).map(|(&x, e)| model.eval(&[x], &[8.0, 82.0, -5.8, 1.1], 1).unwrap() + e).collect();
+        let ys_flat = [10.05, 9.96, 10.02, 9.98, 10.04, 9.95, 10.01, 9.97, 10.03, 9.99];
+
+        let sheet = xy_sheet("xy-gof", "Gof Matrix", &xs, &[("CleanA", &ys_a), ("CleanB", &ys_b), ("FlatVehicle", &ys_flat)]);
+
+        let rs_indep = exec_nl(&sheet, NonlinearFitSpec::new("log_agonist_vs_response_4pl"));
+        let gof = find_tab(&rs_indep, "nonlinear_gof");
+        assert_eq!(gof.column_headers, vec!["CleanA", "CleanB", "FlatVehicle"]);
+        let r2_row = tab_row(&rs_indep, "nonlinear_gof", "R squared");
+        assert_eq!(r2_row.len(), 3);
+        assert!(cell_num(&r2_row[0]) > 0.99, "CleanA R² must stay high, got {:?}", r2_row[0]);
+        assert!(cell_num(&r2_row[1]) > 0.99, "CleanB R² must stay high, got {:?}", r2_row[1]);
+        for lbl in ["Degrees of Freedom", "Sum of Squares (RSS)", "Sy.x", "AICc", "BIC", "Number of points analyzed", "Runs test P value"] {
+            assert_eq!(tab_row(&rs_indep, "nonlinear_gof", lbl).len(), 3, "expected 3 columns for {lbl}");
+        }
+
+        let ptab = find_tab(&rs_indep, "nonlinear_parameters");
+        assert_eq!(ptab.footnotes.len(), 1);
+        let footnote = &ptab.footnotes[0];
+        assert!(footnote.contains("R² = "), "footnote must use Unicode R²: {footnote}");
+        assert!(!footnote.contains("R2 ="), "footnote must not use ASCII R2: {footnote}");
+        assert!(footnote.contains("2 of 3 converged; 1 ambiguous"), "expected convergence summary in footnote: {footnote}");
+
+        let mut nl_shared = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+        nl_shared.parameter_rules = vec![rule_shared("Top"), rule_shared("HillSlope")];
+        let rs_shared = exec_nl(&sheet, nl_shared);
+        let gof_shared = find_tab(&rs_shared, "nonlinear_gof");
+        assert_eq!(gof_shared.column_headers.len(), 1);
+    }
+
+    #[test]
+    fn r19_7_safe_default_unstable_display_preserves_raw_iterate_without_scalar_leak() {
+        let xs = [0.0_f64, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0];
+        let ys: Vec<f64> = xs.iter().map(|&x| 1.0 + 5.0 * (-0.5 * x).exp()).collect();
+        let sheet = xy_sheet_single("xy-col", "Collinear", "Curve", &xs, &ys);
+
+        let dsl = "Y = (A + B) * exp(-K * X) + Base\n# Inits: A=2.0, B=3.0, K=0.5, Base=1.0";
+        let mut nl_default = NonlinearFitSpec::new("custom_collinear");
+        nl_default.custom_dsl = Some(dsl.to_owned());
+        let rs_default = exec_nl(&sheet, nl_default.clone());
+
+        for pname in ["A", "B"] {
+            let row = tab_row(&rs_default, "nonlinear_parameters", &format!("{pname} (Unstable)"));
+            assert_eq!(row[0], ResultCell::Text("Unstable".to_owned()), "{pname} Best-fit must default to Unstable");
+            assert!(rs_default.lookup_scalar(pname, Some(0)).is_none(), "{pname} must never leak into result.scalars (AUD-13-05)");
+        }
+        let row_k = tab_row(&rs_default, "nonlinear_parameters", "K");
+        assert!(matches!(row_k[0], ResultCell::Number { value, prefix: None, .. } if (value - 0.5).abs() < 1e-6));
+        assert!((rs_default.lookup_scalar("K", Some(0)).unwrap() - 0.5).abs() < 1e-6);
+
+        let ptab = find_tab(&rs_default, "nonlinear_parameters");
+        let a_idx = ptab.row_labels.iter().position(|l| l == "A (Unstable)").unwrap();
+        let a_detail = rs_default.cell_detail("nonlinear_parameters", a_idx, 0).expect("raw iterate metadata for unstable A");
+        assert!(a_detail.raw_value.is_some_and(f64::is_finite), "raw iterate must be stored on ResultCellDetail: {a_detail:?}");
+        assert!(a_detail.detail.contains("raw solver iterate ="), "unexpected detail: {}", a_detail.detail);
+
+        let mut nl_amb = nl_default.clone();
+        nl_amb.identifiability_mode = Some(IdentifiabilityMode::IdentifyAmbiguousFits);
+        let rs_amb = exec_nl(&sheet, nl_amb);
+        let a_amb_row = tab_row(&rs_amb, "nonlinear_parameters", "A");
+        assert!(matches!(a_amb_row[0], ResultCell::Number { prefix: Some(ref p), .. } if p == "~"));
+
+        let mut nl_raw = nl_default;
+        nl_raw.identifiability_mode = Some(IdentifiabilityMode::ReportAll);
+        let rs_raw = exec_nl(&sheet, nl_raw);
+        let a_raw_row = tab_row(&rs_raw, "nonlinear_parameters", "A");
+        assert!(matches!(a_raw_row[0], ResultCell::Number { prefix: None, .. }));
+    }
+
+    #[test]
+    fn r19_7_failing_dataset_checklist_and_ext01_preserved() {
+        let model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+        let xs = [0.0_f64, 3.0, 6.0, 9.0, 12.0, 15.0, 18.0, 21.0];
+        let clean_ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let e = if i % 2 == 0 { 0.3 } else { -0.3 };
+                model.eval(&[x], &[5.0, 95.0, 10.5, 0.5], 0).unwrap() + e
+            })
+            .collect();
+        let flat_a = [10.02, 9.98, 10.04, 9.97, 10.01, 9.99, 10.03, 9.96];
+        let flat_b = [20.01, 19.99, 20.03, 19.96, 20.02, 19.98, 20.00, 19.97];
+
+        let sheet = xy_sheet("xy-fail-list", "Panel", &xs, &[("ACTIVE", &clean_ys), ("VEHICLE", &flat_a), ("CLOZAPINE", &flat_b)]);
+        let rs = exec_nl(&sheet, NonlinearFitSpec::new("log_agonist_vs_response_4pl"));
+
+        let amb_item = rs
+            .checklist
+            .iter()
+            .find(|c| c.assumption == "Parameter identifiability (Ambiguous)" && c.status == ChecklistStatus::Violated)
+            .expect("expected consolidated failing-dataset checklist item");
+        assert!(
+            amb_item.explanation.contains("Ambiguous / unbounded fits in 2 of 3 datasets (VEHICLE, CLOZAPINE)"),
+            "unexpected explanation: {}",
+            amb_item.explanation
+        );
+        assert_eq!(amb_item.diagnostic_metric.as_deref(), Some("2 of 3 datasets (VEHICLE, CLOZAPINE)"));
+
+        assert!(
+            rs.checklist.iter().any(|c| c.assumption == "X-axis scale matches log10(X) equation" && c.status == ChecklistStatus::Warn),
+            "EXT-01 RawXScaleWarning must remain intact: {:?}",
+            rs.checklist
+        );
+    }
+
+    #[test]
+    fn r19_7_horizontal_line_null_model_distinguishes_flat_vs_partial_curve() {
+        let model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+        let xs = [-9.0_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5];
+        let clean_ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let noise = if i % 2 == 0 { 0.25 } else { -0.25 };
+                model.eval(&[x], &[5.0, 95.0, -7.2, 1.1], 0).unwrap() + noise
+            })
+            .collect();
+        let flat_ys = [10.05, 9.94, 10.08, 9.92, 10.04, 9.95, 10.02, 9.97];
+        let partial_ys: Vec<f64> = xs
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let noise = if i % 2 == 0 { 0.05 } else { -0.05 };
+                model.eval(&[x], &[5.0, 200.0, -4.0, 1.0], 2).unwrap() + noise
+            })
+            .collect();
+
+        let sheet =
+            xy_sheet("xy-horiz", "Flat vs Partial", &xs, &[("CleanCurve", &clean_ys), ("FlatVehicle", &flat_ys), ("PartialCurve", &partial_ys)]);
+        let spec =
+            AnalysisSpec::new("fit-horiz", "xy-horiz", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl")))
+                .unwrap();
+        let report = compare_nonlinear_analysis_vs_horizontal_line(&spec, &sheet, &HookContext::default()).unwrap();
+
+        assert_eq!(report.per_dataset.len(), 3);
+        let flat_diag = report.per_dataset.iter().find(|d| d.label == "FlatVehicle").unwrap();
+        assert_eq!(flat_diag.classification, HorizontalLineClassification::NotDistinguishableFromHorizontalLine, "{flat_diag:?}");
+        assert!(flat_diag.summary.starts_with("Not distinguishable from horizontal line (P = "), "{}", flat_diag.summary);
+        assert!(flat_diag.p_value.is_some_and(|p| p >= 0.05));
+
+        let partial_diag = report.per_dataset.iter().find(|d| d.label == "PartialCurve").unwrap();
+        assert_eq!(partial_diag.classification, HorizontalLineClassification::IncompleteOrUnboundedCurve, "{partial_diag:?}");
+        assert!(partial_diag.summary.starts_with("Incomplete / unbounded curve (plateau or EC50 outside tested range"), "{}", partial_diag.summary);
+        assert!(partial_diag.p_value.is_some_and(|p| p < 0.05));
+    }
+
+    #[test]
+    fn r20_10_ci_bound_unavailable_for_df0_and_singular_vs_open_profile() {
+        let sheet_df0 = xy_sheet_single("xy-df0-ci", "DF0", "Obs", &[1.0, 2.0], &[3.0, 5.0]);
+        let mut nl_df0 = NonlinearFitSpec::new("straight_line");
+        nl_df0.profile_likelihood_ci = false;
+        let rs_df0 = exec_nl(&sheet_df0, nl_df0);
+        let ptab_df0 = find_tab(&rs_df0, "nonlinear_parameters");
+        let ci_col = ptab_df0.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
+        for row in &ptab_df0.rows {
+            assert_eq!(
+                row[ci_col],
+                ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable },
+                "DF=0 fit must emit CiBound::Unavailable: {row:?}"
+            );
+        }
+
+        let xs_amb: Vec<f64> = (0..8).map(f64::from).collect();
+        let ys_amb: Vec<f64> = xs_amb.iter().map(|&x| 1.0 + 2.0 * x).collect();
+        let sheet_sing = xy_sheet_single("xy-sing-ci", "Sing", "Obs", &xs_amb, &ys_amb);
+        for (profile_ci, mode) in [
+            (false, IdentifiabilityMode::IdentifyAmbiguousFits),
+            (true, IdentifiabilityMode::IdentifyAmbiguousFits),
+            (true, IdentifiabilityMode::ReportAll),
+        ] {
+            let mut nl_sing = NonlinearFitSpec::new("dead_sing");
+            nl_sing.custom_dsl = Some("Y = A*X + B + C*0\n# Inits: A=2.0, B=1.0, C=1.0".to_owned());
+            nl_sing.profile_likelihood_ci = profile_ci;
+            nl_sing.identifiability_mode = Some(mode);
+            let rs_sing = exec_nl(&sheet_sing, nl_sing);
+            let ptab_sing = find_tab(&rs_sing, "nonlinear_parameters");
+            let ci_col_s = ptab_sing.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
+            let c_row = tab_row(&rs_sing, "nonlinear_parameters", "C");
+            assert_eq!(
+                c_row[ci_col_s],
+                ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable },
+                "singular dead C with profile_ci={profile_ci}, mode={mode:?} must emit Unavailable CI"
+            );
+        }
+
+        let sheet_mixed = xy_sheet(
+            "xy-mixed-df0",
+            "MixedDF0",
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            &[("10", &[3.0, 5.0, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN]), ("20", &[2.1, 4.0, 6.1, 8.0, 9.9, 12.1, 13.9, 16.0])],
+        );
+        let mut nl_mixed = NonlinearFitSpec::new("straight_line");
+        nl_mixed.summary_parameter = Some("Slope".to_owned());
+        let rs_mixed = exec_nl(&sheet_mixed, nl_mixed);
+        let ptab_mixed = find_tab(&rs_mixed, "nonlinear_parameters");
+        let ci_col_m = ptab_mixed.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
+        let slope_a = tab_row(&rs_mixed, "nonlinear_parameters", "Slope [10]");
+        assert!(matches!(slope_a[0], ResultCell::Number { value, .. } if (value - 2.0).abs() < 1e-6));
+        assert_eq!(slope_a[ci_col_m], ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable });
+        let slope_b = tab_row(&rs_mixed, "nonlinear_parameters", "Slope [20]");
+        assert!(matches!(slope_b[ci_col_m], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
+
+        let sum_mixed = find_tab(&rs_mixed, "nonlinear_parameter_summary");
+        let sum_ci_col = sum_mixed.column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
+        assert_eq!(sum_mixed.rows[0][sum_ci_col], ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable });
+        assert!(matches!(sum_mixed.rows[1][sum_ci_col], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
+
+        let xs_mm = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0];
+        let ys_mm: Vec<f64> = xs_mm.iter().zip([-0.8, 1.2, -1.0, 1.6, -1.2, 1.4, -1.0, 0.6]).map(|(&x, e)| 600.0 * x / (120.0 + x) + e).collect();
+        let sheet_mm = xy_sheet_single("xy-mm-open", "MM", "SubSat", &xs_mm, &ys_mm);
+        let mut nl_mm = NonlinearFitSpec::new("michaelis_menten");
+        nl_mm.profile_likelihood_ci = true;
+        nl_mm.identifiability_mode = Some(IdentifiabilityMode::IdentifyAmbiguousFits);
+        let rs_mm = exec_nl(&sheet_mm, nl_mm);
+        let vmax_row = tab_row(&rs_mm, "nonlinear_parameters", "Vmax");
+        let ci_col_mm = find_tab(&rs_mm, "nonlinear_parameters").column_headers.iter().position(|h| h == "Confidence Interval").unwrap();
+        assert!(
+            matches!(vmax_row[ci_col_mm], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Open }),
+            "expected finite lower and Open upper profile CI for Vmax, got {:?}",
+            vmax_row[ci_col_mm]
+        );
+    }
+
+    #[test]
+    fn r19_7_summary_param_tab_also_masks_unstable_and_retains_raw_detail() {
+        let xs = [0.0_f64, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0];
+        let ys_a: Vec<f64> = xs.iter().map(|&x| 1.0 + 5.0 * (-0.5 * x).exp()).collect();
+        let ys_b: Vec<f64> = xs.iter().map(|&x| 2.0 + 6.0 * (-0.4 * x).exp()).collect();
+        let sheet = xy_sheet("xy-sum", "Summary", &xs, &[("Curve1", &ys_a), ("Curve2", &ys_b)]);
+
+        let mut nl = NonlinearFitSpec::new("custom_sum");
+        nl.custom_dsl = Some("Y = (A + B) * exp(-K * X) + Base\n# Inits: A=2.0, B=3.0, K=0.5, Base=1.0".to_owned());
+        nl.summary_parameter = Some("A".to_owned());
+        let spec = AnalysisSpec::new("fit-sum", "xy-sum", AnalysisKind::NonlinearRegression(nl)).unwrap();
+        let rs = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+
+        assert_eq!(rs.status.clone(), ResultStatus::UpToDate);
+        let sum_tab = find_tab(&rs, "nonlinear_parameter_summary");
+        assert_eq!(sum_tab.rows[0][0], ResultCell::Text("Unstable".to_owned()));
+        assert!(rs.cell_detail("nonlinear_parameter_summary", 0, 0).is_some_and(|d| d.raw_value.is_some()));
+        assert!(rs.lookup_scalar("A", Some(0)).is_none());
+        let _ = FitStatus::Converged;
+    }
 }

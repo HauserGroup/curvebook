@@ -51,7 +51,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     UiCommandSpec {
         id: "ui.navigator.toggle",
         label: "Toggle Project Navigator",
-        shortcut: "Cmd+Shift+N",
+        shortcut: "Cmd+B",
         params_doc: "{}",
         summary: "Show or hide the left Project Navigator sheet tree.",
         beginner: "Opens or closes the left sidebar listing Data, Info, Results, Graphs, and Layouts sheets.",
@@ -69,7 +69,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     UiCommandSpec {
         id: "ui.family.toggle",
         label: "Toggle Family Strip",
-        shortcut: "Cmd+Shift+F",
+        shortcut: "Cmd+Shift+L",
         params_doc: "{}",
         summary: "Show or hide the bottom linked-sheet Family Strip.",
         beginner: "Displays linked data tables, analyses, graphs, and layouts connected to the current sheet.",
@@ -104,8 +104,8 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.editParams.open",
-        label: "Change Analysis Parameters...",
-        shortcut: "Cmd+T",
+        label: "Change Analysis Parameters",
+        shortcut: "Cmd+Shift+P",
         params_doc: "{\"sheet_id\":\"optional ResultSheetId\"}",
         summary: "Open the Change Analysis Parameters dialog for the active or specified result sheet.",
         beginner: "Reopen and edit statistical or curve-fitting parameters for the active result sheet.",
@@ -128,6 +128,24 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         summary: "Open the wizard to clone a sheet and its downstream pipeline.",
         beginner: "Duplicate a data table together with its linked analyses, graphs, and formatting for new data.",
         rank: ActionRank::Overflow,
+    },
+    UiCommandSpec {
+        id: "ui.zoom.in",
+        label: "Zoom In",
+        shortcut: "Cmd+=",
+        params_doc: "{}",
+        summary: "Zoom in on the active graph or layout canvas.",
+        beginner: "Increases canvas zoom magnification around the center of the sheet viewport.",
+        rank: ActionRank::Secondary,
+    },
+    UiCommandSpec {
+        id: "ui.zoom.out",
+        label: "Zoom Out",
+        shortcut: "Cmd+-",
+        params_doc: "{}",
+        summary: "Zoom out on the active graph or layout canvas.",
+        beginner: "Decreases canvas zoom magnification so more of the sheet fits on screen.",
+        rank: ActionRank::Secondary,
     },
     UiCommandSpec {
         id: "ui.zoom.fitSheet",
@@ -252,7 +270,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         shortcut: "",
         params_doc: "{\"result_sheet_id\":\"optional ResultSheetId\"}",
         summary: "Deprecated under diagnostics-only policy; does not create sibling analyses or mutate the project.",
-        beginner: "Diagnostics remain observational only. Inspect Residuals/Diagnostics tabs or press Cmd+T to change test parameters explicitly.",
+        beginner: "Diagnostics remain observational only. Inspect Residuals/Diagnostics tabs or press Cmd+Shift+P to change test parameters explicitly.",
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {
@@ -302,7 +320,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.grid.excludeWithReason",
-        label: "Exclude Selection with Auditable Reason...",
+        label: "Exclude Selection with Auditable Reason",
         shortcut: "Cmd+Shift+E",
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"reason_tag\":\"optional string\",\"note\":\"optional string\"}",
         summary: "Mark selected cells as excluded with a structured reason tag and note.",
@@ -311,10 +329,10 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.table.convertArchetype.open",
-        label: "Convert Table Archetype...",
+        label: "Convert Table Format",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional SheetId\"}",
-        summary: "Open the non-destructive table archetype conversion preview dialog.",
+        summary: "Open the non-destructive table format conversion preview dialog.",
         beginner: "Reshape a table between XY, Column, Grouped, Contingency, or Survival layouts with a live diff preview.",
         rank: ActionRank::Overflow,
     },
@@ -329,7 +347,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.print.open",
-        label: "Print...",
+        label: "Print",
         shortcut: "Cmd+P",
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"copies\":\"optional u16\",\"printer\":\"optional string\",\"spool\":\"optional bool\"}",
         summary: "Open the publication-scale Print Setup dialog for graphs and layouts.",
@@ -338,7 +356,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.powerWizard.open",
-        label: "Power and Sample Size...",
+        label: "Power and Sample Size",
         shortcut: "",
         params_doc: "{\"family\":\"optional PowerTestFamily\"}",
         summary: "Open the interactive 4-stage Power and Sample Size Wizard.",
@@ -347,7 +365,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.formatPoints.open",
-        label: "Format Selected Points...",
+        label: "Format Selected Points",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"points\":\"optional array\"}",
         summary: "Open the Format Selected Points dialog to override symbol shape, color, size, or row labels.",
@@ -356,7 +374,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.table.randomizeGroups",
-        label: "Randomize Subjects to Groups Dialog...",
+        label: "Randomize Subjects to Groups Dialog",
         shortcut: "",
         params_doc: "{\"groups\":\"optional list\",\"subject_count\":\"optional usize\",\"scheme\":\"complete_balanced|permuted_block\",\"seed\":\"optional u64\"}",
         summary: "Open the Randomize Subjects to Groups dialog for complete balanced or permuted-block assignment.",
@@ -365,7 +383,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.table.randomSampleRows",
-        label: "Random Sample Rows Dialog...",
+        label: "Random Sample Rows Dialog",
         shortcut: "",
         params_doc: "{\"source_sheet_id\":\"optional SheetId\",\"sample_size\":\"optional usize\",\"seed\":\"optional u64\",\"stratify_column\":\"optional usize\"}",
         summary: "Open the Random Sample Rows dialog for simple or stratified subsampling without replacement.",
@@ -374,7 +392,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.table.simulateDistributions",
-        label: "Simulate Distributions Dialog...",
+        label: "Simulate Distributions Dialog",
         shortcut: "",
         params_doc: "{\"n_rows\":\"optional usize\",\"seed\":\"optional u64\",\"columns\":\"optional array\"}",
         summary: "Open the Simulate Distributions dialog to generate Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential data.",
@@ -383,7 +401,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.table.openFormulaBar",
-        label: "Open Formula Bar...",
+        label: "Open Formula Bar",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional DataSheetId\",\"column\":\"optional usize or variable title\",\"title\":\"optional string\"}",
         summary: "Focus and open the inline formula bar for a MultipleVariables column to define or inspect a formula-derived calculated variable.",
@@ -401,7 +419,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.axes.open",
-        label: "Format Axes...",
+        label: "Format Axes",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"target_axis\":\"optional X|Y|Y2\"}",
         summary: "Open the Format Axes dialog to configure axis titles, log/linear scales, bounds, broken axis segments, and reference thresholds.",
@@ -410,7 +428,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.insertModelEquation",
-        label: "Insert Fitted Model Equation...",
+        label: "Insert Fitted Model Equation",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\",\"result_sheet_id\":\"optional ResultSheetId\",\"mode\":\"substituted|symbolic\"}",
         summary: "Open the Insert Model Equation dialog to add or toggle a symbolic or substituted regression equation on a graph.",
@@ -419,7 +437,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.bubblePlot.open",
-        label: "Bubble Plot Channels...",
+        label: "Bubble Plot Channels",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open the Bubble Plot 5-channel encoding inspector (X, Y, color, size, label, convex hulls, ellipses).",
@@ -428,7 +446,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.format.open",
-        label: "Format Graph...",
+        label: "Format Graph",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Format Graph controls for palette, frame preset, error bars, violin/raincloud geometry, and equation mode.",
@@ -437,7 +455,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.pairwise.open",
-        label: "Pairwise Comparison Brackets...",
+        label: "Pairwise Comparison Brackets",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Pairwise Comparison Brackets to auto-add and style significance brackets from an upstream result sheet.",
@@ -446,7 +464,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.applyStyleFrom.open",
-        label: "Apply Style From...",
+        label: "Apply Style From",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
         summary: "Open Apply Style From to clone palette, stroke, axis, or legend styling from another graph sheet.",
@@ -455,7 +473,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.layout.composer.open",
-        label: "Page Layout Composer...",
+        label: "Page Layout Composer",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional LayoutSheetId\"}",
         summary: "Open Page Layout Composer for journal width presets, grid slots, origin alignment, and panel badges.",
@@ -464,7 +482,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.export.figure.open",
-        label: "Export Figure...",
+        label: "Export Figure",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional SheetId\",\"format\":\"svg|pdf|png|tiff\"}",
         summary: "Open Export Figure options for SVG, PDF, PNG, or TIFF output resolution and DPI.",
@@ -482,11 +500,11 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "app.feedback",
-        label: "Send Feedback...",
+        label: "Send Feedback",
         shortcut: "",
-        params_doc: "{\"category\":\"optional bug|feature|numerical\"}",
-        summary: "Open the Send Feedback dialog to compose a prefilled GitHub issue or copy a Markdown report.",
-        beginner: "Draft a bug report, feature request, or numerical result report with optional environment diagnostics and open it on GitHub.",
+        params_doc: "{}",
+        summary: "Open CurveBook's GitHub issue template chooser in your default web browser.",
+        beginner: "Opens GitHub in your browser so you can submit a bug report, feature request, or numerical result issue.",
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {
@@ -500,7 +518,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.graph.create.open",
-        label: "New Graph...",
+        label: "New Graph",
         shortcut: "",
         params_doc: "{\"data_sheet_id\":\"optional SheetId\",\"kind\":\"optional GraphKind\",\"one_per_data_set\":\"optional bool\",\"y_axis_title\":\"optional string\"}",
         summary: "Open the Create New Graph dialog to choose source table, graph kind, Y-axis title, or one-graph-per-data-set creation.",
@@ -509,7 +527,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.layout.equalizeScaling.open",
-        label: "Equalize Scaling...",
+        label: "Equalize Scaling",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional LayoutSheetId\",\"mode\":\"optional match_smallest|match_largest|explicit_percent\",\"percent\":\"optional f64\"}",
         summary: "Open the Equalize Scaling dialog to match inner plot scaling across graph panels on a layout.",
@@ -527,7 +545,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.embeddedTable.format.open",
-        label: "Format Embedded Table...",
+        label: "Format Embedded Table",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
         summary: "Open the Format Embedded Table dialog for a pasted ResultSheet or LiveTable annotation.",
@@ -536,7 +554,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.image.format.open",
-        label: "Format Image...",
+        label: "Format Image",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
         summary: "Open the Format Image dialog to edit bounds, aspect lock, rotation, 4-edge crop, and border.",
@@ -554,16 +572,16 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.import.warnings.open",
-        label: "Import Warnings...",
+        label: "Import Warnings",
         shortcut: "",
         params_doc: "{}",
         summary: "Open the Import Warnings panel showing non-fatal warnings from the latest file import.",
-        beginner: "Review skipped parts, notes, or formatting warnings reported when importing a .prism, .pzfx, or .xlsx file.",
+        beginner: "Review skipped parts, notes, or formatting warnings reported when importing .pzfx files, .prism files, or .xlsx workbooks.",
         rank: ActionRank::Overflow,
     },
     UiCommandSpec {
         id: "ui.export.tableCsv.open",
-        label: "CSV Table...",
+        label: "CSV Table",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional DataSheetId\"}",
         summary: "Open CSV Export Options for the active data table (delimiter and decimal separator).",
@@ -572,7 +590,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.export.resultsCsv.open",
-        label: "CSV Results...",
+        label: "CSV Results",
         shortcut: "",
         params_doc: "{\"sheet_id\":\"optional ResultSheetId\"}",
         summary: "Open CSV Export Options for the active result sheet (all tabs tidy or single tab, delimiter, decimal separator).",
@@ -581,7 +599,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "ui.export.allTablesCsv.open",
-        label: "Export All Data Tables...",
+        label: "Export All Data Tables",
         shortcut: "",
         params_doc: "{}",
         summary: "Open CSV Export Options to batch-export every data table in the project to a folder.",

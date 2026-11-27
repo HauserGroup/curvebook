@@ -122,7 +122,7 @@ fn fa_sec16_03_shell_and_leading_dock_shortcuts_honor_registry_rebindings_and_un
     assert!(!matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette));
 
     assert!(!driver.state().views.leading_collapsed_rail);
-    driver.press_egui_key(egui::Key::N, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT);
+    driver.press_egui_key(egui::Key::B, egui::Modifiers::COMMAND);
     assert!(!driver.state().views.leading_collapsed_rail);
     driver.press_egui_key(egui::Key::B, egui::Modifiers::CTRL);
     assert!(driver.state().views.leading_collapsed_rail);

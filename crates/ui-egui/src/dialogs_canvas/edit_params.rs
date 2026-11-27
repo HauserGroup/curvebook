@@ -220,6 +220,13 @@ pub struct EditAnalysisParametersState {
     pub synced_diag_homoscedasticity: Option<bool>,
     #[serde(default)]
     pub synced_diag_influence: Option<bool>,
+    /// `true` when `EditAnalysisParameters` stages an uncommitted first-run analysis (`analysis.run`).
+    #[serde(default)]
+    pub pending_create: bool,
+    /// Optional deferred `(source_result_sheet_id, tab_id)` extraction (`sheet.extractResultTab`)
+    /// executed atomically before `analysis.run` on commit.
+    #[serde(default)]
+    pub pending_extract: Option<(SheetId, String)>,
 }
 
 fn default_schematic_mode() -> String {
@@ -269,6 +276,8 @@ impl Default for EditAnalysisParametersState {
             synced_diag_residuals: None,
             synced_diag_homoscedasticity: None,
             synced_diag_influence: None,
+            pending_create: false,
+            pending_extract: None,
         }
     }
 }
@@ -318,37 +327,59 @@ impl EditAnalysisParametersState {
 
     /// Reset dialog state and open Edit Analysis Parameters for an existing `ResultSheet` (`RV-79`).
     pub fn open_for_result(&mut self, result: &ResultSheet) {
+        self.open_from_spec(result.id.clone(), result.analysis.clone(), false, None);
+    }
+
+    /// Reset dialog state and stage an uncommitted first-run `AnalysisSpec` (`R20.20`).
+    ///
+    /// On `OK`, `commit_intent` emits `analysis.run` rather than `analysis.updateParams`; on `Cancel`,
+    /// closing discards this draft without mutating the project document.
+    pub fn open_for_pending_create(&mut self, spec: AnalysisSpec, pending_extract: Option<(SheetId, String)>) {
+        let id = spec.id.clone();
+        self.open_from_spec(id, spec, true, pending_extract);
+    }
+
+    /// Clear transient draft and pending-create state when dismissing the modal.
+    pub fn clear_session(&mut self) {
         *self = Self::default();
-        self.result_sheet_id = Some(result.id.clone());
-        self.title_was_custom = result.analysis.custom_title.is_some();
-        self.draft = Some(result.analysis.clone());
-        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &result.analysis.kind {
-            self.pca_predictors.clone_from(&result.analysis.selected_data_sets);
+    }
+
+    fn open_from_spec(&mut self, sheet_id: SheetId, spec: AnalysisSpec, pending_create: bool, pending_extract: Option<(SheetId, String)>) {
+        *self = Self::default();
+        self.result_sheet_id = Some(sheet_id);
+        self.title_was_custom = spec.custom_title.is_some();
+        self.pending_create = pending_create;
+        self.pending_extract = pending_extract;
+        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column, .. }) = &spec.kind {
+            self.pca_predictors.clone_from(&spec.selected_data_sets);
             self.pcr_outcome_column = *pcr_outcome_column;
         }
+        self.draft = Some(spec);
         self.sync_rule_flags_from_kind();
-        match &result.analysis.kind {
-            AnalysisKind::Contingency(cg) => {
-                self.contingency_odds_ratio_checked = cg.compute_odds_and_risk_ratios;
-                self.contingency_relative_risk_checked = cg.compute_odds_and_risk_ratios;
-                self.contingency_attributable_risk_checked = cg.compute_odds_and_risk_ratios;
+        if let Some(spec_ref) = &self.draft {
+            match &spec_ref.kind {
+                AnalysisKind::Contingency(cg) => {
+                    self.contingency_odds_ratio_checked = cg.compute_odds_and_risk_ratios;
+                    self.contingency_relative_risk_checked = cg.compute_odds_and_risk_ratios;
+                    self.contingency_attributable_risk_checked = cg.compute_odds_and_risk_ratios;
+                }
+                AnalysisKind::TwoGroupComparison(two) => {
+                    self.hodges_lehmann_ci = matches!(two.method, TwoGroupMethod::MannWhitneyU | TwoGroupMethod::WilcoxonSignedRank);
+                }
+                AnalysisKind::NonlinearRegression(nl) => {
+                    self.diag_qq_plot = nl.normality_of_residuals;
+                    self.diag_residuals_plot = nl.emit_residuals_tab;
+                    self.diag_homoscedasticity = nl.homoscedasticity_test;
+                    self.synced_diag_qq = Some(nl.normality_of_residuals);
+                    self.synced_diag_residuals = Some(nl.emit_residuals_tab);
+                    self.synced_diag_homoscedasticity = Some(nl.homoscedasticity_test);
+                }
+                AnalysisKind::GeneralizedLinearModel(glm) => {
+                    self.diag_influence_leverage = glm.compute_vif;
+                    self.synced_diag_influence = Some(glm.compute_vif);
+                }
+                _ => {}
             }
-            AnalysisKind::TwoGroupComparison(two) => {
-                self.hodges_lehmann_ci = matches!(two.method, TwoGroupMethod::MannWhitneyU | TwoGroupMethod::WilcoxonSignedRank);
-            }
-            AnalysisKind::NonlinearRegression(nl) => {
-                self.diag_qq_plot = nl.normality_of_residuals;
-                self.diag_residuals_plot = nl.emit_residuals_tab;
-                self.diag_homoscedasticity = nl.homoscedasticity_test;
-                self.synced_diag_qq = Some(nl.normality_of_residuals);
-                self.synced_diag_residuals = Some(nl.emit_residuals_tab);
-                self.synced_diag_homoscedasticity = Some(nl.homoscedasticity_test);
-            }
-            AnalysisKind::GeneralizedLinearModel(glm) => {
-                self.diag_influence_leverage = glm.compute_vif;
-                self.synced_diag_influence = Some(glm.compute_vif);
-            }
-            _ => {}
         }
     }
 
@@ -792,13 +823,12 @@ impl EditAnalysisParametersState {
         None
     }
 
-    /// Emit declarative `analysis.updateParams` intent.
+    /// Emit declarative `analysis.updateParams` (existing sheet) or `analysis.run` (pending first-run create).
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         if self.unsupported_contingency_ci_error().is_some() {
             return None;
         }
-        let id = self.result_sheet_id.as_ref()?;
         let spec = self.draft.as_ref()?;
         let mut kind = spec.kind.clone();
         match &mut kind {
@@ -818,6 +848,22 @@ impl EditAnalysisParametersState {
             }
             _ => {}
         }
+        if self.pending_create {
+            let mut payload = json!({
+                "source_sheet_id": spec.source_sheet_id.as_str(),
+                "kind": kind,
+                "confidence_percent": spec.confidence_level.percent(),
+                "selected_data_sets": spec.selected_data_sets,
+                "p_value_format": spec.p_value_format,
+            });
+            if let Some(title) = &spec.custom_title
+                && let Some(map) = payload.as_object_mut()
+            {
+                map.insert(String::from("title"), json!(title));
+            }
+            return Some(ToolCommandIntent::new("analysis.run", payload));
+        }
+        let id = self.result_sheet_id.as_ref()?;
         let mut payload = json!({
             "sheet_id": id.as_str(),
             "kind": kind,
@@ -838,15 +884,17 @@ impl EditAnalysisParametersState {
         Some(ToolCommandIntent::new("analysis.updateParams", payload))
     }
 
-    /// Emit `analysis.updateParams` and, when `correlation_heatmap` is toggled on for a correlation matrix,
-    /// spawn a linked `DiagnosticPlotKind::Heatmap` `GraphSheet` if none already points to `result_sheet_id`.
+    /// Emit `analysis.updateParams` (or `analysis.run` in pending create mode) and, when
+    /// `correlation_heatmap` is toggled on for a correlation matrix, spawn a linked
+    /// `DiagnosticPlotKind::Heatmap` `GraphSheet` if none already points to `result_sheet_id`.
     #[must_use]
     pub fn commit_intents(&self, doc: Option<&ProjectDocument>) -> Vec<ToolCommandIntent> {
         let Some(primary) = self.commit_intent() else {
             return Vec::new();
         };
         let mut intents = vec![primary];
-        if let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
+        if !self.pending_create
+            && let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
             && self.correlation_heatmap
             && self.correlation_all_pairs
             && matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))

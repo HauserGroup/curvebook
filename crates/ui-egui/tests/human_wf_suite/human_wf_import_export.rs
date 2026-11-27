@@ -157,8 +157,8 @@ fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
 
         let reqs = run.recorded_file_dialog_requests();
         ensure(
-            reqs.iter().any(|r| r.command_id == "table.importPzfx" && r.kind == NativeFileDialogKind::OpenFile),
-            format!("R10.30-PZFX: expected OpenFile dialog request for table.importPzfx, got {reqs:?}"),
+            reqs.iter().any(|r| r.command_id == "table.importPzfx" && r.kind == NativeFileDialogKind::OpenFile && r.filter_label == ".pzfx files"),
+            format!("R10.30-PZFX: expected OpenFile dialog request for table.importPzfx with `.pzfx files` filter, got {reqs:?}"),
         )?;
 
         // Cross-check imported tables against a fresh headless Session import of the exact same file.
@@ -231,8 +231,8 @@ fn r10_30_human_pzfx_and_archive_import_warnings_and_live_edit() -> TestRes {
 
         let reqs = run.recorded_file_dialog_requests();
         ensure(
-            reqs.iter().any(|r| r.command_id == "table.importPrism" && r.kind == NativeFileDialogKind::OpenFile),
-            format!("R10.30-ARCHIVE: expected OpenFile dialog request for table.importPrism, got {reqs:?}"),
+            reqs.iter().any(|r| r.command_id == "table.importPrism" && r.kind == NativeFileDialogKind::OpenFile && r.filter_label == ".prism files"),
+            format!("R10.30-ARCHIVE: expected OpenFile dialog request for table.importPrism with `.prism files` filter, got {reqs:?}"),
         )?;
 
         let mut oracle = Session::new();
@@ -793,4 +793,88 @@ fn r10_30_human_anova_exports_and_all_tables_csv() -> TestRes {
     run.live_edit(LiveEditTarget::sheet_grid_cell(anova_table_id, 0, 2, 0, "35.0"), LiveEditExpectation::scalar_changed(res_id, "F", None, 1.0))?;
 
     run.finish()
+}
+
+#[test]
+fn r10_34_human_gui_file_extension_naming() -> TestRes {
+    use curvebook_ui_egui::i18n::{LOCALES, tr};
+
+    // 1. All 16 shipped locales use literal lowercase `.pzfx` / `.prism` and dot-free updated labels.
+    for &loc in LOCALES {
+        for (key, ext) in [
+            ("cmd.table.importPzfx", ".pzfx"),
+            ("cmd.table.importPrism", ".prism"),
+            ("w6.view.shell.filter_xml_project", ".pzfx"),
+            ("w6.view.shell.filter_archive", ".prism"),
+        ] {
+            let txt = tr(loc, key);
+            ensure(txt.contains(ext), format!("R10.34: locale `{loc}` key `{key}` missing `{ext}`: {txt:?}"))?;
+            ensure(
+                !txt.contains("External Archive") && !txt.contains("XML Project"),
+                format!("R10.34: locale `{loc}` key `{key}` kept legacy euphemism: {txt:?}"),
+            )?;
+            ensure(!txt.ends_with("...") && !txt.ends_with('…'), format!("R10.34: locale `{loc}` key `{key}` must be dot-free per R20.15: {txt:?}"))?;
+        }
+        let warn_lbl = tr(loc, "cmd.ui.import.warnings.open");
+        ensure(
+            !warn_lbl.ends_with("...") && !warn_lbl.ends_with('…'),
+            format!("R10.34: locale `{loc}` `cmd.ui.import.warnings.open` must be dot-free: {warn_lbl:?}"),
+        )?;
+        for welcome_key in ["welcome.open.subtitle", "welcome.open.pipeline_label"] {
+            let txt = tr(loc, welcome_key);
+            ensure(
+                txt.contains(".curvebook") && txt.contains(".pzfx") && txt.contains(".prism"),
+                format!("R10.34: locale `{loc}` `{welcome_key}` must mention .curvebook, .pzfx, and .prism: {txt:?}"),
+            )?;
+        }
+    }
+
+    // 2. Live Welcome Hub Open File copy & File > Import menu labels.
+    let dir = temp_dir("r10-34-naming")?;
+    let pzfx_path = dir.path().join("plate.pzfx");
+    let archive_path = dir.path().join("study.prism");
+    fs::write(&pzfx_path, build_pzfx_fixture_bytes()).map_err(|e| e.to_string())?;
+    fs::write(&archive_path, build_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
+
+    let mut run = WorkflowRun::start("R10.34-NAMING");
+    run.click("welcome.action.open_existing")?;
+    for wid in ["welcome.open.subtitle", "welcome.preview.pipeline"] {
+        let lbl = &run.frame_meta().find_by_widget_id(wid).ok_or(wid)?.label;
+        ensure(lbl.contains(".pzfx") && lbl.contains(".prism"), format!("R10.34: {wid} missing .pzfx/.prism: {lbl:?}"))?;
+    }
+
+    let _ = run.create_table_via_welcome("welcome.arch.column", "Base Sheet", &[])?;
+    run.click("menu.file")?;
+    run.hover("menu.file.import")?;
+    let pzfx_menu = run.frame_meta().find_by_widget_id("menu.table.importPzfx").ok_or("missing menu.table.importPzfx")?.label.clone();
+    let archive_menu = run.frame_meta().find_by_widget_id("menu.table.importPrism").ok_or("missing menu.table.importPrism")?.label.clone();
+    let warn_menu = run.frame_meta().find_by_widget_id("menu.ui.import.warnings.open").ok_or("missing menu.ui.import.warnings.open")?.label.clone();
+    ensure(pzfx_menu == "Import .pzfx files", format!("expected `Import .pzfx files`, got {pzfx_menu:?}"))?;
+    ensure(archive_menu == "Import .prism files", format!("expected `Import .prism files`, got {archive_menu:?}"))?;
+    ensure(warn_menu == "Import Warnings", format!("expected `Import Warnings`, got {warn_menu:?}"))?;
+
+    // 3. Replace-or-merge modal title uses format-specific `.pzfx files` / `.prism files` label.
+    run.script_file_dialog_for("table.importPzfx", Some(pzfx_path));
+    run.click("menu.table.importPzfx")?;
+    let dlg_pzfx = run.frame_meta().find_by_widget_id("dialog.import_project_mode").ok_or("missing dialog.import_project_mode")?.label.clone();
+    ensure(dlg_pzfx == "Import .pzfx files", format!("expected ImportProjectMode title `Import .pzfx files`, got {dlg_pzfx:?}"))?;
+    run.click("modal.cancel")?;
+
+    run.script_file_dialog_for("table.importPrism", Some(archive_path));
+    run.open_menu_and_click("menu.file", &["menu.file.import"], "menu.table.importPrism")?;
+    let dlg_archive = run.frame_meta().find_by_widget_id("dialog.import_project_mode").ok_or("missing dialog.import_project_mode")?.label.clone();
+    ensure(dlg_archive == "Import .prism files", format!("expected ImportProjectMode title `Import .prism files`, got {dlg_archive:?}"))?;
+    run.click("modal.cancel")?;
+
+    // 4. Command Palette matches `.pzfx files` and `.prism files` by file extension.
+    run.click("toolbar.command_palette")?;
+    run.replace_textbox("palette.query", ".pzfx")?;
+    let pal_pzfx = run.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing palette.item.0 for .pzfx")?.label.clone();
+    ensure(pal_pzfx.contains("Import .pzfx files"), format!("Command Palette `.pzfx` missing `Import .pzfx files`: {pal_pzfx:?}"))?;
+    run.replace_textbox("palette.query", ".prism")?;
+    let pal_archive = run.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing palette.item.0 for .prism")?.label.clone();
+    ensure(pal_archive.contains("Import .prism files"), format!("Command Palette `.prism` missing `Import .prism files`: {pal_archive:?}"))?;
+    run.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE)?;
+
+    run.assert_shell_health("R10.34-NAMING")
 }

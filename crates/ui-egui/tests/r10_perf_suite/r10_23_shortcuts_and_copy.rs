@@ -127,7 +127,7 @@ fn r10_23_undo_redo_shortcuts_cmd_and_ctrl_human_path() -> TestRes {
 #[test]
 fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> TestRes {
     let mut h = EguiWfHarness::from_app(build_r10_23_workspace()?, ViewportMetrics::new(1440.0, 900.0, 1.0));
-    h.click("nav.chip.graphs")?;
+    h.select_nav_kind_filter("nav.chip.graphs")?;
     h.click("nav.sheet.graph-1")?;
     assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
     assert!(h.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
@@ -136,10 +136,10 @@ fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> TestR
     let (cmd_s, ctrl_s) = (Modifiers::COMMAND | Modifiers::SHIFT, Modifiers::CTRL | Modifiers::SHIFT);
     let open_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    h.driver.press_egui_key(Key::N, cmd_s);
+    h.driver.press_egui_key(Key::B, Modifiers::COMMAND);
     assert!(h.driver.state().views.leading_collapsed_rail && h.driver.frame_meta().find_by_widget_id("nav.search_input").is_none());
     assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
-    h.driver.press_egui_key(Key::N, ctrl_s);
+    h.driver.press_egui_key(Key::B, Modifiers::CTRL);
     assert!(!h.driver.state().views.leading_collapsed_rail && h.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
 
     h.driver.press_egui_key(Key::I, cmd_s);
@@ -148,17 +148,17 @@ fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> TestR
     assert!(!h.driver.state().views.trailing_collapsed_rail);
 
     assert!(h.app().family_open);
-    h.driver.press_egui_key(Key::F, cmd_s);
+    h.driver.press_egui_key(Key::L, cmd_s);
     assert!(!h.app().family_open);
-    h.driver.press_egui_key(Key::F, ctrl_s);
+    h.driver.press_egui_key(Key::L, ctrl_s);
     assert!(h.app().family_open);
 
     // Arabic (`ar`) @ 1.5x HiDPI toggle parity.
     assert_eq!(h.app_mut().set_locale("ar"), "ar");
     h.driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
-    for (mods, lbl) in [(cmd_s, "ar closed panes 1.5x"), (ctrl_s, "ar restored panes 1.5x")] {
-        h.driver.press_egui_key(Key::N, mods);
-        h.driver.press_egui_key(Key::I, mods);
+    for (nav_mods, insp_mods, lbl) in [(Modifiers::COMMAND, cmd_s, "ar closed panes 1.5x"), (Modifiers::CTRL, ctrl_s, "ar restored panes 1.5x")] {
+        h.driver.press_egui_key(Key::B, nav_mods);
+        h.driver.press_egui_key(Key::I, insp_mods);
         h.assert_parity_and_layout(lbl)?;
     }
     assert_input_to_paint_budget(&h, 50.0)
@@ -199,7 +199,7 @@ fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Te
     app.set_clipboard_adapter(clip_stub.clone());
     let mut h = EguiWfHarness::from_app(app, default_viewport());
 
-    h.click("nav.chip.graphs")?;
+    h.select_nav_kind_filter("nav.chip.graphs")?;
     h.click("nav.sheet.graph-1")?;
     assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
     let graph_png = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
@@ -210,7 +210,7 @@ fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Te
     assert_valid_vector_bundle(&g_bundles[0], "GraphSheet Cmd+C")?;
     assert_eq!((&g_bundles[1].pdf_bytes, &g_bundles[1].svg), (&g_bundles[0].pdf_bytes, &g_bundles[0].svg));
 
-    h.click("nav.chip.layouts")?;
+    h.select_nav_kind_filter("nav.chip.layouts")?;
     h.click("nav.sheet.layout-1")?;
     assert_eq!(h.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
     assert_ne!(h.screenshot_png(ScreenshotRegionTarget::FullWindow)?, graph_png);
@@ -229,7 +229,7 @@ fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Te
     let mut custom_app = build_r10_23_workspace()?;
     custom_app.set_clipboard_adapter(Arc::clone(&custom) as Arc<dyn PlatformClipboardAdapter>);
     let mut ch = EguiWfHarness::from_app(custom_app, ViewportMetrics::new(1280.0, 800.0, 2.0));
-    ch.click("nav.chip.layouts")?;
+    ch.select_nav_kind_filter("nav.chip.layouts")?;
     ch.click("nav.sheet.layout-1")?;
     ch.driver.press_egui_key(Key::C, Modifiers::COMMAND);
     let cap = custom.captured.read_or_recover().map_err(|e| e.to_string())?;
@@ -327,7 +327,7 @@ fn r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command() -> Test
     app.set_clipboard_adapter(clip_stub.clone());
     let mut h = EguiWfHarness::from_app(app, default_viewport());
 
-    h.click("nav.chip.graphs")?;
+    h.select_nav_kind_filter("nav.chip.graphs")?;
     h.click("nav.sheet.graph-1")?;
     assert_input_to_paint_budget(&h, 50.0)?;
     h.driver.press_egui_key(Key::C, Modifiers::COMMAND | Modifiers::SHIFT);
@@ -344,7 +344,7 @@ fn r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command() -> Test
         (Some("nav.chip.layouts"), Some("nav.sheet.layout-1"), "canvas.layout_ctx.copy_for_slides"),
     ] {
         if let (Some(c), Some(s)) = (chip, sheet) {
-            h.click(c)?;
+            h.select_nav_kind_filter(c)?;
             h.click(s)?;
         }
         let rect = widget_rect(&h.driver, "canvas.viewport")?;

@@ -943,36 +943,72 @@ fn nonlinear_analyze_ok_auto_opens_fit_params_modal() -> TestRes {
     let app = curvebook_ui_egui::UiApp::from_session(Session::from_document(doc));
     let mut h = EguiWfHarness::from_app(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
 
+    let base_seq = h.app().mutation_seq();
+    let base_undo = h.app().session().undo_depth();
     h.select_sheet(&SheetId::from("xy-auto-fit"))?;
-    let fit_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
 
-    // Nonlinear curve fit creation via Analyze Data OK must immediately open the
-    // Nonlinear Curve Fitting (Parameters / Cmd+T) modal on the Model tab.
+    // R20.20 #4: Analyze Data OK for nonlinear fit opens Parameters WITHOUT creating ResultSheet yet.
+    h.click("toolbar.analyze")?;
+    h.click("analyze.search")?;
+    h.driver.type_text("Nonlinear")?;
+    h.click("analyze.entry.fit.nonlinear")?;
+    h.click("modal.ok")?;
+
     ensure(
-        matches!(
-            &h.app().canvas_dialogs.active_dialog,
-            curvebook_ui_egui::dialogs_canvas::ActiveDialog::EditAnalysisParameters { result_sheet_id } if *result_sheet_id == fit_id
-        ),
-        format!("expected EditAnalysisParameters to auto-open for `{fit_id}`, got {:?}", h.app().canvas_dialogs.active_dialog),
+        h.app().document().result_sheets.is_empty(),
+        format!("expected 0 ResultSheets before Parameters > OK, got {}", h.app().document().result_sheets.len()),
+    )?;
+    ensure(h.app().mutation_seq() == base_seq && h.app().session().undo_depth() == base_undo, "deferred staging must not mutate doc/undo")?;
+    ensure(
+        matches!(&h.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. })
+            && h.app().canvas_dialogs.edit_params.pending_create,
+        format!("expected pending EditAnalysisParameters to auto-open, got {:?}", h.app().canvas_dialogs.active_dialog),
     )?;
     ensure(
         h.driver.frame_meta().find_by_widget_id("fit.eq.search").is_some(),
         "expected Model tab equation search (`fit.eq.search`) to be immediately visible",
     )?;
+    ensure(h.driver.frame_meta().find_by_widget_id("modal.apply").is_none(), "create-mode Parameters modal must hide Apply button")?;
 
-    // User can pick a nonlinear model right away without pressing Cmd+T.
+    // Clicking Cancel in Parameters discards draft and leaves project & undo stack untouched.
+    h.click("fit.eq.search")?;
+    h.driver.type_text("michaelis")?;
+    h.click("fit.eq.item.michaelis_menten")?;
+    h.click("modal.cancel")?;
+    ensure(h.app().canvas_dialogs.active_dialog == ActiveDialog::None, "Cancel must close Parameters modal")?;
+    ensure(
+        h.app().document().result_sheets.is_empty() && h.app().mutation_seq() == base_seq && h.app().session().undo_depth() == base_undo,
+        "Cancel on first-run Parameters must leave 0 ResultSheets and unchanged undo stack",
+    )?;
+
+    // Second launch: choose michaelis_menten and confirm via Parameters > OK ("Fit Curve") -> commits once.
+    h.click("toolbar.analyze")?;
+    h.click("analyze.search")?;
+    h.driver.type_text("Nonlinear")?;
+    h.click("analyze.entry.fit.nonlinear")?;
+    h.click("modal.ok")?;
+    ensure(h.app().document().result_sheets.is_empty(), "expected 0 ResultSheets until Parameters > OK")?;
     h.click("fit.eq.search")?;
     h.driver.type_text("michaelis")?;
     h.click("fit.eq.item.michaelis_menten")?;
     h.click("modal.ok")?;
-    ensure(
-        h.app().canvas_dialogs.active_dialog == curvebook_ui_egui::dialogs_canvas::ActiveDialog::None,
-        "expected modal to close after confirming model selection",
-    )?;
-    let rs = h.app().document().result_sheet(&fit_id).ok_or("missing fit result sheet")?;
+    ensure(h.app().canvas_dialogs.active_dialog == ActiveDialog::None, "expected modal to close after confirming model selection")?;
+    ensure(h.app().document().result_sheets.len() == 1, "expected exactly 1 ResultSheet created after Parameters > OK")?;
+    ensure(h.app().session().undo_depth() == base_undo + 1, "expected single undo entry for first-run fit creation")?;
+    let rs = h.app().document().result_sheets.first().ok_or("missing created fit result sheet")?;
+    let fit_id = rs.id.clone();
+    ensure(h.app().document().active_sheet_id.as_ref() == Some(&fit_id), "created fit ResultSheet must be selected")?;
     ensure(
         matches!(&rs.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "michaelis_menten"),
         "expected michaelis_menten to persist after immediate model selection",
+    )?;
+
+    // Single Undo removes the created ResultSheet cleanly.
+    h.click("menu.edit")?;
+    h.click("menu.edit.undo")?;
+    ensure(
+        h.app().document().result_sheets.is_empty() && h.app().session().undo_depth() == base_undo,
+        "single Undo must cleanly remove created nonlinear ResultSheet",
     )?;
     Ok(())
 }

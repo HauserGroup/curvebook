@@ -246,7 +246,11 @@ fn r15_gui_32_column_cell_right_click_cut_and_canvas_copy_image() -> Result<(), 
         [(&["nav.sheet.gs-col"][..], "canvas.graph_ctx.copy_image"), (&["nav.chip.layouts", "nav.sheet.ls-col"][..], "canvas.layout_ctx.copy_image")]
     {
         for wid in pre_clicks {
-            driver.click_widget_id(wid)?;
+            if wid.starts_with("nav.chip.") {
+                crate::common::select_nav_kind_filter(&mut driver, wid)?;
+            } else {
+                driver.click_widget_id(wid)?;
+            }
         }
         let c = widget_center(&driver, "canvas.viewport")?;
         driver.click_at_button(c, PointerButton::Secondary, KeyModifiers::default())?;
@@ -272,9 +276,17 @@ fn r15_gui_33_about_modal_closes_via_button_and_escape_without_internal_clutter(
     let joined: String = cap.text_runs.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join(" | ");
     assert!(!joined.contains("Active Beta locales") && !joined.contains("Registered keyboard shortcuts") && joined.contains("MIT OR Apache-2.0"));
 
+    assert!(driver.frame_meta().find_by_widget_id("dialog.button.ok").is_none());
     driver.click_widget_id("dialog.about.copy_version")?;
     assert_eq!(driver.frame_meta().find_by_widget_id("dialog.about.copy_version").ok_or("missing copy")?.label, "Copied");
-    driver.click_widget_id("dialog.button.ok")?;
+    driver.click_widget_id("dialog.about.close")?;
+    assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+
+    driver.click_widget_id("menu.help")?;
+    driver.click_widget_id("menu.app.about")?;
+    let dlg_rect = driver.frame_meta().find_by_widget_id("dialog.about").ok_or("missing dialog.about")?.clipped_rect;
+    let outside = egui::pos2((dlg_rect.left() - 12.0).max(4.0), dlg_rect.center().y);
+    driver.click_at(outside)?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
 
     driver.click_widget_id("menu.help")?;

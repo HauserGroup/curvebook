@@ -7,6 +7,7 @@
 
 mod batch;
 mod export;
+mod fit_diagnostics;
 mod formats;
 mod inspect;
 
@@ -20,6 +21,7 @@ pub use export::{
     resolve_strict_raster_target, resolve_tabular_sheet_by_name_or_id, resolve_tidy_flag, resolve_visual_sheet_by_name_or_id, tiff_compression_str,
     validate_dpi, validate_ttf_font_bytes,
 };
+pub use fit_diagnostics::compare_result_vs_horizontal_line;
 pub use formats::{
     LoadedProject, dir_size_bytes, has_unpacked_dir_suffix, import_registered_path, is_unpacked_project_path, load_project_from_bytes,
     load_project_from_bytes_with_xlsx_options, load_project_from_bytes_with_xlsx_sheets, load_project_from_path,

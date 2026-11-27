@@ -1024,7 +1024,7 @@ fn render_stage2_effect(
             role: "status",
             text: &format!("Derived Standardized {}: {eff:.3}", pw.family.default_effect_label()),
             font_size: 12.0,
-            color: tokens.accent,
+            color: tokens.text_strong,
             z_layer: ZLayer::ModalDialog,
             tooltip: None,
             record_meta: true,
@@ -1246,7 +1246,12 @@ fn render_stage4_results(
                 .corner_radius(CornerRadius::same(tokens.metrics.radius_md))
                 .inner_margin(Vec2::new(10.0, 8.0))
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Methods & Sample Size Narrative").strong().color(tokens.accent));
+                    ui.label(
+                        egui::RichText::new("Methods & Sample Size Narrative")
+                            .font(crate::egui_shell::fonts::section_heading_font_id(ui.ctx(), tokens))
+                            .strong()
+                            .color(tokens.text_strong),
+                    );
                     ui.add_space(4.0);
                     let resp = ui.label(egui::RichText::new(&narrative).color(tokens.text_primary));
                     record_widget(

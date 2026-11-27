@@ -2556,10 +2556,12 @@ pub fn kb_ci_from_pkb_ci(pkb_lower: CiBound, pkb_upper: CiBound) -> (CiBound, Ci
     let kb_lower = match pkb_upper {
         CiBound::Finite(u) => safe_pow10(-u).map_or(CiBound::Open, CiBound::Finite),
         CiBound::Open => CiBound::Open,
+        CiBound::Unavailable => CiBound::Unavailable,
     };
     let kb_upper = match pkb_lower {
         CiBound::Finite(l) => safe_pow10(-l).map_or(CiBound::Open, CiBound::Finite),
         CiBound::Open => CiBound::Open,
+        CiBound::Unavailable => CiBound::Unavailable,
     };
     (kb_lower, kb_upper)
 }

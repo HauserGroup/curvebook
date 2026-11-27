@@ -599,22 +599,26 @@ fn wf54_human_dual_axis_nudged_bars_alpha_lines_and_selective_decay_fit() -> Tes
         }
     }
 
-    // Selective single-series fit (Series 0 only) via Analyze Data checkbox + One-Phase Exponential Decay.
+    // Selective single-series fit (Series 0 only) via Analyze Data checkbox + One-Phase Exponential Decay (R20.20 #4 deferred commit).
     run.select_sheet(&sid)?;
     let before_rs = run.document().result_sheets.len();
     run.click("toolbar.analyze")?;
     run.replace_textbox("analyze.search", "Nonlinear")?;
     run.click("analyze.entry.fit.nonlinear")?;
-    run.click("analyze.mv.var.1")?;
+    run.click("analyze.dataset.1")?;
     run.commit_modal_ok()?;
-    ensure(run.document().result_sheets.len() == before_rs + 1, "WF-54 selective Nonlinear must create ResultSheet")?;
-    let fit_id = run.document().result_sheets.last().map(|r| r.id.clone()).ok_or("WF-54 missing fit ResultSheet")?;
-
-    run.select_sheet(&fit_id)?;
-    run.open_cmd_t()?;
+    ensure(run.document().result_sheets.len() == before_rs, "WF-54 Nonlinear Analyze OK must defer creation until Parameters > OK")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::EditAnalysisParameters { .. })
+            && run.frame_meta().find_by_widget_id("fit.eq.search").is_some()
+            && run.frame_meta().find_by_widget_id("modal.apply").is_none(),
+        "WF-54 expected Parameters modal to open in deferred create mode",
+    )?;
     run.replace_textbox("fit.eq.search", "one_phase_decay")?;
     run.click("fit.eq.item.one_phase_decay")?;
     run.commit_modal_ok()?;
+    ensure(run.document().result_sheets.len() == before_rs + 1, "WF-54 selective Nonlinear Parameters > OK must create ResultSheet")?;
+    let fit_id = run.document().result_sheets.last().map(|r| r.id.clone()).ok_or("WF-54 missing fit ResultSheet")?;
     {
         let rs = run.document().result_sheet(&fit_id).ok_or("WF-54 missing decay fit")?;
         ensure(matches!(rs.status, ResultStatus::UpToDate), "WF-54 selective One-Phase Decay fit must be UpToDate")?;

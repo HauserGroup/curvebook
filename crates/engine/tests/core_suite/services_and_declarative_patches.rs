@@ -349,3 +349,64 @@ fn doc_enum_aliases_preserve_canonical_serialization_and_graph_patches_reject_un
         json!({ "sheet_id": &graph_id, "series": [{ "index": 0, "marker": { "shape": "diamond", "bogus_field": 123 } }] }),
     );
 }
+
+#[test]
+fn r19_7_engine_diagnostics_summary_cell_details_export_and_horizontal_service() {
+    let mut doc = ProjectDocument::new("R19.7 Engine Diagnostics").unwrap();
+    let model = curvebook_fit::get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let xs = [-9.0_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5];
+
+    let mut xy = XyTable::new(SubcolumnMode::Single, 3, xs.len()).unwrap();
+    xy.data_sets[0].title = String::from("ACTIVE");
+    xy.data_sets[1].title = String::from("VEHICLE");
+    xy.data_sets[2].title = String::from("PARTIAL");
+
+    for (r, &x) in xs.iter().enumerate() {
+        let noise = if r % 2 == 0 { 0.25 } else { -0.25 };
+        xy.set_x_cell(r, curvebook_doc::Cell::number(x)).unwrap();
+        xy.data_sets[0].cells[r][0] = curvebook_doc::Cell::number(model.eval(&[x], &[5.0, 95.0, -7.2, 1.1], 0).unwrap() + noise);
+        xy.data_sets[1].cells[r][0] = curvebook_doc::Cell::number(10.0 + if r % 2 == 0 { 0.04 } else { -0.04 });
+        let partial_noise = if r % 2 == 0 { 0.05 } else { -0.05 };
+        xy.data_sets[2].cells[r][0] = curvebook_doc::Cell::number(model.eval(&[x], &[5.0, 200.0, -4.0, 1.0], 2).unwrap() + partial_noise);
+    }
+    doc.add_data_sheet(DataSheet::new("xy-r197", "Panel", TableArchetype::Xy(xy)).unwrap()).unwrap();
+
+    let mut session = Session::from_document(doc);
+    let run_out = session
+        .execute(
+            "fit.run",
+            json!({
+                "sheet_id": "fit-r197",
+                "source_sheet_id": "xy-r197",
+                "kind": "log_agonist_vs_response_4pl",
+                "profile_likelihood_ci": false
+            }),
+        )
+        .unwrap();
+
+    let failing = run_out.payload["failing_datasets"].as_array().expect("failing_datasets array");
+    let failing_names: Vec<&str> = failing.iter().filter_map(|v| v.as_str()).collect();
+    assert!(failing_names.contains(&"VEHICLE"), "expected VEHICLE in failing_datasets: {failing_names:?}");
+    let summary_str = run_out.payload["failing_datasets_summary"].as_str().expect("failing_datasets_summary");
+    assert!(summary_str.contains("Ambiguous / unbounded fits in "), "unexpected summary: {summary_str}");
+    assert!(summary_str.contains("VEHICLE"), "unexpected summary: {summary_str}");
+
+    let cell_details = run_out.payload["cell_details"].as_array().expect("cell_details with raw solver iterates");
+    assert!(!cell_details.is_empty(), "expected raw iterates preserved in payload.cell_details");
+
+    // Verify JSON export also retains `cell_details` cleanly.
+    let export_out = session.execute("analysis.exportJson", json!({ "sheet_id": "fit-r197", "pretty": false })).unwrap();
+    let exported_json = export_out.payload["json"].as_str().expect("json payload");
+    let parsed: serde_json::Value = serde_json::from_str(exported_json).unwrap();
+    assert!(parsed["cell_details"].as_array().is_some_and(|arr| !arr.is_empty()));
+
+    // Verify diagnostics-only Compare vs. Horizontal Line service entrypoint.
+    let before_doc = session.document().clone();
+    let report = curvebook_engine::services::compare_result_vs_horizontal_line(session.document(), &"fit-r197".into()).unwrap();
+    assert_eq!(session.document(), &before_doc, "horizontal-line diagnostic must never mutate document or exclude datasets");
+
+    let vehicle = report.per_dataset.iter().find(|d| d.label == "VEHICLE").unwrap();
+    assert_eq!(vehicle.classification, curvebook_fit::HorizontalLineClassification::NotDistinguishableFromHorizontalLine);
+    let partial = report.per_dataset.iter().find(|d| d.label == "PARTIAL").unwrap();
+    assert_eq!(partial.classification, curvebook_fit::HorizontalLineClassification::IncompleteOrUnboundedCurve);
+}

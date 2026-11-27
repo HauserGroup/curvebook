@@ -72,8 +72,9 @@ mod profile;
 mod results;
 
 pub use comparison::{
+    HorizontalLineClassification, HorizontalLineComparisonReport, HorizontalLineDatasetDiagnostic, HorizontalLineModel,
     ModelComparisonQuestionResult, SynchronizedComparisonRequest, compare_models, compare_models_checked, compare_models_question,
-    compare_models_synchronized, ordered_nested_roles,
+    compare_models_synchronized, compare_vs_horizontal_line, ordered_nested_roles,
 };
 pub use fit::fit_nonlinear;
 pub use identifiability::{

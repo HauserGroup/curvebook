@@ -18,8 +18,8 @@ use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, CurveSamplePoint, DataSheet,
     DemingErrorSpec, ErrorCode, FitFlagRules, FittedCurveOverlay, IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, OutlierHandling,
-    ReplicateFitMode, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode, TableArchetype,
-    XColumnMode, XyTable, format_significant_digits,
+    ReplicateFitMode, ResultCell, ResultCellDetail, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode,
+    TableArchetype, XColumnMode, XyTable, format_significant_digits,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -33,8 +33,8 @@ use crate::linear::{
     linear_grid, prepare_linear_points, resolve_linear_grid_bounds,
 };
 use crate::solver::{
-    InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_question, evaluate_fit_flags, fit_nonlinear,
-    ordered_nested_roles,
+    FittedDatasetResult, FittedParameterSummary, HorizontalLineComparisonReport, InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult,
+    SolverConfig, compare_models_question, compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, ordered_nested_roles,
 };
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_from_multivar_multi_with_y_map,
@@ -44,7 +44,8 @@ use crate::types::{
 fn ci_bounds_cell(lower: CiBound, upper: CiBound) -> ResultCell {
     let sanitize = |bound: CiBound| match bound {
         CiBound::Finite(v) if v.is_finite() => CiBound::Finite(v),
-        _ => CiBound::Open,
+        CiBound::Open => CiBound::Open,
+        CiBound::Finite(_) | CiBound::Unavailable => CiBound::Unavailable,
     };
     ResultCell::ConfidenceInterval { lower: sanitize(lower), upper: sanitize(upper) }
 }
@@ -268,7 +269,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         let mut has_rows = false;
         let to_ci_bound = |v: Option<f64>| match v {
             Some(x) if x.is_finite() => CiBound::Finite(x),
-            _ => CiBound::Open,
+            _ => CiBound::Unavailable,
         };
         for (_, lbl, f) in &fits {
             for (dir, items) in [("X from Y", &f.interpolated_x_from_y), ("Y from X", &f.interpolated_y_from_x)] {
@@ -413,14 +414,14 @@ pub fn resolve_model_from_spec(nl_spec: &NonlinearFitSpec) -> Result<Box<dyn Par
     get_builtin_model(&nl_spec.equation_id).ok_or_else(|| FitError::UnknownEquation { id: nl_spec.equation_id.clone() })
 }
 
-/// Execute nonlinear regression from [`NonlinearFitSpec`] + [`DataSheet`] and emit a complete [`ResultSheet`].
-pub fn execute_nonlinear_analysis(
-    spec: &AnalysisSpec,
-    nl_spec: &NonlinearFitSpec,
-    sheet: &DataSheet,
-    hooks: &HookContext,
-) -> Result<ResultSheet, FitError> {
-    let mut result = ResultSheet::new(spec.clone())?;
+struct PreparedNonlinearFit {
+    datasets: Vec<DatasetSeries>,
+    mv_y_col_map: Option<HashMap<usize, usize>>,
+    model: Box<dyn ParametricModel>,
+    config: SolverConfig,
+}
+
+fn prepare_nonlinear_fit(spec: &AnalysisSpec, nl_spec: &NonlinearFitSpec, sheet: &DataSheet) -> Result<PreparedNonlinearFit, FitError> {
     if nl_spec.flag_r_squared_below.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
         return Err(FitError::InvalidParameter { name: "flag_r_squared_below", reason: "threshold must be a finite number from 0 to 1".to_owned() });
     }
@@ -510,6 +511,37 @@ pub fn execute_nonlinear_analysis(
         replicate_fit_mode: nl_spec.replicate_fit_mode,
         convergence_strictness: nl_spec.convergence_strictness,
     };
+
+    Ok(PreparedNonlinearFit { datasets, mv_y_col_map, model, config })
+}
+
+/// Compare an existing [`NonlinearFitSpec`] against a diagnostics-only horizontal line (`Y = Mean`)
+/// null model without modifying [`ResultSheet`] outputs or excluding any dataset (`R19.7`).
+pub fn compare_nonlinear_analysis_vs_horizontal_line(
+    spec: &AnalysisSpec,
+    sheet: &DataSheet,
+    hooks: &HookContext,
+) -> Result<HorizontalLineComparisonReport, FitError> {
+    let AnalysisKind::NonlinearRegression(nl_spec) = &spec.kind else {
+        return Err(FitError::InvalidParameter {
+            name: "analysis.kind",
+            reason: format!("Horizontal-line comparison requires NonlinearRegression, got `{}`", spec.kind.derive_auto_title()),
+        });
+    };
+    let prepared = prepare_nonlinear_fit(spec, nl_spec, sheet)?;
+    let fit = fit_nonlinear(prepared.model.as_ref(), &prepared.datasets, hooks, &prepared.config)?;
+    compare_vs_horizontal_line(&fit, &prepared.datasets, hooks, &prepared.config)
+}
+
+/// Execute nonlinear regression from [`NonlinearFitSpec`] + [`DataSheet`] and emit a complete [`ResultSheet`].
+pub fn execute_nonlinear_analysis(
+    spec: &AnalysisSpec,
+    nl_spec: &NonlinearFitSpec,
+    sheet: &DataSheet,
+    hooks: &HookContext,
+) -> Result<ResultSheet, FitError> {
+    let mut result = ResultSheet::new(spec.clone())?;
+    let PreparedNonlinearFit { datasets, mv_y_col_map, model, config } = prepare_nonlinear_fit(spec, nl_spec, sheet)?;
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
     if config.method == curvebook_doc::FitMethod::PoissonDeviance
@@ -706,10 +738,86 @@ fn fmt_fit_scalar(value: f64, sig_figs: Option<u8>) -> String {
     }
 }
 
+fn dataset_ci_unavailable(fit: &NonlinearFitResult, dataset_index: Option<usize>) -> bool {
+    if fit.df == 0 || !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        return true;
+    }
+    dataset_index
+        .and_then(|idx| fit.datasets.iter().find(|d| d.data_set_index == idx))
+        .is_some_and(|ds| ds.df == 0 || !matches!(ds.status, FitStatus::Converged | FitStatus::Ambiguous))
+}
+
+fn nonlinear_param_ci_cell(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p: &FittedParameterSummary) -> ResultCell {
+    if dataset_ci_unavailable(fit, p.dataset_index)
+        || fit.is_robust_cauchy()
+        || !p.inference_availability.is_available()
+        || (!nl_spec.profile_likelihood_ci && (!p.se.is_finite() || fit.covariance.covariance_matrix.is_empty()))
+        || (!p.se.is_finite() && matches!(p.ci_lower, CiBound::Open) && matches!(p.ci_upper, CiBound::Open))
+    {
+        return ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable };
+    }
+    ci_bounds_cell(p.ci_lower, p.ci_upper)
+}
+
+fn dataset_convergence_summary(fit: &NonlinearFitResult) -> Option<String> {
+    let total = fit.datasets.len();
+    if total <= 1 {
+        return None;
+    }
+    let mut converged = 0_usize;
+    let mut ambiguous = 0_usize;
+    let mut not_converged = 0_usize;
+    for ds in &fit.datasets {
+        if !matches!(ds.status, FitStatus::Converged | FitStatus::Ambiguous) {
+            not_converged += 1;
+        } else if ds.ambiguous || matches!(ds.identifiability, FitIdentifiability::Ambiguous { .. }) || ds.status == FitStatus::Ambiguous {
+            ambiguous += 1;
+        } else {
+            converged += 1;
+        }
+    }
+    let mut parts = vec![format!("{converged} of {total} converged")];
+    if ambiguous > 0 {
+        parts.push(format!("{ambiguous} ambiguous"));
+    }
+    if not_converged > 0 {
+        parts.push(format!("{not_converged} not converged"));
+    }
+    Some(parts.join("; "))
+}
+
+fn format_unstable_detail(p: &FittedParameterSummary, sig_figs: Option<u8>) -> String {
+    let raw_str = if p.estimate.is_finite() { fmt_fit_scalar(p.estimate, sig_figs) } else { String::from("non-finite") };
+    let mut parts = vec![format!("Unstable estimate; raw solver iterate = {raw_str}")];
+    if p.se.is_finite() {
+        parts.push(format!("raw SE = {}", fmt_fit_scalar(p.se, sig_figs)));
+    }
+    if p.dependency.is_finite() {
+        parts.push(format!("Dependency = {:.4}", p.dependency));
+    }
+    parts.join("; ")
+}
+
+fn param_dataset_ambiguous(fit: &NonlinearFitResult, p: &FittedParameterSummary) -> bool {
+    p.dataset_index.and_then(|idx| fit.datasets.iter().find(|d| d.data_set_index == idx)).map_or(fit.covariance.ambiguous, |ds| ds.ambiguous)
+}
+
+fn should_mask_parameter_as_unstable(p: &FittedParameterSummary, fit: &NonlinearFitResult, mode: Option<IdentifiabilityMode>) -> bool {
+    match mode {
+        Some(IdentifiabilityMode::ReportAll) => false,
+        Some(IdentifiabilityMode::IdentifyAmbiguousFits) => p.notes.contains(&ParameterNote::Unstable) || !p.estimate.is_finite(),
+        Some(IdentifiabilityMode::IdentifyUnstableParameters) | None => {
+            p.notes.contains(&ParameterNote::Unstable) || !p.estimate.is_finite() || (param_dataset_ambiguous(fit, p) && !p.se.is_finite())
+        }
+    }
+}
+
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
     let show_se = nl_spec.should_show_standard_errors() || is_robust;
-    let unstable_as_text = nl_spec.effective_identifiability_mode() == Some(IdentifiabilityMode::IdentifyUnstableParameters);
+    let ident_mode = nl_spec.effective_identifiability_mode();
+    let unstable_as_text = !matches!(ident_mode, Some(IdentifiabilityMode::IdentifyAmbiguousFits | IdentifiabilityMode::ReportAll));
+    let sig_figs = nl_spec.output_significant_digits;
     let mut tab =
         if show_se {
             TabBuilder::new("nonlinear_parameters", "Best-fit values & confidence intervals", ResultTabKind::ParametersAndConfidenceIntervals)
@@ -721,13 +829,13 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
     let ds_names = dataset_display_names(fit);
 
-    for p in &fit.parameters {
+    for (row_idx, p) in fit.parameters.iter().enumerate() {
         let mut label = parameter_display_label(fit, &ds_names, &p.name, p.dataset_index);
-        let unstable = p.notes.contains(&ParameterNote::Unstable);
-        if unstable {
+        let flagged_unstable = should_mask_parameter_as_unstable(p, fit, ident_mode);
+        if p.notes.contains(&ParameterNote::Unstable) || (flagged_unstable && unstable_as_text) {
             label.push_str(" (Unstable)");
         }
-        let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
+        let prefix = (!flagged_unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
         if is_robust || !p.inference_availability.is_available() {
             let na = text_cell("Not applicable");
             if show_se {
@@ -735,22 +843,29 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
             } else {
                 tab.push_row(label, [ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na]);
             }
-        } else if unstable && unstable_as_text {
+        } else if flagged_unstable && unstable_as_text {
             let u_cell = text_cell("Unstable");
             if show_se {
-                tab.push_row(label, [u_cell.clone(), u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1)]);
+                tab.push_row(label, [u_cell.clone(), u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1.abs())]);
             } else {
-                tab.push_row(label, [u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1)]);
+                tab.push_row(label, [u_cell.clone(), u_cell, num_cell(p.dependency), num_cell(p.hougaard_g1.abs())]);
             }
+            result.cell_details.push(ResultCellDetail {
+                tab_id: String::from("nonlinear_parameters"),
+                row: row_idx,
+                col: 0,
+                raw_value: p.estimate.is_finite().then_some(p.estimate),
+                detail: format_unstable_detail(p, sig_figs),
+            });
         } else if show_se {
             tab.push_row(
                 label,
                 [
                     ResultCell::Number { value: p.estimate, prefix, units: None },
                     num_cell(p.se),
-                    ci_bounds_cell(p.ci_lower, p.ci_upper),
+                    nonlinear_param_ci_cell(fit, nl_spec, p),
                     num_cell(p.dependency),
-                    num_cell(p.hougaard_g1),
+                    num_cell(p.hougaard_g1.abs()),
                 ],
             );
         } else {
@@ -758,14 +873,14 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
                 label,
                 [
                     ResultCell::Number { value: p.estimate, prefix, units: None },
-                    ci_bounds_cell(p.ci_lower, p.ci_upper),
+                    nonlinear_param_ci_cell(fit, nl_spec, p),
                     num_cell(p.dependency),
-                    num_cell(p.hougaard_g1),
+                    num_cell(p.hougaard_g1.abs()),
                 ],
             );
         }
         emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
-        if !(unstable && unstable_as_text) && p.estimate.is_finite() {
+        if !(flagged_unstable && unstable_as_text) && p.estimate.is_finite() {
             result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
         }
     }
@@ -797,11 +912,10 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         }
     }
 
-    let sig_figs = nl_spec.output_significant_digits;
     let sy_x_str = if is_robust {
         fit.rsdr.filter(|v| v.is_finite()).map_or_else(
             || "Not applicable (NotApplicableInRobustMode)".to_owned(),
-            |rsdr| format!("Not applicable (NotApplicableInRobustMode), RSDR = {}", fmt_fit_scalar(rsdr, sig_figs)),
+            |rsdr| format!("Not applicable (NotApplicableInRobustMode); RSDR = {}", fmt_fit_scalar(rsdr, sig_figs)),
         )
     } else if fit.rsd.is_finite() {
         fmt_fit_scalar(fit.rsd, sig_figs)
@@ -809,9 +923,13 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         "N/A (DF = 0)".to_owned()
     };
 
+    let status_part = if let Some(conv_summary) = dataset_convergence_summary(fit) {
+        format!("Status: {:?} ({conv_summary})", fit.status)
+    } else {
+        format!("Status: {:?}", fit.status)
+    };
     let mut param_footnote = format!(
-        "Status: {:?}, Iterations: {}, DF: {}, R2 = {}, Sy.x = {}, RSS = {}",
-        fit.status,
+        "{status_part}; Iterations = {}; DF = {}; R² = {}; Sy.x = {}; RSS = {}",
         fit.iterations,
         fit.df,
         fmt_fit_scalar(fit.r_squared, sig_figs),
@@ -820,7 +938,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     );
     if nonlinear_uses_weighted_objective(fit, nl_spec) {
         let obj_lbl = if fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance { "Poisson Deviance" } else { "Weighted SS" };
-        param_footnote.push_str(&format!(", {obj_lbl} = {}", fmt_fit_scalar(fit.weighted_ss, sig_figs)));
+        param_footnote.push_str(&format!("; {obj_lbl} = {}", fmt_fit_scalar(fit.weighted_ss, sig_figs)));
     }
     if !show_se && !is_robust {
         param_footnote
@@ -834,6 +952,143 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
 /// published cut-offs: `Dependency > 0.99` warns of near-redundant parameters (the dependency
 /// measure is described by Motulsky & Christopoulos 2004), and `|g1| > 1` flags strong
 /// nonlinearity on the interpretation scale for Hougaard's skewness given by Ratkowsky (1990).
+fn evaluate_dataset_fit_flags(fit: &NonlinearFitResult, ds: &FittedDatasetResult, rules: &FitFlagRules) -> crate::solver::FitFlagOutcome {
+    let mut reasons = Vec::new();
+    if let Some(min_r2) = rules.min_r_squared
+        && ds.r_squared.is_finite()
+        && ds.r_squared < min_r2
+    {
+        reasons.push(format!("R² = {:.4} is below threshold {min_r2:.4}.", ds.r_squared));
+    }
+    if let Some(min_n) = rules.min_observations
+        && ds.n_obs < min_n
+    {
+        reasons.push(format!("Observations analyzed = {} is below threshold {min_n}.", ds.n_obs));
+    }
+    if let Some(max_dep) = rules.max_dependency {
+        let max_d = fit
+            .parameters
+            .iter()
+            .filter(|p| p.dataset_index == Some(ds.data_set_index) || p.dataset_index.is_none())
+            .map(|p| p.dependency)
+            .filter(|v| v.is_finite())
+            .fold(0.0_f64, f64::max);
+        if max_d > max_dep {
+            reasons.push(format!("Maximum dependency = {max_d:.4} exceeds threshold {max_dep:.4}."));
+        }
+    }
+    if let Some(min_norm_p) = rules.min_normality_p {
+        for norm in [&ds.normality, &ds.normality_anderson_darling, &ds.normality_lilliefors_ks].into_iter().flatten() {
+            if norm.p_value.is_finite() && norm.p_value < min_norm_p {
+                reasons.push(format!("{} normality p = {:.4} is below threshold {:.4}.", norm.test_name, norm.p_value, min_norm_p));
+            }
+        }
+    }
+    if let Some(min_lof_p) = rules.min_runs_or_lof_p {
+        if let Some(runs) = &ds.runs_test
+            && runs.p_too_few_runs.is_finite()
+            && runs.p_too_few_runs < min_lof_p
+        {
+            reasons.push(format!("Runs test p = {:.4} is below threshold {:.4}.", runs.p_too_few_runs, min_lof_p));
+        }
+        if let Some(lof) = &ds.lack_of_fit
+            && lof.p_value.is_finite()
+            && lof.p_value < min_lof_p
+        {
+            reasons.push(format!("Replicates lack-of-fit test p = {:.4} is below threshold {:.4}.", lof.p_value, min_lof_p));
+        }
+    }
+    if let Some(max_out) = rules.max_rout_outliers
+        && ds.n_outliers > max_out
+    {
+        reasons.push(format!("ROUT outlier count = {} exceeds maximum threshold {max_out}.", ds.n_outliers));
+    }
+    crate::solver::FitFlagOutcome { flagged: !reasons.is_empty(), reasons }
+}
+
+fn append_independent_nonlinear_gof_tab(
+    result: &mut ResultSheet,
+    fit: &NonlinearFitResult,
+    nl_spec: &NonlinearFitSpec,
+    p_fmt: PValueFormat,
+    weighted_obj: bool,
+    weighted_footnote: &str,
+) {
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
+    let is_poisson = fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance;
+    let na_cell = || text_cell("Not applicable");
+    let ds_names = dataset_display_names(fit);
+    let headers: Vec<String> = fit.datasets.iter().map(|ds| ds_names.get(&ds.data_set_index).cloned().unwrap_or_else(|| ds.label.clone())).collect();
+    let mut gof = TabBuilder::new("nonlinear_gof", "Goodness of Fit", ResultTabKind::MainSummary).headers(headers);
+
+    gof.push_row("Degrees of Freedom", fit.datasets.iter().map(|ds| num_cell(ds.df as f64)));
+    gof.push_row("R squared", fit.datasets.iter().map(|ds| num_cell(ds.r_squared)));
+    gof.push_row("Sum of Squares (RSS)", fit.datasets.iter().map(|ds| num_cell(ds.ss_residual)));
+    gof.push_row("Sy.x", fit.datasets.iter().map(|ds| if is_robust { na_cell() } else { num_cell(ds.sy_x) }));
+    if is_robust && fit.datasets.iter().any(|ds| ds.rsdr.is_some_and(f64::is_finite)) {
+        gof.push_row("RSDR (Robust SD of residuals)", fit.datasets.iter().map(|ds| opt_num_cell(ds.rsdr.filter(|v| v.is_finite()))));
+    }
+    gof.push_row("AICc", fit.datasets.iter().map(|ds| if is_robust { na_cell() } else { opt_num_cell(ds.aic_c) }));
+    gof.push_row("BIC", fit.datasets.iter().map(|ds| if is_robust { na_cell() } else { opt_num_cell(ds.bic) }));
+    gof.push_row("Number of points analyzed", fit.datasets.iter().map(|ds| num_cell(ds.n_obs as f64)));
+    if weighted_obj {
+        let label = if is_poisson { "Poisson Deviance" } else { "Weighted Sum of Squares" };
+        gof.push_row(label, fit.datasets.iter().map(|ds| num_cell(ds.weighted_ss)));
+        gof.push_footnote(weighted_footnote);
+    }
+    if fit.datasets.iter().any(|ds| ds.runs_test.is_some()) {
+        gof.push_row(
+            "Runs test P value",
+            fit.datasets.iter().map(|ds| ds.runs_test.as_ref().map_or(ResultCell::Empty, |r| p_cell(r.p_too_few_runs, p_fmt))),
+        );
+    }
+
+    let mut norm_test_names: Vec<String> = Vec::new();
+    for ds in &fit.datasets {
+        for norm in [&ds.normality, &ds.normality_anderson_darling, &ds.normality_lilliefors_ks].into_iter().flatten() {
+            if !norm_test_names.contains(&norm.test_name) {
+                norm_test_names.push(norm.test_name.clone());
+            }
+        }
+    }
+    for test_name in norm_test_names {
+        gof.push_row(
+            format!("Normality ({test_name}) P value"),
+            fit.datasets.iter().map(|ds| {
+                [&ds.normality, &ds.normality_anderson_darling, &ds.normality_lilliefors_ks]
+                    .into_iter()
+                    .flatten()
+                    .find(|norm| norm.test_name == test_name)
+                    .map_or(ResultCell::Empty, |norm| p_cell(norm.p_value, p_fmt))
+            }),
+        );
+    }
+
+    if fit.datasets.iter().any(|ds| ds.homoscedasticity.is_some()) {
+        gof.push_row(
+            "Homoscedasticity (Spearman rho)",
+            fit.datasets.iter().map(|ds| ds.homoscedasticity.as_ref().map_or(ResultCell::Empty, |h| num_cell(h.spearman_rho))),
+        );
+        gof.push_row(
+            "Homoscedasticity P value",
+            fit.datasets.iter().map(|ds| ds.homoscedasticity.as_ref().map_or(ResultCell::Empty, |h| p_cell(h.p_value, p_fmt))),
+        );
+    }
+    if fit.n_outliers_excluded > 0 {
+        gof.push_row("ROUT outliers excluded", fit.datasets.iter().map(|ds| num_cell(ds.n_outliers as f64)));
+    } else if fit.rout.is_some() {
+        gof.push_row("ROUT outliers identified", fit.datasets.iter().map(|ds| num_cell(ds.n_outliers as f64)));
+    }
+    if let Some(rules) = nl_spec.fit_flag_rules.as_ref().filter(|r| !nl_spec.plot_function_only && r.has_any_rule()) {
+        let per_ds_flags: Vec<_> = fit.datasets.iter().map(|ds| evaluate_dataset_fit_flags(fit, ds, rules)).collect();
+        gof.push_row("Fit quality flag", per_ds_flags.iter().map(|f| text_cell(if f.flagged { "Flagged" } else { "Pass" })));
+        if per_ds_flags.iter().any(|f| f.flagged) {
+            gof.push_row("Flag reasons", per_ds_flags.iter().map(|f| if f.flagged { text_cell(f.reasons.join("; ")) } else { ResultCell::Empty }));
+        }
+    }
+    result.tabs.push(gof.build());
+}
+
 fn append_nonlinear_gof_tab(
     result: &mut ResultSheet,
     fit: &NonlinearFitResult,
@@ -845,6 +1100,13 @@ fn append_nonlinear_gof_tab(
     let weighted_obj = nonlinear_uses_weighted_objective(fit, nl_spec);
     let is_poisson = fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance;
     let na_cell = || text_cell("Not applicable");
+    let weighted_footnote = "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective; residual normality and homoscedasticity checks use weighted / deviance-standardized residuals.";
+
+    if fit.is_independent_multi_dataset() {
+        append_independent_nonlinear_gof_tab(result, fit, nl_spec, p_fmt, weighted_obj, weighted_footnote);
+        return;
+    }
+
     let mut gof = KvTabBuilder::new("nonlinear_gof", "Goodness of Fit", ResultTabKind::MainSummary, fit.equation_name.as_str())
         .num("Degrees of Freedom", fit.df as f64)
         .num("R squared", fit.r_squared)
@@ -857,9 +1119,7 @@ fn append_nonlinear_gof_tab(
         .push_cell("BIC", if is_robust { na_cell() } else { opt_num_cell(fit.bic) })
         .push_num("Number of points analyzed", fit.n_obs as f64);
     if weighted_obj {
-        gof.push_num(if is_poisson { "Poisson Deviance" } else { "Weighted Sum of Squares" }, fit.weighted_ss).push_footnote(
-            "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective; residual normality and homoscedasticity checks use weighted / deviance-standardized residuals.",
-        );
+        gof.push_num(if is_poisson { "Poisson Deviance" } else { "Weighted Sum of Squares" }, fit.weighted_ss).push_footnote(weighted_footnote);
     }
     if let Some(r) = &fit.runs_test {
         gof.push_cell("Runs test P value", p_cell(r.p_too_few_runs, p_fmt));
@@ -906,16 +1166,8 @@ fn populate_nonlinear_result_sheet(
 
     append_nonlinear_gof_tab(result, fit, nl_spec, p_fmt, flag_outcome.as_ref());
 
-    let unstable_as_text = nl_spec.effective_identifiability_mode() == Some(IdentifiabilityMode::IdentifyUnstableParameters);
     if let Some(target_param) = nl_spec.summary_parameter.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        append_parameter_summary_tab_and_data(
-            result,
-            fit,
-            datasets,
-            target_param,
-            nl_spec.should_show_standard_errors() || is_robust,
-            unstable_as_text,
-        );
+        append_parameter_summary_tab_and_data(result, fit, datasets, target_param, nl_spec.should_show_standard_errors() || is_robust, nl_spec);
     }
     if nl_spec.emit_residuals_tab {
         append_nonlinear_residuals_tab(result, fit);
@@ -1270,6 +1522,38 @@ fn solver_convergence_item(fit: &NonlinearFitResult) -> Option<ChecklistItem> {
     })
 }
 
+fn ambiguous_multi_dataset_checklist_item(fit: &NonlinearFitResult, reasons: &[String]) -> ChecklistItem {
+    let ds_names = dataset_display_names(fit);
+    let mut failing_names: Vec<String> = Vec::new();
+    for ds in &fit.datasets {
+        let ds_has_unstable = fit.parameters.iter().any(|p| {
+            p.dataset_index == Some(ds.data_set_index) && (p.notes.contains(&ParameterNote::Unstable) || p.notes.contains(&ParameterNote::Ambiguous))
+        });
+        if ds.ambiguous || matches!(ds.identifiability, FitIdentifiability::Ambiguous { .. }) || ds.status == FitStatus::Ambiguous || ds_has_unstable
+        {
+            let name = ds_names.get(&ds.data_set_index).cloned().unwrap_or_else(|| ds.label.clone());
+            if !failing_names.contains(&name) {
+                failing_names.push(name);
+            }
+        }
+    }
+    let prefix = if failing_names.is_empty() {
+        String::from("Ambiguous / unbounded fit detected.")
+    } else {
+        format!("Ambiguous / unbounded fits in {} of {} datasets ({}).", failing_names.len(), fit.datasets.len(), failing_names.join(", "))
+    };
+    let metric =
+        (!failing_names.is_empty()).then(|| format!("{} of {} datasets ({})", failing_names.len(), fit.datasets.len(), failing_names.join(", ")));
+    let joined_reasons = reasons.join(" ");
+    ChecklistItem {
+        assumption: "Parameter identifiability (Ambiguous)".to_owned(),
+        status: ChecklistStatus::Violated,
+        diagnostic_metric: metric,
+        explanation: if joined_reasons.is_empty() { prefix } else { format!("{prefix} {joined_reasons}") },
+        remediation: None,
+    }
+}
+
 fn parameter_identifiability_checklist_items(fit: &NonlinearFitResult, is_robust: bool) -> Vec<ChecklistItem> {
     if is_robust {
         return vec![ChecklistItem {
@@ -1281,18 +1565,25 @@ fn parameter_identifiability_checklist_items(fit: &NonlinearFitResult, is_robust
         }];
     }
     if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
+        let ds_names = dataset_display_names(fit);
+        if fit.datasets.len() > 1 {
+            return vec![ambiguous_multi_dataset_checklist_item(fit, reasons)];
+        }
         return reasons
             .iter()
             .map(|reason| ChecklistItem {
                 assumption: "Parameter identifiability (Ambiguous)".to_owned(),
                 status: ChecklistStatus::Violated,
-                diagnostic_metric: None,
+                diagnostic_metric: fit.datasets.first().map(|d| ds_names.get(&d.data_set_index).cloned().unwrap_or_else(|| d.label.clone())),
                 explanation: reason.clone(),
                 remediation: None,
             })
             .collect();
     }
     let item = if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
+        if fit.datasets.len() > 1 {
+            return vec![ambiguous_multi_dataset_checklist_item(fit, &[String::from("One or more parameters are redundant or unidentifiable.")])];
+        }
         ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
             status: ChecklistStatus::Violated,
@@ -1566,8 +1857,7 @@ struct ParamSummaryRow {
     title_x: Option<f64>,
     est: f64,
     se: f64,
-    lo: CiBound,
-    hi: CiBound,
+    ci_cell: ResultCell,
     is_unstable: bool,
 }
 
@@ -1579,9 +1869,11 @@ fn append_parameter_summary_tab_and_data(
     datasets: &[DatasetSeries],
     target_param: &str,
     show_se: bool,
-    unstable_as_text: bool,
+    nl_spec: &NonlinearFitSpec,
 ) {
     let ds_names = dataset_display_names(fit);
+    let ident_mode = nl_spec.effective_identifiability_mode();
+    let unstable_as_text = !matches!(ident_mode, Some(IdentifiabilityMode::IdentifyAmbiguousFits | IdentifiabilityMode::ReportAll));
     let mut rows_data: Vec<ParamSummaryRow> = Vec::new();
     for (idx, ds_res) in fit.datasets.iter().enumerate() {
         let label = ds_names.get(&ds_res.data_set_index).cloned().unwrap_or_else(|| ds_res.label.clone());
@@ -1591,14 +1883,33 @@ fn append_parameter_summary_tab_and_data(
             .iter()
             .find(|p| p.name.eq_ignore_ascii_case(target_param) && (p.dataset_index == Some(ds_res.data_set_index) || p.dataset_index.is_none()))
         {
-            let is_unstable = unstable_as_text && p.notes.contains(&ParameterNote::Unstable);
-            rows_data.push(ParamSummaryRow { label, title_x, est: p.estimate, se: p.se, lo: p.ci_lower, hi: p.ci_upper, is_unstable });
+            let is_unstable = unstable_as_text && should_mask_parameter_as_unstable(p, fit, ident_mode);
+            let ci_cell = if p.estimate.is_finite() {
+                nonlinear_param_ci_cell(fit, nl_spec, p)
+            } else {
+                ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable)
+            };
+            rows_data.push(ParamSummaryRow { label, title_x, est: p.estimate, se: p.se, ci_cell, is_unstable });
         } else if let Some(d) = fit.derived_scalars.get(idx).and_then(|list| list.iter().find(|d| d.name.eq_ignore_ascii_case(target_param))) {
-            rows_data.push(ParamSummaryRow { label, title_x, est: d.value, se: f64::NAN, lo: CiBound::Open, hi: CiBound::Open, is_unstable: false });
+            rows_data.push(ParamSummaryRow {
+                label,
+                title_x,
+                est: d.value,
+                se: f64::NAN,
+                ci_cell: ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable),
+                is_unstable: false,
+            });
         } else if let Some(pos) = ds_res.param_names.iter().position(|n| n.eq_ignore_ascii_case(target_param))
             && let Some(&val) = ds_res.params.get(pos)
         {
-            rows_data.push(ParamSummaryRow { label, title_x, est: val, se: f64::NAN, lo: CiBound::Open, hi: CiBound::Open, is_unstable: false });
+            rows_data.push(ParamSummaryRow {
+                label,
+                title_x,
+                est: val,
+                se: f64::NAN,
+                ci_cell: ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable),
+                is_unstable: false,
+            });
         }
     }
     if rows_data.is_empty() {
@@ -1621,12 +1932,21 @@ fn append_parameter_summary_tab_and_data(
                 .headers([target_param, "Confidence Interval"])
         };
 
-    for row in &rows_data {
+    for (r_idx, row) in rows_data.iter().enumerate() {
         let (val_cell, se_cell, ci_cell) = if row.is_unstable {
             let u = text_cell("Unstable");
+            let val_col = usize::from(has_numeric_x);
+            let raw_str = if row.est.is_finite() { format_significant_digits(row.est, 6) } else { String::from("non-finite") };
+            result.cell_details.push(ResultCellDetail {
+                tab_id: String::from("nonlinear_parameter_summary"),
+                row: r_idx,
+                col: val_col,
+                raw_value: row.est.is_finite().then_some(row.est),
+                detail: format!("Unstable estimate for {} ({}); raw solver iterate = {raw_str}", target_param, row.label),
+            });
             (u.clone(), u.clone(), u)
         } else {
-            (num_cell(row.est), num_cell(row.se), ci_bounds_cell(row.lo, row.hi))
+            (num_cell(row.est), num_cell(row.se), row.ci_cell.clone())
         };
         match (has_numeric_x, show_se) {
             (true, true) => {
@@ -2063,8 +2383,21 @@ fn append_interpolated_tab<'a>(
         if suppress_ci {
             has_robust_ci_suppression = true;
         }
-        let ci_rendered = if suppress_ci { text_cell("Not applicable") } else { ci_bounds_cell(item.ci_lower, item.ci_upper) };
-        let pred_rendered = if suppress_ci { text_cell("Not applicable") } else { ci_bounds_cell(item.pred_lower, item.pred_upper) };
+        let uncomputed_ci = !item.output_estimate.is_finite() || fit.df == 0 || !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous);
+        let ci_rendered = if suppress_ci {
+            text_cell("Not applicable")
+        } else if uncomputed_ci {
+            ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable)
+        } else {
+            ci_bounds_cell(item.ci_lower, item.ci_upper)
+        };
+        let pred_rendered = if suppress_ci {
+            text_cell("Not applicable")
+        } else if uncomputed_ci {
+            ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable)
+        } else {
+            ci_bounds_cell(item.pred_lower, item.pred_upper)
+        };
         tab.push_row(
             format!("{lbl} ({source})"),
             [num_cell(item.input_value), num_cell(item.output_estimate), ci_rendered, pred_rendered, text_cell(direction), text_cell(lbl.as_str())],
@@ -2616,8 +2949,8 @@ mod tests {
         let interp_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("InterpolatedUnknowns tab");
         assert_eq!(interp_tab.rows.len(), 4);
         assert_eq!(interp_tab.rows[2][1], ResultCell::Empty);
-        assert_eq!(interp_tab.rows[2][2], ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open });
-        assert_eq!(interp_tab.rows[2][3], ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open });
+        assert_eq!(interp_tab.rows[2][2], ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable });
+        assert_eq!(interp_tab.rows[2][3], ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable });
         assert_eq!(interp_tab.footnotes.len(), 1);
         assert!(interp_tab.footnotes[0].contains("outside fitted curve range"));
     }
@@ -2947,5 +3280,98 @@ mod tests {
         // Unsorted / duplicate-X overlay must also enforce coverage after collapse.
         let unsorted_partial = FittedCurveOverlay { points: vec![pt(8.0, 2.0), pt(5.0, 2.0), pt(8.0, 2.0)], ..narrowed };
         assert_eq!(super::compute_curve_overlay_auc(&unsorted_partial, 0.0, 10.0, &mut scratch, &mut collapsed), None);
+    }
+
+    #[test]
+    fn r19_6_append_nonlinear_parameter_tab_applies_abs_and_empty_for_nan_across_all_branches() {
+        use curvebook_doc::{IdentifiabilityMode, ResultSheet};
+
+        use crate::diagnostics::CovarianceDiagnostics;
+        use crate::error::{FitIdentifiability, FitStatus, ParameterNote};
+        use crate::solver::{FittedParameterSummary, InferenceAvailability, NonlinearFitResult};
+
+        let make_param = |slot_index: usize, name: &str, hougaard_g1: f64, notes: Vec<ParameterNote>| FittedParameterSummary {
+            slot_index,
+            name: name.to_owned(),
+            dataset_index: None,
+            estimate: 1.5,
+            se: 0.25,
+            ci_lower: CiBound::Finite(1.0),
+            ci_upper: CiBound::Finite(2.0),
+            symmetric_ci_lower: 1.0,
+            symmetric_ci_upper: 2.0,
+            dependency: 0.2,
+            hougaard_g1,
+            notes,
+            inference_availability: InferenceAvailability::Available,
+        };
+
+        let fit = NonlinearFitResult {
+            equation_id: "test_eq".to_owned(),
+            equation_name: "Test Eq".to_owned(),
+            fit_method: curvebook_doc::FitMethod::LeastSquares,
+            inference_availability: InferenceAvailability::Available,
+            status: FitStatus::Converged,
+            identifiability: FitIdentifiability::Identifiable,
+            iterations: 5,
+            n_obs: 10,
+            n_outliers_excluded: 0,
+            k_free: 4,
+            df: 6,
+            rss: 1.0,
+            weighted_ss: 1.0,
+            predicted_y_neg_log_weight_sum: None,
+            rsd: (1.0_f64 / 6.0).sqrt(),
+            rsdr: None,
+            r_squared: 0.99,
+            aic_c: Some(10.0),
+            bic: Some(11.0),
+            parameters: vec![
+                make_param(0, "NegNormal", -13.0577, Vec::new()),
+                make_param(1, "NanNormal", f64::NAN, Vec::new()),
+                make_param(2, "NegUnstable", -4.25, vec![ParameterNote::Unstable]),
+                make_param(3, "NanUnstable", f64::NAN, vec![ParameterNote::Unstable]),
+            ],
+            fixed_constants: Vec::new(),
+            covariance: CovarianceDiagnostics {
+                standard_errors: vec![0.25; 4],
+                symmetric_ci_lower: vec![1.0; 4],
+                symmetric_ci_upper: vec![2.0; 4],
+                covariance_matrix: Vec::new(),
+                correlation_matrix: Vec::new(),
+                dependencies: vec![0.2; 4],
+                numerical_rank: 4,
+                ambiguous: false,
+            },
+            datasets: Vec::new(),
+            derived_scalars: Vec::new(),
+            runs_test: None,
+            lack_of_fit: None,
+            normality: None,
+            normality_anderson_darling: None,
+            normality_lilliefors_ks: None,
+            homoscedasticity: None,
+            rout: None,
+            interpolated_x: Vec::new(),
+            interpolated_y: Vec::new(),
+            has_shared_parameters: false,
+        };
+
+        for (profile_ci, expected_cols) in [(false, 5_usize), (true, 4_usize)] {
+            let mut nl = NonlinearFitSpec::new("test_eq");
+            nl.profile_likelihood_ci = profile_ci;
+            nl.identifiability_mode = Some(IdentifiabilityMode::IdentifyUnstableParameters);
+            let spec = AnalysisSpec::new("r196-unit", "ds1", AnalysisKind::NonlinearRegression(nl.clone())).unwrap();
+            let mut res = ResultSheet::new(spec).unwrap();
+            super::append_nonlinear_parameter_tab(&mut res, &fit, &nl);
+            let tab = res.tabs.iter().find(|t| t.id == "nonlinear_parameters").unwrap();
+            assert_eq!(tab.column_headers.len(), expected_cols);
+            let hc = tab.column_headers.iter().position(|h| h == "Hougaard |g1|").unwrap();
+
+            assert_num_cell_approx(&tab.rows[0][hc], 13.0577, 1e-12, "normal negative g1 rendered as |g1|");
+            assert_eq!(tab.rows[1][hc], ResultCell::Empty, "normal NaN g1 rendered as Empty");
+            assert_num_cell_approx(&tab.rows[2][hc], 4.25, 1e-12, "unstable negative g1 rendered as |g1|");
+            assert_eq!(tab.rows[3][hc], ResultCell::Empty, "unstable NaN g1 rendered as Empty");
+        }
     }
 }

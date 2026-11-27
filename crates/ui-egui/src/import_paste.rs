@@ -778,7 +778,7 @@ fn table_kind_wire_name(kind: TableKind) -> &'static str {
     match kind {
         TableKind::Column => "Column",
         TableKind::Grouped => "Grouped",
-        TableKind::Xy => "Xy",
+        TableKind::Xy => "XY",
         TableKind::MultipleVariables => "MultipleVariables",
         TableKind::Contingency => "Contingency",
         TableKind::Survival => "Survival",
@@ -1597,15 +1597,21 @@ fn extract_resultsheet_preview_grid(rs: &curvebook_doc::ResultSheet, active_tab_
                     ResultCell::Text(s) => Cell::text(s.clone()),
                     ResultCell::Boolean(b) => Cell::number(if *b { 1.0 } else { 0.0 }),
                     ResultCell::ConfidenceInterval { lower, upper } => {
-                        let lo = match lower {
-                            CiBound::Finite(v) => v.to_string(),
-                            CiBound::Open => String::from("-inf"),
-                        };
-                        let hi = match upper {
-                            CiBound::Finite(v) => v.to_string(),
-                            CiBound::Open => String::from("+inf"),
-                        };
-                        Cell::text(format!("[{lo}, {hi}]"))
+                        if matches!(lower, CiBound::Unavailable) && matches!(upper, CiBound::Unavailable) {
+                            Cell::text("Unavailable")
+                        } else {
+                            let lo = match lower {
+                                CiBound::Finite(v) => v.to_string(),
+                                CiBound::Open => String::from("-inf"),
+                                CiBound::Unavailable => String::from("Unavailable"),
+                            };
+                            let hi = match upper {
+                                CiBound::Finite(v) => v.to_string(),
+                                CiBound::Open => String::from("+inf"),
+                                CiBound::Unavailable => String::from("Unavailable"),
+                            };
+                            Cell::text(format!("[{lo}, {hi}]"))
+                        }
                     }
                 })
                 .collect()

@@ -1434,7 +1434,7 @@ fn render_target_archetype_selector(ui: &mut Ui, pcx: TargetArchetypePickerCtx<'
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
             }
         };
-    ui.label(RichText::new("Target Table Archetype:").strong().color(tokens.text_primary));
+    ui.label(RichText::new("Target Table Format:").strong().color(tokens.text_primary));
     ui.horizontal_wrapped(|row| {
         for (tk, slug, lbl) in [
             (TableKind::Xy, "xy", "Coordinate (XY)"),
@@ -1458,11 +1458,11 @@ fn render_target_archetype_selector(ui: &mut Ui, pcx: TargetArchetypePickerCtx<'
             }
         }
     });
-    let legacy_ta = widgets::secondary_button(ui, "Cycle Target Archetype");
+    let legacy_ta = widgets::secondary_button(ui, "Cycle Target Format");
     meta.record_modal_response(
         ui,
         &legacy_ta,
-        FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Archetype", None, true),
+        FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Table Format", None, true),
     );
     if legacy_ta.clicked() {
         let next_tk = if target_kind == TableKind::Xy { TableKind::Column } else { TableKind::Xy };
@@ -2600,7 +2600,7 @@ pub fn render_exclude_with_reason_modal(
         let nr = ui.add(
             egui::TextEdit::multiline(&mut state.exclude_note_draft)
                 .id(note_id)
-                .hint_text("Optional audit note…")
+                .hint_text("Optional audit note")
                 .desired_rows(2)
                 .desired_width((dlg_w - 44.0).max(160.0)),
         );

@@ -488,13 +488,15 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
     })
 }
 
-/// Compute Hougaard's skewness measure `g_{1,i}` for each free parameter using second-order
+/// Compute signed Hougaard skewness `g_{1,i}` for each free parameter using second-order
 /// finite differences of the model prediction vector `eval_fn(theta) -> Option<Vec<f64>>`.
 ///
 /// Hougaard (1985) skewness in the form given by Ratkowsky (1990):
 /// `g_{1,i} = -s * sum_{jkl} L_ij L_ik L_il (W_jkl + W_kjl + W_ljk) / L_ii^{3/2}`, with
 /// `L = (J^T J)^{-1}` and `W_jkl = sum_m (d f_m / d theta_j)(d^2 f_m / d theta_k d theta_l)`
 /// (weighted). Second derivatives use central differences with step `1e-4 * max(|theta|, 1)`.
+/// Entries are `f64::NAN` whenever skewness cannot be computed (e.g., non-positive or non-finite
+/// `sigma`, failed model evaluation, non-positive covariance diagonal, or non-finite result).
 pub fn compute_hougaard_skewness<F>(
     theta: &[f64],
     sqrt_weights: &[f64],
@@ -532,33 +534,33 @@ where
 {
     let p = theta.len();
     let n = j_mat.nrows();
-    if p == 0 || n == 0 || !sigma.is_finite() || sigma <= 0.0 {
-        return vec![0.0; p];
+    if p == 0 || n == 0 || sqrt_weights.len() != n || j_mat.ncols() != p || !sigma.is_finite() || sigma <= 0.0 {
+        return vec![f64::NAN; p];
     }
     let mut f0 = vec![0.0_f64; n];
     if !eval_into(theta, &mut f0) {
-        return vec![0.0; p];
+        return vec![f64::NAN; p];
     }
 
     let steps: Vec<f64> = theta.iter().map(|&t| 1e-4 * t.abs().max(1.0)).collect();
     let Some(w_flat) = build_hougaard_w_tensor(theta, &f0, &steps, sqrt_weights, j_mat, &mut eval_into) else {
-        return vec![0.0; p];
+        return vec![f64::NAN; p];
     };
 
     let mut out = Vec::with_capacity(p);
     for i in 0..p {
-        let l_ii = cov_unscaled.get(i, i).unwrap_or(0.0);
+        let l_ii = cov_unscaled.get(i, i).unwrap_or(f64::NAN);
         if !l_ii.is_finite() || l_ii <= 0.0 {
-            out.push(0.0);
+            out.push(f64::NAN);
             continue;
         }
         let mut s_acc = NeumaierSum::new();
         for j in 0..p {
-            let l_ij = cov_unscaled.get(i, j).unwrap_or(0.0);
+            let l_ij = cov_unscaled.get(i, j).unwrap_or(f64::NAN);
             for k in 0..p {
-                let l_ik = cov_unscaled.get(i, k).unwrap_or(0.0);
+                let l_ik = cov_unscaled.get(i, k).unwrap_or(f64::NAN);
                 for l in 0..p {
-                    let l_il = cov_unscaled.get(i, l).unwrap_or(0.0);
+                    let l_il = cov_unscaled.get(i, l).unwrap_or(f64::NAN);
                     let w_jkl = w_flat[(j * p + k) * p + l];
                     let w_kjl = w_flat[(k * p + j) * p + l];
                     let w_ljk = w_flat[(l * p + j) * p + k];
@@ -567,7 +569,7 @@ where
             }
         }
         let g1 = -sigma * s_acc.total() / l_ii.powf(1.5);
-        out.push(if g1.is_finite() { g1 } else { 0.0 });
+        out.push(if g1.is_finite() { if g1 == 0.0 { 0.0 } else { g1 } } else { f64::NAN });
     }
     out
 }

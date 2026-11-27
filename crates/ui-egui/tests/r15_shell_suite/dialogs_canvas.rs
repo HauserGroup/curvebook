@@ -248,7 +248,7 @@ fn result_viewer_checklist_and_constant_hook_picker_work() {
             &ResultCell::ConfidenceInterval { lower: CiBound::Finite(4.2), upper: CiBound::Open },
             PValueFormat::Apa
         ),
-        "[4.2000, Unbounded]"
+        "[4.2000, unbounded]"
     );
 
     app.canvas_dialogs.open_hook_picker(&doc, &"graph-donor".into(), Some("Bottom".into()));

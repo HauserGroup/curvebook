@@ -1013,7 +1013,7 @@ fn target_kind_wire_name(kind: TableKind) -> &'static str {
     match kind {
         TableKind::Column => "Column",
         TableKind::Grouped => "Grouped",
-        TableKind::Xy => "Xy",
+        TableKind::Xy => "XY",
         TableKind::MultipleVariables => "MultipleVariables",
         _ => "Grouped",
     }

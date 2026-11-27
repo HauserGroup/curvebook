@@ -97,7 +97,7 @@ pub use plate::{MAX_PLATE_WELLS, PlateGeometry, PlateWellRole};
 pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairedObservationAccounting,
-    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultCellDetail, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
     format_significant_digits,
 };
 pub use result_builder::{

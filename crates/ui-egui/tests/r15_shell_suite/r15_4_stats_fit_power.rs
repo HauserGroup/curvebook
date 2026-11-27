@@ -653,13 +653,19 @@ fn aud_07_08_09_10_ext01_stats_fit_power_modals_regressions() -> BoxRes {
 fn aud_10_ext01_dose_response_and_log_x_warning_banner() -> BoxRes {
     use crate::helpers::{make_commit_driver, seed_xy_app};
 
-    // 3. EXT-01: Raw vs log10 dose-response default & fit.warning.log_x_scale one-click switch.
+    // 3. EXT-01 + R20.20 #4: Raw vs log10 dose-response default & deferred commit until Parameters > OK.
     let (raw_xs, log_xs, ys) = ([0.01, 0.1, 1.0, 10.0, 100.0, 1000.0], [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0], [5.0, 12.0, 48.0, 88.0, 97.0, 99.0]);
     for (xs, expected_eq) in [(raw_xs.as_slice(), "agonist_vs_response_4pl"), (log_xs.as_slice(), "log_agonist_vs_response_4pl")] {
         let (mut a, s) = seed_xy_app(xs, &ys);
         assert!(a.canvas_dialogs.open_analyze_dialog(&a.document().clone(), &s));
         a.canvas_dialogs.analyze.select_catalog_entry("fit.nonlinear");
         let mut d = make_commit_driver(a);
+        d.click_widget_id("modal.ok")?;
+        assert!(d.state().app.document().result_sheets.is_empty(), "R20.20 #4: Analyze OK must not pre-commit ResultSheet");
+        assert!(d.state().app.canvas_dialogs.edit_params.pending_create);
+        if expected_eq == "agonist_vs_response_4pl" {
+            assert!(d.frame_meta().find_by_widget_id("fit.warning.log_x_scale").is_none());
+        }
         d.click_widget_id("modal.ok")?;
         assert!(
             matches!(&d.state().app.document().result_sheets.last().ok_or("rs")?.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == expected_eq)
@@ -777,11 +783,18 @@ fn aud_10_analyze_picker_dataset_category_pstack_and_pcr_regressions() -> BoxRes
     use crate::helpers::{make_commit_driver, seed_column_app, seed_mv_app};
     use curvebook_ui_egui::dialogs_canvas::AnalysisCategory;
 
-    // 5. AUD-10-06/07/23/24: Analyze picker dataset uncheck (live & fallback), category preserves search, P-Value Stack dropdown & column cycle, PCR leakage disable.
-    let (mut ac, sc_id) = seed_column_app(&[("A", &[0.01, 0.04]), ("B", &[0.02, 0.05]), ("C", &[0.03, 0.06])], ColumnDesignHint::UnpairedReplicates);
+    // 5. R20.19 + AUD-10-06/07/23/24: Analyze picker named Column datasets (`analyze.dataset.*`), empty MV guard, category preserves search, P-Value Stack dropdown & column cycle, PCR leakage disable.
+    let (mut ac, sc_id) = seed_column_app(
+        &[("Vehicle", &[0.01, 0.04]), ("Low Dose", &[0.02, 0.05]), ("High Dose", &[0.03, 0.06])],
+        ColumnDesignHint::UnpairedReplicates,
+    );
     assert!(ac.canvas_dialogs.open_analyze_dialog(&ac.document().clone(), &sc_id));
+    assert!(ac.canvas_dialogs.analyze.variable_candidates.is_empty());
     let mut dc = make_commit_driver(ac);
-    dc.click_widget_id("analyze.mv.var.0")?;
+    assert!(dc.frame_meta().find_by_widget_id("analyze.mv.var.0").is_none());
+    let ds0 = dc.frame_meta().find_by_widget_id("analyze.dataset.0").ok_or("analyze.dataset.0")?;
+    assert_eq!((ds0.label.as_str(), ds0.value.as_ref()), ("Vehicle", Some(&json!(true))));
+    dc.click_widget_id("analyze.dataset.0")?;
     assert_eq!(dc.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1, 2]);
     set_textbox(&mut dc, "analyze.search", "t-test")?;
     dc.click_widget_id("analyze.cat.column")?;
@@ -802,16 +815,19 @@ fn aud_10_analyze_picker_dataset_category_pstack_and_pcr_regressions() -> BoxRes
         dc.click_widget_id("analyze.pvalue_stack.column")?;
         assert_eq!(dc.state().app.canvas_dialogs.analyze.pvalue_stack_column, exp);
     }
-    let (mut afb, sfb) = seed_column_app(&[("A", &[0.01]), ("B", &[0.02]), ("C", &[0.03])], ColumnDesignHint::UnpairedReplicates);
-    assert!(afb.canvas_dialogs.open_analyze_dialog(&afb.document().clone(), &sfb));
-    afb.canvas_dialogs.analyze.variable_candidates.clear();
-    let mut dfb = make_commit_driver(afb);
-    dfb.click_widget_id("analyze.dataset.0")?;
-    assert_eq!(dfb.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1, 2]);
 
     let (mut amv, smv) = seed_mv_app(4, 6);
     assert!(amv.canvas_dialogs.open_analyze_dialog(&amv.document().clone(), &smv));
     let mut dmv = make_commit_driver(amv);
+    let mv0 = dmv.frame_meta().find_by_widget_id("analyze.mv.var.0").ok_or("analyze.mv.var.0")?;
+    assert_eq!((mv0.label.as_str(), mv0.value.as_ref()), ("V1", Some(&json!(true))));
+    dmv.click_widget_id("analyze.mv.var.0")?;
+    dmv.click_widget_id("analyze.mv.var.1")?;
+    dmv.click_widget_id("analyze.mv.var.2")?;
+    assert_eq!(dmv.state().app.canvas_dialogs.analyze.selected_data_sets, vec![3]);
+    dmv.click_widget_id("analyze.mv.var.3")?;
+    assert_eq!(dmv.state().app.canvas_dialogs.analyze.selected_data_sets, vec![3]);
+    assert_eq!(dmv.frame_meta().find_by_widget_id("analyze.mv.var.3").and_then(|e| e.value.clone()), Some(json!(true)));
     set_textbox(&mut dmv, "analyze.search", "PCR")?;
     dmv.click_widget_id("analyze.entry.stats.pcr")?;
     dmv.click_widget_id("analyze.pca.pred.1")?;
@@ -1057,4 +1073,351 @@ fn aud_10_r9_defaults_spline_viewer_and_contingency_ci_regressions() -> BoxRes {
         dcg.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled && dcg.frame_meta().find_by_widget_id("edit.contingency.ci.error").is_none()
     );
     Ok(())
+}
+
+#[test]
+fn r20_20_first_run_nonlinear_fit_cancel_and_ok_commit_gate() -> BoxRes {
+    let (mut app, _, xy_id, _) = seed_rich_project_app()?;
+    let seq0 = app.mutation_seq();
+    let undo0 = app.session().undo_depth();
+    let rs0 = app.document().result_sheets.len();
+
+    let doc_snap = app.document().clone();
+    assert!(app.canvas_dialogs.open_analyze_dialog(&doc_snap, &xy_id));
+    let mut driver = make_driver(app, 1024.0, 640.0);
+    driver.click_widget_id("analyze.search")?;
+    driver.type_text("Nonlinear")?;
+    driver.click_widget_id("analyze.entry.fit.nonlinear")?;
+    driver.click_widget_id("modal.ok")?;
+    if matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
+        driver.click_widget_id("analyze_picker.dup.create_new")?;
+        driver.click_widget_id("modal.ok")?;
+    }
+
+    assert_eq!(
+        HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false).modal_surface,
+        HybridModalSurface::EguiFitModal
+    );
+    assert_eq!(driver.state().app.document().result_sheets.len(), rs0);
+    assert_eq!(driver.state().app.mutation_seq(), seq0);
+
+    driver.click_widget_id("modal.cancel")?;
+    assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+    assert_eq!(driver.state().app.document().result_sheets.len(), rs0);
+    assert_eq!(driver.state().app.session().undo_depth(), undo0);
+
+    let doc_snap2 = driver.state().app.document().clone();
+    assert!(driver.state_mut().app.canvas_dialogs.open_analyze_dialog(&doc_snap2, &xy_id));
+    driver.run_settled();
+    driver.click_widget_id("analyze.search")?;
+    driver.type_text("Nonlinear")?;
+    driver.click_widget_id("analyze.entry.fit.nonlinear")?;
+    driver.click_widget_id("modal.ok")?;
+    if matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
+        driver.click_widget_id("analyze_picker.dup.create_new")?;
+        driver.click_widget_id("modal.ok")?;
+    }
+    assert_eq!(driver.state().app.document().result_sheets.len(), rs0);
+
+    driver.click_widget_id("fit.eq.search")?;
+    driver.type_text("log_agonist_vs_response_5pl")?;
+    driver.click_widget_id("fit.eq.item.log_agonist_vs_response_5pl")?;
+    driver.click_widget_id("modal.ok")?;
+    assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+    assert_eq!(driver.state().app.document().result_sheets.len(), rs0 + 1);
+    assert_eq!(driver.state().app.session().undo_depth(), undo0 + 1);
+    let created = driver.state().app.document().result_sheets.last().ok_or("missing created fit")?;
+    assert!(matches!(&created.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "log_agonist_vs_response_5pl"));
+    Ok(())
+}
+
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod analyze_picker_and_fit_defer_tests {
+    use curvebook_doc::{
+        AnalysisKind, Cell, DataSheet, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype,
+        WeightingScheme, XyTable,
+    };
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::UiApp;
+    use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+    use curvebook_ui_egui::egui_shell::driver::EguiHumanPathDriver;
+    use egui::{Key, Modifiers};
+    use serde_json::json;
+
+    use crate::common::{ShellTestState, set_textbox, sync_app_to_driver};
+    use crate::helpers::make_commit_driver;
+
+    fn open_named_xy_nonlinear_analyze_driver() -> EguiHumanPathDriver<'static, ShellTestState> {
+        let xs = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0];
+        let series: [(&str, [f64; 6]); 3] = [
+            ("Vehicle", [4.0, 10.0, 42.0, 84.0, 96.0, 99.0]),
+            ("Agonist A", [5.0, 18.0, 58.0, 91.0, 98.0, 100.0]),
+            ("Antagonist B", [3.0, 7.0, 22.0, 61.0, 89.0, 97.0]),
+        ];
+        let mut tbl = XyTable::new(SubcolumnMode::Single, series.len(), xs.len()).unwrap();
+        tbl.x_title = String::from("Log[Conc]");
+        for (r, &x) in xs.iter().enumerate() {
+            tbl.x_cells[r][0] = Cell::number(x);
+        }
+        for (ci, (name, ys)) in series.iter().enumerate() {
+            tbl.data_sets[ci].title = (*name).to_owned();
+            for (r, &y) in ys.iter().enumerate() {
+                tbl.data_sets[ci].cells[r][0] = Cell::number(y);
+            }
+        }
+        let sid = SheetId::try_new("xy-named").unwrap();
+        let mut doc = ProjectDocument::new("Named XY Analyze").unwrap();
+        doc.data_sheets.push(DataSheet::new(sid.clone(), "Dose Curve", TableArchetype::Xy(tbl)).unwrap());
+        doc.active_sheet_id = Some(sid.clone());
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        app.sync_views();
+        let doc_snap = app.document().clone();
+        assert!(app.canvas_dialogs.open_analyze_dialog(&doc_snap, &sid));
+        assert!(app.canvas_dialogs.analyze.variable_candidates.is_empty());
+        let mut drv = make_commit_driver(app);
+        set_textbox(&mut drv, "analyze.search", "Nonlinear").unwrap();
+        drv.click_widget_id("analyze.entry.fit.nonlinear").unwrap();
+        drv
+    }
+
+    fn assert_dataset_checked_states(drv: &EguiHumanPathDriver<'static, ShellTestState>, all_checked: bool, item_checked: [bool; 3]) {
+        assert_eq!(drv.frame_meta().find_by_widget_id("analyze.dataset.all").and_then(|e| e.value.clone()), Some(json!(all_checked)));
+        for (idx, expected) in item_checked.into_iter().enumerate() {
+            assert_eq!(drv.frame_meta().find_by_widget_id(&format!("analyze.dataset.{idx}")).and_then(|e| e.value.clone()), Some(json!(expected)));
+        }
+    }
+
+    #[test]
+    fn r20_19_analyze_picker_named_xy_series_and_selection_semantics() {
+        let mut drv_all = open_named_xy_nonlinear_analyze_driver();
+        assert!(drv_all.frame_meta().find_by_widget_id("analyze.mv.var.0").is_none());
+        assert!(
+            !drv_all.frame_meta().entries.iter().any(|e| matches!(e.label.as_str(), "Col A" | "Col B" | "Col C")),
+            "named XY Analyze picker must never substitute fake Col A..C labels"
+        );
+        for (idx, expected_title) in [(0, "Vehicle"), (1, "Agonist A"), (2, "Antagonist B")] {
+            let entry = drv_all.frame_meta().find_by_widget_id(&format!("analyze.dataset.{idx}")).expect("dataset checkbox");
+            assert_eq!(entry.label, expected_title);
+        }
+        assert_dataset_checked_states(&drv_all, true, [true, true, true]);
+        drv_all.click_widget_id("modal.ok").unwrap();
+        drv_all.run_settled();
+        assert!(drv_all.state().app.document().result_sheets.is_empty(), "must defer ResultSheet creation until Parameters > OK");
+        drv_all.click_widget_id("modal.ok").unwrap();
+        drv_all.run_settled();
+        let rs_all = drv_all.state().app.document().result_sheets.last().expect("default nonlinear fit sheet");
+        assert!(matches!(rs_all.status, ResultStatus::UpToDate));
+        assert!(rs_all.analysis.selected_data_sets.is_empty(), "default All commits empty selected_data_sets");
+
+        let mut drv_multi = open_named_xy_nonlinear_analyze_driver();
+        drv_multi.click_widget_id("analyze.dataset.1").unwrap();
+        assert_eq!(drv_multi.state().app.canvas_dialogs.analyze.selected_data_sets, vec![0, 2]);
+        assert_dataset_checked_states(&drv_multi, false, [true, false, true]);
+        drv_multi.click_widget_id("modal.ok").unwrap();
+        drv_multi.run_settled();
+        assert!(drv_multi.state().app.document().result_sheets.is_empty(), "must preserve selected_data_sets through deferred Parameters modal");
+        drv_multi.click_widget_id("modal.ok").unwrap();
+        drv_multi.run_settled();
+        let rs_multi = drv_multi.state().app.document().result_sheets.last().expect("multi-series fit sheet");
+        assert!(matches!(rs_multi.status, ResultStatus::UpToDate));
+        assert_eq!(rs_multi.analysis.selected_data_sets, vec![0, 2]);
+
+        let mut drv_one = open_named_xy_nonlinear_analyze_driver();
+        drv_one.click_widget_id("analyze.dataset.0").unwrap();
+        drv_one.click_widget_id("analyze.dataset.2").unwrap();
+        assert_eq!(drv_one.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1]);
+
+        drv_one.click_widget_id("analyze.dataset.1").unwrap();
+        assert_eq!(drv_one.state().app.canvas_dialogs.analyze.selected_data_sets, vec![1]);
+        assert_dataset_checked_states(&drv_one, false, [false, true, false]);
+
+        drv_one.click_widget_id("modal.ok").unwrap();
+        drv_one.run_settled();
+        assert!(drv_one.state().app.document().result_sheets.is_empty());
+        drv_one.click_widget_id("modal.ok").unwrap();
+        drv_one.run_settled();
+        let rs_one = drv_one.state().app.document().result_sheets.last().expect("single-series fit sheet");
+        assert!(matches!(rs_one.status, ResultStatus::UpToDate));
+        assert_eq!(rs_one.analysis.selected_data_sets, vec![1]);
+    }
+
+    #[test]
+    fn r20_20_item4_first_run_nonlinear_cancel_and_esc_discard_draft() {
+        let mut drv = open_named_xy_nonlinear_analyze_driver();
+        let base_seq = drv.state().app.mutation_seq();
+        let base_undo = drv.state().app.session().undo_depth();
+        let base_dirty = drv.state().app.session().is_dirty();
+        let base_active = drv.state().app.document().active_sheet_id.clone();
+
+        drv.click_widget_id("analyze.dataset.1").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+
+        assert!(matches!(drv.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
+        assert!(drv.state().app.canvas_dialogs.edit_params.pending_create);
+        assert_eq!(drv.state().app.document().result_sheets.len(), 0);
+        assert_eq!(drv.state().app.document().graph_sheets.len(), 0);
+        assert_eq!(drv.state().app.mutation_seq(), base_seq);
+        assert_eq!(drv.state().app.session().undo_depth(), base_undo);
+        assert_eq!(drv.state().app.session().is_dirty(), base_dirty);
+        assert!(drv.frame_meta().find_by_widget_id("modal.apply").is_none(), "create mode must hide Apply");
+
+        set_textbox(&mut drv, "fit.eq.search", "michaelis").unwrap();
+        drv.click_widget_id("fit.eq.item.michaelis_menten").unwrap();
+        drv.click_widget_id("fit.tab.weight").unwrap();
+        drv.click_widget_id("fit.wt.rel_sq").unwrap();
+        drv.click_widget_id("modal.cancel").unwrap();
+        drv.run_settled();
+
+        assert_eq!(drv.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+        assert!(!drv.state().app.canvas_dialogs.edit_params.pending_create);
+        assert!(drv.state().app.canvas_dialogs.edit_params.draft.is_none());
+        assert_eq!(drv.state().app.document().result_sheets.len(), 0);
+        assert_eq!(drv.state().app.document().graph_sheets.len(), 0);
+        assert_eq!(drv.state().app.mutation_seq(), base_seq);
+        assert_eq!(drv.state().app.session().undo_depth(), base_undo);
+        assert_eq!(drv.state().app.session().is_dirty(), base_dirty);
+        assert_eq!(drv.state().app.document().active_sheet_id, base_active);
+
+        let doc_reopen = drv.state().app.document().clone();
+        let src_sid = base_active.unwrap();
+        assert!(drv.state_mut().app.canvas_dialogs.open_analyze_dialog(&doc_reopen, &src_sid));
+        sync_app_to_driver(&mut drv);
+        set_textbox(&mut drv, "analyze.search", "Nonlinear").unwrap();
+        drv.click_widget_id("analyze.entry.fit.nonlinear").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        assert!(matches!(
+            &drv.state().app.canvas_dialogs.edit_params.draft.as_ref().map(|s| &s.kind),
+            Some(AnalysisKind::NonlinearRegression(nl))
+                if nl.equation_id == "log_agonist_vs_response_4pl" && nl.weighting == WeightingScheme::None
+        ));
+        drv.press_egui_key(Key::Escape, Modifiers::NONE);
+        drv.run_settled();
+        assert_eq!(drv.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+        assert_eq!(drv.state().app.document().result_sheets.len(), 0);
+        assert_eq!(drv.state().app.mutation_seq(), base_seq);
+        assert_eq!(drv.state().app.session().undo_depth(), base_undo);
+    }
+
+    fn open_mm_enzyme_analyze_driver() -> (EguiHumanPathDriver<'static, ShellTestState>, SheetId) {
+        let mut tbl_mm = XyTable::new(SubcolumnMode::Single, 3, 6).unwrap();
+        tbl_mm.x_title = String::from("[Substrate] (uM)");
+        let mm_xs = [0.5, 1.0, 2.5, 5.0, 10.0, 20.0];
+        let mm_series = [("Vehicle", 120.0, 3.0), ("Modulator A", 95.0, 4.0), ("Modulator B", 140.0, 5.0)];
+        for (r, &x) in mm_xs.iter().enumerate() {
+            tbl_mm.x_cells[r][0] = Cell::number(x);
+            for (ci, &(title, vmax, km)) in mm_series.iter().enumerate() {
+                tbl_mm.data_sets[ci].title = title.to_owned();
+                tbl_mm.data_sets[ci].cells[r][0] = Cell::number(vmax * x / (km + x));
+            }
+        }
+        let mm_sid = SheetId::try_new("xy-mm").unwrap();
+        let mut doc_mm = ProjectDocument::new("Enzyme Kinetics").unwrap();
+        doc_mm.data_sheets.push(DataSheet::new(mm_sid.clone(), "Enzyme Curve", TableArchetype::Xy(tbl_mm)).unwrap());
+        doc_mm.active_sheet_id = Some(mm_sid.clone());
+        let mut app_mm = UiApp::from_session(Session::from_document(doc_mm));
+        app_mm.sync_views();
+        let doc_mm_snap = app_mm.document().clone();
+        assert!(app_mm.canvas_dialogs.open_analyze_dialog(&doc_mm_snap, &mm_sid));
+        (make_commit_driver(app_mm), mm_sid)
+    }
+
+    fn commit_mm_enzyme_fit(drv: &mut EguiHumanPathDriver<'static, ShellTestState>) -> ResultSheet {
+        set_textbox(drv, "analyze.search", "Nonlinear").unwrap();
+        drv.click_widget_id("analyze.entry.fit.nonlinear").unwrap();
+        drv.click_widget_id("analyze.dataset.1").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        assert_eq!(drv.state().app.document().result_sheets.len(), 0);
+
+        set_textbox(drv, "fit.eq.search", "michaelis").unwrap();
+        drv.click_widget_id("fit.eq.item.michaelis_menten").unwrap();
+        drv.click_widget_id("fit.tab.weight").unwrap();
+        drv.click_widget_id("fit.wt.rel_sq").unwrap();
+        drv.click_widget_id("fit.tab.constraints").unwrap();
+        drv.click_widget_id("fit.con.rule.Vmax.fixed").unwrap();
+        set_textbox(drv, "fit.con.const.Vmax", "120").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+
+        assert_eq!(drv.state().app.canvas_dialogs.active_dialog, ActiveDialog::None, "last_intent_error={:?}", drv.state().last_intent_error);
+        assert!(!drv.state().app.canvas_dialogs.edit_params.pending_create);
+        assert_eq!(drv.state().app.document().result_sheets.len(), 1);
+        drv.state().app.document().result_sheets.first().unwrap().clone()
+    }
+
+    #[test]
+    fn r20_20_item4_first_run_nonlinear_ok_commits_once_and_single_undo_reverts() {
+        let (mut drv, _) = open_mm_enzyme_analyze_driver();
+        let base_undo = drv.state().app.session().undo_depth();
+        let created = commit_mm_enzyme_fit(&mut drv);
+
+        assert_eq!(drv.state().app.session().undo_depth(), base_undo + 1);
+        assert_eq!(drv.state().app.document().active_sheet_id.as_ref(), Some(&created.id));
+        assert!(matches!(created.status, ResultStatus::UpToDate));
+        assert_eq!(created.analysis.selected_data_sets, vec![0, 2]);
+        let AnalysisKind::NonlinearRegression(created_nl) = &created.analysis.kind else {
+            panic!("expected NonlinearRegression");
+        };
+        assert_eq!(created_nl.equation_id, "michaelis_menten");
+        assert_eq!(created_nl.weighting, WeightingScheme::RelativeSquare);
+        assert!(
+            created_nl.parameter_rules.iter().any(|r| r.name == "Vmax" && matches!(r.scope, ParameterScope::Constant(v) if (v - 120.0).abs() < 1e-9))
+        );
+
+        drv.state_mut().app.execute_command("edit.undo", json!({})).unwrap();
+        assert_eq!(drv.state().app.document().result_sheets.len(), 0);
+        assert_eq!(drv.state().app.session().undo_depth(), base_undo);
+    }
+
+    #[test]
+    fn r20_20_item4_existing_fit_edit_in_place_and_duplicate_create_new_defer() {
+        let (mut drv, mm_sid) = open_mm_enzyme_analyze_driver();
+        let created = commit_mm_enzyme_fit(&mut drv);
+
+        let seq_before_edit = drv.state().app.mutation_seq();
+        let doc_edit = drv.state().app.document().clone();
+        assert!(drv.state_mut().app.canvas_dialogs.open_edit_parameters(&doc_edit, &created.id));
+        sync_app_to_driver(&mut drv);
+        assert!(drv.frame_meta().find_by_widget_id("modal.apply").is_some());
+        drv.click_widget_id("fit.tab.weight").unwrap();
+        drv.click_widget_id("fit.wt.none").unwrap();
+        drv.click_widget_id("modal.cancel").unwrap();
+        drv.run_settled();
+        assert_eq!(drv.state().app.mutation_seq(), seq_before_edit);
+        assert!(matches!(
+            &drv.state().app.document().result_sheet(&created.id).unwrap().analysis.kind,
+            AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "michaelis_menten" && nl.weighting == WeightingScheme::RelativeSquare
+        ));
+
+        let doc_edit2 = drv.state().app.document().clone();
+        assert!(drv.state_mut().app.canvas_dialogs.open_edit_parameters(&doc_edit2, &created.id));
+        sync_app_to_driver(&mut drv);
+        set_textbox(&mut drv, "fit.eq.search", "agonist_vs_response_4pl").unwrap();
+        drv.click_widget_id("fit.eq.item.agonist_vs_response_4pl").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        assert_eq!(drv.state().app.document().result_sheets.len(), 1);
+        assert!(matches!(
+            &drv.state().app.document().result_sheet(&created.id).unwrap().analysis.kind,
+            AnalysisKind::NonlinearRegression(nl) if nl.equation_id == "agonist_vs_response_4pl"
+        ));
+
+        let doc_dup = drv.state().app.document().clone();
+        assert!(drv.state_mut().app.canvas_dialogs.open_analyze_dialog(&doc_dup, &mm_sid));
+        sync_app_to_driver(&mut drv);
+        set_textbox(&mut drv, "analyze.search", "Nonlinear").unwrap();
+        drv.click_widget_id("analyze.entry.fit.nonlinear").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        assert!(matches!(drv.state().app.canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }));
+        drv.click_widget_id("analyze_picker.dup.create_new").unwrap();
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        assert_eq!(drv.state().app.document().result_sheets.len(), 1);
+        drv.click_widget_id("modal.cancel").unwrap();
+        drv.run_settled();
+        assert_eq!(drv.state().app.document().result_sheets.len(), 1);
+    }
 }

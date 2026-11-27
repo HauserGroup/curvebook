@@ -1019,6 +1019,21 @@ fn source_cell_id_schema() -> SchemaNode {
     .with_title("SourceCellId")
 }
 
+fn result_cell_detail_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("tab_id", string_schema().with_min_length(1)),
+            ("row", integer_schema().with_minimum_i64(0)),
+            ("col", integer_schema().with_minimum_i64(0)),
+            ("raw_value", nullable_schema(number_schema())),
+            ("detail", string_schema()),
+        ],
+        &["tab_id", "row", "col", "detail"],
+        false,
+    )
+    .with_title("ResultCellDetail")
+}
+
 fn result_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
@@ -1032,6 +1047,7 @@ fn result_sheet_schema() -> SchemaNode {
             ("fitted_curves", array_schema(ref_schema("FittedCurveOverlay"))),
             ("eliminated_outliers", array_schema(ref_schema("SourceCellId"))),
             ("checklist", array_schema(ref_schema(ChecklistItem::schema_name()))),
+            ("cell_details", array_schema(ref_schema("ResultCellDetail"))),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
         ],
@@ -1175,6 +1191,7 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def("DataSheet", data_sheet_schema())
     .with_def("InfoSheet", info_sheet_schema())
     .with_def("SourceCellId", source_cell_id_schema())
+    .with_def("ResultCellDetail", result_cell_detail_schema())
     .with_def("ResultSheet", result_sheet_schema())
     .with_def("GraphSheet", graph_sheet_schema())
     .with_def("LayoutSheet", layout_sheet_schema())

@@ -28,7 +28,7 @@ fn result_cell_formatting_handles_open_ci_bounds_and_pvalues() {
         &ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.5), upper: CiBound::Open },
         PValueFormat::FourDecimal,
     );
-    assert!(ci.contains("Unbounded"));
+    assert!(ci.contains("unbounded"));
 
     let p = ResultSheetViewState::format_result_cell(
         &ResultCell::PValue { raw: 0.0021, formatted: String::from("0.0021"), stars: String::from("**") },
@@ -768,5 +768,71 @@ mod aud09_remediation_tests {
         };
         assert_eq!(cgt.commit_intent().unwrap().params["grouped_arrangement"], json!(curvebook_doc::GroupedArrangement::Superimposed));
         assert!(cgt.commit_intents(&doc).iter().any(|i| i.command_id == "graph.setSpec" && i.params["grouped_arrangement"] == json!(curvebook_doc::GroupedArrangement::Superimposed)));
+    }
+
+    #[test]
+    fn r20_6_and_r20_10_xy_wire_name_ambiguity_only_banner_and_tsv_explicit_ci() {
+        use crate::AssumptionDiagnosticBanner;
+        use crate::dialogs_canvas::ResultSheetViewState;
+        use crate::dialogs_canvas::workspace_dialogs::convert_target_wire_name;
+        use curvebook_doc::{ChecklistItem, ChecklistStatus, CiBound, PValueFormat, ResultStatus, ResultTab, ResultTabKind};
+
+        assert_eq!(convert_target_wire_name(curvebook_doc::TableKind::Xy), "XY");
+
+        let both_open = ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open };
+        let half_open = ResultCell::ConfidenceInterval { lower: CiBound::Finite(0.1753), upper: CiBound::Open };
+        let half_unavail = ResultCell::ConfidenceInterval { lower: CiBound::Finite(0.1753), upper: CiBound::Unavailable };
+        assert_eq!(ResultSheetViewState::format_result_cell(&both_open, PValueFormat::FourDecimal), "Not bounded");
+        assert_eq!(ResultSheetViewState::format_result_cell(&half_open, PValueFormat::FourDecimal), "[0.1753, unbounded]");
+        assert_eq!(ResultSheetViewState::format_result_cell(&half_unavail, PValueFormat::FourDecimal), "[0.1753, Unavailable]");
+        assert_eq!(ResultSheetViewState::format_result_cell_with_survival(&both_open, PValueFormat::FourDecimal, true), "Not reached");
+        assert_eq!(
+            ResultSheetViewState::format_result_cell_with_survival(
+                &ResultCell::ConfidenceInterval { lower: CiBound::Finite(14.0), upper: CiBound::Open },
+                PValueFormat::FourDecimal,
+                true,
+            ),
+            "[14, Not reached]"
+        );
+
+        let mut doc = ProjectDocument::default();
+        let mut rs = ResultSheet::new(
+            AnalysisSpec::new(
+                "res-nl-only",
+                "ds-1",
+                AnalysisKind::NonlinearRegression(curvebook_doc::NonlinearFitSpec::new("log_agonist_vs_response_4pl")),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        rs.status = ResultStatus::UpToDate;
+        rs.tabs.push(ResultTab {
+            id: String::from("nonlinear_parameters"),
+            title: String::from("Nonlinear fit"),
+            kind: ResultTabKind::ParametersAndConfidenceIntervals,
+            column_headers: vec![String::from("VEHICLE"), String::from("DRUG")],
+            row_labels: vec![String::from("IC50")],
+            rows: vec![vec![both_open.clone(), ResultCell::Number { value: 1.5, prefix: None, units: None }]],
+            footnotes: Vec::new(),
+        });
+        assert!(rs.checklist.is_empty());
+        let banner = AssumptionDiagnosticBanner::from_result(&rs).expect("ambiguity-only NL cells must surface single banner");
+        assert!(banner.summary.contains("VEHICLE") && !banner.summary.contains("???"));
+
+        rs.checklist.push(ChecklistItem {
+            assumption: String::from("X-axis scale matches log10(X) equation"),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: None,
+            explanation: String::from("Non-log X scale."),
+            remediation: None,
+        });
+        let combined = AssumptionDiagnosticBanner::from_result(&rs).expect("combined banner");
+        assert!(combined.summary.contains("VEHICLE") && combined.summary.contains("X-axis scale matches log10(X) equation"));
+
+        doc.result_sheets.push(rs);
+        let mut app = crate::UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        let out = copy_result_table_to_clipboard(&mut app, "res-nl-only", true);
+        let tsv = out.command_result.unwrap()["copied_text"].as_str().unwrap().to_owned();
+        assert!(tsv.contains("Not bounded") && !tsv.contains("???"), "unexpected TSV: {tsv}");
     }
 }

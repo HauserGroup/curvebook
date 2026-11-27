@@ -463,3 +463,34 @@ fn csv_locale_default_and_command_palette_import_export_routing() -> Result<(), 
 
     Ok(())
 }
+
+#[test]
+fn r10_34_native_file_picker_filters_use_extension_naming() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut rt, wid, adapter) = spawn_runtime(Session::new())?;
+
+    for (locale, expected_pzfx, expected_archive) in
+        [("en", ".pzfx files", ".prism files"), ("de", ".pzfx-Dateien", ".prism-Dateien"), ("ja", ".pzfx ファイル", ".prism ファイル")]
+    {
+        rt.window_mut(wid)?.app_mut().set_locale(locale);
+        adapter.push_response("table.importPzfx", None);
+        adapter.push_response("table.importPrism", None);
+        let _ = rt.dispatch_native_file_command(wid, "table.importPzfx")?;
+        let _ = rt.dispatch_native_file_command(wid, "table.importPrism")?;
+        let reqs = adapter.requests();
+        let pzfx_req = reqs.iter().rev().find(|r| r.command_id == "table.importPzfx").expect("pzfx dialog request");
+        let archive_req = reqs.iter().rev().find(|r| r.command_id == "table.importPrism").expect("archive dialog request");
+        assert_eq!(pzfx_req.filter_label, expected_pzfx, "locale {locale}");
+        assert_eq!(pzfx_req.extensions, vec![String::from("pzfx")]);
+        assert_eq!(archive_req.filter_label, expected_archive, "locale {locale}");
+        assert_eq!(archive_req.extensions, vec![String::from("prism")]);
+    }
+
+    rt.window_mut(wid)?.app_mut().set_locale("en");
+    adapter.push_response("project.open", None);
+    let _ = rt.dispatch_native_file_command(wid, "project.open")?;
+    let open_req = adapter.requests().into_iter().rev().find(|r| r.command_id == "project.open").expect("open dialog request");
+    assert_eq!(open_req.filter_label, "CurveBook, .pzfx, .prism & Data files");
+    assert!(open_req.extensions.iter().any(|e| e == "pzfx") && open_req.extensions.iter().any(|e| e.ends_with("ism")));
+
+    Ok(())
+}

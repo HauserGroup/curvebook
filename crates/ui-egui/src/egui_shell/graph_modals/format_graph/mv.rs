@@ -370,7 +370,7 @@ fn render_mv_level_reorder_controls(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, d
         for (idx, level) in draft.mv_levels.iter().enumerate() {
             let is_selected = idx == sel_idx;
             let text = if is_selected {
-                egui::RichText::new(level).strong().color(gctx.tokens.accent)
+                egui::RichText::new(level).strong().color(gctx.tokens.text_strong)
             } else {
                 egui::RichText::new(level).color(gctx.tokens.text_muted)
             };

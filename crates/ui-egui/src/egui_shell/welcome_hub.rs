@@ -466,9 +466,10 @@ fn render_card_header(ui: &mut egui::Ui, app: &UiApp, tokens: &Tokens, z_layer: 
     let sub_txt = tr(&app.locale, "welcome.subtitle");
     let avail_w = ui.available_width();
     ui.horizontal_centered(|ui| {
-        let (mark_rect, _) = ui.allocate_exact_size(Vec2::splat(32.0), Sense::hover());
+        let mark_size = crate::egui_shell::brand::WELCOME_MARK_SIZE;
+        let (mark_rect, _) = ui.allocate_exact_size(mark_size, Sense::hover());
         crate::egui_shell::brand::paint_mark(ui, mark_rect);
-        let text_w = (avail_w - 32.0 - ui.spacing().item_spacing.x).max(80.0);
+        let text_w = (avail_w - mark_size.x - ui.spacing().item_spacing.x).max(80.0);
         ui.vertical(|ui| {
             ui.set_max_width(text_w);
             render_clipped_text_label(ui, "welcome.header.title", title_txt, FontId::proportional(15.5), tokens.text_strong, z_layer, meta);
@@ -1471,7 +1472,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
             widget_id: "welcome.btn.clone_options",
             role: "button",
             a11y_role: egui::Role::Button,
-            label: "Clone Options…",
+            label: "Clone Options",
             command_id: None,
             selected: state.clone_options_open,
             enabled,

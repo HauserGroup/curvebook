@@ -185,7 +185,7 @@ fn navigator_drag_reorder_info_sheet_and_canvas_title_inline_edit() {
     h.driver.drag(widget_center(&h.driver, "nav.sheet.data-xy").unwrap(), widget_center(&h.driver, "nav.sheet.data-grp").unwrap()).unwrap();
     assert_eq!(h.app().document().data_sheets[0].id.as_str(), "data-grp");
 
-    h.click("nav.chip.info").unwrap();
+    h.select_nav_kind_filter("nav.chip.info").unwrap();
     h.click("nav.sheet.info-1").unwrap();
     let ph_wid =
         h.driver.frame_meta().entries.iter().find(|e| e.widget_id.starts_with("info.const.") && e.label == "Target_pH").unwrap().widget_id.clone();
@@ -199,7 +199,7 @@ fn navigator_drag_reorder_info_sheet_and_canvas_title_inline_edit() {
     h.click("info.notes.save").unwrap();
     assert_eq!(h.app().document().info_sheet(&"info-1".into()).unwrap().notes_markdown, "Incubated 45 min at 37 C.");
 
-    h.click("nav.chip.graphs").unwrap();
+    h.select_nav_kind_filter("nav.chip.graphs").unwrap();
     h.click("nav.sheet.graph-xy").unwrap();
     h.app_mut().execute_command("graph.setSpec", json!({ "sheet_id": "graph-xy", "spec": { "title": "Normalized Fluorescence" } })).unwrap();
     h.app_mut().execute_command("graph.setAxes", json!({ "sheet_id": "graph-xy", "x_axis": { "title": "Log[Agonist] (M)" } })).unwrap();

@@ -134,18 +134,20 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
 pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
     match id {
         "app.about" => ("menu.help", "Help/About"),
-        "app.feedback" => ("menu.help", "Help/Send Feedback..."),
+        "app.feedback" => ("menu.help", "Help/Send Feedback"),
         "ui.navigator.toggle" => ("menu.view", "View/Navigator"),
         "ui.inspector.toggle" => ("menu.view", "View/Inspector"),
         "ui.family.toggle" => ("menu.view", "View/Family Pane"),
-        "ui.palette.open" => ("menu.view", "View/Command Palette..."),
-        "ui.sheet.find" => ("menu.edit", "Edit/Find in Sheet..."),
-        "ui.zoom.fitSheet" => ("menu.view", "View/Zoom to Fit"),
+        "ui.palette.open" => ("menu.view", "View/Command Palette"),
+        "ui.sheet.find" => ("menu.edit", "Edit/Find in Sheet"),
+        "ui.zoom.in" => ("menu.view", "View/Zoom/Zoom In"),
+        "ui.zoom.out" => ("menu.view", "View/Zoom/Zoom Out"),
+        "ui.zoom.fitSheet" => ("menu.view", "View/Zoom/Zoom to Fit"),
         "ui.gallery.toggle" => ("menu.view", "View/Gallery View"),
         "ui.rulers.toggle" => ("menu.view", "View/Rulers"),
         "ui.pane.cycle" => ("menu.view", "View/Cycle Focus Pane"),
-        "ui.shortcut.set" => ("menu.edit", "Edit/Preferences/Keyboard Shortcuts..."),
-        "ui.shortcut.reset" => ("menu.edit", "Edit/Preferences/Reset Shortcuts"),
+        "ui.shortcut.set" => ("menu.edit", "Edit/Settings/Keyboard Shortcuts"),
+        "ui.shortcut.reset" => ("menu.edit", "Edit/Settings/Reset Shortcuts"),
         "ui.locale.set" => ("menu.view", "View/Language"),
         "ui.theme.set" => ("menu.view", "View/Theme"),
         "ui.previewFilter.set" => ("menu.view", "View/Colorblind Preview"),
@@ -153,46 +155,46 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.split.toggle" => ("menu.view", "View/Split Workspace"),
         "ui.screenshot" => ("menu.view", "View/Capture Screenshot"),
         "ui.event.dispatch" => ("menu.view", "Tools/Dispatch UI Event"),
-        "ui.powerWizard.open" => ("menu.analyze", "Analyze/Power and Sample Size..."),
-        "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze..."),
-        "ui.editParams.open" => ("menu.analyze", "Analyze/Change Analysis Parameters..."),
+        "ui.powerWizard.open" => ("menu.analyze", "Analyze/Power and Sample Size"),
+        "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze"),
+        "ui.editParams.open" => ("menu.analyze", "Analyze/Change Analysis Parameters"),
         "ui.result.copyMethodsReport" => ("menu.analyze", "Analyze/Copy Methods Report"),
         "ui.result.applyRemediation" => ("menu.analyze", "Analyze/Apply Assumption Remediation"),
         "ui.result.inspectDiagnostics" => ("menu.analyze", "Analyze/Inspect Result Diagnostic Tabs"),
         "ui.result.appendClusterColumn" => ("menu.analyze", "Analyze/Append Cluster Column to Source Table"),
-        "ui.formatPoints.open" => ("menu.graph", "Format/Format Selected Points..."),
-        "ui.graph.axes.open" => ("menu.graph", "Format/Format Axes..."),
-        "ui.graph.insertModelEquation" => ("menu.graph", "Draw/Insert Model Equation..."),
-        "ui.graph.bubblePlot.open" => ("menu.graph", "Graph/Bubble Plot Channels..."),
-        "ui.graph.format.open" => ("menu.graph", "Format/Format Graph..."),
-        "ui.graph.pairwise.open" => ("menu.graph", "Format/Pairwise Comparison Brackets..."),
-        "ui.applyStyleFrom.open" => ("menu.graph", "Graph/Apply Style From..."),
-        "ui.layout.composer.open" => ("menu.graph", "Layout/Page Layout Composer..."),
-        "ui.changeGraphType.open" => ("menu.graph", "Graph/Change Graph Type..."),
+        "ui.formatPoints.open" => ("menu.graph", "Format/Format Selected Points"),
+        "ui.graph.axes.open" => ("menu.graph", "Format/Format Axes"),
+        "ui.graph.insertModelEquation" => ("menu.graph", "Draw/Insert Model Equation"),
+        "ui.graph.bubblePlot.open" => ("menu.graph", "Graph/Bubble Plot Channels"),
+        "ui.graph.format.open" => ("menu.graph", "Format/Format Graph"),
+        "ui.graph.pairwise.open" => ("menu.graph", "Format/Pairwise Comparison Brackets"),
+        "ui.applyStyleFrom.open" => ("menu.graph", "Graph/Apply Style From"),
+        "ui.layout.composer.open" => ("menu.graph", "Layout/Page Layout Composer"),
+        "ui.changeGraphType.open" => ("menu.graph", "Graph/Change Graph Type"),
         "ui.canvas.applyPreset" => ("menu.graph", "Graph/Apply Canvas Preset"),
         "ui.canvas.preflight" => ("menu.graph", "Graph/Preflight Check"),
         "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
-        "ui.print.open" => ("menu.file", "File/Print..."),
-        "ui.export.figure.open" => ("menu.file", "File/Export Figure..."),
-        "ui.export.tableCsv.open" => ("menu.file", "File/Export/CSV Table..."),
-        "ui.export.resultsCsv.open" => ("menu.file", "File/Export/CSV Results..."),
-        "ui.export.allTablesCsv.open" => ("menu.file", "File/Export/Export All Data Tables..."),
+        "ui.print.open" => ("menu.file", "File/Print"),
+        "ui.export.figure.open" => ("menu.file", "File/Export Figure"),
+        "ui.export.tableCsv.open" => ("menu.file", "File/Export/CSV Table"),
+        "ui.export.resultsCsv.open" => ("menu.file", "File/Export/CSV Results"),
+        "ui.export.allTablesCsv.open" => ("menu.file", "File/Export/Export All Data Tables"),
         "ui.export.allTablesCsv" => ("menu.file", "File/Export/Export All Data Tables"),
-        "ui.import.warnings.open" => ("menu.file", "File/Import/Import Warnings..."),
-        "ui.import.reshape.open" => ("menu.file", "File/Import Reshape..."),
-        "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline..."),
-        "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Archetype..."),
-        "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups Dialog..."),
-        "ui.table.randomSampleRows" => ("menu.data", "Data/Random Sample Rows Dialog..."),
-        "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog..."),
-        "ui.table.openFormulaBar" => ("menu.data", "Data/Open Formula Bar..."),
-        "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason..."),
+        "ui.import.warnings.open" => ("menu.file", "File/Import/Import Warnings"),
+        "ui.import.reshape.open" => ("menu.file", "File/Import Reshape"),
+        "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline"),
+        "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Format"),
+        "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups Dialog"),
+        "ui.table.randomSampleRows" => ("menu.data", "Data/Random Sample Rows Dialog"),
+        "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog"),
+        "ui.table.openFormulaBar" => ("menu.data", "Data/Open Formula Bar"),
+        "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason"),
         "ui.view.rowTitles.toggle" => ("menu.view", "View/Row Titles"),
         "ui.gridOverlay.toggle" => ("menu.view", "View/Canvas Grid"),
-        "ui.graph.create.open" => ("menu.insert", "Insert/New Graph Dialog..."),
-        "ui.layout.equalizeScaling.open" => ("menu.graph", "Arrange/Equalize Scaling..."),
-        "ui.embeddedTable.format.open" => ("menu.graph", "Graph/Format Embedded Table..."),
-        "ui.image.format.open" => ("menu.graph", "Graph/Format Image..."),
+        "ui.graph.create.open" => ("menu.insert", "Insert/New Graph Dialog"),
+        "ui.layout.equalizeScaling.open" => ("menu.graph", "Arrange/Equalize Scaling"),
+        "ui.embeddedTable.format.open" => ("menu.graph", "Graph/Format Embedded Table"),
+        "ui.image.format.open" => ("menu.graph", "Graph/Format Image"),
         "ui.clipboard.copyForSlides" => ("menu.edit", "Edit/Copy for Slides & Documents"),
         _ => ("menu.view", "UI"),
     }
@@ -237,7 +239,7 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
         | "ui.export.allTablesCsv.open"
         | "ui.export.allTablesCsv" => !doc.data_sheets.is_empty(),
         "ui.sheet.find" => !doc.data_sheets.is_empty() || !doc.result_sheets.is_empty(),
-        "ui.zoom.fitSheet" => doc.total_sheet_count() > 0,
+        "ui.zoom.in" | "ui.zoom.out" | "ui.zoom.fitSheet" => doc.total_sheet_count() > 0,
         "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => !doc.layout_sheets.is_empty(),
         "ui.embeddedTable.format.open" => {
             doc.graph_sheets
@@ -258,6 +260,48 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
 
 fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
     ui_command_enabled_for_doc(app.document(), id)
+}
+
+/// Resolve an actionable localized unlock explanation when `command_id` is currently disabled.
+pub(crate) fn command_disabled_reason_for_app(app: &UiApp, command_id: &str) -> &'static str {
+    let doc = app.document();
+    match command_id {
+        "edit.undo" => "Nothing to undo",
+        "edit.redo" => "Nothing to redo",
+        "ui.editParams.open"
+        | "ui.result.copyMethodsReport"
+        | "ui.result.applyRemediation"
+        | "ui.result.inspectDiagnostics"
+        | "ui.export.resultsCsv.open" => {
+            if doc.result_sheets.is_empty() {
+                "Open a ResultSheet first"
+            } else {
+                i18n::tr(&app.locale, "tooltip.disabled.select_command_sheet")
+            }
+        }
+        "ui.result.appendClusterColumn" => "Run a Clustering analysis first",
+        "ui.table.openFormulaBar" => "Create a Multiple Variables data table first",
+        "ui.analyze.open" => i18n::tr(&app.locale, "nav.disabled_need_data"),
+        "ui.formatPoints.open"
+        | "ui.changeGraphType.open"
+        | "ui.graph.axes.open"
+        | "ui.graph.insertModelEquation"
+        | "ui.graph.bubblePlot.open"
+        | "ui.graph.format.open"
+        | "ui.graph.pairwise.open"
+        | "ui.applyStyleFrom.open" => "Create or open a Graph sheet first",
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => "Create a Layout sheet first",
+        "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" | "ui.clipboard.copyForSlides" => {
+            i18n::tr(&app.locale, "nav.disabled_need_graph_or_layout")
+        }
+        _ => {
+            if !doc.data_sheets.is_empty() {
+                i18n::tr(&app.locale, "tooltip.disabled.select_command_sheet")
+            } else {
+                i18n::tr(&app.locale, "nav.disabled_need_data_or_graph")
+            }
+        }
+    }
 }
 
 /// Resolved localized toolbar button entry paired with its hover [`CommandTooltip`].

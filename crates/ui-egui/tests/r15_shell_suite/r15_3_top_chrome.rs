@@ -72,11 +72,16 @@ fn seed_xy_graph(state: &mut TopChromeHarnessState, ds: &str, gs: &str, rows: us
     Ok(())
 }
 
-fn assert_tier_heights(driver: &EguiHumanPathDriver<'_, TopChromeHarnessState>, label: &str) -> TestRes {
+fn assert_tier_heights(driver: &EguiHumanPathDriver<'_, TopChromeHarnessState>, host_draws_menu_bar: bool, label: &str) -> TestRes {
     let rep = driver.state().last_report.as_ref().ok_or_else(|| format!("{label}: missing report"))?;
-    let t1 = rep.tier1_rect_pt.ok_or_else(|| format!("{label}: missing tier1"))?;
     let t2 = rep.tier2_rect_pt.ok_or_else(|| format!("{label}: missing tier2"))?;
-    assert!((t1.height() - 32.0).abs() <= 1.0 && (t2.height() - 38.0).abs() <= 1.0, "{label}: t1={}, t2={}", t1.height(), t2.height());
+    assert!((t2.height() - 38.0).abs() <= 1.0, "{label}: expected 38pt unified toolbar, got t2={}", t2.height());
+    if host_draws_menu_bar {
+        assert!(rep.tier1_rect_pt.is_none(), "{label}: expected tier1 collapsed when host_draws_menu_bar=true, got {:?}", rep.tier1_rect_pt);
+    } else {
+        let t1 = rep.tier1_rect_pt.ok_or_else(|| format!("{label}: missing tier1"))?;
+        assert!((t1.height() - 28.0).abs() <= 1.0, "{label}: expected 28pt menu bar, got t1={}", t1.height());
+    }
     Ok(())
 }
 
@@ -89,19 +94,101 @@ fn top_chrome_all_14_beta_locales_zero_bleed_640x420_and_1440x600() -> TestRes {
             let mut driver = make_top_driver(state, ViewportMetrics::new(1440.0, 600.0, 1.0), locale);
 
             assert_clean_parity(&driver, &format!("{locale} host_menu={host_draws_menu_bar} 1440x600"))?;
-            assert_tier_heights(&driver, &format!("{locale} wide"))?;
+            assert_tier_heights(&driver, host_draws_menu_bar, &format!("{locale} host_menu={host_draws_menu_bar} wide"))?;
             assert!(driver.frame_meta().find_by_widget_id("toolbar.command_palette").is_some());
             assert!(driver.frame_meta().find_by_widget_id("toolbar.preset").is_none());
+            if host_draws_menu_bar {
+                assert!(driver.frame_meta().find_by_widget_id("toolbar.project_title").is_none(), "{locale}: duplicate title pill");
+                assert!(!driver.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("menu.")));
+            }
 
             driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.5));
             assert_clean_parity(&driver, &format!("{locale} host_menu={host_draws_menu_bar} 640x420@1.5x"))?;
-            assert_tier_heights(&driver, &format!("{locale} compact"))?;
+            assert_tier_heights(&driver, host_draws_menu_bar, &format!("{locale} host_menu={host_draws_menu_bar} compact"))?;
+            for required in ["toolbar.home", "toolbar.analyze", "toolbar.command_palette", "toolbar.split"] {
+                assert!(
+                    driver.frame_meta().find_by_widget_id(required).is_some(),
+                    "{locale} host_menu={host_draws_menu_bar} 640x420 missing `{required}`"
+                );
+            }
             for entry in &driver.frame_meta().entries {
                 if entry.widget_id.starts_with("toolbar.") || entry.widget_id.starts_with("menu.") {
                     assert!(entry.clipped_rect.right() <= 640.5, "{locale} `{}` overflowed: {:?}", entry.widget_id, entry.clipped_rect);
                 }
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn r20_18_and_r20_9_logo_home_button_and_icon_only_undo_redo_tooltips() -> TestRes {
+    for &host_draws_menu_bar in &[false, true] {
+        let mut state = TopChromeHarnessState::new("de", host_draws_menu_bar);
+        seed_xy_graph(&mut state, "ds-logo", "gs-logo", 4)?;
+        let mut driver = make_top_driver(state, ViewportMetrics::new(1280.0, 720.0, 1.0), "de");
+
+        let home = driver.frame_meta().find_by_widget_id("toolbar.home").ok_or("missing toolbar.home")?.clone();
+        assert_eq!(home.label, "Start");
+        assert!(home.clipped_rect.width() >= 36.0 && home.clipped_rect.height() >= 24.0, "bad toolbar.home rect: {:?}", home.clipped_rect);
+        let top_y = if host_draws_menu_bar { 0.0 } else { 28.0 };
+        assert!((home.clipped_rect.top() - top_y).abs() <= 8.0, "host_menu={host_draws_menu_bar}: home={:?}", home.clipped_rect);
+
+        driver.hover_widget_id("toolbar.home")?;
+        let home_tips = driver.visible_tooltip_texts();
+        assert!(home_tips.iter().any(|t| t == "Start"), "missing Start tooltip on toolbar.home: {home_tips:?}");
+
+        let undo = driver.frame_meta().find_by_widget_id("toolbar.undo").ok_or("missing toolbar.undo")?.clone();
+        let redo = driver.frame_meta().find_by_widget_id("toolbar.redo").ok_or("missing toolbar.redo")?.clone();
+        assert!((undo.clipped_rect.width() - 28.0).abs() <= 1.0 && (undo.clipped_rect.height() - 28.0).abs() <= 1.0, "{undo:?}");
+        assert!((redo.clipped_rect.width() - 28.0).abs() <= 1.0 && (redo.clipped_rect.height() - 28.0).abs() <= 1.0, "{redo:?}");
+        assert_eq!(undo.label, curvebook_ui_egui::tr("de", "toolbar.undo"));
+        assert_eq!(redo.label, curvebook_ui_egui::tr("de", "toolbar.redo"));
+
+        driver.hover_widget_id("toolbar.undo")?;
+        let undo_tips = driver.visible_tooltip_texts();
+        let expected_undo_sc = if cfg!(target_os = "macos") { "⌘Z" } else { "Ctrl+Z" };
+        assert!(undo_tips.iter().any(|t| t.contains(expected_undo_sc)), "missing {expected_undo_sc} in undo tooltip: {undo_tips:?}");
+
+        driver.hover_widget_id("toolbar.redo")?;
+        let redo_tips = driver.visible_tooltip_texts();
+        let expected_redo_sc = if cfg!(target_os = "macos") { "⇧⌘Z" } else { "Ctrl+Shift+Z" };
+        assert!(redo_tips.iter().any(|t| t.contains(expected_redo_sc)), "missing {expected_redo_sc} in redo tooltip: {redo_tips:?}");
+
+        driver.click_widget_id("toolbar.home")?;
+        assert!(driver.state().app.egui_views.launcher_open);
+        driver.click_widget_id("toolbar.home")?;
+        assert!(!driver.state().app.egui_views.launcher_open);
+
+        // Verify post-click hover after realistic >=100 ms pointer travel opens enabled Undo & Redo tooltips.
+        driver
+            .state_mut()
+            .app
+            .execute_command("table.setCell", json!({ "sheet_id": "ds-logo", "row": 0, "col": 0, "value": 42.0 }))
+            .map_err(|e| e.to_string())?;
+        for _ in 0..8 {
+            driver.step_single_frame();
+        }
+        driver.run_settled();
+        assert!(driver.frame_meta().find_by_widget_id("toolbar.undo").is_some_and(|e| e.enabled));
+        driver.hover_widget_id("toolbar.undo")?;
+        let enabled_undo_tips = driver.visible_tooltip_texts();
+        assert!(
+            enabled_undo_tips.iter().any(|t| t.contains(expected_undo_sc)),
+            "missing {expected_undo_sc} in enabled undo tooltip: {enabled_undo_tips:?}"
+        );
+        driver.click_widget_id("toolbar.undo")?;
+        for _ in 0..8 {
+            driver.step_single_frame();
+        }
+        driver.run_settled();
+        assert!(driver.frame_meta().find_by_widget_id("toolbar.redo").is_some_and(|e| e.enabled));
+        driver.hover_widget_id("toolbar.redo")?;
+        let enabled_redo_tips = driver.visible_tooltip_texts();
+        assert!(
+            enabled_redo_tips.iter().any(|t| t.contains(expected_redo_sc)),
+            "missing {expected_redo_sc} in enabled redo tooltip: {enabled_redo_tips:?}"
+        );
     }
     Ok(())
 }
@@ -391,5 +478,46 @@ fn aud_07_23_08_14_18_and_09_26_44_history_top_bar_fit_search_recents_and_palett
     app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
     app.sync_views();
     assert!(filter_palette_commands(&app, "ui.sheet.find", 24).iter().any(|r| r.command_id == "ui.sheet.find"));
+    Ok(())
+}
+
+#[test]
+fn r20_21_command_tooltips_render_summary_only_and_preserve_beginner_in_metadata() -> TestRes {
+    let mut state = TopChromeHarnessState::new("en", false);
+    seed_xy_graph(&mut state, "ds-r2021", "gs-r2021", 4)?;
+    let mut driver = make_top_driver(state, ViewportMetrics::new(1440.0, 600.0, 1.0), "en");
+
+    // 1. Metadata in menus/tooltips.rs must keep `.beginner` intact for MCP / docs / palette.
+    let palette_tip = curvebook_ui_egui::menus::command_tooltip(&driver.state().app, "ui.palette.open").ok_or("missing ui.palette.open")?;
+    let new_tip = curvebook_ui_egui::menus::command_tooltip(&driver.state().app, "sheet.createData").ok_or("missing sheet.createData")?;
+    assert!(!palette_tip.beginner.is_empty() && palette_tip.format_tooltip().contains(palette_tip.beginner));
+    assert!(!new_tip.beginner.is_empty() && new_tip.format_tooltip().contains(new_tip.beginner));
+
+    // 2. Hovering toolbar buttons renders CommandTooltip.summary + platform shortcut pill, NEVER .beginner.
+    driver.hover_widget_id("toolbar.command_palette")?;
+    let pal_tips = driver.visible_tooltip_texts();
+    assert!(pal_tips.iter().any(|t| t == palette_tip.summary), "expected summary in toolbar.command_palette tooltip: {pal_tips:?}");
+    let expected_k = if cfg!(target_os = "macos") { "⌘K" } else { "Ctrl+K" };
+    assert!(pal_tips.iter().any(|t| t.contains(expected_k)), "expected {expected_k} shortcut pill: {pal_tips:?}");
+    assert!(!pal_tips.iter().any(|t| t.contains(palette_tip.beginner)), "GUI tooltip must not render .beginner: {pal_tips:?}");
+
+    driver.hover_widget_id("toolbar.new")?;
+    let new_tips = driver.visible_tooltip_texts();
+    assert!(new_tips.iter().any(|t| t == new_tip.summary), "expected summary on toolbar.new: {new_tips:?}");
+    assert!(!new_tips.iter().any(|t| t.contains(new_tip.beginner)), "toolbar.new must not render .beginner: {new_tips:?}");
+
+    // 3. Hovering in-window menu item leaves surfaces .summary without .beginner.
+    let layout_tip = curvebook_ui_egui::menus::command_tooltip(&driver.state().app, "layout.create").ok_or("missing layout.create")?;
+    assert!(!layout_tip.beginner.is_empty());
+    driver.click_widget_id("menu.insert")?;
+    driver.hover_widget_id("menu.layout.create")?;
+    let leaf_tips = driver.visible_tooltip_texts();
+    assert!(leaf_tips.iter().any(|t| t == layout_tip.summary), "expected summary on menu.layout.create: {leaf_tips:?}");
+    assert!(!leaf_tips.iter().any(|t| t.contains(layout_tip.beginner)), "menu leaf must not render .beginner: {leaf_tips:?}");
+
+    driver.hover_widget_id("menu.sheet.createData")?;
+    let menu_tips = driver.visible_tooltip_texts();
+    assert!(menu_tips.iter().any(|t| t == new_tip.summary), "expected summary on menu.sheet.createData: {menu_tips:?}");
+    assert!(!menu_tips.iter().any(|t| t.contains(new_tip.beginner)), "menu leaf must not render .beginner: {menu_tips:?}");
     Ok(())
 }

@@ -165,7 +165,7 @@ pub(super) fn render_metadata_hooks_studio(
                 meta,
                 &StudioChipSpec {
                     label: &lbl,
-                    tooltip: &lbl,
+                    tooltip: "",
                     max_w,
                     selected,
                     enabled: ctx_in.enabled,
@@ -422,7 +422,7 @@ pub(super) fn render_metadata_hooks_studio(
             tokens,
             meta,
             &StudioButtonSpec {
-                label: "Insert Model / Hook Box…",
+                label: "Insert Model / Hook Box",
                 tooltip: "Insert hooked equation or callout onto active graph",
                 selected: false,
                 enabled: ctx_in.enabled,

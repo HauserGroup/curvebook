@@ -88,7 +88,7 @@ pub fn render_analyze_sheet_modal(
                     Vec2::new(edit_w, 24.0),
                     TextEdit::singleline(&mut state.analyze_query_draft)
                         .id(search_id)
-                        .hint_text("Search analyses (e.g., t-test, ANOVA, nonlinear, GLM, PCA)…"),
+                        .hint_text("Search analyses (e.g., t-test, ANOVA, nonlinear, GLM, PCA)"),
                 );
                 if state.analyze_focus_requested {
                     search_resp.request_focus();
@@ -248,7 +248,7 @@ fn render_analyze_entries_pane(
                 role: "status",
                 text: &msg,
                 font_size: tokens.metrics.font_ui_small_pt,
-                color: tokens.accent,
+                color: tokens.text_muted,
                 z_layer: ZLayer::ModalDialog,
                 tooltip: Some(&msg),
                 record_meta: true,
@@ -383,8 +383,21 @@ fn render_analyze_datasets_pane(
         }
         for (idx, col_title) in titles.iter().enumerate() {
             let checked = az.selected_data_sets.is_empty() || az.selected_data_sets.contains(&idx);
-            if render_modal_checkbox(ui, tokens, meta, &format!("analyze.dataset.{idx}"), col_title, checked, &ControlEnablement::enabled()) {
-                let mut next = if az.selected_data_sets.is_empty() { (0..titles.len()).collect() } else { az.selected_data_sets.clone() };
+            let fallback_title;
+            let label = if col_title.trim().is_empty() {
+                fallback_title = format!("Data Set {}", curvebook_doc::default_column_label(idx));
+                fallback_title.as_str()
+            } else {
+                col_title.as_str()
+            };
+            if render_modal_checkbox(ui, tokens, meta, &format!("analyze.dataset.{idx}"), label, checked, &ControlEnablement::enabled()) {
+                let mut next: Vec<usize> = if az.selected_data_sets.is_empty() {
+                    (0..titles.len()).collect()
+                } else {
+                    az.selected_data_sets.iter().copied().filter(|&c| c < titles.len()).collect()
+                };
+                next.sort_unstable();
+                next.dedup();
                 if let Some(pos) = next.iter().position(|&c| c == idx) {
                     if next.len() > 1 {
                         next.remove(pos);

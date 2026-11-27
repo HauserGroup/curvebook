@@ -659,7 +659,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.open",
         label: "Open Project",
-        menu_path: "File/Open...",
+        menu_path: "File/Open",
         shortcut: "Cmd+O",
         summary: "Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.",
         beginner: "Opens a project from a filesystem path or base64 archive payload and replaces the current session document.",
@@ -683,7 +683,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.saveTemplate",
         label: "Save Template",
-        menu_path: "File/Save Template...",
+        menu_path: "File/Save Template",
         summary: "Export the project structure as a data-stripped `.cbtemplate` file.",
         beginner: "Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.",
         effects: Effects::WRITES_FILESYSTEM,
@@ -694,7 +694,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.instantiateTemplate",
         label: "New Project From Template",
-        menu_path: "File/New From Template...",
+        menu_path: "File/New From Template",
         summary: "Create a new project from a `.cbtemplate` archive.",
         beginner: "Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
@@ -727,7 +727,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.createCheckpoint",
         label: "Create Checkpoint",
-        menu_path: "File/Checkpoints/Create Checkpoint...",
+        menu_path: "File/Checkpoints/Create Checkpoint",
         summary: "Save a named project snapshot checkpoint inside the document.",
         beginner: "Captures a named milestone copy of all sheets so you can restore or branch back to it later.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -749,7 +749,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.restoreCheckpoint",
         label: "Restore Checkpoint",
-        menu_path: "File/Checkpoints/Restore Checkpoint...",
+        menu_path: "File/Checkpoints/Restore Checkpoint",
         summary: "Restore the document to a previously saved named checkpoint.",
         beginner: "Replaces the current sheets with the chosen checkpoint snapshot while keeping existing checkpoints intact.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
@@ -760,7 +760,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "project.deleteCheckpoint",
         label: "Delete Checkpoint",
-        menu_path: "File/Checkpoints/Delete Checkpoint...",
+        menu_path: "File/Checkpoints/Delete Checkpoint",
         summary: "Remove a named checkpoint from the project.",
         beginner: "Deletes a stored checkpoint by ID or name without altering active data sheets.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),

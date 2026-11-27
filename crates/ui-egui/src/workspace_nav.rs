@@ -4,9 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use curvebook_doc::{
-    Cell, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DocError, GroupedTable, LinkBorderColor,
-    MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode,
-    SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
+    Cell, ChecklistStatus, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DiagnosticPlotKind,
+    DocError, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedTable, LayoutItem, LinkBorderColor, LinkSource, MultipleVariablesTable,
+    NestedTable, PartsOfWholeTable, ProjectDocument, ResultSheet, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
+    TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_palette::Rgba8;
 use curvebook_tools::{NavigatorDragState, ToolCommandIntent};
@@ -80,12 +81,23 @@ impl NavigatorBadge {
     }
 }
 
+/// Disambiguation metadata for one sheet in Navigator, Family lineage, and Split View selectors (`R20.12`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SheetDisambiguation {
+    pub subtitle: Option<String>,
+    pub has_duplicate_title: bool,
+}
+
 /// Navigator entry summarizing one sheet in one of the five project sections.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NavigatorEntry {
     pub sheet_id: SheetId,
     pub section: SheetSection,
     pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub has_duplicate_title: bool,
     pub is_active: bool,
     pub is_bold: bool,
     pub is_upstream_dependency: bool,
@@ -125,6 +137,10 @@ pub struct FamilyPaneNode {
     pub sheet_id: SheetId,
     pub section: SheetSection,
     pub title: String,
+    #[serde(default)]
+    pub subtitle: Option<String>,
+    #[serde(default)]
+    pub has_duplicate_title: bool,
     pub relation: FamilyRelation,
     pub hop_distance: usize,
     pub is_active: bool,
@@ -547,6 +563,90 @@ impl ActiveWorkspacePane {
     }
 }
 
+/// Sort order options inside Portfolio Gallery (`R10.35`, Locked Decision #1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum GallerySortOrder {
+    /// Follow Navigator folder sequence (`Data -> Info -> Results -> Graphs -> Layouts`) with collapsible sections in `All`.
+    #[default]
+    NavigatorOrder,
+    /// Alphabetical by sheet title (`A–Z`), flattened across folders.
+    NameAsc,
+    /// Grouped by sheet type (`Graphs -> Layouts -> Data -> Results -> Info`) with collapsible sections in `All`.
+    Type,
+    /// Descending by series, panels, rows, tabs, or constants count, flattened across folders.
+    SeriesOrRows,
+}
+
+impl GallerySortOrder {
+    /// Ordered list of all supported Portfolio Gallery sort options.
+    pub const ALL: [Self; 4] = [Self::NavigatorOrder, Self::NameAsc, Self::Type, Self::SeriesOrRows];
+
+    /// Stable machine slug for inspection metadata and widget IDs.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::NavigatorOrder => "navigator_order",
+            Self::NameAsc => "name_az",
+            Self::Type => "type",
+            Self::SeriesOrRows => "series_or_rows",
+        }
+    }
+
+    /// Localization catalog key for this sort option.
+    #[must_use]
+    pub const fn label_key(self) -> &'static str {
+        match self {
+            Self::NavigatorOrder => "gallery.sort.navigator",
+            Self::NameAsc => "gallery.sort.name_az",
+            Self::Type => "gallery.sort.type",
+            Self::SeriesOrRows => "gallery.sort.series_rows",
+        }
+    }
+
+    /// Locked Decision #1: collapsible section headers appear in `All` view only for `NavigatorOrder` and `Type`.
+    #[must_use]
+    pub const fn uses_collapsible_sections(self) -> bool {
+        matches!(self, Self::NavigatorOrder | Self::Type)
+    }
+}
+
+/// Per-folder sheet counts displayed on Portfolio Gallery filter pills (`R10.35`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GalleryFolderCounts {
+    pub total: usize,
+    pub data: usize,
+    pub info: usize,
+    pub results: usize,
+    pub graphs: usize,
+    pub layouts: usize,
+}
+
+impl GalleryFolderCounts {
+    /// Compute sheet counts per folder from `doc`.
+    #[must_use]
+    pub fn from_document(doc: &ProjectDocument) -> Self {
+        let data = doc.data_sheets.len();
+        let info = doc.info_sheets.len();
+        let results = doc.result_sheets.len();
+        let graphs = doc.graph_sheets.len();
+        let layouts = doc.layout_sheets.len();
+        Self { total: data + info + results + graphs + layouts, data, info, results, graphs, layouts }
+    }
+
+    /// Count matching an optional folder filter (`None` = `All`).
+    #[must_use]
+    pub const fn for_filter(self, filter: Option<SheetFolderKind>) -> usize {
+        match filter {
+            None => self.total,
+            Some(SheetFolderKind::Data) => self.data,
+            Some(SheetFolderKind::Info) => self.info,
+            Some(SheetFolderKind::Results) => self.results,
+            Some(SheetFolderKind::Graphs) => self.graphs,
+            Some(SheetFolderKind::Layouts) => self.layouts,
+        }
+    }
+}
+
 /// Visual summary card rendered in the Portfolio Gallery overview and batch-export view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortfolioCard {
@@ -558,15 +658,31 @@ pub struct PortfolioCard {
     pub color_tag: Option<Rgba8>,
     pub active: bool,
     pub selected: bool,
+    #[serde(default)]
+    pub is_frozen: bool,
+    #[serde(default)]
+    pub is_uninitialized: bool,
+    #[serde(default)]
+    pub is_warning_or_stale: bool,
+    #[serde(default)]
+    pub metric_count: usize,
+    #[serde(default)]
+    pub navigator_index: usize,
 }
 
-/// State for the Project Portfolio Gallery overlay supporting folder filters and multi-select batch export.
+/// State for the Project Portfolio Gallery overlay supporting folder filters, sorting, and multi-select batch workflows.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PortfolioGalleryState {
     pub open: bool,
     pub filter_folder: Option<SheetFolderKind>,
     pub selected_ids: BTreeSet<SheetId>,
     pub cards: Vec<PortfolioCard>,
+    #[serde(default)]
+    pub search_query: String,
+    #[serde(default)]
+    pub sort_order: GallerySortOrder,
+    #[serde(default)]
+    pub current_family_only: bool,
 }
 
 /// Build an `"info.setConstant"` [`ToolCommandIntent`] for updating or creating an [`curvebook_doc::InfoSheet`] constant.
@@ -787,6 +903,221 @@ impl WorkspaceNavState {
         out
     }
 
+    /// Collect every sheet ID belonging to the active Navigator/Family lineage (`R10.35`).
+    #[must_use]
+    pub fn collect_current_family_ids(&self, doc: &ProjectDocument) -> BTreeSet<SheetId> {
+        let mut out = BTreeSet::new();
+        for node in &self.family_nodes {
+            out.insert(node.sheet_id.clone());
+        }
+        for id in &self.family_related_ids {
+            out.insert(id.clone());
+        }
+        for id in &self.transitive_upstream_ids {
+            out.insert(id.clone());
+        }
+        for id in &self.transitive_downstream_ids {
+            out.insert(id.clone());
+        }
+        if let Some(anchor) = self.family_anchor_sheet_id.as_ref().or(doc.family_anchor_sheet_id.as_ref()).or(doc.active_sheet_id.as_ref()) {
+            out.insert(anchor.clone());
+            if self.family_nodes.is_empty() {
+                for dep in collect_downstream_dependents(doc, anchor) {
+                    out.insert(dep);
+                }
+            }
+        }
+        out
+    }
+
+    /// Update Portfolio Gallery view options (search, sort order, Current Family filter) and resync cards.
+    pub fn set_gallery_view_options(
+        &mut self,
+        doc: &ProjectDocument,
+        search_query: Option<String>,
+        sort_order: Option<GallerySortOrder>,
+        current_family_only: Option<bool>,
+    ) {
+        if let Some(q) = search_query {
+            self.gallery.search_query = q;
+        }
+        if let Some(s) = sort_order {
+            self.gallery.sort_order = s;
+        }
+        if let Some(f) = current_family_only {
+            self.gallery.current_family_only = f;
+        }
+        self.sync_gallery(doc);
+    }
+
+    /// Build ordered, filtered [`PortfolioCard`] entries using explicit search/sort/family overrides so
+    /// [`Self::sync_gallery`] and `center_stage` always share the exact same ordering (`R10.35`).
+    #[must_use]
+    pub fn build_gallery_cards_with(
+        &self,
+        doc: &ProjectDocument,
+        search_query: &str,
+        sort_order: GallerySortOrder,
+        current_family_only: bool,
+    ) -> Vec<PortfolioCard> {
+        let active = doc.active_sheet_id.as_ref();
+        let selected = &self.gallery.selected_ids;
+        let filter = self.gallery.filter_folder;
+        let needle = search_query.trim().to_ascii_lowercase();
+        let family_ids = current_family_only.then(|| self.collect_current_family_ids(doc));
+        let mut cards = Vec::new();
+        let mut nav_idx = 0usize;
+
+        let matches_query = |card: &PortfolioCard| {
+            if let Some(ref fam) = family_ids
+                && !fam.contains(&card.sheet_id)
+            {
+                return false;
+            }
+            if needle.is_empty() {
+                return true;
+            }
+            card.title.to_ascii_lowercase().contains(&needle)
+                || card.badge_label.to_ascii_lowercase().contains(&needle)
+                || card.subtitle.to_ascii_lowercase().contains(&needle)
+        };
+
+        for s in &doc.data_sheets {
+            let idx = nav_idx;
+            nav_idx += 1;
+            if !filter.is_none_or(|f| f == SheetFolderKind::Data) {
+                continue;
+            }
+            let rows = s.archetype.row_count();
+            let cols = s.archetype.column_count();
+            let card = PortfolioCard {
+                sheet_id: s.id.clone(),
+                title: s.title.clone(),
+                folder: SheetFolderKind::Data,
+                badge_label: s.kind().label().to_owned(),
+                subtitle: format!("{rows} × {cols}"),
+                color_tag: s.color_tag,
+                active: active == Some(&s.id),
+                selected: selected.contains(&s.id),
+                is_frozen: s.frozen,
+                is_uninitialized: false,
+                is_warning_or_stale: false,
+                metric_count: rows,
+                navigator_index: idx,
+            };
+            if matches_query(&card) {
+                cards.push(card);
+            }
+        }
+        for s in &doc.info_sheets {
+            let idx = nav_idx;
+            nav_idx += 1;
+            if !filter.is_none_or(|f| f == SheetFolderKind::Info) {
+                continue;
+            }
+            let constants_len = s.constants.len();
+            let card = PortfolioCard {
+                sheet_id: s.id.clone(),
+                title: s.title.clone(),
+                folder: SheetFolderKind::Info,
+                badge_label: String::from("Info"),
+                subtitle: format!("{constants_len} constants"),
+                color_tag: s.color_tag,
+                active: active == Some(&s.id),
+                selected: selected.contains(&s.id),
+                is_frozen: false,
+                is_uninitialized: false,
+                is_warning_or_stale: false,
+                metric_count: constants_len,
+                navigator_index: idx,
+            };
+            if matches_query(&card) {
+                cards.push(card);
+            }
+        }
+        for s in &doc.result_sheets {
+            let idx = nav_idx;
+            nav_idx += 1;
+            if !filter.is_none_or(|f| f == SheetFolderKind::Results) {
+                continue;
+            }
+            let tabs_len = s.tabs.len();
+            let card = PortfolioCard {
+                sheet_id: s.id.clone(),
+                title: s.title().to_owned(),
+                folder: SheetFolderKind::Results,
+                badge_label: String::from("Result"),
+                subtitle: format!("{tabs_len} tabs"),
+                color_tag: s.color_tag,
+                active: active == Some(&s.id),
+                selected: selected.contains(&s.id),
+                is_frozen: s.analyzable_data.as_ref().is_some_and(|ds| ds.frozen),
+                is_uninitialized: false,
+                is_warning_or_stale: result_is_warning_or_stale(s),
+                metric_count: tabs_len,
+                navigator_index: idx,
+            };
+            if matches_query(&card) {
+                cards.push(card);
+            }
+        }
+        for s in &doc.graph_sheets {
+            let idx = nav_idx;
+            nav_idx += 1;
+            if !filter.is_none_or(|f| f == SheetFolderKind::Graphs) {
+                continue;
+            }
+            let series_len = s.spec.series.len();
+            let card = PortfolioCard {
+                sheet_id: s.id.clone(),
+                title: s.title.clone(),
+                folder: SheetFolderKind::Graphs,
+                badge_label: graph_kind_label(&s.spec).to_owned(),
+                subtitle: if s.initialized { format!("{series_len} series") } else { String::from("Uninitialized") },
+                color_tag: s.color_tag,
+                active: active == Some(&s.id),
+                selected: selected.contains(&s.id),
+                is_frozen: false,
+                is_uninitialized: !s.initialized,
+                is_warning_or_stale: graph_is_warning_or_stale(doc, s),
+                metric_count: series_len,
+                navigator_index: idx,
+            };
+            if matches_query(&card) {
+                cards.push(card);
+            }
+        }
+        for s in &doc.layout_sheets {
+            let idx = nav_idx;
+            nav_idx += 1;
+            if !filter.is_none_or(|f| f == SheetFolderKind::Layouts) {
+                continue;
+            }
+            let items_len = s.spec.items.len();
+            let card = PortfolioCard {
+                sheet_id: s.id.clone(),
+                title: s.title.clone(),
+                folder: SheetFolderKind::Layouts,
+                badge_label: String::from("Layout"),
+                subtitle: format!("{items_len} items"),
+                color_tag: s.color_tag,
+                active: active == Some(&s.id),
+                selected: selected.contains(&s.id),
+                is_frozen: false,
+                is_uninitialized: false,
+                is_warning_or_stale: layout_is_warning_or_stale(doc, s),
+                metric_count: items_len,
+                navigator_index: idx,
+            };
+            if matches_query(&card) {
+                cards.push(card);
+            }
+        }
+
+        sort_portfolio_cards(&mut cards, sort_order);
+        cards
+    }
+
     /// Rebuild Portfolio Gallery cards from `doc`, pruning deleted sheet IDs from `selected_ids`.
     pub fn sync_gallery(&mut self, doc: &ProjectDocument) {
         let valid_ids: BTreeSet<SheetId> = doc
@@ -800,83 +1131,8 @@ impl WorkspaceNavState {
             .collect();
         self.gallery.selected_ids.retain(|id| valid_ids.contains(id));
 
-        let active = doc.active_sheet_id.as_ref();
-        let selected = &self.gallery.selected_ids;
-        let filter = self.gallery.filter_folder;
-        let mut cards = Vec::new();
-
-        if filter.is_none_or(|f| f == SheetFolderKind::Data) {
-            for s in &doc.data_sheets {
-                cards.push(PortfolioCard {
-                    sheet_id: s.id.clone(),
-                    title: s.title.clone(),
-                    folder: SheetFolderKind::Data,
-                    badge_label: s.kind().label().to_owned(),
-                    subtitle: format!("{} rows", s.archetype.row_count()),
-                    color_tag: s.color_tag,
-                    active: active == Some(&s.id),
-                    selected: selected.contains(&s.id),
-                });
-            }
-        }
-        if filter.is_none_or(|f| f == SheetFolderKind::Info) {
-            for s in &doc.info_sheets {
-                cards.push(PortfolioCard {
-                    sheet_id: s.id.clone(),
-                    title: s.title.clone(),
-                    folder: SheetFolderKind::Info,
-                    badge_label: String::from("Info"),
-                    subtitle: format!("{} constants", s.constants.len()),
-                    color_tag: s.color_tag,
-                    active: active == Some(&s.id),
-                    selected: selected.contains(&s.id),
-                });
-            }
-        }
-        if filter.is_none_or(|f| f == SheetFolderKind::Results) {
-            for s in &doc.result_sheets {
-                cards.push(PortfolioCard {
-                    sheet_id: s.id.clone(),
-                    title: s.title().to_owned(),
-                    folder: SheetFolderKind::Results,
-                    badge_label: String::from("Results"),
-                    subtitle: format!("{} tabs", s.tabs.len()),
-                    color_tag: s.color_tag,
-                    active: active == Some(&s.id),
-                    selected: selected.contains(&s.id),
-                });
-            }
-        }
-        if filter.is_none_or(|f| f == SheetFolderKind::Graphs) {
-            for s in &doc.graph_sheets {
-                cards.push(PortfolioCard {
-                    sheet_id: s.id.clone(),
-                    title: s.title.clone(),
-                    folder: SheetFolderKind::Graphs,
-                    badge_label: format!("{:?}", s.spec.kind),
-                    subtitle: if s.initialized { format!("{} series", s.spec.series.len()) } else { String::from("Uninitialized") },
-                    color_tag: s.color_tag,
-                    active: active == Some(&s.id),
-                    selected: selected.contains(&s.id),
-                });
-            }
-        }
-        if filter.is_none_or(|f| f == SheetFolderKind::Layouts) {
-            for s in &doc.layout_sheets {
-                cards.push(PortfolioCard {
-                    sheet_id: s.id.clone(),
-                    title: s.title.clone(),
-                    folder: SheetFolderKind::Layouts,
-                    badge_label: String::from("Layout"),
-                    subtitle: format!("{} items", s.spec.items.len()),
-                    color_tag: s.color_tag,
-                    active: active == Some(&s.id),
-                    selected: selected.contains(&s.id),
-                });
-            }
-        }
-
-        self.gallery.cards = cards;
+        self.gallery.cards =
+            self.build_gallery_cards_with(doc, &self.gallery.search_query, self.gallery.sort_order, self.gallery.current_family_only);
     }
 
     /// Toggle collapsed state for a [`curvebook_doc::FloatingNote`] identifier and return the new collapsed flag.
@@ -1009,6 +1265,8 @@ impl WorkspaceNavState {
                     sheet_id: entry.sheet_id.clone(),
                     section: entry.section,
                     title: entry.title.clone(),
+                    subtitle: entry.subtitle.clone(),
+                    has_duplicate_title: entry.has_duplicate_title,
                     relation,
                     hop_distance,
                     is_active: entry.is_active,
@@ -1041,6 +1299,76 @@ fn section_label(section: SheetSection) -> &'static str {
         SheetSection::Analyses => "Results",
         SheetSection::Graphs => "Graphs",
         SheetSection::Layouts => "Layouts",
+    }
+}
+
+fn result_is_warning_or_stale(rs: &ResultSheet) -> bool {
+    matches!(rs.status, ResultStatus::Dirty | ResultStatus::Failed { .. })
+        || rs.checklist.iter().any(|c| matches!(c.status, ChecklistStatus::Warn | ChecklistStatus::Violated))
+}
+
+fn graph_is_warning_or_stale(doc: &ProjectDocument, gs: &GraphSheet) -> bool {
+    if !gs.initialized {
+        return false;
+    }
+    let missing_source = doc.data_sheet(&gs.spec.primary_source_sheet_id).is_none() && doc.result_sheet(&gs.spec.primary_source_sheet_id).is_none();
+    let stale_overlay = gs.spec.series.iter().any(|s| {
+        s.regression_overlay.as_ref().is_some_and(|ro| {
+            doc.result_sheet(&ro.result_sheet_id).is_none_or(|r| matches!(r.status, ResultStatus::Dirty | ResultStatus::Failed { .. }))
+        })
+    });
+    missing_source
+        || stale_overlay
+        || (gs.spec.series.is_empty()
+            && gs.spec.annotations.is_empty()
+            && !matches!(gs.spec.kind, GraphKind::Diagnostic(_) | GraphKind::MultipleVariables))
+}
+
+fn layout_is_warning_or_stale(doc: &ProjectDocument, ls: &curvebook_doc::LayoutSheet) -> bool {
+    ls.spec.items.iter().any(|item| match item {
+        LayoutItem::LiveGraph { graph_sheet_id, .. } => {
+            doc.graph_sheet(graph_sheet_id).is_none_or(|gs| !gs.initialized || graph_is_warning_or_stale(doc, gs))
+        }
+        LayoutItem::LiveTable { source_sheet_id, .. } => {
+            doc.data_sheet(source_sheet_id).is_none()
+                && doc.info_sheet(source_sheet_id).is_none()
+                && doc.result_sheet(source_sheet_id).is_none_or(result_is_warning_or_stale)
+        }
+        LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => false,
+    })
+}
+
+const fn type_folder_rank(folder: SheetFolderKind) -> usize {
+    match folder {
+        SheetFolderKind::Graphs => 0,
+        SheetFolderKind::Layouts => 1,
+        SheetFolderKind::Data => 2,
+        SheetFolderKind::Results => 3,
+        SheetFolderKind::Info => 4,
+    }
+}
+
+fn sort_portfolio_cards(cards: &mut [PortfolioCard], sort_order: GallerySortOrder) {
+    match sort_order {
+        GallerySortOrder::NavigatorOrder => cards.sort_by_key(|c| c.navigator_index),
+        GallerySortOrder::NameAsc => {
+            cards.sort_by(|a, b| a.title.to_ascii_lowercase().cmp(&b.title.to_ascii_lowercase()).then(a.navigator_index.cmp(&b.navigator_index)))
+        }
+        GallerySortOrder::Type => cards.sort_by(|a, b| {
+            type_folder_rank(a.folder)
+                .cmp(&type_folder_rank(b.folder))
+                .then_with(|| a.badge_label.to_ascii_lowercase().cmp(&b.badge_label.to_ascii_lowercase()))
+                .then_with(|| a.title.to_ascii_lowercase().cmp(&b.title.to_ascii_lowercase()))
+                .then(a.navigator_index.cmp(&b.navigator_index))
+        }),
+        GallerySortOrder::SeriesOrRows => {
+            cards.sort_by(|a, b| {
+                b.metric_count
+                    .cmp(&a.metric_count)
+                    .then_with(|| a.title.to_ascii_lowercase().cmp(&b.title.to_ascii_lowercase()))
+                    .then(a.navigator_index.cmp(&b.navigator_index))
+            });
+        }
     }
 }
 
@@ -1120,13 +1448,209 @@ fn bfs_distances(start: &SheetId, adj: &BTreeMap<SheetId, Vec<SheetId>>) -> BTre
     dist
 }
 
+fn lookup_doc_sheet_title<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Option<&'a str> {
+    if let Some(ds) = doc.data_sheet(id) {
+        Some(&ds.title)
+    } else if let Some(info) = doc.info_sheet(id) {
+        Some(&info.title)
+    } else if let Some(rs) = doc.result_sheet(id) {
+        Some(rs.title())
+    } else if let Some(gs) = doc.graph_sheet(id) {
+        Some(&gs.title)
+    } else if let Some(ls) = doc.layout_sheet(id) {
+        Some(&ls.title)
+    } else {
+        None
+    }
+}
+
+fn graph_kind_label(spec: &GraphSpec) -> &'static str {
+    match spec.kind {
+        GraphKind::Xy => "XY",
+        GraphKind::Column => match spec.series.first().map(|s| &s.gdo) {
+            Some(GraphicalDataObject::Violin { .. }) => "Violin",
+            Some(GraphicalDataObject::BoxAndWhisker { .. }) => "Box Plot",
+            Some(GraphicalDataObject::AlignedDotPlot { .. }) => "Dot Plot",
+            Some(GraphicalDataObject::FloatingBar { .. }) => "Floating Bar",
+            Some(GraphicalDataObject::BeforeAfterLines { .. }) => "Before\u{2013}After",
+            Some(GraphicalDataObject::BarWithReplicates { .. }) => "Bar",
+            _ => "Column",
+        },
+        GraphKind::Grouped => "Grouped",
+        GraphKind::Contingency => "Contingency",
+        GraphKind::PartsOfWhole => "Parts of Whole",
+        GraphKind::Survival => "Survival",
+        GraphKind::MultipleVariables => "Multivariate",
+        GraphKind::Diagnostic(diag) => match diag {
+            DiagnosticPlotKind::Heatmap => "Heatmap",
+            DiagnosticPlotKind::Volcano => "Volcano",
+            DiagnosticPlotKind::BlandAltman => "Bland\u{2013}Altman",
+            DiagnosticPlotKind::RocCurve => "ROC Curve",
+            DiagnosticPlotKind::ForestPlot => "Forest Plot",
+            DiagnosticPlotKind::ResidualPlot => "Residual Plot",
+            DiagnosticPlotKind::NormalQqPlot => "Normal Q\u{2013}Q",
+        },
+    }
+}
+
+fn derive_data_subtitle(doc: &ProjectDocument, s: &DataSheet) -> Option<String> {
+    for region in &s.linked_regions {
+        match &region.spec.source {
+            LinkSource::InternalSheet { sheet_id, .. } => {
+                let src_title = lookup_doc_sheet_title(doc, sheet_id).unwrap_or(sheet_id.as_str());
+                return Some(format!("Linked \u{2190} {src_title}"));
+            }
+            LinkSource::ExternalDelimitedFile { path, .. } => {
+                let file_name = path.rsplit(['/', '\\']).find(|p| !p.is_empty()).unwrap_or(path.as_str());
+                return Some(format!("Linked \u{2190} {file_name}"));
+            }
+            LinkSource::Clipboard => {}
+        }
+    }
+    Some(format!("{} \u{00B7} {}\u{00D7}{}", s.kind().label(), s.archetype.row_count(), s.archetype.column_count()))
+}
+
+fn derive_info_subtitle(doc: &ProjectDocument, s: &curvebook_doc::InfoSheet) -> Option<String> {
+    let n_const = s.constants.len();
+    let const_lbl = if n_const == 1 { String::from("1 constant") } else { format!("{n_const} constants") };
+    let paired: Vec<&str> = s.linked_data_sheets.iter().filter_map(|id| lookup_doc_sheet_title(doc, id)).collect();
+    if paired.is_empty() { Some(const_lbl) } else { Some(format!("Paired: {} \u{00B7} {const_lbl}", paired.join(", "))) }
+}
+
+fn derive_result_subtitle(doc: &ProjectDocument, s: &ResultSheet) -> Option<String> {
+    let src_title = lookup_doc_sheet_title(doc, &s.analysis.source_sheet_id).unwrap_or(s.analysis.source_sheet_id.as_str());
+    let short_kind = s.analysis.kind.descriptor().short_label;
+    if s.analysis.custom_title.is_some() { Some(format!("From {src_title} \u{00B7} {short_kind}")) } else { Some(format!("From {src_title}")) }
+}
+
+fn derive_graph_subtitle(doc: &ProjectDocument, gs: &GraphSheet) -> Option<String> {
+    let base_kind = graph_kind_label(&gs.spec);
+    let linked_result_id = gs
+        .spec
+        .series
+        .iter()
+        .find_map(|ser| ser.regression_overlay.as_ref().map(|ov| &ov.result_sheet_id))
+        .or_else(|| gs.spec.comparisons.first().map(|c| &c.result_sheet_id))
+        .or_else(|| gs.spec.compact_letter_display.as_ref().map(|c| &c.result_sheet_id));
+    let kind_part = match linked_result_id.and_then(|rid| doc.result_sheet(rid)) {
+        Some(rs) => format!("{base_kind} + {}", rs.analysis.kind.descriptor().short_label),
+        None => String::from(base_kind),
+    };
+    let src_title = lookup_doc_sheet_title(doc, &gs.spec.primary_source_sheet_id).map(str::trim).filter(|t| !t.is_empty());
+    let norm_title = gs.title.trim().to_lowercase();
+    let norm_src = src_title.map(str::to_lowercase);
+    let norm_kind = kind_part.to_lowercase();
+
+    match (src_title, norm_src.as_deref() == Some(norm_title.as_str()), norm_kind == norm_title) {
+        (Some(src), false, false) => Some(format!("{src} \u{00B7} {kind_part}")),
+        (Some(src), false, true) => Some(format!("From {src}")),
+        (_, true, false) | (None, _, false) => Some(kind_part),
+        (Some(src), true, true) => Some(format!("From {src}")),
+        (None, _, true) => None,
+    }
+}
+
+fn derive_layout_subtitle(ls: &curvebook_doc::LayoutSheet) -> Option<String> {
+    let n = ls.spec.items.len();
+    Some(if n == 1 { String::from("1 panel") } else { format!("{n} panels") })
+}
+
+fn collision_hint_suffix(doc: &ProjectDocument, section: SheetSection, id: &SheetId) -> Option<String> {
+    match section {
+        SheetSection::Analyses => doc.result_sheet(id).and_then(|rs| {
+            (!rs.analysis.selected_data_sets.is_empty()).then(|| {
+                let cols: Vec<String> = rs.analysis.selected_data_sets.iter().map(|i| format!("{}", i + 1)).collect();
+                format!("cols {}", cols.join(", "))
+            })
+        }),
+        SheetSection::Graphs => doc.graph_sheet(id).map(|gs| {
+            let n = gs.spec.series.len();
+            if n == 1 { String::from("1 series") } else { format!("{n} series") }
+        }),
+        SheetSection::Layouts => doc.layout_sheet(id).map(|ls| format!("{}x{}", ls.spec.width, ls.spec.height)),
+        SheetSection::Data | SheetSection::Info => None,
+    }
+}
+
+const fn section_ord(section: SheetSection) -> u8 {
+    match section {
+        SheetSection::Data => 0,
+        SheetSection::Info => 1,
+        SheetSection::Analyses => 2,
+        SheetSection::Graphs => 3,
+        SheetSection::Layouts => 4,
+    }
+}
+
+/// Compute per-sheet disambiguation metadata (`subtitle` and `has_duplicate_title`) across all sections (`R20.12`).
+#[must_use]
+pub fn compute_sheet_disambiguation(doc: &ProjectDocument) -> BTreeMap<SheetId, SheetDisambiguation> {
+    let mut title_counts: BTreeMap<(u8, String), usize> = BTreeMap::new();
+    let mut rows: Vec<(SheetId, SheetSection, String, Option<String>)> = Vec::with_capacity(doc.total_sheet_count());
+
+    let mut push_row = |id: &SheetId, section: SheetSection, title: &str, subtitle: Option<String>| {
+        let norm_title = title.trim().to_lowercase();
+        *title_counts.entry((section_ord(section), norm_title.clone())).or_insert(0) += 1;
+        rows.push((id.clone(), section, norm_title, subtitle));
+    };
+
+    for s in &doc.data_sheets {
+        push_row(&s.id, SheetSection::Data, &s.title, derive_data_subtitle(doc, s));
+    }
+    for s in &doc.info_sheets {
+        push_row(&s.id, SheetSection::Info, &s.title, derive_info_subtitle(doc, s));
+    }
+    for s in &doc.result_sheets {
+        push_row(&s.id, SheetSection::Analyses, s.title(), derive_result_subtitle(doc, s));
+    }
+    for s in &doc.graph_sheets {
+        push_row(&s.id, SheetSection::Graphs, &s.title, derive_graph_subtitle(doc, s));
+    }
+    for s in &doc.layout_sheets {
+        push_row(&s.id, SheetSection::Layouts, &s.title, derive_layout_subtitle(s));
+    }
+
+    let mut out: BTreeMap<SheetId, SheetDisambiguation> = BTreeMap::new();
+    let mut collision_groups: BTreeMap<(u8, String, String), (SheetSection, Vec<SheetId>)> = BTreeMap::new();
+    for (id, section, norm_title, subtitle) in rows {
+        let sec_k = section_ord(section);
+        let has_dup = title_counts.get(&(sec_k, norm_title.clone())).copied().unwrap_or(0) >= 2;
+        if has_dup {
+            let sub_key = subtitle.as_deref().unwrap_or("").to_lowercase();
+            collision_groups.entry((sec_k, norm_title, sub_key)).or_insert_with(|| (section, Vec::new())).1.push(id.clone());
+        }
+        out.insert(id, SheetDisambiguation { subtitle, has_duplicate_title: has_dup });
+    }
+
+    // Break residual (section, title, subtitle) collisions deterministically without showing raw SheetIds.
+    for (_, (section, group)) in collision_groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let hints: Vec<Option<String>> = group.iter().map(|id| collision_hint_suffix(doc, section, id)).collect();
+        let unique_hints: BTreeSet<&str> = hints.iter().filter_map(|h| h.as_deref()).collect();
+        let hints_all_distinct = hints.iter().all(Option::is_some) && unique_hints.len() == group.len();
+        for (idx, id) in group.iter().enumerate() {
+            if let Some(entry) = out.get_mut(id) {
+                let suffix = if hints_all_distinct { hints[idx].clone().unwrap_or_default() } else { format!("#{}", idx + 1) };
+                entry.subtitle = Some(match &entry.subtitle {
+                    Some(base) if !base.is_empty() => format!("{base} \u{00B7} {suffix}"),
+                    _ => suffix,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set: &BTreeSet<SheetId>) -> Vec<NavigatorEntry> {
     let mut entries = Vec::with_capacity(doc.total_sheet_count());
     let active = doc.active_sheet_id.as_ref();
     let ctx = FamilyHighlightCtx { active, up_set, down_set };
+    let disambig = compute_sheet_disambiguation(doc);
 
     for s in &doc.data_sheets {
-        entries.push(build_data_entry(s, active, up_set, down_set));
+        entries.push(build_data_entry(s, active, up_set, down_set, disambig.get(&s.id)));
     }
     for s in &doc.info_sheets {
         entries.push(build_simple_entry(
@@ -1134,6 +1658,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 id: &s.id,
                 section: SheetSection::Info,
                 title: &s.title,
+                disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
             },
@@ -1141,7 +1666,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
         ));
     }
     for s in &doc.result_sheets {
-        entries.push(build_result_entry(s, active, up_set, down_set));
+        entries.push(build_result_entry(s, active, up_set, down_set, disambig.get(&s.id)));
     }
     for s in &doc.graph_sheets {
         entries.push(build_simple_entry(
@@ -1149,6 +1674,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 id: &s.id,
                 section: SheetSection::Graphs,
                 title: &s.title,
+                disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
             },
@@ -1161,6 +1687,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 id: &s.id,
                 section: SheetSection::Layouts,
                 title: &s.title,
+                disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
             },
@@ -1180,11 +1707,18 @@ struct SimpleSheetSummary<'a> {
     id: &'a SheetId,
     section: SheetSection,
     title: &'a str,
+    disambig: Option<&'a SheetDisambiguation>,
     color_tag: Option<Rgba8>,
     floating_note_count: usize,
 }
 
-fn build_data_entry(s: &DataSheet, active: Option<&SheetId>, up_set: &BTreeSet<SheetId>, down_set: &BTreeSet<SheetId>) -> NavigatorEntry {
+fn build_data_entry(
+    s: &DataSheet,
+    active: Option<&SheetId>,
+    up_set: &BTreeSet<SheetId>,
+    down_set: &BTreeSet<SheetId>,
+    disambig: Option<&SheetDisambiguation>,
+) -> NavigatorEntry {
     let is_up = up_set.contains(&s.id);
     let is_down = down_set.contains(&s.id);
     let mut link_colors = Vec::new();
@@ -1217,6 +1751,8 @@ fn build_data_entry(s: &DataSheet, active: Option<&SheetId>, up_set: &BTreeSet<S
         sheet_id: s.id.clone(),
         section: SheetSection::Data,
         title: s.title.clone(),
+        subtitle: disambig.and_then(|d| d.subtitle.clone()),
+        has_duplicate_title: disambig.is_some_and(|d| d.has_duplicate_title),
         is_active: active == Some(&s.id),
         is_bold: active == Some(&s.id) || is_up || is_down,
         is_upstream_dependency: is_up,
@@ -1234,10 +1770,11 @@ fn build_data_entry(s: &DataSheet, active: Option<&SheetId>, up_set: &BTreeSet<S
 }
 
 fn build_result_entry(
-    s: &curvebook_doc::ResultSheet,
+    s: &ResultSheet,
     active: Option<&SheetId>,
     up_set: &BTreeSet<SheetId>,
     down_set: &BTreeSet<SheetId>,
+    disambig: Option<&SheetDisambiguation>,
 ) -> NavigatorEntry {
     let is_up = up_set.contains(&s.id);
     let is_down = down_set.contains(&s.id);
@@ -1257,6 +1794,8 @@ fn build_result_entry(
         sheet_id: s.id.clone(),
         section: SheetSection::Analyses,
         title: s.title().to_owned(),
+        subtitle: disambig.and_then(|d| d.subtitle.clone()),
+        has_duplicate_title: disambig.is_some_and(|d| d.has_duplicate_title),
         is_active: active == Some(&s.id),
         is_bold: active == Some(&s.id) || is_up || is_down,
         is_upstream_dependency: is_up,
@@ -1281,6 +1820,8 @@ fn build_simple_entry(summary: SimpleSheetSummary<'_>, ctx: &FamilyHighlightCtx<
         sheet_id: summary.id.clone(),
         section: summary.section,
         title: summary.title.to_owned(),
+        subtitle: summary.disambig.and_then(|d| d.subtitle.clone()),
+        has_duplicate_title: summary.disambig.is_some_and(|d| d.has_duplicate_title),
         is_active,
         is_bold: is_active || is_up || is_down,
         is_upstream_dependency: is_up,
@@ -1376,6 +1917,7 @@ fn matches_search(entry: &NavigatorEntry, needle_lower: &str) -> bool {
     entry.title.to_lowercase().contains(needle_lower)
         || entry.sheet_id.as_str().to_lowercase().contains(needle_lower)
         || entry.archetype_label.as_deref().is_some_and(|lbl| lbl.to_lowercase().contains(needle_lower))
+        || entry.subtitle.as_deref().is_some_and(|sub| sub.to_lowercase().contains(needle_lower))
 }
 
 fn build_folders(entries: &[NavigatorEntry], mode: NavigatorNestingMode, collapsed: &[SheetSection]) -> Vec<NavigatorFolder> {
@@ -1559,5 +2101,120 @@ pub(crate) fn sheet_floating_notes<'a>(doc: &'a ProjectDocument, id: &SheetId) -
         &ls.floating_notes
     } else {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curvebook_doc::{AnalysisKind, AnalysisSpec, GraphSpec, InfoSheet, LayoutSheet, LayoutSpec};
+
+    #[test]
+    fn duplicate_titles_get_disambiguation_subtitles_and_family_propagation() {
+        let mut doc = ProjectDocument::new("dup-test").unwrap();
+        let mut d1 = ColumnTable::new(ColumnDesignHint::default(), 2, 3).unwrap();
+        d1.data_sets[0].title = String::from("Ctrl");
+        d1.data_sets[1].title = String::from("Drug");
+        let ds1 = DataSheet::new(SheetId::from("d1"), "Cohort A", TableArchetype::Column(d1)).unwrap();
+
+        let d2 = ColumnTable::new(ColumnDesignHint::default(), 3, 5).unwrap();
+        let ds2 = DataSheet::new(SheetId::from("d2"), "Cohort B", TableArchetype::Column(d2)).unwrap();
+
+        let g1_spec = GraphSpec::default_for_data_sheet(&ds1);
+        let gs1 = GraphSheet {
+            id: SheetId::from("g1"),
+            title: String::from("Summary"),
+            initialized: true,
+            spec: g1_spec,
+            floating_notes: Vec::new(),
+            color_tag: None,
+        };
+        let mut g2_spec = GraphSpec::default_for_data_sheet(&ds2);
+        g2_spec.series[0].gdo = GraphicalDataObject::Violin {
+            fill_color: Rgba8::rgb(100, 120, 200),
+            stroke_color: Rgba8::BLACK,
+            clip_to_observed_range: true,
+            show_median_and_quartiles: true,
+            half_violin_with_points: false,
+        };
+        let gs2 = GraphSheet {
+            id: SheetId::from("g2"),
+            title: String::from("Summary"),
+            initialized: true,
+            spec: g2_spec,
+            floating_notes: Vec::new(),
+            color_tag: None,
+        };
+
+        let mut rs1 = ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::OneWayAnova(Default::default())).unwrap()).unwrap();
+        rs1.analysis.custom_title = Some(String::from("Comparison"));
+        let mut rs2 = ResultSheet::new(AnalysisSpec::new("r2", "d2", AnalysisKind::OneWayAnova(Default::default())).unwrap()).unwrap();
+        rs2.analysis.custom_title = Some(String::from("comparison "));
+
+        let info1 = InfoSheet::new_preseeded("i1", "Cohort A").unwrap();
+        let mut ls1 = LayoutSheet::new("l1", "Panel", LayoutSpec::default()).unwrap();
+        ls1.spec.grid_template = None;
+
+        doc.data_sheets.extend([ds1, ds2]);
+        doc.graph_sheets.extend([gs1, gs2]);
+        doc.result_sheets.extend([rs1, rs2]);
+        doc.info_sheets.push(info1);
+        doc.layout_sheets.push(ls1);
+        doc.active_sheet_id = Some(SheetId::from("d1"));
+        doc.family_anchor_sheet_id = Some(SheetId::from("d1"));
+
+        let mut nav = WorkspaceNavState::default();
+        nav.sync_from_document(&doc);
+
+        let g1_entry = nav.all_entries.iter().find(|e| e.sheet_id.as_str() == "g1").unwrap();
+        let g2_entry = nav.all_entries.iter().find(|e| e.sheet_id.as_str() == "g2").unwrap();
+        assert!(g1_entry.has_duplicate_title);
+        assert!(g2_entry.has_duplicate_title);
+        assert_ne!(g1_entry.subtitle, g2_entry.subtitle);
+        assert!(g1_entry.subtitle.as_deref().unwrap().contains("Cohort A"));
+        assert!(g2_entry.subtitle.as_deref().unwrap().contains("Cohort B"));
+        assert!(g2_entry.subtitle.as_deref().unwrap().contains("Violin"));
+
+        let r1_entry = nav.all_entries.iter().find(|e| e.sheet_id.as_str() == "r1").unwrap();
+        let r2_entry = nav.all_entries.iter().find(|e| e.sheet_id.as_str() == "r2").unwrap();
+        assert!(r1_entry.has_duplicate_title);
+        assert!(r2_entry.has_duplicate_title);
+        assert!(r1_entry.subtitle.as_deref().unwrap().starts_with("From Cohort A"));
+        assert!(r2_entry.subtitle.as_deref().unwrap().starts_with("From Cohort B"));
+
+        // Family nodes inherit subtitle + has_duplicate_title
+        let fam_g1 = nav.family_nodes.iter().find(|n| n.sheet_id.as_str() == "g1").unwrap();
+        assert!(fam_g1.has_duplicate_title);
+        assert_eq!(fam_g1.subtitle, g1_entry.subtitle);
+
+        // Search query matches subtitles cleanly
+        nav.set_search_query("Violin", &doc);
+        assert!(nav.entries.iter().any(|e| e.sheet_id.as_str() == "g2"));
+        assert!(!nav.entries.iter().any(|e| e.sheet_id.as_str() == "g1"));
+    }
+
+    #[test]
+    fn graph_subtitle_omits_redundant_title_and_collision_suffixes_stay_distinct() {
+        let mut doc = ProjectDocument::new("collision-test").unwrap();
+        let ds1 = DataSheet::new(SheetId::from("d1"), "Data 1", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 3, 2).unwrap())).unwrap();
+        let ds2 = DataSheet::new(SheetId::from("d2"), "Data 1", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 3, 2).unwrap())).unwrap();
+        let gs_same = GraphSheet {
+            id: SheetId::from("g_same"),
+            title: String::from("Data 1"),
+            initialized: true,
+            spec: GraphSpec::default_for_data_sheet(&ds1),
+            floating_notes: Vec::new(),
+            color_tag: None,
+        };
+        doc.data_sheets.extend([ds1, ds2]);
+        doc.graph_sheets.push(gs_same);
+
+        let map = compute_sheet_disambiguation(&doc);
+        let d1 = &map[&SheetId::from("d1")];
+        let d2 = &map[&SheetId::from("d2")];
+        assert!(d1.has_duplicate_title);
+        assert!(d2.has_duplicate_title);
+        assert_ne!(d1.subtitle, d2.subtitle);
+        assert_eq!(map[&SheetId::from("g_same")].subtitle.as_deref(), Some("XY"));
     }
 }

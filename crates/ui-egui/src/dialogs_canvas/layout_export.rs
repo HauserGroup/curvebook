@@ -301,11 +301,12 @@ impl ExportFigureState {
     }
 }
 
-/// Target surface for the CSV Export Options modal (`R10.29`).
+/// Target surface for the CSV Export Options modal (`R10.29`, `R10.35`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CsvExportTargetKind {
     ResultSheet { sheet_id: SheetId },
     DataTable { sheet_id: SheetId },
+    DataTables { sheet_ids: Vec<SheetId> },
     AllDataTables,
 }
 

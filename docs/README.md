@@ -46,7 +46,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Curve fitting | [Curve-fitting evidence](evidence/curve-fitting.md) |
 | Graphing | [Graphing evidence](evidence/graphing.md) |
 | Interchange | [File-format evidence](evidence/file-formats.md) |
-| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), and [GUI layout specification](planning/gui-layout-spec.md) |
+| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), [GUI layout specification](planning/gui-layout-spec.md), and [post-Beta GUI improvements](planning/gui-improvements.md) |
 | Platforms | [Platform evidence](evidence/platforms.md) |
 | Localization | [Localization evidence](evidence/localization.md) |
 | Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |

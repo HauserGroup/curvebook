@@ -358,7 +358,7 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
         ("nav.chip.results", "nav.sheet.res-anova", false, false),
         ("nav.chip.graphs", "nav.sheet.graph-1", true, true),
     ] {
-        driver.click_widget_id(chip)?;
+        crate::common::select_nav_kind_filter(&mut driver, chip)?;
         driver.click_widget_id(sheet)?;
         assert_eq!(driver.frame_meta().find_by_widget_id("status.rulers").is_some(), has_rulers, "{sheet} rulers");
         assert_eq!(driver.frame_meta().find_by_widget_id("status.zoom.in").is_some(), has_zoom, "{sheet} zoom");
@@ -386,9 +386,9 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
     driver.click_widget_id("status.zoom.reset")?;
     assert!((driver.state().app.canvas_dialogs.canvas.zoom - 1.0).abs() < 1e-6);
 
-    driver.click_widget_id("nav.chip.layouts")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.layouts")?;
     driver.click_widget_id("nav.sheet.layout-1")?;
-    driver.click_widget_id("nav.chip.all")?;
+    crate::common::select_nav_kind_filter(&mut driver, "nav.chip.all")?;
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_some() && driver.frame_meta().find_by_widget_id("status.zoom.in").is_some());
 
@@ -816,4 +816,244 @@ fn aud_09_08_18_19_20_41_43_46_info_layout_grid_and_trailing_studio() -> BoxRes 
     let _ = pass_ts(&egui::Context::default(), &r_app, &mut ts_r, &tok_r, Default::default())?;
     assert!(!ts_r.last_copied_methods);
     Ok(())
+}
+
+mod methods_tab_studio_tests {
+    use std::sync::Arc;
+
+    use curvebook_ui_egui::UiApp;
+    use curvebook_ui_egui::egui_shell::trailing_studio::{ResultsStudioTab, TrailingStudioContext, TrailingStudioEguiState, render_trailing_studio};
+    use curvebook_ui_egui::egui_shell::{FrameInspectMeta, LayoutMetrics, PendingUiIntents, ShellLayoutInput, Tokens, UiIntent};
+    use curvebook_ui_egui::is_desktop_host_routed_command;
+    use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
+    use egui::{Pos2, Vec2};
+    use serde_json::{Value, json};
+
+    use crate::helpers::run_egui_pass_with_ctx;
+
+    fn click_at_pos(pos: Pos2) -> egui::RawInput {
+        egui::RawInput {
+            events: vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn render_methods_studio_once(
+        ctx: &egui::Context,
+        tokens: &Tokens,
+        layout: curvebook_ui_egui::egui_shell::ResponsiveShellLayout,
+        app_ref: &UiApp,
+        state: &mut TrailingStudioEguiState,
+        raw: egui::RawInput,
+    ) -> Result<(FrameInspectMeta, PendingUiIntents), String> {
+        let mut meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::new();
+        run_egui_pass_with_ctx(ctx, Vec2::new(1200.0, 800.0), raw, false, |c, ui| {
+            meta.begin_pass(c);
+            let ctx_in =
+                TrailingStudioContext { tokens, layout, enabled: true, focused: true, selected_panel_index: None, selected_graph_annotation: None };
+            render_trailing_studio(ui, app_ref, state, ctx_in, &mut meta, &mut intents);
+        })?;
+        Ok((meta, intents))
+    }
+
+    fn preview_text_from_meta(meta: &FrameInspectMeta) -> Result<&str, String> {
+        meta.find_by_widget_id("inspector.methods.preview")
+            .and_then(|e| e.value.as_ref())
+            .and_then(Value::as_str)
+            .ok_or_else(|| String::from("missing methods preview text"))
+    }
+
+    fn click_methods_widget(
+        ctx: &egui::Context,
+        tokens: &Tokens,
+        layout: curvebook_ui_egui::egui_shell::ResponsiveShellLayout,
+        meta: &FrameInspectMeta,
+        widget_id: &str,
+        app: &UiApp,
+        state: &mut TrailingStudioEguiState,
+    ) -> Result<PendingUiIntents, String> {
+        let entry = meta.find_by_widget_id(widget_id).ok_or_else(|| format!("missing widget `{widget_id}`"))?;
+        let (_, intents) = render_methods_studio_once(ctx, tokens, layout, app, state, click_at_pos(entry.clipped_rect.center()))?;
+        Ok(intents)
+    }
+
+    #[test]
+    fn r20_7_methods_tab_scope_selectable_preview_save_sync_and_copied_reset() -> Result<(), String> {
+        let mut app = UiApp::new();
+        let stub = Arc::new(StubPlatformClipboardAdapter::new());
+        app.set_clipboard_adapter(stub);
+        app.set_human_path_only(true);
+
+        app.execute_command(
+            "sheet.createData",
+            json!({ "sheet_id": "ds-xy", "title": "Dose Response", "kind": "xy", "cols": 2, "rows": 6, "auto_graph": false }),
+        )
+        .map_err(|e| e.to_string())?;
+        app.execute_command("table.setTitles", json!({ "sheet_id": "ds-xy", "titles": ["Vehicle", "Agonist"] })).map_err(|e| e.to_string())?;
+        app.execute_command("table.setXCells", json!({ "sheet_id": "ds-xy", "values": [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0] }))
+            .map_err(|e| e.to_string())?;
+        app.execute_command(
+            "table.setCells",
+            json!({ "sheet_id": "ds-xy", "rows": [[5.0, 6.0], [12.0, 18.0], [48.0, 62.0], [86.0, 91.0], [96.0, 98.0], [99.0, 100.0]] }),
+        )
+        .map_err(|e| e.to_string())?;
+        app.execute_command(
+            "fit.run",
+            json!({ "source_sheet_id": "ds-xy", "sheet_id": "res-4pl", "kind": "log_agonist_vs_response_4pl", "create_summary_graph": false }),
+        )
+        .map_err(|e| e.to_string())?;
+
+        app.execute_command(
+            "sheet.createData",
+            json!({ "sheet_id": "ds-col", "title": "Column Study", "kind": "column", "cols": 3, "rows": 4, "auto_graph": false }),
+        )
+        .map_err(|e| e.to_string())?;
+        app.execute_command(
+            "table.setCells",
+            json!({ "sheet_id": "ds-col", "rows": [[10.0, 14.0, 21.0], [11.0, 15.0, 22.0], [9.5, 14.5, 20.5], [10.5, 15.5, 21.5]] }),
+        )
+        .map_err(|e| e.to_string())?;
+        app.execute_command("stats.run", json!({ "source_sheet_id": "ds-col", "sheet_id": "res-anova", "kind": "one_way_anova" }))
+            .map_err(|e| e.to_string())?;
+
+        app.execute_command("sheet.select", json!({ "sheet_id": "res-4pl" })).map_err(|e| e.to_string())?;
+        app.sync_views();
+
+        let layout = LayoutMetrics::CANONICAL.solve_shell_layout(ShellLayoutInput {
+            viewport_w_pt: 1200.0,
+            viewport_h_pt: 800.0,
+            empty_workspace: false,
+            navigator_open: false,
+            inspector_open: true,
+            family_open: false,
+            leading_user_collapsed: false,
+            trailing_user_collapsed: false,
+            leading_width_override_pt: None,
+            trailing_width_override_pt: None,
+            host_draws_menu_bar: false,
+            is_rtl: false,
+        });
+        let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+        let mut ts = TrailingStudioEguiState { results_tab: ResultsStudioTab::Methods, ..Default::default() };
+        let ctx = egui::Context::default();
+
+        let (meta, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        assert_eq!((ts.methods_scope.as_str(), ts.methods_format.as_str()), ("methods", "markdown"));
+        for (wid, expected) in [
+            ("inspector.methods.scope.methods", "Methods"),
+            ("inspector.methods.scope.full", "Full Report"),
+            ("inspector.copy_methods", "Copy"),
+            ("inspector.save_methods", "Save"),
+        ] {
+            let entry = meta.find_by_widget_id(wid).ok_or_else(|| format!("missing widget `{wid}`"))?;
+            assert_eq!(entry.label, expected, "unexpected label on `{wid}`");
+            assert!(!entry.label.ends_with('…') && !entry.label.ends_with("..."), "R20.15 violation on `{wid}`: {}", entry.label);
+        }
+
+        let preview = meta.find_by_widget_id("inspector.methods.preview").ok_or("missing methods preview")?;
+        assert_eq!(preview.role, "textbox");
+        assert!(preview.enabled, "R20.7: preview must be selectable (enabled), not interactive(false)");
+        let preview_h = preview.clipped_rect.height();
+        assert!(preview_h > 220.0, "R20.7: preview must expand into available sidebar height (got {preview_h} pt, expected > 220 pt)");
+        let preview_text = preview_text_from_meta(&meta)?;
+        assert!(preview_text.contains(env!("CARGO_PKG_VERSION")), "Methods prose must include CurveBook version:\n{preview_text}");
+        assert!(
+            preview_text.contains("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"),
+            "Clean Markdown equation expected:\n{preview_text}"
+        );
+        assert!(!preview_text.contains("\\*") && !preview_text.contains("\\_") && !preview_text.contains("\\<") && !preview_text.contains("\\>"));
+        assert!(!preview_text.contains("res-4pl") && !preview_text.contains("ds-xy"), "Internal sheet IDs must not leak:\n{preview_text}");
+        assert!(!preview_text.contains("Study Context and Data Provenance") && !preview_text.contains("| --- |"));
+
+        let preview_center = Pos2::new(preview.clipped_rect.center().x, preview.clipped_rect.top() + 24.0);
+        let mut edit_raw = click_at_pos(preview_center);
+        edit_raw.events.push(egui::Event::Text(String::from("MUTATED_TOKEN")));
+        let (meta_after_type, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, edit_raw)?;
+        assert!(!preview_text_from_meta(&meta_after_type)?.contains("MUTATED_TOKEN"), "Read-only preview must ignore text mutation");
+
+        let mut copy_intents = click_methods_widget(&ctx, &tokens, layout, &meta, "inspector.copy_methods", &app, &mut ts)?;
+        assert!(ts.last_copied_methods);
+        let has_copy_cmd = copy_intents.intents().iter().any(|i| {
+            matches!(
+                i,
+                UiIntent::UiCommand { command_id, params }
+                    if command_id == "ui.result.copyMethodsReport"
+                        && params.get("result_sheet_id").and_then(Value::as_str) == Some("res-4pl")
+                        && params.get("format").and_then(Value::as_str) == Some("markdown")
+                        && params.get("scope").and_then(Value::as_str) == Some("methods")
+            )
+        });
+        assert!(has_copy_cmd, "Copy must emit ui.result.copyMethodsReport with format+scope: {:?}", copy_intents.intents());
+        let _ = copy_intents.commit_if_settled(&mut app, false).map_err(|e| e.to_string())?;
+
+        let mut full_intents = click_methods_widget(&ctx, &tokens, layout, &meta, "inspector.methods.scope.full", &app, &mut ts)?;
+        assert_eq!(ts.methods_scope, "full");
+        assert!(!ts.last_copied_methods, "Scope switch must reset last_copied_methods");
+        let _ = full_intents.commit_if_settled(&mut app, false).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.result_view.report_scope, "full");
+        let (meta_full, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        let full_text = preview_text_from_meta(&meta_full)?;
+        assert!(
+            full_text.contains("Study Context and Data Provenance") && full_text.contains("Stored Results Summary") && full_text.contains("| --- |")
+        );
+
+        let mut tex_intents = click_methods_widget(&ctx, &tokens, layout, &meta_full, "inspector.methods.fmt.latex", &app, &mut ts)?;
+        assert_eq!(ts.methods_format, "latex");
+        let _ = tex_intents.commit_if_settled(&mut app, false).map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.result_view.report_format, "latex");
+
+        let (meta_tex, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        let save_intents = click_methods_widget(&ctx, &tokens, layout, &meta_tex, "inspector.save_methods", &app, &mut ts)?;
+        let has_save_cmd = save_intents.intents().iter().any(|i| {
+            matches!(
+                i,
+                UiIntent::EngineCommand { command_id, params }
+                    if command_id == "result.generateReport"
+                        && params.get("result_sheet_id").and_then(Value::as_str) == Some("res-4pl")
+                        && params.get("format").and_then(Value::as_str) == Some("latex")
+                        && params.get("scope").and_then(Value::as_str) == Some("full")
+            )
+        });
+        assert!(has_save_cmd, "Save must emit result.generateReport with format+scope: {:?}", save_intents.intents());
+        assert!(is_desktop_host_routed_command("result.generateReport"));
+
+        ts.last_copied_methods = true;
+        ts.last_copied_methods_text = String::from("copied before external change");
+        let _ = curvebook_ui_egui::dispatch_ui_command(
+            &mut app,
+            "ui.result.copyMethodsReport",
+            &json!({ "result_sheet_id": "res-4pl", "format": "plain", "scope": "methods", "skip_os_clipboard": true }),
+        )
+        .map_err(|e| e.to_string())?;
+        let (meta_synced, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        assert_eq!((ts.methods_format.as_str(), ts.methods_scope.as_str()), ("plain", "methods"));
+        assert!(!ts.last_copied_methods, "External format/scope change must reset last_copied_methods");
+
+        ts.last_copied_methods = true;
+        ts.last_copied_methods_text = preview_text_from_meta(&meta_synced)?.to_owned();
+        app.execute_command("analysis.updateParams", json!({ "sheet_id": "res-4pl", "confidence_percent": 99.0 })).map_err(|e| e.to_string())?;
+        app.sync_views();
+        let (meta_99, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        assert!(!ts.last_copied_methods, "Parameter change must reset last_copied_methods");
+        let text_99 = preview_text_from_meta(&meta_99)?.to_owned();
+        assert!(text_99.contains("99%"), "Preview must reflect updated confidence level:\n{text_99}");
+
+        ts.last_copied_methods = true;
+        ts.last_copied_methods_text = text_99;
+        app.execute_command("sheet.select", json!({ "sheet_id": "res-anova" })).map_err(|e| e.to_string())?;
+        app.sync_views();
+        let _ = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        assert!(!ts.last_copied_methods, "Switching ResultSheet must reset last_copied_methods");
+
+        app.canvas_dialogs.result_view.last_methods_report = Some(String::from("STALE_OTHER_SHEET_REPORT"));
+        let (meta_anova, _) = render_methods_studio_once(&ctx, &tokens, layout, &app, &mut ts, egui::RawInput::default())?;
+        assert!(!preview_text_from_meta(&meta_anova)?.contains("STALE_OTHER_SHEET_REPORT"));
+        app.canvas_dialogs.result_view.last_methods_report = None;
+        Ok(())
+    }
 }

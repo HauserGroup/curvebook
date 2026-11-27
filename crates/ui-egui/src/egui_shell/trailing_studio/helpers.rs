@@ -29,12 +29,38 @@ pub(super) struct StudioChipSpec<'a> {
 }
 
 pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: &StudioChipSpec<'_>) -> bool {
+    studio_chip_with_shortcut(ui, tokens, meta, spec, None)
+}
+
+pub(super) fn studio_chip_with_shortcut(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    spec: &StudioChipSpec<'_>,
+    shortcut: Option<&str>,
+) -> bool {
     let ak_role = match spec.role {
         "tab" => egui::Role::Tab,
         "text" => egui::Role::Label,
         _ => egui::Role::Button,
     };
-    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
+    let tip_override = shortcut.map(|sc| {
+        let mut tip = crate::egui_shell::ui_kit::TooltipSpec::new(spec.label).with_shortcut(sc);
+        if !spec.tooltip.trim().is_empty() {
+            if spec.label.chars().count() <= 2 {
+                tip.title = spec.tooltip;
+            } else {
+                tip = tip.with_summary(spec.tooltip);
+            }
+        }
+        if !spec.enabled
+            && let Some(reason) = spec.disabled_reason
+        {
+            tip = tip.with_disabled_reason(reason);
+        }
+        tip
+    });
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button_with_tooltip(
         ui,
         tokens,
         meta,
@@ -44,7 +70,7 @@ pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameIn
             a11y_role: ak_role,
             a11y_selectable: false,
             label: spec.label,
-            tooltip: Some(spec.tooltip),
+            tooltip: (!spec.tooltip.is_empty()).then_some(spec.tooltip),
             command_id: spec.command_id,
             width: crate::egui_shell::ui_kit::ButtonWidth::FitText { min_w: 24.0_f32.min(spec.max_w), max_w: spec.max_w.max(24.0), pad_x: 14.0 },
             height: SECTION_BTN_H,
@@ -64,6 +90,7 @@ pub(super) fn studio_chip(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameIn
             clip_interact_to_viewport: true,
             tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
         },
+        tip_override,
     );
     clicked
 }
@@ -80,7 +107,44 @@ pub(super) struct StudioButtonSpec<'a> {
 }
 
 pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: &StudioButtonSpec<'_>) -> bool {
-    let (_, clicked) = crate::egui_shell::ui_kit::styled_button(
+    studio_sized_button(ui, tokens, meta, ui.available_width().max(48.0), spec)
+}
+
+pub(super) fn studio_full_button_with_shortcut(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    spec: &StudioButtonSpec<'_>,
+    shortcut: Option<&str>,
+) -> bool {
+    studio_sized_button_with_shortcut(ui, tokens, meta, ui.available_width().max(48.0), spec, shortcut)
+}
+
+pub(super) fn studio_sized_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, width: f32, spec: &StudioButtonSpec<'_>) -> bool {
+    studio_sized_button_with_shortcut(ui, tokens, meta, width, spec, None)
+}
+
+pub(super) fn studio_sized_button_with_shortcut(
+    ui: &mut egui::Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    width: f32,
+    spec: &StudioButtonSpec<'_>,
+    shortcut: Option<&str>,
+) -> bool {
+    let tip_override = shortcut.map(|sc| {
+        let mut tip = crate::egui_shell::ui_kit::TooltipSpec::new(spec.label).with_shortcut(sc);
+        if !spec.tooltip.trim().is_empty() && !spec.tooltip.trim().eq_ignore_ascii_case(spec.label.trim()) {
+            tip = tip.with_summary(spec.tooltip);
+        }
+        if !spec.enabled
+            && let Some(reason) = spec.disabled_reason
+        {
+            tip = tip.with_disabled_reason(reason);
+        }
+        tip
+    });
+    let (_, clicked) = crate::egui_shell::ui_kit::styled_button_with_tooltip(
         ui,
         tokens,
         meta,
@@ -90,9 +154,9 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
             a11y_role: egui::Role::Button,
             a11y_selectable: false,
             label: spec.label,
-            tooltip: Some(spec.tooltip),
+            tooltip: (!spec.tooltip.is_empty()).then_some(spec.tooltip),
             command_id: spec.command_id,
-            width: crate::egui_shell::ui_kit::ButtonWidth::Fixed(ui.available_width().max(48.0)),
+            width: crate::egui_shell::ui_kit::ButtonWidth::Fixed(width.max(48.0)),
             height: SECTION_BTN_H,
             font_size: 11.5,
             radius: tokens.metrics.radius_md,
@@ -110,6 +174,7 @@ pub(super) fn studio_full_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut 
             clip_interact_to_viewport: true,
             tooltip_mode: crate::egui_shell::ui_kit::TooltipMode::Standard,
         },
+        tip_override,
     );
     clicked
 }
@@ -165,16 +230,16 @@ pub(super) fn render_collapsed_rail(
     intents: &mut PendingUiIntents,
 ) {
     let locale = &tokens.locale;
-    let expand_tip = super::format_studio_toggle_tooltip(app, "Expand Studio");
+    let expand_sc = super::studio_toggle_shortcut(app);
     ui.vertical_centered(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
-        let expand_resp = studio_chip(
+        let expand_resp = studio_chip_with_shortcut(
             ui,
             tokens,
             meta,
             &StudioChipSpec {
                 label: if is_rtl_locale(locale) { "»" } else { "«" },
-                tooltip: &expand_tip,
+                tooltip: "Expand Studio",
                 max_w: 26.0,
                 selected: false,
                 enabled,
@@ -184,6 +249,7 @@ pub(super) fn render_collapsed_rail(
                 command_id: Some("ui.inspector.toggle"),
                 disabled_reason: (!enabled).then_some("modal dialog is active"),
             },
+            expand_sc.as_deref(),
         );
         if expand_resp && enabled {
             intents.push(UiIntent::ToggleTrailingCollapsedRail);

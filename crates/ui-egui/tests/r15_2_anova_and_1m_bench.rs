@@ -456,7 +456,7 @@ fn run_egui_case_b_analyze_to_resultsheet(
 }
 
 fn run_egui_case_a_anova_modal_and_update(driver: &mut EguiHumanPathDriver<'_, EguiAnovaQaState>, rs_id: &SheetId) -> Result<(), String> {
-    driver.press_key("T", KeyModifiers { meta: true, ..Default::default() })?;
+    driver.press_key("P", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
     let d_case_a = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
     assert_eq!(d_case_a.sheet_surface, HybridSheetSurface::EguiStage);

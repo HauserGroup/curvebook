@@ -1248,10 +1248,6 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
         "fit.eq.search",
         "navigator.search_input",
         "hook.search_input",
-        "feedback.title",
-        "feedback.summary",
-        "feedback.details",
-        "feedback.extra",
     ] {
         app.interaction.text_field_buffers.remove(id);
     }
@@ -1260,6 +1256,7 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
 pub(crate) fn close_active_modal(app: &mut UiApp) {
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
         crate::dialogs_canvas::clear_fit_parameter_inputs(app);
+        app.canvas_dialogs.edit_params.clear_session();
     }
     app.canvas_dialogs.close_dialog();
 }
@@ -1389,9 +1386,6 @@ fn is_multiline_text_widget_id(wid: &str) -> bool {
             | "fit.dsl.input"
             | "edit.fit.custom_dsl"
             | "analyze.fit.custom_dsl"
-            | "feedback.summary"
-            | "feedback.details"
-            | "feedback.extra"
     )
 }
 
@@ -1433,10 +1427,6 @@ fn initial_text_for_widget(app: &UiApp, wid: &str) -> String {
         "exclude.note" | "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note.clone(),
         "checkpoints.name" => app.canvas_dialogs.checkpoints.name_draft.clone(),
         "checkpoints.note" => app.canvas_dialogs.checkpoints.note_draft.clone(),
-        "feedback.title" => app.canvas_dialogs.feedback.title.clone(),
-        "feedback.summary" => app.canvas_dialogs.feedback.summary.clone(),
-        "feedback.details" => app.canvas_dialogs.feedback.details.clone(),
-        "feedback.extra" => app.canvas_dialogs.feedback.extra.clone(),
         "import.title" => app.grid.import_reshape.title.clone(),
         "import.x_title" => app.grid.import_reshape.x_title.clone(),
         "import.tidy_csv" => app.grid.import_reshape.tidy_csv.clone(),
@@ -2011,10 +2001,6 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "exclude.note" | "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note = text,
         "checkpoints.name" => app.canvas_dialogs.checkpoints.name_draft = text,
         "checkpoints.note" => app.canvas_dialogs.checkpoints.note_draft = text,
-        "feedback.title" => app.canvas_dialogs.feedback.title = text,
-        "feedback.summary" => app.canvas_dialogs.feedback.summary = text,
-        "feedback.details" => app.canvas_dialogs.feedback.details = text,
-        "feedback.extra" => app.canvas_dialogs.feedback.extra = text,
         "page_layout.callout_input" => app.canvas_dialogs.page_layout.new_callout_markdown = text,
         "rand_groups.arms_input" => {
             let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(&text);
@@ -2091,10 +2077,6 @@ fn is_text_widget_id(wid: &str) -> bool {
                 | "axes.x_thresholds"
                 | "axes.thresholds"
                 | "axes.title"
-                | "feedback.title"
-                | "feedback.summary"
-                | "feedback.details"
-                | "feedback.extra"
                 | "fit.wr.x_min"
                 | "fit.wr.x_max"
         )
@@ -2413,7 +2395,6 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         return handle_modal_key_down(app, metrics, key, trimmed, is_space, modifiers);
     }
 
-    // `Cmd/Ctrl+T` is context-scoped (`ui.editParams.open` vs `sheet.createData`) via `ShortcutRegistry` (`RV-75`).
     let text_focused = app.focus_widget_id.as_deref().is_some_and(is_text_widget_id);
     if !text_focused
         && (modifiers.meta || modifiers.ctrl)
@@ -2512,7 +2493,31 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         }
     }
 
+    if secondary_ctrl_y_redo_allowed_for_os(cfg!(target_os = "macos"), app, text_focused, modifiers, trimmed) {
+        let outcome = app.execute_command("edit.redo", json!({})).map_err(|err| err.to_string())?;
+        clear_inspector_axis_buffers(app);
+        let result = serde_json::to_value(outcome).map_err(|err| format!("failed to serialize command outcome: {err}"))?;
+        return Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("shortcut:edit.redo"),
+            command_id: Some(String::from("edit.redo")),
+            command_result: Some(result),
+        });
+    }
+
     Ok(UiEventOutcome { handled: false, action: String::from("key_down_unhandled"), ..Default::default() })
+}
+
+pub(crate) fn secondary_ctrl_y_redo_allowed_for_os(is_macos: bool, app: &UiApp, text_focused: bool, modifiers: KeyModifiers, key: &str) -> bool {
+    if is_macos || text_focused || !modifiers.ctrl || modifiers.meta || modifiers.alt || modifiers.shift || !key.eq_ignore_ascii_case("y") {
+        return false;
+    }
+    if app.shortcuts.active_combo("edit.redo") != Some("Cmd+Shift+Z") {
+        return false;
+    }
+    let on_result = resolve_result_sheet_for_shortcut(app, true).is_some();
+    app.shortcuts.handle_key_combo_for_context("Ctrl+Y", on_result).is_none()
+        && app.shortcuts.handle_key_combo_for_context("Cmd+Y", on_result).is_none()
 }
 
 fn handle_modal_key_down(
@@ -2745,6 +2750,29 @@ pub fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<Stri
     if modifiers.ctrl && !modifiers.meta {
         out.push(build(true));
     }
+    if (modifiers.meta || modifiers.ctrl) && key == "+" {
+        let mut eq_parts = Vec::with_capacity(5);
+        if modifiers.meta {
+            eq_parts.push("Cmd");
+        }
+        if modifiers.ctrl {
+            eq_parts.push("Ctrl");
+        }
+        if modifiers.alt {
+            eq_parts.push("Alt");
+        }
+        eq_parts.push("=");
+        out.push(eq_parts.join("+"));
+        if modifiers.ctrl && !modifiers.meta {
+            let mut cmd_eq = Vec::with_capacity(3);
+            cmd_eq.push("Cmd");
+            if modifiers.alt {
+                cmd_eq.push("Alt");
+            }
+            cmd_eq.push("=");
+            out.push(cmd_eq.join("+"));
+        }
+    }
     out
 }
 
@@ -2798,5 +2826,67 @@ mod tests {
             vec!["Ctrl+Alt+Shift+k", "Cmd+Alt+Shift+k"]
         );
         assert_eq!(build_shortcut_candidates("k", KeyModifiers { ctrl: true, meta: true, alt: true, shift: true }), vec!["Cmd+Ctrl+Alt+Shift+k"]);
+    }
+
+    #[test]
+    fn r20_22_shortcuts_and_non_macos_ctrl_y_redo_dispatch() -> Result<(), String> {
+        use serde_json::json;
+
+        let mut app = crate::UiApp::new();
+        app.execute_command("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "xy", "cols": 1, "rows": 2 })).map_err(|e| e.to_string())?;
+        app.execute_command("sheet.select", json!({ "sheet_id": "ds-1" })).map_err(|e| e.to_string())?;
+
+        // Cmd+, -> app.preferences; Cmd+B -> Navigator; Cmd+Shift+L -> Family Strip; Cmd+=/- -> Zoom; Cmd+Shift+T -> New Data Table.
+        let m = crate::interaction::ViewportMetrics::default();
+        let out_prefs = crate::interaction::dispatch_ui_event(
+            &mut app,
+            crate::interaction::UiInputEvent::KeyDown { key: String::from(","), modifiers: KeyModifiers { meta: true, ..Default::default() } },
+            m,
+        )?;
+        assert_eq!(out_prefs.command_id.as_deref(), Some("app.preferences"));
+        assert!(app.egui_views.app_modals.preferences_open);
+        app.egui_views.app_modals.close_all();
+
+        let nav0 = app.nav.navigator_open;
+        let out_b = crate::interaction::dispatch_ui_event(
+            &mut app,
+            crate::interaction::UiInputEvent::KeyDown { key: String::from("b"), modifiers: KeyModifiers { meta: true, ..Default::default() } },
+            m,
+        )?;
+        assert_eq!(out_b.command_id.as_deref(), Some("ui.navigator.toggle"));
+        assert_ne!(app.nav.navigator_open, nav0);
+
+        let fam0 = app.family_open;
+        let out_l = crate::interaction::dispatch_ui_event(
+            &mut app,
+            crate::interaction::UiInputEvent::KeyDown {
+                key: String::from("l"),
+                modifiers: KeyModifiers { meta: true, shift: true, ..Default::default() },
+            },
+            m,
+        )?;
+        assert_eq!(out_l.command_id.as_deref(), Some("ui.family.toggle"));
+        assert_ne!(app.family_open, fam0);
+
+        let z0 = app.canvas_dialogs.canvas.zoom;
+        let out_zin = crate::interaction::dispatch_ui_event(
+            &mut app,
+            crate::interaction::UiInputEvent::KeyDown { key: String::from("="), modifiers: KeyModifiers { meta: true, ..Default::default() } },
+            m,
+        )?;
+        assert_eq!(out_zin.command_id.as_deref(), Some("ui.zoom.in"));
+        assert!(app.canvas_dialogs.canvas.zoom > z0);
+        let out_zout = crate::interaction::dispatch_ui_event(
+            &mut app,
+            crate::interaction::UiInputEvent::KeyDown { key: String::from("-"), modifiers: KeyModifiers { meta: true, ..Default::default() } },
+            m,
+        )?;
+        assert_eq!(out_zout.command_id.as_deref(), Some("ui.zoom.out"));
+        assert!((app.canvas_dialogs.canvas.zoom - z0).abs() < 1e-6);
+
+        let ctrl = KeyModifiers { ctrl: true, ..Default::default() };
+        assert!(super::secondary_ctrl_y_redo_allowed_for_os(false, &app, false, ctrl, "y"));
+        assert!(!super::secondary_ctrl_y_redo_allowed_for_os(true, &app, false, ctrl, "y"));
+        Ok(())
     }
 }

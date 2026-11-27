@@ -7,7 +7,7 @@ use std::io;
 use std::time::{Duration, Instant};
 
 use curvebook::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
-use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
+use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions, install_desktop_font_definitions};
 use curvebook::live_control::{LiveControlBridge, serve_live_control_io};
 use curvebook::mac_menu::{NATIVE_MENU_BAR_TITLES, collect_egui_menubar_parity, collect_menu_parity_entries, verify_menu_parity};
 use curvebook_ui_egui::i18n::BETA_ACTIVE_LOCALES;
@@ -192,6 +192,14 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
             assert!(bounds_close(live_px, off_px, 0.5), "full-bounds mismatch `{wid}`: {live_px:?} vs {off_px:?}");
         }
     }
+    let home_y_pt = f64::from(native_app.inspect_meta().find_by_widget_id("toolbar.home").ok_or("missing toolbar.home")?.clipped_rect.top());
+    if in_window_menus {
+        assert!(home_y_pt >= 28.0, "expected unified toolbar below 28pt in-window menu bar, got y={home_y_pt}");
+        assert!(native_app.inspect_meta().entries.iter().any(|e| e.widget_id == "menu.file"));
+    } else {
+        assert!(home_y_pt < 16.0, "expected unified toolbar at top edge when host draws menus, got y={home_y_pt}");
+        assert!(!native_app.inspect_meta().entries.iter().any(|e| e.widget_id.starts_with("menu.")));
+    }
 
     let deadline = Instant::now() + Duration::from_secs(10);
     while !client_handle.is_finished() && Instant::now() < deadline {
@@ -241,4 +249,40 @@ fn mac_menu_accelerator_parses_plus_and_slash() {
     ] {
         assert_eq!(parse_muda_accelerator(spec).is_some(), expected, "{spec}");
     }
+}
+
+#[test]
+fn r20_13_live_desktop_app_installs_bold_and_numeral_font_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    let vp = ViewportMetrics::new(1024.0, 640.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        new_instance: true,
+        initial_viewport: vp,
+        ..DesktopHostConfig::default()
+    });
+    let win_id = rt.open_window(None, vp)?;
+    let mut native_app = CurveBookNativeApp::new(rt, win_id, None);
+    let ctx = egui::Context::default();
+    install_desktop_font_definitions(&ctx, None);
+
+    let mut raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0))), ..Default::default() };
+    native_app.drain_synthetic_events_into(&mut raw);
+    let mut out = ctx.run_ui(raw, |ui| native_app.step_ui(ui));
+    out.textures_delta.clear();
+
+    let expected = curvebook_ui_egui::egui_shell::fonts::build_egui_font_definitions().report;
+    assert_eq!(curvebook_ui_egui::egui_shell::fonts::has_bold_font(&ctx), expected.bold_face_loaded);
+    assert!(curvebook_ui_egui::egui_shell::fonts::has_aligned_numeral_font(&ctx));
+    if cfg!(target_os = "macos") {
+        assert!(curvebook_ui_egui::egui_shell::fonts::has_bold_font(&ctx));
+    }
+
+    let tokens = curvebook_ui_egui::egui_shell::Tokens::default();
+    let num_font = curvebook_ui_egui::egui_shell::fonts::aligned_numeral_font_id(&ctx, &tokens);
+    assert_eq!(num_font.family, egui::FontFamily::Name(std::sync::Arc::from(curvebook_ui_egui::egui_shell::fonts::ALIGNED_NUMERAL_FONT_FAMILY)));
+    if expected.bold_face_loaded {
+        let heading_font = curvebook_ui_egui::egui_shell::fonts::section_heading_font_id(&ctx, &tokens);
+        assert_eq!(heading_font.family, egui::FontFamily::Name(std::sync::Arc::from(curvebook_ui_egui::egui_shell::fonts::BOLD_FONT_FAMILY)));
+    }
+    Ok(())
 }

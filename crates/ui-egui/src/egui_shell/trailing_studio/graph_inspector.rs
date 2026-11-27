@@ -172,7 +172,11 @@ fn render_graph_studio_tabs(
     let tab_specs = [
         crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.data", label: "Data", tooltip: Some("Data & Series") },
         crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.axes", label: "Axes", tooltip: Some("Axes & Frame") },
-        crate::egui_shell::ui_kit::UnderlineTabSpec { widget_id: "inspector.graph.tab.legends", label: "Legend", tooltip: Some("Legend") },
+        crate::egui_shell::ui_kit::UnderlineTabSpec {
+            widget_id: "inspector.graph.tab.legends",
+            label: "Legend",
+            tooltip: Some("Legend placement, visibility, and entry order"),
+        },
         crate::egui_shell::ui_kit::UnderlineTabSpec {
             widget_id: "inspector.graph.tab.annotations",
             label: "Annotations",
@@ -216,7 +220,7 @@ fn render_graph_series_selector(
                 meta,
                 &StudioChipSpec {
                     label: &lbl,
-                    tooltip: &base_lbl,
+                    tooltip: "",
                     max_w: 120.0,
                     selected: idx == sel_idx,
                     enabled,
@@ -504,7 +508,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "Format Graph…",
+                    label: "Format Graph",
                     tooltip: "Open Format Graph dialog",
                     selected: false,
                     enabled: ctx_in.enabled,
@@ -521,7 +525,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "Bubble & MV Encoding…",
+                    label: "Bubble & MV Encoding",
                     tooltip: "Open Multivariate Bubble Plot settings",
                     selected: false,
                     enabled: ctx_in.enabled,
@@ -538,7 +542,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "Apply Style From…",
+                    label: "Apply Style From",
                     tooltip: "Clone graph styling from another sheet",
                     selected: false,
                     enabled: ctx_in.enabled,
@@ -668,7 +672,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "More… Format Axes",
+                    label: "Format Axes",
                     tooltip: "Open Format Axes dialog",
                     selected: false,
                     enabled: ctx_in.enabled,
@@ -761,7 +765,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "More… Pairwise & CLD",
+                    label: "Pairwise & CLD",
                     tooltip: "Open Pairwise Significance & CLD dialog",
                     selected: false,
                     enabled: ctx_in.enabled,
@@ -822,7 +826,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "+ Add Model Equation…",
+                    label: "+ Add Model Equation",
                     tooltip: "Insert live regression equation callout",
                     selected: false,
                     enabled: ctx_in.enabled && !doc.result_sheets.is_empty(),
@@ -935,7 +939,7 @@ pub(super) fn render_graph_inspector_studio(
                 tokens,
                 meta,
                 &StudioButtonSpec {
-                    label: "More… Export Figure",
+                    label: "Export Figure",
                     tooltip: "Open Figure Export dialog (PDF / SVG / PNG)",
                     selected: false,
                     enabled: ctx_in.enabled,

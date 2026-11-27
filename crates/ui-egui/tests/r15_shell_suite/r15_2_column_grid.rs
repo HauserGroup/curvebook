@@ -373,6 +373,9 @@ fn linked_data_region_border_readonly_guard_and_actions() -> TestRes {
     driver.run_settled();
     driver.click_widget_id("grid.link_badge.0")?;
     assert!(driver.state().grid.active_link_popover.is_some());
+    let goto_node = driver.frame_meta().find_by_widget_id("grid.link_popover.goto").ok_or("missing grid.link_popover.goto")?;
+    assert_eq!(goto_node.role, "link");
+    assert!(goto_node.unclipped_rect.height() >= 24.0);
     driver.click_widget_id("grid.link_popover.goto")?;
     assert_eq!(driver.state().app.document().active_sheet_id, Some(SheetId::from("raw-plate")));
     Ok(())

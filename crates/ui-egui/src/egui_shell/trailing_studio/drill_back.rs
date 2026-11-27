@@ -183,7 +183,7 @@ pub(super) fn render_data_point_drill_back_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Format Selected Point…",
+            label: "Format Selected Point",
             tooltip: "Customize individual point color, shape, and size",
             selected: false,
             enabled: format_enabled,

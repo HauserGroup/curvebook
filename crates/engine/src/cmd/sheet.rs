@@ -1893,7 +1893,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
         id: "sheet.createData",
         label: "New Data Table",
         menu_path: "Insert/New Data Table",
-        shortcut: "Cmd+T",
+        shortcut: "Cmd+Shift+T",
         summary: "Create a typed data table sheet and optional paired info/graph sheets.",
         beginner: "Creates one of the eight scientific table archetypes (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested).",
         effects: Effects::MUTATES_DOCUMENT,
@@ -1948,7 +1948,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "sheet.clonePipeline",
         label: "Clone Pipeline",
-        menu_path: "Change/Clone Pipeline...",
+        menu_path: "Change/Clone Pipeline",
         summary: "Clone a table structure and downstream analysis/graph/layout pipeline for a new experimental run.",
         beginner: "Creates a new table preserving X coordinates, analyses, graphs, and layouts while clearing Y replicates for new measurements.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -2003,7 +2003,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "sheet.extractResultTab",
         label: "Extract Result Tab to Data Table",
-        menu_path: "Insert/Extract Result Tab...",
+        menu_path: "Insert/Extract Result Tab",
         summary: "Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).",
         beginner: "Copies a computed result table tab into a new linked data table so you can analyze or graph it.",
         effects: Effects::MUTATES_DOCUMENT,

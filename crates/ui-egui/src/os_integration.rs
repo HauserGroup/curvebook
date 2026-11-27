@@ -486,16 +486,30 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     }
 }
 
+/// Canonical CurveBook GitHub issue template chooser URL opened by `app.feedback`.
+pub const GITHUB_FEEDBACK_URL: &str = "https://github.com/HauserGroup/curvebook/issues/new/choose";
+
+/// Validate that `url` matches [`GITHUB_FEEDBACK_URL`] exactly.
+///
+/// Rejects arbitrary origins, query strings, fragments, non-HTTPS schemes, whitespace,
+/// quotes, and control characters so URL openers can never act as generic launchers.
+///
+/// # Errors
+/// Returns a descriptive error string when `url` is not equal to [`GITHUB_FEEDBACK_URL`].
+pub fn validate_github_issue_url(url: &str) -> Result<(), String> {
+    if url == GITHUB_FEEDBACK_URL { Ok(()) } else { Err(format!("external URL must match `{GITHUB_FEEDBACK_URL}` exactly")) }
+}
+
 /// Injectable platform URL opener used by [`crate::UiApp`] for allowlisted GitHub issue links.
 ///
 /// Interactive desktop sessions install [`SystemPlatformUrlOpener::live`], interactive browser
 /// sessions install `WebPlatformUrlOpener`, and headless / test sessions keep the default
 /// [`SystemPlatformUrlOpener::guarded`] or install `StubPlatformUrlOpener`.
 pub trait PlatformUrlOpener: std::fmt::Debug + Send + Sync {
-    /// Open an allowlisted CurveBook GitHub new-issue URL in the user's browser.
+    /// Open an allowlisted CurveBook GitHub issue chooser URL in the user's browser.
     ///
     /// # Errors
-    /// Returns an error if `url` fails [`crate::feedback::validate_github_issue_url`] or if an
+    /// Returns an error if `url` fails [`validate_github_issue_url`] or if an
     /// active OS launcher fails.
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String>;
 }
@@ -596,7 +610,7 @@ impl StubPlatformUrlOpener {
 #[cfg(any(test, feature = "test-support"))]
 impl PlatformUrlOpener for StubPlatformUrlOpener {
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
-        crate::feedback::validate_github_issue_url(url)?;
+        validate_github_issue_url(url)?;
         let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
         guard.urls.push(url.to_owned());
         if guard.available {
@@ -747,18 +761,18 @@ fn build_windows_url_opener_candidate(stage_dir: &std::path::Path) -> Result<OsC
     })
 }
 
-/// Validate `url` against [`crate::feedback::validate_github_issue_url`] and open it in the
+/// Validate `url` against [`validate_github_issue_url`] and open it in the
 /// host OS browser when `allow_live_launch` is `true` or `CURVEBOOK_ALLOW_OS_GUI_DIALOG` is set.
 ///
 /// # Errors
 /// Returns an error if `url` fails allowlist validation or if spawning the host launcher fails.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
-    crate::feedback::validate_github_issue_url(url)?;
+    validate_github_issue_url(url)?;
     if !allow_live_launch && std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
         return Ok(OsAdapterStatus::unavailable(
             "os-browser",
-            "browser launch disabled in headless/test mode; copy Markdown or open the GitHub URL manually",
+            "browser launch disabled in headless/test mode; open the GitHub feedback URL manually",
         ));
     }
 
@@ -780,12 +794,12 @@ pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAda
             available: true,
             availability: OsAdapterAvailability::Submitted,
             backend: candidate.program,
-            detail: String::from("opened GitHub issue form in default browser"),
+            detail: String::from("opened GitHub issue chooser in default browser"),
             text: Some(url.to_owned()),
             job_id: None,
         }),
         CandidateOutcome::NotFound => {
-            Ok(OsAdapterStatus::unavailable(candidate.program, "OS browser launcher not found; copy Markdown or open the GitHub URL manually"))
+            Ok(OsAdapterStatus::unavailable(candidate.program, "OS browser launcher not found; open the GitHub feedback URL manually"))
         }
     }
 }
@@ -797,8 +811,8 @@ pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAda
 /// Returns an error if `url` fails allowlist validation.
 #[cfg(target_arch = "wasm32")]
 pub fn open_github_issue_url(url: &str, _allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
-    crate::feedback::validate_github_issue_url(url)?;
-    Ok(OsAdapterStatus::unavailable("wasm-browser", "no browser window opener installed; copy Markdown or open the GitHub URL manually"))
+    validate_github_issue_url(url)?;
+    Ok(OsAdapterStatus::unavailable("wasm-browser", "no browser window opener installed; open the GitHub feedback URL manually"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2427,25 +2441,47 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
     }
 
     #[test]
-    fn url_opener_enforces_github_allowlist_and_guards_headless_launch() -> Result<(), String> {
-        use super::{OsAdapterAvailability, PlatformUrlOpener, StubPlatformUrlOpener, SystemPlatformUrlOpener};
+    fn validate_github_issue_url_accepts_only_exact_feedback_chooser_url() {
+        assert!(super::validate_github_issue_url(super::GITHUB_FEEDBACK_URL).is_ok());
+        for bad in [
+            "",
+            "http://github.com/HauserGroup/curvebook/issues/new/choose",
+            "https://github.com/HauserGroup/curvebook/issues/new",
+            "https://github.com/HauserGroup/curvebook/issues/new?template=bug_report.yml",
+            "https://github.com/HauserGroup/curvebook/issues/new/choose?template=bug_report.yml",
+            "https://github.com/HauserGroup/curvebook/issues/new/choose/",
+            "https://github.com/HauserGroup/curvebook/issues/new/choose#frag",
+            "https://github.com/HauserGroup/curvebook/issues/new/choose.evil.example/",
+            "https://github.com/other/repo/issues/new/choose",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+        ] {
+            assert!(super::validate_github_issue_url(bad).is_err(), "expected `{bad}` to be rejected");
+        }
+    }
 
-        let valid = "https://github.com/HauserGroup/curvebook/issues/new?template=bug_report.yml&title=Test";
+    #[test]
+    fn url_opener_enforces_github_allowlist_and_guards_headless_launch() -> Result<(), String> {
+        use super::{GITHUB_FEEDBACK_URL, OsAdapterAvailability, PlatformUrlOpener, StubPlatformUrlOpener, SystemPlatformUrlOpener};
+
         let stub = StubPlatformUrlOpener::new();
         assert!(stub.open_external_url("https://example.com/evil").is_err());
+        assert!(stub.open_external_url("https://github.com/HauserGroup/curvebook/issues/new?template=bug_report.yml&title=Test").is_err());
+        assert!(stub.open_external_url("https://github.com/HauserGroup/curvebook/issues/new/choose?template=bug_report.yml").is_err());
         assert!(stub.captured_urls().is_empty());
 
-        let status = stub.open_external_url(valid)?;
+        let status = stub.open_external_url(GITHUB_FEEDBACK_URL)?;
         assert!(status.available);
         assert_eq!(status.availability, OsAdapterAvailability::Submitted);
-        assert_eq!(stub.last_url().as_deref(), Some(valid));
+        assert_eq!(stub.last_url().as_deref(), Some(GITHUB_FEEDBACK_URL));
 
         let guarded = SystemPlatformUrlOpener::guarded();
         assert!(guarded.open_external_url("javascript:alert(1)").is_err());
         if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
-            let guarded_status = guarded.open_external_url(valid)?;
+            let guarded_status = guarded.open_external_url(GITHUB_FEEDBACK_URL)?;
             assert!(!guarded_status.available);
             assert_eq!(guarded_status.availability, OsAdapterAvailability::Unavailable);
+            assert!(!guarded_status.detail.contains("Markdown"));
         }
 
         #[cfg(not(target_arch = "wasm32"))]

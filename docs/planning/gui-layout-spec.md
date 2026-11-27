@@ -30,36 +30,37 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 
 ```text
 +-----------------------------------------------------------------------------------------------------------------+
-| [Home] [File Edit View Insert Data Analyze Graph Help]                     [Project] [Find...] [Cmd+K] [Split]  |  32 pt  Tier 1: Application Bar
+| [File Edit View Insert Data Analyze Graph Help] (in-window only; macOS uses native NSMenu)    Project Title •   |  28 pt* (0 pt on macOS)
 +-----------------------------------------------------------------------------------------------------------------+
-| [+ Sheet v] [Undo Redo] | [Primary CTA: Analyze... / Graph Type...]  Ghost Quick Tools                    [...] |  36 pt* Tier 2: Action Strip (no sheet tabs)
+| [Logo] | [+ Sheet v] [Undo Redo] | [Primary CTA: Analyze / Graph Type]  Ghost Quick Tools  [⋯] [Search] [Split] |  38 pt  Unified Toolbar
 +-----------------------+-----------------------------------------------+-----------------------------------------+
 | Project Navigator [<<]| [Dose-Response v]      | [4PL Curve Fit v] [x]| Graph Inspector · 4PL Fit     [Pin][>>] |  32 pt* Shared Panel Header Baseline
 |-----------------------+------------------------+----------------------+-----------------------------------------+
-| [Search...] [All v]   |   #  | X     | Y1 | Y2 |                      | Data  Axes  Legend  Annotations  Canvas |
+| [Search]    [All v]   |   #  | X     | Y1 | Y2 |                      | Data  Axes  Legend  Annotations  Canvas |
 | > Data Tables         |   1  | 0.01  |98.4|97.1|   Live Graph Sheet   | ────                                    |
 |   Dose-Response       |   2  | 0.10  |97.9|98.1|  (Fit Zoom Active)   |  [x] Data points                        |
-|   + New Data Table... |   3  | 1.00  |74.5|71.0|                      |  [x] Fitted curve overlay               |
+|   + New Data Table    |   3  | 1.00  |74.5|71.0|                      |  [x] Fitted curve overlay               |
 | > Info                |                        |  Draggable 40/60     |                                         |
 | > Results             |   Unified Virtualized  |  Split (1 pt divider,|  Series: (●) Compound 7                 |
 | > Graphs              |       DataGrid         |  8 pt hit slop)      |  Shape:  [ ○ | □ | △ | ◇ ]              |
 | > Layouts             |  (Contiguous Hairlines)|                      |                                         |
 |-----------------------|                        |                      |                                         |
-| Family (Lineage)      |   + [Floating Notes]   | + [Bottom Banner]    |  [Format Graph...]                      |
-|   Dose-Response       |                        |                      |  [Apply Style From...]                  |
+| Family (Lineage)      |   + [Floating Notes]   | + [Bottom Banner]    |  [Format Graph]                         |
+|   Dose-Response       |                        |                      |  [Apply Style From]                     |
 |     4PL Curve Fit     |                        |                      |                                         |
 +-----------------------+------------------------+----------------------+-----------------------------------------+
 | [< >] [Gallery] [Sheet v*] [Link OK] | Quick-Stats / Canvas Size               | [CVD] [- Fit v +]              |  26 pt  Tier 3: Status Footer
 +-----------------------------------------------------------------------------------------------------------------+
    232 pt* (192-380 pt)              Protected Flexible Center Stage                  276 pt* (240-420 pt)
-   * [Target] provisional R20.2-R20.4 metrics (Sheet v shown in Footer only when Navigator is collapsed)
+   * 38 pt total top chrome when host_draws_menu_bar == true (macOS); 28 + 38 = 66 pt with in-window menu bar.
+     (Sheet v shown in Footer only when Navigator is collapsed)
 ```
 
 ```mermaid
 flowchart TB
-    subgraph TopChrome["Top Window Chrome (68 pt target / 70 pt baseline)"]
-        AppBar["Tier 1: Application Bar (32 pt) — Home, Menus, Project Title, Find, Cmd/Ctrl+K, Split"]
-        ActionStrip["Tier 2: Contextual Action Strip (36 pt target / 38 pt baseline) — Fixed Anchors, Single Primary CTA, Ghost Tools, Overflow"]
+    subgraph TopChrome["Top Window Chrome (38 pt macOS / 66 pt Windows & Linux)"]
+        AppBar["Menu Strip (28 pt when host_draws_menu_bar == false; 0 pt macOS native NSMenu) — Menus & Project Title"]
+        ActionStrip["Unified Toolbar (38 pt) — Logo/Home, Fixed Anchors, Single Primary CTA, Ghost Tools, Overflow, Search, Split"]
     end
 
     subgraph Body["Three-Column Workspace Body (Shared 32 pt provisional panel header baseline; RTL at 1.0)"]
@@ -137,7 +138,7 @@ To prevent split-pane focus, Navigator selection, and Inspector controls from fi
    - The contextual command target **is** `ProjectDocument::active_sheet_id` (`crates/doc/src/project.rs`), persisted in `.curvebook` / `.prism` archives and updated solely through `curvebook-engine` (`sheet.select`).
    - **Preserved `sheet.select` semantics:** `sheet.select` is registered with `Effects::CHANGES_UI_STATE | Effects::IDEMPOTENT` (not `MUTATES_DOCUMENT`) and returns `CommandOutcome::read_only(...)`, so changing the active command target **never creates an undo step, never marks the session dirty, and never appends to `ops.journal`**.
    - **Family-anchor preservation:** Selecting a sheet in `Project Navigator` calls `sheet.select` with default `mode: "navigator"` (updating both `active_sheet_id` and `family_anchor_sheet_id`). **Activating a split pane or switching panes in compact fallback calls `sheet.select` with `mode: "family"`**, updating `doc.active_sheet_id` while **preserving `family_anchor_sheet_id`** so editing cells in a split table does not re-anchor or churn the Family lineage tree.
-   - Drives Tier 2 contextual actions (`Analyze…`, `Graph Type…`, `Export…`) and Navigator/Family active-row selection.
+   - Drives Tier 2 contextual actions (`Analyze`, `Graph Type`, `Export`) and Navigator/Family active-row selection.
 2. **Pane Display Assignment (`primary_sheet_id`, `secondary_sheet_id` — Ephemeral UI View State):**
    - Materialized as concrete `SheetId`s inside `SplitWorkspaceState` the instant Split Comparison opens; never left `None` to drift with `doc.active_sheet_id` (falling back only if an assigned sheet is deleted) and never persisted to `ProjectDocument` or `ops.journal`.
    - Both panes instantiate full native renderers parameterized by explicit `sheet_id`—including the unified virtualized `DataGrid` with independent per-pane scroll and cell-selection state—**retiring `render_split_non_column_preview` and `render_split_column_sheet_preview`**.
@@ -170,35 +171,30 @@ To prevent split-pane focus, Navigator selection, and Inspector controls from fi
 
 ---
 
-## 3. Top Chrome: Application Bar & Contextual Action Strip
+## 3. Top Chrome: Menu Strip & Unified Toolbar
 
-### 3.1 Tier 1 — Application & Document Bar (`32 pt`)
+### 3.1 Menu Placement & Height (`0 pt` macOS Native / `28 pt` In-Window)
 
-- **Leading Cluster:**
-  - Platform window caption clearance on macOS transparent titlebars (with double-click-to-zoom drag area on empty bar space).
-  - **Home / Launcher Button** (`20 × 20 pt`, hit box `28 × 28 pt`): Toggles the Project Launcher / Template Hub without closing the current project.
-  - **Menu Bar:** Routed to the native macOS menu bar via macOS-only `muda` (`cfg(target_os = "macos")`, `default-features = false`) while keeping the in-`egui` `MenuBar` active on Windows/Linux/FreeBSD, under `--in-window-menus`, and across `EguiHumanPathDriver`/`egui_kittest` runs with an automated `command_id`/enablement parity test:
-    `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Help`.
-- **Middle Cluster — Active Project Header / Optional Multi-Project Tabs:**
-  - In **Beta**, renders the active project header and unsaved dirty-state indicator (`•`) for `apps/curvebook`'s single-session window; multi-project in-window document tabs (`.curvebook` tab strip, `+` new project, OS window drag-out, and `Window › Consolidate / Tile`) are deferred post-1.0.
-- **Trailing Cluster (Right-to-Left Fit Solver):**
-  - **`[Implemented]` Inline Find Capsule (`Cmd/Ctrl+F`) & Command Palette (`Cmd/Ctrl+K`):** Displays an inline search/find capsule when room permits (`>= 180 pt`), degrading cleanly to icon buttons in narrow windows; disabled while a modal dialog owns focus.
-  - **Split-Workspace Quick Toggle (`Cmd/Ctrl+\`):** One-click toggle and preset menu (`Off`, `Data + Graph`, `Swap Panes`, and orientation options). **`[Target]`** Active split state renders via a subtle recessed pill or active icon tint—never appending `•` (reserved exclusively for unsaved dirty state).
-  - **`[Implemented]` Workspace Presets under `View`:** Workspace layout presets (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`) live in the `View` menu rather than competing for horizontal space in Tier 1.
+- **OS-Native vs. In-Window Menu Bar (`R20.9`):** Routed to the native macOS menu bar via macOS-only `muda` (`cfg(target_os = "macos")`, `default-features = false`) when `host_draws_menu_bar == true` (`tier1_app_bar_h_pt = 0 pt`, giving a **single `38 pt` unified toolbar**); when `host_draws_menu_bar == false` (Windows, Linux, FreeBSD, `--in-window-menus`, and headless/test in-window mode), a **`28 pt`** in-window menu bar sits above the **`38 pt`** unified toolbar (**`66 pt`** combined top chrome) with an automated `command_id`/enablement parity test:
+  `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Help`.
+- **Middle / Trailing Menu-Row Project Title (In-Window Only):** In **Beta**, renders the active project header and unsaved dirty-state indicator (`•`) on the in-window menu bar (`apps/curvebook/src/gui_window.rs::sync_window_title` owns the native OS window titlebar on macOS).
+- **Workspace Presets under `View`:** Workspace layout presets (`Default`, `Data Prep`, `Modeling`, `Publication`, `Compact`) live in the `View` menu rather than competing for horizontal space in the toolbar.
 
-### 3.2 Tier 2 — Sheet-Adaptive Contextual Action Strip (`38 pt`)
+### 3.2 Unified Toolbar (`38 pt`)
 
-A single uncluttered horizontal strip (`38 pt` `[Implemented]`; **`36 pt` `[Target]` provisional height**) divided by subtle `1 pt` `divider` rules into semantic groups. **`[Target]` Single-owner navigation:** Tier 2 never renders duplicate open-sheet tabs (`sheet.tab.*` retired in `R20.3`; `Project Navigator` is the sole primary sheet browser). Secondary actions render as borderless **Ghost Actions** at rest on `surface_chrome` (highlighting with `hover_bg` on hover), keeping at most one accent **Primary** CTA per context and spilling lower-priority controls into `⋯` via `fit_ranked_toolbar`. Universal left-hand anchors stay in fixed positions across sheet switches so muscle memory never breaks; right-hand groups adapt to `doc.active_sheet_id`'s sheet kind and table archetype:
+A single uncluttered horizontal bar (`38 pt` across all platforms) divided by subtle `1 pt` `divider` rules into semantic groups (`Logo/Home` leading button, fixed anchors `+ New Sheet`, icon-only `Undo`/`Redo`, contextual actions, trailing `Search` capsule + `Split` toggle):
+- **Single-Owner Navigation:** The toolbar never renders duplicate open-sheet tabs (`Project Navigator` is the sole primary sheet browser). Secondary actions render as borderless **Ghost Actions** at rest on `surface_chrome` (highlighting with `hover_bg` on hover), keeping at most one accent **Primary** CTA per context and spilling lower-priority controls into `⋯` via `fit_ranked_toolbar` before collapsing the `Search` capsule to an icon button.
+- **Preserved Leading & Trailing Anchors:** `[Logo/Home]`, `+ New Sheet`, `Undo`, `Redo` stay in fixed leading positions and `Search` (`Cmd/Ctrl+K`) + `Split` (`Cmd/Ctrl+\`, highlighted via subtle recessed pill or active tint—never `•`) stay anchored trailing across sheet switches:
 
 | Active Context | Fixed Leading Anchors | Primary Contextual CTA Group | Secondary Contextual Tools | Trailing Output & View Group |
 |---|---|---|---|---|
-| **`EmptyWorkspace` / Launcher** | `New Project`, `Open…` | `New Data Table…`, `Browse Samples`, `Clone Pipeline…` | `Import CSV / TSV…`, `Power & Sample Size…` | `Theme`, `Language` |
-| **`DataSheet` (Structured)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **Archetype Quick-Run Actions** (e.g., `t-Test` / `ANOVA` on Column; `Fit Curve` / `Linear Reg.` on XY; `2-Way ANOVA` on Grouped; `Contingency` on Contingency; `Kaplan-Meier` on Survival) | `Import / Reshape…`, `Transform…`, `Exclude (Cmd+E)`, `Freeze Table`, `Prune` / `Sort` `[Target]`, `Decimals (.00)` `[Target]` | `New Graph`, `Inspector`, `⋯` |
-| **`DataSheet` (`MultipleVariables`)** | `+ New Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze…`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Actions** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables…`, `Filter & Transform…`, `Extract & Rearrange…`, `Exclude (Cmd+E)`, `Freeze Table` | `New MV Graph`, `Formula Studio`, `⋯` |
-| **`InfoSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy/Paste` | **`+ Add Constant`** | `Add Date/ID Preset`, `Link Constant…`, `Format Notes` (`Bold`, `Italic`, `List`) | `Inspector`, `⋯` |
-| **`ResultSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy`, `Copy Methods` | **`Edit Parameters… (Cmd+T)`** (accent button) + **`Interpret & Checklist`** (badge shows warning count) | `Change Data Analyzed…`, `Chain Analysis…`, `New Graph from Tab…` | `Export Table…`, `Inspector`, `⋯` |
-| **`GraphSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`Graph Type…`** + **`Analyze / Fit…`** | `Format Graph…`, `Format Axes…`, `Pairwise / CLD v`, `Insert Text / TeX / Bracket v`, `Palette` | **`Export Figure…`**, `Print…`, `Inspector`, `⋯` |
-| **`LayoutSheet`** | `+ New Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`+ Place Graph`** + **`Arrange Grid…`** | `Align / Distribute v`, `Sync Panel Scales`, `Panel Badges (A, B, C)`, `Add Text / TeX` / `Scale Bar` `[Target]` | **`Export Layout…`**, `Print…`, `Inspector`, `⋯` |
+| **`EmptyWorkspace` / Launcher** | `New Project`, `Open` | `New Data Table`, `Browse Samples`, `Clone Pipeline` | `Import CSV / TSV`, `Power & Sample Size` | `Theme`, `Language` |
+| **`DataSheet` (Structured)** | `+ Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze`** (accent button) + **Archetype Quick-Run Actions** (e.g., `t-Test` / `ANOVA` on Column; `Fit Curve` / `Linear Reg.` on XY; `2-Way ANOVA` on Grouped; `Contingency` on Contingency; `Kaplan-Meier` on Survival) | `Import / Reshape`, `Transform`, `Exclude (Cmd+E)`, `Freeze Table`, `Prune` / `Sort`, `Decimals (.00)` | `New Graph`, `Inspector`, `⋯` |
+| **`DataSheet` (`MultipleVariables`)** | `+ Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Actions** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables`, `Filter & Transform`, `Extract & Rearrange`, `Exclude (Cmd+E)`, `Freeze Table` | `New MV Graph`, `Formula Studio`, `⋯` |
+| **`InfoSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy/Paste` | **`+ Add Constant`** | `Add Date/ID Preset`, `Link Constant`, `Format Notes` (`Bold`, `Italic`, `List`) | `Inspector`, `⋯` |
+| **`ResultSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy`, `Copy Methods` | **`Edit Parameters (Cmd+Shift+P)`** (accent button) + **`Interpret & Checklist`** (badge shows warning count) | `Change Data Analyzed`, `Chain Analysis`, `New Graph from Tab` | `Export Table`, `Inspector`, `⋯` |
+| **`GraphSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`Graph Type`** + **`Analyze / Fit`** | `Format Graph`, `Format Axes`, `Pairwise / CLD v`, `Insert Text / TeX / Bracket v`, `Palette` | **`Export Figure`**, `Print`, `Inspector`, `⋯` |
+| **`LayoutSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`+ Place Graph`** + **`Arrange Grid`** | `Align / Distribute v`, `Sync Panel Scales`, `Panel Badges (A, B, C)`, `Add Text / TeX` / `Scale Bar` | **`Export Layout`**, `Print`, `Inspector`, `⋯` |
 
 ---
 
@@ -222,7 +218,7 @@ A single uncluttered horizontal strip (`38 pt` `[Implemented]`; **`36 pt` `[Targ
    - **`[Target]` Vector disclosure triangles & frameless sheet icons:** Crisp `1.5 pt`-stroke disclosure triangles (pointing inward collapsed, downward expanded—never dot-like Unicode bullets) + frameless semantic sheet-kind icons (never checkbox-like checkmark-in-box or slash-in-box frames) + editable sheet title + trailing status badges (`Frozen` lock badge, `Color Tag` dot, `Warning/Unconverged` indicator).
    - Active selection uses `active_bg` when Navigator holds focus and neutral `selection_unemphasized_bg` when focus lives in another pane (`[Target]`).
    - Clicking a section header's **`Folder Gallery`** icon switches the Center Stage into the Multi-Sheet Thumbnail Gallery filtered to that section.
-   - Each section ends with a **neutral muted** inline **`+ New <Kind>…`** row (`text_muted` at rest, `text_strong` on hover—never accent blue) for zero-menu sheet creation.
+   - Each section ends with a **neutral muted** inline **`+ New <Kind>`** row (`text_muted` at rest, `text_strong` on hover—never accent blue) for zero-menu sheet creation.
 5. **Direct Manipulation & Cascading Integrity:**
    - **Double-click title (`F2`):** Inline rename (`sheet.rename`), automatically cascading updated titles to dependent default analysis headers, graph titles, and legend labels.
    - **Drag-reorder within section:** Reorders sheets deterministically without mutating stable `SheetId`s.
@@ -254,8 +250,8 @@ The Center Stage is a protected dock target (cannot be closed or floated away) t
    - **Live Two-Way Point Brushing:** Selecting or hovering rows in a Data/Residual Grid highlights the corresponding plotted marks/bars on an adjacent `GraphSheet`, and box-selecting or clicking plotted marks on a `GraphSheet` scrolls to and highlights the originating cells in the adjacent `DataSheet`.
 3. **Multi-Sheet Portfolio Gallery Mode:**
    - Activated by clicking a Navigator folder gallery icon, the `Gallery` footer button (`ui.gallery.toggle`), or `View › Sheet Gallery`.
-   - Renders a responsive grid of live-rendered sheet preview cards with folder filter chips (`All`, `Graphs`, `Layouts`, `Data`, `Results`), thumbnail zoom slider, `F6` pane cycling, click-to-open, multi-card selection (`Shift+Click` range, `Cmd/Ctrl+Click` multi-select), and batch `Apply Style From…` (`R13.3`/`R13.8`). Additional batch gallery actions (`Export Selected…`, `Place Selected onto New Layout`) are `[Target]` (`R10.31`).
-4. **Project Launcher Mode:** Shown automatically when `total_sheet_count() == 0` or when `Home` / `File › New Data Table…` is invoked in full-stage mode (see §8.1).
+   - Renders a responsive grid of live-rendered sheet preview cards with folder filter chips (`All`, `Graphs`, `Layouts`, `Data`, `Results`), thumbnail zoom slider, `F6` pane cycling, click-to-open, multi-card selection (`Shift+Click` range, `Cmd/Ctrl+Click` multi-select), and batch `Apply Style From` (`R13.3`/`R13.8`). Additional batch gallery actions (`Export Selected`, `Place Selected onto New Layout`) are `[Target]` (`R10.31`).
+4. **Project Launcher Mode:** Shown automatically when `total_sheet_count() == 0` or when `Home` / `File › New Data Table` is invoked in full-stage mode (see §8.1).
 5. **Prospective Power & Sample Size Studio Mode:** Full-stage or large-modal interactive study-planning workflow (see §8.13).
 
 ### 5.1 Stage-Level Non-Modal Overlays (`ZLayer::FloatingOverlay`)
@@ -279,19 +275,19 @@ Instead of forcing users into modal dialogs for routine edits—or hiding multiv
   - **Borderless Underline Tabs:** Full, non-abbreviated tab labels (`Data` · `Axes` · `Legend` · `Annotations` · `Canvas`, preserving `Annotations` semantics and stable `inspector.graph.tab.*` IDs; never clipped to `"Leg"`, `"Annot"`, or `"Can…"`) with a `2 pt` bottom accent indicator on the active tab.
   - **Affirmative Checkboxes:** Boolean visibility options render as leading-aligned checkboxes with affirmative sentence-case noun phrases (`Data points`, `Fitted curve overlay`), replacing mixed `"Show Data Points: On"` / `"Hide Fitted Curve Overlay"` buttons.
   - **Segmented Tracks & Series Pickers:** Mutually exclusive options (`Symbol Shape`, axis scale) use equal-width segmented controls on `surface_recessed` with an unmistakable elevated active segment; series dropdowns include a leading series colour dot.
-  - **Trailing-Ellipsis Escalation Links:** Footer actions that open modal dialogs place `…` only at the trailing end (`Format Graph…`, `Apply Style From…`, never `"More… Format Graph"`).
+  - **Dot-Free Escalation Links (`R20.15`):** Never put `…` or `...` on buttons, menus, or text-input placeholders (`Format Graph`, `Apply Style From`, `Format Axes`, never `"More… Format Axes"` or `"Format Graph…"`). Reserve `…` strictly for truncated text and active progress copy (`Listening…`, `Solving…`), and `⋯` for overflow triggers.
 
 | Targeted Surface (`inspector_target_sheet_id`) | Studio Title & Mode | Sub-Tabs / Accordion Sections | Escalation Footer Button |
 |---|---|---|---|
-| **`DataSheet` (`MultipleVariables`)** | **Variable & Formula Studio** | 1. **`Formula (fx)`**: Variable Name, live `f(x) =` expression box with inline syntax/cycle status, searchable `Variables` list, searchable `Functions` catalog (`Recent` + categorized `Math`, `Stats/Column`, `Logic`, `Text`) with signature doc card.<br/>2. **`Role & Levels`**: Type selector (`Auto`, `Continuous`, `Categorical`, `Label`), missing-value summary, inline categorical level recoding & explicit level ordering (`Up`/`Down`, reference level). | `Manage All Variables…` |
-| **`DataSheet` (Structured)** | **Table & Selection Studio** | 1. **`Structure`**: Table archetype summary, X/subcolumn configuration, `Convert Archetype…` trigger.<br/>2. **`Selection & Provenance`**: Linked-region source inspector (`Go to Source`, `Edit Link`, `Unlink`), excluded-cell reason audit list, and **Selected-Row Graph Override** (`Marker Color`, `Shape`, `Size`, `Show Row Title on Graph`, `Reset to Series`). | `Format Data Table…` |
-| **`InfoSheet`** | **Metadata & Hooks Studio** | **Referenced By** list showing every analysis constraint, transform `K` parameter, and graph/layout text box currently hot-linked to the selected `Info` constant, plus typed format controls (`ISO Date`, `Number`, `Text`, `ORCID/DOI`). | `Open Hook Browser…` |
-| **`ResultSheet`** | **Interpret & Diagnostics** | 1. **`Assumptions`**: Interactive methodological checklist (`Pass`, `Review`, `Violated` badges + severity filter).<br/>2. **`Guidance`**: Diagnostics-only plain-language explanation of test structure and effect sizes (strictly non-prescriptive).<br/>3. **`Methods`**: Copyable publication methods paragraph interpolating exact model settings, sample sizes, and software version. | `Edit Parameters… (Cmd+T)` |
-| **`GraphSheet` (No single point selected)** | **Graph Inspector** | Five underline tabs (full labels, `[Target]`):<br/>1. **`Data`** (color-dot Series/Channel selector, `Symbols` segmented controls, `Bars/Boxes`, `Error Bars`, `Lines/Curves`, affirmative visibility checkboxes, `Ellipses/Hulls`, `Heatmap/Dendrogram`)<br/>2. **`Axes`** (`X` / `Left Y` / `Right Y`: auto/manual range, interval, scale, breaks, titles, label angle)<br/>3. **`Legend`** (visibility, placement, discrete vs 3-point continuous bubble/colorbar legends)<br/>4. **`Annotations`** (`Pairwise Brackets` vs `Compact Letter Display`, equations, threshold lines)<br/>5. **`Canvas`** (palette cards, background fill & alpha, plot-area fill `[Target]`, aspect ratio, display checkboxes) | `Format Graph…` / `Apply Style From…` |
-| **`GraphSheet` (Single plotted point clicked)** | **Data Point Drill-Back** | Source `DataSheet` link, `Row #` & Row Title, series/variable coordinates (`X`, `Y`, `Color`, `Size`), individual point style override controls, `Exclude Point…`, and primary **`Jump to Row in Data Table`** button (`← Back to Graph Inspector` in header). | `Format Selected Points…` |
-| **`LayoutSheet`** | **Page Layout Composer** | 1. **`Page`** (Journal width presets: `85 mm` 1-col, `114 mm` 1.5-col, `174 mm` 2-col, `A4`/`Letter`; orientation; margins; DPI preflight).<br/>2. **`Grid & Align`** (rows×cols template, snap guides, align plot frames vs outer bounds, lock shared scale).<br/>3. **`Annotations`** (auto `A, B, C` panel badges, scale bar generator `[Target]`, hooked constants). | `Export Layout…` |
+| **`DataSheet` (`MultipleVariables`)** | **Variable & Formula Studio** | 1. **`Formula (fx)`**: Variable Name, live `f(x) =` expression box with inline syntax/cycle status, searchable `Variables` list, searchable `Functions` catalog (`Recent` + categorized `Math`, `Stats/Column`, `Logic`, `Text`) with signature doc card.<br/>2. **`Role & Levels`**: Type selector (`Auto`, `Continuous`, `Categorical`, `Label`), missing-value summary, inline categorical level recoding & explicit level ordering (`Up`/`Down`, reference level). | `Manage All Variables` |
+| **`DataSheet` (Structured)** | **Table & Selection Studio** | 1. **`Structure`**: Table archetype summary, X/subcolumn configuration, `Convert Archetype` trigger.<br/>2. **`Selection & Provenance`**: Linked-region source inspector (`Go to Source`, `Edit Link`, `Unlink`), excluded-cell reason audit list, and **Selected-Row Graph Override** (`Marker Color`, `Shape`, `Size`, `Show Row Title on Graph`, `Reset to Series`). | `Format Data Table` |
+| **`InfoSheet`** | **Metadata & Hooks Studio** | **Referenced By** list showing every analysis constraint, transform `K` parameter, and graph/layout text box currently hot-linked to the selected `Info` constant, plus typed format controls (`ISO Date`, `Number`, `Text`, `ORCID/DOI`). | `Open Hook Browser` |
+| **`ResultSheet`** | **Interpret & Diagnostics** | 1. **`Assumptions`**: Interactive methodological checklist (`Pass`, `Review`, `Violated` badges + severity filter).<br/>2. **`Guidance`**: Diagnostics-only plain-language explanation of test structure and effect sizes (strictly non-prescriptive).<br/>3. **`Methods`**: Copyable publication methods paragraph interpolating exact model settings, sample sizes, and software version. | `Edit Parameters (Cmd+Shift+P)` |
+| **`GraphSheet` (No single point selected)** | **Graph Inspector** | Five underline tabs (full labels, `[Target]`):<br/>1. **`Data`** (color-dot Series/Channel selector, `Symbols` segmented controls, `Bars/Boxes`, `Error Bars`, `Lines/Curves`, affirmative visibility checkboxes, `Ellipses/Hulls`, `Heatmap/Dendrogram`)<br/>2. **`Axes`** (`X` / `Left Y` / `Right Y`: auto/manual range, interval, scale, breaks, titles, label angle)<br/>3. **`Legend`** (visibility, placement, discrete vs 3-point continuous bubble/colorbar legends)<br/>4. **`Annotations`** (`Pairwise Brackets` vs `Compact Letter Display`, equations, threshold lines)<br/>5. **`Canvas`** (palette cards, background fill & alpha, plot-area fill `[Target]`, aspect ratio, display checkboxes) | `Format Graph` / `Apply Style From` |
+| **`GraphSheet` (Single plotted point clicked)** | **Data Point Drill-Back** | Source `DataSheet` link, `Row #` & Row Title, series/variable coordinates (`X`, `Y`, `Color`, `Size`), individual point style override controls, `Exclude Point`, and primary **`Jump to Row in Data Table`** button (`← Back to Graph Inspector` in header). | `Format Selected Point` |
+| **`LayoutSheet`** | **Page Layout Composer** | 1. **`Page`** (Journal width presets: `85 mm` 1-col, `114 mm` 1.5-col, `174 mm` 2-col, `A4`/`Letter`; orientation; margins; DPI preflight).<br/>2. **`Grid & Align`** (rows×cols template, snap guides, align plot frames vs outer bounds, lock shared scale).<br/>3. **`Annotations`** (auto `A, B, C` panel badges, scale bar generator `[Target]`, hooked constants). | `Export Layout` |
 
-Every section header inside the `Graph Inspector` includes a compact **`Format…`** or **`Details…`** link (trailing ellipsis) that opens the corresponding tab of `Format Graph` or `Format Axes` when advanced multi-series or sub-tick editing is needed.
+Every section header inside the `Graph Inspector` includes a compact **`Format`** or **`Details`** link (dot-free) that opens the corresponding tab of `Format Graph` or `Format Axes` when advanced multi-series or sub-tick editing is needed.
 
 ---
 
@@ -338,7 +334,7 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
 |   Starter Templates|  ( ) Single Y value              |  [x] Auto-create Graph     |
 |   Clone Pipeline   |  (o) Replicates: [- 3 +]         |  [x] Attach Info Sheet     |
 |   Sample Gallery   |  ( ) Pre-computed: [Mean,SD,N v] |                            |
-|   Open File...     |                                  |         [Cancel]  [Create] |
+|   Open File        |                                  |         [Cancel]  [Create] |
 +--------------------+----------------------------------+----------------------------+
 ```
 
@@ -357,7 +353,7 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
   - **`Nested`:** Hierarchical `GroupColumns × ReplicateSubcolumns` representing sub-replicates nested within biological units (e.g., technical replicates per animal/well).
 - **Clone Pipeline Mode (`Clone a Graph / Pipeline`):**
   - Tabs across `Open Projects`, `Recent Files`, and `Saved .cbtemplate Pipelines` with a thumbnail zoom slider.
-  - Clicking `Clone…` opens the **Clone Options Sub-Modal** with checkboxes to selectively `Clear raw data values`, `Keep column titles`, `Keep row titles`, and `Rename cloned family prefix`, instantiating the full linked Data -> Transform -> Analysis -> Graph chain ready for new assay measurements.
+  - Clicking `Clone` opens the **Clone Options Sub-Modal** with checkboxes to selectively `Clear raw data values`, `Keep column titles`, `Keep row titles`, and `Rename cloned family prefix`, instantiating the full linked Data -> Transform -> Analysis -> Graph chain ready for new assay measurements.
 
 ---
 
@@ -380,7 +376,7 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
   - Only visible `(row, flat_subcol)` cells are formatted and emitted into the UI tree (`<= 16.67 ms` 60-fps budget verified at `1,000 × 1,000 = 1,000,000` cells); inline `TextEdit` changes buffer locally and commit once via `Session::execute` on `Enter`, `Tab`, or focus loss using the pane's explicit `sheet_id` to preserve exact undo and `ops.journal` parity.
   - **`[Target]` Unified Single & Split Renderer:** Both single-sheet and split-comparison panes render this identical virtualized contiguous spreadsheet parameterized by explicit `sheet_id` with independent per-pane scroll and selection state—retiring button-based split preview fallbacks (`render_split_non_column_preview`, `render_split_column_sheet_preview`).
   - Two-axis independent scrollbars (`ScrollAxes::Both`, overflow-only muted bars); frozen top 3-tier header band and frozen leading `#` (`48 px`) + collapsible/resizable `Row Titles` (`112 px` default, `34 px` collapsed) columns.
-- **Top-Left Corner Schema Button:** Displays the current archetype in uppercase (`XY`, `COL`, `GRP`, `MV`, …; `[Target]`, never mixed-case `"Xy"`) and opens `Format Data Table` / `Convert Table Archetype…` (with live mapping preview and lossy-conversion warning).
+- **Top-Left Corner Schema Button:** Displays the current archetype in uppercase (`XY`, `COL`, `GRP`, `MV`, …; `[Target]`, never mixed-case `"Xy"`) and opens `Format Data Table` / `Convert Table Archetype` (with live mapping preview and lossy-conversion warning).
 - **Multivariable Tier-3 Type & Role Header Strip:**
   - When `TableArchetype::MultipleVariables` is active, Tier 3 renders per-column interactive **Role Chips**:
     - `Auto` (infers `Continuous` when numeric, automatically switching to `Categorical` when text tokens are entered),
@@ -391,9 +387,9 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
 - **Cell Visual States, Surface Styling & Provenance:**
   - **`[Target]` Flat Contiguous Spreadsheet Plane:** All `X` and `Y` data cells sit uniformly on `surface_content` divided by quiet `1 pt` `divider` hairlines with subtle alternating row tints—zero individually rounded resting cell boxes. Column headers render in `text_strong` on neutral `header_bg` (never accent blue). Active cell selection displays `active_bg` + `2 pt` `focus_ring` when the grid owns focus and `selection_unemphasized_bg` when focus lives in another pane.
   - **Numeric Alignment:** Right-aligned numerals (`12.5 pt` `[Implemented]`; **`13 pt` `[Target]`** in `R20.2` backed by a runtime ASCII `'0'..='9'` advance-width check on the resolved primary proportional sans face—using `13 pt` primary sans when digits share equal width, or selecting a uniform-digit system sans / cap-height-matched system monospace fallback strictly for aligned numeric columns); categorical/label strings start-aligned.
-  - **Missing vs Excluded Observations:** Empty cells represent missing values (`NaN`/unbalanced design, tolerated natively by ANOVA/GLM/Regression). Excluded cells (`Cmd/Ctrl+E` or `Exclude with Reason…` `Cmd/Ctrl+Shift+E`) stay visible in place with muted color, strikethrough, italic text, a corner reason-indicator triangle, and a hover tooltip showing timestamp/reason.
+  - **Missing vs Excluded Observations:** Empty cells represent missing values (`NaN`/unbalanced design, tolerated natively by ANOVA/GLM/Regression). Excluded cells (`Cmd/Ctrl+E` or `Exclude with Reason` `Cmd/Ctrl+Shift+E`) stay visible in place with muted color, strikethrough, italic text, a corner reason-indicator triangle, and a hover tooltip showing timestamp/reason.
   - **Linked Data Regions (`LinkedDataRegion`):** Cell ranges populated via `Paste Link` or linked file import draw a `2 px` color-coded perimeter border (`link_blue`, `link_green`, …) with a header pill showing upstream source (`Raw Plate › A1:H12`) and quick actions (`Go to Source`, `Re-import`, `Unlink`). Typing inside a linked region triggers a non-destructive read-only guard popover rather than silently corrupting provenance.
-  - **Row-Subset -> Graph Override Context Menu:** Selecting rows (e.g., after sorting a fold-change/P-value table) and right-clicking exposes `Style Selected Points on Graph…` (color + alpha, shape, size, border), `Show Row Titles on Graph`, `Reset to Dataset Style`, and `Exclude Selected`.
+  - **Row-Subset -> Graph Override Context Menu:** Selecting rows (e.g., after sorting a fold-change/P-value table) and right-clicking exposes `Style Selected Points on Graph` (color + alpha, shape, size, border), `Show Row Titles on Graph`, `Reset to Dataset Style`, and `Exclude Selected`.
 
 ---
 
@@ -407,8 +403,8 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
      - *Available Variables:* Searchable list displaying column letter, title, and `NUM`/`CAT`/`LBL`/`FX=` badge; clicking inserts the identifier at the caret.
      - *Available Functions:* Searchable list with category pills (`Recent`, `All`, `Math`, `Column Aggregates`, `Conditional`, `Rounding`) covering row-wise functions (`abs`, `ln`, `log10`, `exp`, `round`, `ifelse`, `is_defined`, row-wise `sum`/`min`/`max`) and whole-column aggregators (`mean(Var)`, `sd(Var)`, `median(Var)`, `zscore(Var)` enabling multi-step pipelines such as $\Delta\Delta C_t$ qPCR fold-change).
    - **Signature & Description Footer (`64 pt`):** Displays exact parameter syntax and edge-case `NaN` behavior for the highlighted function.
-2. **Bulk Variable & Categorical Level Manager Modal (`Manage Variables…`):**
-   - Master-detail modal accessed from Tier-3 `Manage Variables…` or `Data › Manage Variables…`:
+2. **Bulk Variable & Categorical Level Manager Modal (`Manage Variables`):**
+   - Master-detail modal accessed from Tier-3 `Manage Variables` or `Data › Manage Variables`:
      - *Upper Master Table:* Filterable list of all columns (`Display: All | Categorical | Continuous | Calculated`) with `Auto` checkbox and explicit `Continuous / Categorical / Label` radio columns.
      - *Lower Categorical Level Inspector (enabled whenever a `Categorical` variable is selected):* Lists every distinct level with `Total Rows`, `Excluded Rows`, **Inline Level Rename / Merge** (typing an existing level name merges misspelled categories cleanly in one undoable step), and explicit `Level Order` controls (`Alphabetical`, `Frequency`, or `Custom` keyboard/drag reordering + `Reference Level` pin).
 
@@ -463,13 +459,13 @@ All data-reshaping operations execute as non-destructive `ResultSheet` or derive
 
 ### 8.7 Analysis Launcher, Re-Analysis Disambiguation & Retargeting
 
-1. **`Analyze…` Modal (`640 × 460 pt`):**
+1. **`Analyze` Modal (`640 × 460 pt`):**
    - **Header:** Source sheet indicator + instant search box (`analyze_picker` filter, focused on open so typing + `Enter` launches in `< 2 s`).
    - **Left Pane (`58%`):** Categorized method tree (`Recently Used`, `Transform & Normalize`, `XY Analyses`, `Column Analyses`, `Grouped Analyses`, `Contingency Analyses`, `Survival Analyses`, `Parts of Whole`, `Multiple Variables & GLM`, `Unsupervised Clustering`, `Nested Analyses`, `Simulate & Theoretical Curves`). Pre-expands and highlights the category matching the active table's archetype.
    - **Right Pane (`42%`):** Dataset / Variable checklist (`Select All` / `Clear All`) scoping which columns enter the analysis.
 2. **Re-Analysis Disambiguation Prompt (`DuplicateAnalysisPrompt`):**
    - Triggered automatically when invoking an analysis family already attached to the active table: offers **`Edit Existing Analysis Parameters`** vs **`Create New Independent Analysis`**.
-3. **`Change Data Analyzed…` Modal (`ChangeDataAnalyzed`):**
+3. **`Change Data Analyzed` Modal (`ChangeDataAnalyzed`):**
    - Opened from any `ResultSheet` (or by dragging a `ResultSheet` onto another compatible `DataSheet`) to retarget the existing parameter configuration to a different compatible `DataSheet` and/or change included datasets, updating downstream graphs and `Family` lineage atomically.
 
 ---
@@ -498,7 +494,7 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 | **Two-Group & One-Way / RM / Mixed ANOVA** | `[Data]` · `Experimental Design` · `[Repeated Measures]` · `Multiple Comparisons` · `Options` · `Residuals` | **`R1` (Missing cells vs RM/REML):** Complete tables enable Repeated Measures ANOVA; incomplete matched tables automatically switch to `REML` Mixed-Effects Model (`Kenward-Roger` / `Satterthwaite` DF). **`R1b`:** Enabling `REML` disables classical sphericity checkboxes and restricts incompatible post-hoc options with explanatory tooltips. **`R2`:** Nonparametric rank selection (`Mann-Whitney`, `Wilcoxon`, `Kruskal-Wallis`, `Friedman`) disables Gaussian equal-SD toggles and switches `Multiple Comparisons` to rank-based Dunn's test. **`R3`:** Control-group selector enables *only* when `"Compare each group to a control"` is selected. **`R4`:** Welch's *t*-test / nonparametric modes gate equal-variance residual diagnostics and unlock `Estimation Plot` / Hodges-Lehmann median-difference options. |
 | **Multifactor (`N`-Way) ANOVA** | `Data` · `Model` · `Multiple Comparisons` · `Options` · `Residuals` | `Model` tab provides hierarchical checkboxes (`Main effects`, `Two-way interactions`, `Three-way interactions`) above a read-only live symbolic formula bar (`Y ~ FactorA + FactorB + FactorA:FactorB`) and Type I / II / III Sum-of-Squares selector. |
 | **Contingency ($\chi^2$ / Fisher)** | `Test & Calculations` · `Options` | **`R5`:** $2\times 2$ effect sizes (`Odds Ratio`, `Relative Risk`, `Attributable Risk`, `Sensitivity / Specificity`) disable on $R\times C > 2\times 2$ tables, while `Chi-square test for trend` (Cochran-Armitage) disables on $2\times 2$ tables. **`R6`:** On `Options`, individual CI method dropdowns (Baptista-Pike, Woolf, Koopman, Newcombe/Wilson) enable *only* for the specific effect sizes checked on Tab 1. |
-| **Linear Regression & Correlation** | `Model & Comparison` · `Confidence & Range` · `Residuals` | **`R7`:** Correlation matrix heatmap option enables *only* when computing all-pairs correlations across $\ge 2$ columns. **`R8`:** Subcolumn aggregation radios (`Mean`, `Individual replicates`, `Per subcolumn`) enable *only* when source subcolumns $> 1$. Includes **`Switch to Nonlinear Regression…`** escalation button for weighted/constrained linear fits. |
+| **Linear Regression & Correlation** | `Model & Comparison` · `Confidence & Range` · `Residuals` | **`R7`:** Correlation matrix heatmap option enables *only* when computing all-pairs correlations across $\ge 2$ columns. **`R8`:** Subcolumn aggregation radios (`Mean`, `Individual replicates`, `Per subcolumn`) enable *only* when source subcolumns $> 1$. Includes **`Switch to Nonlinear Regression`** escalation button for weighted/constrained linear fits. |
 | **GLM & Cox PH (`Linear`, `Logistic`, `Poisson`, `Cox`)** | `Model` · `Reference Levels` · `Predictions` · `Compare` · `Options` · `Diagnostics` · `Residuals` · `Graphs` | `Model` tab hosts outcome binding (incl. `Time` + `Event/Censor` codes + `Efron`/`Breslow`/`Exact` ties for Cox), hierarchical term builder (`Intercept`, `Main effects`, `2-way`, `3-way`, `Transforms`), and copyable symbolic formula preview. `Reference Levels` dynamically lists *only* categorical predictors in the model. **`R11` (GLM Family Gating):** Switching from Gaussian to `Poisson` disables Gaussian `Multiple R`, `Adjusted R²`, and residual normality tests while enabling `Deviance`, `Dispersion`, `Log-Likelihood`, and `Pseudo R²`. **`R12`:** Single-predictor logistic S-curve card on `Graphs` enables *only* when exactly one continuous predictor is active; `ROC Curve`, `Actual vs Predicted`, `Residual vs Predicted`, and `Parameter Covariance Heatmap` cards pair clean-room schematic thumbnails with diagnostic purpose labels. |
 | **PCA / PCR & Clustering (`Hierarchical`, `K-Means`)** | `Data` · `Options` · `Output` · `Graphs` | **`R10` (PCR Chaining):** Checking `Run Principal Component Regression (PCR)` on `PCA › Data` unlocks `Outcome Variable` and automatically excludes that target column from the unsupervised predictor checklist; `PCA › Graphs` allows mapping *any* table column (including out-of-model categorical variables) to `PC Scores` point color, size, labels, or connecting lines. Clustering `Options` exposes scaling order (`None`, `Z-Score`, `Mean-Center`), distance (`Euclidean`, `Manhattan`, `Pearson`, `Cosine`), linkage (for Hierarchical) or algorithm + **$k_{min}..k_{max}$ Cluster Sweep** + reproducible `Seed` (for K-Means), plus `Dendrogram`, `Clustered Heatmap`, `Silhouette`, `Elbow`, and `Gap` plot cards. |
 | **Kaplan-Meier Survival** | `[Data]` · `Model & Options` · `Multiple Comparisons` | Group-count predicate disables 2-group hazard ratios when $\ge 3$ groups exist (enabling omnibus Log-rank, Trend, and Gehan-Breslow-Wilcoxon plus multiplicity-adjusted pairwise curve comparisons). Includes direct toggles for `Censored tick marks`, `Asymmetric log-log CI bands`, and **`Show Number-at-Risk table below X-axis`**. |
@@ -548,7 +544,7 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 - **Top Bar (`32 pt`):** Leading **`Edit Parameters (Cmd/Ctrl+T)`** pill + horizontal scrollable **Sub-Sheet Tab Strip** with a trailing **`⋯ +N` overflow menu** (shown only when tabs exceed available width) and keyboard tab switching (`Ctrl+PageUp/PageDown`).
 - **Two Semantic Sub-Tab Kinds (`ResultTabKind`):**
   1. *Inferential Report Tabs (`Tabular Results`, `ANOVA`, `Multiple Comparisons`, `Model Comparison`, `Diagnostics`):* Multi-column sectioned grids with bold collapsible section headers, exact $P$-values alongside summary stars, explicit `??? (ambiguous / wide)` markers with inline explanation callouts when profile-likelihood bounds do not close, and blank cells (never `0` or `NaN` text) when a survival curve has not reached median (`50%`) survival.
-  2. *Plot-Ready Derived Data Matrix Tabs (`Residuals`, `Row Predictions`, `Interpolated Unknowns`, `PC Scores`, `Loadings`, `Distance Matrix`, `Clustered Data` with appended cluster-membership columns, `Number at Risk`):* Directly selectable as upstream sources for **`New Graph from Tab…`** or **`Chain Analysis…`** without copying data manually, and supporting rectangular range `Copy` -> live `EmbeddedResultTable` pasting (`R13.4`/`R13.8`).
+  2. *Plot-Ready Derived Data Matrix Tabs (`Residuals`, `Row Predictions`, `Interpolated Unknowns`, `PC Scores`, `Loadings`, `Distance Matrix`, `Clustered Data` with appended cluster-membership columns, `Number at Risk`):* Directly selectable as upstream sources for **`New Graph from Tab`** or **`Chain Analysis`** without copying data manually, and supporting rectangular range `Copy` -> live `EmbeddedResultTable` pasting (`R13.4`/`R13.8`).
 
 ---
 
@@ -575,7 +571,7 @@ Prepended as Tab 1 whenever a classical analysis (`t`-Test, Multifactor ANOVA, K
 - **Bottom Live Preview:** Renders the actual active dataset using the selected chart configuration before committing.
 
 #### C. Modal `Format Graph` (Three Clean Context-Switched Schemas)
-Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Cancel`, `Apply` (live preview), and `OK`:
+Includes cross-jump buttons (`Change Graph Type`, `Format Axes`) plus `Cancel`, `Apply` (live preview), and `OK`:
 1. **Series-Based Schema (`XY`, `Column`, `Grouped`, `Survival`, `PartsOfWhole`, `Nested`):**
    - `Appearance`: Top **Scope Bar** (`Dataset Selector v` + `<` `>` steppers + **`Apply Globally`** scope toggle) above composable layer checkboxes (`Bars / Boxes`, `Symbols` with alpha slider for overplotting and `Show mean as '+'`, `Error Bars` direction/cap/thickness, `Connecting Lines / Curves`, `Area / Confidence-Band Fill` incl. `Within error bands`), z-order selector (`Lines & error bars on top of points` vs `Underneath`), Left/Right Y-axis assignment, and per-series row-title point labels.
    - `Series & Arrangement`: Add/remove/reorder datasets (`Left-to-right` order on categorical charts; `Front-to-back` z-order on scatter charts) plus multi-series topology (`Interleaved`, `Stacked`, `Superimposed`, or `Separated` with conditional vertical divider line & inter-group gap controls).
@@ -595,7 +591,7 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 #### D. Modal `Format Axes` & `Additional Ticks / Thresholds` Sub-Modal
 - **Tabs:** `Frame & Origin` · `X Axis` · `Left Y Axis` · `Right Y Axis` · `Titles & Typography`.
 - **`Frame & Origin`:** Framing presets (`Open L-Frame`, `Boxed`, `Offset Axes`, `Crosshair`) and **Origin Placement** (`Automatic`, `Lower-Left`, `Lower-Right`, `Upper-Left`, `Custom (X0, Y0)` — ensuring volcano and PCA score plots with negative coordinates keep the Y-axis cleanly on the left frame edge when `Lower-Left` is chosen).
-- **Axis Tabs:** Scale (`Linear`, `Log10`, `Log2`, `Ln`, `Logit`, `Probability`), `Two/Three-Segment Discontinuous Axis Breaks` (with break position, length proportion, and ornament), `Range & Major/Minor Ticks` (with `🔗` constant hooks), **Categorical Axis Guard** (automatically locking continuous range/log controls with an inline explanation when an axis plots discrete categories, while exposing `Column Titles` vs `Row Titles` label-source switching on Grouped plots), and **`Additional Ticks, Threshold Lines & Shaded Zones`** table with a `Details…` sub-modal for dashed horizontal/vertical significance cutoffs (e.g., $-\log_{10} P = 1.301$, $\text{FC} = \pm 1$) and shaded reference bands.
+- **Axis Tabs:** Scale (`Linear`, `Log10`, `Log2`, `Ln`, `Logit`, `Probability`), `Two/Three-Segment Discontinuous Axis Breaks` (with break position, length proportion, and ornament), `Range & Major/Minor Ticks` (with `🔗` constant hooks), **Categorical Axis Guard** (automatically locking continuous range/log controls with an inline explanation when an axis plots discrete categories, while exposing `Column Titles` vs `Row Titles` label-source switching on Grouped plots), and **`Additional Ticks, Threshold Lines & Shaded Zones`** table with a `Details` sub-modal for dashed horizontal/vertical significance cutoffs (e.g., $-\log_{10} P = 1.301$, $\text{FC} = \pm 1$) and shaded reference bands.
 
 ---
 
@@ -651,8 +647,8 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 
 | Token | Logical Value | Scaling & Ergonomic Rule |
 |---|---|---|
-| `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)` |
-| `chrome.action_strip_h` | `38 pt` `[Implemented]` / `36 pt` `[Target]` *(provisional)* | Single horizontal row (no sheet tabs); overflow items collapse into trailing `⋯` popup via `fit_ranked_toolbar` |
+| `chrome.app_bar_h` | `28 pt` (`0 pt` when `host_draws_menu_bar == true`) | In-window menu strip on Windows/Linux (`66 pt` combined top chrome); `0 pt` on macOS native `NSMenu` (`R20.9`) |
+| `chrome.action_strip_h` | `38 pt` | Unified top toolbar (`38 pt` total top chrome when `host_draws_menu_bar == true`); overflow items collapse into `⋯` via `fit_ranked_toolbar` |
 | `chrome.panel_header_h` | `32 pt` `[Target]` *(provisional)* | Shared top header baseline across Navigator, Center Split panes, and Trailing Studio with `1 pt` bottom `divider`; validated at default and `ui_scale > 1.0` |
 | `chrome.status_bar_h` | `26 pt` | Fixed single-line footer with borderless ghost controls and aligned numerals for quick-stats & zoom |
 | `dock.navigator_w` | `232 pt` `[Target]` (`192–380 pt`; `240 pt` `[Implemented]`) | Narrows to `192 pt` before collapsing to `36 pt` rail (§2.3) |
@@ -668,10 +664,10 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 
 All three shipped themes (`Light`, `Dark`, `HighContrast`) derive from `ThemeSeeds` in `crates/ui-egui/src/theme.rs` and apply WCAG 2.2 criteria to desktop software by analogy per W3C WCAG2ICT guidance (`>= 4.5:1` body text in `Light`/`Dark`, `>= 7.0:1` AAA in `HighContrast`, and **SC 1.4.11 Level AA `>= 3.0:1` non-text contrast** across every visual cue required to identify interactive components and their states—rest, hover, pressed, selected, checked, focused, error—explicitly tested per theme rather than assuming a `1 pt` border establishes conformance):
 - **Three Opaque Neutral Surface Tiers (`[Target]`):** `surface_chrome` (`app_bar`, `panel_bg`), `surface_recessed` (segmented tracks, filter wells, `canvas_mat`), and `surface_content` (`surface_bg`, contiguous grid, `paper_white`), stepping **lighter** on elevation in `Dark` mode and retaining explicit structural borders in `HighContrast`.
-- **Strokes, Selection & Scoped Accent:** quiet `divider` vs. editable `input_border`; emphasized (`active_bg`) vs. unfocused (`selection_unemphasized_bg`) selection; `hover_bg`; and a restrained single accent (`focus_ring`, single `Primary` CTA, active selection cue, `2 pt` focused split-pane header bar—never static table headers, `+ New…` rows, or full-pane whitespace cages).
+- **Strokes, Selection & Scoped Accent:** quiet `divider` vs. editable `input_border`; emphasized (`active_bg`) vs. unfocused (`selection_unemphasized_bg`) selection; `hover_bg`; and a restrained single accent (`focus_ring`, single `Primary` CTA fill behind `on_accent`, active selection cue, `2 pt` focused split-pane header bar, and clickable text links via `ui_kit::link_button` (`text_link`)—zero exceptions for static table headers, `NUM` pills, section headings, frozen/status labels, `+ New` rows, or full-pane whitespace cages).
 - **Data Provenance & Roles:**
-  - Variable Role Badges: `NUM` (blue), `CAT` (amber/vermilion), `LBL` (slate), `FX=` (emerald/teal).
-  - Provenance Borders: `link_blue`, `link_green`, `link_red` (broken/stale external link paired with broken-link glyph and dashed pattern), `excluded_cell_text` (muted + strikethrough).
+  - Variable Role Badges: `NUM` (neutral `text_strong` on `surface_recessed` + `border`), `CAT` (amber/vermilion), `LBL` (slate), `FX=` (emerald/teal).
+  - Provenance Borders & Excluded Cells: `link_blue` (strictly borders/dots, never text), `link_green`, `link_red` (broken/stale external link paired with broken-link glyph and dashed pattern), `excluded_cell_text` (neutral muted slate + italic + strikethrough + corner triangle; WCAG AA in `Light`/`Dark`, AAA in `HighContrast`).
   - Default Chart Series Palette (decoupled in `crates/palette`): 8-color **Okabe–Ito** colorblind-safe categorical palette (`#000000`, `#E69F00`, `#56B4E9`, `#009E73`, `#F0E442`, `#0072B2`, `#D55E00`, `#CC79A7`) + perceptually uniform **Viridis / Cividis / Diverging Blue-White-Vermilion** colormaps.
 
 ### 9.3 Attributed Upstream UI Adaptation & Clean-Room Rewrite Boundaries
@@ -756,8 +752,9 @@ Strictly **four UI type sizes** (`[Target]`, retiring the legacy `12.5 pt` numer
 1. **At most three text sizes on one panel at a time.** Section headings differ from body text by weight, not size.
 2. **Each typographic cue has one job.** Size marks titles, weight marks section headings and the active item in a list, and `text_muted` marks secondary text. Never bold whole paragraphs.
 3. **Numbers** are right-aligned with aligned digit columns per §9.1 and §8.2.
-4. **Capitalisation & writing (English).** Title Case for menus, buttons, tabs, and panel/dialog titles; sentence case for descriptions, hints, tooltips, affirmative checkbox noun phrases (`Data points`), and messages. Variable-role badges (`NUM`, `CAT`, `LBL`, `FX=`) and archetype badges (`XY`) stay uppercase. Place `…` only at the trailing end of dialog-opening controls (`Format Graph…`). Reserve `•` strictly for unsaved dirty state.
+4. **Capitalisation & writing (English).** Title Case for menus, buttons, tabs, and panel/dialog titles; sentence case for descriptions, hints, tooltips, affirmative checkbox noun phrases (`Data points`), and messages. Variable-role badges (`NUM`, `CAT`, `LBL`, `FX=`) and archetype badges (`XY`) stay uppercase. Never put `…` or `...` on buttons, menus, or text-input placeholders; reserve `…` strictly for truncated text and active progress copy (`Listening…`, `Solving…`), and `⋯` for overflow triggers (`R20.15`). Reserve `•` strictly for unsaved dirty state.
 5. **Minimum size.** No UI text below `type.small` (`11.5 pt`). Exported chart typography follows `crates/chart` format settings independently (`R20.5`).
+6. **Blue means clickable link (zero exceptions).** Blue foreground text (`text_link`, rendered through `ui_kit::link_button` with `PointingHand` cursor, hover underline, and `>= 24 pt` target height) is strictly reserved for interactive navigation links (`R20.14`). Section headings (`type.section`), `NUM` role badges, static headers (`X`, `XY`), frozen/provenance counts, and status/warning text use neutral (`text_strong`, `text_primary`, `text_muted`) or semantic (`link_green`, `warning`, `error`, `stale`) tokens, enforced by `cargo xtask design-tokens`.
 
 ### 10.3 Corner Radius, Strokes & Elevation
 
@@ -807,8 +804,8 @@ Before a GUI change counts as done, inspect screenshots at `1280 × 800 pt` (def
 - [ ] Surface tiers establish hierarchy without "box soup" (resting `1 pt` borders appear on inputs/dropdowns, not every toolbar/footer button or spreadsheet cell).
 - [ ] Navigator, Center Split panes, and Trailing Studio align cleanly on the shared panel-header baseline, with one left edge per panel and no nested framed boxes.
 - [ ] Every gap and padding follows §10.1 (`4`-point rhythm; inter-group gap `>= 2×` intra-group gap), and no UI text falls below `11.5 pt` or uses more than three sizes per panel.
-- [ ] Section headings are bold, English labels follow §10.2 capitalisation, checkboxes use affirmative noun phrases, `…` appears only at the trailing end of modal launchers, and `•` marks unsaved dirty state only.
-- [ ] Each surface has at most one primary accent action, accent colour is absent from static headers and `+ New…` rows, and dialog footers read `Cancel`, `Apply`, `Primary`.
+- [ ] Section headings are bold, English labels follow §10.2 capitalisation, checkboxes use affirmative noun phrases, no trailing `…` or `...` appears on buttons, menus, or text-input placeholders (`…` is reserved strictly for truncated text and active progress copy), and `•` marks unsaved dirty state only.
+- [ ] Each surface has at most one primary accent action, blue foreground text appears strictly on clickable `ui_kit::link_button` links (never static headers, `NUM` pills, section headings, frozen/status badges, or `+ New` rows), and dialog footers read `Cancel`, `Apply`, `Primary`.
 - [ ] In Split Comparison, command target, keyboard focus, and Inspector target/pin are visually unambiguous, and split `DataSheet` panes render the full contiguous `DataGrid`.
 - [ ] Disclosure triangles and frameless sheet icons are crisp vector glyphs at uniform size, and every icon-only button has a tooltip and accessible name.
 - [ ] Interface colours come exclusively from `Tokens` (plotted data/palette swatches exempt), no state relies on colour alone, disabled controls remain distinct across all themes, and nothing truncates without an ellipsis and full tooltip (§9.4).

@@ -185,7 +185,8 @@ pub(super) fn render_plate_map_reshape_section(
     if let Some(msg) = &ir.plate_status_message
         && !msg.trim().is_empty()
     {
-        ui.label(RichText::new(msg).small().color(tokens.accent));
+        let msg_col = if msg.contains("failed") || msg.starts_with("Enter ") { tokens.error } else { tokens.text_muted };
+        ui.label(RichText::new(msg).small().color(msg_col));
         ui.add_space(2.0);
     }
 
@@ -241,7 +242,7 @@ fn render_plate_values_subtab(
         ui.label(format!("Expected well count: {expected} (currently {} parsed values)", ir.plate_values.len()));
         let pr = ui.add(
             egui::TextEdit::multiline(&mut state.plate_values_draft)
-                .hint_text("Paste well numbers…")
+                .hint_text("Paste well numbers")
                 .desired_rows(4)
                 .desired_width((avail_w - 28.0).clamp(180.0, 620.0)),
         );
@@ -1019,7 +1020,7 @@ fn render_plate_grids_io_subtab(
         cols_ui.vertical(|v| {
             v.label(tr(locale, "plate.label_grid.label"));
             let lg = v.add(
-                egui::TextEdit::multiline(&mut state.plate_label_grid_draft).hint_text("8×12 or 16×24 labels…").desired_rows(3).desired_width(half_w),
+                egui::TextEdit::multiline(&mut state.plate_label_grid_draft).hint_text("8×12 or 16×24 labels").desired_rows(3).desired_width(half_w),
             );
             meta.record_modal_response(
                 v,
@@ -1037,7 +1038,7 @@ fn render_plate_grids_io_subtab(
             v.label(tr(locale, "plate.x_grid.label"));
             let xg = v.add(
                 egui::TextEdit::multiline(&mut state.plate_x_grid_draft)
-                    .hint_text("Optional 8×12 / 16×24 X values…")
+                    .hint_text("Optional 8×12 / 16×24 X values")
                     .desired_rows(3)
                     .desired_width(half_w),
             );

@@ -269,13 +269,18 @@ pub(super) fn render_page_layout_composer_studio(
         ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
         for dpi in [300u16, 600, 1200] {
             let wid = format!("inspector.layout.dpi.{dpi}");
+            let dpi_tip = match dpi {
+                300 => "300 DPI: standard print and screen export density",
+                600 => "600 DPI: high-resolution journal figure export density",
+                _ => "1200 DPI: ultra-sharp line art and fine symbol rasterization",
+            };
             if studio_chip(
                 ui,
                 tokens,
                 meta,
                 &StudioChipSpec {
                     label: &format!("{dpi} DPI"),
-                    tooltip: "Target rasterization / print DPI",
+                    tooltip: dpi_tip,
                     max_w: 64.0,
                     selected: state.layout_dpi == dpi,
                     enabled: ctx_in.enabled,
@@ -296,7 +301,7 @@ pub(super) fn render_page_layout_composer_studio(
             meta,
             &StudioChipSpec {
                 label: snap_lbl,
-                tooltip: "Toggle panel snap-to-grid guides",
+                tooltip: "Snap dragged panels to page margins and neighbor edges",
                 max_w: 68.0,
                 selected: state.snap_enabled,
                 enabled: ctx_in.enabled,
@@ -451,7 +456,7 @@ pub(super) fn render_page_layout_composer_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Equalize Scaling…",
+            label: "Equalize Scaling",
             tooltip: "Match plot scaling across live graph panels",
             selected: false,
             enabled: ctx_in.enabled && has_live_graphs,
@@ -474,7 +479,7 @@ pub(super) fn render_page_layout_composer_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Layout Composer…",
+            label: "Layout Composer",
             tooltip: "Open full Page Layout Composer dialog",
             selected: false,
             enabled: ctx_in.enabled,
@@ -491,7 +496,7 @@ pub(super) fn render_page_layout_composer_studio(
         tokens,
         meta,
         &StudioButtonSpec {
-            label: "Export Figure…",
+            label: "Export Figure",
             tooltip: "Export layout page to PDF, SVG, or PNG",
             selected: false,
             enabled: ctx_in.enabled,

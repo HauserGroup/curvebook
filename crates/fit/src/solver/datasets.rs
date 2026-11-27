@@ -129,6 +129,28 @@ pub(in crate::solver) fn fit_single_or_shared(
         None
     };
     let res_diag = compute_residual_diagnostics(&obs, &assembled.ds_results, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
+    let has_shared_parameters = assembled.ds_results.len() > 1;
+    let mut ds_results = assembled.ds_results;
+    if ds_results.len() == 1 {
+        let ds0 = &mut ds_results[0];
+        ds0.identifiability = unc.identifiability.fit.clone();
+        ds0.k_free = k_free;
+        ds0.df = df;
+        ds0.weighted_ss = lm_out.weighted_ss;
+        ds0.aic_c = ic.as_ref().map(|x| x.aicc);
+        ds0.bic = ic.as_ref().map(|x| x.bic);
+        ds0.normality = res_diag.normality.clone();
+        ds0.normality_anderson_darling = res_diag.normality_anderson_darling.clone();
+        ds0.normality_lilliefors_ks = res_diag.normality_lilliefors_ks.clone();
+        ds0.homoscedasticity = res_diag.homoscedasticity.clone();
+        ds0.lack_of_fit = res_diag.lack_of_fit.clone();
+        ds0.n_outliers = rout_result.as_ref().map_or(n_outliers_excluded, |r| r.outlier_indices.len().max(n_outliers_excluded));
+        ds0.predicted_y_neg_log_weight_sum = predicted_y_neg_log_weight_sum;
+    } else {
+        for ds_res in &mut ds_results {
+            ds_res.identifiability = unc.identifiability.fit.clone();
+        }
+    }
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -153,7 +175,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         parameters,
         fixed_constants: layout.fixed_constants,
         covariance: cov,
-        datasets: assembled.ds_results,
+        datasets: ds_results,
         derived_scalars: assembled.derived_scalars,
         runs_test: res_diag.runs_test,
         lack_of_fit: res_diag.lack_of_fit,
@@ -164,6 +186,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         rout: rout_result,
         interpolated_x: assembled.interpolated_x,
         interpolated_y: assembled.interpolated_y,
+        has_shared_parameters,
     })
 }
 
@@ -264,10 +287,37 @@ pub(in crate::solver) fn solve_single_dataset_unit(
         },
     );
 
-    let ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
+    let mut ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
     let derived = assembled.derived_scalars.into_iter().next().unwrap_or_default();
     let poisson_ll = if config.method == FitMethod::PoissonDeviance { poisson_log_likelihood_from_obs(&ds_obs, &lm_out.y_hat) } else { None };
     let obs_moments = ds_obs.iter().map(|o| (o.sqrt_weight, o.rep_n, o.ss_within, o.raw_ss_within)).collect();
+    let (ds_pred_nlw, ds_ic) = compute_independent_ic(config, &ds_obs, lm_out.weighted_ss, n_d, p_d, poisson_ll);
+    let ds_diag = compute_residual_diagnostics(
+        &ds_obs,
+        std::slice::from_ref(&ds_result),
+        &lm_out.y_hat,
+        &ds_result.residuals,
+        lm_out.weighted_ss,
+        df_d,
+        config,
+    );
+    ds_result.status = lm_out.status;
+    ds_result.identifiability = unc.identifiability.fit.clone();
+    ds_result.ambiguous = cov.ambiguous || unc.identifiability.fit.is_ambiguous() || lm_out.status == FitStatus::Ambiguous;
+    ds_result.iterations = lm_out.iterations;
+    ds_result.n_obs = n_d;
+    ds_result.k_free = p_d;
+    ds_result.df = df_d;
+    ds_result.weighted_ss = lm_out.weighted_ss;
+    ds_result.aic_c = ds_ic.as_ref().map(|x| x.aicc);
+    ds_result.bic = ds_ic.as_ref().map(|x| x.bic);
+    ds_result.normality = ds_diag.normality;
+    ds_result.normality_anderson_darling = ds_diag.normality_anderson_darling;
+    ds_result.normality_lilliefors_ks = ds_diag.normality_lilliefors_ks;
+    ds_result.homoscedasticity = ds_diag.homoscedasticity;
+    ds_result.lack_of_fit = ds_diag.lack_of_fit;
+    ds_result.predicted_y_neg_log_weight_sum = ds_pred_nlw;
+    ds_result.poisson_ll = poisson_ll;
 
     Ok(SingleDatasetOutcome {
         layout: ds_layout,
@@ -299,22 +349,25 @@ pub(in crate::solver) fn fit_independent_datasets(
     let k_free = global_layout.k_free();
     let all_column_titles = collect_column_title_values(datasets);
     let outlier_handling = config.effective_outlier_handling();
-    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded, aborted_sub_fits) = if outlier_handling != OutlierHandling::None {
-        match run_independent_rout_prefilter(
-            model,
-            datasets,
-            hooks,
-            config,
-            &all_column_titles,
-            config.effective_rout_q_percent(),
-            outlier_handling == OutlierHandling::Eliminate,
-        )? {
-            IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded } => (Some(cleaned), Some(seeds), Some(rout), excluded, None),
-            IndependentRoutPrefilter::Aborted { sub_fits } => (None, None, None, 0, Some(sub_fits)),
-        }
-    } else {
-        (None, None, None, 0, None)
-    };
+    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded, per_ds_outliers, aborted_sub_fits) =
+        if outlier_handling != OutlierHandling::None {
+            match run_independent_rout_prefilter(
+                model,
+                datasets,
+                hooks,
+                config,
+                &all_column_titles,
+                config.effective_rout_q_percent(),
+                outlier_handling == OutlierHandling::Eliminate,
+            )? {
+                IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded, per_ds_outliers } => {
+                    (Some(cleaned), Some(seeds), Some(rout), excluded, per_ds_outliers, None)
+                }
+                IndependentRoutPrefilter::Aborted { sub_fits } => (None, None, None, 0, Vec::new(), Some(sub_fits)),
+            }
+        } else {
+            (None, None, None, 0, Vec::new(), None)
+        };
 
     let active_datasets = clean_storage.as_deref().unwrap_or(datasets);
     let sub_fits = if let Some(failed_subs) = aborted_sub_fits {
@@ -367,7 +420,8 @@ pub(in crate::solver) fn fit_independent_datasets(
 
     let fixed_constants = collect_independent_fixed_constants(model, active_datasets, &sub_fits, config);
 
-    for (d_idx, (sub, ds)) in sub_fits.into_iter().zip(active_datasets.iter()).enumerate() {
+    for (d_idx, (mut sub, ds)) in sub_fits.into_iter().zip(active_datasets.iter()).enumerate() {
+        sub.ds_result.n_outliers = per_ds_outliers.get(d_idx).copied().unwrap_or(0);
         let p_d = sub.layout.k_free();
         if p_d > 0 && matches!(sub.identifiability.fit, FitIdentifiability::NotAssessed) {
             any_unassessed_free = true;
@@ -512,6 +566,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         rout: rout_result,
         interpolated_x,
         interpolated_y,
+        has_shared_parameters: false,
     })
 }
 
@@ -616,7 +671,7 @@ fn collect_independent_fixed_constants(
 }
 
 enum IndependentRoutPrefilter {
-    Clean { cleaned: Vec<DatasetSeries>, seeds: Vec<Vec<f64>>, rout: RoutDetectionResult, excluded: usize },
+    Clean { cleaned: Vec<DatasetSeries>, seeds: Vec<Vec<f64>>, rout: RoutDetectionResult, excluded: usize, per_ds_outliers: Vec<usize> },
     Aborted { sub_fits: Vec<SingleDatasetOutcome> },
 }
 
@@ -653,6 +708,7 @@ fn run_independent_rout_prefilter(
 
     let mut cleaned = Vec::with_capacity(datasets.len());
     let mut seeds = Vec::with_capacity(datasets.len());
+    let mut per_ds_outliers = Vec::with_capacity(datasets.len());
     let mut combined_outliers = Vec::new();
     let mut combined_audit = Vec::new();
     let mut rsdr_weighted_sq = 0.0_f64;
@@ -666,6 +722,7 @@ fn run_independent_rout_prefilter(
         let sqrt_w_d: Vec<f64> = sub.obs_moments.iter().map(|&(sw, _, _, _)| sw).collect();
         let w_res_d: Vec<f64> = sub.ds_result.residuals.iter().zip(sqrt_w_d.iter()).map(|(&r, &sw)| r * sw).collect();
         let rout_d = rout_detect_outliers_mb2006(&ds.points, &w_res_d, &sqrt_w_d, p_d, fdr_q_percent)?;
+        per_ds_outliers.push(rout_d.outlier_indices.len());
 
         let mut is_out = vec![false; ds.points.len()];
         for &local_idx in &rout_d.outlier_indices {
@@ -705,5 +762,5 @@ fn run_independent_rout_prefilter(
         audit: combined_audit,
     };
     let excluded = total_pts - remaining_obs;
-    Ok(IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded })
+    Ok(IndependentRoutPrefilter::Clean { cleaned, seeds, rout, excluded, per_ds_outliers })
 }

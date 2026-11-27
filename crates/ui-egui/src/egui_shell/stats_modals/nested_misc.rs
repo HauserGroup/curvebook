@@ -1262,7 +1262,7 @@ fn render_spline_lowess_design(
             ui.label(
                 egui::RichText::new(format!("Custom LOWESS window fraction: {frac:.2} (choose a preset below to reset)"))
                     .small()
-                    .color(tokens.accent),
+                    .color(tokens.text_muted),
             );
         }
         for preset in LowessPreset::ALL {

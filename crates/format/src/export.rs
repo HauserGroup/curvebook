@@ -2,8 +2,8 @@
 //! designed for downstream R, Python, Snakemake, and Nextflow analysis pipelines.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, CiBound, DataSheet, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultSheet,
-    ResultStatus, ResultTab, SheetId, SourceCellId,
+    AnalysisSpec, ChecklistItem, CiBound, DataSheet, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultCellDetail, ResultScalarEntry,
+    ResultSheet, ResultStatus, ResultTab, SheetId, SourceCellId,
 };
 
 use crate::archive::validate_data_sheet_floats;
@@ -25,6 +25,8 @@ pub struct ResultSheetExportJson<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub analyzable_data: Option<&'a DataSheet>,
     pub checklist: &'a [ChecklistItem],
+    #[serde(skip_serializing_if = "<[_]>::is_empty")]
+    pub cell_details: &'a [ResultCellDetail],
 }
 
 /// Validate that `sheet` has not recorded [`ResultStatus::Failed`] before CSV export.
@@ -114,6 +116,7 @@ pub fn export_result_sheet_json(sheet: &ResultSheet, pretty: bool) -> Result<Str
         eliminated_outliers: &sheet.eliminated_outliers,
         analyzable_data: sheet.analyzable_data.as_ref(),
         checklist: &sheet.checklist,
+        cell_details: &sheet.cell_details,
     };
     let json = if pretty { serde_json::to_string_pretty(&payload)? } else { serde_json::to_string(&payload)? };
     Ok(json)
@@ -445,6 +448,7 @@ fn format_ci_bound(bound: CiBound, opts: &CsvOptions) -> String {
     match bound {
         CiBound::Finite(v) => format_float_opt(Some(v), opts),
         CiBound::Open => String::from("Open"),
+        CiBound::Unavailable => String::from("Unavailable"),
     }
 }
 
@@ -489,6 +493,11 @@ fn validate_result_floats(sheet: &ResultSheet) -> Result<(), FormatError> {
             {
                 return Err(FormatError::NonFiniteFloat { location: format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", sheet.id) });
             }
+        }
+    }
+    for (idx, detail) in sheet.cell_details.iter().enumerate() {
+        if detail.raw_value.is_some_and(|v| !v.is_finite()) {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.cell_details[{idx}].raw_value", sheet.id) });
         }
     }
     if let Some(ds) = sheet.analyzable_data.as_ref() {

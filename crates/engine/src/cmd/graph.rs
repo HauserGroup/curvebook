@@ -75,7 +75,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.create",
         label: "New Graph",
-        menu_path: "Insert/New Graph...",
+        menu_path: "Insert/New Graph",
         summary: "Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.",
         beginner: "Creates a new graph linked to one of your data tables.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -86,7 +86,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.initialize",
         label: "Initialize Graph",
-        menu_path: "Graph/Initialize...",
+        menu_path: "Graph/Initialize",
         summary: "Initialize an uninitialized graph sheet, applying its graph kind and default series styling.",
         beginner: "Chooses an initial plot type for a newly created graph sheet.",
         effects: MUTATE_IDEMPOTENT,
@@ -97,7 +97,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setKind",
         label: "Change Graph Type",
-        menu_path: "Change/Graph Type...",
+        menu_path: "Change/Graph Type",
         summary: "Switch a graph's visualization type (XY, column, grouped, survival, multivariate, diagnostic) with optional style reset.",
         beginner: "Changes the chart type of an existing graph without recreating the sheet.",
         effects: MUTATE_IDEMPOTENT,
@@ -108,7 +108,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setSpec",
         label: "Update Graph Specification",
-        menu_path: "Format/Graph...",
+        menu_path: "Format/Graph",
         summary: "Patch a graph's full GraphSpec, palette, frame, legend, title, survival options, or multivariate encoding.",
         beginner: "Updates visual graph settings such as palette, frame style, legend, or multivariate channels.",
         effects: MUTATE_IDEMPOTENT,
@@ -119,7 +119,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setAxes",
         label: "Format Axes",
-        menu_path: "Format/Axes...",
+        menu_path: "Format/Axes",
         summary: "Configure X, Y, and right-hand Y2 axes including log/probit/logit scales, segmented breaks, thresholds, and frame presets.",
         beginner: "Adjusts axis limits, log scales, titles, broken-axis gaps, and frame styling.",
         effects: MUTATE_IDEMPOTENT,
@@ -130,7 +130,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setAdditionalTicks",
         label: "Set Additional Axis Ticks",
-        menu_path: "Format/Additional Ticks...",
+        menu_path: "Format/Additional Ticks",
         summary: "Set custom callout ticks and optional gridlines along the `x`, `y`, or `y2` axis.",
         beginner: "Places custom reference ticks and gridlines at specific axis coordinates.",
         effects: MUTATE_IDEMPOTENT,
@@ -141,7 +141,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setSeries",
         label: "Format Data Series",
-        menu_path: "Format/Data on Graph...",
+        menu_path: "Format/Data on Graph",
         summary: "Style one or all data series: colors, markers, connecting lines, error bars, right-Y binding, or multivariate encoding.",
         beginner: "Customizes markers, connecting lines, error bars, and colors for curves or bars.",
         effects: MUTATE_IDEMPOTENT,
@@ -152,7 +152,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setRegressionOverlay",
         label: "Overlay Regression Curve",
-        menu_path: "Graph/Regression Overlay...",
+        menu_path: "Graph/Regression Overlay",
         summary: "Bind or clear a fitted curve overlay with optional confidence/prediction bands on one or all graph series.",
         beginner: "Overlays a curve fit line and confidence ribbons from a result sheet onto your graph.",
         effects: MUTATE_IDEMPOTENT,
@@ -163,7 +163,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.addComparisonBrackets",
         label: "Add Pairwise Significance Brackets",
-        menu_path: "Draw/Pairwise Comparison Brackets...",
+        menu_path: "Draw/Pairwise Comparison Brackets",
         summary: "Add statistical comparison brackets (stars or numeric P/q values) driven by a result sheet's pairwise comparisons.",
         beginner: "Draws significance brackets above compared groups using P values from your statistical test.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -174,7 +174,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.addAnnotation",
         label: "Add Graph Annotation",
-        menu_path: "Draw/Annotation...",
+        menu_path: "Draw/Annotation",
         summary: "Add a text box, line/arrow, shape, live embedded result table, or live fitted model equation annotation to a graph.",
         beginner: "Places labels, arrows, geometric callouts, embedded result summaries, or model equations onto a graph.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -184,8 +184,8 @@ static SPECS: &[CommandSpec] = &command_specs!(
     },
     {
         id: "graph.applyStyleFrom",
-        label: "Apply Graph Style From...",
-        menu_path: "Format/Apply Style From...",
+        label: "Apply Graph Style From",
+        menu_path: "Format/Apply Style From",
         summary: "Copy visual styling (palette, frame, axis styling, legend, and series appearances) from a donor graph.",
         beginner: "Copies the visual style of another graph sheet onto this graph without changing its data.",
         effects: MUTATE_IDEMPOTENT,
@@ -196,7 +196,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.applyCanvasPreset",
         label: "Apply Graph Canvas Preset",
-        menu_path: "Format/Canvas Size Preset...",
+        menu_path: "Format/Canvas Size Preset",
         summary: "Resize a graph canvas to a journal column, slide, or poster preset (`KeepTypographyPt` or `ProportionalScale`).",
         beginner: "Resizes a graph to standard journal figure widths and runs a publication preflight check.",
         effects: MUTATE_IDEMPOTENT,
@@ -218,7 +218,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.formatSelectedPoints",
         label: "Format Selected Points",
-        menu_path: "Format/Selected Points...",
+        menu_path: "Format/Selected Points",
         summary: "Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.",
         beginner: "Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.",
         effects: MUTATE_IDEMPOTENT,
@@ -229,7 +229,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.setCompactLetterDisplay",
         label: "Compact Letter Display",
-        menu_path: "Draw/Compact Letter Display...",
+        menu_path: "Draw/Compact Letter Display",
         summary: "Configure or toggle Piepho (2004) compact letter display significance grouping letters and pairwise display mode on a graph.",
         beginner: "Places shared grouping letters (a, b, ab) above graph groups to summarize all-pairwise statistical comparisons.",
         effects: MUTATE_IDEMPOTENT,
@@ -240,7 +240,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.insertImage",
         label: "Insert Image on Graph",
-        menu_path: "Insert/Image on Graph...",
+        menu_path: "Insert/Image on Graph",
         summary: "Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.",
         beginner: "Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
@@ -251,7 +251,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "graph.updateImage",
         label: "Format Embedded Graph Image",
-        menu_path: "Format/Embedded Image...",
+        menu_path: "Format/Embedded Image",
         summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.",
         beginner: "Crops, rotates, resizes, or frames an embedded image on a graph.",
         effects: MUTATE_IDEMPOTENT,

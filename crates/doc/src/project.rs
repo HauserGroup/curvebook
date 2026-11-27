@@ -805,8 +805,11 @@ fn result_cell_is_finite(cell: &ResultCell) -> bool {
         ResultCell::Number { value, .. } => value.is_finite(),
         ResultCell::PValue { raw, .. } => raw.is_finite(),
         ResultCell::ConfidenceInterval { lower, upper } => {
-            matches!(*lower, CiBound::Open).then_some(true).unwrap_or_else(|| matches!(*lower, CiBound::Finite(v) if v.is_finite()))
-                && matches!(*upper, CiBound::Open).then_some(true).unwrap_or_else(|| matches!(*upper, CiBound::Finite(v) if v.is_finite()))
+            let bound_ok = |b: CiBound| match b {
+                CiBound::Open | CiBound::Unavailable => true,
+                CiBound::Finite(v) => v.is_finite(),
+            };
+            bound_ok(*lower) && bound_ok(*upper)
         }
         ResultCell::Empty | ResultCell::Text(_) | ResultCell::Boolean(_) => true,
     }
@@ -832,6 +835,11 @@ fn first_non_finite_result_tabs_and_curves(res: &ResultSheet) -> Option<String> 
             if [Some(pt.x), Some(pt.y), pt.ci_lower, pt.ci_upper, pt.pred_lower, pt.pred_upper].into_iter().flatten().any(|v| !v.is_finite()) {
                 return Some(format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", res.id));
             }
+        }
+    }
+    for (idx, detail) in res.cell_details.iter().enumerate() {
+        if detail.raw_value.is_some_and(|v| !v.is_finite()) {
+            return Some(format!("{}.cell_details[{idx}].raw_value", res.id));
         }
     }
     None

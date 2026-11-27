@@ -37,6 +37,12 @@ pub const BOLD_FONT_FAMILY: &str = "curvebook_bold";
 /// selected via runtime ASCII `'0'..='9'` advance-width verification (`R20.2`).
 pub const ALIGNED_NUMERAL_FONT_FAMILY: &str = "curvebook_numeral";
 
+/// Minimum legible font size (in logical points) for keyboard shortcut keycap pills (`R20.13`).
+pub const SHORTCUT_PILL_FONT_PT: f32 = 11.5;
+
+/// Cap-height compensation scale applied to `Apple Symbols` fallback faces (`R20.13`).
+const APPLE_SYMBOLS_FONT_SCALE: f32 = 1.25;
+
 const BOLD_AVAILABLE_DATA_KEY: &str = "curvebook_bold_face_loaded";
 const NUMERAL_FAMILY_LOADED_DATA_KEY: &str = "curvebook_numeral_family_loaded";
 
@@ -321,8 +327,13 @@ fn assemble_font_definitions(
         };
         if let Some(id) = rctx.db.query(&query) {
             let prefix = format!("os_symbol_{idx}");
-            register_face_for_family(&mut rctx, id, &prefix, &mut prop_seen, &mut proportional);
-            register_face_for_family(&mut rctx, id, &prefix, &mut mono_seen, &mut monospace);
+            let tweak = if *family_name == "Apple Symbols" {
+                egui::FontTweak { scale: APPLE_SYMBOLS_FONT_SCALE, ..Default::default() }
+            } else {
+                egui::FontTweak::default()
+            };
+            register_face_for_family_with_tweak(&mut rctx, id, &prefix, &tweak, &mut prop_seen, &mut proportional);
+            register_face_for_family_with_tweak(&mut rctx, id, &prefix, &tweak, &mut mono_seen, &mut monospace);
         }
     }
 
@@ -452,6 +463,17 @@ fn register_face_for_family(
     seen: &mut HashSet<fontdb::ID>,
     chain: &mut Vec<String>,
 ) -> bool {
+    register_face_for_family_with_tweak(rctx, id, prefix, &egui::FontTweak::default(), seen, chain)
+}
+
+fn register_face_for_family_with_tweak(
+    rctx: &mut FontRegisterCtx<'_>,
+    id: fontdb::ID,
+    prefix: &str,
+    tweak: &egui::FontTweak,
+    seen: &mut HashSet<fontdb::ID>,
+    chain: &mut Vec<String>,
+) -> bool {
     if !seen.insert(id) {
         return false;
     }
@@ -477,7 +499,9 @@ fn register_face_for_family(
         key = format!("{base}_{suffix}");
         suffix += 1;
     }
-    rctx.defs.font_data.insert(key.clone(), Arc::new(egui::FontData::from_blob(blob, face_index)));
+    let mut font_data = egui::FontData::from_blob(blob, face_index);
+    font_data.tweak = tweak.clone();
+    rctx.defs.font_data.insert(key.clone(), Arc::new(font_data));
     rctx.id_keys.insert(id, key.clone());
     if !chain.iter().any(|existing| existing == &key) {
         chain.push(key);
@@ -630,8 +654,17 @@ fn query_primary_monospace(db: &fontdb::Database) -> Option<fontdb::ID> {
     })
 }
 
-const OS_SYMBOL_FAMILIES: &[&str] =
-    &["Apple Symbols", "Segoe UI Symbol", "DejaVu Sans", "Noto Sans Symbols", "Noto Sans Symbols 2", "Noto Sans Math", "Arial Unicode MS"];
+const OS_SYMBOL_FAMILIES: &[&str] = &[
+    "System Font",
+    "Lucida Grande",
+    "Apple Symbols",
+    "Segoe UI Symbol",
+    "DejaVu Sans",
+    "Noto Sans Symbols",
+    "Noto Sans Symbols 2",
+    "Noto Sans Math",
+    "Arial Unicode MS",
+];
 
 const OS_CJK_FAMILIES: &[&str] = &[
     "Hiragino Sans",
@@ -829,6 +862,7 @@ fn curated_os_font_candidates() -> &'static [&'static str] {
         &[
             "/System/Library/Fonts/HelveticaNeue.ttc",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/LucidaGrande.ttc",
             "/System/Library/Fonts/Helvetica.ttc",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -1188,5 +1222,57 @@ mod tests {
         assert!(!ids.is_empty(), "valid relative in-dir manifest entry must load");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn r20_13_macos_symbol_fallback_precedes_apple_symbols_and_scales_apple_symbols() {
+        const {
+            assert!(super::SHORTCUT_PILL_FONT_PT >= 11.5 && super::SHORTCUT_PILL_FONT_PT <= 12.0, "shortcut pill font must be 11.5-12.0 pt");
+        }
+        let sys_pos = super::OS_SYMBOL_FAMILIES.iter().position(|&f| f == "System Font").expect("System Font in OS_SYMBOL_FAMILIES");
+        let lucida_pos = super::OS_SYMBOL_FAMILIES.iter().position(|&f| f == "Lucida Grande").expect("Lucida Grande in OS_SYMBOL_FAMILIES");
+        let apple_pos = super::OS_SYMBOL_FAMILIES.iter().position(|&f| f == "Apple Symbols").expect("Apple Symbols in OS_SYMBOL_FAMILIES");
+        assert!(sys_pos < apple_pos && lucida_pos < apple_pos, "System Font and Lucida Grande must precede Apple Symbols");
+
+        let built = build_egui_font_definitions();
+        if cfg!(target_os = "macos") {
+            let prop_chain = &built.report.proportional_chain;
+            let mono_chain = &built.report.monospace_chain;
+            assert!(
+                prop_chain.iter().any(|k| k.starts_with("os_proportional_") && k.contains("helvetica")),
+                "expected Helvetica Neue as primary proportional face, chain={prop_chain:?}"
+            );
+            let apple_idx = prop_chain.iter().position(|k| k.contains("apple_symbols")).expect("Apple Symbols in proportional chain");
+            let sys_idx = prop_chain
+                .iter()
+                .position(|k| k.starts_with("os_symbol_0_") || k.starts_with("os_symbol_1_"))
+                .expect("System Font or Lucida Grande in proportional chain");
+            assert!(sys_idx < apple_idx, "System Font / Lucida Grande must precede Apple Symbols in proportional chain: {prop_chain:?}");
+
+            let mono_apple_idx = mono_chain.iter().position(|k| k.contains("apple_symbols")).expect("Apple Symbols in monospace chain");
+            let mono_sys_idx = mono_chain
+                .iter()
+                .position(|k| k.starts_with("os_symbol_0_") || k.starts_with("os_symbol_1_"))
+                .expect("System Font or Lucida Grande in monospace chain");
+            assert!(mono_sys_idx < mono_apple_idx, "System Font / Lucida Grande must precede Apple Symbols in monospace chain: {mono_chain:?}");
+
+            let apple_key = &prop_chain[apple_idx];
+            let apple_data = built.definitions.font_data.get(apple_key).expect("Apple Symbols font data");
+            assert!(apple_data.tweak.scale >= 1.2, "expected Apple Symbols FontTweak scale >= 1.2, got {}", apple_data.tweak.scale);
+
+            let ctx = egui::Context::default();
+            super::install_font_definitions(&ctx, built.definitions);
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.ctx().fonts_mut(|fonts| {
+                    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                        let id = egui::FontId::new(super::SHORTCUT_PILL_FONT_PT, family);
+                        for ch in ['⌘', '⇧', '⌥', '⌃'] {
+                            assert!(fonts.has_glyph(&id, ch), "missing macOS modifier `{ch}` in {id:?}");
+                        }
+                    }
+                });
+            })
+            .drop_without_applying_deltas();
+        }
     }
 }

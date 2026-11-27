@@ -138,11 +138,11 @@ impl ConvertArchetypeDialogState {
     }
 }
 
-fn convert_target_wire_name(kind: TableKind) -> &'static str {
+pub(crate) fn convert_target_wire_name(kind: TableKind) -> &'static str {
     match kind {
         TableKind::Column => "Column",
         TableKind::Grouped => "Grouped",
-        TableKind::Xy => "Xy",
+        TableKind::Xy => "XY",
         TableKind::MultipleVariables => "MultipleVariables",
         TableKind::Contingency => "Contingency",
         _ => "Column",
@@ -416,24 +416,16 @@ pub struct AssumptionDiagnosticBanner {
 }
 
 impl AssumptionDiagnosticBanner {
-    /// Derive a strictly diagnostics-only banner from `rs.checklist` (`Violated`, `Warn`, or
-    /// inconclusive/small-sample `Info`) and collect same-sheet detail tab IDs from `rs.tabs`.
+    /// Derive a strictly diagnostics-only banner from `rs` (`Violated`, `Warn`,
+    /// inconclusive/small-sample `Info`, or ambiguous/unbounded nonlinear-fit cells).
     #[must_use]
     pub fn from_result(rs: &ResultSheet) -> Option<Self> {
-        let rank = |status: ChecklistStatus| -> u8 {
-            match status {
-                ChecklistStatus::Violated => 3,
-                ChecklistStatus::Warn => 2,
-                ChecklistStatus::Info => 1,
-                ChecklistStatus::Pass => 0,
-            }
-        };
-        let flagged = rs
-            .checklist
-            .iter()
-            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
-            .max_by_key(|c| rank(c.status))?;
+        Self::from_result_localized(rs, "en")
+    }
 
+    /// Derive a strictly diagnostics-only banner from `rs` with localized nonlinear-fit dataset copy.
+    #[must_use]
+    pub fn from_result_localized(rs: &ResultSheet, locale: &str) -> Option<Self> {
         let mut detail_tab_ids: Vec<String> = rs
             .tabs
             .iter()
@@ -453,6 +445,128 @@ impl AssumptionDiagnosticBanner {
             detail_tab_ids = rs.tabs.iter().map(|tab| tab.id.clone()).collect();
         }
 
+        if matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(_)) {
+            return Self::from_nonlinear_result_localized(rs, locale, detail_tab_ids);
+        }
+
+        let rank = |status: ChecklistStatus| -> u8 {
+            match status {
+                ChecklistStatus::Violated => 3,
+                ChecklistStatus::Warn => 2,
+                ChecklistStatus::Info => 1,
+                ChecklistStatus::Pass => 0,
+            }
+        };
+        let flagged = rs
+            .checklist
+            .iter()
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
+            .max_by_key(|c| rank(c.status))?;
+
+        let status_label = match flagged.status {
+            ChecklistStatus::Violated => "assumption violated",
+            ChecklistStatus::Warn => "assumption warning",
+            ChecklistStatus::Info => "inconclusive / sample-size limitation",
+            ChecklistStatus::Pass => "checked",
+        };
+        let checked_count = rs
+            .checklist
+            .iter()
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
+            .count();
+        let summary = if checked_count > 1 {
+            format!("{} ({status_label}; {checked_count} checks flagged)", flagged.assumption)
+        } else {
+            format!("{} ({status_label})", flagged.assumption)
+        };
+
+        Some(Self {
+            source_result_id: rs.id.clone(),
+            severity: flagged.status,
+            summary,
+            diagnostic_metric: flagged.diagnostic_metric.clone(),
+            limitation_note: sanitize_diagnostics_only_text(flagged),
+            detail_tab_ids,
+        })
+    }
+
+    fn from_nonlinear_result_localized(rs: &ResultSheet, locale: &str, detail_tab_ids: Vec<String>) -> Option<Self> {
+        let rank = |status: ChecklistStatus| -> u8 {
+            match status {
+                ChecklistStatus::Violated => 3,
+                ChecklistStatus::Warn => 2,
+                ChecklistStatus::Info => 1,
+                ChecklistStatus::Pass => 0,
+            }
+        };
+        let flagged_items: Vec<&curvebook_doc::ChecklistItem> = rs
+            .checklist
+            .iter()
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
+            .collect();
+
+        let ident_item = flagged_items.iter().copied().find(|c| c.assumption.starts_with("Parameter identifiability"));
+        let other_items: Vec<&curvebook_doc::ChecklistItem> =
+            flagged_items.iter().copied().filter(|c| !c.assumption.starts_with("Parameter identifiability")).collect();
+
+        let has_ambiguous_cells = result_sheet_has_ambiguous_nl_cells(rs);
+        let ident_is_ambiguous = ident_item.is_some_and(|item| {
+            item.assumption.contains("Ambiguous")
+                || item.explanation.to_ascii_lowercase().contains("ambiguous")
+                || item.explanation.to_ascii_lowercase().contains("unbounded")
+                || item.explanation.to_ascii_lowercase().contains("redundant")
+                || item.explanation.to_ascii_lowercase().contains("unstable")
+        });
+
+        if ident_is_ambiguous || has_ambiguous_cells {
+            let ident_headline = format_nl_ambiguity_headline(rs, ident_item, locale);
+            let mut summary = ident_headline;
+            if !other_items.is_empty() {
+                let extra_names: Vec<&str> = other_items.iter().map(|c| c.assumption.as_str()).collect();
+                let also_lbl = crate::i18n::tr_or_fallback(locale, "results.banner.also_warning", "Also");
+                summary = format!("{summary} {also_lbl}: {}.", extra_names.join("; "));
+            }
+            let severity = flagged_items
+                .iter()
+                .map(|c| c.status)
+                .max_by_key(|s| rank(*s))
+                .filter(|s| matches!(s, ChecklistStatus::Violated | ChecklistStatus::Warn))
+                .unwrap_or(ChecklistStatus::Warn);
+            let diagnostic_metric =
+                ident_item.and_then(|c| c.diagnostic_metric.clone()).or_else(|| other_items.first().and_then(|c| c.diagnostic_metric.clone()));
+            let mut notes = Vec::new();
+            if let Some(id_item) = ident_item {
+                let note = sanitize_diagnostics_only_text(id_item);
+                if !note.is_empty() {
+                    notes.push(note);
+                }
+            } else {
+                notes.push(
+                    crate::i18n::tr_or_fallback(
+                        locale,
+                        "results.banner.ambiguous_summary",
+                        "Ambiguous / unbounded fit: profile-likelihood bounds did not close or parameters are unstable.",
+                    )
+                    .to_owned(),
+                );
+            }
+            for item in &other_items {
+                let note = sanitize_diagnostics_only_text(item);
+                if !note.is_empty() {
+                    notes.push(format!("{}: {note}", item.assumption));
+                }
+            }
+            return Some(Self {
+                source_result_id: rs.id.clone(),
+                severity,
+                summary,
+                diagnostic_metric,
+                limitation_note: notes.join(" "),
+                detail_tab_ids,
+            });
+        }
+
+        let flagged = flagged_items.into_iter().max_by_key(|c| rank(c.status))?;
         let status_label = match flagged.status {
             ChecklistStatus::Violated => "assumption violated",
             ChecklistStatus::Warn => "assumption warning",
@@ -494,6 +608,141 @@ impl AssumptionDiagnosticBanner {
             None => format!("! {}: {} — Inspect Diagnostics", self.summary, self.limitation_note),
         }
     }
+}
+
+fn contains_ascii_ci(haystack: &str, needle_lower: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle_lower.as_bytes();
+    if n.is_empty() || h.len() < n.len() {
+        return false;
+    }
+    h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+fn is_ambiguous_nl_cell(cell: &curvebook_doc::ResultCell) -> bool {
+    match cell {
+        curvebook_doc::ResultCell::ConfidenceInterval { lower, upper } => {
+            matches!(lower, curvebook_doc::CiBound::Open) || matches!(upper, curvebook_doc::CiBound::Open)
+        }
+        curvebook_doc::ResultCell::Text(s) => s.contains("???") || contains_ascii_ci(s, "ambiguous") || contains_ascii_ci(s, "unstable"),
+        _ => false,
+    }
+}
+
+pub(crate) fn result_sheet_has_ambiguous_nl_cells(rs: &ResultSheet) -> bool {
+    rs.tabs.iter().any(|tab| tab.rows.iter().any(|row| row.iter().any(is_ambiguous_nl_cell)))
+}
+
+fn is_generic_metric_col_header(hdr: &str) -> bool {
+    let lower = hdr.trim().to_ascii_lowercase();
+    if lower.is_empty() {
+        return true;
+    }
+    const METRIC_TERMS: &[&str] = &[
+        "best-fit",
+        "value",
+        "std. error",
+        "std error",
+        "se",
+        "95% ci",
+        "90% ci",
+        "99% ci",
+        "ci (",
+        "profile",
+        "p value",
+        "p-value",
+        "df",
+        "r2",
+        "r squared",
+        "r²",
+        "aicc",
+        "sum of squares",
+        "sy.x",
+        "status",
+        "note",
+        "dataset",
+        "parameter",
+        "metric",
+        "ambiguous",
+    ];
+    METRIC_TERMS.iter().any(|term| lower.contains(term))
+}
+
+fn format_nl_ambiguity_headline(rs: &ResultSheet, ident_item: Option<&curvebook_doc::ChecklistItem>, locale: &str) -> String {
+    if let Some(item) = ident_item {
+        let trimmed = item.explanation.trim();
+        if let Some(rest) = trimmed.strip_prefix("Ambiguous / unbounded fits in ")
+            && let Some((counts_part, names_and_more)) = rest.split_once(" datasets (")
+            && let Some((k_str, n_str)) = counts_part.split_once(" of ")
+        {
+            let names = names_and_more.split(')').next().unwrap_or(names_and_more).trim();
+            if locale == "en" {
+                return format!("Ambiguous / unbounded fits in {} of {} datasets ({names}).", k_str.trim(), n_str.trim());
+            }
+            let tpl = crate::i18n::tr_or_fallback(
+                locale,
+                "results.banner.ambiguous_datasets",
+                "Ambiguous / unbounded fits in {k} of {n} datasets ({names}).",
+            );
+            return tpl.replace("{k}", k_str.trim()).replace("{n}", n_str.trim()).replace("{names}", names);
+        }
+    }
+
+    let mut failing_datasets: Vec<String> = Vec::new();
+    let mut total_dataset_cols = 0usize;
+    for tab in &rs.tabs {
+        if matches!(tab.kind, ResultTabKind::Diagnostics | ResultTabKind::CovarianceMatrix | ResultTabKind::Residuals | ResultTabKind::NormalQq) {
+            continue;
+        }
+        let col_count = tab.column_headers.len();
+        if col_count == 0 {
+            continue;
+        }
+        let non_metric_cols: Vec<(usize, &str)> =
+            tab.column_headers.iter().enumerate().filter_map(|(c, hdr)| (!is_generic_metric_col_header(hdr)).then_some((c, hdr.trim()))).collect();
+        if !non_metric_cols.is_empty() && total_dataset_cols == 0 {
+            total_dataset_cols = non_metric_cols.len();
+        }
+        for (c, hdr) in non_metric_cols {
+            let col_has_ambig = tab.rows.iter().any(|row| row.get(c).is_some_and(is_ambiguous_nl_cell));
+            if col_has_ambig && !failing_datasets.iter().any(|d| d == hdr) {
+                failing_datasets.push(hdr.to_owned());
+            }
+        }
+        if !failing_datasets.is_empty() {
+            break;
+        }
+    }
+
+    let curve_total = rs.fitted_curves.iter().map(|c| c.data_set_index).collect::<std::collections::BTreeSet<_>>().len();
+    let total_ds = total_dataset_cols.max(curve_total).max(failing_datasets.len());
+    if !failing_datasets.is_empty() {
+        if total_ds > 1 {
+            let shown = if failing_datasets.len() > 3 { format!("{}, …", failing_datasets[..3].join(", ")) } else { failing_datasets.join(", ") };
+            let tpl = crate::i18n::tr_or_fallback(
+                locale,
+                "results.banner.ambiguous_datasets",
+                "Ambiguous / unbounded fits in {k} of {n} datasets ({names}).",
+            );
+            return tpl.replace("{k}", &failing_datasets.len().to_string()).replace("{n}", &total_ds.to_string()).replace("{names}", &shown);
+        }
+        let tpl = crate::i18n::tr_or_fallback(locale, "results.banner.ambiguous_dataset_one", "Ambiguous / unbounded fit in {name}.");
+        return tpl.replace("{name}", &failing_datasets[0]);
+    }
+
+    if let Some(item) = ident_item {
+        let trimmed = item.explanation.trim();
+        if locale == "en" && !trimmed.is_empty() && (contains_ascii_ci(trimmed, "ambiguous") || contains_ascii_ci(trimmed, "unbounded")) {
+            return trimmed.to_owned();
+        }
+    }
+
+    crate::i18n::tr_or_fallback(
+        locale,
+        "results.banner.ambiguous_summary",
+        "Ambiguous / unbounded fit: profile-likelihood bounds did not close or parameters are unstable.",
+    )
+    .to_owned()
 }
 
 // ============================================================================

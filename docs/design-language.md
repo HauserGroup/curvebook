@@ -34,11 +34,13 @@ Interface colours are derived deterministically from perceptual seeds in `ThemeS
 In a scientific workstation, chromatic saturation belongs to experimental curves, data groups, and statistical diagnostics—not to surrounding chrome:
 
 1. **`[Implemented]` Neutral chrome:** toolbars, docks, inspectors, and dialogs remain predominantly neutral grey, keeping UI chrome visually separate from default **Okabe–Ito** categorical series and **Viridis** / **Cividis** / **Plasma** continuous colormaps in `crates/palette`.
-2. **`[Target]` Strict single-accent budget:** the interface accent colour is limited exclusively to:
-   - the single `Primary` action button on a surface,
-   - active selection cues (the active row in the focused pane, active underline-tab rule, active checkbox/segment indicator, and the `2 pt` top accent bar on the focused split-pane header), and
-   - the transient `2 pt` keyboard focus ring (`focus_ring`).
-   - Accent colour is **not** used on static spreadsheet column headers (`X`, `Y1`), inline `+ New…` creation rows, passive pane labels, or permanent full-pane border cages around blank canvas or table space.
+2. **`[Implemented]` Strict single-accent budget & zero-exception blue-means-link rule:** the interface accent colour is limited exclusively to:
+   - the single `Primary` action button fill on a surface (`on_accent` over `accent_strong`),
+   - active selection cues (the active row in the focused pane, active underline-tab rule, active checkbox/segment indicator, and the `2 pt` top accent bar on the focused split-pane header),
+   - the transient `2 pt` keyboard focus ring (`focus_ring`),
+   - non-text `LinkedDataRegion` borders and status dots (`link_blue`, never rendered as foreground text), and
+   - **clickable links exclusively** via `ui_kit::link_button` (`text_link` foreground, `CursorIcon::PointingHand`, hover underline, `>= 24 pt` target height).
+   - Blue foreground text is **never** used for non-link labels (zero exceptions): static spreadsheet column headers (`X`, `Y1`) and corner archetype buttons (`XY`), `NUM` role badges (neutral `text_strong` on `surface_recessed`), section headings (`type.section`, bold `text_strong`), formula prefixes (`fx (…) =`), status/warning readouts, frozen/provenance badges (`Frozen`, `3 sources`), inline `+ New` rows, or permanent full-pane border cages around blank canvas or table space.
 3. **`[Implemented]` Never colour alone:** error, warning, stale, excluded-cell, and broken-link states always combine colour with a distinct icon, stroke pattern, typography style, or text label.
 4. **Decoupled figure styling:** exported chart palettes (`crates/palette`) and publication figure typography, inset placement, and axis autoranging (`crates/chart`, tracked independently in [`R20.5`](history/roadmap/r20.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging)) remain decoupled from UI chrome tokens.
 
@@ -81,7 +83,7 @@ Every interactive role maps to one recognizable visual control type instead of s
 
 - **Crisp vector disclosures & sheet icons:** paint disclosure triangles (`1.5 pt` stroke, pointing inward when collapsed and downward when expanded), sidebar collapse/expand glyphs, and frameless semantic sheet-kind icons directly from CurveBook's vector icon set ([`ASSETS.md`](../ASSETS.md)). Never use dot-like Unicode bullets for expand/collapse controls or checkbox-like framed checkmarks/slashes for sheet categories.
 - **Unambiguous state markers:** reserve the bullet glyph (`•`) exclusively for unsaved document dirty state (never for active toolbar toggles such as `Split`).
-- **Clear micro-copy & stable IDs:** write boolean checkboxes as affirmative noun phrases (`Data points`, `Fitted curve overlay`), put ellipses (`…`) only at the trailing end of labels that open a modal dialog (`Format Graph…`, `Apply Style From…`), prefer `".pzfx files"` and `".prism files"` naming where appropriate for imported project files (specifically allowed over clean-room and branding principles by `AGENTS.md` §1 and `cargo xtask brands`, replacing opaque labels such as `"External Archive"` or `"XML Project"`), and decouple concise visible labels (`Gallery`, `Annotations`) from longer Command Palette descriptions (`Toggle Portfolio Gallery`) without renaming stable `UI_COMMANDS` or `FrameInspectMeta` IDs.
+- **Clear micro-copy & stable IDs:** write boolean checkboxes as affirmative noun phrases (`Data points`, `Fitted curve overlay`), never put `…` or `...` on buttons, menus, or text-input placeholders (reserve `…` strictly for runtime text truncation and active progress copy such as `"Listening…"` / `"Solving…"`, and `⋯` for overflow triggers per `R20.15`), prefer `".pzfx files"` and `".prism files"` naming where appropriate for imported project files (specifically allowed over clean-room and branding principles by `AGENTS.md` §1 and `cargo xtask brands`, replacing opaque labels such as `"External Archive"` or `"XML Project"`), and decouple concise visible labels (`Gallery`, `Annotations`) from longer Command Palette descriptions (`Toggle Portfolio Gallery`) without renaming stable `UI_COMMANDS` or `FrameInspectMeta` IDs.
 
 ---
 
@@ -101,7 +103,7 @@ Visual consistency must pair with clear structural ownership so the same sheets 
 
 ### Implemented Gates (`[Implemented]`)
 
-- **Raw-value ratchet (`cargo xtask design-tokens`):** scans `crates/ui-egui/src` outside the canonical token definitions, icon/brand vectors, and tests (honouring explicit `// design-token-exempt: <reason>` annotations for scene/canvas geometry) and fails CI if raw colour or size literals exceed the tracked ceiling.
+- **Raw-value & blue-link ratchet (`cargo xtask design-tokens`):** scans `crates/ui-egui/src` outside the canonical token definitions, icon/brand vectors, and tests (honouring explicit `// design-token-exempt: <reason>` annotations for scene/canvas geometry) and fails CI if raw colour or size literals exceed the tracked ceiling, unconstrained `Area` popups appear (`R20.16`), or blue foreground text (`.accent` / `.link_blue` / `.text_link`) appears outside `ui_kit::link_button` (`R20.14`, strict zero-exception blue-means-link policy).
 - **Specimen screenshots (`cargo xtask screenshots --check`):** renders the dev-only widget specimen view across `Light`, `Dark`, and `HighContrast` (`docs/images/specimen-{light,dark,high-contrast}.png`).
 - **Frame geometry, non-overlap & target-size gates (`verify_egui_frame_parity` in [`driver.rs`](../crates/ui-egui/src/egui_shell/driver.rs) and the integration suite [`zz_overlap_probe.rs`](../crates/ui-egui/tests/r15_shell_suite/zz_overlap_probe.rs)):** verifies on settled AccessKit + `FrameInspectMeta` trees across narrow (`640 × 420 pt`), standard (`1280 × 800 pt`), and wide (`1440 × 600 pt`) windows, `200%` scale, and long-word locales that:
   - no two enabled clickable leaf controls overlap on the same `ZLayer`,
@@ -122,9 +124,33 @@ Visual consistency must pair with clear structural ownership so the same sheets 
 
 ---
 
+## 7. Cross-Platform Conventions & 4-Layer Keyboard Shortcut Stack (`[Implemented]`)
+
+Everything in `ui_kit` stays shared across macOS, Windows, and Linux; **only three muscle-memory boundaries adapt by target OS**:
+
+| Convention | macOS | Windows | Linux |
+|---|---|---|---|
+| **Menu bar** | Native `NSMenu` (`muda`): `CurveBook` app menu (`About CurveBook`, `Settings`, `Hide`, `Quit CurveBook`) plus `Window` menu ahead of `Help`; omits `About` (`Help`), `Settings` (`Edit`), and `Quit` (`File`) from top-level menus when `host_draws_menu_bar == true`. | In-window menu bar (`host_draws_menu_bar == false`): `File › Quit`, `Edit › Settings`, `Help › About CurveBook`. | Same in-window layout as Windows (or native desktop menu bar if provided). |
+| **Shortcuts** | Symbolic `⌘`, `⇧`, `⌥`, `⌃` glyphs (`format_shortcut_for_os`). | `Ctrl+`, `Shift+`, `Alt+` labels (`format_shortcut_for_os`) plus secondary `Ctrl+Y` Redo alias alongside `Ctrl+Shift+Z` (`!cfg!(target_os = "macos")`). | Same `Ctrl+`/`Shift+`/`Alt+` labels and secondary `Ctrl+Y` Redo alias as Windows. |
+| **Modal footer order** | Unified trailing primary: `[Leading Destructive/Secondary]     [Cancel] [Primary]` (e.g. `[Don't Save]     [Cancel] [Save]`). Lightweight panels such as `About CurveBook` dismiss on `Esc`, outside click, or top-right `×` without a blocking `OK` button. | Unified trailing primary (`[Don't Save]     [Cancel] [Save]`), keeping desktop layout parity and deterministic cross-OS verification. | Unified trailing primary (`[Don't Save]     [Cancel] [Save]`), matching GNOME/GTK4 conventions. |
+
+### 4-Layer Keyboard Shortcut Reference Stack (Precedence Order)
+
+Shortcuts resolve against a clean-room four-layer precedence stack so platform and accessibility ergonomics are never broken by application shortcuts:
+
+1. **OS & Core App (Never override):** Apple HIG, Microsoft Fluent/WinUI, GNOME HIG / KDE Standard Shortcuts, and IBM CUA system actions (`New` `Cmd/Ctrl+N`, `Open` `Cmd/Ctrl+O`, `Save` `Cmd/Ctrl+S`, `Save As` `Cmd/Ctrl+Shift+S`, `Print` `Cmd/Ctrl+P`, `Close Window` `Cmd/Ctrl+W`, `Quit` `Cmd/Ctrl+Q`, `Undo` `Cmd/Ctrl+Z`, `Redo` `Cmd/Ctrl+Shift+Z` + non-macOS `Ctrl+Y`, `Cut`/`Copy`/`Paste` `X`/`C`/`V`, `Find` `Cmd/Ctrl+F`, `Settings` `Cmd/Ctrl+,`, `Zoom In`/`Out`/`Fit` `Cmd/Ctrl+=` / `-` / `0`, `Cycle Pane` `F6`/`Shift+F6`, `Esc`).
+2. **Widget Navigation & Accessibility:** **W3C WAI-ARIA Authoring Practices Guide (APG)** patterns for `grid` (`Arrows`, `Shift+Arrows`, `Home`/`End`, `PageUp`/`PageDown`, `F2`, `Enter`/`Tab`, `Delete`/`Backspace`), `tree` (`↑`/`↓`, `←`/`→`), `tablist`, and `dialog`/`menu` focus containment.
+3. **Spreadsheet Grid Muscle Memory:** Open tabular keyboard idioms (`Cmd/Ctrl+Arrows` block-edge navigation, `Cmd/Ctrl+Shift+Arrows` selection extension, `Shift+Space` row selection, `Ctrl+Space` column selection, `Cmd/Ctrl+Shift+V` Paste Special).
+4. **Modern Workbench & Domain Actions:** Non-overloaded workbench shortcuts (`Cmd/Ctrl+K` Command Palette, `Cmd/Ctrl+B` Project Navigator, `Cmd/Ctrl+Shift+L` Family Strip, `Cmd/Ctrl+Shift+I` Format Inspector, `Cmd/Ctrl+\` Split View, `Cmd/Ctrl+Shift+T` New Data Table, `Cmd/Ctrl+Shift+P` Edit Analysis Parameters, `Cmd/Ctrl+Shift+A` Analyze, `Cmd/Ctrl+Shift+G` Change Graph Type).
+
+---
+
 ## References
 
 - **Apple Inc.** *Human Interface Guidelines.* <https://developer.apple.com/design/human-interface-guidelines/>
+- **Microsoft Corp.** *Windows App Design & Keyboard Interactions (Fluent / WinUI).* <https://learn.microsoft.com/en-us/windows/apps/design/>
+- **GNOME Project.** *GNOME Human Interface Guidelines.* <https://developer.gnome.org/hig/>
+- **W3C WAI (2023).** *ARIA Authoring Practices Guide (APG).* <https://www.w3.org/WAI/ARIA/apg/>
 - **W3C (2023).** *Web Content Accessibility Guidelines (WCAG) 2.2*, W3C Recommendation, 5 October 2023 — SC 1.4.3 Contrast (Minimum), SC 1.4.6 Contrast (Enhanced), SC 1.4.11 Non-text Contrast (Level AA), SC 2.4.7 Focus Visible, SC 2.4.11 Focus Not Obscured (Minimum), and SC 2.5.8 Target Size (Minimum, Level AA); applied to desktop software by analogy per *Guidance on Applying WCAG 2.2 to Non-Web Information and Communications Technologies (WCAG2ICT)*. <https://www.w3.org/TR/WCAG22/> · <https://www.w3.org/TR/wcag2ict-22/>
 - **Okabe, M. & Ito, K. (2008).** *Color Universal Design (CUD): How to make figures and presentations that are friendly to colorblind people.* Jikei Medical School.
 - **Ottosson, B. (2020).** *A perceptual color space for image processing* (OKLab and OKLCH). <https://bottosson.github.io/posts/oklab/>

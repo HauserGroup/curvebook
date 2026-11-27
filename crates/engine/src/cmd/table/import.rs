@@ -820,13 +820,13 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ImportPrismParams {
-    /// Filesystem path to external archive.
+    /// Filesystem path to a .prism file.
     #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
-    /// Base64-encoded external archive bytes.
+    /// Base64-encoded .prism file bytes.
     #[schemars(length(min = 1))]
     pub(super) bytes_base64: Option<String>,
-    /// Raw byte array of archive contents.
+    /// Raw byte array of .prism file contents.
     pub(super) bytes: Option<Vec<u8>>,
     /// Merge imported sheets into existing document instead of replacing (default false).
     pub(super) merge: Option<bool>,
@@ -1007,19 +1007,19 @@ fn finish_project_import_report(
 
 fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<CommandOutcome, EngineError> {
     let bytes = if let Some(path) = p.path.as_deref() {
-        ctx.session.path_policy.read_binary_file(path, "archive", MAX_ARCHIVE_FILE_BYTES)?
+        ctx.session.path_policy.read_binary_file(path, ".prism file", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         decode_base64(b64)?
     } else if let Some(raw_bytes) = p.bytes {
-        check_inline_payload_len(raw_bytes.len(), MAX_ARCHIVE_FILE_BYTES, "archive")?;
+        check_inline_payload_len(raw_bytes.len(), MAX_ARCHIVE_FILE_BYTES, ".prism file")?;
         raw_bytes
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPrism requires `path`, `bytes_base64`, or `bytes`")
-            .with_remediation("Supply `path`, `bytes_base64`, or `bytes`."));
+            .with_remediation("Supply a .prism `path`, `bytes_base64`, or `bytes`."));
     };
 
     let report = import_prism_bytes(&bytes)?;
-    finish_project_import_report(ctx, "table.importPrism", "imported external archive", report, p.merge.unwrap_or(false))
+    finish_project_import_report(ctx, "table.importPrism", "imported .prism file", report, p.merge.unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------
@@ -1029,12 +1029,12 @@ fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<C
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ImportPzfxParams {
-    /// Inline XML project string.
+    /// Inline .pzfx XML string.
     pub(super) xml: Option<String>,
-    /// Filesystem path to XML project file.
+    /// Filesystem path to a .pzfx file.
     #[schemars(length(min = 1))]
     pub(super) path: Option<String>,
-    /// Base64-encoded XML project bytes.
+    /// Base64-encoded .pzfx file bytes.
     #[schemars(length(min = 1))]
     pub(super) bytes_base64: Option<String>,
     /// Merge imported sheets into existing document instead of replacing (default false).
@@ -1044,20 +1044,20 @@ pub(super) struct ImportPzfxParams {
 pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPzfxParams = parse_params(&command_schema::<ImportPzfxParams>(), raw)?;
     let report = if let Some(xml) = p.xml.as_deref() {
-        check_inline_payload_len(xml.len(), MAX_XML_BYTES, "XML")?;
+        check_inline_payload_len(xml.len(), MAX_XML_BYTES, ".pzfx XML")?;
         import_pzfx_str(xml)?
     } else if let Some(path) = p.path.as_deref() {
-        let bytes = ctx.session.path_policy.read_binary_file(path, "XML file", MAX_XML_BYTES)?;
+        let bytes = ctx.session.path_policy.read_binary_file(path, ".pzfx file", MAX_XML_BYTES)?;
         import_pzfx_bytes(&bytes)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         let bytes = decode_base64(b64)?;
         import_pzfx_bytes(&bytes)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importPzfx requires `path`, `xml`, or `bytes_base64`")
-            .with_remediation("Provide an XML `path`, inline `xml` string, or `bytes_base64`."));
+            .with_remediation("Provide a .pzfx `path`, inline `xml` string, or `bytes_base64`."));
     };
 
-    finish_project_import_report(ctx, "table.importPzfx", "imported XML project", report, p.merge.unwrap_or(false))
+    finish_project_import_report(ctx, "table.importPzfx", "imported .pzfx file", report, p.merge.unwrap_or(false))
 }
 
 // ---------------------------------------------------------------------------

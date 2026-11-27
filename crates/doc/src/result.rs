@@ -229,14 +229,17 @@ pub enum ResultStatus {
     },
 }
 
-/// Confidence-interval endpoint supporting unbounded profile-likelihood plateaus (`CiBound::Open`;
-/// `docs/implementation/curve-fitting-implementation.md` §2.2).
+/// Confidence-interval endpoint supporting unbounded profile-likelihood plateaus (`CiBound::Open`)
+/// and uncomputed intervals (`CiBound::Unavailable`); see
+/// `docs/implementation/curve-fitting-implementation.md` §2.2.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CiBound {
     /// Resolved finite endpoint in the parameter's or effect size's native scale.
     Finite(f64),
-    /// Profile-likelihood or score threshold was not crossed within the identifiable search domain (rendered as `"???"` / open interval rather than `NaN`).
+    /// Profile-likelihood or survival bound threshold was not crossed within the identifiable search domain (open / unbounded interval).
     Open,
+    /// Confidence interval could not be computed (for example `DF = 0`, robust Cauchy, or singular covariance).
+    Unavailable,
 }
 
 /// Typed cell inside a [`ResultTab`].
@@ -480,6 +483,24 @@ pub struct ChecklistItem {
     pub remediation: Option<RemediationKind>,
 }
 
+/// Cell-level diagnostic metadata attached to a coordinate in [`ResultSheet::tabs`]
+/// (e.g. preserving raw unstable solver iterates for tooltips and JSON inspection without
+/// leaking unidentifiable values into [`ResultSheet::scalars`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResultCellDetail {
+    /// Identifier of the target [`ResultTab`] (e.g. `"nonlinear_parameters"`).
+    pub tab_id: String,
+    /// Zero-based row index inside `tab.rows`.
+    pub row: usize,
+    /// Zero-based column index inside `tab.rows[row]`.
+    pub col: usize,
+    /// Optional finite numeric raw solver iterate behind a masked `"Unstable"` cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_value: Option<f64>,
+    /// Human-readable detail string for hover tooltips, Inspect Details, and JSON export.
+    pub detail: String,
+}
+
 /// Complete output node produced by running an [`AnalysisSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ResultSheet {
@@ -505,6 +526,9 @@ pub struct ResultSheet {
     pub eliminated_outliers: Vec<crate::SourceCellId>,
     /// Plain-language assumption and data-hygiene diagnostics.
     pub checklist: Vec<ChecklistItem>,
+    /// Optional per-cell diagnostic metadata (such as raw iterates behind `"Unstable"` cells).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_details: Vec<ResultCellDetail>,
     /// Sticky-note callouts attached to this result sheet.
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
@@ -527,9 +551,16 @@ impl ResultSheet {
             fitted_curves: Vec::new(),
             eliminated_outliers: Vec::new(),
             checklist: Vec::new(),
+            cell_details: Vec::new(),
             floating_notes: Vec::new(),
             color_tag: None,
         })
+    }
+
+    /// Look up attached diagnostic metadata for `(tab_id, row, col)` if present.
+    #[must_use]
+    pub fn cell_detail(&self, tab_id: &str, row: usize, col: usize) -> Option<&ResultCellDetail> {
+        self.cell_details.iter().find(|d| d.tab_id == tab_id && d.row == row && d.col == col)
     }
 
     /// Validate result sheet identifier bounds, analysis spec, finite numeric outputs, and floating notes.
@@ -590,6 +621,16 @@ impl ResultSheet {
                         _ => {}
                     }
                 }
+            }
+        }
+        for detail in &self.cell_details {
+            if detail.raw_value.is_some_and(|v| !v.is_finite()) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Column,
+                    row: detail.row,
+                    col: detail.col,
+                    reason: "result.cell_details.raw_value",
+                });
             }
         }
         for pc in &self.pairwise_comparisons {
@@ -733,6 +774,8 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             #[serde(default)]
             eliminated_outliers: Vec<crate::SourceCellId>,
             checklist: Vec<ChecklistItem>,
+            #[serde(default)]
+            cell_details: Vec<ResultCellDetail>,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
         }
@@ -749,6 +792,7 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             fitted_curves: raw.fitted_curves,
             eliminated_outliers: raw.eliminated_outliers,
             checklist: raw.checklist,
+            cell_details: raw.cell_details,
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
         };
@@ -789,4 +833,20 @@ pub fn format_significant_digits(value: f64, sig_figs: u8) -> String {
     let decimals = (digits as i32 - 1 - rounded_exp).max(0) as usize;
     let rounded_val = sci.parse::<f64>().unwrap_or(value);
     format!("{rounded_val:.decimals$}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ci_bound_unavailable_serde_roundtrip_is_backwards_compatible() {
+        let cell = ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable };
+        let encoded = serde_json::to_string(&cell).unwrap();
+        let decoded: ResultCell = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, cell);
+
+        let open_cell: ResultCell = serde_json::from_str(r#"{"ConfidenceInterval":{"lower":"Open","upper":{"Finite":2.5}}}"#).unwrap();
+        assert_eq!(open_cell, ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.5) });
+    }
 }

@@ -36,20 +36,14 @@ fn infer_slot_action_rank(widget_id: &str, role: &str, command_id: Option<&str>)
     match widget_id {
         "modal.ok"
         | "dialog.button.save"
-        | "dialog.feedback.open_github"
         | "welcome.clone_modal.apply"
         | "welcome.action.create"
         | "power.commit"
         | "import.commit"
         | "transform.commit" => return Some(ActionRank::Primary),
-        "modal.cancel"
-        | "modal.apply"
-        | "modal.close"
-        | "dialog.button.cancel"
-        | "dialog.button.dont_save"
-        | "dialog.feedback.reset"
-        | "dialog.feedback.copy_markdown"
-        | "welcome.clone_modal.close" => return Some(ActionRank::Secondary),
+        "modal.cancel" | "modal.apply" | "modal.close" | "dialog.button.cancel" | "dialog.button.dont_save" | "welcome.clone_modal.close" => {
+            return Some(ActionRank::Secondary);
+        }
         _ => {}
     }
     if widget_id.starts_with("toolbar.") {
@@ -308,7 +302,7 @@ mod tests {
                     FrameInspectEntryInput {
                         widget_id: "toolbar.analyze",
                         role: "Button",
-                        label: "Analyze...",
+                        label: "Analyze",
                         command_id: Some("ui.analyze.open"),
                         value: None,
                         enabled: true,

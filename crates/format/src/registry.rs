@@ -360,9 +360,8 @@ const DESC_TEMPLATE: FormatDescriptor =
 pub const DESC_PLATE_MAP: FormatDescriptor =
     FormatDescriptor { id: "cbplate", label: "CurveBook Plate Map Layout", extensions: &["cbplate"], kind: FormatKind::Template };
 const DESC_PRISM: FormatDescriptor =
-    FormatDescriptor { id: "prism", label: "External Project Archive (.prism)", extensions: &["prism"], kind: FormatKind::ForeignProject };
-const DESC_PZFX: FormatDescriptor =
-    FormatDescriptor { id: "pzfx", label: "PZFX XML Document", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
+    FormatDescriptor { id: "prism", label: ".prism files", extensions: &["prism"], kind: FormatKind::ForeignProject };
+const DESC_PZFX: FormatDescriptor = FormatDescriptor { id: "pzfx", label: ".pzfx files", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
 const DESC_XLSX: FormatDescriptor =
     FormatDescriptor { id: "xlsx", label: "Spreadsheet Workbook (.xlsx)", extensions: &["xlsx"], kind: FormatKind::ForeignProject };
 const DESC_CSV: FormatDescriptor =

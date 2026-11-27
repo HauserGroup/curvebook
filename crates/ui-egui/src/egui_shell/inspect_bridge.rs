@@ -280,7 +280,6 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
         ActiveDialog::ExportFigure { .. }
         | ActiveDialog::Print { .. }
         | ActiveDialog::Checkpoints
-        | ActiveDialog::Feedback
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
         | ActiveDialog::CsvExportOptions(_)
@@ -3664,6 +3663,14 @@ fn handle_shell_global_shortcuts(
             | "table.excludeCells"
             | "ui.grid.excludeWithReason"
             | "table.clearCells" => false,
+            "ui.zoom.in" => {
+                let custom = app.shortcuts.active_combo("ui.zoom.in").is_some_and(|c| c != "Cmd+=");
+                active_canvas_target.is_some() || custom
+            }
+            "ui.zoom.out" => {
+                let custom = app.shortcuts.active_combo("ui.zoom.out").is_some_and(|c| c != "Cmd+-");
+                active_canvas_target.is_some() || custom
+            }
             "ui.zoom.fitSheet" => {
                 let doc = app.document();
                 let canvas_moved = (app.canvas_dialogs.canvas.zoom - 1.0).abs() > 0.001
@@ -3679,6 +3686,7 @@ fn handle_shell_global_shortcuts(
     }) {
         match m.command_id.as_str() {
             "ui.editParams.open" => intents.push_ui("ui.editParams.open", json!({})),
+            "app.preferences" => intents.push(UiIntent::OpenPreferences { category: None }),
             "ui.sheet.find" => intents.push(UiIntent::OpenSheetFind),
             "ui.palette.open" => intents.push(UiIntent::SetPaletteOpen { open: true }),
             "sheet.createData" => intents.push(UiIntent::SetLauncherOpen { open: true }),
@@ -3720,17 +3728,13 @@ fn handle_shell_global_shortcuts(
         }
     }
 
-    // Standard Windows/Linux Ctrl+Y / Cmd+Y Redo convenience fallback when `Cmd+Y` is not bound to
-    // another command and `edit.redo` remains on its default binding (`Cmd+Shift+Z`).
-    let redo_y_allowed = app.shortcuts.active_combo("edit.redo") == Some("Cmd+Shift+Z")
+    // Standard Windows/Linux Ctrl+Y Redo convenience fallback when `Ctrl+Y`/`Cmd+Y` is not bound
+    // to another command and `edit.redo` remains on its default binding (`Cmd+Shift+Z`).
+    let redo_y_allowed = !cfg!(target_os = "macos")
+        && app.shortcuts.active_combo("edit.redo") == Some("Cmd+Shift+Z")
         && !has_registered_shortcut(app, on_result_sheet, Key::Y, Modifiers::COMMAND)
         && !has_registered_shortcut(app, on_result_sheet, Key::Y, Modifiers::CTRL);
-    if redo_y_allowed
-        && ctx.input_mut(|i| {
-            i.consume_key(Modifiers::COMMAND, Key::Y) || i.consume_key(Modifiers::CTRL, Key::Y) || i.consume_key(Modifiers::MAC_CMD, Key::Y)
-        })
-        && app.session().redo_depth() > 0
-    {
+    if redo_y_allowed && ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Y)) && app.session().redo_depth() > 0 {
         intents.push_engine("edit.redo", json!({}));
     }
 
@@ -4322,8 +4326,10 @@ mod tests {
         };
 
         // 1. FitModal (`fit.nonlinear` -> `fit.tab.output` -> `fit.diagnostics.r2.input`)
-        let nl_rs_id = open_edit(&mut app, "ds-fit", "fit.nonlinear")?;
+        let pending_nl_id = open_edit(&mut app, "ds-fit", "fit.nonlinear")?;
+        assert!(app.document().result_sheet(&pending_nl_id).is_none(), "R20.20 defers creation until FitModal commit");
         verify_textbox_enter_commit(&mut app, Some("fit.tab.output"), "fit.diagnostics.r2.input", "0.95")?;
+        let nl_rs_id = app.document().result_sheets.last().map(|r| r.id.clone()).ok_or_else(|| String::from("missing committed fit sheet"))?;
         let committed_r2 = app.document().result_sheet(&nl_rs_id).and_then(|rs| match &rs.analysis.kind {
             curvebook_doc::AnalysisKind::NonlinearRegression(fit) => fit.flag_r_squared_below,
             _ => None,

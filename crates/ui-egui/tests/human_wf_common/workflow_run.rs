@@ -1175,7 +1175,7 @@ fn compare_ci_bound(wf_id: &str, tc: &ReferenceTabCell, gui_b: CiBound, ref_b: C
             approx_eq(g, r, tc.abs_tol, tc.rel_tol),
             format!("{wf_id}: tab ({},{},{}) CI bound mismatch: gui={g:?}, ref={r:?}", tc.tab_index, tc.row, tc.col),
         ),
-        (CiBound::Open, CiBound::Open) => Ok(()),
+        (CiBound::Open, CiBound::Open) | (CiBound::Unavailable, CiBound::Unavailable) => Ok(()),
         _ => Err(format!("{wf_id}: tab ({},{},{}) CI bound kind mismatch: gui={gui_b:?}, ref={ref_b:?}", tc.tab_index, tc.row, tc.col)),
     }
 }

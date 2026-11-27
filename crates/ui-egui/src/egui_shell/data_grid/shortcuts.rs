@@ -15,7 +15,7 @@ use super::inline_edit::begin_inline_edit;
 use super::linked_regions::open_link_popover;
 use super::shared::{
     AuxInlineTarget, MultiGridCtx, MultiGridFrameState, MultiGridGeom, format_cell_into, initial_edit_text_for_cell, is_grid_focus_active,
-    pressed_key_event_modifiers,
+    pressed_key_event_modifiers, push_select_x_if_needed,
 };
 
 pub(super) fn is_x_column_readonly(ds: &DataSheet) -> bool {
@@ -26,10 +26,23 @@ fn x_clipboard_cache_id() -> Id {
     Id::unique("r15_6_grid_x_clipboard")
 }
 
-pub(super) fn copy_x_cell_to_clipboard(ui: &Ui, app: &UiApp, ds: &DataSheet, row: usize, subcol: usize) {
+pub(super) fn copy_x_range_to_clipboard(ui: &Ui, app: &UiApp, ds: &DataSheet, r0: usize, r1: usize, s0: usize, s1: usize) {
     let mut text = String::new();
-    if let Some(cell) = ds.archetype.x_or_time_cell(row, subcol) {
-        format_cell_into(cell, &app.locale_preset, &mut text);
+    let mut cell_buf = String::new();
+    for row in r0..=r1 {
+        if row > r0 {
+            text.push('\n');
+        }
+        for subcol in s0..=s1 {
+            if subcol > s0 {
+                text.push('\t');
+            }
+            cell_buf.clear();
+            if let Some(cell) = ds.archetype.x_or_time_cell(row, subcol) {
+                format_cell_into(cell, &app.locale_preset, &mut cell_buf);
+            }
+            text.push_str(&cell_buf);
+        }
     }
     let _ = app.write_clipboard_text(&text);
     if !app.is_human_path_only() {
@@ -37,6 +50,43 @@ pub(super) fn copy_x_cell_to_clipboard(ui: &Ui, app: &UiApp, ds: &DataSheet, row
     }
     let snapshot = app.interaction.last_clipboard_text.clone();
     ui.ctx().data_mut(|d| d.insert_temp(x_clipboard_cache_id(), Some((text, snapshot))));
+}
+
+pub(super) fn push_x_range_clear_intents(ds: &DataSheet, r0: usize, r1: usize, s0: usize, s1: usize, intents: &mut PendingUiIntents) {
+    if is_x_column_readonly(ds) || r0 > r1 || s0 > s1 {
+        return;
+    }
+    if r0 == r1 && s0 == s1 {
+        intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": r0, "subcol": s0, "value": serde_json::Value::Null }));
+        return;
+    }
+    let null_values = vec![serde_json::Value::Null; r1 - r0 + 1];
+    for subcol in s0..=s1 {
+        intents.push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "start_row": r0, "subcol": subcol, "values": null_values }));
+    }
+}
+
+pub(super) fn push_x_range_exclude_intent(ds: &DataSheet, r0: usize, r1: usize, s0: usize, s1: usize, intents: &mut PendingUiIntents) {
+    if r0 > r1 || s0 > s1 {
+        return;
+    }
+    let was_ex = ds.archetype.x_or_time_cell(r0, s0).is_some_and(|c| c.excluded);
+    if r0 == r1 && s0 == s1 {
+        intents.push_engine("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": r0, "subcol": s0, "excluded": !was_ex }));
+    } else {
+        intents.push_engine(
+            "table.excludeCells",
+            json!({
+                "sheet_id": ds.id.as_str(),
+                "target": "x",
+                "row_start": r0,
+                "row_end": r1,
+                "subcol_start": s0,
+                "subcol_end": s1,
+                "excluded": !was_ex
+            }),
+        );
+    }
 }
 
 pub(super) fn clear_x_clipboard_cache(ui: &Ui) {
@@ -120,9 +170,9 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
         && (ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Copy)))
             || pressed_key_event_modifiers(ui, Key::C).is_some_and(|m| !m.shift && !m.alt && (m.command || m.mac_cmd || m.ctrl)));
     if has_workspace_copy || copy_key {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+        if let Some((xr0, xr1, xs0, xs1)) = fstate.aux.selected_x_bounds() {
             let _ = take_workspace_copy_intent(fstate.intents);
-            copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
+            copy_x_range_to_clipboard(ui, app, ds, xr0, xr1, xs0, xs1);
             return true;
         }
         clear_x_clipboard_cache(ui);
@@ -135,13 +185,9 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
     let cut_key = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Cut)))
         || pressed_key_event_modifiers(ui, Key::X).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
     if cut_key {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-            copy_x_cell_to_clipboard(ui, app, ds, xr, xs);
-            if !is_x_column_readonly(ds) {
-                fstate
-                    .intents
-                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
-            }
+        if let Some((xr0, xr1, xs0, xs1)) = fstate.aux.selected_x_bounds() {
+            copy_x_range_to_clipboard(ui, app, ds, xr0, xr1, xs0, xs1);
+            push_x_range_clear_intents(ds, xr0, xr1, xs0, xs1, fstate.intents);
             return true;
         }
         if !ds.frozen {
@@ -166,9 +212,9 @@ fn handle_multi_clipboard_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &m
     });
     let paste_key = paste_event_text.is_some() || pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
     if paste_key {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+        if let Some((xr0, _, xs0, _)) = fstate.aux.selected_x_bounds() {
             if let Some(clip) = paste_event_text.or_else(|| read_clipboard_text_for_x_paste(ui, app)) {
-                push_x_cell_text_paste_intents(app, ds, xr, xs, &clip, fstate.intents);
+                push_x_cell_text_paste_intents(app, ds, xr0, xs0, &clip, fstate.intents);
             }
             return true;
         }
@@ -433,15 +479,11 @@ fn handle_multi_exclude_shortcut(ui: &Ui, mctx: &MultiGridCtx<'_>, fstate: &mut 
     if ds.frozen {
         return true;
     }
-    if let Some((xr, xs)) = fstate.aux.selected_x_cell {
+    if let Some((xr0, xr1, xs0, xs1)) = fstate.aux.selected_x_bounds() {
         if e_mods.shift {
             fstate.intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() }));
         } else {
-            let was_ex = ds.archetype.x_or_time_cell(xr, xs).is_some_and(|c| c.excluded);
-            fstate.intents.push_engine(
-                "table.excludeCells",
-                json!({ "sheet_id": ds.id.as_str(), "target": "x", "row": xr, "subcol": xs, "excluded": !was_ex }),
-            );
+            push_x_range_exclude_intent(ds, xr0, xr1, xs0, xs1, fstate.intents);
         }
         return true;
     }
@@ -473,12 +515,8 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
         return false;
     }
     if pressed_key_event_modifiers(ui, Key::Delete).is_some() || pressed_key_event_modifiers(ui, Key::Backspace).is_some() {
-        if let Some((xr, xs)) = fstate.aux.selected_x_cell {
-            if !is_x_column_readonly(ds) {
-                fstate
-                    .intents
-                    .push_engine("table.setXCells", json!({ "sheet_id": ds.id.as_str(), "row": xr, "subcol": xs, "value": serde_json::Value::Null }));
-            }
+        if let Some((xr0, xr1, xs0, xs1)) = fstate.aux.selected_x_bounds() {
+            push_x_range_clear_intents(ds, xr0, xr1, xs0, xs1, fstate.intents);
             return true;
         }
         if let Some(sel) = resolve_grid_selection(app, ds) {
@@ -555,6 +593,9 @@ fn handle_multi_clear_and_edit_shortcuts(ui: &Ui, mctx: &MultiGridCtx<'_>, fstat
 }
 
 pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &mut MultiGridFrameState<'_>) {
+    if !mctx.pane_focused {
+        return;
+    }
     let app = mctx.app;
     let ds = mctx.ds;
     let geom = mctx.geom;
@@ -589,10 +630,15 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
             let next_row = cur_row.saturating_add_signed(dy).min(geom.row_count.saturating_sub(1));
             let next_flat = cur_flat.saturating_add_signed(dx).min(geom.total_flat_cols.saturating_sub(1));
             if next_flat < geom.x_subcols {
-                fstate.aux.selected_x_cell = Some((next_row, next_flat));
+                if km.shift {
+                    fstate.aux.extend_x_selection((next_row, next_flat));
+                } else {
+                    fstate.aux.set_single_x((next_row, next_flat));
+                }
+                push_select_x_if_needed(app, next_row, next_flat, fstate.intents);
                 ui.ctx().request_repaint();
             } else if let Some((nc, ns)) = geom.flat_data_to_coord(next_flat - geom.x_subcols) {
-                fstate.aux.selected_x_cell = None;
+                fstate.aux.clear_x_selection();
                 let coord = GridCellCoord::new(next_row, nc, ns);
                 if km.shift {
                     fstate.intents.push(UiIntent::ExtendGridSelection { sheet_id: Some(ds.id.clone()), coord });
@@ -612,7 +658,8 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
         let dy: isize = if km.shift { -1 } else { 1 };
         if let Some((xr, xs)) = fstate.aux.selected_x_cell {
             let next_row = xr.saturating_add_signed(dy).min(geom.row_count - 1);
-            fstate.aux.selected_x_cell = Some((next_row, xs));
+            fstate.aux.set_single_x((next_row, xs));
+            push_select_x_if_needed(app, next_row, xs, fstate.intents);
             ui.ctx().request_repaint();
         } else if let Some(c) = active_for_sheet {
             let next_row = c.row.saturating_add_signed(dy).min(geom.row_count - 1);
@@ -625,10 +672,13 @@ pub(super) fn handle_multi_keyboard_shortcuts(ui: &mut Ui, mctx: &MultiGridCtx<'
     if let Some(km) = pressed_key_event_modifiers(ui, Key::Tab) {
         let (is_x, nc_opt, x_opt) = step_cell_horiz(geom, active_for_sheet, fstate.aux.selected_x_cell, km.shift);
         if is_x {
-            fstate.aux.selected_x_cell = x_opt;
+            if let Some((xr, xs)) = x_opt {
+                fstate.aux.set_single_x((xr, xs));
+                push_select_x_if_needed(app, xr, xs, fstate.intents);
+            }
             ui.ctx().request_repaint();
         } else if let Some(nc) = nc_opt {
-            fstate.aux.selected_x_cell = None;
+            fstate.aux.clear_x_selection();
             fstate.intents.push(UiIntent::SelectGridCell { sheet_id: Some(ds.id.clone()), coord: nc });
             ui.ctx().request_repaint();
         }

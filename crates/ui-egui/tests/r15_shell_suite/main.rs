@@ -30,6 +30,7 @@ mod gap_desktop_ui_fixes;
 mod helpers;
 mod i18n_theme;
 mod interaction_hidpi_qol;
+mod popup_matrix;
 mod r15_1_driver_and_i18n;
 mod r15_1_host_inspect_raster;
 mod r15_2_anova_coexist;

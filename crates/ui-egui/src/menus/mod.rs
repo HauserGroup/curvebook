@@ -14,7 +14,7 @@ pub use tooltips::{
     CommandTooltip, MenuSectionTooltips, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, command_tooltip, default_command_action_rank,
     menu_bar_tooltips, toolbar_caption_command_id, toolbar_tooltips,
 };
-pub(crate) use tooltips::{ui_command_enabled_for_doc, ui_command_menu_info};
+pub(crate) use tooltips::{command_disabled_reason_for_app, ui_command_enabled_for_doc, ui_command_menu_info};
 pub use ui_commands::{ActionRank, UI_COMMANDS, UiCommandSpec};
 
 /// Canonical list of desktop host-routed commands intercepted by the native desktop host

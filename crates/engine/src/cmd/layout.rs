@@ -34,7 +34,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.create",
         label: "New Layout",
-        menu_path: "Insert/New Layout...",
+        menu_path: "Insert/New Layout",
         summary: "Create a new publication layout sheet with a journal width preset, page orientation, and grid template.",
         beginner: "Creates a multi-panel figure page where you can arrange graphs, tables, and text callouts.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -45,7 +45,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.setSpec",
         label: "Format Layout",
-        menu_path: "Format/Layout...",
+        menu_path: "Format/Layout",
         summary: "Update a layout sheet's page dimensions, journal preset, grid template, origin alignment, badge style, or background.",
         beginner: "Changes the page setup, grid arrangement, or panel lettering of an existing figure layout.",
         effects: MUTATE_IDEMPOTENT,
@@ -56,7 +56,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.addPanel",
         label: "Add Panel to Layout",
-        menu_path: "Insert/Layout Panel...",
+        menu_path: "Insert/Layout Panel",
         summary: "Place a live graph panel, live table panel, or markdown text callout onto a layout sheet.",
         beginner: "Adds a graph, data or result table, or label callout to an explicit rectangle or grid slot on a layout.",
         effects: Effects::MUTATES_DOCUMENT,
@@ -78,7 +78,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.applyCanvasPreset",
         label: "Apply Layout Canvas Preset",
-        menu_path: "Format/Layout Canvas Size Preset...",
+        menu_path: "Format/Layout Canvas Size Preset",
         summary: "Resize a layout page to a standard publication canvas preset while optionally preserving typography sizes.",
         beginner: "Resizes a whole layout figure to a journal column width or slide preset and runs preflight checks.",
         effects: MUTATE_IDEMPOTENT,
@@ -111,7 +111,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.insertImage",
         label: "Insert Image on Layout",
-        menu_path: "Insert/Image on Layout...",
+        menu_path: "Insert/Image on Layout",
         summary: "Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.",
         beginner: "Places a microscopy image, gel photo, or schematic panel onto a layout page.",
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
@@ -122,7 +122,7 @@ static SPECS: &[CommandSpec] = &command_specs!(
     {
         id: "layout.updateImage",
         label: "Format Embedded Layout Image",
-        menu_path: "Format/Layout Image...",
+        menu_path: "Format/Layout Image",
         summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.",
         beginner: "Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.",
         effects: MUTATE_IDEMPOTENT,

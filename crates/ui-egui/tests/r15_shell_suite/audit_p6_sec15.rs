@@ -344,7 +344,7 @@ fn fa_sec15_14_i18n_localization_quality_and_no_qol7_tag() {
 
 #[test]
 fn fa_sec15_15_i18n_dead_scaffolding_removed() {
-    assert!(EXTRA_SHARD_CATALOGS.is_empty() && catalog_len() == 870 && missing_translations().is_empty());
+    assert!(EXTRA_SHARD_CATALOGS.is_empty() && catalog_len() == 963 && missing_translations().is_empty());
     assert!(all_keys().all(|k| !k.starts_with("w6.cjk_rtl.")));
     for key in [
         "w6.view.btn.create",

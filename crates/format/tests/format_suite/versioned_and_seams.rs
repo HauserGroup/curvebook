@@ -180,6 +180,8 @@ fn format_registry_lookup_and_roundtrips() {
     for (p, id) in [("nested/study.curvebook.d", "curvebook.d"), ("STUDY.PZFX", "pzfx"), ("legacy.prism", "prism"), ("workbook.XLSX", "xlsx")] {
         assert_eq!(reg.importer_for_path(Path::new(p)).unwrap().descriptor().id, id, "{p}");
     }
+    assert_eq!(reg.importer_by_format("pzfx").unwrap().descriptor().label, ".pzfx files");
+    assert_eq!(reg.importer_by_format("prism").unwrap().descriptor().label, ".prism files");
     assert_eq!(
         (
             reg.exporter_for_path(Path::new("figure.TIFF")).unwrap().descriptor().id,

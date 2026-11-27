@@ -136,7 +136,7 @@ pub(in crate::solver) fn fit_plot_function_only(
             symmetric_ci_lower: f64::NAN,
             symmetric_ci_upper: f64::NAN,
             dependency: if is_robust { f64::NAN } else { 0.0 },
-            hougaard_g1: if is_robust { f64::NAN } else { 0.0 },
+            hougaard_g1: f64::NAN,
             notes: if is_robust { Vec::new() } else { vec![ParameterNote::UnboundedCi] },
             inference_availability,
         });
@@ -241,6 +241,24 @@ pub(in crate::solver) fn fit_plot_function_only(
             sy_x: f64::NAN,
             rsdr: None,
             runs_test: None,
+            status: FitStatus::Converged,
+            identifiability: FitIdentifiability::NotAssessed,
+            ambiguous: false,
+            iterations: 0,
+            n_obs: ds.points.len(),
+            k_free: 0,
+            df: ds.points.len(),
+            weighted_ss: ds_ss,
+            aic_c: None,
+            bic: None,
+            normality: None,
+            normality_anderson_darling: None,
+            normality_lilliefors_ks: None,
+            homoscedasticity: None,
+            lack_of_fit: None,
+            n_outliers: 0,
+            predicted_y_neg_log_weight_sum: None,
+            poisson_ll: None,
             curve_overlay: Some(overlay),
         });
     }
@@ -314,6 +332,7 @@ pub(in crate::solver) fn fit_plot_function_only(
         rout: None,
         interpolated_x: Vec::new(),
         interpolated_y: Vec::new(),
+        has_shared_parameters: layout.free_slots.iter().any(|s| s.is_shared),
     })
 }
 
@@ -528,10 +547,10 @@ fn compute_fit_hougaard(
 ) -> Vec<f64> {
     let k_free = layout.k_free();
     if !enabled || k_free == 0 || k_free > 10 {
-        return vec![0.0; k_free];
+        return vec![f64::NAN; k_free];
     }
     let Some(cov_u) = cov_unscaled else {
-        return vec![0.0; k_free];
+        return vec![f64::NAN; k_free];
     };
     let sqrt_w_opt: Option<Vec<f64>> = if is_poisson {
         if lm_out.y_hat.iter().all(|&yh| yh.is_finite() && yh > 0.0) { Some(lm_out.y_hat.iter().map(|&yh| 1.0 / yh.sqrt()).collect()) } else { None }
@@ -539,7 +558,7 @@ fn compute_fit_hougaard(
         Some(obs.iter().map(|o| o.sqrt_weight).collect())
     };
     let Some(sqrt_w) = sqrt_w_opt else {
-        return vec![0.0; k_free];
+        return vec![f64::NAN; k_free];
     };
     let mut flat_p = vec![0.0_f64; layout.n_datasets * layout.p_model];
     compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma_w, |th, out| {
@@ -656,7 +675,11 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
     };
 
     let full_rank = cov.numerical_rank == k_free;
-    let hougaard_enabled = config.compute_hougaard && full_rank && !cov.ambiguous && df > 0;
+    let hougaard_enabled = config.compute_hougaard
+        && full_rank
+        && !cov.ambiguous
+        && df > 0
+        && !matches!(lm_out.status, FitStatus::Diverged | FitStatus::ImpossibleWeights | FitStatus::BadInitialValues);
     let mut hougaard = compute_fit_hougaard(model, layout, obs, lm_out, cov_unscaled.as_ref(), sigma_w, is_poisson, hougaard_enabled);
 
     let bounds = layout.bounds();

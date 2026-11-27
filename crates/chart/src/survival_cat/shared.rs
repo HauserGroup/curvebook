@@ -381,9 +381,13 @@ pub(crate) fn format_result_cell_with_sig_figs(cell: &ResultCell, sig_figs: Opti
             out
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
+            if matches!(lower, curvebook_doc::CiBound::Unavailable) && matches!(upper, curvebook_doc::CiBound::Unavailable) {
+                return String::from("Unavailable");
+            }
             let fmt_b = |b: &curvebook_doc::CiBound, open_str: &str| match b {
                 curvebook_doc::CiBound::Finite(v) => fmt_num(*v),
                 curvebook_doc::CiBound::Open => String::from(open_str),
+                curvebook_doc::CiBound::Unavailable => String::from("Unavailable"),
             };
             format!("[{}, {}]", fmt_b(lower, "-∞"), fmt_b(upper, "+∞"))
         }

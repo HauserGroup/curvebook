@@ -465,11 +465,11 @@ fn interaction_gui_actions_items_1_3_4_5_new1() -> TestRes {
     app = UiApp::from_session(curvebook_engine::Session::from_document(d));
     exec(&mut app, "sheet.select", json!({ "sheet_id": rs_id.as_str() }))?;
 
-    // Item 1: Cmd+T must not escape open modal.
+    // Item 1: Cmd+Shift+P must not escape open modal.
     app.canvas_dialogs.open_command_palette();
     app.focus_widget_id = Some("formula_bar.input".into());
-    gui(&mut app, "ui.press_key", json!({ "key": "t", "modifiers": ["meta"] }))?;
-    ensure(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette), "Cmd+T escaped modal")?;
+    gui(&mut app, "ui.press_key", json!({ "key": "p", "modifiers": ["meta", "shift"] }))?;
+    ensure(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette), "Cmd+Shift+P escaped modal")?;
     app.canvas_dialogs.close_dialog();
 
     // Item 3: Escape closes focused formula bar.

@@ -6,14 +6,14 @@
 use std::path::PathBuf;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CellCoord, ErrorCode, ImportLinkSpec, InternalLinkKind, LinkSource, LinkedDataRegion, ResultSheet, ResultStatus,
-    SheetCellRange, SheetId,
+    AnalysisKind, AnalysisSpec, CellCoord, ConstantValue, ErrorCode, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource,
+    LinkedDataRegion, ParameterRule, ParameterScope, PlateCellOrigin, ResultSheet, ResultStatus, SheetCellRange, SheetId,
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::driver::accesskit_accessible_name;
 use curvebook_ui_egui::egui_shell::welcome_hub::WelcomeLeftMode;
-use curvebook_ui_egui::egui_shell::{LayoutMetrics, Tokens, color32_to_rgba8, fonts};
+use curvebook_ui_egui::egui_shell::{LayoutMetrics, Tokens, color32_to_rgba8, fonts, rgba8_to_color32};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::{UiThemeMode, UiThemeSpec, wcag_contrast_ratio};
@@ -148,9 +148,9 @@ fn modal_footers_follow_cancel_secondary_primary_order_and_render_cleanly() {
     let mut app_unsaved = seed_xy_app();
     app_unsaved.egui_views.app_modals.unsaved_changes_open = true;
 
-    let mut app_feedback = seed_xy_app();
-    app_feedback.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
-    app_feedback.sync_views();
+    let mut app_about = seed_xy_app();
+    app_about.canvas_dialogs.active_dialog = ActiveDialog::About;
+    app_about.sync_views();
 
     let mut app_clone = seed_xy_app();
     app_clone.nav.welcome.open = true;
@@ -171,16 +171,57 @@ fn modal_footers_follow_cancel_secondary_primary_order_and_render_cleanly() {
     app_mv.sync_views();
 
     let cases: [(&str, UiApp, &[&str]); 4] = [
-        ("UnsavedChanges", app_unsaved, &["dialog.button.cancel", "dialog.button.dont_save", "dialog.button.save"]),
-        ("Feedback", app_feedback, &["dialog.feedback.reset", "dialog.feedback.copy_markdown", "dialog.feedback.open_github"]),
+        ("UnsavedChanges", app_unsaved, &["dialog.button.dont_save", "dialog.button.cancel", "dialog.button.save"]),
+        ("About", app_about, &["dialog.about.copy_version", "dialog.about.send_feedback", "dialog.about.close"]),
         ("CloneOptions", app_clone, &["welcome.clone_modal.close", "welcome.clone_modal.apply"]),
         ("ManageVariables", app_mv, &["dialog.manage_variables"]),
     ];
     for (name, app, ordered_wids) in cases {
         let driver = make_driver(app);
-        let lefts: Vec<f32> = ordered_wids.iter().map(|w| driver.frame_meta().find_by_widget_id(w).expect(w).clipped_rect.left()).collect();
+        let rects: Vec<egui::Rect> = ordered_wids.iter().map(|w| driver.frame_meta().find_by_widget_id(w).expect(w).clipped_rect).collect();
+        let lefts: Vec<f32> = rects.iter().map(|r| r.left()).collect();
         for pair in lefts.windows(2) {
             assert!(pair[0] < pair[1], "{name} footer order mismatch: {lefts:?}");
+        }
+        if name == "UnsavedChanges" {
+            let leading_gap = rects[1].left() - rects[0].right();
+            let trailing_gap = rects[2].left() - rects[1].right();
+            assert!(
+                leading_gap > trailing_gap + 12.0,
+                "UnsavedChanges must separate Don't Save on the leading edge from [Cancel] [Save]: leading_gap={leading_gap}, trailing_gap={trailing_gap}"
+            );
+        } else if name == "About" {
+            assert!(driver.frame_meta().find_by_widget_id("dialog.button.ok").is_none(), "About panel must omit blocking OK button");
+        }
+        let parity = driver.verify_pixel_to_hit_box_parity();
+        assert!(parity.is_clean(), "{name} parity violations: {:?}", parity.violations);
+    }
+
+    // Additional trailing-primary modals: Preferences, ExportFigure, ImportProjectMode, ExportAllTablesExistingFiles.
+    let mut app_prefs = seed_xy_app();
+    app_prefs.egui_views.app_modals.open_preferences(&app_prefs.shortcuts.clone(), None);
+    let mut app_export = seed_xy_app();
+    app_export.canvas_dialogs.active_dialog = ActiveDialog::ExportFigure { sheet_id: SheetId::from("gs-xy") };
+    let mut app_ipm = seed_xy_app();
+    app_ipm.canvas_dialogs.active_dialog = ActiveDialog::ImportProjectMode {
+        command_id: String::from("table.importPrism"),
+        path: String::from("assay.prism"),
+        has_unsaved_changes: false,
+    };
+    let mut app_eef = seed_xy_app();
+    app_eef.canvas_dialogs.active_dialog =
+        ActiveDialog::ExportAllTablesExistingFiles { dir: String::from("/exports"), existing_files: vec![String::from("data.csv")] };
+
+    for (name, app, ordered) in [
+        ("Preferences", app_prefs, &["modal.cancel", "modal.ok"][..]),
+        ("ExportFigure", app_export, &["modal.cancel", "modal.ok"][..]),
+        ("ImportProjectMode", app_ipm, &["import_project_mode.replace", "modal.cancel", "import_project_mode.merge"][..]),
+        ("ExportExistingFiles", app_eef, &["export_existing_files.replace", "modal.cancel", "export_existing_files.keep_both"][..]),
+    ] {
+        let driver = make_driver(app);
+        let lefts: Vec<f32> = ordered.iter().map(|w| driver.frame_meta().find_by_widget_id(w).expect(w).clipped_rect.left()).collect();
+        for pair in lefts.windows(2) {
+            assert!(pair[0] < pair[1], "{name} trailing footer order mismatch: {lefts:?}");
         }
         let parity = driver.verify_pixel_to_hit_box_parity();
         assert!(parity.is_clean(), "{name} parity violations: {:?}", parity.violations);
@@ -201,7 +242,7 @@ fn visual_review_renders_all_viewports_and_themes() {
         ("light_1440x600.png", UiThemeMode::Light, 1440, 600, None),
         ("dark_640x420.png", UiThemeMode::Dark, 640, 420, None),
         ("modal_light_1280x800.png", UiThemeMode::Light, 1280, 800, Some(ActiveDialog::AnalyzeSheet { source_sheet_id: SheetId::from("ds-xy") })),
-        ("modal_dark_1280x800.png", UiThemeMode::Dark, 1280, 800, Some(ActiveDialog::Feedback)),
+        ("modal_dark_1280x800.png", UiThemeMode::Dark, 1280, 800, Some(ActiveDialog::Checkpoints)),
     ];
 
     let mut rendered: Vec<(&str, Vec<u8>)> = Vec::new();
@@ -242,4 +283,118 @@ fn da_05_02_dark_hc_selected_accent_text_and_accent_border_contrast() {
             assert!(wcag_contrast_ratio(color32_to_rgba8(t.accent), color32_to_rgba8(bg)) >= 4.5, "{mode:?} accent on {name}");
         }
     }
+}
+
+#[test]
+fn r20_14_excluded_cell_role_num_and_text_link_tokens_across_themes() {
+    for mode in UiThemeMode::ALL {
+        let spec = UiThemeSpec::for_mode(mode);
+        let t = Tokens::for_mode(mode);
+        assert!(color32_to_rgba8(t.excluded_cell_text).to_oklch().c <= 0.02, "{mode:?} excluded_cell_text must be neutral slate");
+        assert!(color32_to_rgba8(t.role_num).to_oklch().c <= 0.02, "{mode:?} role_num must be neutral");
+        assert_eq!(t.text_link, rgba8_to_color32(spec.accent));
+        assert_ne!(t.text_link, t.text_primary);
+        for (lbl, bg) in [("surface_bg", t.surface_bg), ("panel_bg", t.panel_bg), ("active_bg", t.active_bg)] {
+            let ratio = wcag_contrast_ratio(color32_to_rgba8(t.excluded_cell_text), color32_to_rgba8(bg));
+            assert!(ratio >= 4.5, "{mode:?} excluded_cell_text on {lbl}: {ratio:.2} < 4.5");
+        }
+        assert!(wcag_contrast_ratio(color32_to_rgba8(t.role_num), color32_to_rgba8(t.surface_recessed)) >= 4.5);
+    }
+    let hc = Tokens::for_mode(UiThemeMode::HighContrast);
+    assert!(wcag_contrast_ratio(color32_to_rgba8(hc.excluded_cell_text), color32_to_rgba8(hc.surface_bg)) >= 7.0);
+    assert!(wcag_contrast_ratio(color32_to_rgba8(hc.excluded_cell_text), color32_to_rgba8(hc.panel_bg)) >= 7.0);
+}
+
+#[test]
+fn r20_14_clickable_links_use_link_button_and_open_destinations() {
+    // 1. Search dropdown footer ("Open full search") exposes link role & >= 24 pt height and opens palette.
+    let mut driver = make_driver(seed_xy_app());
+    driver.click_widget_id("toolbar.search_input").expect("focus search");
+    let open_pal = driver.frame_meta().find_by_widget_id("toolbar.search_open_palette").expect("toolbar.search_open_palette");
+    assert_eq!(open_pal.role, "link");
+    assert!(open_pal.unclipped_rect.height() >= 24.0);
+    driver.click_widget_id("toolbar.search_open_palette").expect("click search_open_palette");
+    assert!(driver.frame_meta().find_by_widget_id("palette.dialog").is_some(), "expected command palette dialog to open");
+
+    // 2. Fit Constraints "Linked hook: ..." uses ui_kit::link_button and opens inline Hook Constant browser.
+    let mut doc = seed_xy_app().document().clone();
+    let mut info = InfoSheet::new_preseeded("info-1", "Assay Metadata").unwrap();
+    info.set_constant("VehicleMass", ConstantValue::Number(12.5), Some(String::from("mg"))).unwrap();
+    doc.add_info_sheet(info).unwrap();
+
+    let fit_id = SheetId::from("res-fit-hook");
+    let mut nl = curvebook_doc::NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    nl.parameter_rules = vec![ParameterRule {
+        name: String::from("Bottom"),
+        scope: ParameterScope::HookedConstant(HookSource::InfoConstant {
+            info_sheet_id: Some(SheetId::from("info-1")),
+            constant_name: String::from("VehicleMass"),
+        }),
+        initial_override: None,
+        lower_bound: None,
+        upper_bound: None,
+    }];
+    let mut fit_spec = AnalysisSpec::new("4PL Fit", SheetId::from("ds-xy"), AnalysisKind::NonlinearRegression(nl)).unwrap();
+    fit_spec.id = fit_id.clone();
+    doc.add_result_sheet(ResultSheet::new(fit_spec).unwrap()).unwrap();
+
+    let mut fit_app = UiApp::from_session(Session::from_document(doc));
+    let snap = fit_app.document().clone();
+    assert!(fit_app.canvas_dialogs.open_edit_parameters(&snap, &fit_id));
+    fit_app.sync_views();
+    let mut fit_drv = make_driver(fit_app);
+    fit_drv.click_widget_id("fit.tab.constraints").expect("switch to constraints tab");
+    let linked_hook = fit_drv.frame_meta().find_by_widget_id("fit.con.linked_hook.Bottom").expect("fit.con.linked_hook.Bottom link");
+    assert_eq!(linked_hook.role, "link");
+    assert!(linked_hook.unclipped_rect.height() >= 24.0);
+    fit_drv.click_widget_id("fit.con.linked_hook.Bottom").expect("click linked hook");
+    assert!(
+        fit_drv.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("fit.con.hook_opt.Bottom.")),
+        "clicking Linked hook link must open the inline Hook Constant browser"
+    );
+}
+
+#[test]
+fn r20_21_cell_exclusion_tooltip_uses_show_tooltip_card_delay_and_dismissal() {
+    let mut doc = seed_xy_app().document().clone();
+    {
+        let ds = doc.data_sheet_mut(&SheetId::from("ds-xy")).unwrap();
+        ds.set_excluded_with_reason(CellCoord::new(1, 0, 0), "rout_outlier", "Contaminated well", "2026-11-27T00:00:00Z").unwrap();
+        ds.plate_well_origins.push(PlateCellOrigin { coord: CellCoord::new(1, 0, 0), well: String::from("B03") });
+    }
+    doc.select_in_navigator(&SheetId::from("ds-xy")).unwrap();
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.sync_views();
+    let mut driver = make_driver(app);
+
+    let cell_center = driver.frame_meta().find_by_widget_id("grid.cell.1.0.0").expect("grid.cell.1.0.0").clipped_rect.center();
+    driver.dispatch_events(vec![egui::Event::PointerMoved(cell_center)]);
+    assert!(
+        !driver.visible_tooltip_texts().iter().any(|t| t.contains("Contaminated well")),
+        "cell exclusion tooltip must respect 450ms delay before opening"
+    );
+
+    driver.hover_widget_id("grid.cell.1.0.0").expect("hover excluded cell");
+    let tips = driver.visible_tooltip_texts();
+    assert!(tips.iter().any(|t| t.contains("rout_outlier") && t.contains("Contaminated well")), "missing Band 1 exclusion note: {tips:?}");
+    assert!(tips.iter().any(|t| t.contains("Source well: B03")), "missing Band 2 plate well summary: {tips:?}");
+
+    driver.wheel_at(cell_center, egui::Vec2::new(0.0, -24.0)).expect("scroll dismisses tooltip");
+    assert!(
+        !driver.visible_tooltip_texts().iter().any(|t| t.contains("Contaminated well")),
+        "cell exclusion tooltip must dismiss immediately on scroll"
+    );
+
+    driver.hover_widget_id("grid.cell.1.0.0").expect("re-hover excluded cell");
+    assert!(driver.visible_tooltip_texts().iter().any(|t| t.contains("Contaminated well")));
+    driver.dispatch_events(vec![egui::Event::PointerButton {
+        pos: cell_center,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    assert!(
+        !driver.visible_tooltip_texts().iter().any(|t| t.contains("Contaminated well")),
+        "cell exclusion tooltip must dismiss immediately on pointer press"
+    );
 }

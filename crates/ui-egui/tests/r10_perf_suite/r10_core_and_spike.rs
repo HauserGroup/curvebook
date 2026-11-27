@@ -181,7 +181,14 @@ fn r10_2_and_r10_16_parity_across_views_plus_textbox_ime_clipboard_dropdown_and_
     }
     let mut big_h = EguiWfHarness::from_app(new_shell_app(doc), metrics);
     big_h.assert_parity_and_layout("multi-row result sheet").expect("result sheet parity");
-    assert!(big_h.driver.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("result.tab.")).count() >= 6);
+    let visible_tabs = big_h.driver.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("result.tab.")).count();
+    let hidden_tabs = big_h
+        .driver
+        .frame_meta()
+        .find_by_widget_id("result.tabs.overflow")
+        .and_then(|e| e.label.rsplit_once('+').and_then(|(_, n)| n.trim().parse::<usize>().ok()))
+        .unwrap_or(0);
+    assert!(visible_tabs >= 4 && visible_tabs + hidden_tabs >= 9, "expected >4 tabs without cap, got visible={visible_tabs} hidden={hidden_tabs}");
     let sec_pos = big_h.widget_center("result.section.0").or_else(|_| big_h.widget_center("result.cell.0.0")).expect("scrollable result widget");
     big_h.driver.wheel_at(sec_pos, Vec2::new(0.0, -240.0)).expect("scroll result table");
     assert!(big_h.driver.verify_pixel_to_hit_box_parity().is_clean());

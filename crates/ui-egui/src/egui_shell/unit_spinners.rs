@@ -358,7 +358,7 @@ fn render_scrub_unit_badge(
             Align2::CENTER_CENTER,
             unit_lbl,
             FontId::proportional(tokens.metrics.font_ui_small_pt),
-            if cfg.enabled { tokens.accent } else { tokens.text_disabled },
+            if cfg.enabled { tokens.text_primary } else { tokens.text_disabled },
         );
         if cfg.enabled && unit_btn.clicked() {
             let prev = state.unit;

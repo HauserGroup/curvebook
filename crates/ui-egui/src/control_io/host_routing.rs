@@ -129,6 +129,8 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.navigator.toggle"
             | "ui.inspector.toggle"
             | "ui.family.toggle"
+            | "ui.zoom.in"
+            | "ui.zoom.out"
             | "ui.zoom.fitSheet"
             | "ui.split.toggle"
             | "ui.gallery.toggle"
@@ -855,41 +857,110 @@ fn commit_analyze_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
 fn commit_edit_params_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {
     sync_edit_params_text_buffers(app);
     crate::dialogs_canvas::sync_fit_parameter_inputs(app)?;
+    let was_pending_create = app.canvas_dialogs.edit_params.pending_create;
+    let pending_extract = app.canvas_dialogs.edit_params.pending_extract.clone();
     let doc = app.document().clone();
     let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
     let mut iter = intents.into_iter();
-    let primary = iter.next().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
+    let mut primary = iter.next().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
     let primary_cmd = primary.command_id.clone();
     let primary_payload = app.execute_atomic_group(|a| {
+        if was_pending_create
+            && let Some((src_id, tab_id)) = pending_extract
+            && a.document().result_sheet(&src_id).is_some_and(|rs| rs.analyzable_data.is_none())
+        {
+            let ext = a
+                .execute_command(
+                    "sheet.extractResultTab",
+                    json!({
+                        "result_sheet_id": src_id.as_str(),
+                        "tab_id": tab_id,
+                        "archetype": "auto",
+                        "auto_graph": false,
+                    }),
+                )
+                .map_err(|e| e.to_string())?;
+            let extracted_id =
+                ext.payload.get("sheet_id").and_then(Value::as_str).ok_or_else(|| String::from("extractResultTab did not return `sheet_id`"))?;
+            let sid = SheetId::try_new(extracted_id).map_err(|e| e.to_string())?;
+            if let Some(obj) = primary.params.as_object_mut() {
+                obj.insert(String::from("source_sheet_id"), Value::String(sid.as_str().to_owned()));
+            }
+        }
         let out = a.execute_command(&primary.command_id, primary.params).map_err(|e| e.to_string())?;
         for extra in iter {
             let _ = a.execute_command(&extra.command_id, extra.params).map_err(|e| e.to_string())?;
         }
         Ok::<_, String>(out.payload)
     })?;
+    crate::dialogs_canvas::clear_fit_parameter_inputs(app);
+    app.canvas_dialogs.edit_params.clear_session();
+    if was_pending_create && let Some(new_id) = primary_payload.get("sheet_id").and_then(Value::as_str) {
+        let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+        if let Ok(sid) = SheetId::try_new(new_id) {
+            let doc_after = app.document().clone();
+            app.canvas_dialogs.on_sheet_selected_with_auto_modal(&doc_after, &sid, false);
+        }
+    }
     Ok(finish_modal_commit(app, "dialog.edit_params_committed", Some(primary_cmd), Some(primary_payload)))
 }
 
 fn commit_export_figure_dialog(app: &mut UiApp, sheet_id: &SheetId) -> Result<UiEventOutcome, String> {
-    let mut intent = app.canvas_dialogs.export_figure.commit_intent(sheet_id);
-    let export_opts = &app.canvas_dialogs.export_figure;
-    if matches!(export_opts.format, ExportFigureFormat::Pdf)
-        && let Some(obj) = intent.params.as_object_mut()
-    {
-        let pdf_cs = if export_opts.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
-        obj.insert(String::from("color_space"), json!(pdf_cs));
-    }
-    let opts_snapshot = json!({
-        "transparent_bg": export_opts.transparent_bg,
-        "color_space": export_opts.color_space,
-        "unit": export_opts.unit,
-    });
-    let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-    let mut payload = out.payload;
+    let selected_renderables = crate::egui_shell::app_modals::gallery_selected_renderable_ids(app);
+    let batch_scope = app.egui_views.app_modals.export_selected_gallery_scope && !selected_renderables.is_empty();
+    let (format, opts_snapshot, pdf_cs) = {
+        let export_opts = &app.canvas_dialogs.export_figure;
+        (
+            export_opts.format,
+            json!({
+                "transparent_bg": export_opts.transparent_bg,
+                "color_space": export_opts.color_space,
+                "unit": export_opts.unit,
+            }),
+            if export_opts.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" },
+        )
+    };
+    let (cmd_used, mut payload) = if batch_scope && matches!(format, ExportFigureFormat::Pdf) && selected_renderables.len() >= 2 {
+        let mut intent = app.canvas_dialogs.export_figure.commit_intent(&selected_renderables[0]);
+        if let Some(obj) = intent.params.as_object_mut() {
+            obj.remove("sheet_id");
+            let ids: Vec<&str> = selected_renderables.iter().map(SheetId::as_str).collect();
+            obj.insert(String::from("sheet_ids"), json!(ids));
+            obj.insert(String::from("color_space"), json!(pdf_cs));
+        }
+        let out = app.execute_command("export.pdf", intent.params).map_err(|e| e.to_string())?;
+        (String::from("export.pdf"), out.payload)
+    } else if batch_scope {
+        let mut last_cmd = String::new();
+        let mut payloads = Vec::with_capacity(selected_renderables.len());
+        for sid in &selected_renderables {
+            let mut intent = app.canvas_dialogs.export_figure.commit_intent(sid);
+            if matches!(format, ExportFigureFormat::Pdf)
+                && let Some(obj) = intent.params.as_object_mut()
+            {
+                obj.insert(String::from("color_space"), json!(pdf_cs));
+            }
+            last_cmd = intent.command_id.clone();
+            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+            payloads.push(out.payload);
+        }
+        (last_cmd, json!({ "exports": payloads }))
+    } else {
+        let mut intent = app.canvas_dialogs.export_figure.commit_intent(sheet_id);
+        if matches!(format, ExportFigureFormat::Pdf)
+            && let Some(obj) = intent.params.as_object_mut()
+        {
+            obj.insert(String::from("color_space"), json!(pdf_cs));
+        }
+        let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+        (intent.command_id, out.payload)
+    };
+    app.egui_views.app_modals.export_emf_selected = false;
+    app.egui_views.app_modals.export_selected_gallery_scope = false;
     if let Some(obj) = payload.as_object_mut() {
         obj.insert(String::from("export_options"), opts_snapshot);
     }
-    Ok(finish_modal_commit(app, "dialog.export_committed", Some(intent.command_id), Some(payload)))
+    Ok(finish_modal_commit(app, "dialog.export_committed", Some(cmd_used), Some(payload)))
 }
 
 fn commit_checkpoints_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> {

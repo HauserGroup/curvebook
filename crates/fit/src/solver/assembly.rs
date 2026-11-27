@@ -9,7 +9,7 @@ use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{CovarianceDiagnostics, compute_rsdr, runs_test};
-use crate::error::{FitStatus, ParameterNote};
+use crate::error::{FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::curves::{CurveOverlayContext, build_curve_overlay, interpolate_x_from_y, interpolate_y_from_x, inverse_targets};
 use crate::solver::inference::compute_r_squared;
@@ -89,17 +89,9 @@ pub(in crate::solver) struct AssembledDatasets {
     pub(in crate::solver) interpolated_y: Vec<InterpolatedUnknown>,
 }
 
-pub(in crate::solver) fn assemble_dataset_results(
-    model: &dyn ParametricModel,
-    layout: &ParameterLayout,
-    datasets: &[DatasetSeries],
-    obs: &[ObsRecord],
-    lm_out: &LmRunOutput,
-    studentized_all: &[f64],
-    cfg: &DatasetAssemblyConfig<'_>,
-) -> AssembledDatasets {
+fn compute_slot_dataset_counts(layout: &ParameterLayout, obs: &[ObsRecord], n_datasets: usize) -> Vec<usize> {
     let k_free = layout.k_free();
-    let mut active_ds = vec![false; datasets.len()];
+    let mut active_ds = vec![false; n_datasets];
     for rec in obs {
         if let Some(flag) = active_ds.get_mut(rec.ds_local_idx) {
             *flag = true;
@@ -121,6 +113,37 @@ pub(in crate::solver) fn assemble_dataset_results(
             }
         }
     }
+    slot_ds_count
+}
+
+fn effective_dataset_free_params(layout: &ParameterLayout, ds_local_idx: usize, slot_ds_count: &[usize]) -> f64 {
+    let mut k_eff_d = 0.0_f64;
+    let mut seen_d = vec![false; layout.k_free()];
+    if let Some(row) = layout.bindings.get(ds_local_idx) {
+        for b in row {
+            if let ParamBinding::Free(slot) = *b
+                && let Some(flag) = seen_d.get_mut(slot)
+                && !*flag
+            {
+                *flag = true;
+                let share_count = slot_ds_count.get(slot).copied().unwrap_or(1).max(1) as f64;
+                k_eff_d += 1.0 / share_count;
+            }
+        }
+    }
+    k_eff_d
+}
+
+pub(in crate::solver) fn assemble_dataset_results(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    datasets: &[DatasetSeries],
+    obs: &[ObsRecord],
+    lm_out: &LmRunOutput,
+    studentized_all: &[f64],
+    cfg: &DatasetAssemblyConfig<'_>,
+) -> AssembledDatasets {
+    let slot_ds_count = compute_slot_dataset_counts(layout, obs, datasets.len());
     let mut ds_results = Vec::with_capacity(datasets.len());
     let mut derived_scalars = Vec::with_capacity(datasets.len());
     let mut interpolated_x = Vec::new();
@@ -186,20 +209,7 @@ pub(in crate::solver) fn assemble_dataset_results(
         let ds_r2 = compute_r_squared(ds_ss, dtss, ds_n);
         let is_robust = cfg.solver.method == FitMethod::RobustCauchy;
         let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
-        let mut k_eff_d = 0.0_f64;
-        let mut seen_d = vec![false; k_free];
-        if let Some(row) = layout.bindings.get(ds_local_idx) {
-            for b in row {
-                if let ParamBinding::Free(slot) = *b
-                    && let Some(flag) = seen_d.get_mut(slot)
-                    && !*flag
-                {
-                    *flag = true;
-                    let share_count = slot_ds_count.get(slot).copied().unwrap_or(1).max(1) as f64;
-                    k_eff_d += 1.0 / share_count;
-                }
-            }
-        }
+        let k_eff_d = effective_dataset_free_params(layout, ds_local_idx, &slot_ds_count);
         let ds_df = (ds_n as f64) - k_eff_d;
         let ds_sy_x = if is_robust {
             f64::NAN
@@ -285,6 +295,17 @@ pub(in crate::solver) fn assemble_dataset_results(
             None
         };
 
+        let mut ds_w_ss_acc = NeumaierSum::new();
+        let mut ds_ss_within = NeumaierSum::new();
+        for i in 0..obs.len() {
+            if obs[i].ds_local_idx == ds_local_idx {
+                let wr = lm_out.weighted_res[i];
+                ds_w_ss_acc.add(wr * wr);
+                ds_ss_within.add(obs[i].ss_within);
+            }
+        }
+        let ds_weighted_ss = ds_w_ss_acc.total() + ds_ss_within.total();
+
         ds_results.push(FittedDatasetResult {
             data_set_index: ds.data_set_index,
             label: ds.label.clone(),
@@ -300,6 +321,24 @@ pub(in crate::solver) fn assemble_dataset_results(
             sy_x: ds_sy_x,
             rsdr: ds_rsdr,
             runs_test: ds_runs_test,
+            status: lm_out.status,
+            identifiability: FitIdentifiability::NotAssessed,
+            ambiguous: cfg.ambiguous || lm_out.status == FitStatus::Ambiguous,
+            iterations: lm_out.iterations,
+            n_obs: ds_n,
+            k_free: k_eff_d.max(0.0).round() as usize,
+            df: ds_df.max(0.0).round() as usize,
+            weighted_ss: ds_weighted_ss,
+            aic_c: None,
+            bic: None,
+            normality: None,
+            normality_anderson_darling: None,
+            normality_lilliefors_ks: None,
+            homoscedasticity: None,
+            lack_of_fit: None,
+            n_outliers: 0,
+            predicted_y_neg_log_weight_sum: None,
+            poisson_ll: None,
             curve_overlay,
         });
     }

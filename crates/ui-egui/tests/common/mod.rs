@@ -274,6 +274,12 @@ pub fn select_sheet_and_settle(driver: &mut EguiHumanPathDriver<'_, ShellTestSta
     Ok(())
 }
 
+/// Open the Navigator `nav.kind_filter` dropdown and choose `chip_widget_id` (`nav.chip.*`).
+pub fn select_nav_kind_filter<S>(driver: &mut EguiHumanPathDriver<'_, S>, chip_widget_id: &str) -> TestRes {
+    driver.click_widget_id("nav.kind_filter")?;
+    driver.click_widget_id(chip_widget_id)
+}
+
 /// Locate the center of `wid` in the current frame's [`FrameInspectMeta`].
 pub fn widget_center<S>(driver: &EguiHumanPathDriver<'_, S>, wid: &str) -> Result<Pos2, String> {
     let entry = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("missing widget `{wid}`"))?;
@@ -459,9 +465,13 @@ pub fn measure_egui_regions(app: &UiApp, metrics: ViewportMetrics) -> WorkspaceP
     let max_w = metrics.physical_width_px();
     let max_h = metrics.physical_height_px();
     let to_px = |r: Option<Rect>| r.map(|rect| egui_rect_to_px(rect, scale, max_w, max_h));
+    let toolbar_rect = match (rep.tier1_rect_pt, rep.tier2_rect_pt) {
+        (Some(t1), Some(t2)) => Some(t1.union(t2)),
+        (t1, t2) => t1.or(t2),
+    };
     let zero = PixelRect::default();
     WorkspacePixelRegions {
-        toolbar: to_px(rep.tier1_rect_pt).unwrap_or(zero),
+        toolbar: to_px(toolbar_rect).unwrap_or(zero),
         navigator: to_px(rep.leading_dock_rect_pt).unwrap_or(zero),
         canvas: to_px(rep.regions.canvas_rect_pt).unwrap_or(zero),
         inspector: to_px(rep.trailing_dock_rect_pt).unwrap_or(zero),

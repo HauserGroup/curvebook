@@ -1103,6 +1103,12 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.export.allTablesCsv" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_fallback(app, p))),
         "ui.print.open" | "file.print" => Some(|app, p| map_ui_err(dispatch_ui_print_open(app, p))),
         "app.feedback" => Some(dispatch_ui_app_feedback),
+        #[cfg(not(target_arch = "wasm32"))]
+        "app.preferences" => Some(|app, _p| {
+            let shortcuts = app.shortcuts.clone();
+            app.egui_views.app_modals.open_preferences(&shortcuts, None);
+            Ok(json!({ "dialog": "Preferences", "open": app.egui_views.app_modals.preferences_open }))
+        }),
         "ui.embeddedTable.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, false))),
         "ui.image.format.open" => Some(|app, p| map_ui_err(dispatch_ui_embedded_object_format_open(app, p, true))),
         "ui.clipboard.copyForSlides" => Some(dispatch_ui_copy_for_slides),
@@ -1110,27 +1116,18 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
     }
 }
 
-fn dispatch_ui_app_feedback(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    if let Some(raw_cat) = params.get("category").and_then(Value::as_str) {
-        let Some(parsed) = crate::feedback::FeedbackCategory::parse(raw_cat) else {
-            return Err(EngineError::with_code(
-                ErrorCode::BadInput,
-                format!("unknown feedback category `{raw_cat}` (expected `bug`, `feature`, or `numerical`)"),
-            )
-            .into());
-        };
-        app.canvas_dialogs.feedback.category = parsed;
-    }
-    app.canvas_dialogs.feedback.status_message = None;
-    app.canvas_dialogs.feedback.copied_markdown = false;
-    app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
-    let preview = app.build_feedback_issue_url();
+fn dispatch_ui_app_feedback(app: &mut UiApp, _params: &Value) -> Result<Value, ControlCallError> {
+    let status = app.open_feedback_on_github().map_err(ControlCallError::from)?;
+    let availability = match status.availability {
+        crate::os_integration::OsAdapterAvailability::Submitted => "submitted",
+        crate::os_integration::OsAdapterAvailability::Read => "read",
+        crate::os_integration::OsAdapterAvailability::Unavailable => "unavailable",
+    };
     Ok(json!({
-        "dialog": "Feedback",
-        "category": app.canvas_dialogs.feedback.category.slug(),
-        "template": app.canvas_dialogs.feedback.category.template_filename(),
-        "preview_url": preview.url,
-        "truncated": preview.truncated,
+        "url": crate::GITHUB_FEEDBACK_URL,
+        "opened": status.available,
+        "availability": availability,
+        "detail": status.detail,
     }))
 }
 
@@ -2573,9 +2570,18 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
     if let Some(fmt) = opt_non_empty_str_param(params, &["format"])? {
         app.canvas_dialogs.result_view.report_format = fmt.to_owned();
     }
+    if let Some(scope) = opt_non_empty_str_param(params, &["scope"])? {
+        app.canvas_dialogs.result_view.report_scope = scope.to_owned();
+    }
     let skip_os_clipboard = opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
     let intent = app.canvas_dialogs.result_view.generate_report_intent(&rs_id);
     let outcome = app.execute_command(&intent.command_id, intent.params)?;
+    if let Some(canon_fmt) = outcome.payload.get("format").and_then(Value::as_str) {
+        app.canvas_dialogs.result_view.report_format = canon_fmt.to_owned();
+    }
+    if let Some(canon_scope) = outcome.payload.get("scope").and_then(Value::as_str) {
+        app.canvas_dialogs.result_view.report_scope = canon_scope.to_owned();
+    }
     let report = outcome.payload.get("report").and_then(Value::as_str).unwrap_or_default().to_owned();
     app.canvas_dialogs.result_view.last_methods_report = Some(report.clone());
 
@@ -2587,7 +2593,8 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
     };
     Ok(json!({
         "sheet_id": rs_id.as_str(),
-        "format": app.canvas_dialogs.result_view.report_format,
+        "format": app.canvas_dialogs.result_view.effective_report_format(),
+        "scope": app.canvas_dialogs.result_view.effective_report_scope(),
         "report": report,
         "clipboard_status": clipboard_status,
     }))
@@ -3085,6 +3092,11 @@ fn dispatch_ui_csv_export_open(app: &mut UiApp, params: &Value, mode: CsvExportO
             (CsvExportTargetKind::AllDataTables, "AllDataTables", None, Some(app.document().data_sheets.len()))
         }
     };
+    let batch_count = match &target_kind {
+        CsvExportTargetKind::DataTables { sheet_ids } => Some(sheet_ids.len()),
+        _ => table_count_opt,
+    };
+    let table_count_opt = batch_count;
     app.canvas_dialogs.csv_export.reset_for_locale(app.locale_preset.decimal_separator);
     app.canvas_dialogs.active_dialog = ActiveDialog::CsvExportOptions(target_kind);
     let mut payload = json!({
@@ -3227,6 +3239,26 @@ const UI_TOGGLE_AND_SETTER_SPECS: &[(&str, UiToggleFn)] = &[
     ("ui.navigator.toggle", |a, _| Ok(json!({ "navigator_open": a.toggle_navigator_pane() }))),
     ("ui.inspector.toggle", |a, _| Ok(json!({ "inspector_open": a.toggle_inspector_pane() }))),
     ("ui.family.toggle", |a, _| Ok(json!({ "family_open": a.toggle_family_pane() }))),
+    ("ui.zoom.in", |a, _| {
+        let next = (a.canvas_dialogs.canvas.zoom * 1.25).clamp(0.1, 8.0);
+        a.canvas_dialogs.canvas.zoom = next;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            a.egui_views.canvas_view.fit_zoom_active = false;
+            a.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = false;
+        }
+        Ok(json!({ "zoom": a.canvas_dialogs.canvas.zoom, "fit": false }))
+    }),
+    ("ui.zoom.out", |a, _| {
+        let next = (a.canvas_dialogs.canvas.zoom / 1.25).clamp(0.1, 8.0);
+        a.canvas_dialogs.canvas.zoom = next;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            a.egui_views.canvas_view.fit_zoom_active = false;
+            a.egui_views.center_stage.secondary_canvas_view.fit_zoom_active = false;
+        }
+        Ok(json!({ "zoom": a.canvas_dialogs.canvas.zoom, "fit": false }))
+    }),
     ("ui.zoom.fitSheet", |a, _| {
         a.canvas_dialogs.reset_zoom_to_fit();
         #[cfg(not(target_arch = "wasm32"))]
@@ -3641,7 +3673,6 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::Checkpoints => "Checkpoints",
         ActiveDialog::About => "About",
-        ActiveDialog::Feedback => "Feedback",
         ActiveDialog::ImportWarnings => "ImportWarnings",
         ActiveDialog::ImportProjectMode { .. } => "ImportProjectMode",
         ActiveDialog::CsvExportOptions(_) => "CsvExportOptions",
@@ -4659,15 +4690,15 @@ mod tests {
                 "clear_existing": true
             }),
         )?;
-        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze..." }))?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze" }))?;
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "analyze.entry.stats.one_way_anova" }))?;
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "modal.ok" }))?;
         let res_id = app.document().result_sheets.last().ok_or("missing anova result sheet")?.id.as_str().to_owned();
 
-        // 3. Open EditAnalysisParameters via Cmd+T; verify R1 disabled tab, invalid confidence guard,
+        // 3. Open EditAnalysisParameters via Cmd+Shift+P; verify R1 disabled tab, invalid confidence guard,
         //    all 5 ui.screenshot targets, wheel alias, and Escape close.
-        let press_t = dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "t", "modifiers": { "meta": true } }))?;
-        assert_eq!(press_t.get("result_sheet_id").and_then(Value::as_str), Some(res_id.as_str()));
+        let press_edit = dispatch_gui_action(&mut app, "ui.press_key", json!({ "key": "p", "modifiers": { "meta": true, "shift": true } }))?;
+        assert_eq!(press_edit.get("result_sheet_id").and_then(Value::as_str), Some(res_id.as_str()));
         assert!(matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
         assert_eq!(
             dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab": "repeated_measures" })).as_ref().err().map(|e| e.code),
@@ -4733,7 +4764,7 @@ mod tests {
             .map(|t| t.id.clone())
             .ok_or("missing PCA tab")?;
         dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "tab": scores_tab }))?;
-        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze..." }))?;
+        dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze" }))?;
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "analyze.entry.stats.descriptive" }))?;
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "modal.ok" }))?;
         let downstream_rs = app.document().result_sheets.last().ok_or("missing downstream ResultSheet")?;

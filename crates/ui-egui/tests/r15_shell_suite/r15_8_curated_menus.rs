@@ -46,6 +46,16 @@ fn check_menu_container(nodes: &[CuratedMenuNode], locale: &str, path: &str, glo
                 {
                     return Err(format!("internal jargon `{bad}` leaked into English label `{}`", tip.localized_label));
                 }
+                if tip.localized_label.ends_with("...")
+                    || tip.localized_label.ends_with('…')
+                    || tip.label.ends_with("...")
+                    || tip.label.ends_with('…')
+                {
+                    return Err(format!(
+                        "R20.15 violation: menu item `{}` in `{locale}` retained trailing ellipsis (`{}` / `{}`)",
+                        tip.command_id, tip.localized_label, tip.label
+                    ));
+                }
             }
             CuratedMenuNode::Submenu { id, title, children, .. } => {
                 if !container_labels.insert(title.clone()) {
@@ -96,9 +106,9 @@ fn r15_8_curated_menu_bar_hygiene_and_parity() -> Result<(), String> {
     app.sync_views();
 
     for (path, expected_cmd) in [
-        ("File/Import/Plate / Tidy Long Import...", "ui.import.reshape.open"),
-        ("File/Import Reshape...", "ui.import.reshape.open"),
-        ("Data/Convert Table Archetype...", "ui.table.convertArchetype.open"),
+        ("File/Import/Plate / Tidy Long Import", "ui.import.reshape.open"),
+        ("File/Import Reshape", "ui.import.reshape.open"),
+        ("Data/Convert Table Format", "ui.table.convertArchetype.open"),
     ] {
         let res = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "path": path })).map_err(|e| e.to_string())?;
         assert_eq!(res["command_id"], expected_cmd);
@@ -138,5 +148,40 @@ fn r15_8_curated_menu_bar_hygiene_and_parity() -> Result<(), String> {
         driver.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE);
     }
     assert_eq!(driver.state().last_intent_error, None);
+
+    // OS-adaptive placement & dot-free "Settings" across all 16 locales.
+    for &loc in curvebook_ui_egui::i18n::LOCALES {
+        let mut win_app = UiApp::new();
+        win_app.locale = loc.to_owned();
+        win_app.host_draws_menu_bar = false;
+        let win_sections = curated_menu_bar(&win_app);
+        let win_ids = collect_menu_ids(&win_sections);
+        for required in ["app.quit", "app.preferences", "app.about", "window.close", "ui.zoom.in", "ui.zoom.out", "ui.zoom.fitSheet"] {
+            assert!(win_ids.contains(&required), "in-window menu bar ({loc}) missing `{required}`");
+        }
+        let settings_item = win_sections
+            .iter()
+            .find(|s| s.menu_key == "menu.edit")
+            .and_then(|s| s.flat_actions().into_iter().find(|i| i.command_id == "app.preferences"))
+            .ok_or("missing app.preferences")?;
+        assert!(
+            !settings_item.localized_label.contains("...") && !settings_item.localized_label.contains('…'),
+            "locale `{loc}` Settings item retained ellipsis: `{}`",
+            settings_item.localized_label
+        );
+        if loc == "en" {
+            assert_eq!(settings_item.localized_label, "Settings");
+        }
+
+        let mut mac_app = UiApp::new();
+        mac_app.locale = loc.to_owned();
+        mac_app.host_draws_menu_bar = true;
+        let mac_sections = curated_menu_bar(&mac_app);
+        let mac_ids = collect_menu_ids(&mac_sections);
+        for omitted in ["app.quit", "app.preferences", "app.about"] {
+            assert!(!mac_ids.contains(&omitted), "native host menu bar ({loc}) must omit `{omitted}`");
+        }
+        assert!(mac_ids.contains(&"window.close"), "native host menu bar ({loc}) must retain File > Close Window");
+    }
     Ok(())
 }

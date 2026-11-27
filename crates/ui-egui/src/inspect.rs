@@ -314,7 +314,6 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::CommandPalette => String::from("command_palette"),
         ActiveDialog::Checkpoints => String::from("checkpoints"),
         ActiveDialog::About => String::from("about"),
-        ActiveDialog::Feedback => String::from("feedback"),
         ActiveDialog::ImportWarnings => String::from("import_warnings"),
         ActiveDialog::ImportProjectMode { .. } => String::from("import_project_mode"),
         ActiveDialog::CsvExportOptions(_) => String::from("csv_export_options"),

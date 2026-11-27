@@ -5,16 +5,20 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use curvebook_doc::{LayoutItem, ProjectDocument, ResultStatus, SheetId, SheetSection};
-use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Order, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
+use curvebook_doc::{LayoutItem, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection};
+use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
 use crate::egui_shell::inspect_bridge::{
     ModalCaptureReport, ModalCaptureSpec, consume_matching_shortcut, finalize_egui_modal_response, has_registered_shortcut,
 };
+use crate::egui_shell::ui_kit::{
+    ActionMenuEntry, ActionMenuItem, ActionMenuSpec, TooltipSpec, action_menu_popup, show_tooltip, show_tooltip_for_control,
+};
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, UiIntent, doc_sheet_title};
 use crate::inspect::ZLayer;
+use crate::menus::{command_tooltip, format_shortcut_for_platform};
 use crate::tr;
 use crate::workspace_nav::{
     ActiveWorkspacePane, FamilyPaneNode, FamilyRelation, NavigatorEntry, NavigatorNestingMode, collect_downstream_dependents,
@@ -66,7 +70,7 @@ impl NavigatorKindChip {
     #[must_use]
     pub fn label(self, locale: &str) -> &'static str {
         match self {
-            Self::All => "All",
+            Self::All => tr(locale, "nav.filter_all"),
             Self::Data => tr(locale, "nav.data_tables"),
             Self::Info => tr(locale, "nav.info"),
             Self::Results => tr(locale, "nav.results"),
@@ -76,20 +80,23 @@ impl NavigatorKindChip {
     }
 }
 
-/// Active right-click context menu target inside the Navigator tree (`R15-GUI-38`).
+/// Active right-click context menu target inside the Navigator tree (`R15-GUI-38`, `R20.12`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NavigatorContextMenuState {
     pub sheet_id: SheetId,
+    pub selected_ids: Vec<SheetId>,
     pub section: SheetSection,
     pub is_frozen: bool,
     pub anchor: Pos2,
 }
 
-/// Active cascade-delete confirmation modal target triggered from Navigator context menu (`R15-GUI-38`).
+/// Active cascade-delete confirmation modal target triggered from Navigator context menu (`R15-GUI-38`, `R20.12`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NavigatorDeleteConfirmState {
     pub sheet_id: SheetId,
+    pub sheet_ids: Vec<SheetId>,
     pub title: String,
+    pub titles: Vec<String>,
     pub dependents: Vec<(SheetId, String)>,
 }
 
@@ -100,6 +107,9 @@ pub struct LeadingDockEguiState {
     pub last_synced_query: String,
     pub kind_chip: NavigatorKindChip,
     pub nav_split_fraction: f32,
+    pub selected_sheet_ids: BTreeSet<SheetId>,
+    pub selection_anchor_sheet_id: Option<SheetId>,
+    pub last_synced_active_sheet_id: Option<SheetId>,
     pub renaming_sheet_id: Option<SheetId>,
     pub rename_draft: String,
     pub rename_initial_title: String,
@@ -123,6 +133,9 @@ impl Default for LeadingDockEguiState {
             last_synced_query: String::new(),
             kind_chip: NavigatorKindChip::All,
             nav_split_fraction: 0.65,
+            selected_sheet_ids: BTreeSet::new(),
+            selection_anchor_sheet_id: None,
+            last_synced_active_sheet_id: None,
             renaming_sheet_id: None,
             rename_draft: String::new(),
             rename_initial_title: String::new(),
@@ -181,9 +194,16 @@ enum DropCommitAction {
 }
 
 #[derive(Clone, Copy)]
+enum RailIconKind {
+    Expand { rtl_mirrored: bool },
+    Section(SheetSection),
+    FamilyTree,
+}
+
+#[derive(Clone, Copy)]
 struct RailIconButtonSpec<'a> {
     widget_id: &'a str,
-    glyph: &'a str,
+    icon: RailIconKind,
     tooltip: &'a str,
     command_id: Option<&'a str>,
     selected: bool,
@@ -196,6 +216,7 @@ struct NavigatorTreeCtx<'a> {
     dock: LeadingDockContext<'a>,
     row_w: f32,
     query: &'a str,
+    visible_ids: &'a [SheetId],
 }
 
 #[derive(Clone, Copy)]
@@ -218,6 +239,24 @@ struct NavigatorRowSpec<'a> {
     is_nested_parent: bool,
     nested_collapsed: bool,
     row_w: f32,
+    visible_ids: &'a [SheetId],
+}
+
+fn sync_navigator_selection(doc: &ProjectDocument, state: &mut LeadingDockEguiState) {
+    state.selected_sheet_ids.retain(|id| doc_sheet_title(doc, id).is_some());
+    if let Some(anchor) = state.selection_anchor_sheet_id.as_ref()
+        && doc_sheet_title(doc, anchor).is_none()
+    {
+        state.selection_anchor_sheet_id = doc.active_sheet_id.clone();
+    }
+    if doc.active_sheet_id != state.last_synced_active_sheet_id {
+        state.last_synced_active_sheet_id = doc.active_sheet_id.clone();
+        state.selected_sheet_ids.clear();
+        if let Some(active) = &doc.active_sheet_id {
+            state.selected_sheet_ids.insert(active.clone());
+        }
+        state.selection_anchor_sheet_id = doc.active_sheet_id.clone();
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -262,6 +301,7 @@ pub fn render_leading_dock(
     intents: &mut PendingUiIntents,
 ) -> LeadingDockFrameReport {
     let mut report = LeadingDockFrameReport::default();
+    sync_navigator_selection(app.document(), state);
     if ctx_in.enabled {
         handle_leading_dock_shortcuts(ui, app, state, &ctx_in, intents);
     }
@@ -297,7 +337,7 @@ pub fn render_leading_dock(
         state.nav_split_fraction = state.nav_split_fraction.clamp(0.30, 0.85);
 
         let show_family_body = ctx_in.layout.family_visible && app.family_open && inner_h >= 220.0;
-        let family_bar_h = 24.0;
+        let family_bar_h = tokens.metrics.min_hit_target_pt + tokens.metrics.space_xxs;
         let splitter_h = if show_family_body { 6.0 } else { 0.0 };
         let family_h =
             if show_family_body { (inner_h * (1.0 - state.nav_split_fraction)).clamp(84.0, (inner_h - 116.0).max(84.0)) } else { family_bar_h };
@@ -469,12 +509,12 @@ fn render_collapsed_icon_rail(
     intents: &mut PendingUiIntents,
 ) {
     ui.vertical_centered(|ui| {
-        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.spacing_mut().item_spacing.y = tokens.metrics.space_xs;
         let expand_resp = render_rail_icon_button(
             ui,
             RailIconButtonSpec {
                 widget_id: "nav.rail.expand",
-                glyph: if rtl_mirrored { "«" } else { "»" },
+                icon: RailIconKind::Expand { rtl_mirrored },
                 tooltip: tr(&app.locale, "menu.view.navigator"),
                 command_id: Some("ui.navigator.toggle"),
                 selected: false,
@@ -487,17 +527,24 @@ fn render_collapsed_icon_rail(
             intents.push(UiIntent::ToggleLeadingCollapsedRail);
         }
 
-        for (chip, badge, wid) in [
-            (NavigatorKindChip::Data, "D", "nav.rail.data"),
-            (NavigatorKindChip::Info, "I", "nav.rail.info"),
-            (NavigatorKindChip::Results, "R", "nav.rail.results"),
-            (NavigatorKindChip::Graphs, "G", "nav.rail.graphs"),
-            (NavigatorKindChip::Layouts, "L", "nav.rail.layouts"),
+        for (chip, section, wid) in [
+            (NavigatorKindChip::Data, SheetSection::Data, "nav.rail.data"),
+            (NavigatorKindChip::Info, SheetSection::Info, "nav.rail.info"),
+            (NavigatorKindChip::Results, SheetSection::Analyses, "nav.rail.results"),
+            (NavigatorKindChip::Graphs, SheetSection::Graphs, "nav.rail.graphs"),
+            (NavigatorKindChip::Layouts, SheetSection::Layouts, "nav.rail.layouts"),
         ] {
             let selected = state.kind_chip == chip;
             let resp = render_rail_icon_button(
                 ui,
-                RailIconButtonSpec { widget_id: wid, glyph: badge, tooltip: chip.label(&app.locale), command_id: None, selected, enabled },
+                RailIconButtonSpec {
+                    widget_id: wid,
+                    icon: RailIconKind::Section(section),
+                    tooltip: chip.label(&app.locale),
+                    command_id: None,
+                    selected,
+                    enabled,
+                },
                 tokens,
                 meta,
             );
@@ -511,7 +558,7 @@ fn render_collapsed_icon_rail(
             ui,
             RailIconButtonSpec {
                 widget_id: "family.rail.toggle",
-                glyph: "F",
+                icon: RailIconKind::FamilyTree,
                 tooltip: tr(&app.locale, "menu.view.family_pane"),
                 command_id: Some("ui.family.toggle"),
                 selected: app.family_open,
@@ -526,9 +573,27 @@ fn render_collapsed_icon_rail(
     });
 }
 
+fn rail_command_tooltip(command_id: Option<&str>) -> (Option<String>, Option<&'static str>) {
+    let Some(cid) = command_id else {
+        return (None, None);
+    };
+    let sc = match cid {
+        "ui.navigator.toggle" => Some(format_shortcut_for_platform("Cmd+Shift+N")),
+        "ui.family.toggle" => Some(format_shortcut_for_platform("Cmd+Shift+F")),
+        _ => None,
+    };
+    let summary = match cid {
+        "ui.navigator.toggle" => Some("Expand or collapse the Project Navigator pane"),
+        "ui.family.toggle" => Some("Toggle the active sheet's Family lineage pane"),
+        _ => None,
+    };
+    (sc, summary)
+}
+
 fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
-    let RailIconButtonSpec { widget_id, glyph, tooltip, command_id, selected, enabled } = spec;
-    let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(26.0), if enabled { Sense::click() } else { Sense::hover() });
+    let RailIconButtonSpec { widget_id, icon, tooltip, command_id, selected, enabled } = spec;
+    let rail_btn_sz = tokens.metrics.min_hit_target_pt + tokens.metrics.space_xxs;
+    let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(rail_btn_sz), if enabled { Sense::click() } else { Sense::hover() });
     super::widgets::paint_interactive_chrome(
         ui,
         rect,
@@ -548,10 +613,23 @@ fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, toke
     } else if selected {
         tokens.selected_accent_text()
     } else {
-        tokens.text_strong
+        tokens.icon
     };
-    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, glyph, FontId::proportional(11.5), fg);
-    resp = resp.on_hover_text(tooltip);
+    let icon_sz = tokens.metrics.space_xl;
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(icon_sz));
+    match icon {
+        RailIconKind::Expand { rtl_mirrored } => draw_rail_expand_vector_icon(ui.painter(), icon_rect, rtl_mirrored, fg),
+        RailIconKind::Section(section) => draw_sheet_vector_icon(ui.painter(), icon_rect, section, None, fg),
+        RailIconKind::FamilyTree => draw_family_tree_vector_icon(ui.painter(), icon_rect, fg),
+    }
+    let disabled_reason = (!enabled).then(|| tr(tokens.locale, "tooltip.disabled.close_dialog"));
+    let (rail_sc, rail_summary) = rail_command_tooltip(command_id);
+    let section_summary = (rail_summary.is_none() && command_id.is_none()).then_some("Open Navigator filtered to this section");
+    resp = show_tooltip(
+        &resp,
+        tokens,
+        TooltipSpec { title: tooltip, shortcut: rail_sc.as_deref(), summary: rail_summary.or(section_summary), disabled_reason },
+    );
     let a11y_label = tooltip.to_owned();
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, a11y_label.clone()));
     meta.record_response(
@@ -564,7 +642,7 @@ fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, toke
             command_id,
             value: Some(json!({ "selected": selected })),
             enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
+            disabled_reason,
             z_layer: ZLayer::Workspace,
             ellipsized: false,
             full_label: None,
@@ -703,28 +781,7 @@ fn render_navigator_pane(
     });
     ui.add_space(4.0);
 
-    // Compact single-row inline kind filter on `surface_recessed` (retiring stacked 2x3 bordered chips, R20.4).
-    let chip_labels = [
-        (NavigatorKindChip::All, "All"),
-        (NavigatorKindChip::Data, "D"),
-        (NavigatorKindChip::Info, "I"),
-        (NavigatorKindChip::Results, "R"),
-        (NavigatorKindChip::Graphs, "G"),
-        (NavigatorKindChip::Layouts, "L"),
-    ];
-    let filter_opts: Vec<super::ui_kit::SegmentedOption<'_>> = chip_labels
-        .iter()
-        .map(|(chip, short)| super::ui_kit::SegmentedOption {
-            widget_id: chip.widget_id(),
-            label: short,
-            tooltip: Some(chip.label(locale)),
-            value: None,
-        })
-        .collect();
-    let cur_chip_idx = chip_labels.iter().position(|(c, _)| *c == state.kind_chip).unwrap_or(0);
-    if let Some(chosen) = super::ui_kit::segmented_control(ui, tokens, meta, &filter_opts, cur_chip_idx, enabled, ZLayer::Workspace) {
-        state.kind_chip = chip_labels[chosen].0;
-    }
+    render_kind_filter_dropdown(ui, app, state, tokens, avail_w, enabled, meta);
     ui.add_space(tokens.metrics.space_xs);
     ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
     ui.add_space(tokens.metrics.space_xs);
@@ -733,10 +790,10 @@ fn render_navigator_pane(
     handle_navigator_keyboard(ui, app, state, &ctx_in, &visible_ids, intents);
 
     egui::ScrollArea::vertical().id_salt("leading_nav_scroll").animated(false).auto_shrink([false, false]).show(ui, |ui| {
-        let row_w = (ui.available_width() - 12.0).max(96.0);
-        let q = state.search_draft.trim().to_ascii_lowercase();
+        let row_w = (ui.available_width() - tokens.metrics.space_lg).max(96.0);
+        let q = state.search_draft.trim().to_lowercase();
         let nested_mode = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
-        let tree_ctx = NavigatorTreeCtx { app, dock: ctx_in, row_w, query: &q };
+        let tree_ctx = NavigatorTreeCtx { app, dock: ctx_in, row_w, query: &q, visible_ids: &visible_ids };
 
         if nested_mode {
             render_nested_navigator_tree(ui, tree_ctx, state, signals, meta, intents);
@@ -744,6 +801,155 @@ fn render_navigator_pane(
             render_folder_navigator_tree(ui, tree_ctx, state, signals, meta, intents);
         }
     });
+}
+
+const fn chip_section(chip: NavigatorKindChip) -> Option<SheetSection> {
+    match chip {
+        NavigatorKindChip::All => None,
+        NavigatorKindChip::Data => Some(SheetSection::Data),
+        NavigatorKindChip::Info => Some(SheetSection::Info),
+        NavigatorKindChip::Results => Some(SheetSection::Analyses),
+        NavigatorKindChip::Graphs => Some(SheetSection::Graphs),
+        NavigatorKindChip::Layouts => Some(SheetSection::Layouts),
+    }
+}
+
+fn section_count_for_chip(app: &UiApp, chip: NavigatorKindChip) -> usize {
+    match chip {
+        NavigatorKindChip::All => app.nav.all_entries.len(),
+        _ => app.nav.all_entries.iter().filter(|e| chip.matches_section(e.section)).count(),
+    }
+}
+
+fn render_kind_filter_dropdown(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    state: &mut LeadingDockEguiState,
+    tokens: &Tokens,
+    avail_w: f32,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+) {
+    let locale = app.locale.as_str();
+    let cur_count = section_count_for_chip(app, state.kind_chip);
+    let active_label = format!("{} ({cur_count})", state.kind_chip.label(locale));
+    let mut chosen_chip = None;
+
+    let combo = super::widgets::dropdown("nav.kind_filter", egui::RichText::new(&active_label).size(tokens.metrics.font_ui_small_pt))
+        .width(avail_w)
+        .height(tokens.metrics.min_hit_target_pt)
+        .enabled(enabled)
+        .accessible_name(active_label.clone())
+        .show_ui(ui, |popup_ui| {
+            let row_font = FontId::proportional(tokens.metrics.font_ui_small_pt);
+            let icon_w = tokens.metrics.space_lg + tokens.metrics.space_xxs;
+            let gap = tokens.metrics.space_sm;
+            let pad_x = tokens.metrics.space_md;
+            let row_h = tokens.metrics.min_hit_target_pt;
+            let mut max_w = popup_ui.available_width();
+            let mut rows = Vec::with_capacity(NavigatorKindChip::ALL.len());
+            for chip in NavigatorKindChip::ALL {
+                let lbl = chip.label(locale).to_owned();
+                let count_str = format!("({})", section_count_for_chip(app, chip));
+                let lbl_w = popup_ui.painter().layout_no_wrap(lbl.clone(), row_font.clone(), tokens.text_primary).size().x;
+                let cnt_w = popup_ui.painter().layout_no_wrap(count_str.clone(), row_font.clone(), tokens.text_muted).size().x;
+                max_w = max_w.max(pad_x * 2.0 + icon_w + gap * 2.0 + lbl_w + cnt_w + tokens.metrics.space_md);
+                rows.push((chip, lbl, count_str));
+            }
+            let row_w = max_w.min(popup_ui.max_rect().width().max(avail_w));
+            for (chip, lbl, count_str) in rows {
+                let is_selected = state.kind_chip == chip;
+                let (row_rect, row_resp) =
+                    popup_ui.allocate_exact_size(Vec2::new(row_w, row_h), if enabled { Sense::click() } else { Sense::hover() });
+                super::widgets::paint_hover_row(
+                    popup_ui,
+                    row_rect,
+                    CornerRadius::same(tokens.metrics.radius_md),
+                    row_resp.hovered(),
+                    is_selected,
+                    tokens,
+                );
+                let fg = if !enabled {
+                    tokens.text_disabled
+                } else if is_selected {
+                    tokens.selected_accent_text()
+                } else {
+                    tokens.text_primary
+                };
+                let icon_fg = if !enabled {
+                    tokens.text_disabled
+                } else if is_selected {
+                    tokens.selected_accent_text()
+                } else {
+                    tokens.icon
+                };
+                let icon_h = tokens.metrics.space_lg;
+                let icon_rect =
+                    Rect::from_min_size(Pos2::new(row_rect.left() + pad_x, row_rect.center().y - icon_h * 0.5), Vec2::new(icon_w, icon_h));
+                match chip_section(chip) {
+                    Some(section) => draw_sheet_vector_icon(popup_ui.painter(), icon_rect, section, None, icon_fg),
+                    None => draw_all_sheets_vector_icon(popup_ui.painter(), icon_rect, icon_fg),
+                }
+                let text_x = icon_rect.right() + gap;
+                let cnt_galley =
+                    popup_ui.painter().layout_no_wrap(count_str.clone(), row_font.clone(), if is_selected { fg } else { tokens.text_muted });
+                let lbl_max_w = (row_rect.right() - pad_x - cnt_galley.size().x - gap - text_x).max(20.0);
+                let (lbl_galley, elided) = super::ui_kit::elided_galley(popup_ui.painter(), &lbl, row_font.clone(), fg, lbl_max_w, false);
+                popup_ui.painter().with_clip_rect(row_rect.shrink(tokens.metrics.space_xxs)).galley(
+                    Pos2::new(text_x, row_rect.center().y - lbl_galley.size().y * 0.5),
+                    lbl_galley,
+                    fg,
+                );
+                popup_ui.painter().galley(
+                    Pos2::new(row_rect.right() - pad_x - cnt_galley.size().x, row_rect.center().y - cnt_galley.size().y * 0.5),
+                    cnt_galley,
+                    if is_selected { fg } else { tokens.text_muted },
+                );
+
+                let full_item_lbl = format!("{lbl} {count_str}");
+                let a11y = full_item_lbl.clone();
+                row_resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::MenuItem, enabled, is_selected, a11y.clone()));
+                meta.record_response(
+                    popup_ui,
+                    &row_resp,
+                    FrameInspectEntryInput {
+                        widget_id: chip.widget_id(),
+                        role: "menuitem",
+                        label: &full_item_lbl,
+                        command_id: None,
+                        value: Some(json!({ "selected": is_selected, "kind": chip.widget_id() })),
+                        enabled,
+                        disabled_reason: (!enabled).then(|| tr(&app.locale, "tooltip.disabled.close_dialog")),
+                        z_layer: ZLayer::DropdownMenu,
+                        ellipsized: elided,
+                        full_label: elided.then_some(full_item_lbl.as_str()),
+                    },
+                );
+                if row_resp.clicked() && enabled {
+                    chosen_chip = Some(chip);
+                }
+            }
+        });
+
+    if let Some(chip) = chosen_chip {
+        state.kind_chip = chip;
+    }
+    meta.record_response(
+        ui,
+        &combo.response,
+        FrameInspectEntryInput {
+            widget_id: "nav.kind_filter",
+            role: "combobox",
+            label: &active_label,
+            command_id: None,
+            value: Some(json!({ "selected_kind": state.kind_chip.widget_id(), "count": cur_count })),
+            enabled,
+            disabled_reason: (!enabled).then(|| tr(&app.locale, "tooltip.disabled.close_dialog")),
+            z_layer: ZLayer::Workspace,
+            ellipsized: combo.ellipsized,
+            full_label: combo.ellipsized.then_some(active_label.as_str()),
+        },
+    );
 }
 
 fn render_folder_navigator_tree(
@@ -754,7 +960,7 @@ fn render_folder_navigator_tree(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query } = tree;
+    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query, visible_ids } = tree;
     let tokens = ctx_in.tokens;
     let enabled = ctx_in.enabled;
     let locale = &app.locale;
@@ -787,6 +993,7 @@ fn render_folder_navigator_tree(
                         is_nested_parent: false,
                         nested_collapsed: false,
                         row_w,
+                        visible_ids,
                     },
                     state,
                     signals,
@@ -820,7 +1027,7 @@ fn render_nested_navigator_tree(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query } = tree;
+    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query, visible_ids } = tree;
     let doc = app.document();
     let entry_map: BTreeMap<SheetId, (usize, &NavigatorEntry)> =
         app.nav.folders.iter().flat_map(|f| f.entries.iter().enumerate()).map(|(i, e)| (e.sheet_id.clone(), (i, e))).collect();
@@ -855,6 +1062,7 @@ fn render_nested_navigator_tree(
                     is_nested_parent: has_children,
                     nested_collapsed: collapsed,
                     row_w,
+                    visible_ids,
                 },
                 state,
                 signals,
@@ -878,6 +1086,7 @@ fn render_nested_navigator_tree(
                             is_nested_parent: false,
                             nested_collapsed: false,
                             row_w,
+                            visible_ids,
                         },
                         state,
                         signals,
@@ -910,6 +1119,7 @@ fn render_nested_navigator_tree(
                         is_nested_parent: false,
                         nested_collapsed: false,
                         row_w,
+                        visible_ids,
                     },
                     state,
                     signals,
@@ -1006,32 +1216,72 @@ fn draw_disclosure_triangle(painter: &egui::Painter, center: Pos2, collapsed: bo
     }
 }
 
+const fn gallery_folder_slug(section: SheetSection) -> &'static str {
+    match section {
+        SheetSection::Data => "data",
+        SheetSection::Info => "info",
+        SheetSection::Analyses => "results",
+        SheetSection::Graphs => "graphs",
+        SheetSection::Layouts => "layouts",
+    }
+}
+
+const fn folder_gallery_widget_id(section: SheetSection) -> &'static str {
+    match section {
+        SheetSection::Data => "nav.folder.gallery.data",
+        SheetSection::Info => "nav.folder.gallery.info",
+        SheetSection::Analyses => "nav.folder.gallery.results",
+        SheetSection::Graphs => "nav.folder.gallery.graphs",
+        SheetSection::Layouts => "nav.folder.gallery.layouts",
+    }
+}
+
 fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let FolderHeaderSpec { section, count, collapsed, row_w, tokens, enabled } = spec;
-    let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 24.0), if enabled { Sense::click() } else { Sense::hover() }) else {
+    let folder_h = tokens.metrics.min_hit_target_pt;
+    let gallery_btn_w = tokens.metrics.min_hit_target_pt;
+    let gap = tokens.metrics.space_xxs;
+    let Some((full_rect, _)) = allocate_visible_slot(ui, Vec2::new(row_w, folder_h), Sense::hover()) else {
         return;
     };
-    let label = format!("{} ({count})", tr(&app.locale, section_label_key(section)));
+    let header_w = (full_rect.width() - gallery_btn_w - gap).max(32.0);
+    let rect = Rect::from_min_size(full_rect.min, Vec2::new(header_w, folder_h));
+    let gallery_rect = Rect::from_min_size(Pos2::new(rect.right() + gap, full_rect.top()), Vec2::splat(gallery_btn_w));
+
+    let mut resp = ui.interact(
+        rect,
+        ui.make_persistent_id(("nav_section_header", section_header_widget_id(section))),
+        if enabled { Sense::click() } else { Sense::hover() },
+    );
+    let folder_name = tr(&app.locale, section_label_key(section));
+    let label = format!("{folder_name} ({count})");
     if enabled {
         super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), false, tokens);
     }
-    draw_disclosure_triangle(ui.painter(), Pos2::new(rect.left() + 9.0, rect.center().y), collapsed, tokens.icon);
+    let icon_fg = if enabled { tokens.icon } else { tokens.text_disabled };
+    draw_disclosure_triangle(ui.painter(), Pos2::new(rect.left() + 9.0, rect.center().y), collapsed, icon_fg);
+    let icon_h = tokens.metrics.space_lg;
+    let icon_w = icon_h + 1.0;
+    let icon_rect = Rect::from_min_size(Pos2::new(rect.left() + 18.0, rect.center().y - icon_h * 0.5), Vec2::new(icon_w, icon_h));
+    draw_sheet_vector_icon(ui.painter(), icon_rect, section, None, icon_fg);
+    let text_x = icon_rect.right() + tokens.metrics.space_xs;
+    let text_max_w = (rect.right() - text_x - tokens.metrics.space_xs).max(16.0);
     let (galley, elided) = super::ui_kit::elided_galley(
         ui.painter(),
         &label,
         FontId::proportional(tokens.metrics.font_ui_small_pt),
         tokens.text_muted,
-        (row_w - 22.0).max(16.0),
+        text_max_w,
         false,
     );
-    ui.painter().with_clip_rect(rect.shrink(2.0)).galley(
-        Pos2::new(rect.left() + 18.0, rect.center().y - galley.size().y * 0.5),
+    ui.painter().with_clip_rect(rect.shrink(tokens.metrics.space_xxs)).galley(
+        Pos2::new(text_x, rect.center().y - galley.size().y * 0.5),
         galley,
         tokens.text_muted,
     );
 
     if elided {
-        resp = resp.on_hover_text(&label);
+        resp = show_tooltip(&resp, tokens, TooltipSpec::new(&label));
     }
     if resp.clicked() && enabled {
         intents.push(UiIntent::ToggleNavigatorSection { section });
@@ -1055,6 +1305,212 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
             full_label: elided.then_some(&label),
         },
     );
+
+    let gal_wid = folder_gallery_widget_id(section);
+    let gal_tip = format!("{}: {folder_name}", tr(&app.locale, "nav.open_folder_gallery"));
+    let mut gal_resp =
+        ui.interact(gallery_rect, ui.make_persistent_id(("nav_folder_gallery_btn", gal_wid)), if enabled { Sense::click() } else { Sense::hover() });
+    let is_active_folder_gallery = app.nav.gallery.open
+        && matches!(
+            (app.nav.gallery.filter_folder, section),
+            (Some(SheetFolderKind::Data), SheetSection::Data)
+                | (Some(SheetFolderKind::Info), SheetSection::Info)
+                | (Some(SheetFolderKind::Results), SheetSection::Analyses)
+                | (Some(SheetFolderKind::Graphs), SheetSection::Graphs)
+                | (Some(SheetFolderKind::Layouts), SheetSection::Layouts)
+        );
+    if is_active_folder_gallery {
+        ui.painter().rect(
+            gallery_rect,
+            CornerRadius::same(tokens.metrics.radius_md),
+            tokens.active_bg,
+            Stroke::new(tokens.metrics.stroke_thin_pt, tokens.border),
+            StrokeKind::Inside,
+        );
+    } else if gal_resp.hovered() && enabled {
+        ui.painter().rect_filled(gallery_rect, CornerRadius::same(tokens.metrics.radius_md), tokens.hover_bg);
+    }
+    let gal_icon_rect = Rect::from_center_size(gallery_rect.center(), Vec2::splat(tokens.metrics.space_lg + tokens.metrics.space_xxs));
+    let gal_icon_col = if !enabled {
+        tokens.text_disabled
+    } else if is_active_folder_gallery || gal_resp.hovered() {
+        tokens.text_strong
+    } else {
+        tokens.icon
+    };
+    draw_all_sheets_vector_icon(ui.painter(), gal_icon_rect, gal_icon_col);
+    gal_resp = show_tooltip(&gal_resp, tokens, TooltipSpec::new(&gal_tip));
+    if gal_resp.clicked() && enabled {
+        intents.push_ui("ui.gallery.toggle", json!({ "open": true, "folder": gallery_folder_slug(section) }));
+    }
+    let gal_a11y = gal_tip.clone();
+    gal_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, gal_a11y.clone()));
+    meta.record_response(
+        ui,
+        &gal_resp,
+        FrameInspectEntryInput {
+            widget_id: gal_wid,
+            role: "button",
+            label: &gal_tip,
+            command_id: Some("ui.gallery.toggle"),
+            value: Some(json!({ "folder": gallery_folder_slug(section) })),
+            enabled,
+            disabled_reason: None,
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+}
+
+fn ordered_selected_subset(visible_ids: &[SheetId], selected_set: &BTreeSet<SheetId>) -> Vec<SheetId> {
+    let mut out: Vec<SheetId> = visible_ids.iter().filter(|id| selected_set.contains(*id)).cloned().collect();
+    for id in selected_set {
+        if !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+fn read_click_modifiers(ui: &egui::Ui) -> (bool, bool) {
+    ui.ctx().input(|i| {
+        let mut m = i.modifiers;
+        for ev in &i.events {
+            if let egui::Event::PointerButton { modifiers, .. } = ev {
+                m.shift |= modifiers.shift;
+                m.command |= modifiers.command;
+                m.ctrl |= modifiers.ctrl;
+                m.mac_cmd |= modifiers.mac_cmd;
+            }
+        }
+        (m.shift, m.command || m.ctrl || m.mac_cmd)
+    })
+}
+
+struct NavRowDragPaintCtx<'a> {
+    doc: &'a ProjectDocument,
+    entry: &'a NavigatorEntry,
+    section_index: usize,
+    tokens: &'a Tokens,
+}
+
+fn paint_navigator_row_drag_drop(
+    ui: &egui::Ui,
+    rect: Rect,
+    ctx: NavRowDragPaintCtx<'_>,
+    state: &LeadingDockEguiState,
+    signals: &mut NavFrameSignals,
+) {
+    let NavRowDragPaintCtx { doc, entry, section_index, tokens } = ctx;
+    let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos().or_else(|| i.pointer.hover_pos()));
+    if !(pointer_pos.is_some_and(|p| rect.contains(p)) && state.dragging_sheet_id.is_some()) {
+        return;
+    }
+    match evaluate_drag_drop_outcome(doc, state.dragging_sheet_id.as_ref(), entry, section_index) {
+        DragDropOutcome::ReorderCandidate { target_index, .. } => {
+            ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, tokens.accent));
+            if ui.ctx().input(|i| i.pointer.any_released())
+                && let Some(drag_id) = state.dragging_sheet_id.clone()
+            {
+                signals.drop_commit = Some(DropCommitAction::Reorder { sheet_id: drag_id, target_index });
+            }
+        }
+        DragDropOutcome::RetargetCompatible => {
+            ui.painter().rect_stroke(rect, CornerRadius::same(tokens.metrics.radius_md), Stroke::new(1.5, tokens.link_green), StrokeKind::Inside);
+            if ui.ctx().input(|i| i.pointer.any_released())
+                && let Some(drag_id) = state.dragging_sheet_id.clone()
+            {
+                signals.drop_commit = Some(DropCommitAction::Retarget { result_id: drag_id, target_data_id: entry.sheet_id.clone() });
+            }
+        }
+        DragDropOutcome::RetargetIncompatible => {
+            ui.painter().rect_stroke(rect, CornerRadius::same(tokens.metrics.radius_md), Stroke::new(1.5, tokens.link_red), StrokeKind::Inside);
+        }
+        DragDropOutcome::None => {}
+    }
+}
+
+struct NavRowInteractionCtx<'a> {
+    app: &'a UiApp,
+    entry: &'a NavigatorEntry,
+    visible_ids: &'a [SheetId],
+    enabled: bool,
+}
+
+fn handle_navigator_row_interaction(
+    ui: &egui::Ui,
+    resp: &Response,
+    rect: Rect,
+    ctx: NavRowInteractionCtx<'_>,
+    state: &mut LeadingDockEguiState,
+    intents: &mut PendingUiIntents,
+) {
+    let NavRowInteractionCtx { app, entry, visible_ids, enabled } = ctx;
+    if !enabled {
+        return;
+    }
+    if resp.drag_started() {
+        state.dragging_sheet_id = Some(entry.sheet_id.clone());
+    }
+    if resp.secondary_clicked() {
+        let anchor = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or(rect.center());
+        let selected_ids = if state.selected_sheet_ids.contains(&entry.sheet_id) && state.selected_sheet_ids.len() > 1 {
+            ordered_selected_subset(visible_ids, &state.selected_sheet_ids)
+        } else {
+            state.selected_sheet_ids.clear();
+            state.selected_sheet_ids.insert(entry.sheet_id.clone());
+            state.selection_anchor_sheet_id = Some(entry.sheet_id.clone());
+            vec![entry.sheet_id.clone()]
+        };
+        state.context_menu = Some(NavigatorContextMenuState {
+            sheet_id: entry.sheet_id.clone(),
+            selected_ids,
+            section: entry.section,
+            is_frozen: entry.is_frozen,
+            anchor,
+        });
+    }
+    if resp.double_clicked() && !entry.is_frozen {
+        begin_inline_rename(app, state, entry.sheet_id.clone());
+        return;
+    }
+    if !resp.clicked() || state.dragging_sheet_id.is_some() {
+        return;
+    }
+    let (shift_held, cmd_held) = read_click_modifiers(ui);
+    if shift_held {
+        let anchor = state.selection_anchor_sheet_id.clone().or_else(|| app.document().active_sheet_id.clone());
+        if let Some(anchor_id) = anchor
+            && let (Some(a), Some(b)) = (visible_ids.iter().position(|id| id == &anchor_id), visible_ids.iter().position(|id| id == &entry.sheet_id))
+        {
+            state.selected_sheet_ids.clear();
+            for id in &visible_ids[a.min(b)..=a.max(b)] {
+                state.selected_sheet_ids.insert(id.clone());
+            }
+            state.selection_anchor_sheet_id = Some(anchor_id);
+        } else {
+            state.selected_sheet_ids.insert(entry.sheet_id.clone());
+            state.selection_anchor_sheet_id = Some(entry.sheet_id.clone());
+        }
+    } else if cmd_held {
+        if state.selected_sheet_ids.is_empty()
+            && let Some(active) = app.document().active_sheet_id.as_ref()
+        {
+            state.selected_sheet_ids.insert(active.clone());
+        }
+        if !state.selected_sheet_ids.remove(&entry.sheet_id) {
+            state.selected_sheet_ids.insert(entry.sheet_id.clone());
+        }
+        state.selection_anchor_sheet_id = Some(entry.sheet_id.clone());
+    } else {
+        state.selected_sheet_ids.clear();
+        state.selected_sheet_ids.insert(entry.sheet_id.clone());
+        state.selection_anchor_sheet_id = Some(entry.sheet_id.clone());
+        state.last_synced_active_sheet_id = Some(entry.sheet_id.clone());
+        intents.push_engine("sheet.select", json!({ "sheet_id": entry.sheet_id.as_str(), "mode": "navigator" }));
+        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::Navigator });
+    }
 }
 
 fn render_navigator_row(
@@ -1065,12 +1521,14 @@ fn render_navigator_row(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let NavigatorRowSpec { app, dock: ctx_in, entry, section_index, indent_depth, is_nested_parent, nested_collapsed, row_w } = row;
+    let NavigatorRowSpec { app, dock: ctx_in, entry, section_index, indent_depth, is_nested_parent, nested_collapsed, row_w, visible_ids } = row;
     let tokens = ctx_in.tokens;
     let enabled = ctx_in.enabled;
     let doc = app.document();
     let title = if entry.title.trim().is_empty() { tr(&app.locale, "nav.untitled_sheet") } else { entry.title.as_str() };
-    let row_h = 26.0;
+    let show_two_line =
+        entry.subtitle.is_some() && (matches!(entry.section, SheetSection::Graphs | SheetSection::Analyses) || entry.has_duplicate_title);
+    let row_h = if show_two_line { 38.0_f32 } else { 26.0_f32 };
     let indent_px = (indent_depth.min(4) as f32) * 14.0;
 
     if state.scroll_to_sheet.as_ref() == Some(&entry.sheet_id) {
@@ -1093,49 +1551,37 @@ fn render_navigator_row(
         return;
     }
 
-    let drop_outcome = evaluate_drag_drop_outcome(doc, state.dragging_sheet_id.as_ref(), entry, section_index);
-    let pointer_pos = ui.ctx().input(|i| i.pointer.latest_pos().or_else(|| i.pointer.hover_pos()));
-    let pointer_inside = pointer_pos.is_some_and(|p| rect.contains(p));
+    let in_multi_select = state.selected_sheet_ids.contains(&entry.sheet_id);
+    let is_multi_secondary = !entry.is_active && in_multi_select;
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
 
-    if enabled {
-        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(tokens.metrics.radius_md), resp.hovered(), entry.is_active, tokens);
-    } else if entry.is_active {
-        ui.painter().rect_filled(rect, CornerRadius::same(tokens.metrics.radius_md), tokens.active_bg);
-    }
     if entry.is_active {
-        let bar = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.top() + 3.0), Vec2::new(3.0, rect.height() - 6.0));
-        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent);
-    }
-
-    if pointer_inside && state.dragging_sheet_id.is_some() {
-        match drop_outcome {
-            DragDropOutcome::ReorderCandidate { target_index, .. } => {
-                ui.painter().hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, tokens.accent));
-                if ui.ctx().input(|i| i.pointer.any_released())
-                    && let Some(drag_id) = state.dragging_sheet_id.clone()
-                {
-                    signals.drop_commit = Some(DropCommitAction::Reorder { sheet_id: drag_id, target_index });
-                }
-            }
-            DragDropOutcome::RetargetCompatible => {
-                ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.5, tokens.link_green), StrokeKind::Inside);
-                if ui.ctx().input(|i| i.pointer.any_released())
-                    && let Some(drag_id) = state.dragging_sheet_id.clone()
-                {
-                    signals.drop_commit = Some(DropCommitAction::Retarget { result_id: drag_id, target_data_id: entry.sheet_id.clone() });
-                }
-            }
-            DragDropOutcome::RetargetIncompatible => {
-                ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.5, tokens.link_red), StrokeKind::Inside);
-            }
-            DragDropOutcome::None => {}
+        if enabled {
+            super::widgets::paint_hover_row(ui, rect, radius, resp.hovered(), true, tokens);
+        } else {
+            ui.painter().rect_filled(rect, radius, tokens.active_bg);
         }
+        let bar_w = tokens.metrics.space_xxs + 1.0;
+        let bar = Rect::from_min_size(Pos2::new(rect.left() + 1.0, rect.top() + 3.0), Vec2::new(bar_w, rect.height() - 6.0));
+        ui.painter().rect_filled(bar, CornerRadius::same(1), tokens.accent);
+    } else if is_multi_secondary {
+        ui.painter().rect_filled(rect, radius, tokens.selection_unemphasized_bg);
+        if enabled && resp.hovered() {
+            ui.painter().rect_filled(rect, radius, tokens.hover_bg.linear_multiply(0.5));
+        }
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+    } else if enabled {
+        super::widgets::paint_hover_row(ui, rect, radius, resp.hovered(), false, tokens);
     }
 
+    paint_navigator_row_drag_drop(ui, rect, NavRowDragPaintCtx { doc, entry, section_index, tokens }, state, signals);
+
+    let line1_y = if show_two_line { rect.top() + 13.0 } else { rect.center().y };
     // Disclosure button if nested parent
     let mut x_cur = rect.left() + 5.0 + indent_px;
     if is_nested_parent {
-        let tri_rect = Rect::from_min_size(Pos2::new(x_cur, rect.center().y - 8.0), Vec2::splat(16.0));
+        let tri_sz = tokens.metrics.space_xl;
+        let tri_rect = Rect::from_min_size(Pos2::new(x_cur, line1_y - tri_sz * 0.5), Vec2::splat(tri_sz));
         let tri_resp =
             ui.interact(tri_rect, ui.scope_id().with(("nested_tri", &entry.sheet_id)), if enabled { Sense::click() } else { Sense::hover() });
         draw_disclosure_triangle(ui.painter(), tri_rect.center(), nested_collapsed, tokens.text_muted);
@@ -1146,59 +1592,79 @@ fn render_navigator_row(
                 state.nested_collapsed_parents.insert(entry.sheet_id.clone());
             }
         }
-        x_cur += 16.0;
+        x_cur += tri_sz;
     }
 
-    // Original vector archetype icon
-    let icon_rect = Rect::from_min_size(Pos2::new(x_cur, rect.center().y - 6.0), Vec2::new(14.0, 12.0));
-    draw_sheet_vector_icon(
-        ui.painter(),
-        icon_rect,
-        entry.section,
-        entry.archetype_label.as_deref(),
-        if entry.is_active { tokens.accent } else { tokens.icon },
-    );
-    x_cur += 18.0;
+    // Crisp pixel-snapped vector icon
+    let icon_h = tokens.metrics.space_lg;
+    let icon_w = icon_h + tokens.metrics.space_xxs;
+    let icon_rect = Rect::from_min_size(Pos2::new(x_cur, line1_y - icon_h * 0.5), Vec2::new(icon_w, icon_h));
+    let icon_fg = if !enabled {
+        tokens.text_disabled
+    } else if entry.is_active {
+        tokens.selected_accent_text()
+    } else {
+        tokens.icon
+    };
+    draw_sheet_vector_icon(ui.painter(), icon_rect, entry.section, entry.archetype_label.as_deref(), icon_fg);
+    x_cur += icon_w + tokens.metrics.space_xs;
 
-    // Reserve trailing badges on right
+    // Reserve trailing badges on right of Line 1
     let badge_w = compute_badge_strip_width(entry);
-    let title_max_w = (rect.right() - x_cur - badge_w - 6.0).max(20.0);
+    let title_max_w = (rect.right() - x_cur - badge_w - tokens.metrics.space_sm).max(20.0);
     let fg = if !enabled {
         tokens.text_disabled
-    } else if entry.is_active || entry.is_bold {
+    } else if entry.is_active {
+        tokens.selected_accent_text()
+    } else if entry.is_bold || in_multi_select {
         tokens.text_strong
     } else {
         tokens.text_primary
     };
     let font_size = if entry.is_active || entry.is_bold { 12.0 } else { 11.5 };
     let (galley, ellipsized) = super::ui_kit::elided_galley(ui.painter(), title, FontId::proportional(font_size), fg, title_max_w, false);
-    let title_clip = Rect::from_min_max(Pos2::new(x_cur, rect.top() + 2.0), Pos2::new(x_cur + title_max_w, rect.bottom() - 2.0));
-    ui.painter().with_clip_rect(title_clip).galley(Pos2::new(x_cur, rect.center().y - galley.size().y * 0.5), galley, fg);
+    let line1_top = rect.top() + 2.0;
+    let line1_bot = if show_two_line { rect.top() + 22.0 } else { rect.bottom() - 2.0 };
+    let title_clip = Rect::from_min_max(Pos2::new(x_cur, line1_top), Pos2::new(x_cur + title_max_w, line1_bot));
+    ui.painter().with_clip_rect(title_clip).galley(Pos2::new(x_cur, line1_y - galley.size().y * 0.5), galley, fg);
 
-    paint_row_badges(ui.painter(), rect, entry, tokens, &app.locale);
+    paint_row_badges(ui.painter(), rect, line1_y, entry, tokens, &app.locale);
 
-    if ellipsized {
-        resp = resp.on_hover_text(title);
+    if show_two_line && let Some(sub) = entry.subtitle.as_deref() {
+        let sub_max_w = (rect.right() - x_cur - tokens.metrics.space_sm).max(20.0);
+        let sub_fg = if !enabled {
+            tokens.text_disabled
+        } else if entry.is_active {
+            tokens.selected_accent_text().linear_multiply(0.88)
+        } else {
+            tokens.text_muted
+        };
+        let (sub_galley, _) =
+            super::ui_kit::elided_galley(ui.painter(), sub, FontId::proportional(tokens.metrics.font_ui_small_pt), sub_fg, sub_max_w, false);
+        let sub_clip =
+            Rect::from_min_max(Pos2::new(x_cur, rect.top() + 20.0), Pos2::new(rect.right() - tokens.metrics.space_sm, rect.bottom() - 2.0));
+        ui.painter().with_clip_rect(sub_clip).galley(Pos2::new(x_cur, rect.top() + 21.0), sub_galley, sub_fg);
     }
+    let sheet_summary = build_sheet_hover_summary(doc, &entry.sheet_id, entry.subtitle.as_deref());
+    let row_disabled_reason = (!enabled).then(|| tr(&app.locale, "tooltip.disabled.close_dialog"));
+    resp = show_tooltip_for_control(
+        &resp,
+        tokens,
+        title,
+        ellipsized,
+        TooltipSpec {
+            title,
+            shortcut: None,
+            summary: (!sheet_summary.is_empty()).then_some(sheet_summary.as_str()),
+            disabled_reason: row_disabled_reason,
+        },
+    );
 
-    if resp.drag_started() && enabled {
-        state.dragging_sheet_id = Some(entry.sheet_id.clone());
-    }
-    if resp.secondary_clicked() && enabled {
-        let anchor = ui.ctx().input(|i| i.pointer.interact_pos()).unwrap_or(rect.center());
-        state.context_menu =
-            Some(NavigatorContextMenuState { sheet_id: entry.sheet_id.clone(), section: entry.section, is_frozen: entry.is_frozen, anchor });
-    }
-    if resp.double_clicked() && enabled && !entry.is_frozen {
-        begin_inline_rename(app, state, entry.sheet_id.clone());
-    } else if resp.clicked() && enabled && state.dragging_sheet_id.is_none() {
-        intents.push_engine("sheet.select", json!({ "sheet_id": entry.sheet_id.as_str(), "mode": "navigator" }));
-        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::Navigator });
-    }
+    handle_navigator_row_interaction(ui, &resp, rect, NavRowInteractionCtx { app, entry, visible_ids, enabled }, state, intents);
 
     let wid = format!("nav.sheet.{}", entry.sheet_id.as_str());
     let a11y_lbl = title.to_owned();
-    let is_selected = entry.is_active;
+    let is_selected = entry.is_active || state.selected_sheet_ids.contains(&entry.sheet_id);
     resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::TreeItem, enabled, is_selected, a11y_lbl.clone()));
     meta.record_response(
         ui,
@@ -1208,7 +1674,15 @@ fn render_navigator_row(
             role: "treeitem",
             label: title,
             command_id: Some("sheet.select"),
-            value: Some(json!({ "sheet_id": entry.sheet_id.as_str(), "selected": is_selected, "bold": entry.is_bold })),
+            value: Some(json!({
+                "sheet_id": entry.sheet_id.as_str(),
+                "selected": is_selected,
+                "active": entry.is_active,
+                "multi_selected": state.selected_sheet_ids.contains(&entry.sheet_id),
+                "selected_count": state.selected_sheet_ids.len(),
+                "bold": entry.is_bold,
+                "row_h": row_h,
+            })),
             enabled,
             disabled_reason: None,
             z_layer: ZLayer::Workspace,
@@ -1367,13 +1841,21 @@ fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpe
         super::ui_kit::elided_galley(ui.painter(), &text, FontId::proportional(tokens.metrics.font_ui_small_pt), fg, (row_w - 12.0).max(20.0), false);
     ui.painter().with_clip_rect(rect.shrink(2.0)).galley(Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5), galley, fg);
 
-    if let Some(reason) = disabled_reason
-        && !row_enabled
-    {
-        resp = resp.on_hover_text(reason);
-    } else if elided {
-        resp = resp.on_hover_text(&text);
-    }
+    let disabled_reason = (!enabled).then(|| tr(locale, "tooltip.disabled.close_dialog")).or(disabled_reason);
+    let new_summary = cmd.and_then(|cid| command_tooltip(app, cid).map(|t| t.summary)).filter(|s| !s.trim().is_empty());
+    let new_sc = cmd.and_then(|cid| app.shortcuts.active_combo(cid)).filter(|s| !s.trim().is_empty()).map(format_shortcut_for_platform);
+    resp = show_tooltip_for_control(
+        &resp,
+        tokens,
+        &text,
+        elided,
+        TooltipSpec {
+            title: &text,
+            shortcut: new_sc.as_deref(),
+            summary: new_summary,
+            disabled_reason: (!row_enabled).then_some(disabled_reason).flatten(),
+        },
+    );
 
     if resp.clicked() && row_enabled {
         match section {
@@ -1423,11 +1905,13 @@ fn render_family_collapsed_strip(
     intents: &mut PendingUiIntents,
 ) {
     ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
+    ui.add_space(1.0);
     let w = ui.available_width().max(80.0);
     let label = format!("▸ {}", tr(&app.locale, "nav.family"));
-    let resp = render_compact_chip(
+    let resp = render_compact_chip_height(
         ui,
         CompactChipSpec { max_w: w, widget_id: "family.header.toggle", label: &label, selected: false, enabled },
+        tokens.metrics.min_hit_target_pt,
         tokens,
         meta,
     );
@@ -1478,9 +1962,11 @@ fn render_family_pane(
     let doc = app.document();
 
     egui::ScrollArea::vertical().id_salt("leading_family_scroll").auto_shrink([false, false]).show(ui, |ui| {
-        let row_w = (ui.available_width() - 12.0).max(80.0);
+        let row_w = (ui.available_width() - tokens.metrics.space_lg).max(80.0);
         for (idx, (depth, node)) in ordered.iter().enumerate() {
-            let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 24.0), if enabled { Sense::click() } else { Sense::hover() })
+            let show_sub = node.has_duplicate_title && node.subtitle.is_some();
+            let row_h = if show_sub { 36.0_f32 } else { tokens.metrics.min_hit_target_pt };
+            let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, row_h), if enabled { Sense::click() } else { Sense::hover() })
             else {
                 continue;
             };
@@ -1492,26 +1978,42 @@ fn render_family_pane(
                 ui.painter().rect_filled(rect, CornerRadius::same(tokens.metrics.radius_md), tokens.active_bg);
             }
 
+            let line1_y = if show_sub { rect.top() + 12.0 } else { rect.center().y };
             let indent = ((*depth).min(4) as f32) * 12.0;
             let spine_x = rect.left() + 6.0 + indent * 0.5;
             if *depth > 0 {
-                ui.painter().vline(spine_x, rect.top()..=rect.center().y, Stroke::new(1.0, if in_chain { tokens.accent } else { tokens.divider }));
+                ui.painter().vline(spine_x, rect.top()..=line1_y, Stroke::new(1.0, if in_chain { tokens.accent } else { tokens.divider }));
                 ui.painter().hline(
                     spine_x..=(rect.left() + 10.0 + indent),
-                    rect.center().y,
+                    line1_y,
                     Stroke::new(1.0, if in_chain { tokens.accent } else { tokens.divider }),
                 );
             }
 
             let icon_x = rect.left() + 12.0 + indent;
-            let icon_rect = Rect::from_min_size(Pos2::new(icon_x, rect.center().y - 5.0), Vec2::new(12.0, 10.0));
-            draw_sheet_vector_icon(ui.painter(), icon_rect, node.section, None, if in_chain { tokens.accent } else { tokens.icon });
+            let icon_w = tokens.metrics.space_lg;
+            let icon_h = tokens.metrics.space_lg - tokens.metrics.space_xxs;
+            let icon_rect = Rect::from_min_size(Pos2::new(icon_x, line1_y - icon_h * 0.5), Vec2::new(icon_w, icon_h));
+            let icon_fg = if node.is_active {
+                tokens.selected_accent_text()
+            } else if in_chain {
+                tokens.accent
+            } else {
+                tokens.icon
+            };
+            draw_sheet_vector_icon(ui.painter(), icon_rect, node.section, None, icon_fg);
 
             let multi_dep = multi_dependency_badge(doc, &node.sheet_id);
             let badge_reserve = if multi_dep.is_some() { 56.0 } else { 4.0 };
             let text_x = icon_rect.right() + 5.0;
             let max_text_w = (rect.right() - text_x - badge_reserve).max(16.0);
-            let fg = if in_chain { tokens.text_strong } else { tokens.text_primary };
+            let fg = if node.is_active {
+                tokens.selected_accent_text()
+            } else if in_chain {
+                tokens.text_strong
+            } else {
+                tokens.text_primary
+            };
             let (galley, elided) = super::ui_kit::elided_galley(
                 ui.painter(),
                 &node.title,
@@ -1520,25 +2022,47 @@ fn render_family_pane(
                 max_text_w,
                 false,
             );
+            let line1_bot = if show_sub { rect.top() + 20.0 } else { rect.bottom() };
             ui.painter()
-                .with_clip_rect(Rect::from_min_max(Pos2::new(text_x, rect.top()), Pos2::new(rect.right() - badge_reserve, rect.bottom())))
-                .galley(Pos2::new(text_x, rect.center().y - galley.size().y * 0.5), galley, fg);
+                .with_clip_rect(Rect::from_min_max(Pos2::new(text_x, rect.top()), Pos2::new(rect.right() - badge_reserve, line1_bot)))
+                .galley(Pos2::new(text_x, line1_y - galley.size().y * 0.5), galley, fg);
 
             if let Some(dep_lbl) = multi_dep {
                 ui.painter().text(
-                    Pos2::new(rect.right() - 4.0, rect.center().y),
+                    Pos2::new(rect.right() - 4.0, line1_y),
                     egui::Align2::RIGHT_CENTER,
                     dep_lbl,
                     FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    tokens.link_blue,
+                    tokens.text_muted,
                 );
             }
 
+            if show_sub && let Some(sub) = node.subtitle.as_deref() {
+                let sub_max_w = (rect.right() - text_x - 4.0).max(16.0);
+                let sub_fg = if node.is_active { tokens.selected_accent_text().linear_multiply(0.88) } else { tokens.text_muted };
+                let (sub_galley, _) =
+                    super::ui_kit::elided_galley(ui.painter(), sub, FontId::proportional(tokens.metrics.font_ui_small_pt), sub_fg, sub_max_w, false);
+                ui.painter()
+                    .with_clip_rect(Rect::from_min_max(Pos2::new(text_x, rect.top() + 19.0), Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0)))
+                    .galley(Pos2::new(text_x, rect.top() + 20.0), sub_galley, sub_fg);
+            }
+            let fam_summary = build_sheet_hover_summary(doc, &node.sheet_id, node.subtitle.as_deref());
+            let fam_disabled_reason = (!enabled).then(|| tr(&app.locale, "tooltip.disabled.close_dialog"));
+            resp = show_tooltip_for_control(
+                &resp,
+                tokens,
+                &node.title,
+                elided,
+                TooltipSpec {
+                    title: &node.title,
+                    shortcut: None,
+                    summary: (!fam_summary.is_empty()).then_some(fam_summary.as_str()),
+                    disabled_reason: fam_disabled_reason,
+                },
+            );
+
             if resp.hovered() {
                 signals.any_row_hovered_family = Some(node.sheet_id.clone());
-            }
-            if elided {
-                resp = resp.on_hover_text(&node.title);
             }
             if resp.clicked() && enabled {
                 let mode = if node.section == SheetSection::Data { "navigator" } else { "family" };
@@ -1557,7 +2081,7 @@ fn render_family_pane(
                     role: "treeitem",
                     label: &node.title,
                     command_id: Some("sheet.select"),
-                    value: Some(json!({ "sheet_id": node.sheet_id.as_str(), "idx": idx, "in_chain": in_chain })),
+                    value: Some(json!({ "sheet_id": node.sheet_id.as_str(), "idx": idx, "in_chain": in_chain, "row_h": row_h })),
                     enabled,
                     disabled_reason: None,
                     z_layer: ZLayer::Workspace,
@@ -1630,6 +2154,69 @@ fn compute_active_chain(doc: &ProjectDocument) -> BTreeSet<SheetId> {
     chain
 }
 
+fn push_unique_source_title(doc: &ProjectDocument, sheet_id: &SheetId, seen: &mut BTreeSet<SheetId>, out: &mut Vec<String>) {
+    if seen.insert(sheet_id.clone()) {
+        out.push(doc_sheet_title(doc, sheet_id).unwrap_or(sheet_id.as_str()).to_owned());
+    }
+}
+
+fn build_sheet_hover_summary(doc: &ProjectDocument, sheet_id: &SheetId, fallback_sub: Option<&str>) -> String {
+    if let Some(ds) = doc.data_sheet(sheet_id) {
+        let arch = ds.kind().label();
+        let dims = format!("{}×{}", ds.archetype.row_count(), ds.archetype.column_count());
+        let mut seen = BTreeSet::new();
+        let mut linked_srcs = Vec::new();
+        for reg in &ds.linked_regions {
+            if let Some(up_id) = reg.spec.source.upstream_sheet_id() {
+                push_unique_source_title(doc, up_id, &mut seen, &mut linked_srcs);
+            }
+        }
+        return if linked_srcs.is_empty() {
+            format!("{arch} • {dims}")
+        } else {
+            format!("{arch} • {dims} • Sources ({}): {}", linked_srcs.len(), linked_srcs.join(", "))
+        };
+    }
+    if let Some(info) = doc.info_sheet(sheet_id) {
+        return format!("Info • {} constants", info.constants.len());
+    }
+    if let Some(rs) = doc.result_sheet(sheet_id) {
+        let src_title = doc_sheet_title(doc, &rs.analysis.source_sheet_id).unwrap_or(rs.analysis.source_sheet_id.as_str());
+        return format!("Result • Source: {src_title}");
+    }
+    if let Some(gs) = doc.graph_sheet(sheet_id) {
+        let kind_lbl = format!("{:?}", gs.spec.kind);
+        let mut seen = BTreeSet::new();
+        let mut srcs = Vec::new();
+        push_unique_source_title(doc, &gs.spec.primary_source_sheet_id, &mut seen, &mut srcs);
+        for s in &gs.spec.series {
+            push_unique_source_title(doc, &s.source_sheet_id, &mut seen, &mut srcs);
+        }
+        return if srcs.is_empty() {
+            format!("Graph ({kind_lbl}) • {} series", gs.spec.series.len())
+        } else {
+            format!("Graph ({kind_lbl}) • Sources ({}): {}", srcs.len(), srcs.join(", "))
+        };
+    }
+    if let Some(ls) = doc.layout_sheet(sheet_id) {
+        let mut seen = BTreeSet::new();
+        let mut srcs = Vec::new();
+        for item in &ls.spec.items {
+            match item {
+                LayoutItem::LiveGraph { graph_sheet_id, .. } => push_unique_source_title(doc, graph_sheet_id, &mut seen, &mut srcs),
+                LayoutItem::LiveTable { source_sheet_id, .. } => push_unique_source_title(doc, source_sheet_id, &mut seen, &mut srcs),
+                LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
+            }
+        }
+        return if srcs.is_empty() {
+            format!("Page Layout • {} panels", ls.spec.items.len())
+        } else {
+            format!("Page Layout ({} panels) • Sources ({}): {}", ls.spec.items.len(), srcs.len(), srcs.join(", "))
+        };
+    }
+    fallback_sub.map(str::trim).unwrap_or("").to_owned()
+}
+
 fn multi_dependency_badge(doc: &ProjectDocument, sheet_id: &SheetId) -> Option<String> {
     if let Some(g) = doc.graph_sheet(sheet_id)
         && g.spec.series.len() > 1
@@ -1653,8 +2240,11 @@ fn update_family_hover_preview_timer(
     report: &mut LeadingDockFrameReport,
 ) {
     let FamilyHoverPreviewInput { hovered_family, tokens, dock_rect, rtl_mirrored } = input;
+    let dismiss = ui.ctx().input(|i| {
+        i.pointer.any_down() || i.smooth_scroll_delta.length_sq() > 0.25 || i.events.iter().any(|e| matches!(e, egui::Event::MouseWheel { .. }))
+    });
     let now = ui.ctx().input(|i| i.time);
-    match hovered_family {
+    match if dismiss { None } else { hovered_family } {
         Some(id) => {
             if state.hover_preview_sheet_id.as_ref() == Some(&id) {
                 let start = state.hover_started_sec.unwrap_or(now);
@@ -1739,7 +2329,7 @@ fn render_hover_preview_contents(ui: &mut egui::Ui, doc: &ProjectDocument, sheet
                 .color(tokens.text_muted),
         );
         if ds.frozen {
-            ui.label(egui::RichText::new("Frozen").size(tokens.metrics.font_ui_small_pt).color(tokens.link_blue));
+            ui.label(egui::RichText::new("Frozen").size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
         }
     } else if let Some(res) = doc.result_sheet(sheet_id) {
         let status = match &res.status {
@@ -1810,7 +2400,7 @@ fn finalize_drag_state(ui: &egui::Ui, app: &UiApp, state: &mut LeadingDockEguiSt
 /// `SeparateFolders` vs `NestedResultsUnderData`, collapsed folders/parents, kind chip, and search).
 #[must_use]
 pub fn collect_visible_sheet_ids(app: &UiApp, state: &LeadingDockEguiState) -> Vec<SheetId> {
-    let q = state.search_draft.trim().to_ascii_lowercase();
+    let q = state.search_draft.trim().to_lowercase();
     let mut ids = Vec::new();
     if app.nav.nesting_mode == NavigatorNestingMode::NestedResultsUnderData {
         let doc = app.document();
@@ -1902,8 +2492,10 @@ fn handle_navigator_keyboard(
 
 fn entry_matches_query(entry: &NavigatorEntry, query_lower: &str) -> bool {
     query_lower.is_empty()
-        || entry.title.to_ascii_lowercase().contains(query_lower)
-        || entry.sheet_id.as_str().to_ascii_lowercase().contains(query_lower)
+        || entry.title.to_lowercase().contains(query_lower)
+        || entry.sheet_id.as_str().to_lowercase().contains(query_lower)
+        || entry.archetype_label.as_deref().is_some_and(|lbl| lbl.to_lowercase().contains(query_lower))
+        || entry.subtitle.as_deref().is_some_and(|sub| sub.to_lowercase().contains(query_lower))
 }
 
 fn compute_badge_strip_width(entry: &NavigatorEntry) -> f32 {
@@ -1923,77 +2515,169 @@ fn compute_badge_strip_width(entry: &NavigatorEntry) -> f32 {
     w
 }
 
-fn paint_row_badges(painter: &egui::Painter, rect: Rect, entry: &NavigatorEntry, tokens: &Tokens, _locale: &str) {
+fn paint_row_badges(painter: &egui::Painter, rect: Rect, center_y: f32, entry: &NavigatorEntry, tokens: &Tokens, _locale: &str) {
     let mut x_right = rect.right() - 4.0;
     if let Some(tag) = entry.color_tag {
-        let r = Rect::from_min_size(Pos2::new(x_right - 4.0, rect.center().y - 5.0), Vec2::new(tokens.metrics.space_xs, 10.0)); // design-token-exempt: compact colour-tag pip
+        let tag_h = tokens.metrics.space_md + tokens.metrics.space_xxs;
+        let r = Rect::from_min_size(Pos2::new(x_right - 4.0, center_y - tag_h * 0.5), Vec2::new(tokens.metrics.space_xs, tag_h));
         painter.rect_filled(r, CornerRadius::same(1), crate::egui_shell::rgba8_to_color32(tag));
         x_right -= 7.0;
     }
     if entry.is_dirty {
-        painter.circle_filled(Pos2::new(x_right - 4.0, rect.center().y), 3.0, tokens.link_red);
+        painter.circle_filled(Pos2::new(x_right - 4.0, center_y), 3.0, tokens.link_red);
         x_right -= 11.0;
     }
     if entry.is_frozen {
-        painter.text(Pos2::new(x_right, rect.center().y), egui::Align2::RIGHT_CENTER, "F", FontId::proportional(10.0), tokens.link_blue);
+        painter.text(Pos2::new(x_right, center_y), egui::Align2::RIGHT_CENTER, "F", FontId::proportional(10.0), tokens.text_muted);
         x_right -= 12.0;
     }
     if !entry.link_colors.is_empty() {
-        painter.circle_stroke(Pos2::new(x_right - 4.0, rect.center().y), 3.0, Stroke::new(1.2, tokens.link_green));
+        painter.circle_stroke(Pos2::new(x_right - 4.0, center_y), 3.0, Stroke::new(1.2, tokens.link_green));
     }
 }
 
-fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSection, _arch_lbl: Option<&str>, color: Color32) {
+#[inline]
+fn snap_px(v: f32, pixels_per_point: f32) -> f32 {
+    let ppp = pixels_per_point.max(1.0);
+    (v * ppp).round() / ppp
+}
+
+fn draw_rail_expand_vector_icon(painter: &egui::Painter, rect: Rect, rtl_mirrored: bool, color: Color32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let r = rect.shrink(tokens_pad(rect));
+    let cy = snap_px(r.center().y, ppp);
+    let dy = r.height() * 0.28;
+    let tip_off = r.width() * 0.18;
+    let stroke = Stroke::new(1.4, color);
+    let dir = if rtl_mirrored { -1.0 } else { 1.0 };
+    for base_x in [r.center().x - dir * r.width() * 0.22, r.center().x + dir * r.width() * 0.14] {
+        let bx = snap_px(base_x, ppp);
+        let tip_x = snap_px(base_x + dir * tip_off, ppp);
+        painter.add(egui::Shape::line(vec![Pos2::new(bx, cy - dy), Pos2::new(tip_x, cy), Pos2::new(bx, cy + dy)], stroke));
+    }
+}
+
+fn tokens_pad(rect: Rect) -> f32 {
+    (rect.width().min(rect.height()) * 0.12).clamp(1.0, 2.5)
+}
+
+fn draw_all_sheets_vector_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let ppp = painter.ctx().pixels_per_point();
     let r = rect.shrink(1.0);
+    let gap = snap_px(2.0, ppp);
+    let cell_w = ((r.width() - gap) * 0.5).max(2.0);
+    let cell_h = ((r.height() - gap) * 0.5).max(2.0);
     let stroke = Stroke::new(1.25, color);
+    for row in 0..2 {
+        for col in 0..2 {
+            let x = snap_px(r.left() + (col as f32) * (cell_w + gap), ppp);
+            let y = snap_px(r.top() + (row as f32) * (cell_h + gap), ppp);
+            let cell = Rect::from_min_size(Pos2::new(x, y), Vec2::new(cell_w, cell_h));
+            painter.rect_stroke(cell, CornerRadius::same(1), stroke, StrokeKind::Inside);
+        }
+    }
+}
+
+fn draw_family_tree_vector_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let r = rect.shrink(1.5);
+    let cy = snap_px(r.center().y, ppp);
+    let left_x = snap_px(r.left() + 2.0, ppp);
+    let mid_x = snap_px(r.left() + r.width() * 0.52, ppp);
+    let right_x = snap_px(r.right() - 2.0, ppp);
+    let top_y = snap_px(r.top() + r.height() * 0.22, ppp);
+    let bot_y = snap_px(r.bottom() - r.height() * 0.22, ppp);
+    let line_stroke = Stroke::new(1.3, color);
+    painter.hline(left_x..=mid_x, cy, line_stroke);
+    painter.vline(mid_x, top_y..=bot_y, line_stroke);
+    painter.hline(mid_x..=right_x, top_y, line_stroke);
+    painter.hline(mid_x..=right_x, bot_y, line_stroke);
+    let node_r = 1.9_f32;
+    painter.circle_filled(Pos2::new(left_x, cy), node_r, color);
+    painter.circle_filled(Pos2::new(right_x, top_y), node_r, color);
+    painter.circle_filled(Pos2::new(right_x, bot_y), node_r, color);
+}
+
+fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSection, _arch_lbl: Option<&str>, color: Color32) {
+    let ppp = painter.ctx().pixels_per_point();
+    let r = rect.shrink(1.0);
+    let stroke = Stroke::new(1.3, color);
     match section {
         SheetSection::Data => {
-            // Frameless 2x2 table grid icon (header rule + vertical & horizontal dividers).
-            let y_hdr = r.top() + r.height() * 0.34;
-            let y_mid = r.top() + r.height() * 0.68;
-            let x_mid = r.left() + r.width() * 0.45;
-            painter.hline(r.x_range(), r.top(), Stroke::new(1.5, color));
-            painter.hline(r.x_range(), y_hdr, stroke);
-            painter.hline(r.x_range(), y_mid, Stroke::new(1.0, color.linear_multiply(0.75)));
-            painter.vline(x_mid, r.top()..=r.bottom(), Stroke::new(1.0, color.linear_multiply(0.85)));
+            // Pixel-snapped 2x2 table grid icon (bold header rule + internal cell dividers).
+            let left = snap_px(r.left(), ppp);
+            let right = snap_px(r.right(), ppp);
+            let top = snap_px(r.top(), ppp);
+            let bot = snap_px(r.bottom(), ppp);
+            let y_hdr = snap_px(top + (bot - top) * 0.34, ppp);
+            let y_mid = snap_px(top + (bot - top) * 0.68, ppp);
+            let x_mid = snap_px(left + (right - left) * 0.45, ppp);
+            painter.hline(left..=right, top, Stroke::new(1.6, color));
+            painter.hline(left..=right, y_hdr, stroke);
+            painter.hline(left..=right, y_mid, Stroke::new(1.1, color.linear_multiply(0.8)));
+            painter.vline(x_mid, top..=bot, Stroke::new(1.1, color.linear_multiply(0.85)));
         }
         SheetSection::Info => {
-            // Frameless info glyph: subtle circle + vertical stem + dot.
-            let c = r.center();
+            // Crisp info circle + vertical stem + dot.
+            let c = Pos2::new(snap_px(r.center().x, ppp), snap_px(r.center().y, ppp));
             let rad = (r.width().min(r.height()) * 0.5).max(3.5);
             painter.circle_stroke(c, rad, stroke);
-            painter.circle_filled(Pos2::new(c.x, c.y - rad * 0.38), 1.0, color);
-            painter.vline(c.x, (c.y - rad * 0.08)..=(c.y + rad * 0.48), stroke);
+            painter.circle_filled(Pos2::new(c.x, snap_px(c.y - rad * 0.42, ppp)), 1.05, color);
+            painter.vline(c.x, snap_px(c.y - rad * 0.08, ppp)..=snap_px(c.y + rad * 0.48, ppp), stroke);
         }
         SheetSection::Analyses => {
-            // Frameless analysis bars (three rising columns above a baseline, never a boxed checkmark).
-            painter.hline(r.x_range(), r.bottom(), stroke);
-            let w = r.width();
-            let h = r.height();
-            painter.vline(r.left() + w * 0.22, (r.bottom() - h * 0.42)..=r.bottom(), Stroke::new(1.8, color));
-            painter.vline(r.left() + w * 0.52, (r.bottom() - h * 0.72)..=r.bottom(), Stroke::new(1.8, color));
-            painter.vline(r.left() + w * 0.82, (r.bottom() - h * 0.92)..=r.bottom(), Stroke::new(1.8, color));
+            // Crisp pixel-snapped vector Sigma (Σ) glyph for statistical/regression Results (`R10.36`).
+            let left = snap_px(r.left() + r.width() * 0.14, ppp);
+            let right = snap_px(r.right() - r.width() * 0.08, ppp);
+            let top = snap_px(r.top() + 0.5, ppp);
+            let bot = snap_px(r.bottom() - 0.5, ppp);
+            let mid_y = snap_px((top + bot) * 0.5, ppp);
+            let mid_x = snap_px(left + (right - left) * 0.46, ppp);
+            let serif = (r.height() * 0.16).clamp(1.2, 2.2);
+            let sigma_stroke = Stroke::new(1.4, color);
+            let pts = vec![
+                Pos2::new(right, snap_px(top + serif, ppp)),
+                Pos2::new(right, top),
+                Pos2::new(left, top),
+                Pos2::new(mid_x, mid_y),
+                Pos2::new(left, bot),
+                Pos2::new(right, bot),
+                Pos2::new(right, snap_px(bot - serif, ppp)),
+            ];
+            painter.add(egui::Shape::line(pts, sigma_stroke));
         }
         SheetSection::Graphs => {
-            // Frameless L-axes with a rising sigmoidal curve.
-            painter.vline(r.left() + 1.0, r.top()..=r.bottom(), stroke);
-            painter.hline((r.left() + 1.0)..=r.right(), r.bottom(), stroke);
+            // Pixel-snapped L-axes with a rising sigmoidal curve.
+            let ax_x = snap_px(r.left() + 1.0, ppp);
+            let ax_bot = snap_px(r.bottom(), ppp);
+            let top = snap_px(r.top(), ppp);
+            let right = snap_px(r.right(), ppp);
+            painter.vline(ax_x, top..=ax_bot, stroke);
+            painter.hline(ax_x..=right, ax_bot, stroke);
             let pts = [
-                Pos2::new(r.left() + 2.5, r.bottom() - 1.5),
-                Pos2::new(r.left() + r.width() * 0.42, r.bottom() - r.height() * 0.32),
-                Pos2::new(r.left() + r.width() * 0.68, r.top() + r.height() * 0.30),
-                Pos2::new(r.right() - 0.5, r.top() + 1.0),
+                Pos2::new(snap_px(ax_x + 1.5, ppp), snap_px(ax_bot - 1.5, ppp)),
+                Pos2::new(snap_px(r.left() + r.width() * 0.42, ppp), snap_px(ax_bot - r.height() * 0.34, ppp)),
+                Pos2::new(snap_px(r.left() + r.width() * 0.68, ppp), snap_px(top + r.height() * 0.28, ppp)),
+                Pos2::new(snap_px(right - 0.5, ppp), snap_px(top + 1.0, ppp)),
             ];
             painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.35, color)));
         }
         SheetSection::Layouts => {
-            // Frameless multi-panel page mosaic (two side-by-side panels over a wide footer panel).
-            let gap = 2.0;
-            let top_h = (r.height() - gap) * 0.52;
-            let half_w = (r.width() - gap) * 0.5;
-            let tl = Rect::from_min_size(r.min, Vec2::new(half_w, top_h));
-            let tr = Rect::from_min_size(Pos2::new(r.left() + half_w + gap, r.top()), Vec2::new(half_w, top_h));
-            let bot = Rect::from_min_size(Pos2::new(r.left(), r.top() + top_h + gap), Vec2::new(r.width(), r.height() - top_h - gap));
+            // Pixel-snapped 2-over-1 publication page mosaic.
+            let gap = snap_px(2.0, ppp);
+            let left = snap_px(r.left(), ppp);
+            let top = snap_px(r.top(), ppp);
+            let right = snap_px(r.right(), ppp);
+            let bot_edge = snap_px(r.bottom(), ppp);
+            let w = (right - left).max(4.0);
+            let h = (bot_edge - top).max(4.0);
+            let top_h = snap_px((h - gap) * 0.52, ppp);
+            let half_w = snap_px((w - gap) * 0.5, ppp);
+            let tl = Rect::from_min_size(Pos2::new(left, top), Vec2::new(half_w, top_h));
+            let tr =
+                Rect::from_min_size(Pos2::new(snap_px(left + half_w + gap, ppp), top), Vec2::new((right - (left + half_w + gap)).max(2.0), top_h));
+            let y_bot = snap_px(top + top_h + gap, ppp);
+            let bot = Rect::from_min_size(Pos2::new(left, y_bot), Vec2::new(w, (bot_edge - y_bot).max(2.0)));
             painter.rect_stroke(tl, CornerRadius::same(1), stroke, StrokeKind::Inside);
             painter.rect_stroke(tr, CornerRadius::same(1), stroke, StrokeKind::Inside);
             painter.rect_stroke(bot, CornerRadius::same(1), stroke, StrokeKind::Inside);
@@ -2002,6 +2686,10 @@ fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSec
 }
 
 fn render_compact_chip(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
+    render_compact_chip_height(ui, spec, 20.0, tokens, meta)
+}
+
+fn render_compact_chip_height(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, height: f32, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
     super::ui_kit::styled_button(
         ui,
         tokens,
@@ -2015,7 +2703,7 @@ fn render_compact_chip(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, tokens: &To
             tooltip: None,
             command_id: None,
             width: super::ui_kit::ButtonWidth::Fixed(spec.max_w.max(20.0)),
-            height: 20.0,
+            height,
             font_size: tokens.metrics.font_ui_small_pt,
             radius: tokens.metrics.radius_md,
             text_align: super::ui_kit::ButtonTextAlign::Center,
@@ -2157,237 +2845,113 @@ fn render_leading_dock_splitter(
     });
 }
 
-struct NavCtxItemSpec<'a> {
-    widget_id: &'a str,
-    label: &'a str,
-    command_id: Option<&'a str>,
-    enabled: bool,
-    disabled_reason: Option<&'a str>,
-    tokens: &'a Tokens,
+#[derive(Clone, Copy)]
+enum NavCtxAction {
+    CompareSplit,
+    Rename,
+    Duplicate,
+    DuplicateFamily,
+    ToggleFreeze,
+    Analyze,
+    NewGraph,
+    ConvertArchetype,
+    EditParams,
+    Rerun,
+    Retarget,
+    ChangeGraphType,
+    ExportFigure,
+    ExportBatchPdf,
+    Print,
+    Delete,
 }
 
-fn render_nav_ctx_item(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, spec: NavCtxItemSpec<'_>) -> bool {
-    let sense = if spec.enabled { Sense::click() } else { Sense::hover() };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(208.0, 26.0), sense);
-    let fg = if spec.enabled { spec.tokens.text_strong } else { spec.tokens.text_disabled };
-    if spec.enabled {
-        super::widgets::paint_hover_row(ui, rect, CornerRadius::same(spec.tokens.metrics.radius_md), resp.hovered(), false, spec.tokens);
-    }
-    ui.painter().with_clip_rect(rect.shrink2(Vec2::new(6.0, 0.0))).text(
-        Pos2::new(rect.left() + 8.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        spec.label,
-        FontId::proportional(12.0),
-        fg,
-    );
-    let ak_lbl = spec.label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::MenuItem, spec.enabled, ak_lbl.clone()));
-    meta.record_response(
-        ui,
-        &resp,
-        FrameInspectEntryInput {
-            widget_id: spec.widget_id,
-            role: "menuitem",
-            label: spec.label,
-            command_id: spec.command_id,
-            value: None,
-            enabled: spec.enabled,
-            disabled_reason: spec.disabled_reason,
-            z_layer: ZLayer::ContextMenu,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
-    spec.enabled && resp.clicked()
-}
-
-fn render_nav_section_ctx_items(
-    ui: &mut egui::Ui,
-    locale: &str,
+fn push_nav_section_ctx_entries<'a>(
+    locale: &'a str,
     menu: &NavigatorContextMenuState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) -> bool {
-    let sid = menu.sheet_id.as_str();
-    let frozen_reason = menu.is_frozen.then(|| tr(locale, "nav.frozen_badge"));
+    frozen_reason: Option<&'a str>,
+    entries: &mut Vec<ActionMenuEntry<'a>>,
+    actions: &mut Vec<Option<NavCtxAction>>,
+) {
+    let mut push = |item: ActionMenuItem<'a>, act: NavCtxAction| {
+        entries.push(ActionMenuEntry::Item(item));
+        actions.push(Some(act));
+    };
     match menu.section {
         SheetSection::Data => {
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.analyze",
-                    label: tr(locale, "menu.analyze.analyze"),
-                    command_id: Some("ui.analyze.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.analyze.open", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.new_graph",
-                    label: tr(locale, "menu.insert.new_graph"),
-                    command_id: Some("graph.create"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_engine("graph.create", json!({ "data_sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.convert_archetype",
-                    label: tr(locale, "cmd.ui.table.convertArchetype.open"),
-                    command_id: Some("ui.table.convertArchetype.open"),
-                    enabled: !menu.is_frozen,
-                    disabled_reason: frozen_reason,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": sid }));
-                return true;
-            }
+            push(
+                ActionMenuItem::menu_item("nav.ctx.analyze", tr(locale, "menu.analyze.analyze")).command_id(Some("ui.analyze.open")),
+                NavCtxAction::Analyze,
+            );
+            push(
+                ActionMenuItem::menu_item("nav.ctx.new_graph", tr(locale, "menu.insert.new_graph")).command_id(Some("graph.create")),
+                NavCtxAction::NewGraph,
+            );
+            push(
+                ActionMenuItem::menu_item("nav.ctx.convert_archetype", tr(locale, "cmd.ui.table.convertArchetype.open"))
+                    .command_id(Some("ui.table.convertArchetype.open"))
+                    .enabled(!menu.is_frozen)
+                    .disabled_reason(frozen_reason),
+                NavCtxAction::ConvertArchetype,
+            );
         }
         SheetSection::Analyses => {
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.edit_params",
-                    label: tr(locale, "menu.analyze.change_params"),
-                    command_id: Some("ui.editParams.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.editParams.open", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.rerun",
-                    label: tr(locale, "cmd.analysis.run"),
-                    command_id: Some("analysis.run"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_engine("analysis.run", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.retarget",
-                    label: tr(locale, "menu.analyze.change_data"),
-                    command_id: Some("analysis.retargetData"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push(UiIntent::OpenRetargetDialog { result_sheet_id: menu.sheet_id.clone(), target_data_sheet_id: None });
-                return true;
-            }
+            push(
+                ActionMenuItem::menu_item("nav.ctx.edit_params", tr(locale, "menu.analyze.change_params")).command_id(Some("ui.editParams.open")),
+                NavCtxAction::EditParams,
+            );
+            push(ActionMenuItem::menu_item("nav.ctx.rerun", tr(locale, "cmd.analysis.run")).command_id(Some("analysis.run")), NavCtxAction::Rerun);
+            push(
+                ActionMenuItem::menu_item("nav.ctx.retarget", tr(locale, "menu.analyze.change_data")).command_id(Some("analysis.retargetData")),
+                NavCtxAction::Retarget,
+            );
         }
         SheetSection::Graphs => {
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.change_graph_type",
-                    label: tr(locale, "menu.graph.change_type"),
-                    command_id: Some("ui.changeGraphType.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.changeGraphType.open", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.export_figure",
-                    label: tr(locale, "cmd.ui.export.figure.open"),
-                    command_id: Some("ui.export.figure.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.export.figure.open", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.print",
-                    label: tr(locale, "cmd.ui.print.open"),
-                    command_id: Some("ui.print.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.print.open", json!({ "sheet_id": sid }));
-                return true;
-            }
+            push(
+                ActionMenuItem::menu_item("nav.ctx.change_graph_type", tr(locale, "menu.graph.change_type"))
+                    .command_id(Some("ui.changeGraphType.open")),
+                NavCtxAction::ChangeGraphType,
+            );
+            push(
+                ActionMenuItem::menu_item("nav.ctx.export_figure", tr(locale, "cmd.ui.export.figure.open")).command_id(Some("ui.export.figure.open")),
+                NavCtxAction::ExportFigure,
+            );
+            push(ActionMenuItem::menu_item("nav.ctx.print", tr(locale, "cmd.ui.print.open")).command_id(Some("ui.print.open")), NavCtxAction::Print);
         }
         SheetSection::Layouts => {
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.export_figure",
-                    label: tr(locale, "cmd.ui.export.figure.open"),
-                    command_id: Some("ui.export.figure.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.export.figure.open", json!({ "sheet_id": sid }));
-                return true;
-            }
-            if render_nav_ctx_item(
-                ui,
-                meta,
-                NavCtxItemSpec {
-                    widget_id: "nav.ctx.print",
-                    label: tr(locale, "cmd.ui.print.open"),
-                    command_id: Some("ui.print.open"),
-                    enabled: true,
-                    disabled_reason: None,
-                    tokens,
-                },
-            ) {
-                intents.push_ui("ui.print.open", json!({ "sheet_id": sid }));
-                return true;
-            }
+            push(
+                ActionMenuItem::menu_item("nav.ctx.export_figure", tr(locale, "cmd.ui.export.figure.open")).command_id(Some("ui.export.figure.open")),
+                NavCtxAction::ExportFigure,
+            );
+            push(ActionMenuItem::menu_item("nav.ctx.print", tr(locale, "cmd.ui.print.open")).command_id(Some("ui.print.open")), NavCtxAction::Print);
         }
         SheetSection::Info => {}
     }
-    false
+}
+
+pub(super) fn collect_multi_dependents(doc: &ProjectDocument, root_ids: &[SheetId]) -> Vec<(SheetId, String)> {
+    let selected_set: BTreeSet<SheetId> = root_ids.iter().cloned().collect();
+    let mut deps = Vec::new();
+    let mut seen = BTreeSet::new();
+    for id in root_ids {
+        for dep_id in collect_downstream_dependents(doc, id) {
+            if !selected_set.contains(&dep_id) && seen.insert(dep_id.clone()) {
+                let dep_title = doc_sheet_title(doc, &dep_id).unwrap_or(dep_id.as_str()).to_owned();
+                deps.push((dep_id, dep_title));
+            }
+        }
+    }
+    deps
+}
+
+pub(super) fn deduplicate_delete_roots(doc: &ProjectDocument, targets: &[SheetId]) -> Vec<SheetId> {
+    let mut covered_by_other = BTreeSet::new();
+    for id in targets {
+        for dep in collect_downstream_dependents(doc, id) {
+            covered_by_other.insert(dep);
+        }
+    }
+    let roots: Vec<SheetId> = targets.iter().filter(|id| !covered_by_other.contains(*id)).cloned().collect();
+    if roots.is_empty() { targets.to_vec() } else { roots }
 }
 
 fn render_navigator_context_menu(
@@ -2402,138 +2966,220 @@ fn render_navigator_context_menu(
         return;
     };
     let doc = app.document();
+    let locale = app.locale.as_str();
+    let targets: Vec<SheetId> = if menu.selected_ids.len() > 1 {
+        menu.selected_ids.iter().filter(|id| doc_sheet_title(doc, id).is_some()).cloned().collect()
+    } else if doc_sheet_title(doc, &menu.sheet_id).is_some() {
+        vec![menu.sheet_id.clone()]
+    } else {
+        Vec::new()
+    };
+    if targets.is_empty() {
+        state.context_menu = None;
+        return;
+    }
+
+    if targets.len() > 1 {
+        let count = targets.len();
+        let dup_lbl = format!("{} ({count})", tr(locale, "cmd.sheet.duplicate"));
+        let data_targets: Vec<SheetId> = targets.iter().filter(|id| doc.data_sheet(id).is_some()).cloned().collect();
+        let all_data_frozen = !data_targets.is_empty() && data_targets.iter().all(|id| is_sheet_frozen(doc, id));
+        let freeze_cmd = if all_data_frozen { "sheet.unfreeze" } else { "sheet.freeze" };
+        let freeze_lbl = tr(locale, if all_data_frozen { "cmd.sheet.unfreeze" } else { "cmd.sheet.freeze" });
+        let need_data_reason = data_targets.is_empty().then(|| tr(locale, "nav.disabled_need_data"));
+        let renderable_ids: Vec<SheetId> =
+            targets.iter().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned().collect();
+        let need_export_reason = renderable_ids.is_empty().then(|| tr(locale, "nav.disabled_need_graph_or_layout"));
+        let any_frozen = targets.iter().any(|id| is_sheet_frozen(doc, id));
+        let frozen_reason = any_frozen.then(|| tr(locale, "nav.frozen_badge"));
+
+        let mut entries: Vec<ActionMenuEntry<'_>> = Vec::new();
+        let mut actions: Vec<Option<NavCtxAction>> = Vec::new();
+
+        if targets.len() == 2 {
+            entries.push(ActionMenuEntry::Item(
+                ActionMenuItem::menu_item("nav.ctx.compare_split", tr(locale, "nav.ctx.compare_split")).command_id(Some("ui.split.toggle")),
+            ));
+            actions.push(Some(NavCtxAction::CompareSplit));
+            entries.push(ActionMenuEntry::Separator);
+            actions.push(None);
+        }
+
+        entries.push(ActionMenuEntry::Item(ActionMenuItem::menu_item("nav.ctx.duplicate", &dup_lbl).command_id(Some("sheet.duplicate"))));
+        actions.push(Some(NavCtxAction::Duplicate));
+
+        entries.push(ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.freeze", freeze_lbl)
+                .command_id(Some(freeze_cmd))
+                .enabled(!data_targets.is_empty())
+                .disabled_reason(need_data_reason),
+        ));
+        actions.push(Some(NavCtxAction::ToggleFreeze));
+
+        entries.push(ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.export_batch", tr(locale, "btn.export"))
+                .command_id(Some(if renderable_ids.len() >= 2 { "export.pdf" } else { "ui.export.figure.open" }))
+                .enabled(!renderable_ids.is_empty())
+                .disabled_reason(need_export_reason),
+        ));
+        actions.push(Some(if renderable_ids.len() >= 2 { NavCtxAction::ExportBatchPdf } else { NavCtxAction::ExportFigure }));
+
+        entries.push(ActionMenuEntry::Separator);
+        actions.push(None);
+        entries.push(ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.delete", tr(locale, "cmd.sheet.delete"))
+                .command_id(Some("sheet.delete"))
+                .enabled(!any_frozen)
+                .disabled_reason(frozen_reason),
+        ));
+        actions.push(Some(NavCtxAction::Delete));
+
+        let out = action_menu_popup(
+            ui.ctx(),
+            tokens,
+            Some(meta),
+            ActionMenuSpec::context(Id::unique(("nav_sheet_ctx_menu", targets[0].as_str())), "popup.nav.ctx", "Sheet Actions", menu.anchor),
+            &entries,
+        );
+        if let Some(hit) = out.clicked_entry
+            && let Some(Some(action)) = actions.get(hit)
+        {
+            match action {
+                NavCtxAction::CompareSplit => {
+                    intents.push_ui(
+                        "ui.split.toggle",
+                        json!({ "enabled": true, "primary_sheet_id": targets[0].as_str(), "secondary_sheet_id": targets[1].as_str() }),
+                    );
+                }
+                NavCtxAction::Duplicate => {
+                    let cmds: Vec<(String, serde_json::Value)> =
+                        targets.iter().map(|id| (String::from("sheet.duplicate"), json!({ "sheet_id": id.as_str() }))).collect();
+                    intents.push(UiIntent::EngineCommandGroup { commands: cmds });
+                }
+                NavCtxAction::ToggleFreeze => {
+                    let cmds: Vec<(String, serde_json::Value)> =
+                        data_targets.iter().map(|id| (String::from(freeze_cmd), json!({ "sheet_id": id.as_str() }))).collect();
+                    if !cmds.is_empty() {
+                        intents.push(UiIntent::EngineCommandGroup { commands: cmds });
+                    }
+                }
+                NavCtxAction::ExportFigure => {
+                    if let Some(first_id) = renderable_ids.first() {
+                        intents.push_ui("ui.export.figure.open", json!({ "sheet_id": first_id.as_str() }));
+                    }
+                }
+                NavCtxAction::ExportBatchPdf => {
+                    let sids: Vec<&str> = renderable_ids.iter().map(SheetId::as_str).collect();
+                    intents.push_engine("export.pdf", json!({ "sheet_ids": sids }));
+                }
+                NavCtxAction::Delete => {
+                    let roots = deduplicate_delete_roots(doc, &targets);
+                    let titles: Vec<String> = targets.iter().map(|id| doc_sheet_title(doc, id).unwrap_or(id.as_str()).to_owned()).collect();
+                    let dependents = collect_multi_dependents(doc, &roots);
+                    let summary = format!("{} {}", targets.len(), tr(locale, "nav.selected_suffix"));
+                    state.delete_confirm =
+                        Some(NavigatorDeleteConfirmState { sheet_id: roots[0].clone(), sheet_ids: roots, title: summary, titles, dependents });
+                    ui.ctx().request_repaint();
+                }
+                _ => {}
+            }
+            state.context_menu = None;
+        } else if out.dismissed {
+            state.context_menu = None;
+        }
+        return;
+    }
+
     let Some(title) = doc_sheet_title(doc, &menu.sheet_id).map(str::to_owned) else {
         state.context_menu = None;
         return;
     };
 
-    let locale = &app.locale;
-    let screen = ui.ctx().content_rect();
-    let pos = Pos2::new(
-        menu.anchor.x.clamp(screen.left() + 4.0, (screen.right() - 246.0).max(screen.left() + 4.0)),
-        menu.anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 280.0).max(screen.top() + 4.0)),
-    );
-    let mut close_menu = false;
-    let mut start_rename = false;
-    let mut open_delete_confirm = false;
     let frozen_reason = menu.is_frozen.then(|| tr(locale, "nav.frozen_badge"));
     let sid = menu.sheet_id.as_str();
+    let freeze_lbl = tr(locale, if menu.is_frozen { "cmd.sheet.unfreeze" } else { "cmd.sheet.freeze" });
+    let freeze_cmd = if menu.is_frozen { "sheet.unfreeze" } else { "sheet.freeze" };
 
-    let area_resp = egui::Area::new(Id::unique(("nav_sheet_ctx_menu", sid))).order(Order::Foreground).fixed_pos(pos).show(ui.ctx(), |menu_ui| {
-        egui::Frame::popup(menu_ui.style())
-            .fill(tokens.surface_bg)
-            .stroke(Stroke::new(1.0, tokens.border))
-            .corner_radius(CornerRadius::same(4))
-            .show(menu_ui, |ui| {
-                ui.set_min_width(232.0);
-                if render_nav_ctx_item(
-                    ui,
-                    meta,
-                    NavCtxItemSpec {
-                        widget_id: "nav.ctx.rename",
-                        label: tr(locale, "cmd.sheet.rename"),
-                        command_id: Some("sheet.rename"),
-                        enabled: !menu.is_frozen,
-                        disabled_reason: frozen_reason,
-                        tokens,
-                    },
-                ) {
-                    start_rename = true;
-                    close_menu = true;
-                }
-                if render_nav_ctx_item(
-                    ui,
-                    meta,
-                    NavCtxItemSpec {
-                        widget_id: "nav.ctx.duplicate",
-                        label: tr(locale, "cmd.sheet.duplicate"),
-                        command_id: Some("sheet.duplicate"),
-                        enabled: true,
-                        disabled_reason: None,
-                        tokens,
-                    },
-                ) {
-                    intents.push_engine("sheet.duplicate", json!({ "sheet_id": sid }));
-                    close_menu = true;
-                }
-                if render_nav_ctx_item(
-                    ui,
-                    meta,
-                    NavCtxItemSpec {
-                        widget_id: "nav.ctx.duplicate_family",
-                        label: tr(locale, "cmd.sheet.duplicateFamily"),
-                        command_id: Some("sheet.duplicateFamily"),
-                        enabled: true,
-                        disabled_reason: None,
-                        tokens,
-                    },
-                ) {
-                    intents.push_engine("sheet.duplicateFamily", json!({ "sheet_id": sid }));
-                    close_menu = true;
-                }
-                let freeze_lbl = tr(locale, if menu.is_frozen { "cmd.sheet.unfreeze" } else { "cmd.sheet.freeze" });
-                let freeze_cmd = if menu.is_frozen { "sheet.unfreeze" } else { "sheet.freeze" };
-                if render_nav_ctx_item(
-                    ui,
-                    meta,
-                    NavCtxItemSpec {
-                        widget_id: "nav.ctx.freeze",
-                        label: freeze_lbl,
-                        command_id: Some(freeze_cmd),
-                        enabled: true,
-                        disabled_reason: None,
-                        tokens,
-                    },
-                ) {
-                    intents.push_engine(freeze_cmd, json!({ "sheet_id": sid }));
-                    close_menu = true;
-                }
+    let mut entries = vec![
+        ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.rename", tr(locale, "cmd.sheet.rename"))
+                .command_id(Some("sheet.rename"))
+                .enabled(!menu.is_frozen)
+                .disabled_reason(frozen_reason),
+        ),
+        ActionMenuEntry::Item(ActionMenuItem::menu_item("nav.ctx.duplicate", tr(locale, "cmd.sheet.duplicate")).command_id(Some("sheet.duplicate"))),
+        ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.duplicate_family", tr(locale, "cmd.sheet.duplicateFamily")).command_id(Some("sheet.duplicateFamily")),
+        ),
+        ActionMenuEntry::Item(ActionMenuItem::menu_item("nav.ctx.freeze", freeze_lbl).command_id(Some(freeze_cmd))),
+    ];
+    let mut actions =
+        vec![Some(NavCtxAction::Rename), Some(NavCtxAction::Duplicate), Some(NavCtxAction::DuplicateFamily), Some(NavCtxAction::ToggleFreeze)];
 
-                if !matches!(menu.section, SheetSection::Info) {
-                    ui.separator();
-                    if render_nav_section_ctx_items(ui, locale, &menu, tokens, meta, intents) {
-                        close_menu = true;
-                    }
-                }
-
-                ui.separator();
-                if render_nav_ctx_item(
-                    ui,
-                    meta,
-                    NavCtxItemSpec {
-                        widget_id: "nav.ctx.delete",
-                        label: tr(locale, "cmd.sheet.delete"),
-                        command_id: Some("sheet.delete"),
-                        enabled: !menu.is_frozen,
-                        disabled_reason: frozen_reason,
-                        tokens,
-                    },
-                ) {
-                    open_delete_confirm = true;
-                    close_menu = true;
-                }
-            });
-    });
-
-    if start_rename {
-        begin_inline_rename(app, state, menu.sheet_id.clone());
-    }
-    if open_delete_confirm {
-        let dependents = collect_downstream_dependents(doc, &menu.sheet_id)
-            .into_iter()
-            .map(|dep_id| {
-                let dep_title = doc_sheet_title(doc, &dep_id).unwrap_or(dep_id.as_str()).to_owned();
-                (dep_id, dep_title)
-            })
-            .collect();
-        state.delete_confirm = Some(NavigatorDeleteConfirmState { sheet_id: menu.sheet_id, title, dependents });
-        ui.ctx().request_repaint();
+    if !matches!(menu.section, SheetSection::Info) {
+        entries.push(ActionMenuEntry::Separator);
+        actions.push(None);
+        push_nav_section_ctx_entries(locale, &menu, frozen_reason, &mut entries, &mut actions);
     }
 
-    let esc = ui.ctx().input(|i| i.key_pressed(Key::Escape));
-    let outside_click =
-        ui.ctx().input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
-    if close_menu || esc || outside_click {
+    entries.push(ActionMenuEntry::Separator);
+    actions.push(None);
+    entries.push(ActionMenuEntry::Item(
+        ActionMenuItem::menu_item("nav.ctx.delete", tr(locale, "cmd.sheet.delete"))
+            .command_id(Some("sheet.delete"))
+            .enabled(!menu.is_frozen)
+            .disabled_reason(frozen_reason),
+    ));
+    actions.push(Some(NavCtxAction::Delete));
+
+    let out = action_menu_popup(
+        ui.ctx(),
+        tokens,
+        Some(meta),
+        ActionMenuSpec::context(Id::unique(("nav_sheet_ctx_menu", sid)), "popup.nav.ctx", "Sheet Actions", menu.anchor),
+        &entries,
+    );
+
+    if let Some(hit) = out.clicked_entry
+        && let Some(Some(action)) = actions.get(hit)
+    {
+        match action {
+            NavCtxAction::Rename => begin_inline_rename(app, state, menu.sheet_id.clone()),
+            NavCtxAction::Duplicate => intents.push_engine("sheet.duplicate", json!({ "sheet_id": sid })),
+            NavCtxAction::DuplicateFamily => intents.push_engine("sheet.duplicateFamily", json!({ "sheet_id": sid })),
+            NavCtxAction::ToggleFreeze => intents.push_engine(freeze_cmd, json!({ "sheet_id": sid })),
+            NavCtxAction::Analyze => intents.push_ui("ui.analyze.open", json!({ "sheet_id": sid })),
+            NavCtxAction::NewGraph => intents.push_engine("graph.create", json!({ "data_sheet_id": sid })),
+            NavCtxAction::ConvertArchetype => intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": sid })),
+            NavCtxAction::EditParams => intents.push_ui("ui.editParams.open", json!({ "sheet_id": sid })),
+            NavCtxAction::Rerun => intents.push_engine("analysis.run", json!({ "sheet_id": sid })),
+            NavCtxAction::Retarget => {
+                intents.push(UiIntent::OpenRetargetDialog { result_sheet_id: menu.sheet_id.clone(), target_data_sheet_id: None });
+            }
+            NavCtxAction::ChangeGraphType => intents.push_ui("ui.changeGraphType.open", json!({ "sheet_id": sid })),
+            NavCtxAction::ExportFigure => intents.push_ui("ui.export.figure.open", json!({ "sheet_id": sid })),
+            NavCtxAction::Print => intents.push_ui("ui.print.open", json!({ "sheet_id": sid })),
+            NavCtxAction::Delete => {
+                let dependents = collect_downstream_dependents(doc, &menu.sheet_id)
+                    .into_iter()
+                    .map(|dep_id| {
+                        let dep_title = doc_sheet_title(doc, &dep_id).unwrap_or(dep_id.as_str()).to_owned();
+                        (dep_id, dep_title)
+                    })
+                    .collect();
+                state.delete_confirm = Some(NavigatorDeleteConfirmState {
+                    sheet_id: menu.sheet_id.clone(),
+                    sheet_ids: vec![menu.sheet_id],
+                    title: title.clone(),
+                    titles: vec![title],
+                    dependents,
+                });
+                ui.ctx().request_repaint();
+            }
+            NavCtxAction::CompareSplit | NavCtxAction::ExportBatchPdf => {}
+        }
+        state.context_menu = None;
+    } else if out.dismissed {
         state.context_menu = None;
     }
 }
@@ -2559,29 +3205,37 @@ pub(crate) fn render_navigator_delete_confirm_modal(
     let mut execute_delete = false;
     let delete_lbl = tr(locale, "cmd.sheet.delete");
     let cancel_lbl = tr(locale, "btn.cancel");
-    let heading = format!("{delete_lbl}: \"{}\"", confirm.title);
+    let is_multi = confirm.titles.len() > 1;
+    let heading = if is_multi { format!("{delete_lbl}: {}", confirm.title) } else { format!("{delete_lbl}: \"{}\"", confirm.title) };
     let modal_w = (ctx.content_rect().width() - 48.0).clamp(240.0, 400.0);
 
     let modal_resp = egui::Modal::new(Id::unique("nav_delete_confirm_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(modal_w);
         ui.set_max_width(modal_w);
         ui.heading(&heading);
-        ui.add_space(6.0);
-        ui.add(egui::Label::new(format!("Are you sure you want to delete \"{}\"?", confirm.title)).wrap());
+        ui.add_space(tokens.metrics.space_sm);
+        if is_multi {
+            ui.add(egui::Label::new(format!("Are you sure you want to delete these {} sheets?", confirm.titles.len())).wrap());
+            for item_title in confirm.titles.iter().take(6) {
+                ui.add(egui::Label::new(format!("• {item_title}")).wrap());
+            }
+        } else {
+            ui.add(egui::Label::new(format!("Are you sure you want to delete \"{}\"?", confirm.title)).wrap());
+        }
         if !confirm.dependents.is_empty() {
-            ui.add_space(6.0);
+            ui.add_space(tokens.metrics.space_sm);
             ui.add(egui::Label::new("The following downstream dependent sheet(s) will also be deleted:").wrap());
-            ui.add_space(4.0);
+            ui.add_space(tokens.metrics.space_xs);
             for (_, dep_title) in &confirm.dependents {
                 ui.add(egui::Label::new(format!("• {dep_title}")).wrap());
             }
         } else {
-            ui.add_space(4.0);
-            ui.add(egui::Label::new(egui::RichText::new("No downstream dependent sheets rely on this sheet.").color(tokens.text_muted)).wrap());
+            ui.add_space(tokens.metrics.space_xs);
+            ui.add(egui::Label::new(egui::RichText::new("No downstream dependent sheets rely on this selection.").color(tokens.text_muted)).wrap());
         }
         ui.add_space(10.0);
         ui.separator();
-        ui.add_space(6.0);
+        ui.add_space(tokens.metrics.space_sm);
         ui.horizontal(|ui| {
             let cancel_btn = ui.button(cancel_lbl);
             let cancel_vis = cancel_btn.rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
@@ -2618,7 +3272,7 @@ pub(crate) fn render_navigator_delete_confirm_modal(
                         role: "button",
                         label: delete_lbl,
                         command_id: Some("sheet.delete"),
-                        value: Some(json!({ "sheet_id": confirm.sheet_id.as_str(), "cascade": true })),
+                        value: Some(json!({ "sheet_id": confirm.sheet_id.as_str(), "count": confirm.sheet_ids.len(), "cascade": true })),
                         enabled: true,
                         disabled_reason: None,
                         z_layer: ZLayer::ModalDialog,
@@ -2647,10 +3301,208 @@ pub(crate) fn render_navigator_delete_confirm_modal(
     }
 
     if execute_delete {
-        intents.push_engine("sheet.delete", json!({ "sheet_id": confirm.sheet_id.as_str(), "cascade": true }));
+        for id in &confirm.sheet_ids {
+            intents.push_engine("sheet.delete", json!({ "sheet_id": id.as_str(), "cascade": true }));
+        }
     }
     if close_confirm {
         state.delete_confirm = None;
     }
     capture
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::egui_shell::tokens::{Tokens, color32_to_rgba8};
+    use crate::theme::UiThemeMode;
+
+    #[test]
+    fn r10_36_vector_icons_emit_distinct_snapped_shapes_and_sc1411_contrast() {
+        for mode in [UiThemeMode::Light, UiThemeMode::Dark, UiThemeMode::HighContrast] {
+            let tokens = Tokens::for_mode(mode);
+            let min_icon_cr = color32_to_rgba8(tokens.icon).contrast_ratio(color32_to_rgba8(tokens.surface_bg));
+            assert!(min_icon_cr >= 3.0, "{mode:?} icon contrast {min_icon_cr:.2} < 3.0");
+            let sel_icon_cr = color32_to_rgba8(tokens.selected_accent_text()).contrast_ratio(color32_to_rgba8(tokens.active_bg));
+            assert!(sel_icon_cr >= 3.0, "{mode:?} selected icon contrast {sel_icon_cr:.2} < 3.0");
+        }
+
+        let sections = [SheetSection::Data, SheetSection::Info, SheetSection::Analyses, SheetSection::Graphs, SheetSection::Layouts];
+        for ppp in [1.0_f32, 1.5_f32] {
+            let mut sigs = BTreeSet::new();
+            for section in sections {
+                let single_ctx = egui::Context::default();
+                single_ctx.set_pixels_per_point(ppp);
+                let mut out = single_ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let rect = Rect::from_min_size(Pos2::new(4.3, 4.3), Vec2::splat(16.0));
+                    draw_sheet_vector_icon(ui.painter(), rect, section, None, Tokens::for_mode(UiThemeMode::Dark).selected_accent_text());
+                });
+                out.textures_delta.clear();
+                let desc = format!("{:?}", out.shapes.iter().map(|s| format!("{:?}", s.shape)).collect::<Vec<_>>());
+                assert!(sigs.insert(desc.clone()), "section {section:?} at {ppp}x collided with another section's geometry");
+                if section == SheetSection::Analyses {
+                    // Sigma draws a continuous 7-point polyline path (`Shape::Path`), never 3 separate bars.
+                    assert!(desc.contains("Path("), "Analyses sigma should emit a connected Path shape, got: {desc}");
+                }
+            }
+            assert_eq!(sigs.len(), 5);
+
+            // Family tree icon and All-sheets grid icon also render distinct vector primitives.
+            for (kind, idx) in [("family_tree", 0usize), ("all_sheets", 1usize)] {
+                let single_ctx = egui::Context::default();
+                single_ctx.set_pixels_per_point(ppp);
+                let mut out = single_ctx.run_ui(egui::RawInput::default(), |ui| {
+                    let rect = Rect::from_min_size(Pos2::new(4.3, 4.3), Vec2::splat(16.0));
+                    if idx == 0 {
+                        draw_family_tree_vector_icon(ui.painter(), rect, Tokens::for_mode(UiThemeMode::Light).icon);
+                    } else {
+                        draw_all_sheets_vector_icon(ui.painter(), rect, Tokens::for_mode(UiThemeMode::Light).icon);
+                    }
+                });
+                out.textures_delta.clear();
+                assert!(!out.shapes.is_empty(), "{kind} emitted no shapes at {ppp}x");
+            }
+        }
+    }
+
+    #[test]
+    fn r20_21_navigator_family_multi_source_tooltips_and_actionable_disabled_reasons() {
+        use curvebook_doc::{DataSheet, GraphSheet, SubcolumnMode, TableArchetype, XyTable};
+
+        let mut doc = ProjectDocument::new("MultiSrc").expect("doc");
+        let ds1 =
+            DataSheet::new(SheetId::new("ds-alpha"), "Dose Curve A", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 4).expect("xy1")))
+                .expect("ds1");
+        let ds2 =
+            DataSheet::new(SheetId::new("ds-beta"), "Dose Curve B", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 4).expect("xy2")))
+                .expect("ds2");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-multi"), &ds1).expect("gs");
+        gs.title = String::from("Combined Dose Graph");
+        let mut extra_series = gs.spec.series[0].clone();
+        extra_series.source_sheet_id = ds2.id.clone();
+        extra_series.legend_label = Some(String::from("Series B"));
+        gs.spec.series.push(extra_series);
+        doc.data_sheets.push(ds1);
+        doc.data_sheets.push(ds2);
+        doc.graph_sheets.push(gs.clone());
+        doc.active_sheet_id = Some(gs.id.clone());
+
+        let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        app.execute_command("sheet.select", json!({ "sheet_id": "g-multi" })).expect("select");
+        app.family_open = true;
+        app.sync_views();
+        let tokens = Tokens::default();
+        let ctx = egui::Context::default();
+        ctx.all_styles_mut(|s| tokens.configure_style(s));
+        crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+
+        let mut state = LeadingDockEguiState::default();
+
+        fn collect_shape_texts(shapes: &[egui::epaint::ClippedShape], out: &mut Vec<String>) {
+            for cs in shapes {
+                collect_rec(&cs.shape, out);
+            }
+        }
+        fn collect_rec(s: &egui::epaint::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+                egui::epaint::Shape::Vec(v) => {
+                    for c in v {
+                        collect_rec(c, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let run_pass = |st: &mut LeadingDockEguiState,
+                        events: Vec<egui::Event>,
+                        time: f64,
+                        enabled: bool,
+                        rail: bool|
+         -> (Vec<String>, FrameInspectMeta, Rect, Rect) {
+            let mut n_rect = Rect::NOTHING;
+            let mut f_rect = Rect::NOTHING;
+            let mut meta = FrameInspectMeta::new();
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0))),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    meta.begin_pass(ui.ctx());
+                    let mut intents = PendingUiIntents::new();
+                    let layout = tokens.metrics.solve_shell_layout(crate::egui_shell::layout::ShellLayoutInput {
+                        viewport_w_pt: 1280.0,
+                        viewport_h_pt: 720.0,
+                        empty_workspace: false,
+                        navigator_open: true,
+                        inspector_open: true,
+                        family_open: true,
+                        leading_user_collapsed: rail,
+                        trailing_user_collapsed: false,
+                        leading_width_override_pt: None,
+                        trailing_width_override_pt: None,
+                        host_draws_menu_bar: false,
+                        is_rtl: false,
+                    });
+                    let _ = render_leading_dock(
+                        ui,
+                        &app,
+                        st,
+                        LeadingDockContext {
+                            tokens: &tokens,
+                            layout,
+                            workspace_preset: crate::egui_shell::WorkspacePreset::Default,
+                            enabled,
+                            focused: true,
+                        },
+                        &mut meta,
+                        &mut intents,
+                    );
+                    if let Some(n) = meta.find_by_widget_id("nav.sheet.g-multi") {
+                        n_rect = n.clipped_rect;
+                    }
+                    if let Some(f) = meta.find_by_widget_id("family.node.g-multi") {
+                        f_rect = f.clipped_rect;
+                    }
+                },
+            );
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            collect_shape_texts(&out.shapes, &mut texts);
+            (texts, meta, n_rect, f_rect)
+        };
+
+        // Collapsed rail with modal active (`enabled=false`) must expose actionable disabled reasons, never "unavailable" / "modal active".
+        let (_, rail_meta, _, _) = run_pass(&mut state, Vec::new(), 0.0, false, true);
+        for entry in &rail_meta.entries {
+            if let Some(reason) = entry.disabled_reason.as_deref() {
+                assert!(reason != "unavailable" && reason != "modal active", "generic disabled reason `{reason}` found on {}", entry.widget_id);
+            }
+        }
+
+        // Expanded dock: hover Navigator multi-source graph row & Family node (right side `2 sources` badge area).
+        let (_, _, nav_row_rect, fam_row_rect) = run_pass(&mut state, Vec::new(), 0.5, true, false);
+        assert!(nav_row_rect.is_positive(), "nav.sheet.g-multi rect missing: {nav_row_rect:?}");
+        assert!(fam_row_rect.is_positive(), "family.node.g-multi rect missing: {fam_row_rect:?}");
+        let _ = run_pass(&mut state, vec![egui::Event::PointerMoved(nav_row_rect.center())], 1.0, true, false);
+        let _ = run_pass(&mut state, Vec::new(), 1.50, true, false);
+        let (nav_tips, _, _, _) = run_pass(&mut state, Vec::new(), 1.55, true, false);
+        assert!(
+            nav_tips.iter().any(|t| t.contains("Dose Curve A") && t.contains("Dose Curve B")),
+            "Navigator multi-source tooltip missing upstream tables: {nav_tips:?}"
+        );
+
+        let badge_pt = Pos2::new(fam_row_rect.right() - 12.0, fam_row_rect.center().y);
+        let _ = run_pass(&mut state, vec![egui::Event::PointerMoved(badge_pt)], 2.0, true, false);
+        let _ = run_pass(&mut state, Vec::new(), 2.50, true, false);
+        let (fam_tips, _, _, _) = run_pass(&mut state, Vec::new(), 2.55, true, false);
+        assert!(
+            fam_tips.iter().any(|t| t.contains("Dose Curve A") && t.contains("Dose Curve B")),
+            "Family multi-source badge tooltip missing upstream tables: {fam_tips:?}"
+        );
+    }
 }

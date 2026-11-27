@@ -16,7 +16,7 @@ Registered commands: 106
 ### `project.createCheckpoint` — Create Checkpoint
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `File/Checkpoints/Create Checkpoint...`
+- **Menu:** `File/Checkpoints/Create Checkpoint`
 - **Summary:** Save a named project snapshot checkpoint inside the document.
 - **Beginner note:** Captures a named milestone copy of all sheets so you can restore or branch back to it later.
 - **Parameters:** `id` (string|null), `name*` (string), `note` (string|null), `timestamp_utc` (string|null)
@@ -24,7 +24,7 @@ Registered commands: 106
 ### `project.deleteCheckpoint` — Delete Checkpoint
 
 - **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA`
-- **Menu:** `File/Checkpoints/Delete Checkpoint...`
+- **Menu:** `File/Checkpoints/Delete Checkpoint`
 - **Summary:** Remove a named checkpoint from the project.
 - **Beginner note:** Deletes a stored checkpoint by ID or name without altering active data sheets.
 - **Parameters:** `id` (string|null), `name` (string|null)
@@ -40,7 +40,7 @@ Registered commands: 106
 ### `project.instantiateTemplate` — New Project From Template
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/New From Template...`
+- **Menu:** `File/New From Template`
 - **Summary:** Create a new project from a `.cbtemplate` archive.
 - **Beginner note:** Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.
 - **Parameters:** `bytes_base64` (string|null), `path` (string|null), `title` (string|null)
@@ -64,7 +64,7 @@ Registered commands: 106
 ### `project.open` — Open Project
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/Open...`
+- **Menu:** `File/Open`
 - **Shortcut:** `Cmd+O`
 - **Summary:** Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.
 - **Beginner note:** Opens a project from a filesystem path or base64 archive payload and replaces the current session document.
@@ -81,7 +81,7 @@ Registered commands: 106
 ### `project.restoreCheckpoint` — Restore Checkpoint
 
 - **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA`
-- **Menu:** `File/Checkpoints/Restore Checkpoint...`
+- **Menu:** `File/Checkpoints/Restore Checkpoint`
 - **Summary:** Restore the document to a previously saved named checkpoint.
 - **Beginner note:** Replaces the current sheets with the chosen checkpoint snapshot while keeping existing checkpoints intact.
 - **Parameters:** `id` (string|null), `name` (string|null)
@@ -98,7 +98,7 @@ Registered commands: 106
 ### `project.saveTemplate` — Save Template
 
 - **Effects:** `WRITES_FILESYSTEM`
-- **Menu:** `File/Save Template...`
+- **Menu:** `File/Save Template`
 - **Summary:** Export the project structure as a data-stripped `.cbtemplate` file.
 - **Beginner note:** Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.
 - **Parameters:** `path` (string|null), `return_bytes` (boolean|null)
@@ -144,7 +144,7 @@ Registered commands: 106
 ### `sheet.clonePipeline` — Clone Pipeline
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Change/Clone Pipeline...`
+- **Menu:** `Change/Clone Pipeline`
 - **Summary:** Clone a table structure and downstream analysis/graph/layout pipeline for a new experimental run.
 - **Beginner note:** Creates a new table preserving X coordinates, analyses, graphs, and layouts while clearing Y replicates for new measurements.
 - **Parameters:** `clear_column_titles` (boolean|null), `clear_data` (boolean|null), `clear_results` (boolean|null), `clear_row_titles` (boolean|null), `clear_y_values` (boolean|null), `clone_analyses` (boolean|null), `clone_graphs` (boolean|null), `clone_layouts` (boolean|null), `keep_x_values` (boolean|null), `new_sheet_id` (string|null), `override_replicates` (integer|null), `prefix` (string|null), `sheet_id*` (string), `title` (string|null)
@@ -153,7 +153,7 @@ Registered commands: 106
 
 - **Effects:** `MUTATES_DOCUMENT`
 - **Menu:** `Insert/New Data Table`
-- **Shortcut:** `Cmd+T`
+- **Shortcut:** `Cmd+Shift+T`
 - **Summary:** Create a typed data table sheet and optional paired info/graph sheets.
 - **Beginner note:** Creates one of the eight scientific table archetypes (XY, Column, Grouped, Contingency, Survival, Parts of Whole, Multiple Variables, or Nested).
 - **Parameters:** `auto_family` (boolean|null), `auto_graph` (boolean|null), `auto_info` (boolean|null), `censored_code` (integer|null), `cols` (integer|null), `column_factor_title` (string|null), `design_hint` (any), `event_code` (integer|null), `graph_sheet_id` (string|null), `info_sheet_id` (string|null), `kind` (string|null), `replicates` (integer|null), `row_factor_title` (string|null), `rows` (integer|null), `sheet_id` (string|null), `subcolumn_mode` (any), `time_title` (string|null), `title` (string|null), `variables` (array|null), `x_mode` (any), `x_title` (string|null)
@@ -185,7 +185,7 @@ Registered commands: 106
 ### `sheet.extractResultTab` — Extract Result Tab to Data Table
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/Extract Result Tab...`
+- **Menu:** `Insert/Extract Result Tab`
 - **Summary:** Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).
 - **Beginner note:** Copies a computed result table tab into a new linked data table so you can analyze or graph it.
 - **Parameters:** `archetype` (any), `auto_graph` (boolean|null), `result_sheet_id*` (string), `sheet_id` (string|null), `tab_id` (string|null), `title` (string|null)
@@ -240,10 +240,10 @@ Registered commands: 106
 - **Beginner note:** Erase values from selected cells or clear the entire data table.
 - **Parameters:** `all` (boolean|null), `cells` (array|null), `clear_x` (boolean|null), `col` (integer|null), `col_end` (integer|null), `col_start` (integer|null), `coord` (any), `range` (any), `region_id` (string|null), `row` (integer|null), `row_end` (integer|null), `row_start` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `subcol_end` (integer|null), `subcol_start` (integer|null), `unlink` (boolean|null)
 
-### `table.convertArchetype` — Convert Table Archetype
+### `table.convertArchetype` — Convert Table Format
 
 - **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA | IDEMPOTENT`
-- **Menu:** `Change/Convert Table Structure...`
+- **Menu:** `Change/Convert Table Structure`
 - **Summary:** Preview or convert a data table between Column, Grouped, XY, and MultipleVariables archetypes.
 - **Beginner note:** Reshape a data table into another structure, previewing any lossy changes before applying.
 - **Parameters:** `allow_lossy` (boolean|null), `preview_only` (boolean|null), `sheet_id*` (string), `target_kind*` (string)
@@ -260,7 +260,7 @@ Registered commands: 106
 ### `table.excludeCellsWithReason` — Exclude Cells With Reason
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Change/Exclude Values With Reason...`
+- **Menu:** `Change/Exclude Values With Reason`
 - **Summary:** Exclude cells and attach a structured audit reason tag, note, and UTC timestamp.
 - **Beginner note:** Exclude values while recording a reason tag and audit timestamp for review.
 - **Parameters:** `col` (integer|null), `coord` (any), `coords` (array|null), `note` (string|null), `range` (any), `reason_tag*` (string), `row` (integer|null), `sheet_id*` (string), `subcol` (integer|null), `timestamp_utc` (string|null)
@@ -268,7 +268,7 @@ Registered commands: 106
 ### `table.exclusionAuditReport` — Exclusion Audit Report
 
 - **Effects:** `IDEMPOTENT`
-- **Menu:** `Data/Exclusion Audit Report...`
+- **Menu:** `Data/Exclusion Audit Report`
 - **Summary:** Generate a read-only audit report of excluded cells and their reason annotations.
 - **Beginner note:** Inspect all excluded values and audit reasons across one sheet or the entire project.
 - **Parameters:** `sheet_id` (string|null)
@@ -276,7 +276,7 @@ Registered commands: 106
 ### `table.exportCsv` — Export Table CSV / TSV
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Table CSV...`
+- **Menu:** `File/Export/Table CSV`
 - **Summary:** Export a data or result sheet to CSV/TSV text and optionally write atomically to disk.
 - **Beginner note:** Save a data or result table as CSV or TSV without changing the project.
 - **Parameters:** `decimal_separator` (string|null), `delimiter` (string|null), `path` (string|null), `sheet_id*` (string)
@@ -284,7 +284,7 @@ Registered commands: 106
 ### `table.importCsv` — Import CSV / TSV
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/Import/CSV or TSV...`
+- **Menu:** `File/Import/CSV or TSV`
 - **Summary:** Import CSV or TSV data from a file path or inline text into a new or existing data table.
 - **Beginner note:** Create a new data table or populate an existing one from a CSV or TSV file.
 - **Parameters:** `anchor` (any), `archetype` (string|null), `csv` (string|null), `decimal_separator` (string|null), `delimiter` (string|null), `extract_preamble_info` (boolean|null), `filter` (any), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `link` (boolean|null), `mode` (string|null), `normalize_decimal` (boolean|null), `path` (string|null), `propagate_title_header` (boolean|null), `replace` (boolean|null), `replicates` (integer|null), `sheet_id` (string|null), `skip_contiguous_blanks` (boolean|null), `split_by_column` (integer|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `subcolumn_mode` (any), `title` (string|null), `transpose` (boolean|null)
@@ -292,31 +292,31 @@ Registered commands: 106
 ### `table.importPlateMap` — Import Plate Map
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `File/Import/Plate Map...`
+- **Menu:** `File/Import/Plate Map`
 - **Summary:** Map 96-well or 384-well microplate readings and well roles into a structured data sheet.
 - **Beginner note:** Import 96-well or 384-well plate measurements using a plate template or role map.
 - **Parameters:** `blank_labels` (array|null), `geometry` (any), `label_grid` (array|null), `layout_sheet_id` (string|null), `positive_control_labels` (array|null), `roles` (array|null), `sheet_id` (string|null), `source` (any), `subtract_blank_mean` (boolean|null), `target_kind` (string|null), `template` (any), `template_name` (string|null), `title` (string|null), `values` (any), `x_grid` (array|null), `x_grid_sheet_id` (string|null), `x_title` (string|null)
 
-### `table.importPrism` — Import External Archive
+### `table.importPrism` — Import .prism files
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/Import/External Archive...`
-- **Summary:** Import an external ZIP-based project archive from disk, base64, or raw byte array.
-- **Beginner note:** Open or merge an external ZIP-format statistical archive into the project.
+- **Menu:** `File/Import/.prism files`
+- **Summary:** Import .prism files from disk, base64, or raw byte array.
+- **Beginner note:** Open or merge .prism files into the project.
 - **Parameters:** `bytes` (array|null), `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null)
 
-### `table.importPzfx` — Import XML Project
+### `table.importPzfx` — Import .pzfx files
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/Import/XML Project...`
-- **Summary:** Import an XML project document from disk, inline XML string, or base64 payload.
-- **Beginner note:** Open or merge an XML-format project file into the workspace.
+- **Menu:** `File/Import/.pzfx files`
+- **Summary:** Import .pzfx files from disk, inline XML string, or base64 payload.
+- **Beginner note:** Open or merge .pzfx files into the project.
 - **Parameters:** `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null), `xml` (string|null)
 
 ### `table.importTidyLong` — Import Tidy Long Table
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
-- **Menu:** `File/Import/Tidy Long Table...`
+- **Menu:** `File/Import/Tidy Long Table`
 - **Summary:** Pivot a long-format table (rows/headers or CSV/TSV file) into a Column, Grouped, XY, or MultipleVariables sheet.
 - **Beginner note:** Reshape long/tidy tabular records into a grouped or XY data table using column mappings.
 - **Parameters:** `csv` (string|null), `decimal_sep` (string|null), `delimiter` (string|null), `excluded_col` (any), `group_col` (any), `headers` (array|null), `mapping` (any), `normalize_decimal` (boolean|null), `path` (string|null), `replicate_col` (any), `rows` (array|null), `sheet_id` (string|null), `target_kind` (string|null), `title` (string|null), `value_col` (any), `x_col` (any)
@@ -324,7 +324,7 @@ Registered commands: 106
 ### `table.importXlsx` — Import XLSX Workbook
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
-- **Menu:** `File/Import/XLSX Workbook...`
+- **Menu:** `File/Import/XLSX Workbook`
 - **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
 - **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
 - **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `cell_range` (string|null), `extract_preamble_info` (boolean|null), `fill_merged_cells` (boolean|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `row_match` (any), `sheet_indices` (array|null), `sheets` (array|null), `skip_rows` (integer|null), `split_by_column` (integer|null), `subcolumn_mode` (any), `title` (string|null)
@@ -332,7 +332,7 @@ Registered commands: 106
 ### `table.paste` — Paste Special
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Edit/Paste Special...`
+- **Menu:** `Edit/Paste Special`
 - **Shortcut:** `Cmd+V`
 - **Summary:** Paste delimited clipboard text or a 2D cell grid into a table with placement, transpose, and filter options.
 - **Beginner note:** Paste tabular data into a table starting at an anchor cell, optionally transposing or filtering.
@@ -349,7 +349,7 @@ Registered commands: 106
 ### `table.randomSampleRows` — Random Sample Rows
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Data/Random Sample Rows...`
+- **Menu:** `Data/Random Sample Rows`
 - **Summary:** Draw a reproducible Fisher-Yates random sample of rows (optional stratification) into a new data sheet.
 - **Beginner note:** Creates a new table containing a seeded simple or stratified random subset of rows from a source sheet.
 - **Parameters:** `info_sheet_id` (string|null), `proportional_allocation` (boolean|null), `sample_size*` (integer), `seed` (integer|null), `sheet_id` (string|null), `source_sheet_id*` (string), `stratify_column` (integer|null), `title` (string|null)
@@ -357,7 +357,7 @@ Registered commands: 106
 ### `table.randomizeGroups` — Randomize Subjects to Groups
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Data/Randomize Groups...`
+- **Menu:** `Data/Randomize Groups`
 - **Summary:** Deterministically allocate subjects across treatment groups (complete-balanced or permuted-block) and upsert ARRIVE constants on an InfoSheet.
 - **Beginner note:** Randomizes subjects into balanced or blocked treatment arms and stores reproducibility metadata on an Info sheet.
 - **Parameters:** `block_sizes` (any), `groups*` (array), `info_sheet_id` (string|null), `scheme` (any), `seed` (integer|null), `sheet_id` (string|null), `subject_count` (integer|null), `subject_ids` (any), `title` (string|null)
@@ -365,7 +365,7 @@ Registered commands: 106
 ### `table.recodeLevels` — Recode Categorical Levels
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Data/Recode Levels...`
+- **Menu:** `Data/Recode Levels`
 - **Summary:** Map and rewrite categorical values in a MultipleVariables column.
 - **Beginner note:** Rename or merge category labels within a MultipleVariables column.
 - **Parameters:** `col` (any), `mappings*` (any), `sheet_id*` (string), `title` (string|null)
@@ -373,7 +373,7 @@ Registered commands: 106
 ### `table.setCalculatedVariable` — Add / Update Calculated Variable
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Data/Calculated Variable...`
+- **Menu:** `Data/Calculated Variable`
 - **Summary:** Create or update a formula-driven variable column in a MultipleVariables table and evaluate it.
 - **Beginner note:** Add a computed column whose values update automatically from other variables via a formula.
 - **Parameters:** `col` (any), `formula*` (string), `sheet_id*` (string), `title` (string|null)
@@ -381,7 +381,7 @@ Registered commands: 106
 ### `table.setCategoricalOrder` — Set Categorical Order
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Data/Set Categorical Order...`
+- **Menu:** `Data/Set Categorical Order`
 - **Summary:** Configure display/reference ordering of categorical levels in a MultipleVariables column.
 - **Beginner note:** Choose how categories are ordered (explicit list, alphabetical, entry order, or frequency).
 - **Parameters:** `col` (any), `levels` (array|null), `order` (any), `order_spec` (object|null), `reference_level` (string|null), `reversed` (boolean|null), `sheet_id*` (string), `title` (string|null)
@@ -437,7 +437,7 @@ Registered commands: 106
 ### `table.setVariableRole` — Set Variable Role
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Data/Variable Properties...`
+- **Menu:** `Data/Variable Properties`
 - **Summary:** Lock or re-infer the analytical role of a column in a MultipleVariables table.
 - **Beginner note:** Mark a variable column as continuous, categorical, label, calculated, or auto-inferred.
 - **Parameters:** `col` (any), `role*` (string), `sheet_id*` (string), `title` (string|null)
@@ -453,7 +453,7 @@ Registered commands: 106
 ### `table.simulateDistributions` — Simulate Distributions
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/Simulate Distributions...`
+- **Menu:** `Insert/Simulate Distributions`
 - **Summary:** Generate a Column or MultipleVariables table with columns sampled from Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential distributions.
 - **Beginner note:** Creates a new table of seeded random variates drawn from parametric statistical distributions.
 - **Parameters:** `columns*` (array), `n_rows*` (integer), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `use_multiple_variables` (boolean|null)
@@ -461,7 +461,7 @@ Registered commands: 106
 ### `table.simulateXy` — Simulate XY Data
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/Simulate Data...`
+- **Menu:** `Insert/Simulate Data`
 - **Summary:** Generate a synthetic XY data sheet from a built-in equation, parameter map, and noise model.
 - **Beginner note:** Create synthetic XY curves with optional Gaussian, relative CV, or Poisson noise.
 - **Parameters:** `auto_info` (boolean|null), `cv_percent` (number|null), `equation_id` (string|null), `graph_sheet_id` (string|null), `noise_kind` (string|null), `noise_sd` (number|null), `parameters` (any), `replicates` (integer|null), `row_count` (integer|null), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `x_max` (number|null), `x_min` (number|null)
@@ -497,7 +497,7 @@ Registered commands: 106
 ### `analysis.add` — Add Analysis
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Add Analysis...`
+- **Menu:** `Analyze/Add Analysis`
 - **Summary:** Attach and compute a new analysis of any domain (transform, stats, or regression) for a data sheet.
 - **Beginner note:** Adds a new live analysis sheet linked to an input table and computes its initial results.
 - **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
@@ -505,7 +505,7 @@ Registered commands: 106
 ### `analysis.exportCsv` — Export Result Sheet CSV
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Results CSV...`
+- **Menu:** `File/Export/Results CSV`
 - **Summary:** Export a specific tab or tidy combined CSV representation of a result sheet and optionally save it atomically.
 - **Beginner note:** Exports result tables to CSV/TSV text with configurable delimiter and decimal separator.
 - **Parameters:** `decimal_separator` (any), `delimiter` (any), `path` (any), `sheet_id*` (string), `tab_id` (any), `tab_index` (any)
@@ -513,7 +513,7 @@ Registered commands: 106
 ### `analysis.exportJson` — Export Result Sheet JSON
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Results JSON...`
+- **Menu:** `File/Export/Results JSON`
 - **Summary:** Serialize a result sheet (tables, scalars, parameters, checklist) to JSON and optionally save it atomically.
 - **Beginner note:** Exports an analysis result sheet as structured JSON text or saves it to a `.json` file.
 - **Parameters:** `path` (any), `pretty` (any), `sheet_id*` (string)
@@ -521,7 +521,7 @@ Registered commands: 106
 ### `analysis.retargetData` — Change Data Analyzed
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Change/Data Analyzed...`
+- **Menu:** `Change/Data Analyzed`
 - **Summary:** Rebind an existing analysis result sheet to a different compatible data sheet or subset of datasets.
 - **Beginner note:** Points an existing analysis at a different data table and recalculates it immediately.
 - **Parameters:** `clear_selected_data_sets` (any), `selected_data_sets` (any), `sheet_id*` (string), `source_sheet_id*` (string)
@@ -529,7 +529,7 @@ Registered commands: 106
 ### `analysis.run` — New / Run Analysis
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Analyze Data...`
+- **Menu:** `Analyze/Analyze Data`
 - **Summary:** Create and run a new analysis sheet, recalculate an existing result sheet by ID, or recalculate the project when empty.
 - **Beginner note:** Runs a new analysis when source and kind are provided, or refreshes an existing analysis sheet.
 - **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
@@ -537,7 +537,7 @@ Registered commands: 106
 ### `analysis.updateParams` — Change Analysis Parameters
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Change/Analysis Parameters...`
+- **Menu:** `Change/Analysis Parameters`
 - **Summary:** Update analysis kind, confidence level, dataset selection, P-value formatting, or parameter rules and recalculate.
 - **Beginner note:** Modifies settings on an existing result sheet without recreating it and refreshes downstream sheets.
 - **Parameters:** `confidence_percent` (any), `kind` (any), `p_value_format` (any), `params` (any), `selected_data_sets` (any), `sheet_id*` (string), `title` (any)
@@ -554,7 +554,7 @@ Registered commands: 106
 ### `fit.run` — Run Curve Fit / Regression
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Fit Curve...`
+- **Menu:** `Analyze/Fit Curve`
 - **Summary:** Create and execute linear, Deming, built-in nonlinear, global shared-parameter, or custom DSL regression.
 - **Beginner note:** Fits a linear or nonlinear dose-response/kinetic curve with confidence bands and model comparisons.
 - **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
@@ -562,15 +562,15 @@ Registered commands: 106
 ### `result.generateReport` — Generate Methods Report
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Methods Report...`
+- **Menu:** `File/Export/Methods Report`
 - **Summary:** Generate a publication-ready statistical methods prose report in `plain`, `markdown`, or `latex`, optionally saving to disk.
 - **Beginner note:** Creates a narrative methods paragraph describing the statistical test, sample sizes, and options used.
-- **Parameters:** `format` (any), `path` (any), `result_sheet_id*` (string)
+- **Parameters:** `format` (any), `path` (any), `result_sheet_id*` (string), `scope` (any)
 
 ### `stats.pvalueStack` — Analyze a Stack of P Values
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Column Analyses/Analyze a Stack of P Values...`
+- **Menu:** `Analyze/Column Analyses/Analyze a Stack of P Values`
 - **Summary:** Adjust a column stack of raw P values across 7 FWER/FDR multiplicity procedures and report discoveries.
 - **Beginner note:** Adjusts a column of P values using Bonferroni, Holm, Šídák, Holm-Šídák, Benjamini-Hochberg, BKY two-stage, or Benjamini-Yekutieli.
 - **Parameters:** `column` (any), `method` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id*` (string), `threshold` (any), `title` (any)
@@ -578,7 +578,7 @@ Registered commands: 106
 ### `stats.run` — Run Statistical Test
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Statistical Test...`
+- **Menu:** `Analyze/Statistical Test`
 - **Summary:** Create and execute a hypothesis test, ANOVA, contingency, survival, ROC, GLM, or multivariate analysis.
 - **Beginner note:** Runs a statistical test on a compatible data sheet and stores tables, P values, and assumption checks.
 - **Parameters:** `confidence_percent` (any), `df_method` (any), `kind` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
@@ -586,7 +586,7 @@ Registered commands: 106
 ### `transform.run` — Run Transformation
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Analyze/Transform...`
+- **Menu:** `Analyze/Transform`
 - **Summary:** Create and execute a mathematical, normalization, baseline, transpose, prune, select, or simulation transformation sheet.
 - **Beginner note:** Runs a reproducible data transformation pipeline on a data sheet and writes the output to a linked result sheet.
 - **Parameters:** `confidence_percent` (any), `create_graph` (any), `graph_sheet_id` (any), `kind` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
@@ -596,7 +596,7 @@ Registered commands: 106
 ### `graph.addAnnotation` — Add Graph Annotation
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Draw/Annotation...`
+- **Menu:** `Draw/Annotation`
 - **Summary:** Add a text box, line/arrow, shape, live embedded result table, or live fitted model equation annotation to a graph.
 - **Beginner note:** Places labels, arrows, geometric callouts, embedded result summaries, or model equations onto a graph.
 - **Parameters:** `annotation` (any), `bordered` (any), `bounds_pt` (any), `data_set_index` (any), `font_size_pt` (any), `kind` (any), `mode` (any), `result_sheet_id` (any), `sheet_id*` (string), `text` (any)
@@ -604,7 +604,7 @@ Registered commands: 106
 ### `graph.addComparisonBrackets` — Add Pairwise Significance Brackets
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Draw/Pairwise Comparison Brackets...`
+- **Menu:** `Draw/Pairwise Comparison Brackets`
 - **Summary:** Add statistical comparison brackets (stars or numeric P/q values) driven by a result sheet's pairwise comparisons.
 - **Beginner note:** Draws significance brackets above compared groups using P values from your statistical test.
 - **Parameters:** `bracket_step_pt` (any), `clear_existing` (any), `font_size_pt` (any), `group_a` (any), `group_b` (any), `hide_if_non_significant` (any), `label_mode` (any), `result_sheet_id*` (string), `sheet_id*` (string), `significant_only` (any), `stroke_width_pt` (any), `style` (any)
@@ -612,15 +612,15 @@ Registered commands: 106
 ### `graph.applyCanvasPreset` — Apply Graph Canvas Preset
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Canvas Size Preset...`
+- **Menu:** `Format/Canvas Size Preset`
 - **Summary:** Resize a graph canvas to a journal column, slide, or poster preset (`KeepTypographyPt` or `ProportionalScale`).
 - **Beginner note:** Resizes a graph to standard journal figure widths and runs a publication preflight check.
 - **Parameters:** `preset*` (string), `resize_mode` (any), `sheet_id*` (string)
 
-### `graph.applyStyleFrom` — Apply Graph Style From...
+### `graph.applyStyleFrom` — Apply Graph Style From
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Apply Style From...`
+- **Menu:** `Format/Apply Style From`
 - **Summary:** Copy visual styling (palette, frame, axis styling, legend, and series appearances) from a donor graph.
 - **Beginner note:** Copies the visual style of another graph sheet onto this graph without changing its data.
 - **Parameters:** `clone_error_bars_and_legend` (any), `clone_frame_and_axes` (any), `clone_palette` (any), `donor_sheet_id*` (string), `sheet_id` (any), `target_sheet_ids` (any)
@@ -628,7 +628,7 @@ Registered commands: 106
 ### `graph.create` — New Graph
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/New Graph...`
+- **Menu:** `Insert/New Graph`
 - **Summary:** Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.
 - **Beginner note:** Creates a new graph linked to one of your data tables.
 - **Parameters:** `data_sheet_id*` (string), `initialized` (any), `kind` (any), `one_per_data_set` (any), `sheet_id` (any), `title` (any), `y_axis_title` (any)
@@ -636,7 +636,7 @@ Registered commands: 106
 ### `graph.formatSelectedPoints` — Format Selected Points
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Selected Points...`
+- **Menu:** `Format/Selected Points`
 - **Summary:** Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.
 - **Beginner note:** Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.
 - **Parameters:** `border_width_pt` (any), `clear` (boolean), `color` (any), `fill_color` (any), `fill_mode` (any), `hidden` (boolean), `mode` (string), `overrides` (array), `points` (array), `sheet_id*` (string), `size_pt` (any), `symbol` (any)
@@ -644,7 +644,7 @@ Registered commands: 106
 ### `graph.initialize` — Initialize Graph
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Graph/Initialize...`
+- **Menu:** `Graph/Initialize`
 - **Summary:** Initialize an uninitialized graph sheet, applying its graph kind and default series styling.
 - **Beginner note:** Chooses an initial plot type for a newly created graph sheet.
 - **Parameters:** `kind` (any), `sheet_id*` (string), `title` (any)
@@ -652,7 +652,7 @@ Registered commands: 106
 ### `graph.insertImage` — Insert Image on Graph
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
-- **Menu:** `Insert/Image on Graph...`
+- **Menu:** `Insert/Image on Graph`
 - **Summary:** Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.
 - **Beginner note:** Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.
 - **Parameters:** `asset_id` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
@@ -668,7 +668,7 @@ Registered commands: 106
 ### `graph.setAdditionalTicks` — Set Additional Axis Ticks
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Additional Ticks...`
+- **Menu:** `Format/Additional Ticks`
 - **Summary:** Set custom callout ticks and optional gridlines along the `x`, `y`, or `y2` axis.
 - **Beginner note:** Places custom reference ticks and gridlines at specific axis coordinates.
 - **Parameters:** `axis*` (string), `sheet_id*` (string), `ticks*` (array)
@@ -676,7 +676,7 @@ Registered commands: 106
 ### `graph.setAxes` — Format Axes
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Axes...`
+- **Menu:** `Format/Axes`
 - **Summary:** Configure X, Y, and right-hand Y2 axes including log/probit/logit scales, segmented breaks, thresholds, and frame presets.
 - **Beginner note:** Adjusts axis limits, log scales, titles, broken-axis gaps, and frame styling.
 - **Parameters:** `axis` (any), `frame_preset` (any), `sheet_id*` (string), `x_axis` (any), `y2_axis` (any), `y_axis` (any)
@@ -684,7 +684,7 @@ Registered commands: 106
 ### `graph.setCompactLetterDisplay` — Compact Letter Display
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Draw/Compact Letter Display...`
+- **Menu:** `Draw/Compact Letter Display`
 - **Summary:** Configure or toggle Piepho (2004) compact letter display significance grouping letters and pairwise display mode on a graph.
 - **Beginner note:** Places shared grouping letters (a, b, ab) above graph groups to summarize all-pairwise statistical comparisons.
 - **Parameters:** `alpha_override` (any), `color` (any), `enabled` (any), `font_size_pt` (any), `offset_pt` (any), `ordering` (any), `pairwise_display_mode` (any), `result_sheet_id` (any), `sheet_id*` (string), `uppercase` (any)
@@ -692,7 +692,7 @@ Registered commands: 106
 ### `graph.setKind` — Change Graph Type
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Change/Graph Type...`
+- **Menu:** `Change/Graph Type`
 - **Summary:** Switch a graph's visualization type (XY, column, grouped, survival, multivariate, diagnostic) with optional style reset.
 - **Beginner note:** Changes the chart type of an existing graph without recreating the sheet.
 - **Parameters:** `kind*` (any), `option_id` (any), `reset_series_style` (any), `sheet_id*` (string)
@@ -700,7 +700,7 @@ Registered commands: 106
 ### `graph.setRegressionOverlay` — Overlay Regression Curve
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Graph/Regression Overlay...`
+- **Menu:** `Graph/Regression Overlay`
 - **Summary:** Bind or clear a fitted curve overlay with optional confidence/prediction bands on one or all graph series.
 - **Beginner note:** Overlays a curve fit line and confidence ribbons from a result sheet onto your graph.
 - **Parameters:** `all_series` (any), `clear` (any), `data_set_index` (any), `result_sheet_id` (any), `sample_segments` (any), `series_index` (any), `shaded_ribbon` (any), `sheet_id*` (string), `show_confidence_band` (any), `show_prediction_band` (any)
@@ -708,7 +708,7 @@ Registered commands: 106
 ### `graph.setSeries` — Format Data Series
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Data on Graph...`
+- **Menu:** `Format/Data on Graph`
 - **Summary:** Style one or all data series: colors, markers, connecting lines, error bars, right-Y binding, or multivariate encoding.
 - **Beginner note:** Customizes markers, connecting lines, error bars, and colors for curves or bars.
 - **Parameters:** `all_series` (any), `data_set_index` (any), `mode` (any), `multivariate` (any), `series` (any), `series_index` (any), `sheet_id*` (string)
@@ -716,7 +716,7 @@ Registered commands: 106
 ### `graph.setSpec` — Update Graph Specification
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Graph...`
+- **Menu:** `Format/Graph`
 - **Summary:** Patch a graph's full GraphSpec, palette, frame, legend, title, survival options, or multivariate encoding.
 - **Beginner note:** Updates visual graph settings such as palette, frame style, legend, or multivariate channels.
 - **Parameters:** `forest_show_pooled_diamond` (any), `heatmap_labels` (any), `initialized` (any), `multivariate` (any), `orientation` (any), `paper_fill` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
@@ -724,7 +724,7 @@ Registered commands: 106
 ### `graph.updateImage` — Format Embedded Graph Image
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Embedded Image...`
+- **Menu:** `Format/Embedded Image`
 - **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.
 - **Beginner note:** Crops, rotates, resizes, or frames an embedded image on a graph.
 - **Parameters:** `annotation_index*` (integer), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `lock_aspect_ratio` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
@@ -734,7 +734,7 @@ Registered commands: 106
 ### `layout.addPanel` — Add Panel to Layout
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/Layout Panel...`
+- **Menu:** `Insert/Layout Panel`
 - **Summary:** Place a live graph panel, live table panel, or markdown text callout onto a layout sheet.
 - **Beginner note:** Adds a graph, data or result table, or label callout to an explicit rectangle or grid slot on a layout.
 - **Parameters:** `badge_override` (string|null), `bounds_pt` (any), `col` (integer|null), `font_size_pt` (number|null), `graph_sheet_id` (string|null), `gutter_pt` (number|null), `kind` (string|null), `margin_pt` (number|null), `markdown` (string|null), `panel_id` (string|null), `row` (integer|null), `scale_percent` (number|null), `sheet_id*` (string), `source_sheet_id` (string|null), `tab_id` (string|null)
@@ -750,7 +750,7 @@ Registered commands: 106
 ### `layout.applyCanvasPreset` — Apply Layout Canvas Preset
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Layout Canvas Size Preset...`
+- **Menu:** `Format/Layout Canvas Size Preset`
 - **Summary:** Resize a layout page to a standard publication canvas preset while optionally preserving typography sizes.
 - **Beginner note:** Resizes a whole layout figure to a journal column width or slide preset and runs preflight checks.
 - **Parameters:** `preset*` (string), `resize_mode` (string|null), `sheet_id*` (string)
@@ -758,7 +758,7 @@ Registered commands: 106
 ### `layout.create` — New Layout
 
 - **Effects:** `MUTATES_DOCUMENT`
-- **Menu:** `Insert/New Layout...`
+- **Menu:** `Insert/New Layout`
 - **Summary:** Create a new publication layout sheet with a journal width preset, page orientation, and grid template.
 - **Beginner note:** Creates a multi-panel figure page where you can arrange graphs, tables, and text callouts.
 - **Parameters:** `align_plot_origins` (boolean|null), `background_fill` (any), `grid_template` (array|null), `height` (number|null), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id` (string|null), `title` (string|null), `unit` (any), `width` (number|null)
@@ -774,7 +774,7 @@ Registered commands: 106
 ### `layout.insertImage` — Insert Image on Layout
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
-- **Menu:** `Insert/Image on Layout...`
+- **Menu:** `Insert/Image on Layout`
 - **Summary:** Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.
 - **Beginner note:** Places a microscopy image, gel photo, or schematic panel onto a layout page.
 - **Parameters:** `asset_id` (string|null), `badge_override` (string|null), `border` (any), `bounds_pt` (any), `bytes_base64` (string|null), `crop` (any), `lock_aspect_ratio` (boolean|null), `panel_id` (string|null), `path` (string|null), `rotation_deg` (number|null), `sheet_id*` (string)
@@ -790,7 +790,7 @@ Registered commands: 106
 ### `layout.setSpec` — Format Layout
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Layout...`
+- **Menu:** `Format/Layout`
 - **Summary:** Update a layout sheet's page dimensions, journal preset, grid template, origin alignment, badge style, or background.
 - **Beginner note:** Changes the page setup, grid arrangement, or panel lettering of an existing figure layout.
 - **Parameters:** `align_plot_origins` (boolean|null), `background_fill` (any), `grid_template` (array|null), `height` (number|null), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id*` (string), `spec` (object|null), `title` (string|null), `unit` (any), `width` (number|null)
@@ -798,7 +798,7 @@ Registered commands: 106
 ### `layout.updateImage` — Format Embedded Layout Image
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
-- **Menu:** `Format/Layout Image...`
+- **Menu:** `Format/Layout Image`
 - **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.
 - **Beginner note:** Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.
 - **Parameters:** `badge_override` (string|null), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (number|null), `item_index` (integer|null), `lock_aspect_ratio` (boolean|null), `panel_id` (string|null), `rotation_deg` (number|null), `sheet_id*` (string), `width_pt` (number|null)
@@ -808,7 +808,7 @@ Registered commands: 106
 ### `export.pdf` — Export PDF
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/PDF...`
+- **Menu:** `File/Export/PDF`
 - **Summary:** Render one or more graph or layout sheets to publication PDF (sRGB, print CMYK, or grayscale) and optionally write it atomically to disk.
 - **Beginner note:** Creates a single-page or multi-page vector PDF from one or more graphs and layouts.
 - **Parameters:** `color_space` (string|null), `compress_streams` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `sheet_id` (string|null), `sheet_ids` (array|null), `title` (string|null)
@@ -816,7 +816,7 @@ Registered commands: 106
 ### `export.png` — Export PNG
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/PNG...`
+- **Menu:** `File/Export/PNG`
 - **Summary:** Rasterize a graph or layout sheet to a PNG image at the requested pixel dimensions or DPI.
 - **Beginner note:** Renders a graph or layout to a high-DPI PNG image, returning base64 bytes and optionally saving to disk.
 - **Parameters:** `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `transparent_bg` (boolean|null), `width_px` (integer|null)
@@ -824,7 +824,7 @@ Registered commands: 106
 ### `export.svg` — Export SVG
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/SVG...`
+- **Menu:** `File/Export/SVG`
 - **Summary:** Render a graph or layout sheet to scalable vector graphics (SVG) and optionally write it atomically to disk.
 - **Beginner note:** Exports the selected graph or layout as crisp SVG text, optionally saving it to a file path.
 - **Parameters:** `embed_fonts` (boolean|null), `include_metadata` (boolean|null), `include_xml_declaration` (boolean|null), `outline_text` (boolean|null), `path` (string|null), `precision` (integer|null), `pretty` (boolean|null), `sheet_id*` (string), `transparent_bg` (boolean|null)
@@ -832,7 +832,7 @@ Registered commands: 106
 ### `export.tiff` — Export TIFF
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/TIFF...`
+- **Menu:** `File/Export/TIFF`
 - **Summary:** Rasterize a graph or layout sheet to a TIFF image with selectable compression (`none`, `lzw`, `deflate`).
 - **Beginner note:** Renders a publication TIFF image at custom DPI or resolution with lossless compression.
 - **Parameters:** `compression` (string|null), `dpi` (integer|null), `height_px` (integer|null), `path` (string|null), `sheet_id*` (string), `transparent_bg` (boolean|null), `width_px` (integer|null)
@@ -840,7 +840,7 @@ Registered commands: 106
 ### `graph.exportEmf` — Export Graph EMF
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Graph EMF...`
+- **Menu:** `File/Export/Graph EMF`
 - **Summary:** Export a graph sheet as a Windows Enhanced Metafile (EMF) vector graphic.
 - **Beginner note:** Exports a graph sheet to EMF for insertion into Office documents.
 - **Parameters:** `path` (string|null), `sheet_id*` (string)
@@ -872,7 +872,7 @@ Registered commands: 106
 ### `layout.exportEmf` — Export Layout EMF
 
 - **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
-- **Menu:** `File/Export/Layout EMF...`
+- **Menu:** `File/Export/Layout EMF`
 - **Summary:** Export a multi-panel layout sheet as a Windows Enhanced Metafile (EMF) vector graphic.
 - **Beginner note:** Exports a multi-panel layout sheet to EMF for insertion into Office documents.
 - **Parameters:** `path` (string|null), `sheet_id*` (string)
