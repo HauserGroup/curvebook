@@ -40,6 +40,9 @@
 //! - Mann, H. B., & Whitney, D. R. (1947). On a test of whether one of two random variables is
 //!   stochastically larger than the other. *Annals of Mathematical Statistics* 18(1):50–60.
 //!   doi:10.1214/aoms/1177730491
+//! - Streitberg, B., & Röhmel, J. (1986). Exact distributions for permutation and rank tests:
+//!   An introduction to some recently published algorithms. *Statistical Software Newsletter*
+//!   12(1):10–17.
 //! - Pratt, J. W. (1959). Remarks on zeros and ties in the Wilcoxon signed rank procedures.
 //!   *Journal of the American Statistical Association* 54(287):655–667. doi:10.1080/01621459.1959.10501526
 //! - Hodges, J. L., & Lehmann, E. L. (1963). Estimates of location based on rank tests.
@@ -87,8 +90,8 @@ pub use crate::lognormal::{OneSampleRatioTResult, lognormal_welch_t_test, one_sa
 pub use bland_altman::{BlandAltmanResult, bland_altman};
 pub use multiple_row::{MultipleRowTestEntry, multiple_row_t_tests};
 pub use nonparametric::{
-    MannWhitneyResult, PairedSignTestResult, TwoSampleKsResult, WilcoxonMatchedResult, ks_two_sample, mann_whitney_u, paired_sign_test,
-    wilcoxon_matched_pairs,
+    MannWhitneyPMethod, MannWhitneyResult, PairedSignTestResult, TwoSampleKsResult, WilcoxonMatchedResult, ks_two_sample, mann_whitney_u,
+    mann_whitney_u_with_method, paired_sign_test, wilcoxon_matched_pairs,
 };
 pub use parametric::{
     PairedTResult, TwoGroupEffectSizes, UnpairedTResult, lognormal_unpaired_t_test, one_sample_t_test_from_summary, paired_t_test,

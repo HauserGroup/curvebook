@@ -434,9 +434,19 @@ fn audit_21_wilcoxon_pratt_hl_exact_ties_one_tailed_and_sign_overflow() {
     assert_close(mann_whitney_u(&tb, &ta, true, conf).unwrap().p_value, mw_t.p_value, 1e-12, "MW ties swap");
     assert_close(2.0 * mann_whitney_u(&ta, &tb, false, conf).unwrap().p_value, mw_t.p_value, 1e-12, "MW ties 1-tail");
     assert!(
-        !mann_whitney_u(&(0..10).map(|i| (i % 4) as f64).collect::<Vec<_>>(), &(0..9).map(|i| ((i % 4) + 1) as f64).collect::<Vec<_>>(), true, conf)
+        mann_whitney_u(&(0..10).map(|i| (i % 4) as f64).collect::<Vec<_>>(), &(0..9).map(|i| ((i % 4) + 1) as f64).collect::<Vec<_>>(), true, conf)
             .unwrap()
             .exact_p_used
+    );
+    assert!(
+        !mann_whitney_u(
+            &(0..130).map(|i| (i % 4) as f64).collect::<Vec<_>>(),
+            &(0..130).map(|i| ((i % 4) + 1) as f64).collect::<Vec<_>>(),
+            true,
+            conf
+        )
+        .unwrap()
+        .exact_p_used
     );
     for (na, nb) in [(9, 9), (10, 10), (10, 15), (50, 50)] {
         let one = mann_whitney_u(&vec![5.0; na], &vec![5.0; nb], false, conf).unwrap();

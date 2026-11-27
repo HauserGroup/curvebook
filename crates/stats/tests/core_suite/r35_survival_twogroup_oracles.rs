@@ -19,8 +19,8 @@ use curvebook_doc::{
 use curvebook_stats::run_analysis;
 use curvebook_stats::survival::{kaplan_meier_curve, two_cohort_hazard_ratio};
 use curvebook_stats::two_group::{
-    f_test_variances, mann_whitney_u, paired_sign_test, paired_t_test, unpaired_t_test, unpaired_t_test_from_summary, welch_t_test,
-    welch_t_test_from_summary, wilcoxon_matched_pairs,
+    MannWhitneyPMethod, f_test_variances, mann_whitney_u, mann_whitney_u_with_method, paired_sign_test, paired_t_test, unpaired_t_test,
+    unpaired_t_test_from_summary, welch_t_test, welch_t_test_from_summary, wilcoxon_matched_pairs,
 };
 use curvebook_testkit::assert_approx_eq;
 
@@ -407,10 +407,15 @@ fn r35_tg_one_tailed_conventions_consistent() {
 
     let lg_a: Vec<f64> = (0..30).map(|i| i as f64).collect();
     let lg_b: Vec<f64> = (0..30).map(|i| i as f64 + 10.0).collect();
-    let mw_asymp_1 = mann_whitney_u(&lg_a, &lg_b, false, conf(95.0)).unwrap();
-    let mw_asymp_1_rev = mann_whitney_u(&lg_b, &lg_a, false, conf(95.0)).unwrap();
-    let mw_asymp_2 = mann_whitney_u(&lg_a, &lg_b, true, conf(95.0)).unwrap();
+    let mw_asymp_1 = mann_whitney_u_with_method(&lg_a, &lg_b, false, conf(95.0), MannWhitneyPMethod::Asymptotic).unwrap();
+    let mw_asymp_1_rev = mann_whitney_u_with_method(&lg_b, &lg_a, false, conf(95.0), MannWhitneyPMethod::Asymptotic).unwrap();
+    let mw_asymp_2 = mann_whitney_u_with_method(&lg_a, &lg_b, true, conf(95.0), MannWhitneyPMethod::Asymptotic).unwrap();
     assert!(!mw_asymp_1.exact_p_used);
     assert_approx_eq(mw_asymp_1.p_value, mw_asymp_1_rev.p_value, 1e-12, 0.0, "Asymp MW one-tailed direction symmetry");
     assert_approx_eq(mw_asymp_1.p_value, 0.5 * mw_asymp_2.p_value, 1e-12, 0.0, "Asymp MW one-tailed = half two-tailed");
+    // Exact conditional permutation DP at N = 60 also preserves one-tailed direction symmetry.
+    let mw_exact_1 = mann_whitney_u(&lg_a, &lg_b, false, conf(95.0)).unwrap();
+    let mw_exact_1_rev = mann_whitney_u(&lg_b, &lg_a, false, conf(95.0)).unwrap();
+    assert!(mw_exact_1.exact_p_used);
+    assert_approx_eq(mw_exact_1.p_value, mw_exact_1_rev.p_value, 1e-12, 0.0, "Exact MW N=60 one-tailed direction symmetry");
 }

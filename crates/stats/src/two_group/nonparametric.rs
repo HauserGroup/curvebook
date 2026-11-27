@@ -9,6 +9,9 @@
 //! - Mann, H. B., & Whitney, D. R. (1947). On a test of whether one of two random variables is
 //!   stochastically larger than the other. *Annals of Mathematical Statistics* 18(1):50–60.
 //!   doi:10.1214/aoms/1177730491
+//! - Streitberg, B., & Röhmel, J. (1986). Exact distributions for permutation and rank tests:
+//!   An introduction to some recently published algorithms. *Statistical Software Newsletter*
+//!   12(1):10–17.
 //! - Pratt, J. W. (1959). Remarks on zeros and ties in the Wilcoxon signed rank procedures.
 //!   *Journal of the American Statistical Association* 54(287):655–667. doi:10.1080/01621459.1959.10501526
 //! - Hodges, J. L., & Lehmann, E. L. (1963). Estimates of location based on rank tests.
@@ -36,13 +39,37 @@
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{norm_sf, norm_two_sided_isf};
 use curvebook_math::special::inc_beta::reg_beta;
+use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::column::{exact_binomial_median_ci, hodges_lehmann_one_sample_with_coverage, ks_asymptotic_p, wilcoxon_exact_p};
 use crate::common::{quantile_type6_sorted, quartiles_hinge, rank_with_ties, select_kth_pairwise_sum, sorted_finite, validate_finite_slice};
 use crate::error::StatsError;
 
-/// Result of a Mann–Whitney *U* test (Mann & Whitney 1947; Wilcoxon 1945).
+/// Method used to evaluate the Mann–Whitney *U* null *p*-value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum MannWhitneyPMethod {
+    /// Exact permutation distribution (Mann & Whitney 1947 recurrence when tie-free; Streitberg &
+    /// Röhmel 1986 shift algorithm on doubled mid-ranks when ties are present) whenever
+    /// `n_a + n_b <= 250` and the DP table fits within `4_000_000` cells; falls back to the tie-
+    /// and 0.5-continuity-corrected normal approximation above that budget.
+    #[default]
+    Auto,
+    /// Tie- and 0.5-continuity-corrected normal approximation (Hollander, Wolfe & Chicken 2014,
+    /// ch. 4), matching `R` `stats::wilcox.test(..., exact = FALSE, correct = TRUE)`.
+    Asymptotic,
+}
+
+/// Maximum combined sample size `n_a + n_b` for exact Mann–Whitney permutation DP.
+///
+/// At `N = 250`, `C(250, 125) ~= 1.15e74 << f64::MAX`, so non-negative `f64` permutation counts
+/// never overflow and relative rounding error stays bounded by `O(N * eps) < 1e-13`.
+const MANN_WHITNEY_EXACT_MAX_N: usize = 250;
+
+/// Maximum `f64` DP table cells `(k + 1) * (cap + 1)` allocated per tail pass (~32 MiB cap).
+const MANN_WHITNEY_EXACT_MAX_CELLS: usize = 4_000_000;
+
+/// Result of a Mann–Whitney *U* test (Mann & Whitney 1947; Wilcoxon 1945; Streitberg & Röhmel 1986).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MannWhitneyResult {
     /// Number of observations in group A.
@@ -59,7 +86,7 @@ pub struct MannWhitneyResult {
     pub u_b: f64,
     /// Smaller Mann–Whitney statistic `min(u_a, u_b)`.
     pub u_min: f64,
-    /// *P* value testing identical distributions (`two_tailed` doubles smaller tail vs directional observed-tail one-sided via exact DP when `n_a + n_b <= 40` and tie-free, else tie-/continuity-corrected normal).
+    /// *P* value testing identical distributions (`two_tailed` vs directional observed-tail one-sided via exact DP when within budget, else tie-/continuity-corrected normal).
     pub p_value: f64,
     /// True if exact Mann–Whitney combinatorial DP distribution was used; false for normal approximation.
     pub exact_p_used: bool,
@@ -78,85 +105,309 @@ pub struct MannWhitneyResult {
     pub rank_biserial_r: f64,
 }
 
-/// Exact DP distribution of Mann–Whitney `U` for `n1 + n2 <= 40` without ties.
+fn binom_f64(n: usize, k: usize) -> f64 {
+    let k_eff = k.min(n.saturating_sub(k));
+    let mut acc = 1.0_f64;
+    for j in 1..=k_eff {
+        acc = acc * ((n - k_eff + j) as f64) / (j as f64);
+    }
+    acc
+}
+
+const fn gcd_usize(mut a: usize, mut b: usize) -> usize {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
+/// Exact DP distribution of untied Mann–Whitney `U` truncated at `u_min = min(u_obs, n1*n2 - u_obs)`.
 ///
-/// Counts arrangements by the Mann & Whitney (1947) recurrence on `U`; the two-sided *p*-value doubles
-/// the smaller tail, and the one-sided *p*-value returns the smaller (observed-direction) tail
-/// `min(P(U <= u_obs), P(U >= u_obs))`, matching the sign, Wilcoxon, and *t*-test convention.
-fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) -> f64 {
-    let max_u = n1 * n2;
-    // dp[i][u] = number of subsets of size i from i+j elements with U = u, iteratively over N = n1+n2.
-    let mut dp = vec![vec![0.0_f64; max_u + 1]; n1 + 1];
-    dp[0][0] = 1.0;
-    for total in 1..=(n1 + n2) {
+/// Counts arrangements by the Mann & Whitney (1947) recurrence `c(i, j; u) = c(i-1, j; u-j) + c(i, j-1; u)`
+/// for `n1 + n2 <= MANN_WHITNEY_EXACT_MAX_N` within `MANN_WHITNEY_EXACT_MAX_CELLS`. The untied null
+/// distribution is symmetric around `n1 * n2 / 2`, so evaluating `P(U <= u_min)` suffices for both
+/// one-sided (observed-direction tail) and two-sided (`2 * P(U <= u_min)`) *p*-values.
+fn mann_whitney_exact_untied_p(na: usize, nb: usize, u_obs: usize, two_tailed: bool) -> Option<f64> {
+    let n = na.checked_add(nb)?;
+    if n > MANN_WHITNEY_EXACT_MAX_N || na == 0 || nb == 0 {
+        return None;
+    }
+    let (n1, n2) = if na <= nb { (na, nb) } else { (nb, na) };
+    let max_u = n1.checked_mul(n2)?;
+    let u_min = u_obs.min(max_u.saturating_sub(u_obs));
+    if two_tailed && u_min.saturating_mul(2) >= max_u {
+        return Some(1.0);
+    }
+    let total_ways = binom_f64(n, n1);
+    if !total_ways.is_finite() || total_ways <= 0.0 {
+        return None;
+    }
+    let stride = u_min.checked_add(1)?;
+    let cells = n1.checked_add(1)?.checked_mul(stride)?;
+    if cells > MANN_WHITNEY_EXACT_MAX_CELLS {
+        return None;
+    }
+
+    let mut dp = vec![0.0_f64; cells];
+    if let Some(first) = dp.first_mut() {
+        *first = 1.0;
+    }
+    for total in 1..=n {
+        let i_min = total.saturating_sub(n2).max(1);
         let i_max = total.min(n1);
-        for i in (1..=i_max).rev() {
+        for i in (i_min..=i_max).rev() {
             let j = total - i;
-            if j > n2 {
+            if j > u_min {
                 continue;
             }
-            for u in j..=max_u {
-                dp[i][u] += dp[i - 1][u - j];
+            let split_at = i * stride;
+            let (before, after) = dp.split_at_mut(split_at);
+            let prev_start = (i - 1) * stride;
+            let prev_row = before.get(prev_start..split_at)?;
+            let cur_row = after.get_mut(..stride)?;
+            if let (Some(dst), Some(src)) = (cur_row.get_mut(j..=u_min), prev_row.get(..=u_min - j)) {
+                for (d, &s) in dst.iter_mut().zip(src.iter()) {
+                    *d += s;
+                }
             }
         }
     }
-    let total_ways: f64 = dp[n1].iter().sum();
-    if total_ways <= 0.0 {
-        return 1.0;
+    let mut tail_sum = NeumaierSum::new();
+    if let Some(final_row) = dp.get(n1 * stride..(n1 + 1) * stride) {
+        for &c in final_row {
+            tail_sum.add(c);
+        }
     }
-    let lower_tail: f64 = dp[n1].iter().take(u_obs + 1).sum();
-    let upper_tail: f64 = dp[n1].iter().skip(u_obs).sum();
-    let min_tail = lower_tail.min(upper_tail);
-    if two_tailed { (2.0 * min_tail / total_ways).clamp(0.0, 1.0) } else { (min_tail / total_ways).clamp(0.0, 1.0) }
+    let lower_tail = tail_sum.total();
+    let p = if two_tailed { 2.0 * lower_tail / total_ways } else { lower_tail / total_ways };
+    Some(p.clamp(0.0, 1.0))
 }
 
-/// Exact conditional permutation DP for Mann–Whitney with tied ranks (`n_a + n_b <= 18`).
-/// Computes exact permutation counts over doubled integer ranks `2 * r_i`.
-fn mann_whitney_exact_ties_p(ranks: &[f64], na: usize, two_tailed: bool) -> f64 {
+/// Count subsets of size `k` from non-negative integer `weights` whose sum is at most `cap`,
+/// using the Streitberg & Röhmel (1986) shift algorithm with GCD scaling and sorted suffix-minimum
+/// pruning. Returns `None` if the DP table exceeds `MANN_WHITNEY_EXACT_MAX_CELLS`.
+fn count_subsets_sum_le(weights: &[usize], k: usize, cap: usize) -> Option<f64> {
+    let n = weights.len();
+    if k == 0 {
+        return Some(1.0);
+    }
+    if k > n {
+        return Some(0.0);
+    }
+    let mut g = 0_usize;
+    for &w in weights {
+        if w > 0 {
+            g = gcd_usize(g, w);
+            if g == 1 {
+                break;
+            }
+        }
+    }
+    if g == 0 {
+        return Some(binom_f64(n, k));
+    }
+    let mut ws: Vec<usize> = if g > 1 { weights.iter().map(|&w| w / g).collect() } else { weights.to_vec() };
+    let scaled_cap = cap / g;
+    ws.sort_unstable();
+
+    let min_possible: usize = ws.iter().take(k).sum();
+    if scaled_cap < min_possible {
+        return Some(0.0);
+    }
+    let max_possible: usize = ws.iter().rev().take(k).sum();
+    if scaled_cap >= max_possible {
+        return Some(binom_f64(n, k));
+    }
+
+    let stride = scaled_cap.checked_add(1)?;
+    let cells = k.checked_add(1)?.checked_mul(stride)?;
+    if cells > MANN_WHITNEY_EXACT_MAX_CELLS {
+        return None;
+    }
+
+    let mut prefix = Vec::with_capacity(n + 1);
+    prefix.push(0_usize);
+    let mut acc_p = 0_usize;
+    for &w in &ws {
+        acc_p = acc_p.checked_add(w)?;
+        prefix.push(acc_p);
+    }
+
+    let mut dp = vec![0.0_f64; cells];
+    if let Some(first) = dp.first_mut() {
+        *first = 1.0;
+    }
+    let mut row_max: Vec<Option<usize>> = vec![None; k + 1];
+    if let Some(slot) = row_max.first_mut() {
+        *slot = Some(0);
+    }
+
+    for (idx, &w) in ws.iter().enumerate() {
+        let rem = n - 1 - idx;
+        let i_min = k.saturating_sub(rem).max(1);
+        let i_max = k.min(idx + 1);
+        for i in (i_min..=i_max).rev() {
+            let Some(prev_max) = row_max.get(i - 1).copied().flatten() else {
+                continue;
+            };
+            let need = k - i;
+            let suffix_min = prefix.get(idx + 1 + need).copied().unwrap_or(0).saturating_sub(prefix.get(idx + 1).copied().unwrap_or(0));
+            if suffix_min > scaled_cap {
+                continue;
+            }
+            let eff_cap = scaled_cap - suffix_min;
+            if w > eff_cap {
+                continue;
+            }
+            let hi = eff_cap.min(prev_max.saturating_add(w));
+            let split_at = i * stride;
+            let (before, after) = dp.split_at_mut(split_at);
+            let prev_start = (i - 1) * stride;
+            let prev_row = before.get(prev_start..split_at)?;
+            let cur_row = after.get_mut(..stride)?;
+            if let (Some(dst), Some(src)) = (cur_row.get_mut(w..=hi), prev_row.get(..=hi - w)) {
+                for (d, &s) in dst.iter_mut().zip(src.iter()) {
+                    *d += s;
+                }
+            }
+            if let Some(slot) = row_max.get_mut(i) {
+                *slot = Some(slot.map_or(hi, |m| m.max(hi)));
+            }
+        }
+    }
+
+    let Some(final_max) = row_max.get(k).copied().flatten() else {
+        return Some(0.0);
+    };
+    let mut tail_sum = NeumaierSum::new();
+    if let Some(final_row) = dp.get(k * stride..=k * stride + final_max) {
+        for &c in final_row {
+            tail_sum.add(c);
+        }
+    }
+    Some(tail_sum.total())
+}
+
+/// Exact conditional permutation DP for Mann–Whitney with tied ranks via the Streitberg & Röhmel
+/// (1986) shift algorithm over doubled integer mid-ranks `2 * r_i`.
+///
+/// Two-sided *p*-values sum both disjoint tails `P(|S - E[S]| >= |S_obs - E[S]|)`, which is
+/// invariant to group order even when ties make the conditional distribution asymmetric. One-sided
+/// *p*-values return the smaller (observed-direction) tail `min(P(S <= S_obs), P(S >= S_obs))`.
+fn mann_whitney_exact_ties_p(ranks: &[f64], na: usize, two_tailed: bool) -> Option<f64> {
     let n = ranks.len();
+    let nb = n.checked_sub(na)?;
+    if n > MANN_WHITNEY_EXACT_MAX_N || na == 0 || nb == 0 {
+        return None;
+    }
     let two_ranks: Vec<usize> = ranks.iter().map(|&r| (2.0 * r).round() as usize).collect();
-    let max_sum: usize = two_ranks.iter().sum();
-    let mut dp = vec![vec![0_u64; max_sum + 1]; na + 1];
-    dp[0][0] = 1;
-    let mut running_max = 0_usize;
-    for (idx, &tr) in two_ranks.iter().enumerate() {
-        let i_max = na.min(idx + 1);
-        running_max += tr;
-        for i in (1..=i_max).rev() {
-            for s in tr..=running_max {
-                dp[i][s] += dp[i - 1][s - tr];
-            }
-        }
+    let (k, obs_sum) = if na <= nb { (na, two_ranks.iter().take(na).sum::<usize>()) } else { (nb, two_ranks.iter().skip(na).sum::<usize>()) };
+    let min_r = two_ranks.iter().copied().min()?;
+    let max_r = two_ranks.iter().copied().max()?;
+    if min_r == max_r {
+        return Some(1.0);
     }
-    let total_ways: u64 = dp[na].iter().sum();
-    if total_ways == 0 {
-        return 1.0;
+    let exp_sum = k.checked_mul(n.checked_add(1)?)?;
+    let obs_dev = obs_sum.abs_diff(exp_sum);
+    if two_tailed && obs_dev == 0 {
+        return Some(1.0);
     }
-    let two_r1_obs: usize = two_ranks.iter().take(na).sum();
+    let total_ways = binom_f64(n, k);
+    if !total_ways.is_finite() || total_ways <= 0.0 {
+        return None;
+    }
+
+    let k_min_r = k.checked_mul(min_r)?;
+    let k_max_r = k.checked_mul(max_r)?;
+
     if two_tailed {
-        let expected_two_r1 = na * (n + 1);
-        let obs_dev = two_r1_obs.abs_diff(expected_two_r1);
-        let tail_ways: u64 = dp[na].iter().enumerate().filter(|&(s, _)| s.abs_diff(expected_two_r1) >= obs_dev).map(|(_, &c)| c).sum();
-        ((tail_ways as f64) / (total_ways as f64)).clamp(0.0, 1.0)
+        // Because `obs_dev >= 1`, `exp_sum - obs_dev < exp_sum + obs_dev`, so the lower and upper
+        // extreme-deviation tails are strictly disjoint.
+        let lo_cnt = if let Some(cap_lo) = exp_sum.checked_sub(obs_dev).and_then(|t| t.checked_sub(k_min_r)) {
+            let w_lo: Vec<usize> = two_ranks.iter().map(|&r| r - min_r).collect();
+            count_subsets_sum_le(&w_lo, k, cap_lo)?
+        } else {
+            0.0
+        };
+        let hi_cnt = if let Some(cap_hi) = exp_sum.checked_add(obs_dev).and_then(|t| k_max_r.checked_sub(t)) {
+            let w_hi: Vec<usize> = two_ranks.iter().map(|&r| max_r - r).collect();
+            count_subsets_sum_le(&w_hi, k, cap_hi)?
+        } else {
+            0.0
+        };
+        Some(((lo_cnt + hi_cnt) / total_ways).clamp(0.0, 1.0))
+    } else if obs_sum <= exp_sum {
+        let w_lo: Vec<usize> = two_ranks.iter().map(|&r| r - min_r).collect();
+        let lo_cnt = count_subsets_sum_le(&w_lo, k, obs_sum.saturating_sub(k_min_r))?;
+        if 2.0 * lo_cnt <= total_ways {
+            Some((lo_cnt / total_ways).clamp(0.0, 1.0))
+        } else {
+            let w_hi: Vec<usize> = two_ranks.iter().map(|&r| max_r - r).collect();
+            let hi_cnt = count_subsets_sum_le(&w_hi, k, k_max_r.saturating_sub(obs_sum))?;
+            Some((lo_cnt.min(hi_cnt) / total_ways).clamp(0.0, 1.0))
+        }
     } else {
-        let lower_tail: u64 = dp[na].iter().take(two_r1_obs + 1).sum();
-        let upper_tail: u64 = dp[na].iter().skip(two_r1_obs).sum();
-        let min_tail = lower_tail.min(upper_tail);
-        ((min_tail as f64) / (total_ways as f64)).clamp(0.0, 1.0)
+        let w_hi: Vec<usize> = two_ranks.iter().map(|&r| max_r - r).collect();
+        let hi_cnt = count_subsets_sum_le(&w_hi, k, k_max_r.saturating_sub(obs_sum))?;
+        if 2.0 * hi_cnt <= total_ways {
+            Some((hi_cnt / total_ways).clamp(0.0, 1.0))
+        } else {
+            let w_lo: Vec<usize> = two_ranks.iter().map(|&r| r - min_r).collect();
+            let lo_cnt = count_subsets_sum_le(&w_lo, k, obs_sum.saturating_sub(k_min_r))?;
+            Some((lo_cnt.min(hi_cnt) / total_ways).clamp(0.0, 1.0))
+        }
     }
 }
 
-/// Mann–Whitney *U* test comparing `a` and `b`, with exact DP *p*-values for untied samples
-/// (`n_a + n_b <= 40`) and exact conditional permutation DP for tied samples (`n_a + n_b <= 18`),
-/// exact Hodges–Lehmann median difference `a - b` + Moses CI, Cliff's `delta`, and rank-biserial `r`.
+/// Tie- and 0.5-continuity-corrected normal approximation to the Mann–Whitney *U* *p*-value
+/// (Hollander, Wolfe & Chicken 2014, ch. 4).
+fn mann_whitney_asymptotic_p(na: usize, nb: usize, u_a: f64, tie_counts: &[usize], tie_sum_t3_minus_t: f64, two_tailed: bool) -> f64 {
+    let naf = na as f64;
+    let nbf = nb as f64;
+    let nf = (na + nb) as f64;
+    let mean_u = 0.5 * naf * nbf;
+    let var_u = (naf * nbf / 12.0) * (nf + 1.0 - tie_sum_t3_minus_t / (nf * (nf - 1.0)));
+    if tie_counts == [na + nb] || var_u <= 0.0 {
+        return if (u_a - mean_u).abs() <= 1e-12 { 1.0 } else { 0.0 };
+    }
+    let sd_u = var_u.sqrt();
+    let p = if two_tailed {
+        let cc = (u_a - mean_u).abs() - 0.5;
+        if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_u)).min(1.0) }
+    } else {
+        let cc = ((u_a - mean_u).abs() - 0.5).max(0.0);
+        norm_sf(cc / sd_u).clamp(0.0, 1.0)
+    };
+    p.clamp(0.0, 1.0)
+}
+
+/// Mann–Whitney *U* test comparing `a` and `b`, with exact permutation DP *p*-values (Mann &
+/// Whitney 1947 recurrence when untied; Streitberg & Röhmel 1986 shift algorithm when ties are
+/// present) for `n_a + n_b <= 250` within bounded DP memory, exact Hodges–Lehmann median
+/// difference `a - b` + Moses CI, Cliff's `delta`, and rank-biserial `r`.
 ///
 /// Wilcoxon (1945) rank-sum / Mann & Whitney (1947) `U_a = R_a - n_a (n_a + 1) / 2`. Above the
-/// exact DP bounds (`n_a + n_b > 40` untied, or `> 18` with ties), the *p*-value uses the normal
-/// approximation with the tie-corrected variance `(n_a n_b / 12) [N + 1 - sum(t^3 - t) / (N (N - 1))]`
-/// and a 0.5 continuity correction (Hollander, Wolfe & Chicken 2014, ch. 4).
-/// Cliff's `delta = (U_a - U_b) / (n_a n_b)` (Cliff 1993), equal to the rank-biserial correlation
-/// of Wendt (1972) / Kerby (2014).
+/// exact DP budget (`n_a + n_b > 250` or DP table exceeding `4_000_000` cells), the *p*-value uses
+/// the normal approximation with the tie-corrected variance
+/// `(n_a n_b / 12) [N + 1 - sum(t^3 - t) / (N (N - 1))]` and a 0.5 continuity correction
+/// (Hollander, Wolfe & Chicken 2014, ch. 4). Cliff's `delta = (U_a - U_b) / (n_a n_b)` (Cliff 1993),
+/// equal to the rank-biserial correlation of Wendt (1972) / Kerby (2014).
 pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<MannWhitneyResult, StatsError> {
+    mann_whitney_u_with_method(a, b, two_tailed, confidence, MannWhitneyPMethod::Auto)
+}
+
+/// Mann–Whitney *U* test with an explicit [`MannWhitneyPMethod`] selecting either automatic exact
+/// permutation DP with asymptotic fallback ([`MannWhitneyPMethod::Auto`]) or the tie- and
+/// continuity-corrected normal approximation ([`MannWhitneyPMethod::Asymptotic`]).
+pub fn mann_whitney_u_with_method(
+    a: &[f64],
+    b: &[f64],
+    two_tailed: bool,
+    confidence: ConfidenceLevel,
+    p_method: MannWhitneyPMethod,
+) -> Result<MannWhitneyResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
     let na = a.len();
@@ -173,34 +424,24 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
     let r1: f64 = ranked.ranks.iter().take(na).sum();
     let naf = na as f64;
     let nbf = nb as f64;
-    let nf = (na + nb) as f64;
 
     let u_a = r1 - 0.5 * naf * (naf + 1.0);
     let u_b = naf * nbf - u_a;
     let u_min = u_a.min(u_b);
 
-    let (p_value, exact_p_used) = if na + nb <= 40 && ranked.tie_counts.is_empty() {
-        let u_int = u_a.round() as usize;
-        (mann_whitney_exact_p(na, nb, u_int, two_tailed), true)
-    } else if !ranked.tie_counts.is_empty() && na + nb <= 18 {
-        (mann_whitney_exact_ties_p(&ranked.ranks, na, two_tailed), true)
-    } else {
-        let mean_u = 0.5 * naf * nbf;
-        let var_u = (naf * nbf / 12.0) * (nf + 1.0 - ranked.tie_sum_t3_minus_t / (nf * (nf - 1.0)));
-        if ranked.tie_counts.as_slice() == [na + nb] || var_u <= 0.0 {
-            let p = if (u_a - mean_u).abs() <= 1e-12 { 1.0 } else { 0.0 };
-            (p, false)
-        } else {
-            let sd_u = var_u.sqrt();
-            let p = if two_tailed {
-                let cc = (u_a - mean_u).abs() - 0.5;
-                if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_u)).min(1.0) }
+    let exact_opt = match p_method {
+        MannWhitneyPMethod::Auto => {
+            if ranked.tie_counts.is_empty() {
+                mann_whitney_exact_untied_p(na, nb, u_a.round() as usize, two_tailed)
             } else {
-                let cc = ((u_a - mean_u).abs() - 0.5).max(0.0);
-                norm_sf(cc / sd_u).clamp(0.0, 1.0)
-            };
-            (p.clamp(0.0, 1.0), false)
+                mann_whitney_exact_ties_p(&ranked.ranks, na, two_tailed)
+            }
         }
+        MannWhitneyPMethod::Asymptotic => None,
+    };
+    let (p_value, exact_p_used) = match exact_opt {
+        Some(p) => (p, true),
+        None => (mann_whitney_asymptotic_p(na, nb, u_a, &ranked.tie_counts, ranked.tie_sum_t3_minus_t, two_tailed), false),
     };
 
     let (hodges_lehmann_diff, hodges_lehmann_ci, ci_actual_confidence_percent) = hodges_lehmann_two_sample(a, b, confidence)?;

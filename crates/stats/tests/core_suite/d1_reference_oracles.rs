@@ -48,8 +48,8 @@ use curvebook_stats::survival::{
     CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve, log_rank_trend_test, two_cohort_hazard_ratio,
 };
 use curvebook_stats::two_group::{
-    bland_altman, f_test_variances, ks_two_sample, levene_variance_test, lognormal_unpaired_t_test, mann_whitney_u, multiple_row_t_tests,
-    paired_t_test, ratio_paired_t_test, unpaired_t_test, welch_t_test, wilcoxon_matched_pairs,
+    MannWhitneyPMethod, bland_altman, f_test_variances, ks_two_sample, levene_variance_test, lognormal_unpaired_t_test, mann_whitney_u,
+    mann_whitney_u_with_method, multiple_row_t_tests, paired_t_test, ratio_paired_t_test, unpaired_t_test, welch_t_test, wilcoxon_matched_pairs,
 };
 use curvebook_stats::{StatsError, run_analysis};
 use curvebook_testkit::nist_strd::{
@@ -363,14 +363,18 @@ fn oracle_nonparametric_mann_whitney_wilcoxon_and_ks() {
     assert_approx_eq(hl_ci.1, 6.6, 1e-11, 0.0, "HL CI upper");
     assert_approx_eq(mw_ex.cliffs_delta, 1.0, 1e-12, 0.0, "Cliff's delta");
 
-    // Tied samples -> asymptotic continuity-corrected normal approximation
+    // Tied samples: explicit asymptotic continuity-corrected normal approximation (R wilcox.test
+    // exact=FALSE, correct=TRUE) AND exact Streitberg & Rohmel (1986) conditional permutation DP.
     let t_a = [4.0, 5.0, 5.0, 7.0, 8.0, 9.0, 10.0, 10.0, 12.0, 14.0];
     let t_b = [2.0, 3.0, 5.0, 5.0, 6.0, 7.0, 7.0, 8.0, 11.0];
-    let mw_tie = mann_whitney_u(&t_a, &t_b, true, conf_95()).unwrap();
-    assert!(!mw_tie.exact_p_used, "ties trigger asymptotic MW");
-    assert_approx_eq(mw_tie.u_a, 63.5, 1e-12, 0.0, "tied MW W");
-    assert_approx_eq(mw_tie.p_value, 0.138_841_935_618_501, 1e-10, 1e-10, "tied MW asymptotic cc p");
-    assert_approx_eq(mw_tie.hodges_lehmann_diff, 2.0, 1e-11, 0.0, "tied MW HL");
+    let mw_tie_asymp = mann_whitney_u_with_method(&t_a, &t_b, true, conf_95(), MannWhitneyPMethod::Asymptotic).unwrap();
+    assert!(!mw_tie_asymp.exact_p_used, "explicit Asymptotic mode uses tie-/continuity-corrected normal");
+    assert_approx_eq(mw_tie_asymp.u_a, 63.5, 1e-12, 0.0, "tied MW W");
+    assert_approx_eq(mw_tie_asymp.p_value, 0.138_841_935_618_501, 1e-10, 1e-10, "tied MW asymptotic cc p");
+    assert_approx_eq(mw_tie_asymp.hodges_lehmann_diff, 2.0, 1e-11, 0.0, "tied MW HL");
+    let mw_tie_exact = mann_whitney_u(&t_a, &t_b, true, conf_95()).unwrap();
+    assert!(mw_tie_exact.exact_p_used, "default Auto uses exact Streitberg-Rohmel DP at N = 19");
+    assert_approx_eq(mw_tie_exact.p_value, 6260.0 / 46189.0, 1e-12, 1e-12, "tied MW exact Streitberg-Rohmel p");
 
     // Wilcoxon matched-pairs exact (no ties, small n) + tied asymptotic + Pratt zero handling
     let xa = [10.1, 11.3, 12.5, 14.2, 15.8, 17.1, 18.9, 20.6];
@@ -403,6 +407,101 @@ fn oracle_nonparametric_mann_whitney_wilcoxon_and_ks() {
     assert!(ks.exact_p_used);
     assert_approx_eq(ks.d_statistic, 1.0, 1e-15, 0.0, "KS D");
     assert_approx_eq(ks.p_value, 2.0 / 1716.0, 1e-12, 1e-12, "exact KS Smirnov p");
+}
+
+#[test]
+fn issue_71_mann_whitney_exact_dp_untied_and_tied_oracles() {
+    // D1 Provenance:
+    // - Untied exact p-values for N > 40: R 4.5.2 (2025-10-31) `stats::wilcox.test(..., exact = TRUE)`
+    //   / `stats::pwilcox` (Mann & Whitney 1947).
+    // - Tied conditional permutation p-values: exact integer Streitberg & Röhmel (1986) shift DP
+    //   (`P(|S - E[S]| >= |S_obs - E[S]|)` two-sided, `min(P(S <= S_obs), P(S >= S_obs))` one-sided).
+    // - Above-budget asymptotic fallback (`N = 260 > 250`): R 4.5.2 `stats::wilcox.test(..., exact = FALSE, correct = TRUE)`
+    //   (Hollander, Wolfe & Chicken 2014, ch. 4).
+
+    // 1. Untied N = 45 (23 vs 22) and N = 108 (46 vs 62): exact DP above old N = 40 cutoff.
+    let a45: Vec<f64> = (0..23).map(|i| (2 * i + 1) as f64).collect();
+    let b45: Vec<f64> = (1..=8).map(|i| (2 * i) as f64).chain((23..=36).map(|i| (2 * i) as f64)).collect();
+    let mw45_2 = mann_whitney_u(&a45, &b45, true, conf_95()).unwrap();
+    let mw45_1 = mann_whitney_u(&a45, &b45, false, conf_95()).unwrap();
+    assert!(mw45_2.exact_p_used && mw45_1.exact_p_used);
+    assert_approx_eq(mw45_2.u_a, 148.0, 1e-12, 0.0, "N=45 untied U_a");
+    assert_approx_eq(mw45_2.p_value, 0.016_601_200_621_972_425, 1e-12, 1e-12, "N=45 untied R exact 2-tail");
+    assert_approx_eq(mw45_1.p_value, 0.008_300_600_310_986_213, 1e-12, 1e-12, "N=45 untied R exact 1-tail");
+    assert_approx_eq(mann_whitney_u(&b45, &a45, true, conf_95()).unwrap().p_value, mw45_2.p_value, 1e-13, 1e-13, "N=45 swap");
+
+    let a108: Vec<f64> = (0..46).map(|i| (2 * i + 1) as f64).collect();
+    let b108: Vec<f64> = (1..=25).map(|i| (2 * i) as f64).chain((46..=82).map(|i| (2 * i) as f64)).collect();
+    let mw108 = mann_whitney_u(&a108, &b108, true, conf_95()).unwrap();
+    assert!(mw108.exact_p_used);
+    assert_approx_eq(mw108.u_a, 825.0, 1e-12, 0.0, "N=108 untied U_a");
+    assert_approx_eq(mw108.p_value, 0.000_148_080_809_947_160_62, 1e-12, 1e-12, "N=108 untied R exact 2-tail");
+
+    // 2. Tied N = 19..60: exact Streitberg-Röhmel conditional permutation DP (including asymmetric
+    //    tied distributions where `P(|S - E| >= |S_obs - E|) != 2 * min(lo, hi)` and empty opposite tail).
+    let t_a = [4.0, 5.0, 5.0, 7.0, 8.0, 9.0, 10.0, 10.0, 12.0, 14.0];
+    let t_b = [2.0, 3.0, 5.0, 5.0, 6.0, 7.0, 7.0, 8.0, 11.0];
+    let mw19_2 = mann_whitney_u(&t_a, &t_b, true, conf_95()).unwrap();
+    let mw19_1 = mann_whitney_u(&t_a, &t_b, false, conf_95()).unwrap();
+    assert!(mw19_2.exact_p_used && mw19_1.exact_p_used);
+    assert_approx_eq(mw19_2.p_value, 6260.0 / 46189.0, 1e-12, 1e-12, "N=19 tied exact 2-tail");
+    assert_approx_eq(mw19_1.p_value, 284.0 / 4199.0, 1e-12, 1e-12, "N=19 tied exact 1-tail");
+    assert_approx_eq(mann_whitney_u(&t_b, &t_a, true, conf_95()).unwrap().p_value, mw19_2.p_value, 1e-13, 1e-13, "N=19 swap 2-tail");
+    assert_approx_eq(mann_whitney_u(&t_b, &t_a, false, conf_95()).unwrap().p_value, mw19_1.p_value, 1e-13, 1e-13, "N=19 swap 1-tail");
+
+    // Heavy-tie N = 20 where exact p = 1.0 (normal approximation deviates substantially).
+    let a20 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0];
+    let b20 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 3.0];
+    let mw20_2 = mann_whitney_u(&a20, &b20, true, conf_95()).unwrap();
+    let mw20_1 = mann_whitney_u(&a20, &b20, false, conf_95()).unwrap();
+    assert!(mw20_2.exact_p_used && mw20_1.exact_p_used);
+    assert_approx_eq(mw20_2.p_value, 1.0, 1e-12, 1e-12, "N=20 heavy-tie exact 2-tail");
+    assert_approx_eq(mw20_1.p_value, 0.5, 1e-12, 1e-12, "N=20 heavy-tie exact 1-tail");
+
+    // Skewed-tie N = 20 where opposite tail `exp - obs_dev < k * min_r` is strictly empty (`p2 == p1 == 1/114`).
+    let a_sk = [0.0, 0.0, 10.0, 20.0, 30.0];
+    let b_sk = [0.0; 15];
+    let mw_sk_2 = mann_whitney_u(&a_sk, &b_sk, true, conf_95()).unwrap();
+    let mw_sk_1 = mann_whitney_u(&a_sk, &b_sk, false, conf_95()).unwrap();
+    assert!(mw_sk_2.exact_p_used && mw_sk_1.exact_p_used);
+    assert_approx_eq(mw_sk_2.p_value, 1.0 / 114.0, 1e-12, 1e-12, "N=20 skewed empty-tail 2-tail");
+    assert_approx_eq(mw_sk_1.p_value, 1.0 / 114.0, 1e-12, 1e-12, "N=20 skewed empty-tail 1-tail");
+    assert_approx_eq(mann_whitney_u(&b_sk, &a_sk, true, conf_95()).unwrap().p_value, 1.0 / 114.0, 1e-12, 1e-12, "skewed empty-tail swap");
+
+    // Asymmetric tied N = 24 cases where both tails are non-empty and unequal.
+    let a24 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0];
+    let b24 = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5];
+    let mw24_2 = mann_whitney_u(&a24, &b24, true, conf_95()).unwrap();
+    let mw24_1 = mann_whitney_u(&a24, &b24, false, conf_95()).unwrap();
+    assert!(mw24_2.exact_p_used && mw24_1.exact_p_used);
+    assert_approx_eq(mw24_2.p_value, 173.0 / 966.0, 1e-12, 1e-12, "N=24 skewed exact 2-tail");
+    assert_approx_eq(mw24_1.p_value, 65.0 / 966.0, 1e-12, 1e-12, "N=24 skewed exact 1-tail");
+
+    let a24b = [1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+    let b24b = [1.0, 1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 4.0, 5.0];
+    let mw24b_2 = mann_whitney_u(&a24b, &b24b, true, conf_95()).unwrap();
+    let mw24b_1 = mann_whitney_u(&a24b, &b24b, false, conf_95()).unwrap();
+    assert!(mw24b_2.exact_p_used && mw24b_1.exact_p_used);
+    assert_approx_eq(mw24b_2.p_value, 45_891.0 / 832_048.0, 1e-12, 1e-12, "N=24 asym exact 2-tail");
+    assert_approx_eq(mw24b_1.p_value, 35_279.0 / 1_248_072.0, 1e-12, 1e-12, "N=24 asym exact 1-tail");
+
+    // Larger tied N = 60 discrete ordinal scores.
+    let a60: Vec<f64> = (0..25).map(|i| (i % 6) as f64).collect();
+    let b60: Vec<f64> = (0..35).map(|i| ((i % 6) + usize::from(i % 3 == 0)) as f64).collect();
+    let mw60_2 = mann_whitney_u(&a60, &b60, true, conf_95()).unwrap();
+    let mw60_1 = mann_whitney_u(&a60, &b60, false, conf_95()).unwrap();
+    assert!(mw60_2.exact_p_used && mw60_1.exact_p_used);
+    assert_approx_eq(mw60_2.p_value, 0.399_625_726_545_443_15, 1e-12, 1e-12, "N=60 discrete ordinal exact 2-tail");
+    assert_approx_eq(mw60_1.p_value, 0.199_550_214_718_174_1, 1e-12, 1e-12, "N=60 discrete ordinal exact 1-tail");
+
+    // 3. Above budget (N = 260 > 250): automatically falls back to tie-/continuity-corrected normal
+    //    matching R 4.5.2 `wilcox.test(..., exact = FALSE, correct = TRUE)`.
+    let a260: Vec<f64> = (0..130).map(|i| i as f64).collect();
+    let b260: Vec<f64> = (0..130).map(|i| i as f64 + 15.0).collect();
+    let mw260 = mann_whitney_u(&a260, &b260, true, conf_95()).unwrap();
+    assert!(!mw260.exact_p_used, "N=260 > 250 must fall back to asymptotic normal");
+    assert_approx_eq(mw260.u_a, 6612.5, 1e-12, 0.0, "N=260 U_a");
+    assert_approx_eq(mw260.p_value, 0.002_445_420_453_906_451_3, 1e-10, 1e-10, "N=260 R asymp cc 2-tail");
 }
 
 // ============================================================================

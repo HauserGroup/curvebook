@@ -528,9 +528,18 @@ fn audit_38_roc_single_subject_separation_and_paired_delong() {
     assert_close(hm.p_value_vs_05, 4.0 / 11.0, 1e-12, "HM exact MW P");
     assert!(hm.se > 0.2 && hm.ci.0 < 0.5 && hm.ci.1 > 0.5);
     assert!(roc_curve_analysis(&[10.0], &c10, RocCiMethod::HanleyMcNeil, conf).unwrap().p_value_vs_05 >= 0.05);
-    assert!(
-        roc_curve_analysis(&(1..=100).map(f64::from).collect::<Vec<_>>(), &[99.5], RocCiMethod::HanleyMcNeil, conf).unwrap().p_value_vs_05 >= 0.05
+    // With n0 = 100 and 1 case, Hanley-McNeil delegates to exact Mann-Whitney U (uniform over
+    // 101 ranks: 4/101 at rank 100, 8/101 >= 0.05 at rank 98) rather than invalid Wald Z (~3.7e-12 / ~8.6e-5).
+    let c100: Vec<f64> = (1..=100).map(f64::from).collect();
+    assert_close(
+        roc_curve_analysis(&c100, &[99.5], RocCiMethod::HanleyMcNeil, conf).unwrap().p_value_vs_05,
+        4.0 / 101.0,
+        1e-12,
+        "HM exact MW P (n0=100, n1=1, rank 100)",
     );
+    let hm_100_98 = roc_curve_analysis(&c100, &[97.5], RocCiMethod::HanleyMcNeil, conf).unwrap();
+    assert_close(hm_100_98.p_value_vs_05, 8.0 / 101.0, 1e-12, "HM exact MW P (n0=100, n1=1, rank 98)");
+    assert!(hm_100_98.p_value_vs_05 >= 0.05);
     let hm_out = run_kind(&roc_sh, AnalysisKind::RocCurve(RocSpec { ci_method: RocCiMethod::HanleyMcNeil })).unwrap();
     assert!(scalar(&hm_out, "P value (vs. 0.5)") >= 0.05);
     assert!(hm_out.checklist.iter().any(|c| c.assumption == "ROC small-sample inference" && c.status == ChecklistStatus::Warn));
