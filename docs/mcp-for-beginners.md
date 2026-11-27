@@ -11,7 +11,7 @@ Every Beta installer includes both `curvebook` and `curvebook-cli`. Everything r
 ## What you need
 
 1. **CurveBook installed** from the [Releases page](https://github.com/HauserGroup/curvebook/releases). Follow [Get started](reference/get-started.md) to install and verify your download.
-2. **An AI desktop app that supports MCP**, such as Claude Desktop, Cursor, Windsurf, or another local MCP client.
+2. **An AI desktop app that supports MCP**, such as Claude Desktop, ChatGPT Work (in the ChatGPT desktop app), Codex, Cursor, Windsurf, or another local MCP client.
 3. **A folder for your data**, such as `Documents/MyResearchData`, where you keep your CSV files and `.curvebook` projects.
 
 ---
@@ -48,6 +48,7 @@ Open your AI assistant's MCP configuration file:
 
 - **Claude Desktop (macOS):** `~/Library/Application Support/Claude/claude_desktop_config.json` (or **Settings › Developer › Edit Config**).
 - **Claude Desktop (Windows):** `%APPDATA%\Claude\claude_desktop_config.json` (or **Settings › Developer › Edit Config**).
+- **ChatGPT Work and Codex:** These use a TOML file instead of JSON. See [ChatGPT Work and Codex](#chatgpt-work-and-codex) below.
 - **Other MCP clients (Cursor, Windsurf, Cline, and others):** Open the client's `mcp.json` or MCP server settings screen.
 
 Add a `"curvebook"` entry matching your OS. Replace `YOURNAME` and the `--workdir` path with your real username and project folder.
@@ -107,6 +108,28 @@ Add a `"curvebook"` entry matching your OS. Replace `YOURNAME` and the `--workdi
 
 Save the file, then **fully quit and reopen your AI app** so it loads the new `"curvebook"` server.
 
+### ChatGPT Work and Codex {#chatgpt-work-and-codex}
+
+ChatGPT Work (in the ChatGPT desktop app), the Codex command-line tool, and the Codex IDE extension share one settings file: `~/.codex/config.toml` (`%USERPROFILE%\.codex\config.toml` on Windows). Add CurveBook once and it appears in all three.
+
+You can add it from the app's MCP server settings screen, or run this once in a terminal (macOS example):
+
+```sh
+codex mcp add curvebook -- /Applications/CurveBook.app/Contents/MacOS/curvebook-cli mcp --workdir /Users/YOURNAME/Documents/MyResearchData
+```
+
+Or add this to `config.toml` yourself:
+
+```toml
+[mcp_servers.curvebook]
+command = "/Applications/CurveBook.app/Contents/MacOS/curvebook-cli"
+args = ["mcp", "--workdir", "/Users/YOURNAME/Documents/MyResearchData"]
+```
+
+On Windows and Linux, use the same `command` and `--workdir` paths as in the JSON examples above. On Windows, single quotes avoid doubling backslashes in TOML, for example `command = 'C:\Users\YOURNAME\AppData\Local\Programs\CurveBook\curvebook-cli.exe'`.
+
+Restart the ChatGPT desktop app or start a new Codex session to load the server. ChatGPT in a web browser cannot start programs on your computer, so it cannot use CurveBook; use the desktop app.
+
 > **Why `--workdir`?** This flag restricts file access to that folder and its subfolders. CurveBook will not read or write files outside it.
 
 ---
@@ -143,6 +166,7 @@ The workflow works in reverse, too. Save edits in the desktop app, then ask your
 - **Model comparison:** *"Compare a 3-parameter vs 4-parameter curve fit on this table using AICc and the extra sum-of-squares F-test."*
 - **Group and survival statistics:** *"Import `experiment.csv`, run a one-way ANOVA with Tukey post-hoc comparisons (or Kaplan–Meier log-rank survival analysis), and tell me which differences are significant."*
 - **Publication figures:** *"Export every graph in `study.curvebook` as 300 DPI PNG and vector PDF."*
+- **Existing `.pzfx files` and `.prism files`:** *"Open `old-assay.pzfx`, list its data tables, and rerun the t-test on the first one."* CurveBook can also save your data tables back out as a `.pzfx` file (data only; analyses and graphs stay in the `.curvebook` project).
 
 ---
 

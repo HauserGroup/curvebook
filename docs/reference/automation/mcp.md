@@ -45,7 +45,7 @@ Environment variables and flags for live-attach mode:
 
 ## Core tools and dynamic toolsets
 
-On startup in normal mode, `tools/list` exposes the core MCP tools immediately: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`. Each `command_batch` call accepts up to 1,024 command steps. Call `list_toolsets` and `enable_toolset` to load per-group engine tools or toggle the `gui` toolset dynamically (which emits `notifications/tools/list_changed`).
+On startup in normal mode, `tools/list` exposes the core MCP tools immediately: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`. Each `command_batch` call accepts up to 1,000 command steps. Call `list_toolsets` and `enable_toolset` to load per-group engine tools or toggle the `gui` toolset dynamically (which emits `notifications/tools/list_changed`).
 
 Every tool carries standard MCP annotations derived from its command effects:
 
@@ -61,16 +61,24 @@ Single-call `tools/call` request and response syntax (`doc_inspect`):
 ```
 
 ```json
-{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"title\":\"Untitled Project\",\"schema_version\":8,\"file_path\":null,\"dirty\":false,\"total_sheet_count\":0,\"active_sheet_id\":null,\"family_anchor_sheet_id\":null,\"sheets\":{\"data\":[],\"info\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]},\"variables\":{\"info_constants\":[],\"result_scalars\":[]},\"hooks\":[],\"analyses\":[],\"graphs\":[],\"layouts\":[]}"}],"isError":false,"structuredContent":{"title":"Untitled Project","schema_version":8,"file_path":null,"dirty":false,"total_sheet_count":0,"active_sheet_id":null,"family_anchor_sheet_id":null,"sheets":{"data":[],"info":[],"analyses":[],"graphs":[],"layouts":[]},"variables":{"info_constants":[],"result_scalars":[]},"hooks":[],"analyses":[],"graphs":[],"layouts":[]}}}
+{"id":2,"jsonrpc":"2.0","result":{"content":[{"text":"{\"analyses\":[],\"dirty\":false,\"file_path\":null,\"graphs\":[],\"layouts\":[],\"schema_version\":9,\"sheets\":{\"data\":[],\"info\":[]},\"title\":\"Untitled Project\",\"total_sheet_count\":0,\"variables\":{\"result_scalars\":[]}}","type":"text"}],"isError":false,"structuredContent":{"analyses":[],"dirty":false,"file_path":null,"graphs":[],"layouts":[],"schema_version":9,"sheets":{"data":[],"info":[]},"title":"Untitled Project","total_sheet_count":0,"variables":{"result_scalars":[]}}}}
 ```
 
 In `--control-port` live-attach mode, calling `doc_inspect` without `sheet_id` returns `mode: "live_attach"`, `control_port`, the live desktop `snapshot`, and project summary fields regardless of `include_cells`. Supplying `sheet_id` returns that sheet's detail (with optional `include_cells` previews) alongside `mode` and `control_port`.
 
 Exact schemas, annotations, and request/response examples for every core tool, dynamic group toolset, and `gui` tool appear in the [MCP Tools & Surface Registry](../registry/mcp-tools.html).
 
+## Files: open, save, and export
+
+- **`open_file`** opens or imports `.curvebook`, `.curvebook.d`, `.cbtemplate`, `.pzfx files`, `.prism files`, `.xlsx`, `.csv`, and `.tsv`. Pass `append: true` to merge the incoming sheets into the open project instead of replacing it (the same merge as **File › Merge Project…**).
+- **`save_file`** writes `.curvebook`, `.curvebook.d`, or `.cbtemplate`. It can also write a data-only `.pzfx` file (`format: "pzfx"`; `path` is required), or an experimental `.prism` file (the `.prism` format value plus `experimental: true`; `.prism files` are import-only at Beta). Writing `.pzfx` or `.prism` leaves the project's own file path and unsaved-changes state unchanged.
+- **`export`** writes a sheet or the project as `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, or `json`, plus the same data-only `.pzfx` and experimental `.prism` options, either to disk or inline.
+
+`.pzfx` export saves data tables and info sheets only; analyses, graphs, and layouts stay in the `.curvebook` project. It is written to match the structure of real `.pzfx files` but has not been tested in other applications. Without `experimental: true`, a `.prism` export fails with `unsupported_format`.
+
 ## Resources and prompts
 
-- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for each project sheet, `result://<id>` (`application/json`) for computed results sheets, and URI templates (`sheet://{id}`, `result://{id}`).
+- **Resources (`resources/list`, `resources/templates/list`, `resources/read`):** Exposes `sheet://<id>` (`application/json`) for each project sheet, `result://<id>` (`application/json`) for computed results sheets, and URI templates (`sheet://{id}`, `result://{id}`). To keep responses small, `sheet://` URIs accept `?max_rows=N`, `?tab_id=<id>`, and `?detail=summary|full`, and `result://` URIs accept `?include_curves=false` or `?detail=summary` to leave out dense fitted-curve arrays.
 - **Prompts (`prompts/list`, `prompts/get`):** Built-in prompts (`dose_response_curve_fit`, `choose_two_group_test`, `publication_figure_checklist`) provide structured scientific checklists.
 
 Single-call `resources/read` syntax:

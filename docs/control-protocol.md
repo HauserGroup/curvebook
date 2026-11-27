@@ -52,11 +52,11 @@ Intentional socket termination occurs only on:
 
 ## Interactive `ui.*` Actions (`R8.6`)
 
-Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` ([`gui-workflows.md`](gui-workflows.md)):
+Implemented in `crates/ui-egui/src/{control_io.rs, egui_shell/inspect_bridge.rs, inspect.rs}` ([`gui-workflows.md`](gui-workflows.md)):
 
 These 7 JSON-lines actions form the **semantic agent harness** for live desktop inspection and widget automation: widget IDs come from `ui.inspect` nodes synthesized from state. Passing them does not show that a person can operate the drawn GUI; human-operable chrome is gated by `EguiHumanPathDriver` ([`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion)).
 
-| Method | Purpose & Behavior (`crates/ui-egui/src/gui_actions.rs`) |
+| Method | Purpose & Behavior (`crates/ui-egui/src/egui_shell/inspect_bridge.rs`) |
 |---|---|
 | `"ui.inspect"` | Returns a scoped [`UiTreeSnapshot`](../crates/ui-egui/src/inspect.rs) (`scope`: `all`/`workspace`, `menus`, `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`; `include_bounds`, `sheet_id`), including widget `bounds`, `enabled` / `disabled_reason` predicates, `grid_selection`, `brushed_points`, visible `grid_cells` (`grid.cell.*` and XY/Survival `grid.xcell.*`), and canvas hit targets. |
 | `"ui.screenshot"` | Renders an in-memory PNG (`data_base64`, `bytes_len`, `width_px`, `height_px`, `dpi`) for `target` (`full_window`/`full`/`window`/`workspace`/`viewport`, `canvas`/`main`, `dialog`/`modal`; `64..=4096` px, default `1024x640`; `72..=600` dpi, default `144`), with an optional `path` checked against the session's `ExternalPathPolicy`. |

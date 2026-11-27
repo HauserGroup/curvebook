@@ -57,7 +57,7 @@ Send newline-delimited JSON-RPC over stdin (CurveBook also auto-detects `Content
 EOF
 ```
 
-Expected: `ping` returns `{}` and the `stats.run` step (`"index":3`) reports `"status":"UpToDate"` with `"t": -8.520563361656317` and `"PValue": 0.0036599555836826485`.
+Expected: `ping` returns `{}` and the `stats.run` step (`"index":3`) reports `"status":"UpToDate"`, with `payload.scalars.t.value` = `-8.520563361656317` and `payload.scalars.PValue.value` = `0.003659955583682645` (compare numerically; the last digits can vary with float formatting).
 
 ## Protocol & Wire Framing
 
@@ -79,7 +79,7 @@ The desktop application (`curvebook`) provides the declarative `egui 0.37` deskt
 ## Status & Current Limitations
 
 - **Verified stdio parity (`R7.3`):** Headless `command_run` / `command_batch` / `open_file` / `save_file` / `export` / `render_preview`, `WorkdirGuard` path containment, standalone *P*-value stack adjustment (`stats.pvalueStack`), Compact Letter Display (`graph.setCompactLetterDisplay`), and opt-in `curvebook --control <port> --window` shared desktop sessions are verified end to end over spawned `curvebook-cli mcp` stdio JSON-RPC subprocesses.
-- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://curvebook.org/manual/latest/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the declarative `egui 0.37` desktop workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the opt-in `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
+- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://curvebook.org/manual/latest/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the declarative `egui 0.37` desktop workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the opt-in `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, egui_shell/inspect_bridge.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
 - **Headless UI commands:** In default headless `curvebook-cli mcp`, desktop `ui.*` commands report `"available": false` and require `--control-port <port>` attached to a running `curvebook --control <port>` process.
 - **Live-attach `command_batch` rollback:** Both headless and `--control-port` live-attach modes support `"atomic": true` snapshot rollback; in `--control-port` live-attach mode, atomic `command_batch` delegates to the desktop host's atomic `command.batch` RPC (restoring the session and UI shell snapshot on failure; earlier filesystem writes cannot be unlinked and report `filesystem_side_effects_persisted: true`).
 - **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-enhancements.md`](planning/qol-enhancements.md)).
