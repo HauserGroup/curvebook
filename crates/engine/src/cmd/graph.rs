@@ -2428,6 +2428,14 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
         "diag.bland_altman" | "bland_altman" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::BlandAltman), None, None)),
         "diag.roc" | "roc" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve), None, None)),
         "diag.forest" | "forest" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot), None, None)),
+        "diag.homoscedasticity" | "homoscedasticity" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::HomoscedasticityPlot), None, None)),
+        "diag.actual_vs_predicted" | "actual_vs_predicted" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::ActualVsPredictedPlot), None, None)),
+        "diag.residual_vs_row" | "residual_vs_row" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::ResidualVsRowPlot), None, None)),
+        "diag.gap_statistic" | "gap_statistic" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot), None, None)),
+        "diag.param_corr_heatmap" | "param_corr_heatmap" => {
+            Some((GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap), None, None))
+        }
+        "diag.lognormal_qq" | "lognormal_qq" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot), None, None)),
         "xy.scatter" => Some((GraphKind::Xy, None, Some("xy.scatter"))),
         "xy.scatter_line" | "xy_points_connecting" => Some((GraphKind::Xy, None, Some("xy.scatter_line"))),
         "col.bar_replicates" | "col.scatter_bar" => Some((GraphKind::Column, None, Some("col.bar_replicates"))),

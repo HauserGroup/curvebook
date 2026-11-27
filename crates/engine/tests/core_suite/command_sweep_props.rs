@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use curvebook_doc::{Cell, ColumnDesignHint, InfoSheet, ProjectDocument, TableKind, VariableRole};
 use curvebook_engine::cmd;
-use curvebook_engine::{CommandOutcome, EngineError, Session};
+use curvebook_engine::{CommandOutcome, EngineError, ExternalPathPolicy, Session};
 use proptest::collection::vec;
 use proptest::prelude::TestCaseError;
 use proptest::strategy::{BoxedStrategy, Just, Strategy};
@@ -170,6 +170,7 @@ fn sweep_valid_sheet_and_table_commands(s: &mut Session, covered: &mut BTreeSet<
             ("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "Low": "Control" } })),
             ("table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Control", "High"] })),
             ("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "title": "Scaled", "formula": "= [Score] * 2" })),
+            ("table.unlinkCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2 })),
             (
                 "table.simulateXy",
                 json!({ "sheet_id": "sim-1", "row_count": 6, "replicates": 1, "x_min": 0.0, "x_max": 5.0, "equation_id": "linear", "parameters": { "slope": 2.0, "intercept": 1.0 }, "seed": 7 }),
@@ -198,6 +199,7 @@ fn sweep_valid_sheet_and_table_commands(s: &mut Session, covered: &mut BTreeSet<
 
 fn sweep_valid_info_analysis_and_graph_commands(s: &mut Session, covered: &mut BTreeSet<&'static str>) -> Result<(), String> {
     let info_id = s.document().info_sheets.first().ok_or_else(|| String::from("missing info sheet"))?.id.as_str().to_owned();
+    let eq_dir = TempDir::new("sweep-user-eq");
     execute_checked(s, "sheet.createData", json!({ "sheet_id": "pval-1", "title": "P Stack", "archetype": "column", "cols": 1, "rows": 4 }))
         .map_err(|e| e.to_string())?;
     execute_checked(
@@ -222,6 +224,14 @@ fn sweep_valid_info_analysis_and_graph_commands(s: &mut Session, covered: &mut B
                 json!({ "sheet_id": "res-pstack", "source_sheet_id": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
             ),
             ("fit.run", json!({ "sheet_id": "res-fit", "source_sheet_id": "xy-1", "kind": "linear_regression" })),
+            ("fit.cloneBuiltinEquation", json!({ "builtin_id": "michaelis_menten", "new_id": "sweep_mm_custom", "dir": eq_dir.path() })),
+            ("fit.listUserEquations", json!({ "dir": eq_dir.path() })),
+            ("fit.getUserEquation", json!({ "id": "sweep_mm_custom", "dir": eq_dir.path() })),
+            (
+                "fit.saveUserEquation",
+                json!({ "id": "sweep_hill_custom", "name": "Sweep Hill", "dsl_source": "Y = Vmax * X^h / (K^h + X^h)", "overwrite": true, "dir": eq_dir.path() }),
+            ),
+            ("fit.deleteUserEquation", json!({ "id": "sweep_hill_custom", "dir": eq_dir.path() })),
             ("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet_id": "col-1", "kind": "stats.bland_altman" })),
             ("analysis.run", json!({ "sheet_id": "res-col", "source_sheet_id": "col-1", "kind": "descriptive_stats" })),
             ("analysis.updateParams", json!({ "sheet_id": "res-anova", "confidence_percent": 99.0 })),
@@ -385,13 +395,24 @@ fn sweep_every_catalog_command_hostile_and_corrupt_inputs() -> Result<(), String
         json!({ "sheet_id": "xy-1", "row": "zero", "col": -1, "cells": "not-an-array", "x": "NaN", "y": "Infinity", "bounds_pt": ["bad", "array"] }),
     ];
 
+    let hostile_eq_dir = TempDir::new("sweep-hostile-eq");
+    let hostile_eq_policy = ExternalPathPolicy::workdir(hostile_eq_dir.path()).map_err(|e| e.to_string())?;
+
     for spec in cmd::registry().specs() {
         covered.insert(spec.id);
+        let is_user_eq_cmd = spec.id.contains("UserEquation") || spec.id == "fit.cloneBuiltinEquation";
         for hostile in &universal_hostile {
             let mut s = base.clone();
+            if is_user_eq_cmd {
+                s.set_path_policy(hostile_eq_policy.clone());
+            }
             let _ = execute_checked(&mut s, spec.id, hostile.clone());
         }
-        run_targeted_hostile_cases(&base, spec.id);
+        let mut targeted_base = base.clone();
+        if is_user_eq_cmd {
+            targeted_base.set_path_policy(hostile_eq_policy.clone());
+        }
+        run_targeted_hostile_cases(&targeted_base, spec.id);
     }
 
     verify_cyclic_and_frozen_protections()?;
@@ -427,6 +448,16 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "sheet_id": "xy-1", "col": 0, "formula": "= [X] + 1" }),
             json!({ "sheet_id": "mv-1", "col": 0, "formula": "= [MissingVar] * 2" }),
             json!({ "sheet_id": "mv-1", "col": 2, "title": "Scaled", "formula": "= [Scaled] + 1" }),
+        ],
+        "table.unlinkCalculatedVariable" => {
+            vec![json!({ "sheet_id": "xy-1", "col": 0 }), json!({ "sheet_id": "mv-1", "col": 99 }), json!({ "sheet_id": "missing-mv", "col": 0 })]
+        }
+        "fit.listUserEquations" | "fit.getUserEquation" | "fit.saveUserEquation" | "fit.deleteUserEquation" | "fit.cloneBuiltinEquation" => vec![
+            json!({ "dir": "../outside_escape" }),
+            json!({ "id": "missing_eq" }),
+            json!({ "id": "michaelis_menten", "name": "Collision", "dsl_source": "Y = a * X" }),
+            json!({ "id": "bad_dsl", "name": "Bad", "dsl_source": "Y = ((" }),
+            json!({ "builtin_id": "nonexistent_builtin_eq" }),
         ],
         "table.simulateXy" => vec![
             json!({ "sheet_id": "sim-bad", "row_count": u64::MAX }),
@@ -639,21 +670,28 @@ proptest! {
         steps in vec(((0..cmd::registry().len()).boxed(), corrupt_value_strategy()), 1..20)
     ) {
         let mut session = seed_rich_fixture().map_err(TestCaseError::fail)?;
+        let fuzz_eq_dir = TempDir::new("fuzz-user-eq");
         let specs: Vec<_> = cmd::registry().specs().collect();
         for (cmd_idx, mut params) in steps {
             let cmd = specs.get(cmd_idx).ok_or_else(|| TestCaseError::fail(format!("oob cmd idx: {cmd_idx}")))?.id;
             let mut created_temp: Option<PathBuf> = None;
+            let is_user_eq_cmd = cmd.contains("UserEquation") || cmd == "fit.cloneBuiltinEquation";
             if let Some(obj) = params.as_object_mut() {
                 if obj.contains_key("path") || cmd.starts_with("export.") || cmd.contains("export") || cmd == "project.save" {
                     let safe = next_temp_file("fuzz", "tmp");
                     obj.insert(String::from("path"), json!(&safe));
                     created_temp = Some(safe);
                 }
+                if is_user_eq_cmd {
+                    obj.insert(String::from("dir"), json!(fuzz_eq_dir.path()));
+                }
                 for dim in ["width_px", "height_px"] {
                     if obj.get(dim).and_then(Value::as_u64).is_some_and(|v| v > 128) {
                         obj.insert(dim.to_owned(), json!(u32::MAX));
                     }
                 }
+            } else if is_user_eq_cmd {
+                session.set_path_policy(ExternalPathPolicy::reject_external());
             }
 
             let before = session.clone();
@@ -665,6 +703,9 @@ proptest! {
                 prop_assert!(!err.message().contains("recovered from internal panic"), "fuzzed `{cmd}` panicked: {}", err.message());
                 prop_assert_eq!(session.document(), before.document());
                 prop_assert_eq!(&session, &before);
+            }
+            if is_user_eq_cmd {
+                session.set_path_policy(ExternalPathPolicy::unconstrained());
             }
         }
     }

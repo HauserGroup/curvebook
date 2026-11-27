@@ -1690,11 +1690,13 @@ fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
             let Some(cols) = parse_usize_list_text(text) else {
                 return;
             };
-            if let Some(spec) = &mut ep.draft
-                && let AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. }) = spec.kind.clone()
-            {
-                spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cols, operation }));
-                ep.sync_rule_flags_from_kind();
+            if let Some(spec) = &mut ep.draft {
+                let mut kind = spec.kind.clone();
+                if let AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }) = &mut kind {
+                    *baseline_columns = cols;
+                    spec.update_kind(kind);
+                    ep.sync_rule_flags_from_kind();
+                }
             }
         }
         "edit.contingency.expected_proportions" => {
@@ -1730,23 +1732,13 @@ fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
             let Some(cols) = parse_usize_list_text(text) else {
                 return;
             };
-            if let Some(spec) = &mut ep.draft
-                && let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
-                    time_column,
-                    status_column,
-                    reference_levels,
-                    tie_method,
-                    ..
-                }) = spec.kind.clone()
-            {
-                spec.update_kind(AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
-                    time_column,
-                    status_column,
-                    predictor_columns: cols,
-                    reference_levels,
-                    tie_method,
-                }));
-                ep.sync_rule_flags_from_kind();
+            if let Some(spec) = &mut ep.draft {
+                let mut kind = spec.kind.clone();
+                if let AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { predictor_columns, .. }) = &mut kind {
+                    *predictor_columns = cols;
+                    spec.update_kind(kind);
+                    ep.sync_rule_flags_from_kind();
+                }
             }
         }
         "edit.fit.model_id" => {

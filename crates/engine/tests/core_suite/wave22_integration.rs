@@ -387,7 +387,8 @@ fn analysis_wave20_21_paired_sample_cluster_factorial_and_reports() {
                     k_means_k: None,
                     distance: ClusterDistance::Manhattan,
                     linkage: ClusterLinkage::Upgma,
-                    k_sweep_max: Some(4)
+                    k_sweep_max: Some(4),
+                    ..
                 })
             )
     );
@@ -402,7 +403,8 @@ fn analysis_wave20_21_paired_sample_cluster_factorial_and_reports() {
             k_means_k: Some(2),
             distance: ClusterDistance::Cosine,
             linkage: ClusterLinkage::Ward,
-            k_sweep_max: Some(3)
+            k_sweep_max: Some(3),
+            ..
         })
     ));
 

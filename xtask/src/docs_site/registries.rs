@@ -674,11 +674,29 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
 fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
     let (mut toc, mut body) = (Vec::new(), String::with_capacity(20_480));
     let kinds: Vec<(&str, &str, &str)> = [
-        GraphKind::Xy, GraphKind::Column, GraphKind::Grouped, GraphKind::Contingency, GraphKind::PartsOfWhole, GraphKind::Survival, GraphKind::MultipleVariables,
-        GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap), GraphKind::Diagnostic(DiagnosticPlotKind::Volcano), GraphKind::Diagnostic(DiagnosticPlotKind::BlandAltman),
-        GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve), GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot), GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot),
-        GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot)
-    ].into_iter().map(|k| match k {
+        GraphKind::Xy,
+        GraphKind::Column,
+        GraphKind::Grouped,
+        GraphKind::Contingency,
+        GraphKind::PartsOfWhole,
+        GraphKind::Survival,
+        GraphKind::MultipleVariables,
+        GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap),
+        GraphKind::Diagnostic(DiagnosticPlotKind::Volcano),
+        GraphKind::Diagnostic(DiagnosticPlotKind::BlandAltman),
+        GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::HomoscedasticityPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ActualVsPredictedPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ResidualVsRowPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap),
+        GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot),
+    ]
+    .into_iter()
+    .map(|k| match k {
         GraphKind::Xy => ("xy", "XY Scatter / Line / Fitted Curve", "Continuous X vs Y scatter, connected lines, splines, area fills, spaghetti replicate trajectories, composite XY bars with series nudging, and decoupled subset-fit overlays."),
         GraphKind::Column => ("column", "Column Bar / Box / Violin / Dot", "One-way vertical or horizontal categorical comparisons with bar, box, violin, raincloud, beeswarm, or paired before-after lines."),
         GraphKind::Grouped => ("grouped", "Grouped Multi-Factor Figure", "Clustered, separated, stacked, or superimposed multi-factor vertical or horizontal (population pyramid) bar and point figures."),
@@ -693,7 +711,14 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot) => ("diagnostic-forest-plot", "Diagnostic: Forest Plot", "Horizontal effect-size, odds-ratio, or hazard-ratio plot from summary or study bounds with optional pooled summary diamond."),
         GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot) => ("diagnostic-residual-plot", "Diagnostic: Residual Plot", "Regression residuals vs predicted Y or X scatter diagnostic."),
         GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot) => ("diagnostic-normal-qq-plot", "Diagnostic: Normal Q–Q Plot", "Theoretical normal quantiles vs observed/residual quantiles."),
-    }).collect();
+        GraphKind::Diagnostic(DiagnosticPlotKind::HomoscedasticityPlot) => ("diagnostic-homoscedasticity-plot", "Diagnostic: Homoscedasticity Plot", "Absolute residuals versus predicted values for assessing variance homogeneity."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ActualVsPredictedPlot) => ("diagnostic-actual-vs-predicted-plot", "Diagnostic: Actual vs Predicted Plot", "Observed response values plotted against model predictions with identity reference line."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ResidualVsRowPlot) => ("diagnostic-residual-vs-row-plot", "Diagnostic: Residual vs Row Plot", "Regression residuals plotted against observation row order."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot) => ("diagnostic-gap-statistic-plot", "Diagnostic: Gap Statistic Plot", "Gap statistic with Monte Carlo reference error bars across candidate cluster counts."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap) => ("diagnostic-parameter-correlation-heatmap", "Diagnostic: Parameter Correlation Heatmap", "Symmetric heatmap of fitted parameter correlations from regression models."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => ("diagnostic-lognormal-qq-plot", "Diagnostic: Lognormal Q–Q Plot", "Theoretical lognormal quantiles versus observed positive-value quantiles."),
+    })
+    .collect();
     let _ = writeln!(
         body,
         "<p class=\"lead\">Registry of <strong>{}</strong> primary and diagnostic graph kinds, <strong>{}</strong> graph preset options, axis scales, frame presets, qualitative colour palettes, and continuous colormaps.</p>",

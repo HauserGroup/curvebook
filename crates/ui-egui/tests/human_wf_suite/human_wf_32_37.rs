@@ -512,6 +512,12 @@ H06\tHighDose\t90\t0";
                 mv_time_column: Some(2),
                 mv_status_column: Some(3),
                 mv_group_column: Some(1),
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
+                ratio_median_ci: false,
+                mv_status_columns: Vec::new(),
+                mv_group_columns: Vec::new(),
             }))
             .map_err(|e| e.to_string())?;
             sess.execute("analysis.run", json!({ "source_sheet_id": ref_mv_id.as_str(), "kind": k })).map_err(|e| e.to_string())?;
@@ -705,6 +711,11 @@ fn wf37_human_hierarchical_clustering_and_dendrogram() -> TestRes {
                 distance: ClusterDistance::Manhattan,
                 linkage: ClusterLinkage::Complete,
                 k_sweep_max: Some(6),
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: Default::default(),
+                cut_height: None,
+                emit_anova_tab: false,
             }))
             .map_err(|e| e.to_string())?;
             sess.execute("analysis.run", json!({ "source_sheet_id": ref_mv_id.as_str(), "kind": k })).map_err(|e| e.to_string())?;

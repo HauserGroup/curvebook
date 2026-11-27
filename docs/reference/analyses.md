@@ -19,11 +19,11 @@ Applies non-destructive element-wise math transforms, normalizations, baseline r
 - **Options & defaults:**
   - `math`: `x_transform`, `y_transform` (`none` or preset: `log10`, `ln`, `log2`, `exp10`, `exp`, `reciprocal`, `square`, `sqrt`, `logit`, `probit`, `arcsin_sqrt`, etc.), and `error_propagation` (`replicate_endpoints` default, or `first_order_delta` / `delta_method`).
   - `normalize`: `zero_anchor`, `hundred_anchor` (`column_min`, `column_max`, `column_sum`, `first_row`, `last_row`, fixed constant, control column mean, or hooked scalar), `output_percent` (boolean), and `per_data_set` (boolean).
-  - `remove_baseline`: `baseline_columns` and `operation` (`difference`/`subtract`, `ratio`/`divide`, `percent_change`, `fractional_change`).
+  - `remove_baseline`: `baseline_columns`, `baseline_kind` (`ColumnsRowWise`, `ColumnsMean`, `Constant`, `RowRangeMean`, `FirstAndLastLinear`, `OlsLinearWithX`, or `PairedEveryOtherColumn`), and `operation` (`difference`/`subtract`, `ratio`/`divide`, `percent_change`, `fractional_change`).
   - `transpose`: `swap_row_and_column_titles` (boolean).
   - `prune_rows`: `every_k_rows` ($\ge 1$) and `average_window` (boolean).
   - `select_and_transform`: `filter_formula`, `target_archetype`, and `derived_columns`.
-  - `simulate`: `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise`.
+  - `simulate`: `seed`, `simulation_mode` (`XyCurve`, `Column`, or `Contingency2x2`), `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise`.
   - `random_sample`: `seed`, `sample_size`, `stratify_column`, and `proportional_allocation`.
 - **Reported outputs:**
   - Emits a linked derived data table and a **Summary** tab (`summary`) recording transform metadata, anchor scalars (`ZeroAnchor`, `HundredAnchor`), or sampling fields (`sample_size`, `population_size`, `seed`).
@@ -47,12 +47,12 @@ Computes column sample size, location, dispersion, quantiles, geometric summarie
 - **Options & defaults:**
   - `aggregation`: `RowMeans` (default, collapses replicate subcolumns by row mean first), `PerSubcolumn` (computes an independent summary per replicate subcolumn), or `PooledGrandSample` (pools all active replicates).
   - `custom_upper_percentile`: optional $p_{\text{hi}} \in [50.0, 100.0)$ reporting $(100 - p_{\text{hi}}, p_{\text{hi}})$ Hyndman–Fan Type-7 quantiles (default unset).
-  - `run_normality_battery`: boolean (default `true`).
+  - `run_normality_battery`: boolean (default `true`), plus `normality_only` (boolean, skips descriptive tables to emit normality/lognormality tests directly) and `emit_qq_tabs` (boolean, emits both `normal-qq` and `lognormal-qq` coordinate tabs).
   - `hypothetical_value`: optional finite $\mu_0$ triggering one-sample Student *t* and Wilcoxon signed-rank tests (default unset).
 - **Reported outputs:**
   - **Descriptive Summary** (`desc-summary` or `desc-pooled`): $N$, Minimum, 25% Percentile, Median, 75% Percentile, Maximum, Interquartile Range (IQR), Range, Sum, Mean, Std. Deviation, Std. Error of Mean, `conf%` CI of Mean, `conf%` CI of SD ($\chi^2$ normal-theory interval), exact/interpolated binomial CI of Median, %CV, Geometric Mean, Geometric SD Factor, and CI of Geometric Mean (when all values $> 0$), Harmonic Mean and CI (when valid), Quadratic Mean (RMS) and CI, Skewness ($G_1$), Excess Kurtosis ($G_2$), and lag-1 autocorrelation ($r_1$).
-  - **Diagnostics** (`normality`): Shapiro–Wilk $W$ ($3 \le n \le 5000$), D'Agostino–Pearson $K^2$ ($n \ge 8$), Anderson–Darling $A^{2*}$ ($n \ge 8$), and Lilliefors Kolmogorov–Smirnov $D$ ($n \ge 5$) on both raw data and $\ln(Y)$ when strictly positive.
-  - **Normal Q–Q** (`normal-qq`): Blom (1958) plotting positions $p_i = (i - 3/8)/(n + 1/4)$ and expected normal or lognormal $z$ quantiles.
+  - **Diagnostics** (`normality`): Shapiro–Wilk $W$ ($3 \le n \le 5000$), D'Agostino–Pearson $K^2$ ($n \ge 8$), Anderson–Darling $A^{2*}$ ($n \ge 8$), and Lilliefors Kolmogorov–Smirnov $D$ ($n \ge 5$) on both raw data and $\ln(Y)$ when strictly positive, together with Normal vs. Lognormal log-likelihood ratio and Relative Likelihood.
+  - **Normal & Lognormal Q–Q** (`normal-qq`, `lognormal-qq`): Blom (1958) plotting positions $p_i = (i - 3/8)/(n + 1/4)$ and expected normal or lognormal $z$ quantiles for `NormalQqPlot` and `LognormalQqPlot`.
   - **Summary** (`one-sample`): When `hypothetical_value` is set, one-sample *t*-test ($t, \text{df}, P$) and Wilcoxon signed-rank test ($W, P$, Pratt 1959 zero handling and Hodges–Lehmann pseudomedian/CI).
 - **Diagnostic checks:** Reports Shapiro–Wilk normality status per column (pass if $P > \alpha$, warn if $P \le \alpha$) and logs any ignored non-numeric text cells.
 - **Edge cases & limits:**
@@ -89,16 +89,16 @@ Screens each column independently for single or multiple univariate outliers usi
 
 Compares two independent groups, matched pairs, or a single group against a hypothetical location using parametric, lognormal/ratio, or nonparametric rank and distribution tests. Compatible with Column and Multiple Variables tables (`mv_group_column` + `mv_response_column` split a two-level factor in long tables; see [Analysis Registry: `two-group-comparison`](registry/tables.html#analysis-kind-two-group-comparison)).
 
-- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `unpaired_t` (canonical), `t_test`, `unpaired_t_test`, `welch_t`, `paired_t`, `ratio_paired_t`, `lognormal_unpaired_t`, `mann_whitney`, `wilcoxon`, `wilcoxon_matched_pairs`, `kolmogorov_smirnov`, `ks_test`, `paired_sign_test`, `sign_test`, `one_sample_t`, or `one_sample_wilcoxon`.
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `unpaired_t` (canonical), `t_test`, `unpaired_t_test`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_unpaired_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `wilcoxon_matched_pairs`, `kolmogorov_smirnov`, `ks_test`, `paired_sign_test`, `sign_test`, `one_sample_t`, or `one_sample_wilcoxon`.
 - **Options & defaults:**
-  - `method`: `unpaired_t` (default), `welch_t`, `paired_t`, `ratio_paired_t`, `lognormal_unpaired_t`, `mann_whitney`, `wilcoxon_signed_rank`, `kolmogorov_smirnov`, `paired_sign_test`, `one_sample_t`, or `one_sample_wilcoxon`.
+  - `method`: `unpaired_t` (default), `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_unpaired_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon_signed_rank`, `kolmogorov_smirnov`, `paired_sign_test`, `one_sample_t`, or `one_sample_wilcoxon`.
   - `two_tailed`: boolean (default `true`). One-tailed rank tests evaluate the tail strictly in the observed sample direction.
   - `compute_effect_sizes`: boolean (default `true`). Reports Cohen's $d$, Hedges' $g$, Glass's $\Delta$ with noncentral-*t* CIs, $R^2$ ($\eta^2$), and rank-biserial correlation / Cliff's $\delta$ (`mann_whitney`, `wilcoxon_signed_rank`).
   - `mv_group_column`, `mv_response_column`, and `hypothetical` (for one-sample tests).
 - **Reported outputs:**
   - **Summary** (`two-group`, `paired-t`, `mann-whitney`, etc.): group means/medians, difference or ratio of means or Hodges–Lehmann shift with CI, test statistic ($t, U, W, D_{\text{KS}}, S$), $\text{df}$, and *P* value.
   - **Additional diagnostics:** Variance-equality *F*-test and median-centered Levene / Brown–Forsythe test (unpaired tests), pairing correlation $r$ and *P* (`paired_t`, `ratio_paired_t`), and requested effect sizes.
-  - For `ratio_paired_t` and `lognormal_unpaired_t`, geometric mean ratios $\exp(\Delta \bar{y}_{\ln})$ and CIs are back-transformed automatically.
+  - For `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_unpaired_t`, and `lognormal_welch_t`, geometric mean ratios $\exp(\Delta \bar{y}_{\ln})$ and CIs are back-transformed automatically.
 - **Diagnostic checks:** Evaluates group Shapiro–Wilk normality, *F*-test / Levene homoscedasticity, pairing effectiveness (warns if $r \le 0$ or $|r| = 1$), exact Hodges–Lehmann CI achieved coverage for small $n$, and non-positive values in ratio/lognormal tests.
 - **Edge cases & limits:**
   - [Pre-summarized subcolumns](tables.md#subcolumn-modes) (Mean/SD/N, Mean/SEM/N, Mean/%CV/N) work for `unpaired_t`, `welch_t`, and `one_sample_t` (retaining the exact *F*-test while omitting raw-only Levene checks).
@@ -138,6 +138,7 @@ Runs independent or paired two-group comparisons separately on every row of a ta
 - **Options & defaults:**
   - `paired`: boolean (default `false`). Requires matched subcolumns on Grouped/XY tables or an even number ($\ge 4$) of selected columns on Column tables.
   - `nonparametric`: boolean (default `false`; runs Mann–Whitney $U$ or Wilcoxon signed-rank per row when `true`).
+  - `lognormal_mode`: `none` (default), `lognormal` (log-transformed unpaired/Welch *t*-tests per row), or `ratio_paired` (paired log-ratio *t*-tests per row), reporting back-transformed geometric mean ratios on strictly positive data.
   - `assume_equal_sd`: boolean (default `true` for Student pooled variance; `false` for Welch–Satterthwaite when unpaired and parametric).
   - `multiplicity` (`benjamini_hochberg_fdr`, `two_stage_bky_fdr`, `benjamini_yekutieli_fdr`, `holm_sidak`, `bonferroni`, `sidak`, or `none`), `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column`.
 - **Reported outputs:**
@@ -174,10 +175,10 @@ Fits Passing & Bablok (1983) nonparametric errors-in-variables linear regression
 
 Compares $k \ge 2$ groups across independent columns (ordinary ANOVA, Brown–Forsythe and Welch ANOVA, Kruskal–Wallis) or matched subject rows (repeated-measures ANOVA, REML mixed model, Friedman). Includes post-hoc tests, trend tests, and Compact Letter Display (CLD). Compatible with Column and Multiple Variables tables (see [Analysis Registry: `one-way-anova`](registry/tables.html#analysis-kind-one-way-anova)).
 
-- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `one_way_anova` (canonical), `anova`, `welch_anova`, `brown_forsythe`, `rm_one_way_anova`, `repeated_measures_anova`, `kruskal_wallis`, or `friedman`.
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `one_way_anova` (canonical), `anova`, `welch_anova`, `brown_forsythe`, `rm_one_way_anova`, `repeated_measures_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, or `friedman`.
 - **Options & defaults:**
-  - `method`: `ordinary_anova` (default), `brown_forsythe_and_welch`, `repeated_measures`, `kruskal_wallis`, or `friedman`.
-  - `geisser_greenhouse`: boolean (applies to `repeated_measures`).
+  - `method`: `ordinary_anova` (default), `brown_forsythe_and_welch`, `repeated_measures`, `lognormal_ordinary`, `lognormal_welch_bf` (`lognormal_welch_anova`), `lognormal_repeated_measures`, `kruskal_wallis`, or `friedman`.
+  - `geisser_greenhouse`: boolean (applies to `repeated_measures` and `lognormal_repeated_measures`).
   - `mixed_effects_reml`: boolean (default `false`; engages REML automatically when RM subjects have missing cells, or explicitly on complete tables).
   - `df_method`: `kenward_roger` (default) or `satterthwaite`.
   - `residual_covariance`: `compound_symmetry` (default) or `unstructured` (Pinheiro–Bates log-Cholesky REML with automatic fallback to compound symmetry when under-identified).
@@ -204,13 +205,13 @@ Fits fixed-effects or repeated-measures factorial linear models and REML mixed m
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `two_way_anova` (canonical), `factorial_anova`, or `three_way_anova`.
 - **Options & defaults:**
-  - `three_way`: boolean (default `false`; requires 4 grouped columns encoding $2 \times 2$ factors by $K$ rows).
+  - `three_way`: boolean (default `false`; requires 4 grouped columns encoding $2 \times 2$ factors by $K$ rows), with optional `three_way_rm_factors` (`[factor1_rm, factor2_rm, row_rm]`).
   - `multifactor_columns` and `response_column`: factor and outcome column indices on Multiple Variables tables.
   - `max_interaction_order`: integer interaction depth cap (e.g., `2` or `3`).
   - `ss_type`: `type_iii` (default marginal SS for unbalanced designs) or `type_i` (sequential).
-  - `repeated_measures`: `none` (default), `column_factor_matched`, `row_factor_matched`, or `both_factors_matched`.
-  - `mixed_effects_reml` (boolean), `df_method` (`kenward_roger` default or `satterthwaite`), `residual_covariance` (`compound_symmetry` default or `unstructured`), and `fit_reml_on_missing` (boolean, default `true` in REML paths).
-  - `compute_effect_sizes`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column`.
+  - `repeated_measures`: `none` (default), `column_factor_matched`, `row_factor_matched`, or `both_factors_matched`, with Greenhouse–Geisser and Huynh–Feldt sphericity adjustments.
+  - `mixed_effects_reml` (boolean), `reml_zero_variance_policy` (`bound_at_zero` default, `drop_zero_random_term`, `unbounded`, or `legacy_fallback`), `df_method` (`kenward_roger` default or `satterthwaite`), `residual_covariance` (`compound_symmetry` default or `unstructured`), `fit_reml_on_missing` (boolean, default `true` in REML paths), `heteroscedasticity_test` (Spearman $|r|$ vs. predicted tab for `HomoscedasticityPlot`), and `emit_consolidated_data_tab`.
+  - `compute_effect_sizes`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, and `control_column` (including 2-way "cells differing by 1 factor" comparisons).
 - **Reported outputs:**
   - **ANOVA Table** (`factorial-anova`): main effects, interactions, subject/residual terms, SS, df, MS, $F$ (or Kenward–Roger $F^*$), *P*, and partial $\eta^2$ / $\omega^2$.
   - **Diagnostics** (`rm-sphericity`): Greenhouse–Geisser and Huynh–Feldt $\varepsilon$ on repeated-measures factors.
@@ -282,11 +283,11 @@ Fits nonparametric Kaplan–Meier survival curves with cohort log-rank / Gehan�
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `kaplan_meier` (canonical), `survival`, `log_rank`, `cox_ph`, or `cox`.
 - **Options & defaults:**
-  - **Kaplan–Meier:** `log_rank_mantel_cox` (boolean), `gehan_breslow_wilcoxon` (boolean), `trend_test` (Tarone 1975 1-df trend when $\ge 3$ cohorts), `asymmetrical_greenwood_ci` (boolean, default Kalbfleisch–Prentice $\ln(-\ln S(t))$ bounds in $[0, 1]$ vs. symmetric linear Greenwood), `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, `mv_time_column`, `mv_status_column`, and `mv_group_column`.
-  - **Cox PH:** `time_column`, `status_column`, `predictor_columns`, `reference_levels`, and `tie_method` (`efron` default, `breslow`, `exact`).
+  - **Kaplan–Meier:** `log_rank_mantel_cox` (boolean), `gehan_breslow_wilcoxon` (boolean), `trend_test` (Tarone 1975 1-df trend when $\ge 3$ cohorts), `asymmetrical_greenwood_ci` (boolean, default Kalbfleisch–Prentice $\ln(-\ln S(t))$ bounds in $[0, 1]$ vs. symmetric linear Greenwood), `event_code`, `censored_code`, `treat_other_as`, `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, `mv_time_column`, `mv_status_column`, and `mv_group_column`.
+  - **Cox PH:** `time_column`, `status_column`, `predictor_columns`, `reference_levels`, `tie_method` (`efron` default, `breslow`, `exact`), `formula` (interaction and transform terms), `ci_method` (Wald or profile-likelihood CIs), `nested_comparison` (nested Cox likelihood-ratio test), `covariate_profiles` (user-defined profile survival curves), `emit_cox_snell_residuals`, `event_code`, `censored_code`, and `treat_other_as`.
 - **Reported outputs:**
-  - **Kaplan–Meier:** **Summary** (`km-summary` with median survival and Brookmeyer–Crowley 1982 CIs, subjects, events, censored), **Number at Risk**, **Model Comparison** (log-rank, Gehan–Breslow–Wilcoxon, trend $\chi^2, \text{df}, P$), **Parameters and CIs** (Mantel–Haenszel and O/E hazard ratios), **Multiple Comparisons** (`survival-pairwise` for $\ge 3$ cohorts), and step-curve overlays.
-  - **Cox PH:** **Parameters and CIs** (`cox-ph` with $\hat{\beta}_j$, SE, Wald $z, P$, hazard ratio $\exp(\hat{\beta}_j)$, Wald CI, likelihood-ratio omnibus $\chi^2$), **Covariance Matrix**, **Baseline Survival** ($H_0(t), S_0(t)$ at design means), **Log-Minus-Log** ($\ln(-\ln \hat{S}(t))$ diagnostics), Harrell's $C$-index, and Grambsch–Therneau Schoenfeld proportional-hazards tests.
+  - **Kaplan–Meier:** **Summary** (`km-summary` with median survival and Brookmeyer–Crowley 1982 CIs, ratio of median survival, reverse-KM median follow-up time, subjects, events, censored), **Number at Risk**, **Model Comparison** (log-rank, Gehan–Breslow–Wilcoxon, trend $\chi^2, \text{df}, P$), **Parameters and CIs** (Mantel–Haenszel and O/E hazard ratios), **Multiple Comparisons** (`survival-pairwise` for $\ge 3$ cohorts), and step-curve overlays.
+  - **Cox PH:** **Parameters and CIs** (`cox-ph` with $\hat{\beta}_j$, SE, Wald $z, P$, hazard ratio $\exp(\hat{\beta}_j)$ and delta-method SE, Wald or profile-likelihood CI, likelihood-ratio omnibus $\chi^2$), **Covariance Matrix** (`cox-covariance` and parameter correlation matrix), **Baseline Survival** ($H_0(t), S_0(t)$ at design means), **Covariate Profile Survival** (`cox-profile-survival` and `cox_profile:{idx}` overlays), **Residuals** (Schoenfeld, Martingale, deviance, `cox-covariate-residuals`, and `cox-snell-residuals`), **Model Comparison** (nested LRT), **Log-Minus-Log** ($\ln(-\ln \hat{S}(t))$ diagnostics), Harrell's $C$-index, and Grambsch–Therneau Schoenfeld proportional-hazards tests.
 - **Diagnostic checks:** Reports Schoenfeld proportional-hazards *P* values, Cox PH monotone-likelihood separation or collinearity warnings (suppressing unstable Wald SE/CIs while keeping omnibus LR *P*), low event counts, and Harrell's $C$-index.
 - **Edge cases & limits:**
   - Negative times or invalid censoring indicators fail validation.
@@ -326,11 +327,13 @@ Fits multivariable Generalized Linear Models for Gaussian identity (`linear`), B
   - `response_column`: 0-based dependent variable index.
   - `predictor_columns`: ordered list of covariate and categorical predictor indices.
   - `reference_levels`: list of `(categorical_col_idx, reference_level_label)` overrides for treatment coding.
-  - `compute_vif`: boolean (default `true` on multivariable models).
+  - `formula`: optional 2-/3-way interaction, polynomial (`X^2`, `X^3`), and transform (`sqrt(X)`, `ln(X)`) terms; `include_intercept` (default `true`).
+  - `nested_comparison`: optional reduced-model formula for Extra-SS *F* (linear), deviance LRT (logistic/Poisson), and $\Delta\text{AIC}_c$ comparison.
+  - `weights` (`None` default, analytical `Scheme`, or explicit `Column` index for linear WLS), `dispersion_mode` (`canonical` default, `quasi_poisson`, or `robust_sandwich`), `ci_method` (Wald or profile-likelihood CIs), `emit_influence_diagnostics` (leverage, Cook's $D$, DFBETAs), `classification_cutoff` (logistic probability cutoff, default `0.5`), and `compute_vif` (default `true` on multivariable models).
 - **Reported outputs:**
-  - **`linear`:** coefficient estimates, SEs, *t*, *P*, `conf%` *t*-CIs, VIF, Type III partial SS/F/P, $R^2$, adjusted $R^2$, $S_{y.x}$, omnibus *F* and *P*, AIC, AICc, BIC, Durbin–Watson, studentized residuals, leverage, and Cook's distance across **Summary**, **Parameters and CIs**, and **Diagnostics**.
-  - **`logistic`:** log-odds $\hat{\beta}_j$, SE, Wald $z, P$, odds ratios $\exp(\hat{\beta}_j)$ with Wald CIs, likelihood-ratio $\chi^2, P$, McFadden / Nagelkerke / Tjur pseudo-$R^2$, AIC, AICc, Hosmer–Lemeshow $\chi^2$ and *P*, ROC AUC, and classification cutoff table.
-  - **`poisson`:** log-rate $\hat{\beta}_j$, SE, Wald $z, P$, incidence rate ratios $\exp(\hat{\beta}_j)$ with Wald CIs (dispersion $= 1$), residual deviance, Pearson dispersion $\chi^2 / \text{df}$, LR $\chi^2, P$, McFadden pseudo-$R^2$, AIC, AICc, and deviance residuals.
+  - **`linear`:** coefficient estimates, SEs, *t*, *P*, `conf%` *t*-CIs, VIF, Type III partial SS/F/P, $R^2$, adjusted $R^2$, $S_{y.x}$, omnibus *F* and *P*, AIC, AICc, BIC, Durbin–Watson, parameter correlation matrix (`glm-linear-correlation`), studentized residuals, leverage, Cook's distance, DFBETAs (`glm-linear-diagnostics`), and automatic out-of-sample predictions with CIs/PIs for blank-$Y$ rows across **Summary**, **Parameters and CIs**, and **Diagnostics**.
+  - **`logistic`:** log-odds $\hat{\beta}_j$, SE, Wald $z, P$, odds ratios $\exp(\hat{\beta}_j)$ with delta-method SE and Wald or profile-likelihood CIs, likelihood-ratio $\chi^2, P$, McFadden / Nagelkerke / Tjur pseudo-$R^2$, AIC, AICc, Hosmer–Lemeshow $\chi^2$, *P*, and calibration bins (`glm-logistic-calibration`), ROC curve (`glm-logistic-roc`) and AUC, parameter correlation matrix (`glm-logistic-correlation`), influence diagnostics (`glm-logistic-diagnostics`), out-of-sample probability predictions, and classification table at `classification_cutoff`.
+  - **`poisson`:** log-rate $\hat{\beta}_j$, SE, Wald $z, P$, incidence rate ratios $\exp(\hat{\beta}_j)$ with delta-method SE and Wald or profile-likelihood CIs (with optional quasi-Poisson dispersion scaling), residual deviance, Pearson dispersion $\chi^2 / \text{df}$, LR $\chi^2, P$, McFadden pseudo-$R^2$, AIC, AICc, parameter correlation matrix (`glm-poisson-correlation`), influence/deviance diagnostics (`glm-poisson-diagnostics`), and out-of-sample rate predictions.
 - **Diagnostic checks:** Flags rank-deficient or aliased collinear columns via SVD, high multicollinearity (`VIF > 5` and `VIF > 10`), Gaussian residual normality (Shapiro–Wilk), Albert–Anderson separation in logistic IRLS, Poisson overdispersion or convergence issues, and listwise complete-case row omissions.
 - **Edge cases & limits:**
   - Outcomes outside $\{0, 1\}$ fail in `logistic`; negative or non-count outcomes fail in `poisson`.
@@ -348,9 +351,9 @@ Combines exploratory multivariate analysis, correlation matrices, clustering, su
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `pca` (canonical), `principal_components`, `correlation`, `correlation_matrix`, `clustering`, `kmeans`, `multiple_imputation`, `stats.multiple_imputation`, or `mice`.
 - **Options & defaults:**
-  - **PCA / PCR:** `standardize` (`true` for correlation PCA, `false` for covariance PCA), `parallel_analysis_seed` (optional seed for Horn 1965 retention cutoffs), and `pcr_outcome_column` (optional target enabling supervised PCR).
+  - **PCA / PCR:** `standardize` (`true` for correlation PCA, `false` for covariance PCA), `retention_rule` (Kaiser $\lambda > 1$, Horn 1965 parallel analysis with `parallel_analysis_seed`, cumulative variance threshold, or fixed component count), and `pcr_outcome_column` (optional target enabling supervised PCR).
   - **Correlation matrix:** `spearman_rank` (`false` for Pearson $r$, `true` for Spearman $\rho$).
-  - **Clustering:** `distance` (`euclidean`, `manhattan`, `cosine`, `pearson_correlation_dissimilarity`), `linkage` (`single`, `complete`, `average` UPGMA, `weighted` WPGMA, `centroid` UPGMC, `median` WPGMC, `ward_d2` Murtagh–Legendre Ward criterion), `k_means_k` (optional $k \ge 2$ `k-means++`), and `k_sweep_max` (optional candidate-$k$ WCSS and silhouette sweep).
+  - **Clustering:** `distance` (`euclidean`, `manhattan`, `cosine`, `pearson_correlation_dissimilarity`), `linkage` (`single`, `complete`, `average` UPGMA, `weighted` WPGMA, `centroid` UPGMC, `median` WPGMC, `ward_d2` Murtagh–Legendre Ward criterion), `k_means_k` (optional $k \ge 2$ `k-means++`), `kmeans_algorithm` (`lloyd`, `hartigan_wong`, `macqueen`), `k_sweep_max` and `consensus_optimal_k` (17-index NbClust-style majority consensus + Tibshirani–Walther–Hastie Gap statistic tab `gap-statistic`), `cluster_direction` (rows or columns), `cut_height`, and `emit_anova_tab`.
   - **Multiple imputation:** `imputations_m` (2 to 50), `max_iters` (1 to 100), `seed`, `response_column`, and `predictor_columns` (MICE Predictive Mean Matching pooled via Rubin 1987 and Barnard–Rubin 1999 degrees of freedom).
 - **Reported outputs:**
   - **PCA / PCR:** **Summary** (`pca-eigenvalues`, `pcr-summary` with $R^2$, adjusted $R^2$, *F*, RMSE, AIC/BIC), **Parameters and CIs** (`pca-loadings`, `pcr-predictors`, `pcr-components`), scores/biplot coordinates, and **Diagnostics** (`pcr-diagnostics` leverage and Cook's $D$).
@@ -398,14 +401,14 @@ Fits built-in models ([Parametric Equations Registry](registry/equations.html)) 
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `fit.run` with `nonlinear` (canonical), `nonlinear_regression`, `curve_fit`, `fit`, `custom_equation`, `custom_dsl`, or any built-in equation ID directly as `kind` (for example `log_agonist_vs_response_4pl`, `michaelis_menten`).
 - **Options & defaults:**
-  - Model: `equation_id` and `custom_dsl`.
+  - Model: `equation_id` (any built-in model, saved user equation ID from `fit.saveUserEquation` / `fit.cloneBuiltinEquation`, or `"plot_distribution"` with `plot_distribution` for theoretical probability distribution plotting) and `custom_dsl` (supporting `[Equation]`, `[InitialValues]`, `[Constraints]`, and `[Transforms]`).
   - Objective & weights: `method` (`least_squares` default, `poisson_deviance`, `robust_cauchy`, `rout_outlier_elimination`), `outlier_handling` (`None`, `IdentifyAndCountOnly`, `Eliminate`), `emit_cleaned_data_tab`, `fdr_q_percent` (default `1.0`, bounded to $(0, 50]$), `weighting` (`none` default, `relative_square`, `relative`, `general_power_y` + `weighting_power`, `inverse_x`, `inverse_x2`, `observed_sd`), and `weighting_source` (`ObservedY` vs. `PredictedY` curve-height IRLS).
-  - Constraints & solver: `parameter_rules` (`scope`: `local`, `shared_global`, `constant`, `hooked_constant`, `per_dataset_constant`, `column_title_constant`, plus `initial_override`, `lower_bound`, `upper_bound`), `replicate_fit_mode` (`IndividualReplicates` vs. `RowMeansOnly`), `convergence_strictness` (`Default`, `Quick`, `Medium`, `Strict`), `max_iters` (default `1000`, hard cap `50,000`), `mv_y_columns` (multi-response Multiple Variables fitting), `x_range_filter`, `y_range_filter`, `plot_function_only`, `plot_x_min`, and `plot_x_max`.
+  - Constraints & solver: `parameter_rules` (`scope`: `local`, `shared_global`, `constant`, `hooked_constant`, `per_dataset_constant`, `column_title_constant`, plus `initial_override`, `lower_bound`, `upper_bound`), relational inequality constraints (`[Constraints]`, such as `KFast > KSlow`), `replicate_fit_mode` (`IndividualReplicates` vs. `RowMeansOnly`), `convergence_strictness` (`Default`, `Quick`, `Medium`, `Strict`), `max_iters` (default `1000`, hard cap `50,000`), `mv_y_columns` (multi-response Multiple Variables fitting), `x_range_filter`, `y_range_filter`, `plot_function_only`, `plot_x_min`, and `plot_x_max`.
   - Uncertainty, output & diagnostics: `profile_likelihood_ci` (`true` default), `show_standard_errors`, `identify_unstable_parameters`, `identifiability_mode` (`IdentifyUnstableParameters`, `IdentifyAmbiguousFits`, `ReportAll`), `flag_r_squared_below`, `fit_flag_rules`, `summary_parameter`, `create_summary_graph`, `output_significant_digits`, `confidence_bands`, `prediction_bands`, `interpolate_unknowns`, `replicates_lack_of_fit_test`, `normality_of_residuals`, `homoscedasticity_test`, `emit_residuals_tab`, and `emit_covariance_tab`.
   - Model comparison: `comparison` (`extra_sum_of_squares_f`, `aicc`, `likelihood_ratio_test`), `comparison_question` (`AlternativeEquation`, `ParameterInvarianceAcrossDatasets`, `SingleGlobalCurveVsSeparate`, `ParameterEqualsTheoretical`), `comparison_method`, `prefer_well_defined_fit`, `alternative_equation_id`, and `shared_parameter_comparison`.
 - **Reported outputs:**
-  - **Parameters and CIs:** estimates, SEs, Venzon–Moolgavkar profile or Wald CIs (including open bounds), dependency $R^2_j$, Hougaard $|g_1|$, parameter notes, and derived scalars such as `EC50`, `t_half`, and `Span`.
-  - **Summary:** $N$, $K_{\text{free}}$, df, unweighted $R^2$, `rss`, `weighted_ss`, $S_{y.x}$ or `RSDR`, $\text{AIC}_c$, $\text{BIC}$, runs test, replicates lack-of-fit, residual normality tests, and Spearman homoscedasticity.
+  - **Parameters and CIs:** estimates, SEs, Venzon–Moolgavkar profile or Wald CIs (including open bounds), dependency $R^2_j$, Hougaard $|g_1|$, parameter notes, and derived scalars (`EC50`, `KB`, `t_half`, `Span`, analytical inflection points) with propagated monotonic or delta-method SEs and CIs.
+  - **Summary:** $N$, $K_{\text{free}}$, df, unweighted $R^2$, Adjusted $R^2$, Willett–Singer Weighted $R^2$, `rss`, `weighted_ss`, `RMSE` and $S_{y.x}$ (or `RSDR`), Poisson NLL / deviance / pseudo-$R^2$ / dispersion (under `poisson_deviance`), $\text{AIC}_c$, $\text{BIC}$, runs test, replicates lack-of-fit, residual normality tests, and Spearman homoscedasticity.
   - **Additional tabs:** **Residuals**, **Covariance Matrix**, **Model Comparison**, **Interpolated Unknowns** (`Interpolated Mean X` and `Interpolated Replicates` with `Extrapolated` flags), and **Diagnostics** (`fit_auc`; see [Uncertainty and diagnostics](fitting.md#uncertainty-and-diagnostics)).
 - **Diagnostic checks:** Under `robust_cauchy`, parametric covariance, CIs, and bands are omitted intentionally. Flags ambiguous or unstable fits when the Jacobian is rank-deficient, dependency exceeds `0.9999`, or profile bounds plateau; also flags `Dependency > 0.99`, $|g_1| > 1.0$, and $R^2$ below threshold.
 - **Edge cases & limits:** Honors exact sufficient statistics on [pre-summarized XY subcolumns](tables.md#subcolumn-modes) (Mean/SD/N, Mean/SEM/N, Mean/%CV/N) and enforces strict custom equation limits (`4,096` AST nodes, `50,000` ODE steps per point; see [Custom DSL and ODE caps](fitting.md#custom-dsl-and-ode)).
@@ -437,11 +440,11 @@ Treats one or more numeric columns of raw hypothesis-test *P* values $p \in [0.0
 
 ## Statistical power and sample size {#analysis-power-analysis}
 
-Computes prospective or post-hoc sample sizes ($n_1, n_2, N$), achieved power ($1 - \beta$), minimum detectable effect sizes, sensitivity grids, and power-vs-$N$ curves across eight study designs. Compatible with all [table archetypes](tables.md#table-archetypes) and optionally hooks scalars from an info sheet (see [Analysis Registry: `power-analysis`](registry/tables.html#analysis-kind-power-analysis)).
+Computes prospective or post-hoc sample sizes ($n_1, n_2, N$), achieved power ($1 - \beta$), minimum detectable effect sizes, sensitivity grids, and power-vs-$N$ curves across nine study designs. Compatible with all [table archetypes](tables.md#table-archetypes) and optionally hooks scalars from an info sheet (see [Analysis Registry: `power-analysis`](registry/tables.html#analysis-kind-power-analysis)).
 
 - **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `power` (canonical), `power_analysis`, `stats.power`, or `power_sample_size`.
 - **Options & defaults:**
-  - `family`: `two_sample_unpaired_t` (default), `two_sample_paired_t`, `one_sample_t`, `one_way_anova`, `two_proportions`, `correlation`, `chi_square`, or `simple_linear_regression`.
+  - `family`: `two_sample_unpaired_t` (default), `two_sample_paired_t`, `one_sample_t`, `one_way_anova`, `two_proportions`, `correlation`, `chi_square`, `simple_linear_regression`, or `log_rank_survival` (Schoenfeld 1983 and Freedman 1982 survival sample-size and power equations).
   - `solve_target`: `sample_size` (default), `power`, or `detectable_effect`.
   - `tail_mode`: `two_sided`, `one_sided_greater`, or `one_sided_less` (one-sided tests are disallowed on non-directional `one_way_anova` and `chi_square`).
   - `alpha` in $(0, 1)$ (default `0.05`); `target_power` in $(0, 1)$ (for `sample_size` or `detectable_effect`); `sample_size`, `sample_size_group2`, and `allocation_ratio` ($k = n_2 / n_1 > 0$).
@@ -561,3 +564,76 @@ Requires finite numeric `X` coordinates in the desired integration units (see th
 - **References & verification:**
   - **References:** Yeh & Kwan (1978) (*J. Pharmacokinet. Biopharm.* 6(1):79–98); Bailer (1988) (*J. Pharmacokinet. Biopharm.* 16(3):303–309).
   - **Verified against:** `R 4.5.2`, `SciPy`, and exact closed-form partial-window and first-point knot-weight benchmarks ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Row statistics (replicate summaries) {#analysis-row-statistics}
+
+Summarizes active replicate values across each row into totals, means (with SD, SEM, %CV, confidence interval, or min–max), medians (with quartiles or custom percentiles), or geometric means (with geometric SD factor and CI), publishing a chainable derived table for downstream analyses and plotting. Compatible with Column, XY, Grouped, and Multiple Variables tables (see [Analysis Registry: `row-statistics`](registry/tables.html#analysis-kind-row-statistics)).
+
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `transform.run` with `row_statistics` (canonical), `row_stats`, or `transform.row_statistics`.
+- **Options & defaults:**
+  - `summary`: `mean_sd`, `mean_sem`, `mean_cv`, `mean_ci`, `mean_min_max`, `median_quartiles`, `median_min_max`, `median_percentiles`, `geometric_mean_sd`, `geometric_mean_ci`, or `total`.
+  - `upper_percentile`: custom upper quantile $p_{\text{hi}} \in (50.0, 100.0)$ paired with symmetric lower quantile $100 - p_{\text{hi}}$ when `summary: "median_percentiles"`.
+- **Reported outputs:**
+  - **Summary** and chainable **Analyzable Data** table preserving row labels and $X$ coordinates alongside computed row summaries and active replicate counts $N$.
+- **Diagnostic checks:** Skips excluded and blank replicate cells cleanly; leaves geometric summaries blank on rows containing non-positive values with a diagnostic note.
+- **References & verification:**
+  - **References:** Hyndman & Fan (1996) Type-6 and Type-7 quantile estimators; Kirkwood (1979) geometric SD factor.
+  - **Verified against:** `R 4.5.2` offline transform oracles ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Fraction of total {#analysis-fraction-of-total}
+
+Expresses each active cell as a fraction or percentage of its row total, column total, grand total, or all three, with optional Wilson score or exact Clopper–Pearson binomial confidence intervals and chainable output. Compatible with Column, XY, Grouped, Contingency, Parts of Whole, and Multiple Variables tables (see [Analysis Registry: `fraction-of-total`](registry/tables.html#analysis-kind-fraction-of-total)).
+
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `transform.run` with `fraction_of_total` (canonical) or `transform.fraction_of_total`.
+- **Options & defaults:**
+  - `denominator`: `column_total` (default), `row_total`, `grand_total`, or `all_three`.
+  - `output_percent`: boolean (default `true` for $0\text{–}100\%$; `false` for unit fractions in $[0, 1]$).
+  - `ci_method`: `none` (default), `wilson`, or `clopper_pearson`.
+- **Reported outputs:**
+  - **Summary** tabs per selected denominator (plus lower/upper binomial CI columns when enabled) and a chainable **Analyzable Data** table ready for downstream statistical analyses or plotting.
+- **Diagnostic checks:** Guards zero-sum denominators cleanly without producing `NaN`, and enforces non-negative counts whenever binomial CIs are requested.
+- **References & verification:**
+  - **References:** Wilson (1927); Clopper & Pearson (1934).
+  - **Verified against:** `R 4.5.2` offline transform oracles ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Curve calculus (differentiate, integrate, smooth) {#analysis-curve-calculus}
+
+Computes numerical first or second derivatives, cumulative trapezoidal integrals, or Savitzky–Golay, moving-average, and Cleveland LOWESS smoothed curves as a first-class linked XY analysis publishing chainable `analyzable_data`. Compatible exclusively with XY tables (see [Analysis Registry: `curve-calculus`](registry/tables.html#analysis-kind-curve-calculus)).
+
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `transform.run` with `curve_calculus` (canonical), `smooth_differentiate_integrate`, `differentiate`, `smooth`, or `transform.curve_calculus`.
+- **Options & defaults:**
+  - `operation`: `first_derivative`, `second_derivative` (shifted 3-point Lagrange quadratic differentiation on uniform or non-uniform grids), `{"CumulativeIntegral": {"baseline": 0.0}}`, `{"SmoothSavitzkyGolay": {"window": 5, "order": 2}}`, `{"SmoothMovingAverage": {"window": 3}}`, or `{"SmoothLowess": {"span": 0.5}}`.
+- **Reported outputs:**
+  - **Summary** and chainable **Analyzable Data** XY sheet containing the differentiated, integrated, or smoothed curves for direct graphing or downstream regression / AUC chaining.
+- **Diagnostic checks:** Rejects duplicate $X$ values during numerical differentiation and validates odd Savitzky–Golay windows ($w > \text{order}$) and LOWESS spans in $(0, 1]$.
+- **References & verification:**
+  - **References:** Savitzky & Golay (1964); Gorry (1990); Cleveland (1979); Burden & Faires (2011) shifted Lagrange differentiation.
+  - **Verified against:** `R 4.5.2` offline transform oracles ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Monte Carlo simulation {#analysis-monte-carlo-simulation}
+
+Executes a bounded deterministic simulation loop (up to `100,000` iterations) that re-simulates an upstream synthetic table on each iteration, runs any chained downstream transform, statistical test, or nonlinear regression analysis, tracks selected scalar outputs, optionally excludes flagged or non-converged fits, evaluates user-defined `"Hit"` predicates, and summarizes empirical power, coverage, and parameter distributions across `Hits`, `Not Hits`, and `All` tabs. Compatible with all [table archetypes](tables.md#table-archetypes) (see [Analysis Registry: `monte-carlo-simulation`](registry/tables.html#analysis-kind-monte-carlo-simulation)).
+
+- **Commands & shorthands:** Run via [`analysis.run`](../commands.md) or `stats.run` with `monte_carlo` (canonical), `monte_carlo_simulation`, or `stats.monte_carlo`.
+- **Options & defaults:**
+  - `seed`: 64-bit deterministic seed for reproducible per-iteration synthetic tables.
+  - `iterations`: positive integer capped at `100,000`.
+  - `downstream_result_sheet_id`: target downstream result sheet executed on each simulated iteration (auto-tracking up to 8 finite scalars if `tracked_scalars` is omitted).
+  - `tracked_scalars`: list of scalar hooks `{ label, result_sheet_id, parameter_key, data_set_index }` collected per iteration.
+  - `hit_rules`: threshold predicates classifying each retained iteration into `Hits` vs. `Not Hits` (for example, $P < 0.05$ for empirical power or CI coverage checks).
+  - `exclude_flagged_fits`: boolean applying `FitFlagRules::exclude_flagged_from_summary` to omit ambiguous or non-converged nonlinear fits cleanly from summary distributions.
+- **Reported outputs:**
+  - **Summary tabs** (`mc-summary-all`, `mc-summary-hits`, `mc-summary-not-hits`): retained, flagged, hit, and non-hit counts, hit rate percentage, and per-scalar mean, SD, median, IQR, min, and max.
+  - **Per-iteration table & Analyzable Data:** Iteration-level tracked scalar values and hit status exposed for downstream histograms, normality checks, or distribution plotting.
+- **Diagnostic checks:** Validates dependency linkage between the upstream simulation source and `downstream_result_sheet_id` / `tracked_scalars`, honors cooperative cancellation, and logs excluded flagged or failed iterations without aborting the study.
+- **References & verification:**
+  - **References:** Robert & Casella (2004) *Monte Carlo Statistical Methods*; Motulsky & Christopoulos (2004).
+  - **Verified against:** Deterministic engine integration suites verifying reproducibility, `Hits`/`Not Hits`/`All` partitioning, and `exclude_flagged_from_summary` filtering ([statistics evidence](../evidence/statistics.md)).

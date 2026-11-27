@@ -1491,6 +1491,12 @@ fn graph_kind_label(spec: &GraphSpec) -> &'static str {
             DiagnosticPlotKind::ForestPlot => "Forest Plot",
             DiagnosticPlotKind::ResidualPlot => "Residual Plot",
             DiagnosticPlotKind::NormalQqPlot => "Normal Q\u{2013}Q",
+            DiagnosticPlotKind::HomoscedasticityPlot => "Homoscedasticity",
+            DiagnosticPlotKind::ActualVsPredictedPlot => "Actual vs. Predicted",
+            DiagnosticPlotKind::ResidualVsRowPlot => "Residual vs. Row",
+            DiagnosticPlotKind::GapStatisticPlot => "Gap Statistic",
+            DiagnosticPlotKind::ParameterCorrelationHeatmap => "Parameter Correlation",
+            DiagnosticPlotKind::LognormalQqPlot => "Lognormal Q\u{2013}Q",
         },
     }
 }

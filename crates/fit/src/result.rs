@@ -25,6 +25,7 @@ use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
 use curvebook_math::sum::NeumaierSum;
 
+use crate::distribution_plot::{evaluate_theoretical_distribution, populate_distribution_plot_result};
 use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
@@ -490,6 +491,7 @@ fn prepare_nonlinear_fit(spec: &AnalysisSpec, nl_spec: &NonlinearFitSpec, sheet:
         method: nl_spec.method,
         weighting: nl_spec.weighting,
         parameter_rules: nl_spec.parameter_rules.clone(),
+        relational_constraints: nl_spec.relational_constraints.clone(),
         confidence: spec.confidence_level,
         max_iters: nl_spec.clamped_max_iters(),
         compute_profile_ci: nl_spec.profile_likelihood_ci,
@@ -545,6 +547,11 @@ pub fn execute_nonlinear_analysis(
     hooks: &HookContext,
 ) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
+    if let Some(dist_spec) = &nl_spec.plot_distribution {
+        let plot = evaluate_theoretical_distribution(dist_spec, hooks, nl_spec.plot_x_min, nl_spec.plot_x_max, 256)?;
+        populate_distribution_plot_result(&mut result, dist_spec, &plot);
+        return Ok(result);
+    }
     let PreparedNonlinearFit { datasets, mv_y_col_map, model, config } = prepare_nonlinear_fit(spec, nl_spec, sheet)?;
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
@@ -1125,6 +1132,22 @@ fn append_nonlinear_gof_tab(
     if weighted_obj {
         gof.push_num(if is_poisson { "Poisson Deviance" } else { "Weighted Sum of Squares" }, fit.weighted_ss).push_footnote(weighted_footnote);
     }
+    if nl_spec.emit_extra_gof {
+        gof.push_num("Adjusted R squared", fit.adj_r_squared).push_num("RMSE", fit.rmse);
+        if weighted_obj && !is_poisson {
+            gof.push_cell("Weighted R squared", opt_num_cell(fit.weighted_r_squared))
+                .push_cell("Weighted Adjusted R squared", opt_num_cell(fit.weighted_adj_r_squared))
+                .push_cell("Weighted RMSE", opt_num_cell(fit.weighted_rmse))
+                .push_cell("Weighted Sy.x", opt_num_cell(fit.weighted_sy_x));
+        }
+    }
+    if let Some(pg) = &fit.poisson_gof {
+        gof.push_num("Poisson NLL", pg.nll)
+            .push_num("Poisson Null Deviance", pg.null_deviance)
+            .push_num("Poisson Deviance Pseudo-R squared", pg.pseudo_r2_deviance)
+            .push_num("Poisson Pearson Chi-square", pg.pearson_chi2)
+            .push_num("Poisson Dispersion (phi)", pg.dispersion);
+    }
     if let Some(r) = &fit.runs_test {
         gof.push_cell("Runs test P value", p_cell(r.p_too_few_runs, p_fmt));
     }
@@ -1205,11 +1228,39 @@ fn populate_nonlinear_result_sheet(
     if fit.r_squared.is_finite() {
         result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
     }
+    if fit.adj_r_squared.is_finite() {
+        result.scalars.push(ResultScalarEntry { key: "AdjR2".to_owned(), data_set_index: None, value: fit.adj_r_squared, units: None });
+    }
+    if fit.rmse.is_finite() {
+        result.scalars.push(ResultScalarEntry { key: "RMSE".to_owned(), data_set_index: None, value: fit.rmse, units: None });
+    }
     if fit.rss.is_finite() {
         result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
     }
     if weighted_obj && fit.weighted_ss.is_finite() {
         result.scalars.push(ResultScalarEntry { key: "Weighted SS".to_owned(), data_set_index: None, value: fit.weighted_ss, units: None });
+    }
+    if weighted_obj
+        && !is_robust
+        && let Some(wr2) = fit.weighted_r_squared.filter(|v| v.is_finite())
+    {
+        result.scalars.push(ResultScalarEntry { key: "WeightedR2".to_owned(), data_set_index: None, value: wr2, units: None });
+    }
+    if let Some(pg) = &fit.poisson_gof {
+        if pg.nll.is_finite() {
+            result.scalars.push(ResultScalarEntry { key: "PoissonNLL".to_owned(), data_set_index: None, value: pg.nll, units: None });
+        }
+        if pg.pseudo_r2_deviance.is_finite() {
+            result.scalars.push(ResultScalarEntry {
+                key: "PoissonPseudoR2".to_owned(),
+                data_set_index: None,
+                value: pg.pseudo_r2_deviance,
+                units: None,
+            });
+        }
+        if pg.dispersion.is_finite() {
+            result.scalars.push(ResultScalarEntry { key: "PoissonDispersion".to_owned(), data_set_index: None, value: pg.dispersion, units: None });
+        }
     }
     if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
         result.scalars.push(ResultScalarEntry { key: "RSDR".to_owned(), data_set_index: None, value: rsdr, units: None });
@@ -1321,6 +1372,10 @@ pub fn is_log_x_equation_id(equation_id: &str) -> bool {
             | "homologous_one_site_competition"
             | "one_site_competition_ligand_depletion"
             | "allosteric_modulator_competition"
+            | "classic_sigmoidal_dose_response"
+            | "classic_sigmoidal_dose_response_variable_slope"
+            | "classic_one_site_competition"
+            | "classic_two_site_competition"
     )
 }
 
@@ -3328,6 +3383,13 @@ mod tests {
             rsd: (1.0_f64 / 6.0).sqrt(),
             rsdr: None,
             r_squared: 0.99,
+            adj_r_squared: 0.985,
+            rmse: (1.0_f64 / 10.0).sqrt(),
+            weighted_r_squared: None,
+            weighted_adj_r_squared: None,
+            weighted_rmse: None,
+            weighted_sy_x: None,
+            poisson_gof: None,
             aic_c: Some(10.0),
             bic: Some(11.0),
             parameters: vec![

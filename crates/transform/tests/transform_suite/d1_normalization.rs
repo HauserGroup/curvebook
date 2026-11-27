@@ -457,7 +457,12 @@ fn baseline_columns_rowwise_preserves_sem_handles_zero_missing_excluded_and_nega
     }
 
     // Typed AnalysisSpec -> ResultSheet for RemoveBaseline (AC #4).
-    let base_spec = TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Ratio };
+    let base_spec = TransformAnalysisSpec::RemoveBaseline {
+        baseline_columns: vec![0],
+        operation: BaselineOperation::Ratio,
+        baseline_kind: None,
+        retain_unselected_columns: true,
+    };
     let base_analysis = AnalysisSpec::new("an-base-ratio", "xy-rowwise-base", AnalysisKind::Transform(base_spec)).unwrap();
     let base_res = execute_analysis_transform(&s, &base_analysis, &ctx).unwrap();
     assert_eq!(base_res.status, ResultStatus::UpToDate);
@@ -552,9 +557,20 @@ fn math_transform_proportion_uncertainty_and_result_sheet() {
             x_transform: Some(MathTransformPreset::Log10),
             y_transform: Some(preset),
             error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
         };
-        let e_spec =
-            TransformAnalysisSpec::Math { x_transform: None, y_transform: Some(preset), error_propagation: ErrorPropagationMode::ReplicateEndpoints };
+        let e_spec = TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: Some(preset),
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
+        };
         let (d_out, e_out) = (execute_transform(&prop_s, &d_spec, &ctx).unwrap(), execute_transform(&prop_s, &e_spec, &ctx).unwrap());
         let (d_xy, e_xy) = (as_xy(&d_out.data_sheet), as_xy(&e_out.data_sheet));
         assert_approx_eq(d_xy.x_value_at(0).unwrap(), 0.0, NONLINEAR_ABS_TOL, NONLINEAR_REL_TOL, "x0 log10");
@@ -575,6 +591,10 @@ fn math_transform_proportion_uncertainty_and_result_sheet() {
         x_transform: None,
         y_transform: Some(MathTransformPreset::Logit),
         error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
     };
     let math_analysis = AnalysisSpec::new("an-math-logit", "xy-math-prop", AnalysisKind::Transform(math_spec)).unwrap();
     let math_res = execute_analysis_transform(&prop_s, &math_analysis, &ctx).unwrap();
@@ -608,8 +628,15 @@ fn math_transform_decreasing_monotone_endpoints_preserve_lower_upper_ordering() 
             [5.698_970_004_336_019, 5.397_940_008_672_037_5, 5.920_818_753_952_375],
         ),
     ] {
-        let spec =
-            TransformAnalysisSpec::Math { x_transform: None, y_transform: Some(preset), error_propagation: ErrorPropagationMode::ReplicateEndpoints };
+        let spec = TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: Some(preset),
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
+        };
         let out = execute_transform(&ul_s, &spec, &ctx).unwrap();
         let row0 = &as_xy(&out.data_sheet).data_sets[0].cells[0];
         assert_cells_3(row0, exp.map(Num), NL_TOL, label);

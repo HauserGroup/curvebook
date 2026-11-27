@@ -13,32 +13,42 @@
 //! 6. `Correlation`: Pearson `r` vs `H0: r_0 = 0` (Fisher *z*, R `pwr.r.test` hybrid, or conditional *t*-transform).
 //! 7. `ChiSquare`: goodness-of-fit / contingency test parameterized by Cohen's `w` and `df`.
 //! 8. `SimpleLinearRegression`: slope *t*-test / `u = 1` *F*-test parameterized by Cohen's `f^2 = R^2 / (1 - R^2)`, `R^2`, or `(beta1, sigma_x, sigma_eps)` (`lambda = n * f^2`, `df = n - 2`).
+//! 9. `LogRankSurvival`: two-arm log-rank survival comparison parameterized by hazard ratio `HR`, allocation ratio `k = n2 / n1`, and optional arm event probabilities via Schoenfeld (1983) or Freedman (1982).
 //!
 //! Effect-size conventions (`d`, `d_z`, `f`, `h`, `r`, `w`, `f^2`) and the noncentrality parameters
-//! follow Cohen (1988); *t*-test power via the noncentral *t* follows Owen (1965). Per-family sources
-//! are cited on the evaluators below in short `Author (Year)` form.
+//! follow Cohen (1988); *t*-test power via the noncentral *t* follows Owen (1965); log-rank
+//! survival power follows Schoenfeld (1983), Freedman (1982), and Collett (2015). Per-family
+//! sources are cited on the evaluators below in short `Author (Year)` form.
 //!
 //! References:
 //! - Chow, S.-C., Shao, J., & Wang, H. (2008). *Sample Size Calculations in Clinical Research*
 //!   (2nd ed.). Chapman & Hall/CRC.
 //! - Cohen, J. (1988). *Statistical Power Analysis for the Behavioral Sciences* (2nd ed.).
 //!   Lawrence Erlbaum Associates.
+//! - Collett, D. (2015). *Modelling Survival Data in Medical Research* (3rd ed., Ch. 10).
+//!   Chapman & Hall/CRC.
 //! - Fisher, R. A. (1921). On the "probable error" of a coefficient of correlation deduced from a
 //!   small sample. *Metron*, 1, 3-32.
 //! - Fleiss, J. L., Levin, B., & Paik, M. C. (2003). *Statistical Methods for Rates and Proportions*
 //!   (3rd ed.). Wiley.
 //! - Fleiss, J. L., Tytun, A., & Ury, H. K. (1980). A simple approximation for calculating sample
 //!   sizes for comparing independent proportions. *Biometrics*, 36(2), 343-346. doi:10.2307/2529990.
+//! - Freedman, L. S. (1982). Tables of the number of patients required in clinical trials using
+//!   the logrank test. *Statistics in Medicine*, 1(2), 121-129. doi:10.1002/sim.4780010204.
 //! - Owen, D. B. (1965). The power of Student's t-test. *Journal of the American Statistical
 //!   Association*, 60(309), 320-333. doi:10.2307/2283156.
+//! - Schoenfeld, D. A. (1983). Sample-size formula for the proportional-hazards regression model.
+//!   *Biometrics*, 39(2), 499-503. doi:10.2307/2531021.
 
+pub use curvebook_doc::SurvivalPowerMethod;
 use curvebook_doc::{
     AnalysisSpec, Cell, ChecklistStatus, DataSheet, ResultCell, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, XColumnMode,
     XyTable,
 };
 use curvebook_math::dist::{
-    chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
-    student_t_two_sided_isf,
+    chi2_isf, f_isf, freedman_logrank_detectable_hr, freedman_logrank_events, freedman_logrank_power, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf,
+    norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, schoenfeld_logrank_detectable_hr, schoenfeld_logrank_events, schoenfeld_logrank_power,
+    student_t_isf, student_t_two_sided_isf, survival_sample_size_from_events,
 };
 use curvebook_math::quad::gauss_legendre_32;
 use curvebook_math::roots::{RootOptions, brent_root};
@@ -83,11 +93,13 @@ pub enum PowerTestFamily {
     ChiSquare,
     /// Conditional fixed-*x* simple linear regression slope *t*-test (`df = n - 2`, Cohen's $f^2 = R^2 / (1 - R^2)$).
     SimpleLinearRegression,
+    /// Two-arm log-rank survival comparison via Schoenfeld (1983) or Freedman (1982) event formulas.
+    LogRankSurvival,
 }
 
 impl PowerTestFamily {
-    /// All eight supported power-analysis test families in canonical wizard order.
-    pub const ALL: [Self; 8] = [
+    /// All nine supported power-analysis test families in canonical wizard order.
+    pub const ALL: [Self; 9] = [
         Self::TwoSampleUnpairedT,
         Self::TwoSamplePairedT,
         Self::OneSampleT,
@@ -96,6 +108,7 @@ impl PowerTestFamily {
         Self::Correlation,
         Self::ChiSquare,
         Self::SimpleLinearRegression,
+        Self::LogRankSurvival,
     ];
 
     /// Neutral display label for UI pickers and result summaries.
@@ -110,6 +123,7 @@ impl PowerTestFamily {
             Self::Correlation => "Pearson correlation",
             Self::ChiSquare => "Chi-square test",
             Self::SimpleLinearRegression => "Simple linear regression",
+            Self::LogRankSurvival => "Log-rank survival test",
         }
     }
 
@@ -124,6 +138,7 @@ impl PowerTestFamily {
             Self::Correlation => "Pearson r",
             Self::ChiSquare => "Cohen's w",
             Self::SimpleLinearRegression => "Cohen's f^2",
+            Self::LogRankSurvival => "Hazard ratio (HR)",
         }
     }
 
@@ -142,7 +157,7 @@ impl PowerTestFamily {
     #[must_use]
     pub const fn min_integer_n(self) -> usize {
         match self {
-            Self::TwoSampleUnpairedT | Self::TwoSamplePairedT | Self::OneSampleT | Self::OneWayAnova => 2,
+            Self::TwoSampleUnpairedT | Self::TwoSamplePairedT | Self::OneSampleT | Self::OneWayAnova | Self::LogRankSurvival => 2,
             Self::SimpleLinearRegression => 3,
             Self::Correlation => 4,
             Self::TwoProportions | Self::ChiSquare => 1,
@@ -285,6 +300,15 @@ pub enum PowerEffectSpec {
         /// Residual error standard deviation `sigma_epsilon > 0`.
         sigma_eps: f64,
     },
+    /// Hazard ratio (`HR > 0`, `HR != 1`) and optional per-arm cumulative event probabilities for [`PowerTestFamily::LogRankSurvival`].
+    HazardRatio {
+        /// Alternative hazard ratio `HR = lambda_2 / lambda_1 > 0`.
+        hazard_ratio: f64,
+        /// Optional cumulative event probability in arm 1 (`(0, 1]`).
+        event_prob_group1: Option<f64>,
+        /// Optional cumulative event probability in arm 2 (`(0, 1]`).
+        event_prob_group2: Option<f64>,
+    },
 }
 
 /// Typed input specification for [`solve_power`], [`compute_power_curve`], and [`compute_sensitivity_table`].
@@ -319,6 +343,18 @@ pub struct PowerAnalysisRequest {
     pub continuity_correction: bool,
     /// Power-curve convention for `Correlation` (default `FisherZ`).
     pub correlation_method: CorrelationPowerMethod,
+    /// Survival required-events approximation formula (`Schoenfeld` or `Freedman`) for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub survival_method: SurvivalPowerMethod,
+    /// Optional target or available total event count `D > 0` for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub target_events: Option<f64>,
+    /// Optional cumulative event probability `p_E1 in (0, 1]` in arm 1 for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub event_prob_group1: Option<f64>,
+    /// Optional cumulative event probability `p_E2 in (0, 1]` in arm 2 for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub event_prob_group2: Option<f64>,
 }
 
 impl Default for PowerAnalysisRequest {
@@ -338,6 +374,10 @@ impl Default for PowerAnalysisRequest {
             two_proportions_mode: TwoProportionsMethod::PooledNullUnpooledAlt,
             continuity_correction: false,
             correlation_method: CorrelationPowerMethod::FisherZ,
+            survival_method: SurvivalPowerMethod::Schoenfeld,
+            target_events: None,
+            event_prob_group1: None,
+            event_prob_group2: None,
         }
     }
 }
@@ -460,6 +500,18 @@ impl PowerAnalysisRequest {
         }
     }
 
+    /// Construct a two-arm log-rank survival sample-size request from hazard ratio `HR = lambda_2 / lambda_1`.
+    #[must_use]
+    pub fn log_rank_survival(hazard_ratio: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::LogRankSurvival,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1: None, event_prob_group2: None },
+            ..Self::default()
+        }
+    }
+
     /// Set the unknown quantity solved by [`solve_power`] (`SampleSize`, `Power`, or `DetectableEffect`).
     #[must_use]
     pub const fn with_target(mut self, target: PowerSolveTarget) -> Self {
@@ -550,6 +602,28 @@ impl PowerAnalysisRequest {
         self.correlation_method = method;
         self
     }
+
+    /// Set the survival required-events formula (`Schoenfeld` or `Freedman`) for `LogRankSurvival`.
+    #[must_use]
+    pub const fn with_survival_method(mut self, method: SurvivalPowerMethod) -> Self {
+        self.survival_method = method;
+        self
+    }
+
+    /// Set a target or available total event count `D > 0` for `LogRankSurvival`.
+    #[must_use]
+    pub const fn with_target_events(mut self, events: f64) -> Self {
+        self.target_events = Some(events);
+        self
+    }
+
+    /// Set optional per-arm cumulative event probabilities `(p_E1, p_E2)` in `(0, 1]` for `LogRankSurvival`.
+    #[must_use]
+    pub const fn with_survival_event_probs(mut self, event_prob_group1: Option<f64>, event_prob_group2: Option<f64>) -> Self {
+        self.event_prob_group1 = event_prob_group1;
+        self.event_prob_group2 = event_prob_group2;
+        self
+    }
 }
 
 /// Single point on a power-vs-sample-size curve (`Stage 4` interactive chart).
@@ -617,6 +691,12 @@ pub struct PowerAnalysisResult {
     pub cohens_h: Option<f64>,
     /// Implied `R^2 = f^2 / (1 + f^2)` for `SimpleLinearRegression`.
     pub implied_r_squared: Option<f64>,
+    /// Required or evaluated continuous total event count `D` for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub required_events: Option<f64>,
+    /// Pooled cumulative event probability `p_bar = (p_E1 + k * p_E2) / (1 + k)` for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default)]
+    pub pooled_event_prob: Option<f64>,
     /// Denominator / test degrees of freedom evaluated at ceiling `n` (`None` for normal-approx two proportions).
     pub actual_df: Option<f64>,
     /// Numerator degrees of freedom (`Some(k - 1)` for ANOVA, `Some(1.0)` for SimpleLinearRegression).
@@ -756,6 +836,12 @@ enum ResolvedEffect {
         sign: f64,
         slope_scale: Option<f64>,
     },
+    LogRankSurvival {
+        hr: f64,
+        p_e1: Option<f64>,
+        p_e2: Option<f64>,
+        hint_hr_gt1: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -770,6 +856,8 @@ struct ResolvedContext {
     two_proportions_mode: TwoProportionsMethod,
     continuity_correction: bool,
     correlation_method: CorrelationPowerMethod,
+    survival_method: SurvivalPowerMethod,
+    target_events: Option<f64>,
     effect: ResolvedEffect,
 }
 
@@ -1090,15 +1178,72 @@ fn resolve_regression_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffec
     }
 }
 
+fn validate_event_prob(name: &'static str, v: f64) -> Result<f64, StatsError> {
+    if !v.is_finite() || v <= 0.0 || v > 1.0 {
+        return Err(StatsError::InvalidParameter { name, value: v });
+    }
+    Ok(v)
+}
+
+/// Resolve arm cumulative event probabilities `(p_E1, p_E2)` under proportional hazards
+/// (`S_2 = S_1^HR` when only arm 1 is supplied, `S_1 = S_2^(1/HR)` when only arm 2 is supplied,
+/// and `(1.0, 1.0)` in direct-event mode when neither is supplied).
+fn survival_arm_event_probs(hr: f64, p_e1: Option<f64>, p_e2: Option<f64>) -> (f64, f64) {
+    match (p_e1, p_e2) {
+        (Some(e1), Some(e2)) => (e1, e2),
+        (Some(e1), None) => {
+            let e2 = if e1 >= 1.0 { 1.0 } else { -((hr * (-e1).ln_1p()).exp_m1()) };
+            (e1, e2.clamp(f64::MIN_POSITIVE, 1.0))
+        }
+        (None, Some(e2)) => {
+            let e1 = if e2 >= 1.0 { 1.0 } else { -(((-e2).ln_1p() / hr).exp_m1()) };
+            (e1.clamp(f64::MIN_POSITIVE, 1.0), e2)
+        }
+        (None, None) => (1.0, 1.0),
+    }
+}
+
+fn survival_pooled_event_prob(hr: f64, p_e1: Option<f64>, p_e2: Option<f64>, k: f64) -> f64 {
+    let (e1, e2) = survival_arm_event_probs(hr, p_e1, p_e2);
+    (e1 + k * e2) / (1.0 + k)
+}
+
+fn resolve_survival_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    let (hr_opt, eff_e1, eff_e2) = match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => (None, None, None),
+        PowerEffectSpec::Standardized(hr) => (Some(*hr), None, None),
+        PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+            (Some(*hazard_ratio), *event_prob_group1, *event_prob_group2)
+        }
+        _ => {
+            return Err(StatsError::IncompatibleAnalysisSpec { expected: "LogRankSurvival effect specification (HazardRatio or Standardized(HR))" });
+        }
+    };
+    let hr = match hr_opt {
+        Some(h) => validate_positive_finite("hazard_ratio", h)?,
+        None => 1.0,
+    };
+    let p_e1 = eff_e1.or(req.event_prob_group1).map(|v| validate_event_prob("event_prob_group1", v)).transpose()?;
+    let p_e2 = eff_e2.or(req.event_prob_group2).map(|v| validate_event_prob("event_prob_group2", v)).transpose()?;
+    let hint_hr_gt1 = match req.tail_mode {
+        TailMode::OneSided(OneSidedDirection::Greater) => true,
+        TailMode::OneSided(OneSidedDirection::Less) => false,
+        TailMode::TwoSided => hr_opt.is_some_and(|h| h > 1.0),
+    };
+    Ok(ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, hint_hr_gt1 })
+}
+
 fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsError> {
     let alpha = validate_prob_open("alpha", req.alpha)?;
     validate_tail_mode(req.family, req.tail_mode)?;
     let mut allocation_ratio = validate_allocation_ratio(req.allocation_ratio)?;
     let mut fixed_n2 = None;
-    if req.sample_size_group2.is_some() && !matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+    let is_two_arm = matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival);
+    if req.sample_size_group2.is_some() && !is_two_arm {
         return Err(StatsError::IncompatibleAnalysisSpec { expected: "sample_size_group2 is only valid for two-sample designs" });
     }
-    if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+    if is_two_arm {
         let is_welch = matches!(&req.effect, PowerEffectSpec::MeanDiffAndSd { sd_group2: Some(_), .. });
         let min_n2 = if is_welch { 1.0 + 1e-6 } else { 1.0 };
         match (req.sample_size, req.sample_size_group2) {
@@ -1121,6 +1266,16 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
         }
     }
 
+    let target_events = match req.target_events {
+        Some(ev) => {
+            if !ev.is_finite() || ev <= 0.0 || ev > MAX_CONTINUOUS_N {
+                return Err(StatsError::InvalidParameter { name: "target_events", value: ev });
+            }
+            Some(ev)
+        }
+        None => None,
+    };
+
     let target_power = match req.solve_target {
         PowerSolveTarget::SampleSize | PowerSolveTarget::DetectableEffect => {
             let tp = req.target_power.ok_or(StatsError::InvalidParameter { name: "target_power", value: f64::NAN })?;
@@ -1138,6 +1293,7 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
         PowerTestFamily::Correlation => resolve_correlation_effect(req)?,
         PowerTestFamily::ChiSquare => resolve_chi_square_effect(req)?,
         PowerTestFamily::SimpleLinearRegression => resolve_regression_effect(req)?,
+        PowerTestFamily::LogRankSurvival => resolve_survival_effect(req)?,
     };
 
     Ok(ResolvedContext {
@@ -1151,6 +1307,8 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
         two_proportions_mode: req.two_proportions_mode,
         continuity_correction: req.continuity_correction,
         correlation_method: req.correlation_method,
+        survival_method: req.survival_method,
+        target_events,
         effect,
     })
 }
@@ -1552,7 +1710,74 @@ fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Re
             let delta = *sign * (n1 * (*f2)).sqrt();
             t_power(df, delta, ctx.alpha, ctx.tail_mode, Some(1.0))
         }
+        ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } => {
+            let n2 = eff_n2.unwrap_or(ctx.allocation_ratio * n1);
+            if !n1.is_finite() || !n2.is_finite() || n1 <= 0.0 || n2 <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let k_eff = n2 / n1;
+            let (e1, e2) = survival_arm_event_probs(*hr, *p_e1, *p_e2);
+            let total_events = n1 * e1 + n2 * e2;
+            survival_power_from_events(ctx.survival_method, total_events, *hr, ctx.alpha, k_eff, ctx.tail_mode)
+        }
     }
+}
+
+/// Evaluate two-arm log-rank survival power from total expected events `D`, hazard ratio `HR`,
+/// allocation ratio `k = n2 / n1`, and significance level `alpha` via Schoenfeld (1983) or
+/// Freedman (1982).
+fn survival_power_from_events(
+    method: SurvivalPowerMethod,
+    total_events: f64,
+    hr: f64,
+    alpha: f64,
+    k: f64,
+    tail_mode: TailMode,
+) -> Result<PowerEval, StatsError> {
+    if !total_events.is_finite() || total_events <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "target_events", value: total_events });
+    }
+    let z_crit = z_critical_value(alpha, tail_mode)?;
+    if (hr - 1.0).abs() == 0.0 {
+        let crit_out = if matches!(tail_mode, TailMode::OneSided(OneSidedDirection::Less)) { -z_crit } else { z_crit };
+        return Ok(PowerEval { power: alpha, actual_df: None, numerator_df: None, noncentrality_param: 0.0, critical_value: crit_out });
+    }
+    let signed_drift = match method {
+        SurvivalPowerMethod::Schoenfeld => (total_events * k).sqrt() / (1.0 + k) * hr.ln(),
+        SurvivalPowerMethod::Freedman => (total_events * k).sqrt() * (hr - 1.0) / (1.0 + k * hr),
+    };
+    let (crit_out, power) = match tail_mode {
+        TailMode::TwoSided => {
+            let p = match method {
+                SurvivalPowerMethod::Schoenfeld => schoenfeld_logrank_power(total_events, hr, alpha, k, true)?,
+                SurvivalPowerMethod::Freedman => freedman_logrank_power(total_events, hr, alpha, k, true)?,
+            };
+            (z_crit, p)
+        }
+        TailMode::OneSided(OneSidedDirection::Greater) => {
+            let p = if hr > 1.0 {
+                match method {
+                    SurvivalPowerMethod::Schoenfeld => schoenfeld_logrank_power(total_events, hr, alpha, k, false)?,
+                    SurvivalPowerMethod::Freedman => freedman_logrank_power(total_events, hr, alpha, k, false)?,
+                }
+            } else {
+                norm_cdf(signed_drift - z_crit).clamp(0.0, 1.0)
+            };
+            (z_crit, p)
+        }
+        TailMode::OneSided(OneSidedDirection::Less) => {
+            let p = if hr < 1.0 {
+                match method {
+                    SurvivalPowerMethod::Schoenfeld => schoenfeld_logrank_power(total_events, hr, alpha, k, false)?,
+                    SurvivalPowerMethod::Freedman => freedman_logrank_power(total_events, hr, alpha, k, false)?,
+                }
+            } else {
+                norm_cdf(-signed_drift - z_crit).clamp(0.0, 1.0)
+            };
+            (-z_crit, p)
+        }
+    };
+    Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: signed_drift, critical_value: crit_out })
 }
 
 // ============================================================================
@@ -1595,6 +1820,13 @@ fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
             CorrelationPowerMethod::FisherZ | CorrelationPowerMethod::FisherZWithTCrit => 3.005,
         },
         PowerTestFamily::SimpleLinearRegression => 2.25,
+        PowerTestFamily::LogRankSurvival => {
+            if ctx.fixed_n2.is_some() {
+                1.0
+            } else {
+                1.0_f64.max((1.0 + 1e-12) / ctx.allocation_ratio)
+            }
+        }
     }
 }
 
@@ -1655,7 +1887,7 @@ fn min_curve_integer_n(ctx: &ResolvedContext) -> Result<usize, StatsError> {
             };
             Ok(base.max(need))
         }
-        PowerTestFamily::TwoProportions => {
+        PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival => {
             if ctx.fixed_n2.is_some() {
                 return Ok(base.max(1));
             }
@@ -1681,6 +1913,7 @@ fn validate_directional_effect_for_sample_size(ctx: &ResolvedContext, target_pow
         ResolvedEffect::Correlation { r } => *r,
         ResolvedEffect::ChiSquare { w, .. } => *w,
         ResolvedEffect::LinearRegression { f2, sign, .. } => *sign * f2.sqrt(),
+        ResolvedEffect::LogRankSurvival { hr, .. } => hr.ln(),
     };
 
     if signed == 0.0 {
@@ -1726,6 +1959,12 @@ fn asymptotic_n_guess(ctx: &ResolvedContext, target_power: f64) -> f64 {
         ResolvedEffect::Correlation { r } => ((z_sum / r.atanh().abs().max(1e-6)).powi(2) + 3.0).max(5.0),
         ResolvedEffect::ChiSquare { w, df } => ((z_sum + df.sqrt()).powi(2) / w.abs().max(1e-6).powi(2)).max(2.0),
         ResolvedEffect::LinearRegression { f2, .. } => ((z_sum * z_sum) / f2.abs().max(1e-8) + 2.0).max(4.0),
+        ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } => {
+            let p_bar = survival_pooled_event_prob(*hr, *p_e1, *p_e2, k).max(1e-6);
+            let ln_hr = hr.ln().abs().max(1e-6);
+            let events = ((1.0 + k) * (1.0 + k) / k) * (z_sum / ln_hr).powi(2);
+            (events / ((1.0 + k) * p_bar)).max(2.0)
+        }
     }
 }
 
@@ -1744,6 +1983,22 @@ fn solve_continuous_n(ctx: &ResolvedContext) -> Result<f64, StatsError> {
             return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
         }
         return Ok(n_cont);
+    }
+    if ctx.family == PowerTestFamily::LogRankSurvival
+        && ctx.fixed_n2.is_none()
+        && let ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } = &ctx.effect
+    {
+        let two_sided = matches!(ctx.tail_mode, TailMode::TwoSided);
+        let events = match ctx.survival_method {
+            SurvivalPowerMethod::Schoenfeld => schoenfeld_logrank_events(*hr, ctx.alpha, target_power, ctx.allocation_ratio, two_sided)?,
+            SurvivalPowerMethod::Freedman => freedman_logrank_events(*hr, ctx.alpha, target_power, ctx.allocation_ratio, two_sided)?,
+        };
+        let (e1, e2) = survival_arm_event_probs(*hr, *p_e1, *p_e2);
+        let (n1, _n2, _total) = survival_sample_size_from_events(events, e1, e2, ctx.allocation_ratio)?;
+        if !n1.is_finite() || n1 > MAX_CONTINUOUS_N {
+            return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
+        }
+        return Ok(n1);
     }
 
     let guess = asymptotic_n_guess(ctx, target_power).max(n_min + 1.0);
@@ -2058,6 +2313,58 @@ fn solve_detectable_effect(ctx: &mut ResolvedContext, n1: f64, n2_explicit: Opti
             *f2 = (delta * delta) / n1;
             *sign = if delta < 0.0 { -1.0 } else { 1.0 };
         }
+        ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, hint_hr_gt1 } => {
+            if target_power <= ctx.alpha && matches!(ctx.tail_mode, TailMode::TwoSided) {
+                return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+            }
+            let two_sided = matches!(ctx.tail_mode, TailMode::TwoSided);
+            let k_eff = if ctx.target_events.is_some() && n2_explicit.is_none() {
+                ctx.allocation_ratio
+            } else {
+                if !n1.is_finite() || !n2.is_finite() || n1 <= 0.0 || n2 <= 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+                }
+                n2 / n1
+            };
+            let hr_gt1 = match ctx.tail_mode {
+                TailMode::OneSided(OneSidedDirection::Greater) => true,
+                TailMode::OneSided(OneSidedDirection::Less) => false,
+                TailMode::TwoSided => *hint_hr_gt1,
+            };
+            let fixed_events = match (ctx.target_events, *p_e1, *p_e2) {
+                (Some(d), _, _) => Some(d),
+                (None, Some(e1), Some(e2)) => Some(n1 * e1 + n2 * e2),
+                (None, None, None) => Some(n1 + n2),
+                _ => None,
+            };
+            if let Some(total_events) = fixed_events {
+                let solved_hr = match ctx.survival_method {
+                    SurvivalPowerMethod::Schoenfeld => {
+                        schoenfeld_logrank_detectable_hr(total_events, ctx.alpha, target_power, k_eff, two_sided, hr_gt1)?
+                    }
+                    SurvivalPowerMethod::Freedman => freedman_logrank_detectable_hr(total_events, ctx.alpha, target_power, k_eff, two_sided, hr_gt1)?,
+                };
+                *hr = solved_hr;
+            } else {
+                // Fixed sample sizes (n1, n2) with only one arm event probability supplied:
+                // total expected events D(HR) depends on HR via S_2 = S_1^HR (or S_1 = S_2^(1/HR)).
+                let eval_ln_hr = |ln_hr: f64| -> f64 {
+                    let cand_hr = ln_hr.exp();
+                    let (e1, e2) = survival_arm_event_probs(cand_hr, *p_e1, *p_e2);
+                    let d = n1 * e1 + n2 * e2;
+                    survival_power_from_events(ctx.survival_method, d, cand_hr, ctx.alpha, k_eff, ctx.tail_mode)
+                        .map_or(f64::NAN, |ev| ev.power - target_power)
+                };
+                let (lo, hi) = if hr_gt1 { (0.0, 20.0) } else { (-20.0, 0.0) };
+                let f_lo = eval_ln_hr(lo);
+                let f_hi = eval_ln_hr(hi);
+                if !f_lo.is_finite() || !f_hi.is_finite() || f_lo * f_hi > 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+                }
+                let solved_ln_hr = brent_root(eval_ln_hr, lo, hi, ROOT_TOL)?;
+                *hr = solved_ln_hr.exp();
+            }
+        }
     }
     Ok(())
 }
@@ -2067,15 +2374,30 @@ fn solve_detectable_effect(ctx: &mut ResolvedContext, n1: f64, n2_explicit: Opti
 // ============================================================================
 
 fn extract_input_n(req: &PowerAnalysisRequest, ctx: &ResolvedContext) -> Result<(f64, Option<f64>), StatsError> {
+    if req.family == PowerTestFamily::LogRankSurvival
+        && req.sample_size.is_none()
+        && let Some(events) = ctx.target_events
+    {
+        let p_bar = match &ctx.effect {
+            ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } => survival_pooled_event_prob(*hr, *p_e1, *p_e2, ctx.allocation_ratio),
+            _ => 1.0,
+        };
+        let n1 = events / ((1.0 + ctx.allocation_ratio) * p_bar);
+        if !n1.is_finite() || n1 <= 0.0 || n1 > MAX_CONTINUOUS_N {
+            return Err(StatsError::InvalidParameter { name: "target_events", value: events });
+        }
+        return Ok((n1, None));
+    }
     let n1 = req.sample_size.ok_or(StatsError::InvalidParameter { name: "sample_size", value: f64::NAN })?;
     let n_min = min_continuous_n(ctx);
     if !n1.is_finite() || n1 < n_min || n1 > MAX_CONTINUOUS_N {
         return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
     }
     let is_welch = matches!(&ctx.effect, ResolvedEffect::UnpairedT { welch_sds: Some(_), .. });
+    let is_two_arm = matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival);
     let n2 = match req.sample_size_group2 {
         Some(v) => {
-            if !matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+            if !is_two_arm {
                 return Err(StatsError::IncompatibleAnalysisSpec { expected: "sample_size_group2 is only valid for two-sample designs" });
             }
             let min_n2 = if is_welch { 1.0 + 1e-6 } else { 1.0 };
@@ -2098,7 +2420,7 @@ fn min_group2_integer_n(ctx: &ResolvedContext) -> usize {
 
 fn checked_two_sample_or_total_counts(ctx: &ResolvedContext, n1: usize, n2_explicit: Option<f64>) -> Result<(Option<usize>, usize), StatsError> {
     match ctx.family {
-        PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions => {
+        PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival => {
             let n2_min = min_group2_integer_n(ctx);
             let mut n2 = match n2_explicit.or(ctx.fixed_n2) {
                 Some(n2v) => f64_to_checked_usize("sample_size_group2", n2v.ceil())?,
@@ -2169,6 +2491,9 @@ fn summarize_effect(effect: &ResolvedEffect) -> DerivedEffectSummary {
             cohens_h: None,
             implied_r_squared: Some(*f2 / (1.0 + *f2)),
         },
+        ResolvedEffect::LogRankSurvival { hr, .. } => {
+            DerivedEffectSummary { canonical: *hr, raw: Some(hr.ln()), implied_p2: None, cohens_h: None, implied_r_squared: None }
+        }
     }
 }
 
@@ -2223,6 +2548,17 @@ fn build_convention_notes(ctx: &ResolvedContext) -> Vec<String> {
         PowerTestFamily::SimpleLinearRegression => {
             notes.push(String::from("Simple linear regression slope test (u = 1, df = n - 2, lambda = n * f^2)."));
         }
+        PowerTestFamily::LogRankSurvival => {
+            let method_str = match ctx.survival_method {
+                SurvivalPowerMethod::Schoenfeld => "Schoenfeld (1983)",
+                SurvivalPowerMethod::Freedman => "Freedman (1982)",
+            };
+            let alloc_desc = match ctx.fixed_n2 {
+                Some(n2_fix) => format!("fixed n2 = {n2_fix:.1}"),
+                None => format!("n2/n1 = {:.3}", ctx.allocation_ratio),
+            };
+            notes.push(format!("Two-arm log-rank survival test via {method_str} formula ({alloc_desc})."));
+        }
     }
     notes
 }
@@ -2274,8 +2610,20 @@ fn solve_power_core_with_ctx(req: &PowerAnalysisRequest) -> Result<(PowerAnalysi
         PowerSolveTarget::DetectableEffect => {
             let (n1, n2) = extract_input_n(req, &ctx)?;
             solve_detectable_effect(&mut ctx, n1, n2)?;
-            let ev_cont = eval_power_at(&ctx, n1, n2)?;
-            (n1, n2, ev_cont.power)
+            // If LogRankSurvival solved DetectableEffect from target_events with single-arm event prob,
+            // refresh continuous n1 using the solved HR's pooled event probability.
+            let final_n1 = if req.family == PowerTestFamily::LogRankSurvival
+                && req.sample_size.is_none()
+                && let Some(events) = ctx.target_events
+                && let ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } = &ctx.effect
+            {
+                let p_bar = survival_pooled_event_prob(*hr, *p_e1, *p_e2, ctx.allocation_ratio);
+                events / ((1.0 + ctx.allocation_ratio) * p_bar)
+            } else {
+                n1
+            };
+            let ev_cont = eval_power_at(&ctx, final_n1, n2)?;
+            (final_n1, n2, ev_cont.power)
         }
     };
 
@@ -2283,6 +2631,21 @@ fn solve_power_core_with_ctx(req: &PowerAnalysisRequest) -> Result<(PowerAnalysi
     let ceil_eval_init = eval_power_at(&ctx, n1_ceil as f64, n2_ceil.map(|v| v as f64))?;
     let (n_per_group, n_group2, total_n, ceil_eval) = verify_discrete_ceiling(&ctx, n1_ceil, n2_ceil, total_ceil, ceil_eval_init)?;
     let eff = summarize_effect(&ctx.effect);
+
+    let (required_events, pooled_event_prob) = match &ctx.effect {
+        ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } => {
+            let n2_cont = n2_explicit.or(ctx.fixed_n2).unwrap_or(ctx.allocation_ratio * continuous_n);
+            let k_eff = n2_cont / continuous_n;
+            let (e1, e2) = survival_arm_event_probs(*hr, *p_e1, *p_e2);
+            let p_bar = (e1 + k_eff * e2) / (1.0 + k_eff);
+            let events = match (ctx.solve_target, ctx.target_events) {
+                (PowerSolveTarget::Power | PowerSolveTarget::DetectableEffect, Some(d)) if req.sample_size.is_none() => d,
+                _ => continuous_n * e1 + n2_cont * e2,
+            };
+            (Some(events), Some(p_bar))
+        }
+        _ => (None, None),
+    };
 
     let result = PowerAnalysisResult {
         family: ctx.family,
@@ -2301,6 +2664,8 @@ fn solve_power_core_with_ctx(req: &PowerAnalysisRequest) -> Result<(PowerAnalysi
         implied_p2: eff.implied_p2,
         cohens_h: eff.cohens_h,
         implied_r_squared: eff.implied_r_squared,
+        required_events,
+        pooled_event_prob,
         actual_df: ceil_eval.actual_df,
         numerator_df: ceil_eval.numerator_df,
         noncentrality_param: ceil_eval.noncentrality_param,
@@ -2316,7 +2681,7 @@ fn solve_power_core(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, S
     solve_power_core_with_ctx(req).map(|(res, _)| res)
 }
 
-/// Solve a power, sample-size, or minimum-detectable-effect request across any of the 8 test
+/// Solve a power, sample-size, or minimum-detectable-effect request across any of the 9 test
 /// families, populating Stage 4 power curves and sensitivity tables.
 ///
 /// # Errors
@@ -2339,6 +2704,10 @@ pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, St
             curve_req.sample_size_group2 = None;
         }
     }
+    let sens_req = curve_req.clone();
+    if req.family == PowerTestFamily::LogRankSurvival {
+        curve_req.target_events = None;
+    }
 
     let min_curve_n = min_curve_integer_n(&ctx)?;
     let center_n = res.n_per_group.max(min_curve_n);
@@ -2356,11 +2725,14 @@ pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, St
 
     let can_build_sensitivity = match req.solve_target {
         PowerSolveTarget::DetectableEffect => true,
-        _ => res.effect_size != 0.0,
+        _ => match &ctx.effect {
+            ResolvedEffect::LogRankSurvival { hr, .. } => (*hr - 1.0).abs() > 0.0,
+            _ => res.effect_size != 0.0,
+        },
     };
     if can_build_sensitivity {
         let valid_alphas: Vec<f64> = DEFAULT_SENSITIVITY_ALPHAS.iter().copied().filter(|&a| a < 0.70).collect();
-        if let Ok((table, omitted)) = compute_sensitivity_table_best_effort(&curve_req, &valid_alphas, DEFAULT_SENSITIVITY_POWERS) {
+        if let Ok((table, omitted)) = compute_sensitivity_table_best_effort(&sens_req, &valid_alphas, DEFAULT_SENSITIVITY_POWERS) {
             res.sensitivity_table = table;
             if omitted > 0 {
                 let total_cells = valid_alphas.len() * DEFAULT_SENSITIVITY_POWERS.len();
@@ -2386,6 +2758,9 @@ fn resolved_effect_to_spec(res: &PowerAnalysisResult, effect: &ResolvedEffect) -
         ResolvedEffect::LinearRegression { f2, sign, slope_scale } => {
             let sigma_eps = slope_scale.unwrap_or(1.0);
             PowerEffectSpec::RegressionSlope { beta1: *sign * f2.sqrt() * sigma_eps, sigma_x: 1.0, sigma_eps }
+        }
+        ResolvedEffect::LogRankSurvival { hr, p_e1, p_e2, .. } => {
+            PowerEffectSpec::HazardRatio { hazard_ratio: *hr, event_prob_group1: *p_e1, event_prob_group2: *p_e2 }
         }
         _ => PowerEffectSpec::Standardized(res.effect_size),
     }
@@ -2414,13 +2789,14 @@ pub fn compute_power_curve(req: &PowerAnalysisRequest, n_min: usize, n_max: usiz
         return Ok(Vec::new());
     }
 
-    let design_pair = if matches!(ctx.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions)
-        && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
-    {
-        Some((f64_to_checked_usize("sample_size", n1_raw.ceil())?, n2_raw))
-    } else {
-        None
-    };
+    let design_pair =
+        if matches!(ctx.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival)
+            && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
+        {
+            Some((f64_to_checked_usize("sample_size", n1_raw.ceil())?, n2_raw))
+        } else {
+            None
+        };
 
     let n_values = sample_integer_grid(lo, n_max, num_points);
     let mut points = Vec::with_capacity(n_values.len());
@@ -2464,7 +2840,10 @@ fn sample_integer_grid(lo: usize, hi: usize, num_points: usize) -> Vec<usize> {
 fn prepare_sensitivity_base(req: &PowerAnalysisRequest) -> Result<(PowerAnalysisRequest, PowerSolveTarget), StatsError> {
     let mode = if req.solve_target == PowerSolveTarget::DetectableEffect { PowerSolveTarget::DetectableEffect } else { PowerSolveTarget::SampleSize };
     let mut base_req = req.clone();
-    if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions)
+    if mode == PowerSolveTarget::SampleSize {
+        base_req.target_events = None;
+    }
+    if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions | PowerTestFamily::LogRankSurvival)
         && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
     {
         let is_welch = matches!(&req.effect, PowerEffectSpec::MeanDiffAndSd { sd_group2: Some(_), .. });
@@ -2557,6 +2936,7 @@ pub fn power_request_from_doc_spec(spec: &curvebook_doc::PowerAnalysisSpec) -> P
         curvebook_doc::PowerTestFamily::Correlation => PowerTestFamily::Correlation,
         curvebook_doc::PowerTestFamily::ChiSquare => PowerTestFamily::ChiSquare,
         curvebook_doc::PowerTestFamily::SimpleLinearRegression => PowerTestFamily::SimpleLinearRegression,
+        curvebook_doc::PowerTestFamily::LogRankSurvival => PowerTestFamily::LogRankSurvival,
     };
     let solve_target = match spec.solve_target {
         curvebook_doc::PowerSolveTarget::SampleSize => PowerSolveTarget::SampleSize,
@@ -2598,6 +2978,9 @@ pub fn power_request_from_doc_spec(spec: &curvebook_doc::PowerAnalysisSpec) -> P
         curvebook_doc::PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
             PowerEffectSpec::RegressionSlope { beta1: *beta1, sigma_x: *sigma_x, sigma_eps: *sigma_eps }
         }
+        curvebook_doc::PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+            PowerEffectSpec::HazardRatio { hazard_ratio: *hazard_ratio, event_prob_group1: *event_prob_group1, event_prob_group2: *event_prob_group2 }
+        }
     };
     PowerAnalysisRequest {
         family,
@@ -2614,6 +2997,10 @@ pub fn power_request_from_doc_spec(spec: &curvebook_doc::PowerAnalysisSpec) -> P
         two_proportions_mode,
         continuity_correction: spec.continuity_correction,
         correlation_method,
+        survival_method: spec.survival_method,
+        target_events: spec.target_events,
+        event_prob_group1: spec.event_prob_group1,
+        event_prob_group2: spec.event_prob_group2,
     }
 }
 
@@ -2636,7 +3023,7 @@ pub fn run_power_analysis(_sheet: &DataSheet, spec: &AnalysisSpec, doc_power: &c
     };
 
     let sum_headers = vec![String::from("Estimate")];
-    let sum_row_labels = vec![
+    let mut sum_row_labels = vec![
         String::from("Test family"),
         String::from("Solve target"),
         String::from("Tail mode"),
@@ -2657,7 +3044,7 @@ pub fn run_power_analysis(_sheet: &DataSheet, spec: &AnalysisSpec, doc_power: &c
         String::from("Cohen's h"),
         String::from("Implied R^2"),
     ];
-    let sum_rows = vec![
+    let mut sum_rows = vec![
         vec![ResultCell::Text(String::from(solved.family.label()))],
         vec![ResultCell::Text(String::from(solve_label))],
         vec![ResultCell::Text(String::from(tail_label))],
@@ -2678,6 +3065,18 @@ pub fn run_power_analysis(_sheet: &DataSheet, spec: &AnalysisSpec, doc_power: &c
         vec![opt_num_cell(solved.cohens_h)],
         vec![opt_num_cell(solved.implied_r_squared)],
     ];
+    if solved.family == PowerTestFamily::LogRankSurvival {
+        let method_label = match doc_power.survival_method {
+            SurvivalPowerMethod::Schoenfeld => "Schoenfeld (1983)",
+            SurvivalPowerMethod::Freedman => "Freedman (1982)",
+        };
+        sum_row_labels.push(String::from("Survival power method"));
+        sum_rows.push(vec![ResultCell::Text(String::from(method_label))]);
+        sum_row_labels.push(String::from("Required events (D)"));
+        sum_rows.push(vec![opt_num_cell(solved.required_events)]);
+        sum_row_labels.push(String::from("Pooled event probability"));
+        sum_rows.push(vec![opt_num_cell(solved.pooled_event_prob)]);
+    }
     res.tabs.push(build_tab("power-summary", "Power & Sample Size — Summary", ResultTabKind::MainSummary, sum_headers, sum_row_labels, sum_rows));
 
     if !solved.sensitivity_table.is_empty() {
@@ -2762,6 +3161,12 @@ pub fn run_power_analysis(_sheet: &DataSheet, spec: &AnalysisSpec, doc_power: &c
     if let Some(r2) = solved.implied_r_squared {
         push_scalar(&mut res, "ImpliedRSquared", None, r2);
     }
+    if let Some(events) = solved.required_events {
+        push_scalar(&mut res, "RequiredEvents", None, events);
+    }
+    if let Some(p_bar) = solved.pooled_event_prob {
+        push_scalar(&mut res, "PooledEventProb", None, p_bar);
+    }
 
     res.checklist.push(checklist_item(
         "Power & sample-size calculation",
@@ -2801,7 +3206,7 @@ mod tests {
 
     #[test]
     fn family_catalog_and_invalid_inputs_handled_cleanly() {
-        assert_eq!(PowerTestFamily::ALL.len(), 8);
+        assert_eq!(PowerTestFamily::ALL.len(), 9);
         assert!(!PowerTestFamily::OneWayAnova.supports_one_sided());
         assert!(!PowerTestFamily::ChiSquare.supports_one_sided());
         assert!(PowerTestFamily::TwoSampleUnpairedT.supports_one_sided());

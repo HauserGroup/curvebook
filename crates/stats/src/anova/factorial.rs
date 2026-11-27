@@ -206,6 +206,15 @@ pub(in crate::anova) fn fit_factorial_anova_with_model(
     max_interaction_order: usize,
     ss_type: SumOfSquaresType,
 ) -> Result<(FactorialAnovaResult, OlsPostHocModel), StatsError> {
+    fit_factorial_anova_with_model_and_subsets(data, max_interaction_order, None, ss_type)
+}
+
+pub(in crate::anova) fn fit_factorial_anova_with_model_and_subsets(
+    data: &FactorialObservations,
+    max_interaction_order: usize,
+    explicit_subsets: Option<Vec<Vec<usize>>>,
+    ss_type: SumOfSquaresType,
+) -> Result<(FactorialAnovaResult, OlsPostHocModel), StatsError> {
     let n_obs = data.rows.len();
     let n_factors = data.factor_names.len();
     if n_obs < 3 || n_factors == 0 {
@@ -230,7 +239,35 @@ pub(in crate::anova) fn fit_factorial_anova_with_model(
 
     // Pre-check interaction term/column/element bounds before expanding factor combinations.
     let level_counts: Vec<usize> = data.factor_levels.iter().map(Vec::len).collect();
-    let (subsets, expected_cols) = plan_factorial_design_subsets(n_obs, &level_counts, max_interaction_order)?;
+    let (subsets, expected_cols) = if let Some(custom_subsets) = explicit_subsets {
+        if custom_subsets.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let mut total_cols = 1_usize;
+        for sub in &custom_subsets {
+            let mut sub_cols = 1_usize;
+            for &f in sub {
+                let n_lvl = *level_counts.get(f).ok_or(StatsError::MissingColumn { index: f })?;
+                sub_cols = sub_cols
+                    .checked_mul(n_lvl.saturating_sub(1))
+                    .ok_or(StatsError::InvalidParameter { name: "factorial_design_columns", value: f64::INFINITY })?;
+            }
+            total_cols =
+                total_cols.checked_add(sub_cols).ok_or(StatsError::InvalidParameter { name: "factorial_design_columns", value: f64::INFINITY })?;
+            if total_cols > MAX_FACTORIAL_DESIGN_COLS {
+                return Err(StatsError::InvalidParameter { name: "factorial_design_columns", value: total_cols as f64 });
+            }
+        }
+        let total_elems = n_obs
+            .checked_mul(total_cols)
+            .ok_or(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY }))?;
+        if total_elems > MAX_MATRIX_ELEMENTS {
+            return Err(StatsError::Math(curvebook_math::MathError::InvalidParameter { name: "matrix_elements", value: total_elems as f64 }));
+        }
+        (custom_subsets, total_cols)
+    } else {
+        plan_factorial_design_subsets(n_obs, &level_counts, max_interaction_order)?
+    };
 
     // Build sum-to-zero effect coding (+1 / -1) for each factor (needed for valid Type III partial SS!).
     let factor_basis: Vec<Vec<Vec<f64>>> = data.factor_levels.iter().map(|levels| sum_contrast_vectors(levels.len())).collect();

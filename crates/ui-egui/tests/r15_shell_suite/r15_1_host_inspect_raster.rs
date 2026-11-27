@@ -317,6 +317,11 @@ fn aud_07_08_13_control_routing_batch_budget_raster_and_headless_guards() -> Res
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
     )?)?;
     rs.tabs.push(ResultTab {

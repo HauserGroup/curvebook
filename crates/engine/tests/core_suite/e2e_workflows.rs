@@ -200,7 +200,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
             ("info.setConstant", json!({ "sheet_id": "dose-raw", "name": "Compound", "value": "LC-402" })),
             (
                 "transform.run",
-                json!({ "source_sheet_id": "dose-raw", "sheet_id": "log-x-res", "kind": AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: Some(MathTransformPreset::Log10), y_transform: None, error_propagation: ErrorPropagationMode::ReplicateEndpoints }) }),
+                json!({ "source_sheet_id": "dose-raw", "sheet_id": "log-x-res", "kind": AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: Some(MathTransformPreset::Log10), y_transform: None, error_propagation: ErrorPropagationMode::ReplicateEndpoints, pharmacology_preset: None, interchange_xy: false, zero_x_substitute: None, asymmetric_ci_policy: Default::default() }) }),
             ),
             (
                 "transform.run",
@@ -923,6 +923,7 @@ fn beta_g7_g8_multivariate_calculated_vars_cox_logistic_and_bubble_scatter() {
             predictor_columns: vec![6, 7],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )
     .unwrap();

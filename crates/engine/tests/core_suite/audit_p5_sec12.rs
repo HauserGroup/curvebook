@@ -325,9 +325,9 @@ fn fa_sec12_06_set_spec_rejects_shorthand_conflict_and_unknown_nested_keys() -> 
 }
 
 #[test]
-fn fa_sec12_07_all_29_table_schemas_closed_and_flatten_commands_reject_unknown_keys() -> TestResult {
+fn fa_sec12_07_all_30_table_schemas_closed_and_flatten_commands_reject_unknown_keys() -> TestResult {
     let specs = table::specs();
-    assert_eq!(specs.len(), 29);
+    assert_eq!(specs.len(), 30);
     let ids: BTreeSet<&str> = specs
         .iter()
         .map(|s| {
@@ -335,7 +335,7 @@ fn fa_sec12_07_all_29_table_schemas_closed_and_flatten_commands_reject_unknown_k
             s.id
         })
         .collect();
-    assert_eq!(ids.len(), 29);
+    assert_eq!(ids.len(), 30);
 
     let mut session = session_with(
         "SEC12-07",
@@ -374,6 +374,7 @@ fn fa_sec12_07_all_29_table_schemas_closed_and_flatten_commands_reject_unknown_k
         ("table.recodeLevels", json!({ "sheet_id": "mv1", "col": 0, "mappings": { "A": "Alpha" }, "bogus": 1 })),
         ("table.setCategoricalOrder", json!({ "sheet_id": "mv1", "col": 0, "order": "alphabetical", "bogus": 1 })),
         ("table.setCalculatedVariable", json!({ "sheet_id": "mv1", "title": "Calc", "formula": "2", "bogus": 1 })),
+        ("table.unlinkCalculatedVariable", json!({ "sheet_id": "mv1", "col": 1, "bogus": 1 })),
         ("table.simulateXy", json!({ "row_count": 5, "bogus": 1 })),
         ("table.convertArchetype", json!({ "sheet_id": "xy1", "target_kind": "Column", "bogus": 1 })),
         ("table.importPlateMap", json!({ "geometry": 96, "values": vec![1.0; 96], "bogus": 1 })),

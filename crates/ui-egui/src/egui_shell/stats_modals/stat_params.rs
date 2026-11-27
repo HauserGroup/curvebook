@@ -135,7 +135,7 @@ fn resolve_survival_banner(surv: &SurvivalAnalysisSpec) -> (String, String) {
 
 fn resolve_multivariate_banner(mv: &MultivariateSpec, alpha: f64) -> (String, String) {
     match mv {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, .. } => {
             let title = if pcr_outcome_column.is_some() {
                 String::from("Parameters: Principal Component Regression (PCR)")
             } else {
@@ -181,6 +181,8 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
                 TwoGroupMethod::OneSampleT { .. } => "One-sample t-test",
                 TwoGroupMethod::OneSampleWilcoxon { .. } => "One-sample Wilcoxon test",
                 TwoGroupMethod::PairedSignTest => "Paired binomial sign test",
+                TwoGroupMethod::OneSampleRatioT { .. } => "One-sample ratio t-test",
+                TwoGroupMethod::LognormalWelchT => "Lognormal Welch t-test",
             };
             (String::from("Parameters: Two-Group / One-Sample Test"), format!("{m} ({tail}, α={alpha:.3})"))
         }

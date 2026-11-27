@@ -64,6 +64,9 @@ pub fn command_step_writes_filesystem(command_id: &str, params: &Value) -> bool 
     if command_id == "ui.screenshot" {
         return has_non_empty_dest_path_param(params);
     }
+    if command_id == "fit.cloneBuiltinEquation" {
+        return params.get("save").and_then(Value::as_bool).unwrap_or(true);
+    }
     let Some(spec) = registry().get(command_id) else {
         return false;
     };

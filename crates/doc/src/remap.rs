@@ -217,6 +217,17 @@ fn remap_analysis_kind_references(kind: &mut AnalysisKind, remap: &BTreeMap<Shee
                     remap_hook_source(hook, remap);
                 }
             }
+            if let Some(dist) = &mut fit.plot_distribution {
+                for hook in dist.parameter_hooks.iter_mut().flatten() {
+                    remap_hook_source(hook, remap);
+                }
+            }
+        }
+        AnalysisKind::MonteCarloSimulation(mc) => {
+            apply_opt_sheet_remap(&mut mc.downstream_result_sheet_id, remap);
+            for scalar in &mut mc.tracked_scalars {
+                apply_opt_sheet_remap(&mut scalar.result_sheet_id, remap);
+            }
         }
         _ => {}
     }

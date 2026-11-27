@@ -13,7 +13,7 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 
 use curvebook_math::quad::{QuadOptions, integrate_adaptive};
-use curvebook_math::special::{digamma, gamma, ln_factorial, ln_gamma, reg_beta};
+use curvebook_math::special::{bessel_k as math_bessel_k, digamma, gamma, ln_factorial, ln_gamma, reg_beta};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::limits::MAX_BESSEL_ORDER;
@@ -672,48 +672,33 @@ pub(in crate::dsl) fn bessel_k1_scaled(x: f64) -> Option<f64> {
     (ans.is_finite() && ans > 0.0).then_some(ans)
 }
 
-/// Modified Bessel `K0(x)`, `x > 0`: A&S 9.8.5 (`x <= 2`) / 9.8.6 (`x > 2`) (error order `1e-7`).
+/// Modified Bessel `K0(x)`, `x > 0`: delegated to `curvebook_math::special::bessel_k(0, x)` for
+/// full IEEE-754 precision when `x < 700`, with log-scaled asymptotic underflow guard for `x >= 700`.
 pub(in crate::dsl) fn bessel_k0(x: f64) -> Option<f64> {
     if !x.is_finite() || x <= 0.0 {
         return None;
     }
-    if x <= 2.0 {
-        let y = x * x / 4.0;
-        let ans = -(x / 2.0).ln() * bessel_i0(x)?
-            + (-core::f64::consts::EULER_GAMMA
-                + y * (0.422_784_20 + y * (0.230_697_56 + y * (0.034_885_90 + y * (0.002_626_98 + y * (0.000_107_50 + y * 0.000_007_40))))));
-        return ans.is_finite().then_some(ans);
+    if x < 700.0 {
+        return math_bessel_k(0, x).ok().filter(|v| v.is_finite());
     }
     let scaled = bessel_k0_scaled(x)?;
-    let val = if x < 700.0 {
-        scaled * (-x).exp()
-    } else {
-        let ln_val = scaled.ln() - x;
-        if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() }
-    };
+    let ln_val = scaled.ln() - x;
+    let val = if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() };
     val.is_finite().then_some(val)
 }
 
-/// Modified Bessel `K1(x)`, `x > 0`: A&S 9.8.7 (`x <= 2`) / 9.8.8 (`x > 2`) (error order `1e-7`).
+/// Modified Bessel `K1(x)`, `x > 0`: delegated to `curvebook_math::special::bessel_k(1, x)` for
+/// full IEEE-754 precision when `x < 700`, with log-scaled asymptotic underflow guard for `x >= 700`.
 pub(in crate::dsl) fn bessel_k1(x: f64) -> Option<f64> {
     if !x.is_finite() || x <= 0.0 {
         return None;
     }
-    if x <= 2.0 {
-        let y = x * x / 4.0;
-        let ans = (x / 2.0).ln() * bessel_i1(x)?
-            + (1.0 / x)
-                * (1.0
-                    + y * (0.154_431_44 + y * (-0.672_785_79 + y * (-0.181_568_97 + y * (-0.019_194_02 + y * (-0.001_104_04 - y * 0.000_046_86))))));
-        return ans.is_finite().then_some(ans);
+    if x < 700.0 {
+        return math_bessel_k(1, x).ok().filter(|v| v.is_finite());
     }
     let scaled = bessel_k1_scaled(x)?;
-    let val = if x < 700.0 {
-        scaled * (-x).exp()
-    } else {
-        let ln_val = scaled.ln() - x;
-        if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() }
-    };
+    let ln_val = scaled.ln() - x;
+    let val = if ln_val < -745.133_219_101_941_2 { 0.0 } else { ln_val.exp() };
     val.is_finite().then_some(val)
 }
 
@@ -853,6 +838,13 @@ pub(in crate::dsl) fn bessel_kn_counted(n: i32, x: f64, max_work: usize) -> (Opt
     }
     if m == 1 {
         return (bessel_k1(x), 1);
+    }
+    if m <= 20 && x < 700.0 {
+        let work = (m - 1) as usize;
+        if work > max_work {
+            return (None, work);
+        }
+        return (math_bessel_k(n, x).ok().filter(|v| v.is_finite()), work.max(1));
     }
     if m >= 10 {
         let mf = f64::from(m);

@@ -100,14 +100,14 @@ fn fa_sec08_04_richards_5pl_derived_transforms_small_and_large_s_finite() {
     let model = get_builtin_model("log_agonist_vs_response_5pl").unwrap();
     for hill in [1.0_f64, -1.0, 2.5] {
         let scalars = model.derived_transforms(&[0.0, 100.0, -6.0, hill, 1e-4]);
-        let log_ec50 = scalars.iter().find(|s| s.name == "LogEC50").unwrap();
-        assert_rel_close(log_ec50.value, -6.0 - (10_000.0 * core::f64::consts::LOG10_2) / hill, 1e-12, 1e-12, &format!("5PL hill={hill}"));
+        let log_xb = scalars.iter().find(|s| s.name == "LogXb").unwrap();
+        assert_rel_close(log_xb.value, -6.0 + (10_000.0 * core::f64::consts::LOG10_2) / hill, 1e-12, 1e-12, &format!("5PL hill={hill}"));
         assert!(scalars.iter().all(|s| s.value.is_finite()));
     }
 
-    assert_eq!(model.derived_transforms(&[0.0, 100.0, -7.5, 1.5, 1.0]).iter().find(|s| s.name == "LogEC50").unwrap().value, -7.5);
-    let log_ec50_huge = model.derived_transforms(&[0.0, 100.0, -6.0, 1.0, 1e20]).iter().find(|s| s.name == "LogEC50").unwrap().value;
-    assert_rel_close(log_ec50_huge, -6.0 - (core::f64::consts::LN_2 / 1e20).log10(), 1e-12, 1e-12, "5PL S=1e20");
+    assert_eq!(model.derived_transforms(&[0.0, 100.0, -7.5, 1.5, 1.0]).iter().find(|s| s.name == "LogXb").unwrap().value, -7.5);
+    let log_xb_huge = model.derived_transforms(&[0.0, 100.0, -6.0, 1.0, 1e20]).iter().find(|s| s.name == "LogXb").unwrap().value;
+    assert_rel_close(log_xb_huge, -6.0 + (core::f64::consts::LN_2 / 1e20).log10(), 1e-12, 1e-12, "5PL S=1e20");
     assert!(model.derived_transforms(&[0.0, 100.0, -6.0, 1.0, 1e-310]).iter().all(|s| s.value.is_finite()));
 
     let xs = [-12.0, -10.0, -8.0, -6.0, -4.0, -2.0];
@@ -120,15 +120,15 @@ fn fa_sec08_04_richards_5pl_derived_transforms_small_and_large_s_finite() {
     // AUD-03-14: log-space eval continuity across u = 700, exact eval(LogEC50) == 50, extreme tails & NaN/S<=0 guards.
     for s in [1e-4_f64, 1e-3] {
         let params = [0.0, 100.0, -6.0, 1.0, s];
-        let (x_lo, x_hi) = (-6.0 - 700.0 / core::f64::consts::LN_10, -6.0 - 700.001 / core::f64::consts::LN_10);
+        let log_xb = model.derived_transforms(&params).into_iter().find(|d| d.name == "LogXb").unwrap().value;
+        let (x_lo, x_hi) = (log_xb - 700.0 / core::f64::consts::LN_10, log_xb - 700.001 / core::f64::consts::LN_10);
         let (y_lo, y_hi) = (model.eval(&[x_lo], &params, 0).unwrap(), model.eval(&[x_hi], &params, 0).unwrap());
         assert_approx_eq(y_lo, 100.0 * (-s * 700.0).exp(), 1e-10, 1e-12, &format!("5PL u=700 S={s}"));
         assert_approx_eq(y_hi, 100.0 * (-s * 700.001).exp(), 1e-10, 1e-12, &format!("5PL u=700.001 S={s}"));
         assert!((y_lo - y_hi).abs() < 1e-3, "5PL discontinuity at u=700 for S={s}: {y_lo} -> {y_hi}");
-        let log_ec50 = model.derived_transforms(&params).into_iter().find(|d| d.name == "LogEC50").unwrap().value;
-        assert_approx_eq(model.eval(&[log_ec50], &params, 0).unwrap(), 50.0, 1e-10, 1e-11, &format!("5PL eval(LogEC50) S={s}"));
+        assert_approx_eq(model.eval(&[-6.0], &params, 0).unwrap(), 50.0, 1e-10, 1e-11, &format!("5PL eval(LogEC50) S={s}"));
     }
-    assert_approx_eq(model.eval(&[1000.0], &[5.0, 95.0, -6.0, 1.0, 1e-4], 0).unwrap(), 95.0, 1e-12, 1e-12, "5PL upper tail");
+    assert_approx_eq(model.eval(&[10_000.0], &[5.0, 95.0, -6.0, 1.0, 1e-4], 0).unwrap(), 95.0, 1e-12, 1e-12, "5PL upper tail");
     assert_approx_eq(model.eval(&[-1e9], &[5.0, 95.0, -6.0, 1.0, 1e-4], 0).unwrap(), 5.0, 1e-12, 1e-12, "5PL lower tail");
     for (x, p) in [(f64::NAN, [5.0, 95.0, -6.0, 1.0, 1.0]), (-6.0, [f64::NAN, 95.0, -6.0, 1.0, 1.0]), (-6.0, [5.0, 95.0, -6.0, 1.0, 0.0])] {
         assert!(model.eval(&[x], &p, 0).is_none());
@@ -168,9 +168,9 @@ fn fa_sec08_06_kinetic_binding_evals_guard_exp_overflow_and_nan() {
         ("dissociation_one_phase", f64::NAN, &[100.0, 5.0, 0.1][..]),
         ("dissociation_one_phase", 1.0, &[f64::NAN, 5.0, 0.1][..]),
         ("dissociation_one_phase", -1e5, &[100.0, 5.0, 0.1][..]),
-        ("association_kinetics_one_conc", f64::NAN, &[100.0, 0.1][..]),
-        ("association_kinetics_one_conc", 1.0, &[f64::NAN, 0.1][..]),
-        ("association_kinetics_one_conc", -1e5, &[100.0, 0.1][..]),
+        ("association_kinetics_one_conc", f64::NAN, &[1e6, 100.0, 0.1, 10.0][..]),
+        ("association_kinetics_one_conc", 1.0, &[f64::NAN, 100.0, 0.1, 10.0][..]),
+        ("association_kinetics_one_conc", -1e5, &[1e6, 100.0, 0.1, 10.0][..]),
         ("association_kinetics_two_conc", f64::NAN, &[100.0, 1e6, 0.1, 1e-8][..]),
         ("association_kinetics_two_conc", 1.0, &[f64::NAN, 1e6, 0.1, 1e-8][..]),
         ("association_kinetics_two_conc", -1e5, &[100.0, 1e6, 0.1, 1e-8][..]),

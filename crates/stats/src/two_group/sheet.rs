@@ -21,8 +21,8 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
-    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
-    TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
+    LognormalRowTestMode, MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet,
+    ResultTabKind, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::sum::SummaryMoments;
@@ -41,9 +41,10 @@ use crate::column::{OneSampleTResult, shapiro_wilk, summarize_pre_summarized_poi
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
     enforce_summary_mode_matrix, extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell,
-    num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
+use crate::lognormal::{OneSampleRatioTResult, lognormal_welch_t_test, one_sample_ratio_t_test, validate_and_ln_transform};
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
 
 #[derive(Clone, Copy)]
@@ -164,6 +165,17 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             }
             return Ok(res);
         }
+        TwoGroupMethod::OneSampleRatioT { hypothetical } => {
+            let sel = resolve_mv_one_sample_selection(sheet, &spec.selected_data_sets, tg.mv_response_column)?;
+            let cols = extract_numeric_columns(sheet, &sel)?;
+            let first = cols.first().ok_or(StatsError::EmptyInput)?;
+            let out = one_sample_ratio_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
+            populate_one_sample_ratio_t_sheet(&mut res, &first.label, &first.values, &out, fmt);
+            if first.non_numeric_count > 0 {
+                append_ignored_text_checklist_and_footnote(&mut res, "one-sample ratio t test", &[(first.label.clone(), first.non_numeric_count)]);
+            }
+            return Ok(res);
+        }
         _ => {}
     }
 
@@ -200,12 +212,18 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
                 let out = ks_two_sample(&lvl_a.values, &lvl_b.values)?;
                 populate_ks_sheet(&mut res, pair, &out, fmt);
             }
+            TwoGroupMethod::LognormalWelchT => {
+                let out = lognormal_welch_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
+                populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
+                append_unpaired_normality_checklist(&mut res.checklist, &lvl_a.values, &lvl_b.values, true, conf.alpha());
+            }
             TwoGroupMethod::PairedT
             | TwoGroupMethod::RatioPairedT
             | TwoGroupMethod::WilcoxonSignedRank
             | TwoGroupMethod::PairedSignTest
             | TwoGroupMethod::OneSampleT { .. }
-            | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+            | TwoGroupMethod::OneSampleWilcoxon { .. }
+            | TwoGroupMethod::OneSampleRatioT { .. } => {}
         }
         append_listwise_filtered_checklist_and_footnote(&mut res, "Two-group comparison", skipped_missing, lvl_a.values.len() + lvl_b.values.len());
         append_ignored_text_checklist_and_footnote(&mut res, "two-group comparison", &ignored_non_numeric);
@@ -277,7 +295,13 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             populate_ks_sheet(&mut res, pair, &out, fmt);
             append_ignored_text_checklist_and_footnote(&mut res, "Kolmogorov-Smirnov test", &unpaired_ignored(&cols));
         }
-        TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+        TwoGroupMethod::LognormalWelchT => {
+            let out = lognormal_welch_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
+            populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
+            append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, true, conf.alpha());
+            append_ignored_text_checklist_and_footnote(&mut res, "lognormal Welch t test", &unpaired_ignored(&cols));
+        }
+        TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. } => {}
     }
     Ok(res)
 }
@@ -384,7 +408,9 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
     let proc_eff = MultiplicityProcedure::from(mr.multiplicity.method);
     validate_raw_p_multiplicity_procedure(proc_eff)?;
 
-    let inputs = extract_multiple_row_inputs(sheet, spec, mr.paired)?;
+    let effective_paired = mr.paired || mr.lognormal_mode == LognormalRowTestMode::RatioPaired;
+    let is_lognormal_mode = mr.lognormal_mode != LognormalRowTestMode::None;
+    let inputs = extract_multiple_row_inputs(sheet, spec, effective_paired)?;
     let (lbl_a, lbl_b, row_labels, group_a_rows, group_b_rows) = (inputs.label_a, inputs.label_b, inputs.row_labels, inputs.rows_a, inputs.rows_b);
     let mut raw_p = Vec::new();
     let mut staged = Vec::new();
@@ -394,9 +420,9 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         let row_lbl = row_labels.get(idx).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", idx + 1));
         let row_out = run_single_row_comparison(ra, rb, mr, conf);
         match row_out {
-            Ok((mean_a, mean_b, diff, stat, df, p_val)) if p_val.is_finite() => {
-                raw_p.push(p_val);
-                staged.push((idx, row_lbl, mean_a, mean_b, diff, stat, df, p_val));
+            Ok(outcome) if outcome.p_val.is_finite() => {
+                raw_p.push(outcome.p_val);
+                staged.push((idx, row_lbl, outcome));
             }
             Ok(_) | Err(_) => {
                 skipped_rows += 1;
@@ -410,30 +436,40 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
 
     let (adj_p, is_fdr) = adjust_p_values(&raw_p, proc_eff, threshold);
     let mut entries = Vec::with_capacity(staged.len());
-    for ((row_index, label, mean_a, mean_b, difference, statistic, df, rp), adj) in staged.into_iter().zip(adj_p) {
+    let mut ratio_extras = Vec::with_capacity(staged.len());
+    for ((row_index, label, outcome), adj) in staged.into_iter().zip(adj_p) {
         entries.push(MultipleRowTestEntry {
             row_index,
             label,
-            mean_a,
-            mean_b,
-            difference,
-            statistic,
-            df,
-            raw_p: rp,
+            mean_a: outcome.loc_a,
+            mean_b: outcome.loc_b,
+            difference: outcome.diff,
+            statistic: outcome.stat,
+            df: outcome.df,
+            raw_p: outcome.p_val,
             adjusted_p_or_q: adj,
             significant: adj.is_finite() && adj <= threshold,
         });
+        ratio_extras.push((outcome.ratio, outcome.ratio_ci));
     }
 
     let discoveries = entries.iter().filter(|e| e.significant).count();
     let min_raw_p = entries.iter().map(|e| e.raw_p).fold(f64::INFINITY, f64::min);
     let min_adj_p = entries.iter().map(|e| e.adjusted_p_or_q).fold(f64::INFINITY, f64::min);
-    let variant_label = match (mr.paired, mr.nonparametric, mr.assume_equal_sd) {
-        (true, true, _) => "Wilcoxon matched-pairs signed-rank",
-        (true, false, _) => "Paired Student t test",
-        (false, true, _) => "Mann-Whitney U test",
-        (false, false, true) => "Unpaired Student t test",
-        (false, false, false) => "Welch unpaired t test",
+    let variant_label = if is_lognormal_mode {
+        match (effective_paired, mr.assume_equal_sd) {
+            (true, _) => "Ratio paired t test",
+            (false, true) => "Lognormal unpaired Student t test",
+            (false, false) => "Lognormal Welch unpaired t test",
+        }
+    } else {
+        match (mr.paired, mr.nonparametric, mr.assume_equal_sd) {
+            (true, true, _) => "Wilcoxon matched-pairs signed-rank",
+            (true, false, _) => "Paired Student t test",
+            (false, true, _) => "Mann-Whitney U test",
+            (false, false, true) => "Unpaired Student t test",
+            (false, false, false) => "Welch unpaired t test",
+        }
     };
 
     let pair_desc = format!("{lbl_a} vs. {lbl_b}");
@@ -450,30 +486,63 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             .build(),
     );
 
-    let mut cmp_tab = TabBuilder::new("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons).headers([
-        format!("Mean ({lbl_a})"),
-        format!("Mean ({lbl_b})"),
-        String::from("Difference (A - B)"),
-        String::from("Statistic"),
-        String::from("df"),
-        String::from("Raw P"),
-        String::from("Adjusted P / q"),
-        String::from("Significant"),
-    ]);
-    for e in &entries {
-        cmp_tab.push_row(
-            e.label.clone(),
-            [
-                num_cell(e.mean_a),
-                num_cell(e.mean_b),
-                num_cell(e.difference),
-                num_cell(e.statistic),
-                num_cell(e.df),
-                p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
-                p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
-                ResultCell::Boolean(e.significant),
-            ],
-        );
+    let mut cmp_tab = if is_lognormal_mode {
+        TabBuilder::new("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons).headers([
+            format!("Geo. Mean ({lbl_a})"),
+            format!("Geo. Mean ({lbl_b})"),
+            String::from("Geo. Mean Ratio (A / B)"),
+            format!("{}% CI of Ratio", conf.percent()),
+            String::from("Log Difference (ln A - ln B)"),
+            String::from("Statistic"),
+            String::from("df"),
+            String::from("Raw P"),
+            String::from("Adjusted P / q"),
+            String::from("Significant"),
+        ])
+    } else {
+        TabBuilder::new("multiple-row-comparisons", "Multiple Row-Wise Comparisons", ResultTabKind::MultipleComparisons).headers([
+            format!("Mean ({lbl_a})"),
+            format!("Mean ({lbl_b})"),
+            String::from("Difference (A - B)"),
+            String::from("Statistic"),
+            String::from("df"),
+            String::from("Raw P"),
+            String::from("Adjusted P / q"),
+            String::from("Significant"),
+        ])
+    };
+    for (e, &(ratio_opt, ratio_ci_opt)) in entries.iter().zip(ratio_extras.iter()) {
+        if is_lognormal_mode {
+            cmp_tab.push_row(
+                e.label.clone(),
+                [
+                    num_cell(e.mean_a),
+                    num_cell(e.mean_b),
+                    opt_num_cell(ratio_opt),
+                    opt_ci_cell(ratio_ci_opt),
+                    num_cell(e.difference),
+                    num_cell(e.statistic),
+                    num_cell(e.df),
+                    p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
+                    p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
+                    ResultCell::Boolean(e.significant),
+                ],
+            );
+        } else {
+            cmp_tab.push_row(
+                e.label.clone(),
+                [
+                    num_cell(e.mean_a),
+                    num_cell(e.mean_b),
+                    num_cell(e.difference),
+                    num_cell(e.statistic),
+                    num_cell(e.df),
+                    p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
+                    p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
+                    ResultCell::Boolean(e.significant),
+                ],
+            );
+        }
         res.pairwise_comparisons.push(PairwiseComparisonRecord {
             group_a: e.row_index,
             group_b: 1,
@@ -485,7 +554,11 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             significant: e.significant,
         });
     }
-    if mr.paired && mr.nonparametric {
+    if is_lognormal_mode {
+        cmp_tab.push_footnote(
+            "Lognormal / ratio-paired row comparisons evaluate Student or Welch t tests on ln(Y) for strictly positive values and back-transform log-differences and confidence intervals into geometric mean ratios (A / B).",
+        );
+    } else if mr.paired && mr.nonparametric {
         cmp_tab.push_footnote(
             "Paired nonparametric rows use Wilcoxon matched-pairs signed-rank with Pratt (1959) zero-difference handling; df is omitted (not applicable) for rank tests.",
         );
@@ -505,7 +578,7 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         Some(format!("{discoveries} / {} rows significant at threshold {threshold}", entries.len())),
         "Per-row test statistics and multiplicity-adjusted P/q values are available for Volcano plotting.",
     ));
-    if mr.paired {
+    if effective_paired {
         append_listwise_filtered_checklist_and_footnote(&mut res, "Multiple row paired t-tests", inputs.skipped_incomplete_pairs, inputs.kept_pairs);
     }
     append_ignored_text_checklist_and_footnote(&mut res, "Multiple row t-tests", &inputs.ignored_non_numeric);
@@ -1162,29 +1235,105 @@ fn extract_paired_or_unpaired_subcolumns(row_a: Option<&Vec<Cell>>, row_b: Optio
     }
 }
 
-type SingleRowOutcome = (f64, f64, f64, f64, f64, f64);
+struct SingleRowOutcome {
+    loc_a: f64,
+    loc_b: f64,
+    diff: f64,
+    ratio: Option<f64>,
+    ratio_ci: Option<(f64, f64)>,
+    stat: f64,
+    df: f64,
+    p_val: f64,
+}
 
 fn run_single_row_comparison(ra: &[f64], rb: &[f64], mr: &MultipleRowTestsSpec, conf: ConfidenceLevel) -> Result<SingleRowOutcome, StatsError> {
+    if mr.lognormal_mode != LognormalRowTestMode::None {
+        let effective_paired = mr.paired || mr.lognormal_mode == LognormalRowTestMode::RatioPaired;
+        if effective_paired {
+            let out = ratio_paired_t_test(ra, rb, true, conf)?;
+            let la = validate_and_ln_transform(ra, "lognormal_x")?;
+            let lb = validate_and_ln_transform(rb, "lognormal_x")?;
+            let gm_a = SummaryMoments::from_slice(&la)?.mean.exp();
+            let gm_b = SummaryMoments::from_slice(&lb)?.mean.exp();
+            return Ok(SingleRowOutcome {
+                loc_a: gm_a,
+                loc_b: gm_b,
+                diff: out.mean_of_differences,
+                ratio: out.geometric_mean_ratio.or_else(|| Some(out.mean_of_differences.exp())),
+                ratio_ci: out.geometric_mean_ratio_ci.or_else(|| Some((out.ci.0.exp(), out.ci.1.exp()))),
+                stat: out.t_statistic,
+                df: out.df,
+                p_val: out.p_value,
+            });
+        }
+        let out = if mr.assume_equal_sd { lognormal_unpaired_t_test(ra, rb, true, conf)? } else { lognormal_welch_t_test(ra, rb, true, conf)? };
+        return Ok(SingleRowOutcome {
+            loc_a: out.mean_a.exp(),
+            loc_b: out.mean_b.exp(),
+            diff: out.difference,
+            ratio: out.geometric_mean_ratio.or_else(|| Some(out.difference.exp())),
+            ratio_ci: out.geometric_mean_ratio_ci.or_else(|| Some((out.ci.0.exp(), out.ci.1.exp()))),
+            stat: out.t_statistic,
+            df: out.df,
+            p_val: out.p_value,
+        });
+    }
     if mr.paired && mr.nonparametric {
         let out = wilcoxon_matched_pairs(ra, rb, true, conf, true)?;
         let ma = SummaryMoments::from_slice(ra)?.mean;
         let mb = SummaryMoments::from_slice(rb)?.mean;
-        return Ok((ma, mb, out.hodges_lehmann_pseudomedian, out.w_stat, f64::INFINITY, out.p_value));
+        return Ok(SingleRowOutcome {
+            loc_a: ma,
+            loc_b: mb,
+            diff: out.hodges_lehmann_pseudomedian,
+            ratio: None,
+            ratio_ci: None,
+            stat: out.w_stat,
+            df: f64::INFINITY,
+            p_val: out.p_value,
+        });
     }
     if mr.paired {
         let out = paired_t_test(ra, rb, true, conf)?;
         let ma = SummaryMoments::from_slice(ra)?.mean;
         let mb = SummaryMoments::from_slice(rb)?.mean;
-        return Ok((ma, mb, out.mean_of_differences, out.t_statistic, out.df, out.p_value));
+        return Ok(SingleRowOutcome {
+            loc_a: ma,
+            loc_b: mb,
+            diff: out.mean_of_differences,
+            ratio: None,
+            ratio_ci: None,
+            stat: out.t_statistic,
+            df: out.df,
+            p_val: out.p_value,
+        });
     }
     if mr.nonparametric {
         let out = mann_whitney_u(ra, rb, true, conf)?;
         let ma = SummaryMoments::from_slice(ra)?.mean;
         let mb = SummaryMoments::from_slice(rb)?.mean;
-        return Ok((ma, mb, out.hodges_lehmann_diff, out.u_min, f64::INFINITY, out.p_value));
+        return Ok(SingleRowOutcome {
+            loc_a: ma,
+            loc_b: mb,
+            diff: out.hodges_lehmann_diff,
+            ratio: None,
+            ratio_ci: None,
+            stat: out.u_min,
+            df: f64::INFINITY,
+            p_val: out.p_value,
+        });
     }
     let out = if mr.assume_equal_sd { unpaired_t_test(ra, rb, true, conf)? } else { welch_t_test(ra, rb, true, conf)? };
-    Ok((out.mean_a, out.mean_b, out.difference, out.t_statistic, out.df, out.p_value))
+    Ok(SingleRowOutcome {
+        loc_a: out.mean_a,
+        loc_b: out.mean_b,
+        diff: out.difference,
+        ratio: None,
+        ratio_ci: None,
+        stat: out.t_statistic,
+        df: out.df,
+        p_val: out.p_value,
+    })
 }
 
 fn populate_unpaired_t_sheet(res: &mut ResultSheet, pair: GroupPairMeta<'_>, out: &UnpairedTResult, include_es: bool, fmt: SheetFormatCtx) {
@@ -1230,9 +1379,12 @@ fn populate_unpaired_t_sheet_impl(
             .push_num(format!("R squared{suffix}"), out.effect_sizes.r_squared);
     }
     if is_lognormal {
-        tab.push_footnote(
-            "Lognormal unpaired t-test evaluates Student's t on ln(Y); log-scale means, differences, CIs, and effect sizes are on the natural-log scale alongside the back-transformed geometric mean ratio.",
-        );
+        let note = if out.method_label == "Lognormal Welch's t test" {
+            "Lognormal Welch t-test evaluates Welch-Satterthwaite t on ln(Y) without assuming equal log-scale variances; log-scale means, differences, CIs, and effect sizes are reported alongside the back-transformed geometric mean ratio."
+        } else {
+            "Lognormal unpaired t-test evaluates Student's t on ln(Y); log-scale means, differences, CIs, and effect sizes are on the natural-log scale alongside the back-transformed geometric mean ratio."
+        };
+        tab.push_footnote(note);
     }
     if include_es {
         if out.effect_sizes.glass_delta.is_none() {
@@ -1250,6 +1402,9 @@ fn populate_unpaired_t_sheet_impl(
     push_scalar(res, "t", None, out.t_statistic);
     push_scalar(res, "CohensD", None, out.effect_sizes.cohens_d);
     push_scalar(res, "HedgesG", None, out.effect_sizes.hedges_g);
+    if let Some(gmr) = out.geometric_mean_ratio {
+        push_scalar(res, "GeometricMeanRatio", None, gmr);
+    }
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
         group_a: idx_a,
         group_b: idx_b,
@@ -1279,7 +1434,7 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
             "Both groups contain at least 5 observations.",
         ));
     }
-    let assumes_equal_var = out.method_label != "Welch's t test";
+    let assumes_equal_var = !matches!(out.method_label, "Welch's t test" | "Lognormal Welch's t test");
     let f_violated = out.f_test.p_value <= alpha;
     let levene_opt = if has_raw_replicates { out.levene_median.as_ref() } else { None };
     let levene_violated = levene_opt.is_some_and(|lev| lev.p_value <= alpha);
@@ -1655,6 +1810,57 @@ fn populate_one_sample_t_sheet_impl(res: &mut ResultSheet, label: &str, values: 
             "Moments were reconstructed from entered Mean, Spread, and N; Gaussian normality tests require raw replicates.",
         ));
     }
+}
+
+fn populate_one_sample_ratio_t_sheet(res: &mut ResultSheet, label: &str, values: &[f64], out: &OneSampleRatioTResult, fmt: SheetFormatCtx) {
+    let SheetFormatCtx { conf, p_fmt } = fmt;
+    let pct = conf.percent();
+    res.tabs.push(
+        KvTabBuilder::new("one-sample-ratio-t", "One-sample ratio t test", ResultTabKind::MainSummary, label)
+            .num("Hypothetical geometric mean", out.hypothetical_geo_mean)
+            .num("Geometric mean", out.geometric_mean)
+            .num("Geometric SD factor", out.geometric_sd_factor)
+            .ci(format!("{pct}% CI of geometric mean"), out.geometric_mean_ci.0, out.geometric_mean_ci.1)
+            .num("Geometric mean ratio (GM / Hypothetical)", out.ratio_gm_over_hypothetical)
+            .ci(format!("{pct}% CI of ratio"), out.ratio_ci.0, out.ratio_ci.1)
+            .num("Mean of ln(Y)", out.mean_ln)
+            .num("Discrepancy (ln scale)", out.discrepancy_ln)
+            .ci(format!("{pct}% CI of ln discrepancy"), out.ci_ln.0, out.ci_ln.1)
+            .num("t statistic", out.t_statistic)
+            .num("df", out.df)
+            .p("P value", out.p_value, p_fmt, conf.alpha())
+            .opt_num("Hedges' g (ln scale)", out.hedges_g)
+            .footnote("One-sample ratio t-test evaluates Student's t on ln(Y) against ln(hypothetical geometric mean) and back-transforms the geometric mean, ratio, and asymmetric confidence intervals.")
+            .build(),
+    );
+    push_scalar(res, "PValue", None, out.p_value);
+    push_scalar(res, "t", None, out.t_statistic);
+    push_scalar(res, "GeometricMean", None, out.geometric_mean);
+    push_scalar(res, "GeometricMeanRatio", None, out.ratio_gm_over_hypothetical);
+
+    let logs: Vec<f64> = values.iter().map(|v| v.ln()).collect();
+    let (status, metric, explanation) = if out.n < 5 {
+        (
+            ChecklistStatus::Warn,
+            Some(format!("n = {}", out.n)),
+            format!("Sample size (n = {}) is too small to assess lognormal normality reliably; assumption test is inconclusive.", out.n),
+        )
+    } else if let Ok(sw) = shapiro_wilk(&logs, conf.alpha())
+        && !sw.passed
+    {
+        (
+            ChecklistStatus::Warn,
+            Some(format!("n = {}, Shapiro-Wilk(ln) W = {:.4}, p = {:.4}", out.n, sw.statistic, sw.p_value)),
+            String::from("Shapiro-Wilk test on ln(Y) indicates significant departure from a lognormal distribution."),
+        )
+    } else {
+        (
+            ChecklistStatus::Pass,
+            Some(format!("n = {}", out.n)),
+            String::from("One-sample ratio t test assumes strictly positive independent observations from an approximately lognormal population."),
+        )
+    };
+    res.checklist.push(checklist_item("One-sample lognormal assumption", status, metric, explanation));
 }
 
 fn populate_paired_sign_sheet(res: &mut ResultSheet, pair: GroupPairMeta<'_>, out: &PairedSignTestResult, fmt: SheetFormatCtx) {

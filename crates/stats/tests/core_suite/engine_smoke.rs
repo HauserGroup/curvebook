@@ -276,6 +276,12 @@ fn categorical_survival_roc_glm_and_multivariate() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )
     .unwrap();
@@ -335,13 +341,20 @@ fn categorical_survival_roc_glm_and_multivariate() {
             predictor_columns: vec![0, 1],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )
     .unwrap();
     assert!(!glm_out.tabs.is_empty());
     let pca_out = run_kind(
         &msheet,
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(42),
+            pcr_outcome_column: None,
+            retention_rule: Default::default(),
+            emit_extra_matrices: false,
+        }),
     )
     .unwrap();
     assert!(!pca_out.tabs.is_empty());

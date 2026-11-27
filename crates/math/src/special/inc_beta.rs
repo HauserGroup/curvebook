@@ -240,6 +240,18 @@ pub fn reg_beta(x: f64, a: f64, b: f64) -> Result<f64, MathError> {
     reg_beta_xy(x, 1.0 - x, a, b)
 }
 
+/// Regularized incomplete beta function `I_x(a, b)` for `x in [0, 1]` and `a > 0, b > 0`
+/// (DLMF §8.17.2).
+///
+/// Alias for [`reg_beta`] exposed for formula and custom-DSL evaluators.
+///
+/// # Errors
+/// Returns [`MathError::InvalidParameter`] if `a <= 0` or `b <= 0`, or [`MathError::DomainError`]
+/// if `x` lies outside `[0, 1]`.
+pub fn ibeta(x: f64, a: f64, b: f64) -> Result<f64, MathError> {
+    reg_beta(x, a, b)
+}
+
 /// Two-component regularized incomplete beta `I_x(a, b)` accepting both `x >= 0` and `y = 1 - x >= 0`
 /// directly so distributions (`t`, `F`) never suffer `1.0 - x` rounding when `x` is close to `1.0`.
 ///

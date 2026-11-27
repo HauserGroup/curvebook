@@ -704,7 +704,7 @@ fn parse_formula_internal(input: &str, collect_refs: bool) -> Result<(Expr, Vec<
     }
     let offset = input.len() - body_with_tail.len();
     let tokens = tokenize(body, offset)?;
-    let mut parser = Parser { tokens, cursor: 0, depth: 0, ref_spans: collect_refs.then(Vec::new) };
+    let mut parser = Parser { tokens, cursor: 0, depth: 0, in_clause_expr: 0, ref_spans: collect_refs.then(Vec::new) };
     let expr = parser.parse_expr(0)?;
     if let Some(tok) = parser.peek() {
         return Err(TransformError::ParseError { position: tok.pos, message: format!("unexpected trailing token `{:?}`", tok.kind) });
@@ -997,6 +997,7 @@ struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
     depth: usize,
+    in_clause_expr: usize,
     ref_spans: Option<Vec<ColRefSpan>>,
 }
 
@@ -1060,6 +1061,7 @@ impl Parser {
             TokenKind::Star => Some((BinaryOp::Mul, 11, 12)),
             TokenKind::Slash => Some((BinaryOp::Div, 11, 12)),
             TokenKind::Percent => Some((BinaryOp::Mod, 11, 12)),
+            TokenKind::Ident(s) if s.eq_ignore_ascii_case("mod") => Some((BinaryOp::Mod, 11, 12)),
             TokenKind::Caret => Some((BinaryOp::Pow, 16, 15)),
             _ => None,
         }
@@ -1111,7 +1113,11 @@ impl Parser {
             }
             TokenKind::Ident(name) => self.parse_ident_or_call(tok.pos, tok.end, name),
             TokenKind::LParen => {
-                let inner = self.parse_expr(0)?;
+                let saved = self.in_clause_expr;
+                self.in_clause_expr = 0;
+                let inner = self.parse_expr(0);
+                self.in_clause_expr = saved;
+                let inner = inner?;
                 match self.advance() {
                     Some(Token { kind: TokenKind::RParen, .. }) => Ok(inner),
                     Some(other) => Err(TransformError::ParseError { position: other.pos, message: String::from("expected closing `)`") }),
@@ -1141,32 +1147,39 @@ impl Parser {
         let mut args = Vec::new();
         let mut first_arg_text_span: Option<(usize, usize)> = None;
         if !matches!(self.peek().map(|t| &t.kind), Some(TokenKind::RParen)) {
-            loop {
-                let arg_tok_span = self.peek().and_then(|t| match t.kind {
-                    TokenKind::Text(_) => Some((t.pos, t.end)),
-                    _ => None,
-                });
-                let before_cursor = self.cursor;
-                args.push(self.parse_expr(0)?);
-                if args.len() == 1 && self.cursor == before_cursor + 1 {
-                    first_arg_text_span = arg_tok_span;
+            let saved_clause = self.in_clause_expr;
+            self.in_clause_expr = 0;
+            let parse_args_res: Result<(), TransformError> = (|| {
+                loop {
+                    let arg_tok_span = self.peek().and_then(|t| match t.kind {
+                        TokenKind::Text(_) => Some((t.pos, t.end)),
+                        _ => None,
+                    });
+                    let before_cursor = self.cursor;
+                    args.push(self.parse_expr(0)?);
+                    if args.len() == 1 && self.cursor == before_cursor + 1 {
+                        first_arg_text_span = arg_tok_span;
+                    }
+                    match self.peek().map(|t| &t.kind) {
+                        Some(TokenKind::Comma) => {
+                            self.advance();
+                        }
+                        Some(TokenKind::RParen) => break,
+                        Some(_) => {
+                            return Err(TransformError::ParseError {
+                                position: self.current_pos(),
+                                message: String::from("expected `,` or `)` in function arguments"),
+                            });
+                        }
+                        None => {
+                            return Err(TransformError::ParseError { position: pos, message: String::from("unclosed `(` in function call") });
+                        }
+                    }
                 }
-                match self.peek().map(|t| &t.kind) {
-                    Some(TokenKind::Comma) => {
-                        self.advance();
-                    }
-                    Some(TokenKind::RParen) => break,
-                    Some(_) => {
-                        return Err(TransformError::ParseError {
-                            position: self.current_pos(),
-                            message: String::from("expected `,` or `)` in function arguments"),
-                        });
-                    }
-                    None => {
-                        return Err(TransformError::ParseError { position: pos, message: String::from("unclosed `(` in function call") });
-                    }
-                }
-            }
+                Ok(())
+            })();
+            self.in_clause_expr = saved_clause;
+            parse_args_res?;
         }
         let rparen_end = self.advance().map_or(end, |t| t.end);
         let expr = normalize_special_call(pos, name, args)?;
@@ -1221,8 +1234,83 @@ impl Parser {
         }
     }
 
+    fn peek_order_by(&self) -> bool {
+        self.peek_ident_eq("order") && matches!(self.peek_next_kind(), Some(TokenKind::Ident(s)) if s.eq_ignore_ascii_case("by"))
+    }
+
+    fn parse_clause_expr(&mut self, min_bp: u8) -> Result<Expr, TransformError> {
+        self.in_clause_expr += 1;
+        let res = self.parse_expr(min_bp);
+        self.in_clause_expr -= 1;
+        res
+    }
+
+    fn parse_unparenthesized_window_key(&mut self, clause_label: &str) -> Result<Expr, TransformError> {
+        let Some(tok) = self.peek() else {
+            return Err(TransformError::ParseError {
+                position: self.current_pos(),
+                message: format!("expected column expression after `{clause_label}`"),
+            });
+        };
+        if let TokenKind::Ident(kw) = &tok.kind
+            && is_window_clause_keyword(kw)
+        {
+            return Err(TransformError::ParseError { position: tok.pos, message: format!("unexpected keyword `{kw}` after `{clause_label}`") });
+        }
+        self.in_clause_expr += 1;
+        let res = self.parse_primary();
+        self.in_clause_expr -= 1;
+        res
+    }
+
+    fn parse_order_by_item(&mut self, parenthesized: bool) -> Result<OrderByExpr, TransformError> {
+        let expr = if parenthesized { self.parse_clause_expr(0)? } else { self.parse_unparenthesized_window_key("ORDER BY")? };
+        let direction = if self.eat_ident_eq("desc") {
+            SortDirection::Desc
+        } else {
+            let _ = self.eat_ident_eq("asc");
+            SortDirection::Asc
+        };
+        let nulls = if self.eat_ident_eq("nulls") {
+            if self.eat_ident_eq("first") {
+                NullsOrder::First
+            } else {
+                self.expect_ident_eq("last", "expected `FIRST` or `LAST` after `NULLS`")?;
+                NullsOrder::Last
+            }
+        } else {
+            NullsOrder::Last
+        };
+        Ok(OrderByExpr { expr, direction, nulls })
+    }
+
+    fn can_start_second_frame_bound(&self) -> bool {
+        let Some(tok) = self.peek() else {
+            return false;
+        };
+        match &tok.kind {
+            TokenKind::Number(_) | TokenKind::BracketIdent(_) | TokenKind::LParen => true,
+            TokenKind::Ident(s) => {
+                s.eq_ignore_ascii_case("unbounded")
+                    || s.eq_ignore_ascii_case("current")
+                    || (!s.eq_ignore_ascii_case("and")
+                        && !s.eq_ignore_ascii_case("or")
+                        && !s.eq_ignore_ascii_case("mod")
+                        && !is_window_clause_keyword(s))
+            }
+            _ => false,
+        }
+    }
+
     fn parse_call_postfix_clauses(&mut self, mut expr: Expr) -> Result<Expr, TransformError> {
-        let has_modifier = self.peek_ident_eq("over") || self.peek_ident_eq("where") || self.peek_ident_eq("filter");
+        if self.in_clause_expr > 0 {
+            return Ok(expr);
+        }
+        let has_modifier = self.peek_ident_eq("over")
+            || self.peek_ident_eq("where")
+            || self.peek_ident_eq("filter")
+            || self.peek_ident_eq("rows")
+            || self.peek_order_by();
         if !has_modifier {
             return Ok(expr);
         }
@@ -1238,6 +1326,7 @@ impl Parser {
 
         let mut filter: Option<Box<Expr>> = None;
         let mut window: Option<WindowSpec> = None;
+        let mut seen_over = false;
 
         loop {
             if self.peek_ident_eq("filter") {
@@ -1261,28 +1350,49 @@ impl Parser {
                     });
                 }
                 let _ = self.advance();
-                let cond = self.parse_expr(0)?;
+                let cond = self.parse_clause_expr(0)?;
                 filter = Some(Box::new(cond));
             } else if self.peek_ident_eq("over") {
-                if window.is_some() {
-                    return Err(TransformError::ParseError {
-                        position: self.current_pos(),
-                        message: String::from("duplicate `OVER` clause on function call"),
-                    });
+                let over_pos = self.current_pos();
+                if seen_over {
+                    return Err(TransformError::ParseError { position: over_pos, message: String::from("duplicate `OVER` clause on function call") });
                 }
+                seen_over = true;
                 let _ = self.advance();
-                let open_pos = self.expect_lparen("expected `(` after `OVER`")?;
-                let (spec, inline_filter) = self.parse_over_body(open_pos)?;
-                if let Some(cond) = inline_filter {
-                    if filter.is_some() {
-                        return Err(TransformError::ParseError {
-                            position: open_pos,
-                            message: String::from("duplicate `WHERE` / `FILTER` clause on windowed call"),
-                        });
+                if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::LParen)) {
+                    let open_pos = self.expect_lparen("expected `(` after `OVER`")?;
+                    let (spec, inline_filter) = self.parse_over_body(open_pos)?;
+                    if let Some(cond) = inline_filter {
+                        if filter.is_some() {
+                            return Err(TransformError::ParseError {
+                                position: open_pos,
+                                message: String::from("duplicate `WHERE` / `FILTER` clause on windowed call"),
+                            });
+                        }
+                        filter = Some(cond);
                     }
-                    filter = Some(cond);
+                    merge_window_spec(&mut window, spec, open_pos)?;
+                } else {
+                    if self.eat_ident_eq("partition") {
+                        self.expect_ident_eq("by", "expected `BY` after `PARTITION` in `OVER` clause")?;
+                    }
+                    let key = self.parse_unparenthesized_window_key("OVER")?;
+                    let spec = WindowSpec { partition_by: vec![key], order_by: Vec::new(), frame: None };
+                    merge_window_spec(&mut window, spec, over_pos)?;
                 }
-                window = Some(spec);
+            } else if self.peek_order_by() {
+                let order_pos = self.current_pos();
+                let _ = self.advance();
+                let _ = self.advance();
+                let item = self.parse_order_by_item(false)?;
+                let spec = WindowSpec { partition_by: Vec::new(), order_by: vec![item], frame: None };
+                merge_window_spec(&mut window, spec, order_pos)?;
+            } else if self.peek_ident_eq("rows") {
+                let rows_pos = self.current_pos();
+                let _ = self.advance();
+                let frame = self.parse_window_frame(rows_pos)?;
+                let spec = WindowSpec { partition_by: Vec::new(), order_by: Vec::new(), frame: Some(frame) };
+                merge_window_spec(&mut window, spec, rows_pos)?;
             } else {
                 break;
             }
@@ -1328,7 +1438,7 @@ impl Parser {
                         let _ = self.advance();
                         self.expect_ident_eq("by", "expected `BY` after `PARTITION` in `OVER` clause")?;
                         loop {
-                            spec.partition_by.push(self.parse_expr(0)?);
+                            spec.partition_by.push(self.parse_clause_expr(0)?);
                             if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Comma)) {
                                 let _ = self.advance();
                             } else {
@@ -1344,7 +1454,7 @@ impl Parser {
                             });
                         }
                         let _ = self.advance();
-                        inline_filter = Some(Box::new(self.parse_expr(0)?));
+                        inline_filter = Some(Box::new(self.parse_clause_expr(0)?));
                     } else if kw.eq_ignore_ascii_case("filter") {
                         if inline_filter.is_some() {
                             return Err(TransformError::ParseError {
@@ -1367,24 +1477,7 @@ impl Parser {
                         let _ = self.advance();
                         self.expect_ident_eq("by", "expected `BY` after `ORDER` in `OVER` clause")?;
                         loop {
-                            let expr = self.parse_expr(0)?;
-                            let direction = if self.eat_ident_eq("desc") {
-                                SortDirection::Desc
-                            } else {
-                                let _ = self.eat_ident_eq("asc");
-                                SortDirection::Asc
-                            };
-                            let nulls = if self.eat_ident_eq("nulls") {
-                                if self.eat_ident_eq("first") {
-                                    NullsOrder::First
-                                } else {
-                                    self.expect_ident_eq("last", "expected `FIRST` or `LAST` after `NULLS`")?;
-                                    NullsOrder::Last
-                                }
-                            } else {
-                                NullsOrder::Last
-                            };
-                            spec.order_by.push(OrderByExpr { expr, direction, nulls });
+                            spec.order_by.push(self.parse_order_by_item(true)?);
                             if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Comma)) {
                                 let _ = self.advance();
                             } else {
@@ -1422,6 +1515,11 @@ impl Parser {
             Ok(WindowFrame { start, end })
         } else {
             let start = self.parse_frame_bound()?;
+            if self.can_start_second_frame_bound() {
+                let end = self.parse_frame_bound()?;
+                validate_frame_bounds(&start, &end, rows_pos)?;
+                return Ok(WindowFrame { start, end });
+            }
             let end = FrameBound::CurrentRow;
             if matches!(start, FrameBound::Following(_) | FrameBound::UnboundedFollowing) {
                 return Err(TransformError::ParseError {
@@ -1448,7 +1546,7 @@ impl Parser {
             self.expect_ident_eq("row", "expected `ROW` after `CURRENT` in `ROWS` frame")?;
             Ok(FrameBound::CurrentRow)
         } else {
-            let offset = self.parse_expr(5)?;
+            let offset = self.parse_clause_expr(5)?;
             validate_static_frame_offset(&offset, pos)?;
             if self.eat_ident_eq("preceding") {
                 Ok(FrameBound::Preceding(Box::new(offset)))
@@ -1464,9 +1562,52 @@ impl Parser {
     }
 }
 
+fn is_window_clause_keyword(name: &str) -> bool {
+    let t = name.trim();
+    t.eq_ignore_ascii_case("over")
+        || t.eq_ignore_ascii_case("where")
+        || t.eq_ignore_ascii_case("filter")
+        || t.eq_ignore_ascii_case("order")
+        || t.eq_ignore_ascii_case("partition")
+        || t.eq_ignore_ascii_case("rows")
+        || t.eq_ignore_ascii_case("by")
+}
+
+fn merge_window_spec(target: &mut Option<WindowSpec>, incoming: WindowSpec, pos: usize) -> Result<(), TransformError> {
+    let Some(existing) = target else {
+        *target = Some(incoming);
+        return Ok(());
+    };
+    if !incoming.partition_by.is_empty() {
+        if !existing.partition_by.is_empty() {
+            return Err(TransformError::ParseError {
+                position: pos,
+                message: String::from("duplicate `PARTITION BY` / `OVER` clause on function call"),
+            });
+        }
+        existing.partition_by = incoming.partition_by;
+    }
+    if !incoming.order_by.is_empty() {
+        if !existing.order_by.is_empty() {
+            return Err(TransformError::ParseError { position: pos, message: String::from("duplicate `ORDER BY` clause on function call") });
+        }
+        existing.order_by = incoming.order_by;
+    }
+    if let Some(frame) = incoming.frame {
+        if existing.frame.is_some() {
+            return Err(TransformError::ParseError { position: pos, message: String::from("duplicate `ROWS` frame on function call") });
+        }
+        existing.frame = Some(frame);
+    }
+    Ok(())
+}
+
 fn is_reserved_literal_ident(name: &str) -> bool {
     let trimmed = name.trim();
-    trimmed.eq_ignore_ascii_case("true") || trimmed.eq_ignore_ascii_case("false") || trimmed.eq_ignore_ascii_case("nan")
+    trimmed.eq_ignore_ascii_case("true")
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("nan")
+        || trimmed.eq_ignore_ascii_case("null")
 }
 
 fn static_literal_offset(mut expr: &Expr) -> Option<f64> {

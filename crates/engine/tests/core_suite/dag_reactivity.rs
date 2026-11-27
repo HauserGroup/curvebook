@@ -260,6 +260,10 @@ fn hook_source_bindings_info_constant_result_scalar_and_column_title_reactivity(
                     x_transform: None,
                     y_transform: Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: 0.0 }),
                     error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+                    pharmacology_preset: None,
+                    interchange_xy: false,
+                    zero_x_substitute: None,
+                    asymmetric_ci_policy: Default::default(),
                 }),
             )
             .unwrap(),
@@ -407,6 +411,10 @@ fn reactive_linked_region_and_transpose_propagation_without_duplication() {
                     x_transform: None,
                     y_transform: Some(MathTransformPreset::LinearScale { slope: 10.0, intercept: 0.0 }),
                     error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+                    pharmacology_preset: None,
+                    interchange_xy: false,
+                    zero_x_substitute: None,
+                    asymmetric_ci_policy: Default::default(),
                 }),
             )
             .unwrap(),

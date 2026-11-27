@@ -1316,6 +1316,11 @@ mod tests {
                 filter_formula: None,
                 target_archetype: TableKind::Grouped,
                 derived_columns: Vec::new(),
+                complete_rows_only: false,
+                subject_column: None,
+                row_title_column: None,
+                contingency_count_column: None,
+                include_variable_name_prefixes: false,
             }));
         }
         let col2_title = match app.document().data_sheet(&ds_id).map(|ds| &ds.archetype) {

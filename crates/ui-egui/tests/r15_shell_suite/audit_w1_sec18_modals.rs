@@ -336,7 +336,8 @@ fn fa_sec18_04_simulate_xy_standalone_validation_and_edit_params() -> TestRes {
                 x_max: 20.0,
                 equation_id: "linear".into(),
                 parameters: vec![("slope".into(), 2.5), ("intercept".into(), 10.0)],
-                noise: SimulationNoise::Gaussian { sd: 0.25 }
+                noise: SimulationNoise::Gaussian { sd: 0.25 },
+                simulation_mode: None,
             })
         );
         let data = rs.analyzable_data.as_ref().ok_or("missing analyzable_data")?;

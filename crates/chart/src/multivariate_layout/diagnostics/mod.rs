@@ -1,6 +1,11 @@
 //! Shared diagnostic-plot result resolution, cell-source extraction, and subtype dispatch.
 
+mod actual_vs_predicted;
+mod gap_statistic;
 mod heatmap;
+mod homoscedasticity;
+mod param_corr_heatmap;
+mod residual_vs_row;
 mod residuals_qq;
 mod roc_forest;
 mod volcano_ba;
@@ -9,16 +14,21 @@ use curvebook_doc::{
     AnalysisKind, DataSheet, GraphSheet, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, SheetId, TableArchetype,
 };
 
+pub(super) use actual_vs_predicted::compile_actual_vs_predicted_plot;
+pub(super) use gap_statistic::compile_gap_statistic_plot;
 pub(super) use heatmap::compile_heatmap;
+pub(super) use homoscedasticity::compile_homoscedasticity_plot;
+pub(super) use param_corr_heatmap::compile_parameter_correlation_heatmap;
+pub(super) use residual_vs_row::compile_residual_vs_row_plot;
 use residuals_qq::selected_dataset_label_in_tab;
-pub(super) use residuals_qq::{compile_normal_qq_plot, compile_residual_plot};
+pub(super) use residuals_qq::{compile_lognormal_qq_plot, compile_normal_qq_plot, compile_residual_plot};
 pub(super) use roc_forest::{compile_forest_plot, compile_roc_curve};
 pub(super) use volcano_ba::{compile_bland_altman, compile_volcano};
 
 use crate::scene::{ChartWarning, SourceCellId};
 
 // ============================================================================
-// 2. All 7 DiagnosticPlotKinds
+// 2. All 13 DiagnosticPlotKinds
 // ============================================================================
 
 fn push_unique_warning(warnings: &mut Vec<ChartWarning>, code: &'static str, message: String) {

@@ -93,6 +93,10 @@ fn representative_transform_kind(proc_id: SummaryModeProcedure, table_kind: Tabl
             x_transform: None,
             y_transform: Some(MathTransformPreset::LinearScale { slope: 2.0, intercept: 5.0 }),
             error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
         }),
         SummaryModeProcedure::TransformNormalize => AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
             zero_anchor: NormalizeAnchor::FixedValue(0.0),
@@ -100,9 +104,12 @@ fn representative_transform_kind(proc_id: SummaryModeProcedure, table_kind: Tabl
             output_percent: true,
             per_data_set: true,
         }),
-        SummaryModeProcedure::TransformRemoveBaseline => {
-            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Difference })
-        }
+        SummaryModeProcedure::TransformRemoveBaseline => AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: BaselineOperation::Difference,
+            baseline_kind: None,
+            retain_unselected_columns: false,
+        }),
         SummaryModeProcedure::TransformTransposeColumn | SummaryModeProcedure::TransformTransposeXyGrouped => {
             AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true })
         }
@@ -116,6 +123,11 @@ fn representative_transform_kind(proc_id: SummaryModeProcedure, table_kind: Tabl
             filter_formula: None,
             target_archetype: table_kind,
             derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         }),
         SummaryModeProcedure::TransformSimulate => AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
             seed: 42,
@@ -126,6 +138,7 @@ fn representative_transform_kind(proc_id: SummaryModeProcedure, table_kind: Tabl
             equation_id: String::from("straight_line"),
             parameters: vec![(String::from("Slope"), 2.0), (String::from("YIntercept"), 1.0)],
             noise: SimulationNoise::None,
+            simulation_mode: None,
         }),
         SummaryModeProcedure::TransformRandomSample => AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
             seed: 7,
@@ -133,6 +146,9 @@ fn representative_transform_kind(proc_id: SummaryModeProcedure, table_kind: Tabl
             stratify_column: None,
             proportional_allocation: false,
         }),
+        SummaryModeProcedure::RowStatistics => AnalysisKind::RowStatistics(Default::default()),
+        SummaryModeProcedure::FractionOfTotal => AnalysisKind::FractionOfTotal(Default::default()),
+        SummaryModeProcedure::CurveCalculus => AnalysisKind::CurveCalculus(Default::default()),
         other => panic!("unexpected non-transform procedure {other:?}"),
     }
 }
@@ -198,6 +214,10 @@ fn d1_oracles_column_transforms_auc_bailer_spline_and_lossless_conversions() {
                 x_transform: None,
                 y_transform: Some(MathTransformPreset::LinearScale { slope: -2.0, intercept: 50.0 }),
                 error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+                pharmacology_preset: None,
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
             }),
         )
         .unwrap();

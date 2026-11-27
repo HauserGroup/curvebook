@@ -238,6 +238,10 @@ fn category_slots_resolve_analyzable_data_and_reject_failed_results() -> TestRes
                 x_transform: None,
                 y_transform: None,
                 error_propagation: ErrorPropagationMode::default(),
+                pharmacology_preset: None,
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
             }),
         )
         .map_err(|e| format!("{e}"))?;

@@ -5,8 +5,9 @@
 //! `curvebook-format` can reject a document with a precise location.
 
 use super::{
-    AnalysisKind, AnalysisSpec, AucBaseline, DemingErrorSpec, FitMethod, MathTransformPreset, NonlinearFitSpec, NormalizeAnchor, OutlierSpec,
-    ParameterScope, SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
+    AnalysisKind, AnalysisSpec, AucBaseline, BaselineKind, CurveCalculusOp, DemingErrorSpec, DistributionTailShade, FitMethod, GlmWeightSpec,
+    MathTransformPreset, MultivariateSpec, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope, PcaRetentionRule,
+    PharmacologyTransformPreset, SimulationMode, SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
 };
 
 /// `Some(path())` when `value` is `NaN` or infinite.
@@ -48,14 +49,15 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
             OutlierSpec::Rout { fdr_q_percent } => non_finite(*fdr_q_percent, at("outlier.fdr_q_percent")),
         },
         AnalysisKind::TwoGroupComparison(t) => match t.method {
-            TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
-                non_finite(hypothetical, at("hypothetical"))
-            }
+            TwoGroupMethod::OneSampleT { hypothetical }
+            | TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+            | TwoGroupMethod::OneSampleRatioT { hypothetical } => non_finite(hypothetical, at("hypothetical")),
             TwoGroupMethod::UnpairedT
             | TwoGroupMethod::WelchT
             | TwoGroupMethod::PairedT
             | TwoGroupMethod::RatioPairedT
             | TwoGroupMethod::LognormalUnpairedT
+            | TwoGroupMethod::LognormalWelchT
             | TwoGroupMethod::MannWhitneyU
             | TwoGroupMethod::WilcoxonSignedRank
             | TwoGroupMethod::KolmogorovSmirnov
@@ -73,8 +75,22 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
             .find_map(|(idx, p)| non_finite(*p, || format!("analysis.expected_proportions[{idx}]")))
             .or_else(|| non_finite_opt(c.null_proportion, at("null_proportion"))),
         AnalysisKind::Survival(s) => match s {
-            SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => non_finite(multiplicity.threshold, at("multiplicity.threshold")),
-            SurvivalAnalysisSpec::CoxProportionalHazards { .. } => None,
+            SurvivalAnalysisSpec::KaplanMeier { multiplicity, event_code, censored_code, .. } => {
+                non_finite(multiplicity.threshold, at("multiplicity.threshold"))
+                    .or_else(|| non_finite_opt(*event_code, at("survival.event_code")))
+                    .or_else(|| non_finite_opt(*censored_code, at("survival.censored_code")))
+            }
+            SurvivalAnalysisSpec::CoxProportionalHazards { covariate_profiles, event_code, censored_code, .. } => {
+                non_finite_opt(*event_code, at("survival.event_code"))
+                    .or_else(|| non_finite_opt(*censored_code, at("survival.censored_code")))
+                    .or_else(|| {
+                        covariate_profiles.iter().enumerate().find_map(|(p_idx, prof)| {
+                            prof.numeric_values.iter().enumerate().find_map(|(v_idx, (_, val))| {
+                                non_finite(*val, || format!("analysis.covariate_profiles[{p_idx}].numeric_values[{v_idx}]"))
+                            })
+                        })
+                    })
+            }
         },
         AnalysisKind::NonlinearRegression(fit) => nonlinear_fit_first_non_finite_float(fit),
         AnalysisKind::LinearRegression(fit) => range_first_non_finite_float(fit.x_range_filter, "x_range_filter")
@@ -92,11 +108,24 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
             .or_else(|| non_finite_opt(spec.lowess_fraction, at("lowess_fraction")))
             .or_else(|| non_finite_opt(spec.plot_x_min, at("plot_x_min")))
             .or_else(|| non_finite_opt(spec.plot_x_max, at("plot_x_max"))),
+        AnalysisKind::GeneralizedLinearModel(glm) => {
+            non_finite_opt(glm.classification_cutoff, at("glm.classification_cutoff")).or_else(|| match glm.weights {
+                GlmWeightSpec::Scheme(WeightingScheme::GeneralPowerY(k)) => non_finite(k, at("glm.weights.power")),
+                _ => None,
+            })
+        }
+        AnalysisKind::Multivariate(mv) => match mv {
+            MultivariateSpec::Pca { retention_rule, .. } => match retention_rule {
+                PcaRetentionRule::EigenvalueCutoff(v) => non_finite(*v, at("pca.retention_rule.eigenvalue_cutoff")),
+                PcaRetentionRule::CumulativeVariancePercent(v) => non_finite(*v, at("pca.retention_rule.cumulative_variance_percent")),
+                PcaRetentionRule::KaiserOrParallel | PcaRetentionRule::FixedCount(_) | PcaRetentionRule::SelectAll => None,
+            },
+            MultivariateSpec::Clustering { cut_height, .. } => non_finite_opt(*cut_height, at("clustering.cut_height")),
+            MultivariateSpec::CorrelationMatrix { .. } | MultivariateSpec::MultipleImputation { .. } => None,
+        },
         AnalysisKind::BlandAltman(_)
         | AnalysisKind::PassingBablok(_)
         | AnalysisKind::RocCurve(_)
-        | AnalysisKind::GeneralizedLinearModel(_)
-        | AnalysisKind::Multivariate(_)
         | AnalysisKind::LeveneTest(_)
         | AnalysisKind::ImportedSnapshot(_) => None,
         AnalysisKind::PValueStack(ps) => non_finite(ps.threshold, at("pvalue_stack.threshold")),
@@ -112,6 +141,20 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         .or_else(|| non_finite_opt(auc.x_max, at("x_max")))
         .or_else(|| non_finite(auc.min_peak_height, at("min_peak_height")))
         .or_else(|| non_finite(auc.min_area_fraction, at("min_area_fraction"))),
+        AnalysisKind::RowStatistics(rs) => non_finite_opt(rs.upper_percentile, at("row_statistics.upper_percentile")),
+        AnalysisKind::FractionOfTotal(_) => None,
+        AnalysisKind::CurveCalculus(cc) => match cc.operation {
+            CurveCalculusOp::CumulativeIntegral { baseline } => non_finite(baseline, at("curve_calculus.baseline")),
+            CurveCalculusOp::SmoothLowess { span, .. } => non_finite(span, at("curve_calculus.span")),
+            CurveCalculusOp::FirstDerivative
+            | CurveCalculusOp::SecondDerivative
+            | CurveCalculusOp::SmoothSavitzkyGolay { .. }
+            | CurveCalculusOp::SmoothMovingAverage { .. } => None,
+        },
+        AnalysisKind::MonteCarloSimulation(mc) => mc.hit_rules.iter().enumerate().find_map(|(idx, rule)| {
+            non_finite(rule.threshold, || format!("analysis.monte_carlo.hit_rules[{idx}].threshold"))
+                .or_else(|| non_finite_opt(rule.upper_threshold, || format!("analysis.monte_carlo.hit_rules[{idx}].upper_threshold")))
+        }),
     }
 }
 
@@ -152,24 +195,49 @@ fn normalize_anchor_first_non_finite_float(anchor: &NormalizeAnchor, path: &str)
 
 fn transform_first_non_finite_float(transform: &TransformAnalysisSpec) -> Option<String> {
     match transform {
-        TransformAnalysisSpec::Math { x_transform, y_transform, .. } => x_transform
+        TransformAnalysisSpec::Math { x_transform, y_transform, pharmacology_preset, zero_x_substitute, .. } => x_transform
             .as_ref()
             .and_then(|p| math_preset_first_non_finite_float(p, "analysis.x_transform"))
-            .or_else(|| y_transform.as_ref().and_then(|p| math_preset_first_non_finite_float(p, "analysis.y_transform"))),
+            .or_else(|| y_transform.as_ref().and_then(|p| math_preset_first_non_finite_float(p, "analysis.y_transform")))
+            .or_else(|| match pharmacology_preset {
+                Some(PharmacologyTransformPreset::Hill { y_max }) => non_finite_opt(*y_max, at("pharmacology_preset.y_max")),
+                _ => None,
+            })
+            .or_else(|| non_finite_opt(*zero_x_substitute, at("zero_x_substitute"))),
         TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
             normalize_anchor_first_non_finite_float(zero_anchor, "analysis.zero_anchor")
                 .or_else(|| normalize_anchor_first_non_finite_float(hundred_anchor, "analysis.hundred_anchor"))
         }
-        TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, .. } => non_finite(*x_min, at("simulate.x_min"))
+        TransformAnalysisSpec::RemoveBaseline { baseline_kind, .. } => match baseline_kind {
+            Some(BaselineKind::Constant(v)) => non_finite(*v, at("baseline_kind.constant")),
+            _ => None,
+        },
+        TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, simulation_mode, .. } => non_finite(*x_min, at("simulate.x_min"))
             .or_else(|| non_finite(*x_max, at("simulate.x_max")))
             .or_else(|| parameters.iter().enumerate().find_map(|(idx, (_, val))| non_finite(*val, || format!("analysis.simulate.parameters[{idx}]"))))
             .or_else(|| match noise {
                 SimulationNoise::Gaussian { sd } => non_finite(*sd, at("simulate.noise.sd")),
                 SimulationNoise::RelativePercent { cv_percent } => non_finite(*cv_percent, at("simulate.noise.cv_percent")),
                 SimulationNoise::None | SimulationNoise::Poisson => None,
+            })
+            .or_else(|| match simulation_mode {
+                Some(SimulationMode::Contingency2x2(spec)) => spec
+                    .cell_params
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, v)| non_finite(*v, || format!("analysis.simulate.contingency.cell_params[{idx}]"))),
+                Some(SimulationMode::Column(spec)) => spec
+                    .column_means
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, v)| non_finite(*v, || format!("analysis.simulate.column.column_means[{idx}]")))
+                    .or_else(|| non_finite(spec.within_sd, at("simulate.column.within_sd")))
+                    .or_else(|| non_finite_opt(spec.random_effect_sd, at("simulate.column.random_effect_sd")))
+                    .or_else(|| non_finite(spec.outlier_fraction, at("simulate.column.outlier_fraction")))
+                    .or_else(|| non_finite(spec.outlier_shift_sd, at("simulate.column.outlier_shift_sd"))),
+                Some(SimulationMode::XyCurve) | None => None,
             }),
-        TransformAnalysisSpec::RemoveBaseline { .. }
-        | TransformAnalysisSpec::Transpose { .. }
+        TransformAnalysisSpec::Transpose { .. }
         | TransformAnalysisSpec::PruneRows { .. }
         | TransformAnalysisSpec::SelectAndTransform { .. }
         | TransformAnalysisSpec::RandomSample { .. } => None,
@@ -220,6 +288,30 @@ fn nonlinear_fit_first_non_finite_float(fit: &NonlinearFitSpec) -> Option<String
                     .or_else(|| non_finite_opt(rules.max_dependency, at("fit_flag_rules.max_dependency")))
                     .or_else(|| non_finite_opt(rules.min_normality_p, at("fit_flag_rules.min_normality_p")))
                     .or_else(|| non_finite_opt(rules.min_runs_or_lof_p, at("fit_flag_rules.min_runs_or_lof_p")))
+            })
+        })
+        .or_else(|| {
+            fit.relational_constraints
+                .iter()
+                .enumerate()
+                .find_map(|(idx, rc)| non_finite(rc.margin, || format!("analysis.relational_constraints[{idx}].margin")))
+        })
+        .or_else(|| {
+            fit.plot_distribution.as_ref().and_then(|dist| {
+                dist.parameters
+                    .iter()
+                    .enumerate()
+                    .find_map(|(idx, v)| non_finite(*v, || format!("analysis.plot_distribution.parameters[{idx}]")))
+                    .or_else(|| match dist.tail_shade {
+                        DistributionTailShade::None => None,
+                        DistributionTailShade::LowerTail { cutoff } | DistributionTailShade::UpperTail { cutoff } => {
+                            non_finite(cutoff, at("plot_distribution.tail_shade.cutoff"))
+                        }
+                        DistributionTailShade::TwoTailed { lower, upper } | DistributionTailShade::Between { lower, upper } => {
+                            non_finite(lower, at("plot_distribution.tail_shade.lower"))
+                                .or_else(|| non_finite(upper, at("plot_distribution.tail_shade.upper")))
+                        }
+                    })
             })
         })
 }

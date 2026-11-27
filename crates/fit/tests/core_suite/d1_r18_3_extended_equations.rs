@@ -23,8 +23,8 @@ use curvebook_fit::{DatasetSeries, FitStatus, NonlinearFitResult, ParametricMode
 use curvebook_testkit::assert_approx_eq;
 
 use common::{
-    assert_converged, cfg_fast, cfg_fast_rules, dataset_param_val, find_derived, find_param, fit_with, linspace, param_ds_val, rule_const,
-    rule_local_init, rule_per_ds, rule_shared_init, series_eval, series_xy,
+    assert_converged, cfg_fast, cfg_fast_rules, dataset_param_val, find_derived, find_param, find_param_ds, fit_with, linspace, param_ds_val,
+    rule_const, rule_local_init, rule_per_ds, rule_shared_init, series_eval, series_xy,
 };
 
 type ParamOracle<'a> = (&'a str, Option<usize>, f64, f64, f64, f64);
@@ -198,24 +198,21 @@ fn d1_r18_3_group2_linear_special_dose_response() {
         ],
     );
 
-    // 8. operational_model_agonist_conc
+    // 8. operational_model_agonist_conc (<A> full agonist + <~A> partial agonist global split)
     let (xo, eo) = (logspace(-3.0, 2.0, 16), eps_vec(16, 0.25));
-    let yo: Vec<f64> = xo.iter().zip(&eo).map(|(&x, &e)| 5.0 + 95.0 / (1.0 + ((2.0 + x) / (1.5 * x)).powf(1.2)) + e).collect();
-    let mut r8 = local_inits(&[("Basal", 4.0), ("KA", 1.8), ("Tau", 1.4), ("n", 1.1)]);
-    r8.push(rule_const("Emax", 100.0));
-    check(
-        "operational_model_agonist_conc",
-        &xo,
-        &yo,
-        r8,
-        (4.671_387_856_843_455e-1, 1e-7),
-        &[
-            ("Basal", None, 4.993_492_002_449_718, 9.233_084_449_236_710e-2, 1e-6, 1e-5),
-            ("KA", None, 1.995_570_691_391_321, 7.283_045_824_374_790e-2, 1e-6, 1e-5),
-            ("Tau", None, 1.498_694_304_294_045, 1.653_193_771_435_948e-2, 1e-6, 1e-5),
-            ("n", None, 1.200_297_985_438_651, 2.271_855_521_335_176e-2, 1e-6, 1e-5),
-        ],
-    );
+    let yo_full: Vec<f64> = xo.iter().map(|&x| 5.0 + 95.0 / (1.0 + (0.2 / x).powf(1.2))).collect();
+    let yo_part: Vec<f64> = xo.iter().zip(&eo).map(|(&x, &e)| 5.0 + 95.0 / (1.0 + ((2.0 + x) / (1.5 * x)).powf(1.2)) + e).collect();
+    let mut r8 = local_inits(&[("EC50", 0.2), ("KA", 1.8), ("Tau", 1.4)]);
+    r8.push(rule_shared_init("Basal", 4.5));
+    r8.push(rule_const("EffectMax", 100.0));
+    r8.push(rule_shared_init("n", 1.15));
+    let m8 = get_builtin_model("operational_model_agonist_conc").unwrap();
+    let res8 = fit_with(m8.as_ref(), &[series_xy(0, "Full", &xo, &yo_full), series_xy(1, "Partial", &xo, &yo_part)], &cfg_fast_rules(r8));
+    assert_converged(&res8, "operational_model_agonist_conc");
+    assert_approx_eq(find_param_ds(&res8, 0, "EC50").estimate, 0.2, 1e-3, 5e-3, "operational_model_agonist_conc EC50");
+    assert_approx_eq(find_param_ds(&res8, 1, "KA").estimate, 2.0, 2e-2, 2e-2, "operational_model_agonist_conc KA");
+    assert_approx_eq(find_param_ds(&res8, 1, "Tau").estimate, 1.5, 1e-2, 1e-2, "operational_model_agonist_conc Tau");
+    assert_approx_eq(find_param_ds(&res8, 1, "n").estimate, 1.2, 1e-2, 1e-2, "operational_model_agonist_conc n");
 
     // 9. ec50_shift_gaddum_schild_conc & 10. allosteric_ec50_shift_conc (3 datasets each)
     let (x_g, eg) = (logspace(-9.0, -4.0, 12), eps_vec(12, 0.35));
@@ -907,6 +904,8 @@ fn aud_03_27_default_parameter_rules_global_and_ecf() {
 
     let lx = linspace(-9.0, -3.5, 12);
     let cx: Vec<f64> = lx.iter().map(|&v| 10.0_f64.powf(v)).collect();
+    let (true_log_kb, true_log_alpha) = (2e-6_f64.log10(), 0.1_f64.log10());
+    let allo_log_checks = [("LogKB", true_log_kb, 1e-4), ("Logalpha", true_log_alpha, 1e-4)];
     for (id, xs, p_base, rule_name, concs, checks) in [
         (
             "ec50_shift_gaddum_schild",
@@ -920,10 +919,10 @@ fn aud_03_27_default_parameter_rules_global_and_ecf() {
         (
             "allosteric_ec50_shift",
             lx.as_slice(),
-            [4.0, 96.0, -7.0, 1.1, 2e-6, 0.1],
+            [4.0, 96.0, -7.0, 1.1, true_log_kb, true_log_alpha],
             "ModConc",
             &[0.0, 1e-6, 1e-5, 1e-4],
-            &[("Kb", 2e-6, 1e-10), ("alpha", 0.1, 1e-4)],
+            &allo_log_checks[..],
         ),
         (
             "allosteric_ec50_shift_conc",

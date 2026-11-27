@@ -12,14 +12,16 @@
 //!   *Journal of the American Statistical Association*, 74(368), 829-836.
 //!   `doi:10.1080/01621459.1979.10481038`.
 
+use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    AnalysisSpec, AreaUnderCurveSpec, AucBaseline, Cell, ChecklistItem, ChecklistStatus, DataSheet, MultipleVariablesTable, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SplineLowessSpec, SubcolumnMode, SummarizedPoint, TableArchetype,
-    VariableColumn, VariableRole, XColumnMode, XyTable,
+    AnalysisSpec, AreaUnderCurveSpec, AucBaseline, Cell, ChecklistItem, ChecklistStatus, CurveCalculusOp, CurveCalculusSpec, DataSheet,
+    MAX_TITLE_BYTES, MultipleVariablesTable, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SplineLowessSpec,
+    SubcolumnMode, SummarizedPoint, TableArchetype, VariableColumn, VariableRole, XColumnMode, XyTable,
 };
 use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
 
 use crate::error::TransformError;
+use crate::ops::{TransformContext, bounded_suffixed_str};
 use crate::spline::fit_lowess_sorted_values;
 
 /// Options controlling Area Under the Curve and peak detection.
@@ -160,6 +162,14 @@ pub enum SmoothMethod {
     SavitzkyGolay7,
     /// 9-point quadratic/cubic Savitzky–Golay local polynomial filter (Savitzky & Golay 1964).
     SavitzkyGolay9,
+    /// Generalized Savitzky–Golay local polynomial filter of arbitrary odd `window >= 3` and polynomial `order < window`
+    /// with Gorry (1990) boundary polynomial fitting.
+    SavitzkyGolayGeneral {
+        /// Odd smoothing neighborhood width (`>= 3`).
+        window: usize,
+        /// Polynomial degree (`< window`, `<= 12`).
+        order: usize,
+    },
     /// Symmetric unweighted sliding-window arithmetic mean.
     MovingAverage {
         /// Odd/positive window width (`>= 1` points).
@@ -1318,9 +1328,30 @@ fn format_compact_f64(value: f64) -> String {
     if trimmed.is_empty() || trimmed == "-0" { String::from("0") } else { trimmed.to_owned() }
 }
 
+/// Maximum polynomial degree accepted by generalized Savitzky–Golay smoothing/differentiation.
+const MAX_SAVITZKY_GOLAY_ORDER: usize = 12;
+
+fn validate_savitzky_golay_params(window: usize, order: usize) -> Result<(), TransformError> {
+    if window < 3 || window.is_multiple_of(2) {
+        return Err(TransformError::InvalidSpec { message: format!("Savitzky-Golay window must be an odd integer >= 3, got {window}") });
+    }
+    if order >= window {
+        return Err(TransformError::InvalidSpec {
+            message: format!("Savitzky-Golay polynomial order ({order}) must be strictly less than window ({window})"),
+        });
+    }
+    if order > MAX_SAVITZKY_GOLAY_ORDER {
+        return Err(TransformError::InvalidSpec {
+            message: format!("Savitzky-Golay polynomial order ({order}) exceeds maximum supported degree ({MAX_SAVITZKY_GOLAY_ORDER})"),
+        });
+    }
+    Ok(())
+}
+
 fn validate_smooth_method(method: SmoothMethod) -> Result<(), TransformError> {
     match method {
         SmoothMethod::SavitzkyGolay5 | SmoothMethod::SavitzkyGolay7 | SmoothMethod::SavitzkyGolay9 => Ok(()),
+        SmoothMethod::SavitzkyGolayGeneral { window, order } => validate_savitzky_golay_params(window, order),
         SmoothMethod::MovingAverage { window } => {
             if window == 0 {
                 return Err(TransformError::InvalidSpec { message: String::from("moving average window must be >= 1") });
@@ -1355,6 +1386,7 @@ pub fn smooth_xy(points: &[(f64, f64)], method: SmoothMethod) -> Result<Vec<(f64
         SmoothMethod::SavitzkyGolay5 => savitzky_golay(&xs, &ys, 5)?,
         SmoothMethod::SavitzkyGolay7 => savitzky_golay(&xs, &ys, 7)?,
         SmoothMethod::SavitzkyGolay9 => savitzky_golay(&xs, &ys, 9)?,
+        SmoothMethod::SavitzkyGolayGeneral { window, order } => savitzky_golay_general(&xs, &ys, window, order)?,
         SmoothMethod::MovingAverage { window } => moving_average(&ys, window)?,
         SmoothMethod::Lowess { span, robustness_iters } => lowess(&xs, &ys, span, robustness_iters)?,
     };
@@ -1363,6 +1395,28 @@ pub fn smooth_xy(points: &[(f64, f64)], method: SmoothMethod) -> Result<Vec<(f64
         return Err(TransformError::InvalidInput { message: String::from("curve smoothing produced non-finite value") });
     }
     Ok(xs.into_iter().zip(smoothed_y).collect())
+}
+
+/// Compute a Savitzky–Golay local polynomial smoother (`deriv == 0`) or `deriv`-th derivative
+/// (`deriv <= order`) of an `(x, y)` curve with Gorry (1990) boundary polynomial handling.
+pub fn savitzky_golay_derivative(points: &[(f64, f64)], window: usize, order: usize, deriv: usize) -> Result<Vec<(f64, f64)>, TransformError> {
+    validate_savitzky_golay_params(window, order)?;
+    if deriv > order {
+        return Err(TransformError::InvalidSpec {
+            message: format!("Savitzky-Golay derivative order ({deriv}) cannot exceed polynomial order ({order})"),
+        });
+    }
+    if points.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sorted = prepare_sorted_points(&points.iter().map(|&(x, y)| (x, y, None)).collect::<Vec<_>>())?;
+    let xs: Vec<f64> = sorted.iter().map(|p| p.x).collect();
+    let ys: Vec<f64> = sorted.iter().map(|p| p.y).collect();
+    let vals = savitzky_golay_local_poly(&xs, &ys, window, order, deriv)?;
+    if vals.iter().any(|v| !v.is_finite()) {
+        return Err(TransformError::InvalidInput { message: String::from("Savitzky-Golay derivative produced non-finite value") });
+    }
+    Ok(xs.into_iter().zip(vals).collect())
 }
 
 fn is_uniform_grid(xs: &[f64]) -> bool {
@@ -1446,7 +1500,42 @@ fn savitzky_golay(xs: &[f64], ys: &[f64], width: usize) -> Result<Vec<f64>, Tran
     Ok(out)
 }
 
+fn savitzky_golay_general(xs: &[f64], ys: &[f64], window: usize, order: usize) -> Result<Vec<f64>, TransformError> {
+    validate_savitzky_golay_params(window, order)?;
+    if order == SAVITZKY_GOLAY_DEGREE && matches!(window, 5 | 7 | 9) {
+        return savitzky_golay(xs, ys, window);
+    }
+    savitzky_golay_local_poly(xs, ys, window, order, 0)
+}
+
+fn savitzky_golay_local_poly(xs: &[f64], ys: &[f64], window: usize, order: usize, deriv: usize) -> Result<Vec<f64>, TransformError> {
+    let n = ys.len();
+    if n < window {
+        let deg = n.saturating_sub(1).min(order);
+        return Ok((0..n).map(|i| local_poly_deriv_eval(xs, ys, 0..n, xs[i], deg, deriv).unwrap_or(if deriv == 0 { ys[i] } else { 0.0 })).collect());
+    }
+    let half = window / 2;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let start = if i < half {
+            0
+        } else if i + half >= n {
+            n - window
+        } else {
+            i - half
+        };
+        let end = start + window;
+        let fallback = if deriv == 0 { ys[i] } else { f64::NAN };
+        out.push(local_poly_deriv_eval(xs, ys, start..end, xs[i], order, deriv).unwrap_or(fallback));
+    }
+    Ok(out)
+}
+
 fn local_poly_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_target: f64, degree: usize) -> Option<f64> {
+    local_poly_deriv_eval(xs, ys, range, x_target, degree, 0)
+}
+
+fn local_poly_deriv_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_target: f64, degree: usize, deriv: usize) -> Option<f64> {
     let m = range.len();
     if m == 0 {
         return None;
@@ -1456,14 +1545,17 @@ fn local_poly_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_targ
         return None;
     }
     if max_dt == 0.0 {
-        return sum::mean(ys.get(range)?).ok().filter(|v| v.is_finite());
+        return if deriv == 0 { sum::mean(ys.get(range)?).ok().filter(|v| v.is_finite()) } else { None };
     }
     let p = degree.min(m - 1) + 1;
+    if deriv >= p {
+        return Some(0.0);
+    }
     let mut data = Vec::with_capacity(m * p);
     let mut b = Vec::with_capacity(m);
     for idx in range {
-        // Normalize offsets to [-1, 1] so the intercept c_0 = P(x_target) is invariant while the
-        // local Vandermonde columns stay O(1)-conditioned across tiny or huge X scales.
+        // Normalize offsets to [-1, 1] so the local Vandermonde columns stay O(1)-conditioned
+        // across tiny or huge X scales; derivatives rescale by `deriv! / max_dt^deriv`.
         let dt = (xs[idx] - x_target) / max_dt;
         if !dt.is_finite() {
             return None;
@@ -1480,7 +1572,20 @@ fn local_poly_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_targ
     if sol.rank == 0 {
         return None;
     }
-    sol.coefficients.first().copied().filter(|v| v.is_finite())
+    let coeff = sol.coefficients.get(deriv).copied()?;
+    if deriv == 0 {
+        return coeff.is_finite().then_some(coeff);
+    }
+    let mut fact = 1.0_f64;
+    for k in 2..=deriv {
+        #[allow(clippy::cast_precision_loss)]
+        {
+            fact *= k as f64;
+        }
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let val = fact * coeff / max_dt.powi(deriv as i32);
+    val.is_finite().then_some(val)
 }
 
 fn moving_average(ys: &[f64], window: usize) -> Result<Vec<f64>, TransformError> {
@@ -1614,6 +1719,173 @@ pub fn integrate_xy(points: &[(f64, f64)], baseline: f64) -> Result<Vec<(f64, f6
     Ok(out)
 }
 
+/// Execute a first-class [`CurveCalculusSpec`] analysis against an `XY` [`DataSheet`] and return a
+/// populated [`ResultSheet`] with summary diagnostics, transformed coordinates, hookable scalars,
+/// and `analyzable_data`.
+pub fn execute_curve_calculus(
+    source: &DataSheet,
+    analysis: &AnalysisSpec,
+    spec: &CurveCalculusSpec,
+    ctx: &TransformContext<'_>,
+) -> Result<ResultSheet, TransformError> {
+    let TableArchetype::Xy(xy) = &source.archetype else {
+        return Err(TransformError::IncompatibleTable { operation: "Curve Calculus", kind: source.kind() });
+    };
+    let chosen_slice = if !ctx.selected_data_sets.is_empty() { &ctx.selected_data_sets } else { &analysis.selected_data_sets };
+    let active_cols = resolve_auc_columns(xy.data_sets.len(), chosen_slice)?;
+    if active_cols.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("XY table has no datasets for Curve Calculus") });
+    }
+
+    let op = match spec.operation {
+        CurveCalculusOp::FirstDerivative => CurveSheetOp::Differentiate(DerivativeOrder::First),
+        CurveCalculusOp::SecondDerivative => CurveSheetOp::Differentiate(DerivativeOrder::Second),
+        CurveCalculusOp::CumulativeIntegral { baseline } => CurveSheetOp::Integrate { baseline },
+        CurveCalculusOp::SmoothSavitzkyGolay { window, order } => CurveSheetOp::Smooth(SmoothMethod::SavitzkyGolayGeneral { window, order }),
+        CurveCalculusOp::SmoothMovingAverage { window } => CurveSheetOp::Smooth(SmoothMethod::MovingAverage { window }),
+        CurveCalculusOp::SmoothLowess { span, robustness_iters } => CurveSheetOp::Smooth(SmoothMethod::Lowess { span, robustness_iters }),
+    };
+
+    let data_id = ctx.output_id.clone().unwrap_or_else(|| bounded_suffixed_str(analysis.id.as_str(), "-curve", MAX_SHEET_ID_BYTES));
+    let data_title =
+        ctx.output_title.clone().unwrap_or_else(|| bounded_suffixed_str(analysis.effective_title(), " (Curve Calculus)", MAX_TITLE_BYTES));
+    let (derived_sheet, series_curves) = apply_curve_calculus_selected(xy, &active_cols, op, &data_id, &data_title)?;
+
+    let op_label = curve_calculus_op_label(spec.operation);
+    let summary_tab = build_curve_calculus_summary_tab(xy, &active_cols, &series_curves, &op_label);
+    let values_tab = build_curve_calculus_values_tab(&derived_sheet, &op_label);
+
+    let mut sheet = ResultSheet::new(analysis.clone())?;
+    sheet.status = ResultStatus::UpToDate;
+    sheet.tabs.push(summary_tab);
+    sheet.tabs.push(values_tab);
+    for (local_idx, &ds_idx) in active_cols.iter().enumerate() {
+        let curve = &series_curves[local_idx];
+        #[allow(clippy::cast_precision_loss)]
+        sheet.scalars.push(ResultScalarEntry {
+            key: String::from("PointCount"),
+            data_set_index: Some(ds_idx),
+            value: curve.len() as f64,
+            units: None,
+        });
+        if let Some(min_y) = curve.iter().map(|&(_, _, y)| y).reduce(f64::min) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("MinY"), data_set_index: Some(ds_idx), value: min_y, units: None });
+        }
+        if let Some(max_y) = curve.iter().map(|&(_, _, y)| y).reduce(f64::max) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("MaxY"), data_set_index: Some(ds_idx), value: max_y, units: None });
+        }
+        if let Some(&(_, _, end_y)) = curve.last() {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("EndY"), data_set_index: Some(ds_idx), value: end_y, units: None });
+        }
+    }
+    sheet.analyzable_data = Some(derived_sheet);
+    Ok(sheet)
+}
+
+fn curve_calculus_op_label(op: CurveCalculusOp) -> String {
+    match op {
+        CurveCalculusOp::FirstDerivative => String::from("First derivative (dY/dX)"),
+        CurveCalculusOp::SecondDerivative => String::from("Second derivative (d2Y/dX2)"),
+        CurveCalculusOp::CumulativeIntegral { baseline } => format!("Cumulative integral (baseline = {})", format_compact_f64(baseline)),
+        CurveCalculusOp::SmoothSavitzkyGolay { window, order } => format!("Savitzky-Golay smooth (window = {window}, order = {order})"),
+        CurveCalculusOp::SmoothMovingAverage { window } => format!("Moving average smooth (window = {window})"),
+        CurveCalculusOp::SmoothLowess { span, robustness_iters } => {
+            format!("LOWESS smooth (span = {}, iters = {robustness_iters})", format_compact_f64(span))
+        }
+    }
+}
+
+fn build_curve_calculus_summary_tab(xy: &XyTable, active_cols: &[usize], series_curves: &[Vec<(usize, f64, f64)>], op_label: &str) -> ResultTab {
+    let mut row_labels = Vec::with_capacity(active_cols.len());
+    let mut rows = Vec::with_capacity(active_cols.len());
+    for (local_idx, &ds_idx) in active_cols.iter().enumerate() {
+        let title = xy.data_sets[ds_idx].title.clone();
+        row_labels.push(title);
+        let curve = &series_curves[local_idx];
+        #[allow(clippy::cast_precision_loss)]
+        let n_pts = curve.len() as f64;
+        let start_x = curve.first().map(|&(_, x, _)| x);
+        let end_x = curve.last().map(|&(_, x, _)| x);
+        let min_y = curve.iter().map(|&(_, _, y)| y).reduce(f64::min);
+        let max_y = curve.iter().map(|&(_, _, y)| y).reduce(f64::max);
+        let end_y = curve.last().map(|&(_, _, y)| y);
+        rows.push(vec![
+            ResultCell::Text(op_label.to_owned()),
+            auc_num_cell(n_pts),
+            start_x.map_or(ResultCell::Empty, auc_num_cell),
+            end_x.map_or(ResultCell::Empty, auc_num_cell),
+            min_y.map_or(ResultCell::Empty, auc_num_cell),
+            max_y.map_or(ResultCell::Empty, auc_num_cell),
+            end_y.map_or(ResultCell::Empty, auc_num_cell),
+        ]);
+    }
+    ResultTab {
+        id: String::from("curve-calculus-summary"),
+        title: String::from("Curve calculus summary"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![
+            String::from("Operation"),
+            String::from("N Points"),
+            String::from("Start X"),
+            String::from("End X"),
+            String::from("Min Y"),
+            String::from("Max Y"),
+            String::from("End Y"),
+        ],
+        row_labels,
+        rows,
+        footnotes: vec![format!("Applied {op_label} independently to {} selected XY series.", active_cols.len())],
+    }
+}
+
+fn build_curve_calculus_values_tab(derived_sheet: &DataSheet, op_label: &str) -> ResultTab {
+    const MAX_PREVIEW_ROWS: usize = 10_000;
+    let TableArchetype::Xy(xy) = &derived_sheet.archetype else {
+        return ResultTab {
+            id: String::from("curve-calculus-values"),
+            title: String::from("Transformed curve"),
+            kind: ResultTabKind::DescriptiveSummary,
+            column_headers: Vec::new(),
+            row_labels: Vec::new(),
+            rows: Vec::new(),
+            footnotes: Vec::new(),
+        };
+    };
+    let total_rows = xy.row_count();
+    let shown_rows = total_rows.min(MAX_PREVIEW_ROWS);
+    let mut column_headers = Vec::with_capacity(1 + xy.data_sets.len());
+    column_headers.push(if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() });
+    for ds in &xy.data_sets {
+        column_headers.push(ds.title.clone());
+    }
+    let mut row_labels = Vec::with_capacity(shown_rows);
+    let mut rows = Vec::with_capacity(shown_rows);
+    for r in 0..shown_rows {
+        row_labels.push(format!("{}", r + 1));
+        let mut row_cells = Vec::with_capacity(column_headers.len());
+        let x_cell = xy.x_summary_at(r).ok().flatten().map_or(ResultCell::Empty, auc_num_cell);
+        row_cells.push(x_cell);
+        for ds in &xy.data_sets {
+            let y_cell = ds.cells.get(r).and_then(|sub| sub.first()).and_then(Cell::active_number).map_or(ResultCell::Empty, auc_num_cell);
+            row_cells.push(y_cell);
+        }
+        rows.push(row_cells);
+    }
+    let mut footnotes = vec![format!("Curve calculus output ({op_label}).")];
+    if total_rows > MAX_PREVIEW_ROWS {
+        footnotes.push(format!("Preview truncated to first {MAX_PREVIEW_ROWS} of {total_rows} rows; full curve is stored in analyzable_data."));
+    }
+    ResultTab {
+        id: String::from("curve-calculus-values"),
+        title: String::from("Transformed curve"),
+        kind: ResultTabKind::DescriptiveSummary,
+        column_headers,
+        row_labels,
+        rows,
+        footnotes,
+    }
+}
+
 /// Curve-calculus transform wrapper producing a derived `XyTable` [`DataSheet`].
 pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Result<DataSheet, TransformError> {
     let TableArchetype::Xy(xy) = &sheet.archetype else {
@@ -1622,9 +1894,24 @@ pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Res
     if xy.data_sets.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("XY table has no datasets") });
     }
+    let all_cols: Vec<usize> = (0..xy.data_sets.len()).collect();
+    let data_id = bounded_suffixed_str(sheet.id.as_str(), "-curve", MAX_SHEET_ID_BYTES);
+    let data_title = bounded_suffixed_str(&sheet.title, " (Curve)", MAX_TITLE_BYTES);
+    let (out, _) = apply_curve_calculus_selected(xy, &all_cols, op, &data_id, &data_title)?;
+    Ok(out)
+}
 
-    let mut series_curves = Vec::with_capacity(xy.data_sets.len());
-    for ds_idx in 0..xy.data_sets.len() {
+type IndexedCurveSeries = Vec<(usize, f64, f64)>;
+
+fn apply_curve_calculus_selected(
+    xy: &XyTable,
+    active_cols: &[usize],
+    op: CurveSheetOp,
+    data_id: &str,
+    data_title: &str,
+) -> Result<(DataSheet, Vec<IndexedCurveSeries>), TransformError> {
+    let mut series_curves = Vec::with_capacity(active_cols.len());
+    for &ds_idx in active_cols {
         series_curves.push(transform_dataset_curve(xy, ds_idx, op)?);
     }
 
@@ -1632,15 +1919,15 @@ pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Res
     let mut out_xy = XyTable::new_with_x_mode(
         XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single },
         SubcolumnMode::Single,
-        xy.data_sets.len(),
+        active_cols.len(),
         x_grid.len(),
     )?;
     out_xy.x_title = xy.x_title.clone();
     for (out_row, &(_, x)) in x_grid.iter().enumerate() {
         out_xy.set_x_cell(out_row, Cell::number(x))?;
     }
-    for (ds_idx, curve) in series_curves.iter().enumerate() {
-        if let (Some(src_ds), Some(dst_ds)) = (xy.data_sets.get(ds_idx), out_xy.data_sets.get_mut(ds_idx)) {
+    for (dst_idx, (&src_ds_idx, curve)) in active_cols.iter().zip(series_curves.iter()).enumerate() {
+        if let (Some(src_ds), Some(dst_ds)) = (xy.data_sets.get(src_ds_idx), out_xy.data_sets.get_mut(dst_idx)) {
             dst_ds.title = src_ds.title.clone();
             for &(src_row, _, y) in curve {
                 if let Some(&out_row) = row_map.get(&src_row)
@@ -1652,7 +1939,9 @@ pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Res
         }
     }
 
-    Ok(DataSheet::new(format!("{}-curve", sheet.id.as_str()), format!("{} (Curve)", sheet.title), TableArchetype::Xy(out_xy))?)
+    let out_sheet = DataSheet::new(data_id, data_title, TableArchetype::Xy(out_xy))?;
+    out_sheet.validate()?;
+    Ok((out_sheet, series_curves))
 }
 
 /// Curve-calculus operation applicable to an entire `XyTable`.

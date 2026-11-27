@@ -352,6 +352,10 @@ fn fa_sec13_09_all_textbox_nodes_accept_typing_and_sync_including_info_notes() -
                 x_transform: None,
                 y_transform: None,
                 error_propagation: ErrorPropagationMode::default(),
+                pharmacology_preset: None,
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
             }),
         ),
         (
@@ -362,6 +366,7 @@ fn fa_sec13_09_all_textbox_nodes_accept_typing_and_sync_including_info_notes() -
                 predictor_columns: vec![1],
                 reference_levels: Vec::new(),
                 compute_vif: false,
+                ..Default::default()
             }),
         ),
         (

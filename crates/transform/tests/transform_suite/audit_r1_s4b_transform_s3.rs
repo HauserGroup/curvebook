@@ -23,6 +23,7 @@ fn r1_s04_12_simulate_seed_preserves_full_u64_precision() {
             equation_id: String::from("linear"),
             parameters: vec![(String::from("slope"), 1.0), (String::from("intercept"), 0.0)],
             noise: SimulationNoise::Gaussian { sd: 0.5 },
+            simulation_mode: None,
         };
         let out = execute_transform(&src, &spec, &ctx).unwrap();
         assert_seed_summary_cell(&out.summary_tab.rows, &out.summary_tab.row_labels, seed);

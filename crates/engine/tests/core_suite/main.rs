@@ -45,6 +45,7 @@ mod r18_7_spline_lowess_e2e;
 mod r19_2_levene_engine;
 mod r19_4_methods_report_observation_accounting;
 mod r19_5_pending_fit_export;
+mod r23_wave3a_engine;
 mod r45_robust_e2e;
 mod r63_select_and_transform;
 mod recovery_wal_regression;

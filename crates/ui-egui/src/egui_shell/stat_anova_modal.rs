@@ -170,6 +170,10 @@ pub fn resolve_one_way_anova_banner(app: &UiApp) -> String {
             OneWayMethod::RepeatedMeasures { geisser_greenhouse: false } => "Repeated-measures one-way ANOVA (Sphericity assumed)",
             OneWayMethod::KruskalWallis => "Kruskal-Wallis test",
             OneWayMethod::Friedman => "Friedman test",
+            OneWayMethod::LognormalOrdinary => "Lognormal ordinary one-way ANOVA",
+            OneWayMethod::LognormalWelchBf => "Lognormal Brown-Forsythe and Welch ANOVA",
+            OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true } => "Lognormal RM one-way ANOVA + Geisser-Greenhouse",
+            OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false } => "Lognormal RM one-way ANOVA (Sphericity assumed)",
         };
         if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: true }) && !reml_active && post_hoc == "Tukey" {
             return String::from(omnibus);
@@ -1429,6 +1433,11 @@ fn render_method_reference_card(
             }
             OneWayMethod::KruskalWallis => "Kruskal-Wallis compares rank sums across independent columns; pair with Dunn's test + Bonferroni/Sidak multiplicity.",
             OneWayMethod::Friedman => "Friedman's test ranks observations within matched subject rows across >= 2 treatments.",
+            OneWayMethod::LognormalOrdinary => "Lognormal ordinary ANOVA analyzes natural-log-transformed positive data and back-transforms geometric mean ratios.",
+            OneWayMethod::LognormalWelchBf => "Lognormal Welch / Brown-Forsythe ANOVA compares natural-log-transformed positive groups without assuming equal log-scale variances.",
+            OneWayMethod::LognormalRepeatedMeasures { .. } => {
+                "Lognormal repeated-measures ANOVA analyzes natural-log-transformed positive matched subjects and back-transforms geometric mean ratios."
+            }
         };
         render_clipped_text(
             ui,

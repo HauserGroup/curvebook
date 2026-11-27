@@ -101,14 +101,18 @@ pub use factorial::{FactorialObservations, fit_factorial_anova};
 pub use nested::{nested_one_way_anova, nested_one_way_anova_with_df_method};
 pub use nonparametric::{friedman_test, kruskal_wallis_test};
 pub use one_way::{ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova, unequal_variance_one_way_anova};
-pub use reml::{fit_multi_vc_reml, fit_multi_vc_reml_with_df_method, fit_random_intercept_reml, fit_random_intercept_reml_with_df_method};
+pub use reml::{
+    fit_multi_vc_reml, fit_multi_vc_reml_with_df_method, fit_multi_vc_reml_with_policy, fit_random_intercept_reml,
+    fit_random_intercept_reml_with_df_method, fit_random_intercept_reml_with_policy,
+};
 pub use reml_unstructured::{fit_unstructured_rm_reml, fit_unstructured_rm_reml_with_df_method};
 pub use results::{
     AnovaEffectSizes, FactorialAnovaResult, FactorialAnovaTerm, FriedmanResult, KruskalWallisResult, MixedRemlResult, MultiVcRemlResult,
-    NestedAnovaResult, OneWayAnovaResult, RmOneWayAnovaResult, RmSphericityCorrection, RmTwoWayAnovaResult, RmTwoWaySphericities, SphericityResult,
-    UnequalVarianceAnovaResult, UnstructuredFallbackReason, UnstructuredRemlResult, VarianceHomogeneityResult,
+    NestedAnovaResult, OneWayAnovaResult, RmOneWayAnovaResult, RmSphericityCorrection, RmThreeWayAnovaResult, RmTwoWayAnovaResult,
+    RmTwoWaySphericities, SphericityResult, UnequalVarianceAnovaResult, UnstructuredFallbackReason, UnstructuredRemlResult,
+    VarianceHomogeneityResult,
 };
-pub use rm_two_way::{fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity};
+pub use rm_two_way::{fit_rm_three_way_anova, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity};
 pub use sheet::factorial::run_factorial_anova;
 pub use sheet::nested::run_nested_analysis;
 pub use sheet::one_way::run_one_way_anova;

@@ -663,6 +663,7 @@ fn edge_04b_poisson_exposure_scaling_overdispersion_and_sheet_dispatch() {
         predictor_columns: vec![1, 2, 3],
         reference_levels: vec![(2, String::from("A_Ctrl"))],
         compute_vif: true,
+        ..Default::default()
     };
     let aspec = AnalysisSpec::new("an-glm-edge", sid, AnalysisKind::GeneralizedLinearModel(glm_spec.clone())).unwrap();
     let rsheet = run_glm_analysis(&ds, &aspec, &glm_spec).unwrap();

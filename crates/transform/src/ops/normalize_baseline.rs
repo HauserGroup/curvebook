@@ -1,6 +1,8 @@
 //! Normalization (`0%..100%` / `0..1`) and baseline removal (`TransformAnalysisSpec::Normalize`,
 //! `TransformAnalysisSpec::RemoveBaseline`, `docs/implementation/data-tables-and-transforms.md` §5.2–§5.3).
 
+pub use curvebook_doc::BaselineKind;
+
 use curvebook_doc::{
     BaselineOperation, Cell, CellValue, DataSetColumn, DataSheet, NormalizeAnchor, ResultCell, ResultScalarEntry, SheetId, SubcolumnMode,
     TableArchetype, TableKind,
@@ -12,33 +14,6 @@ use crate::ops::{
     TransformContext, TransformOutput, build_summary_tab, remap_swapped_error_notes_batch, snapshot_calculated_variables, swap_error_bound_cells,
     validate_parts_of_whole_non_negative,
 };
-
-/// Generalized baseline source for [`execute_remove_baseline_kind`].
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum BaselineKind {
-    /// Row-by-row mean across `columns`.
-    ColumnsRowWise(Vec<usize>),
-    /// Single grand mean across `columns` and all rows.
-    ColumnsMean(Vec<usize>),
-    /// Constant scalar baseline.
-    Constant(f64),
-    /// Per-column mean over inclusive row slice `start_row..=end_row`.
-    RowRangeMean {
-        /// Zero-based inclusive starting row index of the baseline window.
-        start_row: usize,
-        /// Zero-based inclusive ending row index of the baseline window (`end_row >= start_row`).
-        end_row: usize,
-    },
-    /// Per-column linear baseline interpolated between active-observation centroids `(x_start, y_start)`
-    /// across rows `0..first_k` and `(x_end, y_end)` across rows `(row_count - last_k)..row_count`
-    /// (weighting each row by its active replicate count; falling back to `0.5 * (y_start + y_end)` when `x_end == x_start`).
-    FirstAndLastLinear {
-        /// Number of leading rows (`>= 1`) whose active observations define `(x_start, y_start)`.
-        first_k: usize,
-        /// Number of trailing rows (`>= 1`) whose active observations define `(x_end, y_end)`.
-        last_k: usize,
-    },
-}
 
 /// Normalize a [`DataSheet`] between `zero_anchor` and `hundred_anchor`.
 pub fn execute_normalize(
@@ -143,11 +118,23 @@ pub fn execute_remove_baseline(
     execute_remove_baseline_kind(source, &BaselineKind::ColumnsRowWise(baseline_columns.to_vec()), operation, ctx)
 }
 
-/// Remove baseline using a generalized [`BaselineKind`].
+/// Remove baseline using a generalized [`BaselineKind`], retaining unselected columns unchanged.
 pub fn execute_remove_baseline_kind(
     source: &DataSheet,
     baseline: &BaselineKind,
     operation: BaselineOperation,
+    ctx: &TransformContext<'_>,
+) -> Result<TransformOutput, TransformError> {
+    execute_remove_baseline_with_options(source, baseline, operation, true, ctx)
+}
+
+/// Remove baseline using a generalized [`BaselineKind`] with explicit control over whether
+/// unselected (or paired baseline) columns are retained unchanged or dropped from the output sheet.
+pub fn execute_remove_baseline_with_options(
+    source: &DataSheet,
+    baseline: &BaselineKind,
+    operation: BaselineOperation,
+    retain_unselected_columns: bool,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
     source.archetype.validate()?;
@@ -169,7 +156,13 @@ pub fn execute_remove_baseline_kind(
 
     let mut warnings = Vec::new();
     let mut all_swapped = Vec::new();
+    let is_paired = matches!(baseline, BaselineKind::PairedEveryOtherColumn);
+    let mut processed_cols = Vec::with_capacity(selected.len());
     for (idx_pos, &col) in selected.iter().enumerate() {
+        if is_paired && col.is_multiple_of(2) {
+            continue;
+        }
+        processed_cols.push(col);
         let base_rows = &per_col_baselines[idx_pos];
         let swapped = apply_baseline_to_column(&mut out.archetype, col, base_rows, operation, &mut warnings);
         all_swapped.extend(swapped.iter().copied().map(|r| (r, col)));
@@ -177,6 +170,21 @@ pub fn execute_remove_baseline_kind(
     }
     remap_swapped_error_notes_batch(&mut out.exclusion_notes, &all_swapped);
     snapshot_calculated_variables(&mut out.archetype);
+
+    if !retain_unselected_columns {
+        let kept_cols: Option<Vec<usize>> = if is_paired {
+            Some(processed_cols.clone())
+        } else if !ctx.selected_data_sets.is_empty() {
+            Some(selected.clone())
+        } else {
+            None
+        };
+        if let Some(cols_to_keep) = kept_cols
+            && (cols_to_keep.len() != col_count || cols_to_keep.iter().enumerate().any(|(i, &c)| i != c))
+        {
+            crate::ops::reshape_select::retain_sheet_columns_in_place(&mut out, &cols_to_keep)?;
+        }
+    }
 
     out.prune_stale_plate_well_origins();
     if let TableArchetype::Contingency(t) = &out.archetype {
@@ -191,7 +199,8 @@ pub fn execute_remove_baseline_kind(
         "Baseline removal summary",
         vec![
             ("Operation", ResultCell::Text(format!("{operation:?}"))),
-            ("Columns processed", ResultCell::Number { value: selected.len() as f64, prefix: None, units: None }),
+            ("Columns processed", ResultCell::Number { value: processed_cols.len() as f64, prefix: None, units: None }),
+            ("Retain unselected columns", ResultCell::Boolean(retain_unselected_columns)),
             ("Warnings", ResultCell::Number { value: warnings.len() as f64, prefix: None, units: None }),
         ],
         warnings.clone(),
@@ -568,6 +577,47 @@ fn compute_baselines(
             }
             Ok(out)
         }
+        BaselineKind::PairedEveryOtherColumn => {
+            if col_count < 2 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("PairedEveryOtherColumn requires at least 2 columns, found {col_count}"),
+                });
+            }
+            if !selected.iter().any(|&c| !c.is_multiple_of(2)) {
+                return Err(TransformError::InvalidSpec {
+                    message: String::from("PairedEveryOtherColumn requires at least one odd-indexed sample column"),
+                });
+            }
+            let mut out = Vec::with_capacity(selected.len());
+            for &c in selected {
+                if c.is_multiple_of(2) {
+                    out.push(vec![None; row_count]);
+                } else {
+                    let base_col = c - 1;
+                    let mut row_bases = Vec::with_capacity(row_count);
+                    let mut vals = Vec::new();
+                    for r in 0..row_count {
+                        vals.clear();
+                        collect_row_active_numbers(&source.archetype, base_col, r, &mut vals);
+                        row_bases.push(sum::mean(&vals).ok());
+                    }
+                    out.push(row_bases);
+                }
+            }
+            Ok(out)
+        }
+        BaselineKind::OlsLinearWithX { first_k, last_k } => {
+            if *first_k == 0 || *last_k == 0 || *first_k > row_count || *last_k > row_count {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("invalid OlsLinearWithX window counts ({first_k}, {last_k}) for row_count={row_count}"),
+                });
+            }
+            let mut out = Vec::with_capacity(selected.len());
+            for &c in selected {
+                out.push(ols_linear_baseline_for_col(&source.archetype, c, row_count, *first_k, *last_k));
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -626,6 +676,58 @@ fn linear_baseline_for_col(arch: &TableArchetype, col: usize, row_count: usize, 
                     if convex.is_finite() { convex } else { y_start + t * (y_end - y_start) }
                 }
             };
+            val.is_finite().then_some(val)
+        })
+        .collect()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn row_x_coord(arch: &TableArchetype, row: usize) -> Option<f64> {
+    match arch {
+        TableArchetype::Xy(xy) => xy.x_summary_at(row).ok().flatten().filter(|x| x.is_finite()),
+        _ => Some(row as f64),
+    }
+}
+
+fn ols_linear_baseline_for_col(arch: &TableArchetype, col: usize, row_count: usize, first_k: usize, last_k: usize) -> Vec<Option<f64>> {
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    let mut row_vals = Vec::new();
+    let tail_start = row_count.saturating_sub(last_k);
+    for r in 0..row_count {
+        if r >= first_k && r < tail_start {
+            continue;
+        }
+        let Some(xr) = row_x_coord(arch, r) else {
+            continue;
+        };
+        row_vals.clear();
+        collect_row_active_numbers(arch, col, r, &mut row_vals);
+        for &yv in &row_vals {
+            xs.push(xr);
+            ys.push(yv);
+        }
+    }
+    let (Ok(x_mean), Ok(y_mean)) = (sum::mean(&xs), sum::mean(&ys)) else {
+        return vec![None; row_count];
+    };
+    let mut sxx = sum::NeumaierSum::new();
+    let mut sxy = sum::NeumaierSum::new();
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        let dx = x - x_mean;
+        let dy = y - y_mean;
+        sxx.add(dx * dx);
+        sxy.add(dx * dy);
+    }
+    let sxx_tot = sxx.total();
+    let slope = if sxx_tot > 0.0 && sxx_tot.is_finite() { sxy.total() / sxx_tot } else { 0.0 };
+    if !slope.is_finite() {
+        return vec![None; row_count];
+    }
+    (0..row_count)
+        .map(|r| {
+            let xr = row_x_coord(arch, r)?;
+            let val = y_mean + slope * (xr - x_mean);
             val.is_finite().then_some(val)
         })
         .collect()
@@ -692,7 +794,13 @@ fn apply_baseline_datasets(
                     apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
                 }
                 let reverses = b_opt.is_some_and(|b| b < 0.0)
-                    && matches!(operation, BaselineOperation::Ratio | BaselineOperation::PercentChange | BaselineOperation::FractionalChange);
+                    && matches!(
+                        operation,
+                        BaselineOperation::Ratio
+                            | BaselineOperation::PercentChange
+                            | BaselineOperation::FractionalChange
+                            | BaselineOperation::Multiply
+                    );
                 let should_swap = match (row_cells.get(1).and_then(|c| c.value.finite_f64()), row_cells.get(2).and_then(|c| c.value.finite_f64())) {
                     (Some(lo), Some(hi)) => lo > hi || (lo == hi && reverses),
                     _ => reverses,
@@ -722,7 +830,13 @@ fn apply_baseline_datasets(
                     }
                 }
                 if b_opt.is_some_and(|b| b < 0.0)
-                    && matches!(operation, BaselineOperation::Ratio | BaselineOperation::PercentChange | BaselineOperation::FractionalChange)
+                    && matches!(
+                        operation,
+                        BaselineOperation::Ratio
+                            | BaselineOperation::PercentChange
+                            | BaselineOperation::FractionalChange
+                            | BaselineOperation::Multiply
+                    )
                     && swap_error_bound_cells(row_cells)
                 {
                     swapped_rows.push(r);
@@ -824,6 +938,8 @@ fn apply_baseline_op(v: f64, b: f64, op: BaselineOperation) -> Option<f64> {
     }
     let out = match op {
         BaselineOperation::Difference => v - b,
+        BaselineOperation::Add => v + b,
+        BaselineOperation::Multiply => v * b,
         BaselineOperation::Ratio => (b != 0.0).then(|| v / b)?,
         BaselineOperation::PercentChange => {
             if b == 0.0 {
@@ -849,7 +965,8 @@ fn baseline_spread_scale(b: f64, op: BaselineOperation) -> Option<f64> {
         return None;
     }
     let sc = match op {
-        BaselineOperation::Difference => 1.0,
+        BaselineOperation::Difference | BaselineOperation::Add => 1.0,
+        BaselineOperation::Multiply => b.abs(),
         BaselineOperation::Ratio | BaselineOperation::FractionalChange => (b != 0.0).then(|| 1.0 / b.abs())?,
         BaselineOperation::PercentChange => (b != 0.0).then(|| 100.0 / b.abs())?,
     };

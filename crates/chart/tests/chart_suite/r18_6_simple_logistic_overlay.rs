@@ -154,6 +154,7 @@ fn simple_logistic_and_glm_roc_overlay_parity_and_no_raw_xy_fabrication() {
                 predictor_columns: vec![1, 2],
                 reference_levels: Vec::new(),
                 compute_vif: false,
+                ..GlmSpec::default()
             }),
         )
         .expect("glm spec"),

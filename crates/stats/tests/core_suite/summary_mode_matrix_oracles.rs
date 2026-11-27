@@ -109,12 +109,17 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::PairedT, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::RatioPairedT, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::LognormalUnpairedT, ..TwoGroupSpec::default() }),
+            AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::LognormalWelchT, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::MannWhitneyU, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::WilcoxonSignedRank, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::PairedSignTest, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::KolmogorovSmirnov, ..TwoGroupSpec::default() }),
             AnalysisKind::TwoGroupComparison(TwoGroupSpec {
                 method: TwoGroupMethod::OneSampleWilcoxon { hypothetical: 10.0 },
+                ..TwoGroupSpec::default()
+            }),
+            AnalysisKind::TwoGroupComparison(TwoGroupSpec {
+                method: TwoGroupMethod::OneSampleRatioT { hypothetical: 10.0 },
                 ..TwoGroupSpec::default()
             }),
         ],
@@ -132,6 +137,12 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
             }),
             AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::KruskalWallis, ..OneWayAnovaSpec::default() }),
             AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::Friedman, ..OneWayAnovaSpec::default() }),
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::LognormalOrdinary, ..OneWayAnovaSpec::default() }),
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::LognormalWelchBf, ..OneWayAnovaSpec::default() }),
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method: OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true },
+                ..OneWayAnovaSpec::default()
+            }),
         ],
         SummaryModeProcedure::FactorialAnova => vec![AnalysisKind::FactorialAnova(FactorialAnovaSpec::default())],
         SummaryModeProcedure::ContingencyColumnBinary => {
@@ -144,15 +155,27 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
             predictor_columns: vec![1],
             reference_levels: Vec::new(),
             compute_vif: false,
+            ..GlmSpec::default()
         })],
         SummaryModeProcedure::Multivariate => vec![
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: None }),
+            AnalysisKind::Multivariate(MultivariateSpec::Pca {
+                standardize: true,
+                parallel_analysis_seed: None,
+                pcr_outcome_column: None,
+                retention_rule: Default::default(),
+                emit_extra_matrices: false,
+            }),
             AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
             AnalysisKind::Multivariate(MultivariateSpec::Clustering {
                 k_means_k: Some(2),
                 distance: ClusterDistance::Euclidean,
                 linkage: ClusterLinkage::Upgma,
                 k_sweep_max: None,
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: Default::default(),
+                cut_height: None,
+                emit_anova_tab: false,
             }),
             AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
                 imputations_m: 3,
@@ -182,7 +205,10 @@ fn exhaustive_stats_summary_mode_matrix_matches_runtime_verdicts() {
     let mut supported_cells = 0_usize;
     let mut refused_cells = 0_usize;
 
-    for row in summary_mode_matrix_rows().iter().filter(|r| r.analysis_kind_id.descriptor().domain == AnalysisDomainKind::Stats) {
+    for row in summary_mode_matrix_rows().iter().filter(|r| {
+        let desc = r.analysis_kind_id.descriptor();
+        desc.domain == AnalysisDomainKind::Stats && desc.recompute_strategy != curvebook_doc::AnalysisRecomputeStrategy::MonteCarloEngine
+    }) {
         let kinds = representative_stats_kinds(row.procedure);
         assert!(!kinds.is_empty());
         for &table_kind in row.table_kinds {

@@ -15,12 +15,29 @@ use crate::dsl::lexer::tokenize;
 use crate::dsl::limits::{MAX_AST_NODES, MAX_PARSE_DEPTH};
 use crate::error::FitError;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DelimKind {
+    Paren,
+    Bracket,
+    Brace,
+}
+
+impl DelimKind {
+    fn close_str(self) -> &'static str {
+        match self {
+            Self::Paren => ")",
+            Self::Bracket => "]",
+            Self::Brace => "}",
+        }
+    }
+}
+
 enum ParseOp {
     UnaryPlus,
     Unary(UnaryOp),
     Binary(BinaryOp),
-    Paren { line: usize, col: usize },
-    CallStart { tok: Token, arg_count: usize },
+    Paren { delim: DelimKind, line: usize, col: usize },
+    CallStart { tok: Token, arg_count: usize, bracket: bool },
 }
 
 impl ParseOp {
@@ -135,9 +152,16 @@ impl<'a> Parser<'a> {
                 self.vals.push(Expr::Binary { op: bop, lhs: Box::new(lhs), rhs: Box::new(rhs) });
                 Ok(())
             }
-            ParseOp::Paren { line, col } => Err(FitError::DslCompileError { message: "Expected `)`".to_owned(), line, column: col }),
-            ParseOp::CallStart { tok, .. } => {
-                Err(FitError::DslCompileError { message: format!("Expected `)` after call to `{}`", tok.text), line: tok.line, column: tok.col })
+            ParseOp::Paren { delim, line, col } => {
+                Err(FitError::DslCompileError { message: format!("Expected `{}`", delim.close_str()), line, column: col })
+            }
+            ParseOp::CallStart { tok, bracket, .. } => {
+                let close = if bracket { "]" } else { ")" };
+                Err(FitError::DslCompileError {
+                    message: format!("Expected `{close}` after call to `{}`", tok.text),
+                    line: tok.line,
+                    column: tok.col,
+                })
             }
         }
     }
@@ -171,20 +195,38 @@ impl<'a> Parser<'a> {
             } else {
                 Err(FitError::DslCompileError { message: "Invalid IF arguments".to_owned(), line: tok.line, column: tok.col })
             }
-        } else if upper == "AND" && args.len() == 2 {
-            let mut it = args.into_iter();
-            if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                Ok(Expr::Binary { op: BinaryOp::And, lhs: Box::new(a), rhs: Box::new(b) })
-            } else {
-                Err(FitError::DslCompileError { message: "Invalid AND arguments".to_owned(), line: tok.line, column: tok.col })
+        } else if upper == "AND" {
+            if args.len() < 2 {
+                return Err(FitError::DslCompileError {
+                    message: "`AND(...)` requires at least 2 arguments".to_owned(),
+                    line: tok.line,
+                    column: tok.col,
+                });
             }
-        } else if upper == "OR" && args.len() == 2 {
             let mut it = args.into_iter();
-            if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                Ok(Expr::Binary { op: BinaryOp::Or, lhs: Box::new(a), rhs: Box::new(b) })
-            } else {
-                Err(FitError::DslCompileError { message: "Invalid OR arguments".to_owned(), line: tok.line, column: tok.col })
+            let Some(mut acc) = it.next() else {
+                return Err(FitError::DslCompileError { message: "Invalid AND arguments".to_owned(), line: tok.line, column: tok.col });
+            };
+            for rhs in it {
+                acc = Expr::Binary { op: BinaryOp::And, lhs: Box::new(acc), rhs: Box::new(rhs) };
             }
+            Ok(acc)
+        } else if upper == "OR" {
+            if args.len() < 2 {
+                return Err(FitError::DslCompileError {
+                    message: "`OR(...)` requires at least 2 arguments".to_owned(),
+                    line: tok.line,
+                    column: tok.col,
+                });
+            }
+            let mut it = args.into_iter();
+            let Some(mut acc) = it.next() else {
+                return Err(FitError::DslCompileError { message: "Invalid OR arguments".to_owned(), line: tok.line, column: tok.col });
+            };
+            for rhs in it {
+                acc = Expr::Binary { op: BinaryOp::Or, lhs: Box::new(acc), rhs: Box::new(rhs) };
+            }
+            Ok(acc)
         } else if upper == "NOT" && args.len() == 1 {
             if let Some(a) = args.into_iter().next() {
                 Ok(Expr::Unary { op: UnaryOp::Not, rhs: Box::new(a) })
@@ -217,7 +259,17 @@ impl<'a> Parser<'a> {
                 Ok(true)
             }
             TokenKind::LParen => {
-                self.push_op(ParseOp::Paren { line: tok.line, col: tok.col }, tok.line, tok.col)?;
+                self.push_op(ParseOp::Paren { delim: DelimKind::Paren, line: tok.line, col: tok.col }, tok.line, tok.col)?;
+                self.pos += 1;
+                Ok(true)
+            }
+            TokenKind::LBracket => {
+                self.push_op(ParseOp::Paren { delim: DelimKind::Bracket, line: tok.line, col: tok.col }, tok.line, tok.col)?;
+                self.pos += 1;
+                Ok(true)
+            }
+            TokenKind::LBrace => {
+                self.push_op(ParseOp::Paren { delim: DelimKind::Brace, line: tok.line, col: tok.col }, tok.line, tok.col)?;
                 self.pos += 1;
                 Ok(true)
             }
@@ -235,7 +287,29 @@ impl<'a> Parser<'a> {
     fn handle_ident_prefix(&mut self) -> Result<bool, FitError> {
         let tok = self.tokens[self.pos].clone();
         self.track_node(tok.line, tok.col)?;
-        if self.tokens.get(self.pos + 1).is_some_and(|t| t.kind == TokenKind::LParen) {
+        let next_kind = self.tokens.get(self.pos + 1).map(|t| t.kind);
+        if tok.text.eq_ignore_ascii_case("NOT") && next_kind != Some(TokenKind::LParen) && next_kind.is_some() {
+            // Prefix `NOT expr` (only when followed by a prefix token, not when standalone identifier).
+            let starts_expr = matches!(
+                next_kind,
+                Some(
+                    TokenKind::Ident
+                        | TokenKind::Number
+                        | TokenKind::LParen
+                        | TokenKind::LBracket
+                        | TokenKind::LBrace
+                        | TokenKind::Plus
+                        | TokenKind::Minus
+                        | TokenKind::Bang
+                )
+            );
+            if starts_expr {
+                self.push_op(ParseOp::Unary(UnaryOp::Not), tok.line, tok.col)?;
+                self.pos += 1;
+                return Ok(true);
+            }
+        }
+        if next_kind == Some(TokenKind::LParen) {
             if self.tokens.get(self.pos + 2).is_some_and(|t| t.kind == TokenKind::RParen) {
                 self.check_depth(tok.line, tok.col)?;
                 let expr = Self::build_call_expr(tok, Vec::new())?;
@@ -243,10 +317,33 @@ impl<'a> Parser<'a> {
                 self.pos += 3;
                 Ok(false)
             } else {
-                self.push_op(ParseOp::CallStart { tok: tok.clone(), arg_count: 1 }, tok.line, tok.col)?;
+                self.push_op(ParseOp::CallStart { tok: tok.clone(), arg_count: 1, bracket: false }, tok.line, tok.col)?;
                 self.pos += 2;
                 Ok(true)
             }
+        } else if next_kind == Some(TokenKind::LBracket) {
+            let curve_fn = if tok.text.eq_ignore_ascii_case("Y") {
+                "__curve_y"
+            } else if tok.text.eq_ignore_ascii_case("X") {
+                "__curve_x"
+            } else {
+                return Err(FitError::DslCompileError {
+                    message: format!("Bracket evaluation `{}[...]` is only supported for `Y[x]` and `X[y]`", tok.text),
+                    line: tok.line,
+                    column: tok.col,
+                });
+            };
+            if self.tokens.get(self.pos + 2).is_some_and(|t| t.kind == TokenKind::RBracket) {
+                return Err(FitError::DslCompileError {
+                    message: format!("`{}[...]` requires 1 argument", tok.text),
+                    line: tok.line,
+                    column: tok.col,
+                });
+            }
+            let call_tok = Token { text: curve_fn.to_owned(), ..tok };
+            self.push_op(ParseOp::CallStart { tok: call_tok, arg_count: 1, bracket: true }, tok.line, tok.col)?;
+            self.pos += 2;
+            Ok(true)
         } else {
             self.vals.push(Expr::Ident(tok.text));
             self.pos += 1;
@@ -256,8 +353,21 @@ impl<'a> Parser<'a> {
 
     fn handle_infix(&mut self) -> Result<bool, FitError> {
         let tok = &self.tokens[self.pos];
-        let infix_op = infix_binary_op(tok.kind)
-            .or_else(|| if tok.kind == TokenKind::Ident && tok.text.eq_ignore_ascii_case("mod") { Some((BinaryOp::Rem, 5, true)) } else { None });
+        let infix_op = infix_binary_op(tok.kind).or_else(|| {
+            if tok.kind == TokenKind::Ident {
+                if tok.text.eq_ignore_ascii_case("mod") {
+                    Some((BinaryOp::Rem, 5, true))
+                } else if tok.text.eq_ignore_ascii_case("and") {
+                    Some((BinaryOp::And, 2, true))
+                } else if tok.text.eq_ignore_ascii_case("or") {
+                    Some((BinaryOp::Or, 1, true))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
         if let Some((bop, prec, left_assoc)) = infix_op {
             let (line, col) = (tok.line, tok.col);
             self.track_node(line, col)?;
@@ -270,7 +380,7 @@ impl<'a> Parser<'a> {
             TokenKind::Comma => {
                 self.pop_ops_above(1, true)?;
                 match self.ops.last_mut() {
-                    Some(ParseOp::CallStart { arg_count, .. }) => {
+                    Some(ParseOp::CallStart { arg_count, bracket: false, .. }) => {
                         *arg_count += 1;
                         self.pos += 1;
                         Ok(true)
@@ -282,18 +392,26 @@ impl<'a> Parser<'a> {
                     }),
                 }
             }
-            TokenKind::RParen => {
+            TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                let expected_delim = match tok.kind {
+                    TokenKind::RParen => DelimKind::Paren,
+                    TokenKind::RBracket => DelimKind::Bracket,
+                    _ => DelimKind::Brace,
+                };
                 let (line, col, text) = (tok.line, tok.col, tok.text.clone());
                 self.pop_ops_above(1, true)?;
                 match self.pop_op()? {
-                    Some(ParseOp::Paren { .. }) => {
+                    Some(ParseOp::Paren { delim, .. }) if delim == expected_delim => {
                         self.pos += 1;
                         Ok(false)
                     }
-                    Some(ParseOp::CallStart { tok: call_tok, arg_count }) => {
+                    Some(ParseOp::CallStart { tok: call_tok, arg_count, bracket })
+                        if (bracket && expected_delim == DelimKind::Bracket) || (!bracket && expected_delim == DelimKind::Paren) =>
+                    {
                         if self.vals.len() < arg_count {
+                            let close = if bracket { "]" } else { ")" };
                             return Err(FitError::DslCompileError {
-                                message: format!("Expected `)` after call to `{}`", call_tok.text),
+                                message: format!("Expected `{close}` after call to `{}`", call_tok.text),
                                 line: call_tok.line,
                                 column: call_tok.col,
                             });
@@ -303,6 +421,19 @@ impl<'a> Parser<'a> {
                         self.vals.push(expr);
                         self.pos += 1;
                         Ok(false)
+                    }
+                    Some(ParseOp::Paren { delim, .. }) => Err(FitError::DslCompileError {
+                        message: format!("Mismatched closing delimiter `{text}`; expected `{}`", delim.close_str()),
+                        line,
+                        column: col,
+                    }),
+                    Some(ParseOp::CallStart { tok: call_tok, bracket, .. }) => {
+                        let close = if bracket { "]" } else { ")" };
+                        Err(FitError::DslCompileError {
+                            message: format!("Mismatched closing delimiter `{text}`; expected `{close}` after `{}`", call_tok.text),
+                            line,
+                            column: col,
+                        })
                     }
                     _ => Err(FitError::DslCompileError { message: format!("Unexpected trailing token `{text}`"), line, column: col }),
                 }
@@ -344,7 +475,13 @@ pub(crate) fn parse_expr_collecting_locs(
     let tokens = tokenize(input, line)?;
     if let Some(locs) = ident_locs {
         for (idx, tok) in tokens.iter().enumerate() {
-            if tok.kind == TokenKind::Ident && !tokens.get(idx + 1).is_some_and(|next| next.kind == TokenKind::LParen) {
+            if tok.kind == TokenKind::Ident
+                && !tokens.get(idx + 1).is_some_and(|next| matches!(next.kind, TokenKind::LParen | TokenKind::LBracket))
+                && !tok.text.eq_ignore_ascii_case("and")
+                && !tok.text.eq_ignore_ascii_case("or")
+                && !tok.text.eq_ignore_ascii_case("not")
+                && !tok.text.eq_ignore_ascii_case("mod")
+            {
                 locs.entry(tok.text.clone()).or_insert((tok.line, col_offset + tok.col));
             }
         }

@@ -516,13 +516,13 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
                 state.constant_k_draft = format!("{k}");
             }
         }
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation })) => {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation, .. })) => {
             state.baseline_cols = if baseline_columns.is_empty() { vec![0] } else { baseline_columns.clone() };
             state.baseline_op = match operation {
                 BaselineOperation::Ratio => 1,
                 BaselineOperation::PercentChange => 2,
                 BaselineOperation::FractionalChange => 3,
-                BaselineOperation::Difference => 0,
+                BaselineOperation::Difference | BaselineOperation::Add | BaselineOperation::Multiply => 0,
             };
         }
         Some(AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set })) => {
@@ -547,7 +547,7 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
             state.prune_every_k_draft = state.prune_every_k_rows.to_string();
             state.prune_average_window = *average_window;
         }
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns, .. })) => {
             state.filter_formula_draft = filter_formula.clone().unwrap_or_default();
             state.extract_target_kind = Some(*target_archetype);
             state.derived_cols = derived_columns.iter().map(|d| (d.title.clone(), d.formula.clone())).collect();
@@ -561,6 +561,7 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
             equation_id,
             parameters,
             noise,
+            ..
         })) => {
             state.sim_seed_draft = seed.to_string();
             state.sim_row_count_draft = row_count.to_string();
@@ -650,7 +651,7 @@ fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     }
     let active_k_op = state.selected_k_op;
     let (cur_x, cur_y, cur_ep) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })) if from_edit => {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, .. })) if from_edit => {
             let eff_y = active_k_op.map(|op| build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok()).unwrap_or(*y_transform);
             (*x_transform, eff_y, *error_propagation)
         }
@@ -1035,7 +1036,7 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
     let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (cur_cols, cur_op) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation })) => {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation, .. })) => {
             (baseline_columns.clone(), *operation)
         }
         _ => (
@@ -1073,7 +1074,12 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                 }
                 if from_edit {
                     if let Some(spec) = draft_spec.as_mut() {
-                        spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: next_cols, operation: cur_op });
+                        spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+                            baseline_columns: next_cols,
+                            operation: cur_op,
+                            baseline_kind: None,
+                            retain_unselected_columns: false,
+                        });
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                     }
                 } else {
@@ -1102,8 +1108,12 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
             if r.clicked() {
                 if from_edit {
                     if let Some(spec) = draft_spec.as_mut() {
-                        spec.kind =
-                            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: op });
+                        spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+                            baseline_columns: cur_cols.clone(),
+                            operation: op,
+                            baseline_kind: None,
+                            retain_unselected_columns: false,
+                        });
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                     }
                 } else {
@@ -1124,10 +1134,14 @@ fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
                         BaselineOperation::Difference => BaselineOperation::Ratio,
                         BaselineOperation::Ratio => BaselineOperation::PercentChange,
                         BaselineOperation::PercentChange => BaselineOperation::FractionalChange,
-                        BaselineOperation::FractionalChange => BaselineOperation::Difference,
+                        BaselineOperation::FractionalChange | BaselineOperation::Add | BaselineOperation::Multiply => BaselineOperation::Difference,
                     };
-                    spec.kind =
-                        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cur_cols.clone(), operation: next_op });
+                    spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+                        baseline_columns: cur_cols.clone(),
+                        operation: next_op,
+                        baseline_kind: None,
+                        retain_unselected_columns: false,
+                    });
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                 }
             } else {
@@ -1149,7 +1163,7 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
     let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (mut filter_formula, target_arch, derived) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns, .. })) => {
             (filter_formula.clone().unwrap_or_default(), *target_archetype, derived_columns.clone())
         }
         _ => (
@@ -1218,6 +1232,11 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                                     filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
                                     target_archetype: target_arch,
                                     derived_columns: next_d,
+                                    complete_rows_only: false,
+                                    subject_column: None,
+                                    row_title_column: None,
+                                    contingency_count_column: None,
+                                    include_variable_name_prefixes: false,
                                 });
                                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                             } else {
@@ -1260,6 +1279,11 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                                     filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
                                     target_archetype: target_arch,
                                     derived_columns: next_d,
+                                    complete_rows_only: false,
+                                    subject_column: None,
+                                    row_title_column: None,
+                                    contingency_count_column: None,
+                                    include_variable_name_prefixes: false,
                                 });
                                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                             } else if idx < state.derived_cols.len() {
@@ -1286,6 +1310,11 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         filter_formula: (!filter_formula.trim().is_empty()).then_some(filter_formula.clone()),
                         target_archetype: target_arch,
                         derived_columns: derived.clone(),
+                        complete_rows_only: false,
+                        subject_column: None,
+                        row_title_column: None,
+                        contingency_count_column: None,
+                        include_variable_name_prefixes: false,
                     });
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                 }
@@ -1340,6 +1369,11 @@ fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) 
                         filter_formula: Some(synth),
                         target_archetype: target_arch,
                         derived_columns: derived.clone(),
+                        complete_rows_only: false,
+                        subject_column: None,
+                        row_title_column: None,
+                        contingency_count_column: None,
+                        include_variable_name_prefixes: false,
                     });
                     intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
                 }
@@ -1433,6 +1467,11 @@ fn render_target_archetype_selector(ui: &mut Ui, pcx: TargetArchetypePickerCtx<'
                     filter_formula: filter_formula.clone(),
                     target_archetype: tk,
                     derived_columns: derived_columns.clone(),
+                    complete_rows_only: false,
+                    subject_column: None,
+                    row_title_column: None,
+                    contingency_count_column: None,
+                    include_variable_name_prefixes: false,
                 });
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
             }
@@ -2024,7 +2063,17 @@ fn validate_and_build_simulate_spec(state: &TransformModalsEguiState, preset: &c
         3 => SimulationNoise::Poisson,
         _ => SimulationNoise::None,
     };
-    Ok(TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id: eq.to_owned(), parameters, noise })
+    Ok(TransformAnalysisSpec::Simulate {
+        seed,
+        row_count,
+        replicates,
+        x_min,
+        x_max,
+        equation_id: eq.to_owned(),
+        parameters,
+        noise,
+        simulation_mode: None,
+    })
 }
 
 fn split_simulate_param_entries(raw: &str, comma_decimal: bool) -> Vec<&str> {
@@ -2328,7 +2377,7 @@ fn apply_math_patch(
     intents: &mut PendingUiIntents,
 ) {
     let Some(spec) = draft else { return };
-    if let AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation }) = &mut spec.kind {
+    if let AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, .. }) = &mut spec.kind {
         if let Some(x) = new_x {
             *x_transform = x;
         }
@@ -2367,6 +2416,10 @@ fn build_standalone_transform_params(
                     x_transform,
                     y_transform,
                     error_propagation: state.standalone_error_propagation,
+                    pharmacology_preset: None,
+                    interchange_xy: false,
+                    zero_x_substitute: None,
+                    asymmetric_ci_policy: Default::default(),
                 }),
             });
             if state.create_new_graph
@@ -2416,6 +2469,11 @@ fn build_standalone_transform_params(
                 filter_formula,
                 target_archetype,
                 derived_columns,
+                complete_rows_only: false,
+                subject_column: None,
+                row_title_column: None,
+                contingency_count_column: None,
+                include_variable_name_prefixes: false,
             }))
             .map_err(|err| format!("Failed to encode select/transform spec: {err}"))?;
             let mut obj = json!({

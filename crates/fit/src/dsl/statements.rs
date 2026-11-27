@@ -2,13 +2,54 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use curvebook_doc::{ParameterRule, ParameterScope, RelationalConstraint, RelationalConstraintOp};
+
 use crate::dsl::ast::{BinaryOp, CompiledInitRule, CompiledProgram, DatasetFilter, DslCompileWarning, DslEquationKind, DslWarningKind, Expr, OpCode};
-use crate::dsl::compile::compile_target_resolved;
-use crate::dsl::limits::{MAX_DATASET_CLASSES, MAX_DATASET_EXPANSION, MAX_FILTER_CLASS_MATCHES, MAX_TOTAL_OPCODES};
+use crate::dsl::compile::{compile_target_resolved, compile_transform_target_resolved};
+use crate::dsl::limits::{MAX_DATASET_CLASSES, MAX_DATASET_EXPANSION, MAX_DSL_LINES, MAX_FILTER_CLASS_MATCHES, MAX_TOTAL_OPCODES};
 use crate::dsl::parser::{LocalResolver, parse_expr_collecting_locs};
+use crate::dsl::vm::eval_bytecode;
 use crate::error::FitError;
 use crate::library::estimate_x_at_ymid;
 use crate::types::DataPoint;
+
+/// Join physical DSL source lines ending with a backslash (`\`) continuation marker into logical
+/// lines, preserving the 1-based starting line number of each logical statement and enforcing
+/// [`MAX_DSL_LINES`].
+pub(crate) fn join_continued_lines(source: &str) -> Result<Vec<(usize, String)>, FitError> {
+    let mut logical: Vec<(usize, String)> = Vec::new();
+    let mut pending: Option<(usize, String)> = None;
+    for (idx, raw_line) in source.lines().enumerate() {
+        let line_no = idx + 1;
+        if line_no > MAX_DSL_LINES {
+            return Err(FitError::DslCompileError {
+                message: format!("Custom equation exceeds maximum line limit ({MAX_DSL_LINES})"),
+                line: line_no,
+                column: 1,
+            });
+        }
+        let trimmed_end = raw_line.trim_end();
+        let is_cont = trimmed_end.strip_suffix('\\').filter(|prefix| !prefix.contains('#') && !prefix.contains(';'));
+        if let Some(code_prefix) = is_cont {
+            if let Some((_, ref mut buf)) = pending {
+                buf.push(' ');
+                buf.push_str(code_prefix.trim());
+            } else {
+                pending = Some((line_no, code_prefix.trim_end().to_owned()));
+            }
+        } else if let Some((start_line, mut buf)) = pending.take() {
+            buf.push(' ');
+            buf.push_str(raw_line.trim_start());
+            logical.push((start_line, buf));
+        } else {
+            logical.push((line_no, raw_line.to_owned()));
+        }
+    }
+    if let Some((start_line, buf)) = pending.take() {
+        logical.push((start_line, buf));
+    }
+    Ok(logical)
+}
 
 pub(in crate::dsl) enum ParsedStatement {
     OdeDerivative { rhs: Expr, uses_t_axis: bool },
@@ -62,12 +103,61 @@ pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(Datase
     let inside = inside_raw.trim();
     let rest = rest_raw.trim();
     let (negated, body) = if let Some(s) = inside.strip_prefix('~') { (true, s.trim()) } else { (false, inside) };
+    let parts: Vec<&str> = body.split(',').collect();
     let mut indices = Vec::new();
-    for part in body.split(',') {
-        let p = part.trim();
-        if let Some((start_s, end_s)) = p.split_once(':') {
-            let s_idx = parse_ds_token(start_s.trim(), line_no)?;
-            let e_idx = parse_ds_token(end_s.trim(), line_no)?;
+    let mut pi = 0_usize;
+    while pi < parts.len() {
+        let p = parts[pi].trim();
+        if p.contains(':') {
+            let segs: Vec<&str> = p.split(':').collect();
+            let (start_s, end_s, step) = if segs.len() == 2 {
+                let s_raw = segs[0].trim();
+                let e_raw = segs[1].trim();
+                let alpha_range = !s_raw.is_empty()
+                    && !e_raw.is_empty()
+                    && s_raw.bytes().all(|b| b.is_ascii_alphabetic())
+                    && e_raw.bytes().all(|b| b.is_ascii_alphabetic());
+                let next_step = if alpha_range
+                    && let Some(next_raw) = parts.get(pi + 1).map(|s| s.trim())
+                    && !next_raw.is_empty()
+                    && next_raw.bytes().all(|b| b.is_ascii_digit())
+                {
+                    let parsed_step = next_raw.parse::<usize>().map_err(|_| FitError::DslCompileError {
+                        message: format!("Invalid dataset range step `{next_raw}`"),
+                        line: line_no,
+                        column: 1,
+                    })?;
+                    if parsed_step == 0 {
+                        return Err(FitError::DslCompileError {
+                            message: "Dataset range step must be at least 1".to_owned(),
+                            line: line_no,
+                            column: 1,
+                        });
+                    }
+                    pi += 1;
+                    parsed_step
+                } else {
+                    1
+                };
+                (s_raw, e_raw, next_step)
+            } else if segs.len() == 3 {
+                let s_raw = segs[0].trim();
+                let e_raw = segs[1].trim();
+                let step_raw = segs[2].trim();
+                let parsed_step = step_raw.parse::<usize>().map_err(|_| FitError::DslCompileError {
+                    message: format!("Invalid dataset range step `{step_raw}`"),
+                    line: line_no,
+                    column: 1,
+                })?;
+                if parsed_step == 0 {
+                    return Err(FitError::DslCompileError { message: "Dataset range step must be at least 1".to_owned(), line: line_no, column: 1 });
+                }
+                (s_raw, e_raw, parsed_step)
+            } else {
+                return Err(FitError::DslCompileError { message: format!("Invalid dataset range `{p}`"), line: line_no, column: 1 });
+            };
+            let s_idx = parse_ds_token(start_s, line_no)?;
+            let e_idx = parse_ds_token(end_s, line_no)?;
             if s_idx > e_idx {
                 return Err(FitError::DslCompileError {
                     message: format!("Reversed dataset range `{p}`: start index ({s_idx}) exceeds end index ({e_idx})"),
@@ -75,7 +165,7 @@ pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(Datase
                     column: 1,
                 });
             }
-            let count = e_idx.checked_sub(s_idx).and_then(|d| d.checked_add(1));
+            let count = e_idx.checked_sub(s_idx).map(|d| d / step).and_then(|q| q.checked_add(1));
             if count.is_none_or(|c| c > MAX_DATASET_EXPANSION || indices.len().saturating_add(c) > MAX_DATASET_EXPANSION) {
                 return Err(FitError::DslCompileError {
                     message: format!("Dataset range `{p}` exceeds maximum expansion limit ({MAX_DATASET_EXPANSION})"),
@@ -83,7 +173,17 @@ pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(Datase
                     column: 1,
                 });
             }
-            indices.extend(s_idx..=e_idx);
+            let mut cur = s_idx;
+            loop {
+                indices.push(cur);
+                let Some(next_cur) = cur.checked_add(step) else {
+                    break;
+                };
+                if next_cur > e_idx {
+                    break;
+                }
+                cur = next_cur;
+            }
         } else if !p.is_empty() {
             if indices.len() >= MAX_DATASET_EXPANSION {
                 return Err(FitError::DslCompileError {
@@ -94,6 +194,7 @@ pub(crate) fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(Datase
             }
             indices.push(parse_ds_token(p, line_no)?);
         }
+        pi += 1;
     }
     indices.sort_unstable();
     indices.dedup();
@@ -105,12 +206,18 @@ pub(in crate::dsl) fn parse_ds_token(tok: &str, line_no: usize) -> Result<usize,
     if let Ok(idx) = tok.parse::<usize>() {
         return Ok(idx);
     }
-    let upper = tok.to_ascii_uppercase();
-    if upper.len() == 1 {
-        let b = upper.as_bytes()[0];
-        if b.is_ascii_uppercase() {
-            return Ok((b - b'A') as usize);
+    if !tok.is_empty() && tok.bytes().all(|b| b.is_ascii_alphabetic()) {
+        // Excel-style bijective base-26 column label (`A=0..Z=25`, `AA=26`, `AB=27`, ...).
+        let mut acc: usize = 0;
+        for b in tok.bytes() {
+            let digit = usize::from(b.to_ascii_uppercase() - b'A') + 1;
+            acc = acc.checked_mul(26).and_then(|v| v.checked_add(digit)).ok_or_else(|| FitError::DslCompileError {
+                message: format!("Dataset selector `{tok}` overflows column index"),
+                line: line_no,
+                column: 1,
+            })?;
         }
+        return Ok(acc - 1);
     }
     Err(FitError::DslCompileError { message: format!("Invalid dataset selector `{tok}`"), line: line_no, column: 1 })
 }
@@ -131,25 +238,27 @@ pub(in crate::dsl) fn parse_statement_with_locs(
         let lhs_compact: String = lhs_trim.chars().filter(|c| !c.is_whitespace()).collect();
         let lhs_upper = lhs_compact.to_ascii_uppercase();
         let rhs_offset = col_offset + byte_offset_in_line(rest, rhs_s);
-        if lhs_upper == "DY/DX" || lhs_upper == "DY/DT" || lhs_upper == "D(Y,X)" || lhs_upper == "D(Y,T)" {
+        if matches!(lhs_upper.as_str(), "DY/DX" | "DY/DT" | "D(Y,X)" | "D(Y,T)" | "Y'" | "Y'(X)" | "Y'(T)") {
             let rhs = parse_expr_collecting_locs(rhs_s, line_no, rhs_offset, ident_locs.as_deref_mut())?;
-            let uses_t_axis = lhs_upper == "DY/DT" || lhs_upper == "D(Y,T)";
+            let uses_t_axis = matches!(lhs_upper.as_str(), "DY/DT" | "D(Y,T)" | "Y'(T)");
             return Ok(ParsedStatement::OdeDerivative { rhs, uses_t_axis });
         }
         if lhs_upper == "Y0" {
             let rhs = parse_expr_collecting_locs(rhs_s, line_no, rhs_offset, ident_locs.as_deref_mut())?;
             return Ok(ParsedStatement::OdeInitial { lhs_name: Some(lhs_trim.to_owned()), t0: Some(0.0), rhs });
         }
-        if lhs_upper == "Y(0)" {
+        if lhs_upper == "Y(0)" || lhs_upper == "Y[0]" {
             let rhs = parse_expr_collecting_locs(rhs_s, line_no, rhs_offset, ident_locs.as_deref_mut())?;
             return Ok(ParsedStatement::OdeInitial { lhs_name: None, t0: Some(0.0), rhs });
         }
-        if let Some(inner) = lhs_upper.strip_prefix("Y(").and_then(|s| s.strip_suffix(')'))
+        let ode_t0_inner =
+            lhs_upper.strip_prefix("Y(").and_then(|s| s.strip_suffix(')')).or_else(|| lhs_upper.strip_prefix("Y[").and_then(|s| s.strip_suffix(']')));
+        if let Some(inner) = ode_t0_inner
             && let Ok(t0_val) = inner.parse::<f64>()
         {
             if !t0_val.is_finite() {
                 return Err(FitError::DslCompileError {
-                    message: "ODE initial time `Y(...)` must be finite".to_owned(),
+                    message: "ODE initial time `Y(...)` / `Y[...]` must be finite".to_owned(),
                     line: line_no,
                     column: col_offset + 1,
                 });
@@ -175,8 +284,8 @@ pub(crate) fn split_top_level_assignment(s: &str) -> Option<(&str, &str)> {
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
             b'=' if depth == 0 => {
                 let prev = if i > 0 { bytes[i - 1] } else { 0 };
                 let next = bytes.get(i + 1).copied().unwrap_or(0);
@@ -214,6 +323,7 @@ pub(crate) enum DslSection {
     Equation,
     InitialValues,
     Transforms,
+    Constraints,
 }
 
 pub(in crate::dsl) const INIT_STAT_NAMES: [&str; 21] = [
@@ -355,6 +465,7 @@ pub(crate) fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Opti
         "equation" | "equations" | "body" | "model" => Ok(Some(DslSection::Equation)),
         "initialvalues" | "initialvalue" | "initials" | "init" => Ok(Some(DslSection::InitialValues)),
         "transforms" | "transform" | "derived" | "derivedscalars" => Ok(Some(DslSection::Transforms)),
+        "constraints" | "constraint" => Ok(Some(DslSection::Constraints)),
         _ => Err(FitError::DslCompileError { message: format!("Unknown DSL section `{trimmed}`"), line: line_no, column: 1 }),
     }
 }
@@ -1555,7 +1666,7 @@ pub(in crate::dsl) fn compile_transforms(
     for (line_no, name, rhs) in raw_transform_lines {
         let resolver = LocalResolver::Flat(&local_map);
         let remaining = MAX_TOTAL_OPCODES.saturating_sub(*total_opcodes);
-        let prog = compile_target_resolved(&rhs, &resolver, param_map, remaining).map_err(|e| with_line(e, line_no))?;
+        let prog = compile_transform_target_resolved(&rhs, &resolver, param_map, remaining).map_err(|e| with_line(e, line_no))?;
         *total_opcodes = total_opcodes.saturating_add(prog.code.len());
         if *total_opcodes > MAX_TOTAL_OPCODES {
             return Err(FitError::DslCompileError {
@@ -1668,4 +1779,585 @@ fn collect_free_idents_with_declared_locals(
 pub(in crate::dsl) fn collect_free_idents(expr: &Expr, bound_locals: &BTreeSet<String>, seen: &mut BTreeSet<String>, order: &mut Vec<String>) {
     let empty_declared = HashSet::new();
     collect_free_idents_with_declared_locals(expr, bound_locals, &empty_declared, seen, order);
+}
+
+pub(in crate::dsl) struct ParsedConstraints {
+    pub(in crate::dsl) parameter_rules: Vec<ParameterRule>,
+    pub(in crate::dsl) relational_constraints: Vec<RelationalConstraint>,
+    pub(in crate::dsl) mandatory_constants: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelCmpOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Default)]
+struct ParamConstraintAccum {
+    scope: Option<ParameterScope>,
+    lower: Option<(f64, bool)>,
+    upper: Option<(f64, bool)>,
+    mandatory_constant: bool,
+}
+
+fn resolve_constraint_param<'a>(raw: &str, param_names: &'a [String], line_no: usize) -> Result<&'a str, FitError> {
+    let trimmed = raw.trim();
+    if let Some(exact) = param_names.iter().find(|p| p.as_str() == trimmed) {
+        return Ok(exact.as_str());
+    }
+    if let Some(ci) = param_names.iter().find(|p| p.eq_ignore_ascii_case(trimmed)) {
+        return Ok(ci.as_str());
+    }
+    Err(FitError::DslCompileError { message: format!("Unknown parameter `{trimmed}` in [Constraints]"), line: line_no, column: 1 })
+}
+
+fn eval_constant_constraint_number(raw: &str, line_no: usize) -> Option<f64> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(v) = s.parse::<f64>() {
+        return v.is_finite().then_some(v);
+    }
+    let expr = parse_expr_collecting_locs(s, line_no, 0, None).ok()?;
+    let empty_locals = HashMap::new();
+    let empty_params = HashMap::new();
+    let prog = compile_target_resolved(&expr, &LocalResolver::Flat(&empty_locals), &empty_params, MAX_TOTAL_OPCODES).ok()?;
+    if ensure_no_data_vars(&prog, "[Constraints]", line_no).is_err() {
+        return None;
+    }
+    eval_bytecode(&prog, &[0.0], f64::NAN, &[], 0).filter(|v| v.is_finite())
+}
+
+fn find_top_level_cmp_ops(s: &str) -> Vec<(usize, usize, RelCmpOp)> {
+    let bytes = s.as_bytes();
+    let mut depth = 0_i32;
+    let mut ops = Vec::new();
+    let mut i = 0_usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'<' if depth == 0 => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    ops.push((i, i + 2, RelCmpOp::Le));
+                    i += 2;
+                    continue;
+                }
+                ops.push((i, i + 1, RelCmpOp::Lt));
+            }
+            b'>' if depth == 0 => {
+                if bytes.get(i + 1) == Some(&b'=') {
+                    ops.push((i, i + 2, RelCmpOp::Ge));
+                    i += 2;
+                    continue;
+                }
+                ops.push((i, i + 1, RelCmpOp::Gt));
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    ops
+}
+
+fn parse_param_plus_offset<'a>(raw: &str, param_names: &'a [String], line_no: usize) -> Option<(&'a str, f64)> {
+    let s = raw.trim();
+    if is_valid_ident(s)
+        && let Ok(p) = resolve_constraint_param(s, param_names, line_no)
+    {
+        return Some((p, 0.0));
+    }
+    // Look for top-level `+` or `-` after the first character separating `<param>` and `<number>`.
+    let bytes = s.as_bytes();
+    let mut depth = 0_i32;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'+' | b'-' if depth == 0 && i > 0 => {
+                let (lhs_raw, rhs_raw) = s.split_at_checked(i)?;
+                let lhs = lhs_raw.trim();
+                let rhs = rhs_raw.get(1..)?.trim();
+                if is_valid_ident(lhs)
+                    && let Ok(p) = resolve_constraint_param(lhs, param_names, line_no)
+                    && let Some(val) = eval_constant_constraint_number(rhs, line_no)
+                {
+                    let signed = if b == b'+' { val } else { -val };
+                    return Some((p, signed));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_param_minus_param<'a>(raw: &str, param_names: &'a [String], line_no: usize) -> Option<(&'a str, &'a str)> {
+    let s = raw.trim();
+    let bytes = s.as_bytes();
+    let mut depth = 0_i32;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b'-' if depth == 0 && i > 0 => {
+                let (lhs_raw, rhs_raw) = s.split_at_checked(i)?;
+                let lhs = lhs_raw.trim();
+                let rhs = rhs_raw.get(1..)?.trim();
+                if is_valid_ident(lhs)
+                    && is_valid_ident(rhs)
+                    && let (Ok(p1), Ok(p2)) =
+                        (resolve_constraint_param(lhs, param_names, line_no), resolve_constraint_param(rhs, param_names, line_no))
+                {
+                    return Some((p1, p2));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn apply_lower_bound(acc: &mut ParamConstraintAccum, bound: f64, strict: bool) {
+    acc.lower = Some(match acc.lower {
+        Some((prev, prev_strict)) if prev > bound => (prev, prev_strict),
+        Some((prev, prev_strict)) if (prev - bound).abs() == 0.0 => (bound, prev_strict || strict),
+        _ => (bound, strict),
+    });
+}
+
+fn apply_upper_bound(acc: &mut ParamConstraintAccum, bound: f64, strict: bool) {
+    acc.upper = Some(match acc.upper {
+        Some((prev, prev_strict)) if prev < bound => (prev, prev_strict),
+        Some((prev, prev_strict)) if (prev - bound).abs() == 0.0 => (bound, prev_strict || strict),
+        _ => (bound, strict),
+    });
+}
+
+fn set_constraint_scope(acc: &mut ParamConstraintAccum, scope: ParameterScope, param: &str, line_no: usize) -> Result<(), FitError> {
+    if let Some(prev) = &acc.scope
+        && prev != &scope
+    {
+        return Err(FitError::DslCompileError {
+            message: format!("Conflicting constraints on parameter `{param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        });
+    }
+    acc.scope = Some(scope);
+    Ok(())
+}
+
+fn parse_prose_constraint(
+    trimmed: &str,
+    param_names: &[String],
+    line_no: usize,
+    accum: &mut HashMap<String, ParamConstraintAccum>,
+    relations: &mut Vec<RelationalConstraint>,
+) -> Result<bool, FitError> {
+    let mut words = trimmed.split_whitespace();
+    let Some(first) = words.next() else {
+        return Ok(false);
+    };
+    let rest_words: Vec<&str> = words.collect();
+    if rest_words.is_empty() {
+        return Ok(false);
+    }
+
+    // `Share K` / `Shared K`
+    if (first.eq_ignore_ascii_case("share") || first.eq_ignore_ascii_case("shared")) && rest_words.len() == 1 {
+        let param = resolve_constraint_param(rest_words[0], param_names, line_no)?;
+        let entry = accum.entry(param.to_owned()).or_default();
+        set_constraint_scope(entry, ParameterScope::SharedGlobal, param, line_no)?;
+        return Ok(true);
+    }
+
+    if !is_valid_ident(first) {
+        return Ok(false);
+    }
+    let rest_lower = rest_words.join(" ").to_ascii_lowercase();
+
+    // `<P> shared` / `<P> shared value for all data sets` / `<P> is shared`
+    if rest_lower == "shared"
+        || rest_lower == "share"
+        || rest_lower == "is shared"
+        || rest_lower.starts_with("shared value")
+        || rest_lower.starts_with("shared across")
+    {
+        let param = resolve_constraint_param(first, param_names, line_no)?;
+        let entry = accum.entry(param.to_owned()).or_default();
+        set_constraint_scope(entry, ParameterScope::SharedGlobal, param, line_no)?;
+        return Ok(true);
+    }
+
+    // `<P> constant equal to ...` / `<P> must be constant`
+    if rest_lower == "constant equal to" || rest_lower == "constant equal to ?" || rest_lower == "must be constant" || rest_lower == "constant" {
+        let param = resolve_constraint_param(first, param_names, line_no)?;
+        accum.entry(param.to_owned()).or_default().mandatory_constant = true;
+        return Ok(true);
+    }
+    if let Some(val_str) = rest_lower.strip_prefix("constant equal to ").or_else(|| rest_lower.strip_prefix("constant = ")) {
+        let param = resolve_constraint_param(first, param_names, line_no)?;
+        let val_trim = val_str.trim();
+        if val_trim == "?" || val_trim.is_empty() {
+            accum.entry(param.to_owned()).or_default().mandatory_constant = true;
+            return Ok(true);
+        }
+        let val = eval_constant_constraint_number(val_trim, line_no).ok_or_else(|| FitError::DslCompileError {
+            message: format!("Invalid constant value `{val_trim}` for `{param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        })?;
+        let entry = accum.entry(param.to_owned()).or_default();
+        set_constraint_scope(entry, ParameterScope::Constant(val), param, line_no)?;
+        return Ok(true);
+    }
+
+    // `<P> must be between A and B` / `<P> between A and B`
+    if let Some(span_str) = rest_lower.strip_prefix("must be between ").or_else(|| rest_lower.strip_prefix("between "))
+        && let Some((lo_s, hi_s)) = span_str.split_once(" and ")
+    {
+        let param = resolve_constraint_param(first, param_names, line_no)?;
+        let lo = eval_constant_constraint_number(lo_s, line_no).ok_or_else(|| FitError::DslCompileError {
+            message: format!("Invalid lower bound `{lo_s}` for `{param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        })?;
+        let hi = eval_constant_constraint_number(hi_s, line_no).ok_or_else(|| FitError::DslCompileError {
+            message: format!("Invalid upper bound `{hi_s}` for `{param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        })?;
+        let entry = accum.entry(param.to_owned()).or_default();
+        apply_lower_bound(entry, lo, false);
+        apply_upper_bound(entry, hi, false);
+        return Ok(true);
+    }
+
+    // `<P> must be greater than [or equal to] <val|Q>` / `<P> must be less than [or equal to] <val|Q>`
+    let prose_cmp = rest_lower
+        .strip_prefix("must be greater than or equal to ")
+        .map(|rhs| (RelCmpOp::Ge, rhs))
+        .or_else(|| rest_lower.strip_prefix("must be greater than ").map(|rhs| (RelCmpOp::Gt, rhs)))
+        .or_else(|| rest_lower.strip_prefix("must be less than or equal to ").map(|rhs| (RelCmpOp::Le, rhs)))
+        .or_else(|| rest_lower.strip_prefix("must be less than ").map(|rhs| (RelCmpOp::Lt, rhs)));
+    if let Some((op, rhs_lower)) = prose_cmp {
+        let param = resolve_constraint_param(first, param_names, line_no)?;
+        let rhs_trim = rhs_lower.trim();
+        if let Some(val) = eval_constant_constraint_number(rhs_trim, line_no) {
+            let entry = accum.entry(param.to_owned()).or_default();
+            match op {
+                RelCmpOp::Gt => apply_lower_bound(entry, val, true),
+                RelCmpOp::Ge => apply_lower_bound(entry, val, false),
+                RelCmpOp::Lt => apply_upper_bound(entry, val, true),
+                RelCmpOp::Le => apply_upper_bound(entry, val, false),
+            }
+            return Ok(true);
+        }
+        if let Some((rhs_param, offset)) = parse_param_plus_offset(rhs_trim, param_names, line_no) {
+            push_relational_constraint(param, op, rhs_param, offset, line_no, relations)?;
+            return Ok(true);
+        }
+        return Err(FitError::DslCompileError {
+            message: format!("Invalid bound `{rhs_trim}` for `{param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        });
+    }
+
+    Ok(false)
+}
+
+fn push_relational_constraint(
+    lhs_param: &str,
+    op: RelCmpOp,
+    rhs_param: &str,
+    offset: f64,
+    line_no: usize,
+    relations: &mut Vec<RelationalConstraint>,
+) -> Result<(), FitError> {
+    if lhs_param == rhs_param {
+        return Err(FitError::DslCompileError {
+            message: format!("Self-referential relational constraint on `{lhs_param}` in [Constraints]"),
+            line: line_no,
+            column: 1,
+        });
+    }
+    let (hi_p, lo_p, rel_op, margin) = match op {
+        RelCmpOp::Gt => (lhs_param, rhs_param, RelationalConstraintOp::GreaterThan, offset),
+        RelCmpOp::Ge => (lhs_param, rhs_param, RelationalConstraintOp::GreaterOrEqual, offset),
+        RelCmpOp::Lt => (rhs_param, lhs_param, RelationalConstraintOp::GreaterThan, -offset),
+        RelCmpOp::Le => (rhs_param, lhs_param, RelationalConstraintOp::GreaterOrEqual, -offset),
+    };
+    if !margin.is_finite() || margin < 0.0 {
+        return Err(FitError::DslCompileError {
+            message: format!("Relational constraint `{hi_p} >= {lo_p} + {margin}` requires a non-negative finite separation margin"),
+            line: line_no,
+            column: 1,
+        });
+    }
+    relations.push(RelationalConstraint { lhs_param: hi_p.to_owned(), op: rel_op, rhs_param: lo_p.to_owned(), margin });
+    Ok(())
+}
+
+fn check_relational_cycles(relations: &[RelationalConstraint], line_no: usize) -> Result<(), FitError> {
+    if relations.is_empty() {
+        return Ok(());
+    }
+    let mut nodes: Vec<&str> = Vec::new();
+    let mut id_map: HashMap<&str, usize> = HashMap::new();
+    for r in relations {
+        for name in [r.lhs_param.as_str(), r.rhs_param.as_str()] {
+            if !id_map.contains_key(name) {
+                id_map.insert(name, nodes.len());
+                nodes.push(name);
+            }
+        }
+    }
+    let n = nodes.len();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut indeg: Vec<usize> = vec![0; n];
+    for r in relations {
+        let lo = id_map[r.rhs_param.as_str()];
+        let hi = id_map[r.lhs_param.as_str()];
+        adj[lo].push(hi);
+        indeg[hi] += 1;
+    }
+    let mut queue: Vec<usize> = (0..n).filter(|&i| indeg[i] == 0).collect();
+    let mut visited = 0_usize;
+    while let Some(u) = queue.pop() {
+        visited += 1;
+        for &v in &adj[u] {
+            indeg[v] -= 1;
+            if indeg[v] == 0 {
+                queue.push(v);
+            }
+        }
+    }
+    if visited != n {
+        return Err(FitError::DslCompileError {
+            message: "Cyclic relational constraints detected in [Constraints]".to_owned(),
+            line: line_no,
+            column: 1,
+        });
+    }
+    Ok(())
+}
+
+pub(in crate::dsl) fn parse_constraints_section(raw_lines: &[(usize, String)], param_names: &[String]) -> Result<ParsedConstraints, FitError> {
+    if raw_lines.is_empty() {
+        return Ok(ParsedConstraints { parameter_rules: Vec::new(), relational_constraints: Vec::new(), mandatory_constants: Vec::new() });
+    }
+    let mut accum: HashMap<String, ParamConstraintAccum> = HashMap::new();
+    let mut relations: Vec<RelationalConstraint> = Vec::new();
+    let mut last_rel_line = 1_usize;
+
+    for (line_no, raw) in raw_lines {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // 1. Check prose / keyword forms (`Share K`, `K Constant equal to 1.5`, `K must be > 0`, ...).
+        if parse_prose_constraint(trimmed, param_names, *line_no, &mut accum, &mut relations)? {
+            continue;
+        }
+        // 2. Check top-level comparison operators (`<`, `<=`, `>`, `>=`) — 1-sided or chained 2-sided.
+        let cmp_ops = find_top_level_cmp_ops(trimmed);
+        if cmp_ops.len() == 2 {
+            let (s1, e1, op1) = cmp_ops[0];
+            let (s2, e2, op2) = cmp_ops[1];
+            let left_s = trimmed.get(..s1).unwrap_or("").trim();
+            let mid_s = trimmed.get(e1..s2).unwrap_or("").trim();
+            let right_s = trimmed.get(e2..).unwrap_or("").trim();
+            let param = resolve_constraint_param(mid_s, param_names, *line_no)?;
+            let left_val = eval_constant_constraint_number(left_s, *line_no).ok_or_else(|| FitError::DslCompileError {
+                message: format!("Expected numeric lower/upper bound `{left_s}` in chained constraint"),
+                line: *line_no,
+                column: 1,
+            })?;
+            let right_val = eval_constant_constraint_number(right_s, *line_no).ok_or_else(|| FitError::DslCompileError {
+                message: format!("Expected numeric lower/upper bound `{right_s}` in chained constraint"),
+                line: *line_no,
+                column: 1,
+            })?;
+            let entry = accum.entry(param.to_owned()).or_default();
+            match (op1, op2) {
+                (RelCmpOp::Lt | RelCmpOp::Le, RelCmpOp::Lt | RelCmpOp::Le) => {
+                    apply_lower_bound(entry, left_val, op1 == RelCmpOp::Lt);
+                    apply_upper_bound(entry, right_val, op2 == RelCmpOp::Lt);
+                }
+                (RelCmpOp::Gt | RelCmpOp::Ge, RelCmpOp::Gt | RelCmpOp::Ge) => {
+                    apply_upper_bound(entry, left_val, op1 == RelCmpOp::Gt);
+                    apply_lower_bound(entry, right_val, op2 == RelCmpOp::Gt);
+                }
+                _ => {
+                    return Err(FitError::DslCompileError {
+                        message: format!("Inconsistent inequality direction in `{trimmed}`"),
+                        line: *line_no,
+                        column: 1,
+                    });
+                }
+            }
+            continue;
+        }
+        if cmp_ops.len() == 1 {
+            let (s1, e1, op) = cmp_ops[0];
+            let lhs_s = trimmed.get(..s1).unwrap_or("").trim();
+            let rhs_s = trimmed.get(e1..).unwrap_or("").trim();
+            // Case A: `<P> - <Q> >= <num>` / `<P> - <Q> <= <num>`
+            if let Some((p1, p2)) = parse_param_minus_param(lhs_s, param_names, *line_no)
+                && let Some(val) = eval_constant_constraint_number(rhs_s, *line_no)
+            {
+                last_rel_line = *line_no;
+                push_relational_constraint(p1, op, p2, val, *line_no, &mut relations)?;
+                continue;
+            }
+            // Case B: `<P> <op> <num>` or `<P> <op> <Q> [+/- num]`
+            if is_valid_ident(lhs_s) {
+                let param = resolve_constraint_param(lhs_s, param_names, *line_no)?;
+                if let Some(val) = eval_constant_constraint_number(rhs_s, *line_no) {
+                    let entry = accum.entry(param.to_owned()).or_default();
+                    match op {
+                        RelCmpOp::Gt => apply_lower_bound(entry, val, true),
+                        RelCmpOp::Ge => apply_lower_bound(entry, val, false),
+                        RelCmpOp::Lt => apply_upper_bound(entry, val, true),
+                        RelCmpOp::Le => apply_upper_bound(entry, val, false),
+                    }
+                    continue;
+                }
+                if let Some((rhs_param, offset)) = parse_param_plus_offset(rhs_s, param_names, *line_no) {
+                    last_rel_line = *line_no;
+                    push_relational_constraint(param, op, rhs_param, offset, *line_no, &mut relations)?;
+                    continue;
+                }
+                return Err(FitError::DslCompileError {
+                    message: format!("Invalid right-hand side `{rhs_s}` in constraint `{trimmed}`"),
+                    line: *line_no,
+                    column: 1,
+                });
+            }
+            // Case C: `<num> <op> <P>`
+            if is_valid_ident(rhs_s)
+                && let Some(val) = eval_constant_constraint_number(lhs_s, *line_no)
+            {
+                let param = resolve_constraint_param(rhs_s, param_names, *line_no)?;
+                let entry = accum.entry(param.to_owned()).or_default();
+                match op {
+                    RelCmpOp::Lt => apply_lower_bound(entry, val, true),
+                    RelCmpOp::Le => apply_lower_bound(entry, val, false),
+                    RelCmpOp::Gt => apply_upper_bound(entry, val, true),
+                    RelCmpOp::Ge => apply_upper_bound(entry, val, false),
+                }
+                continue;
+            }
+            return Err(FitError::DslCompileError {
+                message: format!("Unsupported inequality constraint `{trimmed}` in [Constraints]"),
+                line: *line_no,
+                column: 1,
+            });
+        }
+        // 3. Top-level equality assignment: `<P> = <val | Shared | ? | CONSTANT>`
+        if let Some((lhs_raw, rhs_raw)) = split_top_level_assignment(trimmed) {
+            let lhs_s = lhs_raw.trim();
+            let rhs_s = rhs_raw.trim();
+            if !is_valid_ident(lhs_s) {
+                return Err(FitError::DslCompileError {
+                    message: format!("Expected parameter name on left-hand side of `{trimmed}` in [Constraints]"),
+                    line: *line_no,
+                    column: 1,
+                });
+            }
+            let param = resolve_constraint_param(lhs_s, param_names, *line_no)?;
+            let rhs_lower = rhs_s.to_ascii_lowercase();
+            let entry = accum.entry(param.to_owned()).or_default();
+            if rhs_lower == "shared" || rhs_lower == "share" {
+                set_constraint_scope(entry, ParameterScope::SharedGlobal, param, *line_no)?;
+            } else if rhs_s == "?" || rhs_lower == "constant" || rhs_lower == "mandatory" {
+                entry.mandatory_constant = true;
+            } else {
+                let rhs_num_str = rhs_s
+                    .strip_prefix("Constant ")
+                    .or_else(|| rhs_s.strip_prefix("constant "))
+                    .or_else(|| rhs_s.strip_prefix("CONSTANT "))
+                    .unwrap_or(rhs_s);
+                let val = eval_constant_constraint_number(rhs_num_str, *line_no).ok_or_else(|| FitError::DslCompileError {
+                    message: format!("Invalid constant value `{rhs_s}` for `{param}` in [Constraints]"),
+                    line: *line_no,
+                    column: 1,
+                })?;
+                set_constraint_scope(entry, ParameterScope::Constant(val), param, *line_no)?;
+            }
+            continue;
+        }
+        return Err(FitError::DslCompileError {
+            message: format!("Invalid constraint syntax `{trimmed}` in [Constraints]"),
+            line: *line_no,
+            column: 1,
+        });
+    }
+
+    check_relational_cycles(&relations, last_rel_line)?;
+
+    // Build deterministic rules in parameter declaration order and validate consistency.
+    let mut parameter_rules = Vec::new();
+    let mut mandatory_constants = Vec::new();
+    for pname in param_names {
+        let Some(acc) = accum.remove(pname) else {
+            continue;
+        };
+        if acc.mandatory_constant && acc.scope.is_some() {
+            return Err(FitError::DslCompileError {
+                message: format!("Conflicting mandatory-constant prompt and explicit scope on `{pname}` in [Constraints]"),
+                line: 1,
+                column: 1,
+            });
+        }
+        if let (Some((lo, lo_strict)), Some((hi, hi_strict))) = (acc.lower, acc.upper)
+            && (lo > hi || ((lo - hi).abs() == 0.0 && (lo_strict || hi_strict)))
+        {
+            return Err(FitError::DslCompileError {
+                message: format!("Infeasible bounds on `{pname}` in [Constraints]: lower ({lo}) exceeds upper ({hi})"),
+                line: 1,
+                column: 1,
+            });
+        }
+        if let Some(ParameterScope::Constant(val)) = acc.scope {
+            if let Some((lo, lo_strict)) = acc.lower
+                && (val < lo || (lo_strict && val <= lo))
+            {
+                return Err(FitError::DslCompileError {
+                    message: format!("Constant value {val} for `{pname}` violates lower bound {lo} in [Constraints]"),
+                    line: 1,
+                    column: 1,
+                });
+            }
+            if let Some((hi, hi_strict)) = acc.upper
+                && (val > hi || (hi_strict && val >= hi))
+            {
+                return Err(FitError::DslCompileError {
+                    message: format!("Constant value {val} for `{pname}` violates upper bound {hi} in [Constraints]"),
+                    line: 1,
+                    column: 1,
+                });
+            }
+        }
+        if acc.mandatory_constant {
+            mandatory_constants.push(pname.clone());
+        }
+        if acc.scope.is_some() || acc.lower.is_some() || acc.upper.is_some() {
+            parameter_rules.push(ParameterRule {
+                name: pname.clone(),
+                scope: acc.scope.unwrap_or(ParameterScope::Local),
+                initial_override: None,
+                lower_bound: acc.lower.map(|(v, _)| v),
+                upper_bound: acc.upper.map(|(v, _)| v),
+            });
+        }
+    }
+
+    Ok(ParsedConstraints { parameter_rules, relational_constraints: relations, mandatory_constants })
 }

@@ -70,8 +70,27 @@ pub(in crate::dsl) fn compile_target_resolved(
     params: &HashMap<String, usize>,
     max_opcodes: usize,
 ) -> Result<CompiledProgram, FitError> {
+    compile_target_resolved_with_curve(target, locals, params, max_opcodes, false)
+}
+
+pub(in crate::dsl) fn compile_transform_target_resolved(
+    target: &Expr,
+    locals: &LocalResolver<'_>,
+    params: &HashMap<String, usize>,
+    max_opcodes: usize,
+) -> Result<CompiledProgram, FitError> {
+    compile_target_resolved_with_curve(target, locals, params, max_opcodes, true)
+}
+
+fn compile_target_resolved_with_curve(
+    target: &Expr,
+    locals: &LocalResolver<'_>,
+    params: &HashMap<String, usize>,
+    max_opcodes: usize,
+    allow_curve_eval: bool,
+) -> Result<CompiledProgram, FitError> {
     let mut code = Vec::new();
-    compile_expr_resolved(target, locals, params, &mut code, max_opcodes)?;
+    compile_expr_resolved_inner(target, locals, params, &mut code, max_opcodes, allow_curve_eval)?;
     code.push(OpCode::Halt);
     check_opcode_budget(&code, max_opcodes)?;
     Ok(CompiledProgram { code, local_count: 0 })
@@ -82,6 +101,8 @@ pub(in crate::dsl) enum CompileTask<'a> {
     EmitUnary(UnaryKind),
     EmitBinary(BinaryKind),
     EmitCall(BuiltinFn, usize),
+    EmitEvalCurveY,
+    EmitSolveCurveX,
     AndAfterLhs { rhs: &'a Expr },
     AndAfterRhs { jz_idx: usize },
     OrAfterLhs { rhs: &'a Expr },
@@ -116,6 +137,7 @@ pub(in crate::dsl) fn schedule_expr_compile<'a>(
     params: &HashMap<String, usize>,
     code: &mut Vec<OpCode>,
     tasks: &mut Vec<CompileTask<'a>>,
+    allow_curve_eval: bool,
 ) -> Result<(), FitError> {
     match node {
         Expr::Num(v) => code.push(OpCode::PushConst(*v)),
@@ -148,6 +170,40 @@ pub(in crate::dsl) fn schedule_expr_compile<'a>(
             tasks.push(CompileTask::Eval(cond));
         }
         Expr::Call { name, args } => {
+            if name == "__curve_y" {
+                if !allow_curve_eval {
+                    return Err(FitError::DslCompileError {
+                        message: "`Y[expr]` curve evaluation is only supported in [Transforms]".to_owned(),
+                        line: 1,
+                        column: 1,
+                    });
+                }
+                if args.len() != 1 {
+                    return Err(FitError::DslCompileError { message: "`Y[expr]` expects 1 argument".to_owned(), line: 1, column: 1 });
+                }
+                tasks.push(CompileTask::EmitEvalCurveY);
+                if let Some(arg) = args.first() {
+                    tasks.push(CompileTask::Eval(arg));
+                }
+                return Ok(());
+            }
+            if name == "__curve_x" {
+                if !allow_curve_eval {
+                    return Err(FitError::DslCompileError {
+                        message: "`X[expr]` inverse curve evaluation is only supported in [Transforms]".to_owned(),
+                        line: 1,
+                        column: 1,
+                    });
+                }
+                if args.len() != 1 {
+                    return Err(FitError::DslCompileError { message: "`X[expr]` expects 1 argument".to_owned(), line: 1, column: 1 });
+                }
+                tasks.push(CompileTask::EmitSolveCurveX);
+                if let Some(arg) = args.first() {
+                    tasks.push(CompileTask::Eval(arg));
+                }
+                return Ok(());
+            }
             let bf = resolve_builtin_fn(name, args.len())?;
             if matches!(bf, BuiltinFn::IsDefined) {
                 let enter_idx = code.len();
@@ -184,14 +240,27 @@ pub(in crate::dsl) fn compile_expr_resolved(
     code: &mut Vec<OpCode>,
     max_opcodes: usize,
 ) -> Result<(), FitError> {
+    compile_expr_resolved_inner(expr, locals, params, code, max_opcodes, false)
+}
+
+fn compile_expr_resolved_inner(
+    expr: &Expr,
+    locals: &LocalResolver<'_>,
+    params: &HashMap<String, usize>,
+    code: &mut Vec<OpCode>,
+    max_opcodes: usize,
+    allow_curve_eval: bool,
+) -> Result<(), FitError> {
     let mut tasks = vec![CompileTask::Eval(expr)];
     while let Some(task) = tasks.pop() {
         check_opcode_budget(code, max_opcodes)?;
         match task {
-            CompileTask::Eval(node) => schedule_expr_compile(node, locals, params, code, &mut tasks)?,
+            CompileTask::Eval(node) => schedule_expr_compile(node, locals, params, code, &mut tasks, allow_curve_eval)?,
             CompileTask::EmitUnary(kind) => code.push(OpCode::Unary(kind)),
             CompileTask::EmitBinary(kind) => code.push(OpCode::Binary(kind)),
             CompileTask::EmitCall(bf, arity) => code.push(OpCode::CallBuiltin(bf, arity)),
+            CompileTask::EmitEvalCurveY => code.push(OpCode::EvalCurveY),
+            CompileTask::EmitSolveCurveX => code.push(OpCode::SolveCurveX),
             CompileTask::AndAfterLhs { rhs } => {
                 let jz_idx = code.len();
                 code.push(OpCode::JumpIfZero(0));
@@ -301,6 +370,12 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<Buil
             _ => Err(FitError::DslCompileError { message: format!("Function `{name}` expects 1 or 3 argument(s), got {argc}"), line: 1, column: 1 }),
         };
     }
+    if u == "round" {
+        return match argc {
+            1 | 2 => Ok(BuiltinFn::Round),
+            _ => Err(FitError::DslCompileError { message: format!("Function `{name}` expects 1 or 2 argument(s), got {argc}"), line: 1, column: 1 }),
+        };
+    }
     if u == "min" || u == "max" {
         if argc < 2 {
             return Err(FitError::DslCompileError {
@@ -324,19 +399,18 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<Buil
         "sin" => (BuiltinFn::Sin, 1),
         "cos" => (BuiltinFn::Cos, 1),
         "tan" => (BuiltinFn::Tan, 1),
-        "asin" => (BuiltinFn::Asin, 1),
-        "acos" => (BuiltinFn::Acos, 1),
+        "asin" | "arcsin" => (BuiltinFn::Asin, 1),
+        "acos" | "arccos" => (BuiltinFn::Acos, 1),
         "atan" | "arctan" => (BuiltinFn::Atan, 1),
-        "atan2" => (BuiltinFn::Atan2, 2),
+        "atan2" | "arctan2" => (BuiltinFn::Atan2, 2),
         "sinh" => (BuiltinFn::Sinh, 1),
         "cosh" => (BuiltinFn::Cosh, 1),
         "tanh" => (BuiltinFn::Tanh, 1),
-        "asinh" => (BuiltinFn::Asinh, 1),
-        "acosh" => (BuiltinFn::Acosh, 1),
-        "atanh" => (BuiltinFn::Atanh, 1),
+        "asinh" | "arcsinh" => (BuiltinFn::Asinh, 1),
+        "acosh" | "arccosh" => (BuiltinFn::Acosh, 1),
+        "atanh" | "arctanh" => (BuiltinFn::Atanh, 1),
         "floor" => (BuiltinFn::Floor, 1),
         "ceil" => (BuiltinFn::Ceil, 1),
-        "round" => (BuiltinFn::Round, 1),
         "trunc" | "int" => (BuiltinFn::Trunc, 1),
         "sign" | "sgn" => (BuiltinFn::Sign, 1),
         "mod" => (BuiltinFn::Mod, 2),
@@ -376,10 +450,10 @@ pub(in crate::dsl) fn resolve_builtin_fn(name: &str, argc: usize) -> Result<Buil
         "digamma" | "psi" => (BuiltinFn::Digamma, 1),
         "besselj0" | "j0" => (BuiltinFn::BesselJ0, 1),
         "besselj1" | "j1" => (BuiltinFn::BesselJ1, 1),
-        "besseljn" | "jn" => (BuiltinFn::BesselJn, 2),
+        "besselj" | "besseljn" | "jn" => (BuiltinFn::BesselJn, 2),
         "bessely0" | "y0" => (BuiltinFn::BesselY0, 1),
         "bessely1" | "y1" => (BuiltinFn::BesselY1, 1),
-        "besselyn" | "yn" => (BuiltinFn::BesselYn, 2),
+        "bessely" | "besselyn" | "yn" => (BuiltinFn::BesselYn, 2),
         "besseli0" | "i0" => (BuiltinFn::BesselI0, 1),
         "besseli1" | "i1" => (BuiltinFn::BesselI1, 1),
         "besseli" | "besselin" => (BuiltinFn::BesselIn, 2),

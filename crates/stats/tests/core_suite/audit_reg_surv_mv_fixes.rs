@@ -36,6 +36,7 @@ fn glm_kind(family: GlmFamily, resp: usize, preds: Vec<usize>, refs: Vec<(usize,
         predictor_columns: preds,
         reference_levels: refs,
         compute_vif: vif,
+        ..Default::default()
     })
 }
 
@@ -46,6 +47,14 @@ fn cox_kind(time: usize, status: usize, preds: Vec<usize>, refs: Vec<(usize, Str
         predictor_columns: preds,
         reference_levels: refs,
         tie_method: tie,
+        formula: None,
+        covariate_profiles: Vec::new(),
+        nested_comparison: None,
+        emit_cox_snell_residuals: false,
+        ci_method: Default::default(),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
     })
 }
 
@@ -94,6 +103,12 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         })
     };
     let r01 = run_kind_sel(&sh0, km(MultiplicitySpec::default(), false), vec![0, 1]).unwrap();
@@ -128,6 +143,12 @@ fn audit_19_20_survival_rank_df_censored_status_times_and_pairwise() {
             mv_time_column: Some(0),
             mv_status_column: Some(1),
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         });
         assert!(
             matches!(run_kind(&sh, mv_km), Err(StatsError::InvalidParameter { name: "survival_status", value }) if (value - bad_st).abs() < 1e-12)
@@ -817,8 +838,24 @@ fn audit_fa_sec06_02_multivariate_presummarized_xy_parity_and_horn_pa() {
     // 3. Multivariate pre-summarized guards & XY RawReplicates parity (FA-SEC06-02).
     let mv_specs = [
         MultivariateSpec::CorrelationMatrix { spearman_rank: false },
-        MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: None },
-        MultivariateSpec::Clustering { k_means_k: Some(2), distance: ClusterDistance::Euclidean, linkage: ClusterLinkage::Ward, k_sweep_max: None },
+        MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: None,
+            pcr_outcome_column: None,
+            retention_rule: Default::default(),
+            emit_extra_matrices: false,
+        },
+        MultivariateSpec::Clustering {
+            k_means_k: Some(2),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
+        },
         MultivariateSpec::MultipleImputation { imputations_m: 3, max_iters: 5, seed: 42, response_column: None, predictor_columns: vec![] },
     ];
     let col_pre = presum_col_sheet(
@@ -927,7 +964,12 @@ fn audit_fa_sec06_02_multivariate_presummarized_xy_parity_and_horn_pa() {
                     k_means_k: None,
                     distance: ClusterDistance::Euclidean,
                     linkage: ClusterLinkage::Ward,
-                    k_sweep_max: None
+                    k_sweep_max: None,
+                    consensus_optimal_k: false,
+                    kmeans_algorithm: Default::default(),
+                    cluster_direction: Default::default(),
+                    cut_height: None,
+                    emit_anova_tab: false,
                 })
             )
             .unwrap(),
@@ -1007,6 +1049,11 @@ fn audit_fa_sec06_02_multivariate_presummarized_xy_parity_and_horn_pa() {
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: Some(100),
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
     )
     .unwrap();
@@ -1238,6 +1285,11 @@ fn audit_aud05_multivariate_clustering_rubin_kendall_and_pca_scale() {
                 distance: ClusterDistance::Euclidean,
                 linkage: doc,
                 k_sweep_max: None,
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: Default::default(),
+                cut_height: None,
+                emit_anova_tab: false,
             }),
         )
         .unwrap();

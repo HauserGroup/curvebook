@@ -120,6 +120,7 @@ fn arb_simulate_spec() -> impl Strategy<Value = TransformAnalysisSpec> {
             equation_id,
             parameters,
             noise,
+            simulation_mode: None,
         })
 }
 
@@ -251,6 +252,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                 (String::from("HillSlope"), 1.0),
             ],
             noise: SimulationNoise::Gaussian { sd: 2.5 },
+            simulation_mode: None,
         }),
     )
     .unwrap();
@@ -454,6 +456,10 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             x_transform: Some(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-9 }),
             y_transform: Some(MathTransformPreset::LinearScale { slope: 2.0, intercept: -1.0 }),
             error_propagation: curvebook_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: curvebook_doc::AsymmetricCiTransformPolicy::default(),
         }),
         AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
             zero_anchor: NormalizeAnchor::FixedValue(0.0),
@@ -495,6 +501,12 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             mv_time_column: Some(0),
             mv_status_column: Some(1),
             mv_group_column: Some(2),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: curvebook_doc::SurvivalOtherValuePolicy::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
         AnalysisKind::RocCurve(RocSpec { ci_method: RocCiMethod::DeLong }),
         AnalysisKind::GeneralizedLinearModel(GlmSpec {
@@ -503,8 +515,15 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             predictor_columns: vec![1, 2],
             reference_levels: vec![(1, String::from("Baseline"))],
             compute_vif: true,
+            ..GlmSpec::default()
         }),
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(123), pcr_outcome_column: None }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(123),
+            pcr_outcome_column: None,
+            retention_rule: curvebook_doc::PcaRetentionRule::default(),
+            emit_extra_matrices: false,
+        }),
         AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
             imputations_m: 5,
             max_iters: 20,
@@ -518,6 +537,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             nonparametric: false,
             assume_equal_sd: false,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: true },
+            ..MultipleRowTestsSpec::default()
         }),
         AnalysisKind::PassingBablok(PassingBablokSpec::default()),
         AnalysisKind::LinearRegression(LinearRegressionSpec::default()),
@@ -585,6 +605,7 @@ fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
             nonparametric,
             assume_equal_sd: true,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: false },
+            ..MultipleRowTestsSpec::default()
         });
         assert_eq!(mrow.derive_auto_title(), expected_title);
         assert!(mrow.is_compatible_with(TableKind::Grouped));
@@ -863,18 +884,46 @@ fn wave20_random_sample_and_clustering_seams() {
         assert_json_roundtrip(&l);
     }
 
-    let full_cluster =
-        MultivariateSpec::Clustering { k_means_k: Some(4), distance: ClusterDistance::Cosine, linkage: ClusterLinkage::Upgma, k_sweep_max: Some(8) };
+    let full_cluster = MultivariateSpec::Clustering {
+        k_means_k: Some(4),
+        distance: ClusterDistance::Cosine,
+        linkage: ClusterLinkage::Upgma,
+        k_sweep_max: Some(8),
+        consensus_optimal_k: false,
+        kmeans_algorithm: curvebook_doc::KMeansAlgorithm::default(),
+        cluster_direction: curvebook_doc::ClusterDirection::default(),
+        cut_height: None,
+        emit_anova_tab: false,
+    };
     assert_json_roundtrip(&full_cluster);
-    let default_cluster =
-        MultivariateSpec::Clustering { k_means_k: None, distance: ClusterDistance::default(), linkage: ClusterLinkage::default(), k_sweep_max: None };
+    let default_cluster = MultivariateSpec::Clustering {
+        k_means_k: None,
+        distance: ClusterDistance::default(),
+        linkage: ClusterLinkage::default(),
+        k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: curvebook_doc::KMeansAlgorithm::default(),
+        cluster_direction: curvebook_doc::ClusterDirection::default(),
+        cut_height: None,
+        emit_anova_tab: false,
+    };
     let default_cluster_val = serde_json::to_value(&default_cluster).unwrap();
     assert!(default_cluster_val["Clustering"].get("k_sweep_max").is_none());
 
     let legacy_cluster: MultivariateSpec = serde_json::from_str(r#"{"Clustering":{"k_means_k":3}}"#).unwrap();
     assert_eq!(
         legacy_cluster,
-        MultivariateSpec::Clustering { k_means_k: Some(3), distance: ClusterDistance::Euclidean, linkage: ClusterLinkage::Ward, k_sweep_max: None }
+        MultivariateSpec::Clustering {
+            k_means_k: Some(3),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: curvebook_doc::KMeansAlgorithm::default(),
+            cluster_direction: curvebook_doc::ClusterDirection::default(),
+            cut_height: None,
+            emit_anova_tab: false,
+        }
     );
 }
 
@@ -1089,6 +1138,11 @@ fn r63_select_and_transform_derived_columns_serde_and_legacy() {
             filter_formula: Some(String::from("X > 0")),
             target_archetype: TableKind::Column,
             derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         }
     );
     let reserialized = serde_json::to_value(&legacy).unwrap();
@@ -1101,6 +1155,11 @@ fn r63_select_and_transform_derived_columns_serde_and_legacy() {
             DerivedColumnFormula::new("Norm", "Response / mean(Response) OVER (PARTITION BY Batch)"),
             DerivedColumnFormula::new("Z", "zscore(Norm)"),
         ],
+        complete_rows_only: false,
+        subject_column: None,
+        row_title_column: None,
+        contingency_count_column: None,
+        include_variable_name_prefixes: false,
     };
     assert_json_roundtrip(&with_derived);
 

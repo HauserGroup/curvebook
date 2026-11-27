@@ -16,12 +16,13 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResultSheet,
+    FactorialComparisonFamilyMode, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, PValueFormat, PairwiseComparisonRecord,
+    RepeatedMeasuresDesign, ResultSheet,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
     dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, max_studentized_range_isf, max_studentized_range_sf, student_t_two_sided_isf,
-    student_t_two_sided_p,
+    student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
 };
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
@@ -394,6 +395,22 @@ impl OlsPostHocModel {
         let w = self.avg_design_over(&other_factors, &tuples, &[(f_idx, lvl)]);
         if is_vec_estimable(&self.row_proj, &w)? { Ok(Some(dot_slice(&w, &self.beta))) } else { Ok(None) }
     }
+
+    pub(in crate::anova) fn eval_cell_pair(
+        &self,
+        cell_a: &[usize],
+        cell_b: &[usize],
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        let fixed_a: Vec<(usize, usize)> = cell_a.iter().copied().enumerate().collect();
+        let fixed_b: Vec<(usize, usize)> = cell_b.iter().copied().enumerate().collect();
+        self.eval_contrast_from_tuples(&[], &[Vec::new()], &fixed_a, &fixed_b, unequal_var)
+    }
+
+    pub(in crate::anova) fn predict_cell(&self, cell: &[usize]) -> f64 {
+        let dv = factorial_design_vector(self.total_cols, &self.subsets, &self.factor_basis, cell);
+        dot_slice(&dv, &self.beta)
+    }
 }
 
 impl RmBalancedPostHocModel {
@@ -520,6 +537,67 @@ impl RmBalancedPostHocModel {
             Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         }
     }
+
+    pub(in crate::anova) fn eval_cell_pair(
+        &self,
+        cell_a: &[usize],
+        cell_b: &[usize],
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        if cell_a.len() != 2 || cell_b.len() != 2 {
+            return Ok(None);
+        }
+        let (ra, ca) = (cell_a[0], cell_a[1]);
+        let (rb, cb) = (cell_b[0], cell_b[1]);
+        if ra == rb {
+            return self.eval_simple_pair(0, ra, 1, ca, cb, unequal_var);
+        }
+        if ca == cb {
+            return self.eval_simple_pair(1, ca, 0, ra, rb, unequal_var);
+        }
+        let diff = self.cell_means[ra][ca] - self.cell_means[rb][cb];
+        let sf = self.s_count as f64;
+        if !unequal_var {
+            let af = self.a_count as f64;
+            let bf = self.b_count as f64;
+            let (ms_pooled, df) = match self.design {
+                RepeatedMeasuresDesign::ColumnFactorMatched => {
+                    let t1 = self.err_a_ms;
+                    let t2 = (bf - 1.0) * self.err_ab_ms;
+                    ((t1 + t2) / bf, satterthwaite_two_term_df(t1, self.err_a_df, t2, self.err_ab_df))
+                }
+                RepeatedMeasuresDesign::RowFactorMatched => {
+                    let t1 = self.err_b_ms;
+                    let t2 = (af - 1.0) * self.err_ab_ms;
+                    ((t1 + t2) / af, satterthwaite_two_term_df(t1, self.err_b_df, t2, self.err_ab_df))
+                }
+                RepeatedMeasuresDesign::BothFactorsMatched | RepeatedMeasuresDesign::None => {
+                    // Var(Ybar_{ra,ca} - Ybar_{rb,cb}) = (2/S) * ((1/b)*MS_SA + (1/a)*MS_SB + (1 - 1/a - 1/b)*MS_SAB).
+                    let w_a = (1.0 / bf) * self.err_a_ms;
+                    let w_b = (1.0 / af) * self.err_b_ms;
+                    let w_ab = (1.0 - 1.0 / af - 1.0 / bf).max(0.0) * self.err_ab_ms;
+                    let (_, df_sat) = welch_stats_from_weighted_terms(&[(w_a, self.err_a_df), (w_b, self.err_b_df), (w_ab, self.err_ab_df)]);
+                    (w_a + w_b + w_ab, df_sat)
+                }
+            };
+            let v_lvl = (ms_pooled / sf).max(0.0);
+            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)), cov_vectors: None }));
+        }
+        let va: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][ra][ca]).collect();
+        let vb: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][rb][cb]).collect();
+        if self.design == RepeatedMeasuresDesign::BothFactorsMatched {
+            let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
+            let (d, se, df) = paired_diff_stats(&diffs)?;
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
+        } else {
+            let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
+        }
+    }
+
+    pub(in crate::anova) fn predict_cell(&self, cell: &[usize]) -> f64 {
+        if cell.len() >= 2 { self.cell_means[cell[0]][cell[1]] } else { 0.0 }
+    }
 }
 
 impl RemlContrastModel {
@@ -632,6 +710,18 @@ impl RemlContrastModel {
             Ok(None)
         }
     }
+
+    pub(in crate::anova) fn eval_cell_pair(&self, cell_a: &[usize], cell_b: &[usize]) -> Result<Option<ContrastEstimate>, StatsError> {
+        let wa = factorial_design_vector(self.total_cols, &self.subsets, &self.factor_basis, cell_a);
+        let wb = factorial_design_vector(self.total_cols, &self.subsets, &self.factor_basis, cell_b);
+        self.eval_weight_vecs(&wa, &wb)
+    }
+
+    pub(in crate::anova) fn predict_cell(&self, cell: &[usize]) -> f64 {
+        let dv = factorial_design_vector(self.total_cols, &self.subsets, &self.factor_basis, cell);
+        let mapped = self.map_to_eff(&dv);
+        dot_slice(&mapped, &self.beta) * self.y_scale
+    }
 }
 
 impl FactorialPostHocContext {
@@ -662,6 +752,27 @@ impl FactorialPostHocContext {
             Self::Ols(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
             Self::RmBalanced(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
             Self::Reml(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b),
+        }
+    }
+
+    pub(in crate::anova) fn eval_cell_pair(
+        &self,
+        cell_a: &[usize],
+        cell_b: &[usize],
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        match self {
+            Self::Ols(m) => m.eval_cell_pair(cell_a, cell_b, unequal_var),
+            Self::RmBalanced(m) => m.eval_cell_pair(cell_a, cell_b, unequal_var),
+            Self::Reml(m) => m.eval_cell_pair(cell_a, cell_b),
+        }
+    }
+
+    pub(in crate::anova) fn predict_cell(&self, cell: &[usize]) -> f64 {
+        match self {
+            Self::Ols(m) => m.predict_cell(cell),
+            Self::RmBalanced(m) => m.predict_cell(cell),
+            Self::Reml(m) => m.predict_cell(cell),
         }
     }
 
@@ -1549,12 +1660,242 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
     Ok(())
 }
 
-pub(in crate::anova) fn run_factorial_multiplicity(
+fn format_cell_label(obs: &FactorialObservations, cell: &[usize]) -> String {
+    cell.iter()
+        .enumerate()
+        .map(|(f_idx, &lvl)| obs.factor_levels.get(f_idx).and_then(|v| v.get(lvl)).map_or("?", String::as_str))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn flatten_cell_index(radices: &[usize], cell: &[usize]) -> usize {
+    let mut idx = 0_usize;
+    for (&r, &c) in radices.iter().zip(cell.iter()) {
+        idx = idx * r + c;
+    }
+    idx
+}
+
+fn unflatten_cell_index(radices: &[usize], mut flat: usize) -> Option<Vec<usize>> {
+    let total: usize = radices.iter().try_fold(1_usize, |acc, &r| acc.checked_mul(r))?;
+    if flat >= total {
+        return None;
+    }
+    let mut out = vec![0_usize; radices.len()];
+    for pos in (0..radices.len()).rev() {
+        let r = radices[pos];
+        out[pos] = flat % r;
+        flat /= r;
+    }
+    Some(out)
+}
+
+fn apply_swap_direction(details: &mut [PairwiseComparisonDetail], method: MultiplicityMethod) {
+    let is_unsigned_q = matches!(method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::GamesHowell);
+    for d in details {
+        std::mem::swap(&mut d.group_a, &mut d.group_b);
+        std::mem::swap(&mut d.label_a, &mut d.label_b);
+        d.mean_diff = -d.mean_diff;
+        if !is_unsigned_q {
+            d.statistic = -d.statistic;
+        }
+        if let Some((lo, hi)) = d.ci {
+            d.ci = Some((-hi, -lo));
+        }
+    }
+}
+
+fn evaluate_cell_pair_family(
+    obs: &FactorialObservations,
+    post_hoc: &FactorialPostHocContext,
+    cell_pairs: &[(Vec<usize>, Vec<usize>)],
+    mult_spec: &MultiplicitySpec,
+    confidence: ConfidenceLevel,
+    swap_direction: bool,
+    tukey_family_hint: Option<(usize, usize)>,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    if cell_pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let unequal = is_unequal_variance_method(mult_spec.method);
+    let radices: Vec<usize> = obs.factor_levels.iter().map(Vec::len).collect();
+    let ci_alpha = confidence.alpha();
+
+    let mut labels_owned: Vec<(usize, usize, String, String, ContrastEstimate)> = Vec::with_capacity(cell_pairs.len());
+    for (ca, cb) in cell_pairs {
+        let Some(est) = post_hoc.eval_cell_pair(ca, cb, unequal)? else {
+            continue;
+        };
+        labels_owned.push((
+            flatten_cell_index(&radices, ca),
+            flatten_cell_index(&radices, cb),
+            format_cell_label(obs, ca),
+            format_cell_label(obs, cb),
+            est,
+        ));
+    }
+    if labels_owned.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut details = if matches!(mult_spec.method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::GamesHowell) {
+        let (n_slices, k_means) = tukey_family_hint.unwrap_or_else(|| {
+            let mut uniq = BTreeSet::new();
+            for &(ia, ib, _, _, _) in &labels_owned {
+                uniq.insert(ia);
+                uniq.insert(ib);
+            }
+            (1, uniq.len().max(2))
+        });
+        let mut out_det = Vec::with_capacity(labels_owned.len());
+        for (id_a, id_b, label_a, label_b, est) in labels_owned {
+            let (q_stat, raw_p, adj_p) = if est.se > 0.0 {
+                let t_abs = (est.diff / est.se).abs();
+                let q = std::f64::consts::SQRT_2 * t_abs;
+                let rp = student_t_two_sided_p(t_abs, est.df)?;
+                let ap =
+                    if n_slices > 1 { max_studentized_range_sf(q, n_slices, k_means, est.df)? } else { studentized_range_sf(q, k_means, est.df)? };
+                (q, rp, ap)
+            } else {
+                let (st, p) = zero_se_pair(est.diff, true);
+                (st, p, p)
+            };
+            let ci = if mult_spec.report_confidence_intervals {
+                let q_crit = if n_slices > 1 {
+                    max_studentized_range_isf(ci_alpha, n_slices, k_means, est.df)?
+                } else {
+                    studentized_range_isf(ci_alpha, k_means, est.df)?
+                };
+                let half = (q_crit / std::f64::consts::SQRT_2) * est.se;
+                Some((est.diff - half, est.diff + half))
+            } else {
+                None
+            };
+            out_det.push(mark_pair_significance(
+                PairwiseComparisonDetail {
+                    group_a: id_a,
+                    group_b: id_b,
+                    label_a,
+                    label_b,
+                    mean_diff: est.diff,
+                    se_diff: est.se,
+                    statistic: q_stat,
+                    df: est.df,
+                    raw_p,
+                    adjusted_p_or_q: adj_p,
+                    is_fdr_q: false,
+                    ci,
+                    significant: false,
+                },
+                mult_spec.threshold,
+            ));
+        }
+        out_det
+    } else {
+        let entries: Vec<NamedSliceContrast<'_>> = labels_owned
+            .iter()
+            .map(|(ia, ib, la, lb, est)| NamedSliceContrast {
+                id_a: *ia,
+                id_b: *ib,
+                label_a: la.as_str(),
+                label_b: lb.as_str(),
+                diff: est.diff,
+                se: est.se,
+                df: est.df,
+            })
+            .collect();
+        let proc_eff = match MultiplicityProcedure::from(mult_spec.method) {
+            MultiplicityProcedure::Dunnett { .. } | MultiplicityProcedure::NewmanKeuls => MultiplicityProcedure::Sidak,
+            other => other,
+        };
+        compare_independent_contrast_family(&entries, proc_eff, mult_spec.threshold, ci_alpha, mult_spec.report_confidence_intervals)?
+    };
+    if swap_direction {
+        apply_swap_direction(&mut details, mult_spec.method);
+    }
+    Ok(details)
+}
+
+type CellCoordPair = (Vec<usize>, Vec<usize>);
+
+fn collect_one_factor_diff_pairs_by_factor(obs: &FactorialObservations, varying_factor: usize) -> Result<Vec<CellCoordPair>, StatsError> {
+    let n_factors = obs.factor_levels.len();
+    let other_factors: Vec<usize> = (0..n_factors).filter(|&f| f != varying_factor).collect();
+    let other_radices: Vec<usize> = other_factors.iter().map(|&f| obs.factor_levels[f].len()).collect();
+    let other_tuples = enumerate_cartesian(&other_radices)?;
+    let k_var = obs.factor_levels[varying_factor].len();
+    let mut pairs = Vec::new();
+    for tup in &other_tuples {
+        for a in 0..k_var {
+            for b in (a + 1)..k_var {
+                let mut ca = vec![0_usize; n_factors];
+                let mut cb = vec![0_usize; n_factors];
+                for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+                    ca[f] = v;
+                    cb[f] = v;
+                }
+                ca[varying_factor] = a;
+                cb[varying_factor] = b;
+                pairs.push((ca, cb));
+            }
+        }
+    }
+    Ok(pairs)
+}
+
+fn swap_standard_multiplicity_outputs(out: &mut ResultSheet, start_tabs: usize, start_pairs: usize, method: MultiplicityMethod) {
+    let is_unsigned_q = matches!(method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::GamesHowell);
+    for rec in &mut out.pairwise_comparisons[start_pairs..] {
+        std::mem::swap(&mut rec.group_a, &mut rec.group_b);
+        std::mem::swap(&mut rec.label_a, &mut rec.label_b);
+        if let Some(d) = rec.estimate_diff {
+            rec.estimate_diff = Some(-d);
+        }
+    }
+    for tab in &mut out.tabs[start_tabs..] {
+        if tab.kind != curvebook_doc::ResultTabKind::MultipleComparisons {
+            continue;
+        }
+        for lbl in &mut tab.row_labels {
+            if let Some((a, b)) = lbl.split_once(" vs. ") {
+                *lbl = format!("{b} vs. {a}");
+            }
+        }
+        for row in &mut tab.rows {
+            if let Some(curvebook_doc::ResultCell::Number { value, .. }) = row.first_mut() {
+                *value = -*value;
+            }
+            if !is_unsigned_q && let Some(curvebook_doc::ResultCell::Number { value, .. }) = row.get_mut(2) {
+                *value = -*value;
+            }
+            if let Some(curvebook_doc::ResultCell::ConfidenceInterval { lower, upper }) = row.get_mut(6) {
+                let new_lo = match *upper {
+                    curvebook_doc::CiBound::Finite(u) => curvebook_doc::CiBound::Finite(-u),
+                    curvebook_doc::CiBound::Open => curvebook_doc::CiBound::Open,
+                    curvebook_doc::CiBound::Unavailable => curvebook_doc::CiBound::Unavailable,
+                };
+                let new_hi = match *lower {
+                    curvebook_doc::CiBound::Finite(l) => curvebook_doc::CiBound::Finite(-l),
+                    curvebook_doc::CiBound::Open => curvebook_doc::CiBound::Open,
+                    curvebook_doc::CiBound::Unavailable => curvebook_doc::CiBound::Unavailable,
+                };
+                *lower = new_lo;
+                *upper = new_hi;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::anova) fn run_factorial_multiplicity_with_options(
     out: &mut ResultSheet,
     obs: &FactorialObservations,
     post_hoc: &FactorialPostHocContext,
     result: &FactorialAnovaResult,
     mult_spec: &MultiplicitySpec,
+    family_mode: FactorialComparisonFamilyMode,
+    preselected_pairs: &[(usize, usize)],
+    swap_direction: bool,
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
@@ -1569,6 +1910,161 @@ pub(in crate::anova) fn run_factorial_multiplicity(
     if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());
     }
+
+    match family_mode {
+        FactorialComparisonFamilyMode::Standard => {
+            let start_tabs = out.tabs.len();
+            let start_pairs = out.pairwise_comparisons.len();
+            run_factorial_multiplicity_standard(out, obs, post_hoc, mult_spec, p_fmt, confidence)?;
+            if swap_direction {
+                swap_standard_multiplicity_outputs(out, start_tabs, start_pairs, mult_spec.method);
+            }
+            Ok(())
+        }
+        FactorialComparisonFamilyMode::CellsDifferingByOneFactor | FactorialComparisonFamilyMode::SingleGrandFamily => {
+            let mut all_pairs = Vec::new();
+            // Order: within-row (varying column factor = 1 first for 2-way, matching R oracle), then within-col (varying row = 0), then remaining factors.
+            let factor_order: Vec<usize> = if obs.factor_levels.len() >= 2 {
+                let mut ord = vec![1, 0];
+                ord.extend(2..obs.factor_levels.len());
+                ord
+            } else {
+                (0..obs.factor_levels.len()).collect()
+            };
+            for f_var in factor_order {
+                all_pairs.extend(collect_one_factor_diff_pairs_by_factor(obs, f_var)?);
+            }
+            let total_cells: usize = obs.factor_levels.iter().map(Vec::len).product();
+            let details = evaluate_cell_pair_family(obs, post_hoc, &all_pairs, mult_spec, confidence, swap_direction, Some((1, total_cells)))?;
+            let (tab_id, title, note) = if family_mode == FactorialComparisonFamilyMode::CellsDifferingByOneFactor {
+                (
+                    "multiple-comparisons-one-factor-diff",
+                    "Multiple comparisons: cells differing by one factor",
+                    format!("Single grand family across all {} cell pairs differing by exactly one factor.", details.len()),
+                )
+            } else {
+                (
+                    "multiple-comparisons-grand-family",
+                    "Multiple comparisons: single grand family",
+                    format!("Single grand family pooling all {} comparisons.", details.len()),
+                )
+            };
+            push_pairwise_outputs_with_footnote(out, &details, tab_id, title, p_fmt, confidence, Some(note));
+            Ok(())
+        }
+        FactorialComparisonFamilyMode::TwoFactorFamilies => {
+            let n_factors = obs.factor_levels.len();
+            let factor_order: Vec<usize> = if n_factors >= 2 {
+                let mut ord = vec![1, 0];
+                ord.extend(2..n_factors);
+                ord
+            } else {
+                (0..n_factors).collect()
+            };
+            for f_var in factor_order {
+                let pairs = collect_one_factor_diff_pairs_by_factor(obs, f_var)?;
+                if pairs.is_empty() {
+                    continue;
+                }
+                let k_var = obs.factor_levels[f_var].len();
+                let n_slices: usize =
+                    obs.factor_levels.iter().enumerate().filter(|&(f, _)| f != f_var).map(|(_, lvls)| lvls.len()).product::<usize>().max(1);
+                let details = evaluate_cell_pair_family(obs, post_hoc, &pairs, mult_spec, confidence, swap_direction, Some((n_slices, k_var)))?;
+                let f_name = obs.factor_names.get(f_var).map_or("Factor", String::as_str);
+                let tab_id = format!("multiple-comparisons-family-factor-{}", f_var + 1);
+                let title = format!("Multiple comparisons: family varying {f_name}");
+                let note = format!("Multiplicity adjusted within the factor family of {} comparisons varying {f_name}.", details.len());
+                push_pairwise_outputs_with_footnote(out, &details, &tab_id, &title, p_fmt, confidence, Some(note));
+            }
+            Ok(())
+        }
+        FactorialComparisonFamilyMode::PerSliceFamilies => {
+            let n_factors = obs.factor_levels.len();
+            let factor_order: Vec<usize> = if n_factors >= 2 {
+                let mut ord = vec![1, 0];
+                ord.extend(2..n_factors);
+                ord
+            } else {
+                (0..n_factors).collect()
+            };
+            for f_var in factor_order {
+                let other_factors: Vec<usize> = (0..n_factors).filter(|&f| f != f_var).collect();
+                let other_radices: Vec<usize> = other_factors.iter().map(|&f| obs.factor_levels[f].len()).collect();
+                let other_tuples = enumerate_cartesian(&other_radices)?;
+                let k_var = obs.factor_levels[f_var].len();
+                let mut all_slice_details = Vec::new();
+                for tup in &other_tuples {
+                    let mut slice_pairs = Vec::new();
+                    for a in 0..k_var {
+                        for b in (a + 1)..k_var {
+                            let mut ca = vec![0_usize; n_factors];
+                            let mut cb = vec![0_usize; n_factors];
+                            for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+                                ca[f] = v;
+                                cb[f] = v;
+                            }
+                            ca[f_var] = a;
+                            cb[f_var] = b;
+                            slice_pairs.push((ca, cb));
+                        }
+                    }
+                    let slice_det = evaluate_cell_pair_family(obs, post_hoc, &slice_pairs, mult_spec, confidence, swap_direction, Some((1, k_var)))?;
+                    all_slice_details.extend(slice_det);
+                }
+                if !all_slice_details.is_empty() {
+                    let f_name = obs.factor_names.get(f_var).map_or("Factor", String::as_str);
+                    let tab_id = format!("multiple-comparisons-per-slice-factor-{}", f_var + 1);
+                    let title = format!("Multiple comparisons (per-slice families): {f_name}");
+                    let note = format!(
+                        "Each slice of {} levels of {f_name} is adjusted independently as its own comparison family ({} slices).",
+                        k_var,
+                        other_tuples.len()
+                    );
+                    push_pairwise_outputs_with_footnote(out, &all_slice_details, &tab_id, &title, p_fmt, confidence, Some(note));
+                }
+            }
+            Ok(())
+        }
+        FactorialComparisonFamilyMode::PreselectedPairs => {
+            if preselected_pairs.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
+            let radices: Vec<usize> = obs.factor_levels.iter().map(Vec::len).collect();
+            let mut pairs = Vec::with_capacity(preselected_pairs.len());
+            for &(idx_a, idx_b) in preselected_pairs {
+                if idx_a == idx_b {
+                    return Err(StatsError::InvalidParameter { name: "preselected_pairs", value: idx_a as f64 });
+                }
+                let ca =
+                    unflatten_cell_index(&radices, idx_a).ok_or(StatsError::InvalidParameter { name: "preselected_pairs", value: idx_a as f64 })?;
+                let cb =
+                    unflatten_cell_index(&radices, idx_b).ok_or(StatsError::InvalidParameter { name: "preselected_pairs", value: idx_b as f64 })?;
+                pairs.push((ca, cb));
+            }
+            let details = evaluate_cell_pair_family(obs, post_hoc, &pairs, mult_spec, confidence, swap_direction, None)?;
+            let note = format!("Multiplicity adjusted across {} user-preselected cell pair(s).", details.len());
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons-preselected",
+                "Multiple comparisons: preselected pairs",
+                p_fmt,
+                confidence,
+                Some(note),
+            );
+            Ok(())
+        }
+    }
+}
+
+fn run_factorial_multiplicity_standard(
+    out: &mut ResultSheet,
+    obs: &FactorialObservations,
+    post_hoc: &FactorialPostHocContext,
+    mult_spec: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
     let dunnett_target = match mult_spec.method {
         MultiplicityMethod::Dunnett { control_column } => Some((resolve_factorial_dunnett_target(obs, control_column)?, control_column)),
         _ => None,

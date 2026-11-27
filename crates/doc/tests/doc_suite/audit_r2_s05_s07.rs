@@ -207,6 +207,7 @@ fn r2_s07_10_power_analysis_spec_serde_validation_and_schema() {
         continuity_correction: true,
         correlation_method: CorrelationPowerMethod::FisherZ,
         info_sheet_id: Some(SheetId::new("info-power")),
+        ..PowerAnalysisSpec::default()
     };
     spec.validate().expect("valid two-proportions PowerAnalysisSpec");
 

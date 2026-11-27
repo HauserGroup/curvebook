@@ -1,6 +1,7 @@
 //! XY scatter, line, error-bar, confidence-band, and fitted regression curve scene builder,
 //! plus shared multi-segment axis, tick, frame, marker, error-bar, annotation, and legend kernels.
 
+mod distribution;
 mod fit_overlay;
 mod series;
 

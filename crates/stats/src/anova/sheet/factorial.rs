@@ -10,22 +10,29 @@ use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, PValueFormat, RepeatedMeasuresDesign,
     ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
+use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
 
 use crate::anova::factorial::{
-    FactorialObservations, OlsPostHocModel, build_xtx_pinv_and_proj, finalize_term_p_values, fit_factorial_anova_with_model,
+    FactorialObservations, build_xtx_pinv_and_proj, finalize_term_p_values, fit_factorial_anova_with_model,
+    fit_factorial_anova_with_model_and_subsets,
 };
-use crate::anova::posthoc::{FactorialPostHocContext, RemlContrastModel, run_factorial_multiplicity};
-use crate::anova::results::{FactorialAnovaResult, FactorialAnovaTerm, RmSphericityCorrection, RmTwoWayAnovaResult, SphericityResult};
-use crate::anova::rm_two_way::{apply_rm_sphericity_p, fit_rm_two_way_anova_with_posthoc};
+use crate::anova::posthoc::{FactorialPostHocContext, RemlContrastModel, run_factorial_multiplicity_with_options};
+use crate::anova::reml::RemlContrastCore;
+use crate::anova::results::{
+    FactorialAnovaResult, FactorialAnovaTerm, RmSphericityCorrection, RmThreeWayAnovaResult, RmTwoWayAnovaResult, SphericityResult,
+};
+use crate::anova::rm_two_way::{apply_rm_sphericity_p, fit_rm_three_way_anova, fit_rm_two_way_anova_with_posthoc};
 use crate::anova::sheet::one_way::{
-    RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml, emit_random_intercept_reml, emit_unstructured_rm_reml,
+    RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml_with_policy, emit_random_intercept_reml_with_policy, emit_unstructured_rm_reml,
 };
 use crate::common::{
     TabBuilder, checklist_item, enforce_summary_mode_matrix, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats, try_resolve_selected_indices,
+    sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
+use crate::formula_design::resolve_factorial_formula_subsets;
+use crate::multivariate::spearman_correlation;
 
 /// Execute a [`FactorialAnovaSpec`] (Two-way, Three-way `2x2xK`, Repeated-Measures Two-way,
 /// Mixed-Effects REML on missing RM data, or Multifactor `N`-way ANOVA).
@@ -44,8 +51,8 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
             if !spec.selected_data_sets.is_empty() {
                 let _ = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
             }
-            let (res, obs, model) = run_multifactor_mv(mv, fac_spec)?;
-            (res, obs, FactorialPostHocContext::Ols(model), Vec::new(), None)
+            let outcome = run_multifactor_mv(mv, &mut out, fac_spec, p_fmt, confidence.alpha())?;
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -98,7 +105,26 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     out.tabs.push(main_tab.build());
     out.tabs.extend(aux_tabs);
 
-    run_factorial_multiplicity(&mut out, &obs, &post_hoc, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
+    if fac_spec.emit_consolidated_data_tab {
+        out.tabs.push(build_consolidated_data_tab(&obs));
+    }
+
+    if fac_spec.heteroscedasticity_test {
+        append_spearman_heteroscedasticity(&mut out, &obs, &post_hoc, p_fmt, confidence.alpha())?;
+    }
+
+    run_factorial_multiplicity_with_options(
+        &mut out,
+        &obs,
+        &post_hoc,
+        &result,
+        &fac_spec.multiplicity,
+        fac_spec.comparison_family_mode,
+        &fac_spec.preselected_pairs,
+        fac_spec.swap_direction,
+        p_fmt,
+        confidence,
+    )?;
 
     out.checklist.push(checklist_item(
         "Cell balance & sums of squares",
@@ -224,6 +250,176 @@ pub(in crate::anova) fn push_rm_sphericity_outputs(
     build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt, alpha)
 }
 
+fn build_consolidated_data_tab(obs: &FactorialObservations) -> ResultTab {
+    let mut headers = obs.factor_names.clone();
+    headers.push(String::from("Value"));
+    let mut tab = TabBuilder::new("consolidated-data", "Consolidated Data", ResultTabKind::Diagnostics).headers(headers);
+    for (idx, (lvls, y)) in obs.rows.iter().enumerate() {
+        let mut row = Vec::with_capacity(lvls.len() + 1);
+        for (f_idx, &lvl) in lvls.iter().enumerate() {
+            let lbl = obs.factor_levels.get(f_idx).and_then(|v| v.get(lvl)).map_or("?", String::as_str);
+            row.push(text_cell(lbl));
+        }
+        row.push(num_cell(*y));
+        tab.push_row(format!("Obs {}", idx + 1), row);
+    }
+    tab.build()
+}
+
+fn snap_near_ties(values: &mut [f64], tol: f64) {
+    if values.len() < 2 || !tol.is_finite() || tol <= 0.0 {
+        return;
+    }
+    let mut order: Vec<usize> = (0..values.len()).collect();
+    order.sort_by(|&a, &b| values[a].total_cmp(&values[b]));
+    let mut i = 0;
+    while i < order.len() {
+        let anchor = values[order[i]];
+        let mut j = i + 1;
+        while j < order.len() && (values[order[j]] - anchor).abs() <= tol {
+            values[order[j]] = anchor;
+            j += 1;
+        }
+        i = j;
+    }
+}
+
+fn append_spearman_heteroscedasticity(
+    out: &mut ResultSheet,
+    obs: &FactorialObservations,
+    post_hoc: &FactorialPostHocContext,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(), StatsError> {
+    if obs.rows.len() < 3 {
+        return Ok(());
+    }
+    let mut fitted = Vec::with_capacity(obs.rows.len());
+    let mut abs_resid = Vec::with_capacity(obs.rows.len());
+    let mut y_scale = 1.0_f64;
+    for (lvls, y) in &obs.rows {
+        y_scale = y_scale.max(y.abs());
+        let yhat = post_hoc.predict_cell(lvls);
+        fitted.push(yhat);
+        abs_resid.push((y - yhat).abs());
+    }
+    // Snap sub-1e-11 solver rounding jitter so identical cell means and symmetric residuals
+    // receive exact mathematical mid-ranks independent of contrast coding or row order.
+    let tie_tol = 1e-11 * y_scale;
+    snap_near_ties(&mut fitted, tie_tol);
+    snap_near_ties(&mut abs_resid, tie_tol);
+    if let Ok(sp) = spearman_correlation(&fitted, &abs_resid) {
+        push_scalar(out, "Heteroscedasticity Spearman rho", None, sp.r);
+        push_scalar(out, "Heteroscedasticity P", None, sp.p_value);
+        let homoscedastic = sp.p_value >= alpha;
+        let status_text = if homoscedastic { "Homoscedasticity not rejected" } else { "Heteroscedasticity detected" };
+        out.tabs.push(
+            TabBuilder::new("heteroscedasticity", "Homoscedasticity Test (Spearman)", ResultTabKind::Diagnostics)
+                .headers(["Spearman rho", "t statistic", "df", "P value", "N", "Status"])
+                .row(
+                    "Predicted vs. |Residual|",
+                    [
+                        num_cell(sp.r),
+                        num_cell(sp.statistic),
+                        opt_num_cell(sp.df),
+                        p_cell_at_alpha(sp.p_value, p_fmt, alpha),
+                        num_cell(sp.n as f64),
+                        text_cell(status_text),
+                    ],
+                )
+                .footnote("Spearman rank correlation between fitted cell means and absolute residuals |y - y_hat| tests monotonic variance-mean heteroscedasticity.")
+                .build(),
+        );
+        out.checklist.push(checklist_item(
+            "Homoscedasticity (Spearman rank test)",
+            if homoscedastic { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+            Some(format!("rho = {:.4}, P = {:.4}", sp.r, sp.p_value)),
+            if homoscedastic {
+                "No significant monotonic relationship between fitted values and residual magnitude was detected."
+            } else {
+                "Absolute residuals correlate significantly with fitted cell means, indicating heteroscedasticity."
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn push_rm_three_way_sphericity_outputs(
+    out: &mut ResultSheet,
+    rm3: &RmThreeWayAnovaResult,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<Option<ResultTab>, StatsError> {
+    let mut tab = TabBuilder::new("rm-sphericity", "Repeated-measures sphericity (three-way)", ResultTabKind::Diagnostics).headers([
+        "Mauchly W",
+        "Mauchly chi2",
+        "df",
+        "Mauchly P",
+        "G-G epsilon",
+        "H-F epsilon",
+        "G-G P",
+        "H-F P",
+    ]);
+    let mut row_count = 0_usize;
+    let mut worst_gg = 1.0_f64;
+    let mut summary_parts = Vec::new();
+    for (idx, term) in rm3.anova.terms.iter().enumerate() {
+        let Some(Some(s)) = rm3.term_sphericities.get(idx) else {
+            continue;
+        };
+        worst_gg = worst_gg.min(s.greenhouse_geisser_eps);
+        push_scalar(out, format!("{}: G-G epsilon", term.name), None, s.greenhouse_geisser_eps);
+        push_scalar(out, format!("{}: H-F epsilon", term.name), None, s.huynh_feldt_eps);
+        if s.mauchly_df <= 0.0 {
+            continue;
+        }
+        let df_err = rm3.term_error_dfs.get(idx).copied().unwrap_or(rm3.anova.df_residual);
+        let f_val = term.f_statistic.unwrap_or(0.0);
+        let p_gg = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::GreenhouseGeisser)?;
+        let p_hf = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::HuynhFeldt)?;
+        let mauchly_lbl = if s.mauchly_p.is_finite() { format!("{:.4}", s.mauchly_p) } else { String::from("n/a") };
+        summary_parts.push(format!("{}: eps_GG={:.4}, eps_HF={:.4}, P={mauchly_lbl}", term.name, s.greenhouse_geisser_eps, s.huynh_feldt_eps));
+        tab.push_row(
+            term.name.clone(),
+            [
+                num_cell(s.mauchly_w),
+                num_cell(s.mauchly_chi2),
+                num_cell(s.mauchly_df),
+                p_cell_at_alpha(s.mauchly_p, p_fmt, alpha),
+                num_cell(s.greenhouse_geisser_eps),
+                num_cell(s.huynh_feldt_eps),
+                p_cell_at_alpha(p_gg, p_fmt, alpha),
+                p_cell_at_alpha(p_hf, p_fmt, alpha),
+            ],
+        );
+        row_count += 1;
+    }
+    if !summary_parts.is_empty() {
+        out.checklist.push(checklist_item(
+            "Sphericity (RM three-way)",
+            if worst_gg < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+            Some(summary_parts.join("; ")),
+            "Greenhouse-Geisser and Huynh-Feldt (Lecoutre 1991) epsilons summarize covariance sphericity across within-subject strata.",
+        ));
+    }
+    Ok((row_count > 0).then(|| tab.build()))
+}
+
+/// Resolve three-way within-subject flags in canonical `[factor_0, factor_1, factor_2]` axis order:
+/// - `GroupedTable`: `[Factor A (factor_1), Factor B (factor_2), Row factor]` matching `factor_names`.
+/// - `MultipleVariablesTable`: `[multifactor_columns[0], multifactor_columns[1], multifactor_columns[2]]`.
+fn effective_three_way_rm_factors(fac_spec: &FactorialAnovaSpec) -> [bool; 3] {
+    if let Some(flags) = fac_spec.three_way_rm_factors {
+        return flags;
+    }
+    match fac_spec.repeated_measures {
+        RepeatedMeasuresDesign::None => [false, false, false],
+        RepeatedMeasuresDesign::RowFactorMatched => [false, false, true],
+        RepeatedMeasuresDesign::ColumnFactorMatched => [true, true, false],
+        RepeatedMeasuresDesign::BothFactorsMatched => [true, true, true],
+    }
+}
+
 fn active_grouped_rows(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize]) -> Vec<usize> {
     (0..grouped.row_count()).filter(|&r| selected_cols.iter().any(|&c| !grouped.active_replicates(r, c).is_empty())).collect()
 }
@@ -292,9 +488,12 @@ pub(in crate::anova) fn run_grouped_factorial(
         return Err(StatsError::EmptyInput);
     }
 
-    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
+    // Three-way 2 x 2 x K path (supports all 8 RM factor combinations; classical balanced RM with
+    // per-stratum sphericity when complete and not forced to REML, or mixed-effects REML otherwise).
     if fac_spec.three_way && selected_cols.len() == 4 {
-        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+        let rm_flags = effective_three_way_rm_factors(fac_spec);
+        let any_rm = rm_flags.iter().any(|&v| v);
+        if any_rm {
             let active_subs = active_grouped_subs(grouped, &active_rows, &selected_cols, n_subs);
             if active_subs.is_empty() {
                 return Err(StatsError::EmptyInput);
@@ -310,6 +509,71 @@ pub(in crate::anova) fn run_grouped_factorial(
                     context: "complete repeated-measures cells (fit_reml_on_missing is false)",
                     required: total_cells,
                     actual: observed_cells,
+                });
+            }
+            let use_classical_balanced_rm = !has_missing_selected
+                && !fac_spec.mixed_effects_reml
+                && fac_spec.residual_covariance != ResidualCovariance::Unstructured
+                && (fac_spec.three_way_rm_factors.is_some() || fac_spec.sphericity_correction != RmSphericityCorrection::None)
+                && active_rows.len() >= 2
+                && active_subs.len() >= 2;
+            if use_classical_balanced_rm {
+                let grouping = grouped.three_way_grouping.as_ref();
+                let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
+                let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
+                let f3_name = grouped.row_factor_title.clone();
+                let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+                let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+                let f3_levels = grouped_row_levels_for(grouped, &active_rows);
+                let n_eff_rows = active_rows.len();
+                let n_eff_subs = active_subs.len();
+                let mut subject_data = vec![vec![vec![vec![0.0_f64; n_eff_rows]; 2]; 2]; n_eff_subs];
+                let mut obs = Vec::with_capacity(n_eff_subs * 4 * n_eff_rows);
+                for (s_pos, &orig_s) in active_subs.iter().enumerate() {
+                    for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+                        for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+                            let l1 = c_pos / 2;
+                            let l2 = c_pos % 2;
+                            let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
+                                return Err(StatsError::InsufficientSampleSize {
+                                    context: "complete repeated-measures cells",
+                                    required: total_cells,
+                                    actual: observed_cells,
+                                });
+                            };
+                            subject_data[s_pos][l1][l2][r_pos] = v;
+                            obs.push((vec![l1, l2, r_pos], v));
+                        }
+                    }
+                }
+                let rm3 = fit_rm_three_way_anova(&subject_data, [&f1_name, &f2_name, &f3_name], rm_flags, fac_spec.sphericity_correction)?;
+                let sph_tab = push_rm_three_way_sphericity_outputs(out, &rm3, p_fmt, alpha)?;
+                let data = FactorialObservations {
+                    factor_names: vec![f1_name, f2_name, f3_name],
+                    factor_levels: vec![f1_levels, f2_levels, f3_levels],
+                    rows: obs,
+                };
+                let (_, mut post_model) = fit_factorial_anova_with_model(&data, 3, SumOfSquaresType::TypeIII)?;
+                post_model.ms_resid = rm3.anova.ms_residual;
+                post_model.df_resid = rm3.anova.df_residual;
+                let corr_lbl = match fac_spec.sphericity_correction {
+                    RmSphericityCorrection::None => "uncorrected",
+                    RmSphericityCorrection::GreenhouseGeisser => "Greenhouse-Geisser corrected",
+                    RmSphericityCorrection::HuynhFeldt => "Huynh-Feldt corrected",
+                };
+                let estimator_desc = format!("Classical balanced three-way RM ANOVA ({corr_lbl})");
+                out.checklist.push(checklist_item(
+                    "Repeated-measures estimator",
+                    ChecklistStatus::Info,
+                    Some(estimator_desc.clone()),
+                    format!("Fitted classical balanced three-way RM ANOVA with within-subject flags {:?} and {corr_lbl} sphericity.", rm_flags),
+                ));
+                return Ok(GroupedFactorialOutcome {
+                    result: rm3.anova,
+                    observations: data,
+                    post_hoc: FactorialPostHocContext::Ols(post_model),
+                    aux_tabs: sph_tab.into_iter().collect(),
+                    estimator_note: Some(format!("Estimator: {estimator_desc}.")),
                 });
             }
             return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt, alpha);
@@ -341,7 +605,9 @@ pub(in crate::anova) fn run_grouped_factorial(
         let obs = raw_obs.into_iter().map(|(l1, l2, r_pos, y)| (vec![l1_remap[l1], l2_remap[l2], r_pos], y)).collect();
         let data =
             FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
-        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
+        let explicit_subsets = fac_spec.formula.as_ref().map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &[])).transpose()?;
+        let (res, model) =
+            fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order.clamp(1, 3), explicit_subsets, fac_spec.ss_type)?;
         return Ok(GroupedFactorialOutcome {
             result: res,
             observations: data,
@@ -454,15 +720,20 @@ pub(in crate::anova) fn run_grouped_factorial(
             &grouped.row_factor_title,
             &grouped.column_factor_title,
             fac_spec.repeated_measures,
-            RmSphericityCorrection::None,
+            fac_spec.sphericity_correction,
         )?;
         let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt, alpha)?;
-        let estimator_desc = "Classical balanced repeated-measures ANOVA (OLS)";
+        let corr_lbl = match fac_spec.sphericity_correction {
+            RmSphericityCorrection::None => "uncorrected",
+            RmSphericityCorrection::GreenhouseGeisser => "Greenhouse-Geisser corrected",
+            RmSphericityCorrection::HuynhFeldt => "Huynh-Feldt corrected",
+        };
+        let estimator_desc = format!("Classical balanced repeated-measures ANOVA (OLS, {corr_lbl})");
         out.checklist.push(checklist_item(
             "Repeated-measures estimator",
             ChecklistStatus::Info,
-            Some(String::from(estimator_desc)),
-            "All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA.",
+            Some(estimator_desc.clone()),
+            format!("All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA ({corr_lbl})."),
         ));
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
@@ -497,7 +768,9 @@ pub(in crate::anova) fn run_grouped_factorial(
         factor_levels: vec![row_levels, col_levels],
         rows: obs,
     };
-    let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
+    let explicit_subsets = fac_spec.formula.as_ref().map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &[])).transpose()?;
+    let (res, model) =
+        fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order.clamp(1, 2), explicit_subsets, fac_spec.ss_type)?;
     Ok(GroupedFactorialOutcome {
         result: res,
         observations: data,
@@ -540,6 +813,150 @@ pub(in crate::anova) fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[Fac
 }
 
 #[allow(clippy::too_many_arguments)]
+fn fit_three_way_cs_reml(
+    out: &mut ResultSheet,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    obs_cells: &[Vec<usize>],
+    subj_ids: &[usize],
+    factor_names: &[String],
+    factor_levels: &[Vec<String>],
+    term_slices: &[(&str, usize, usize)],
+    fac_spec: &FactorialAnovaSpec,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
+    let vc_policy = fac_spec.reml_zero_variance_policy;
+    let rm_flags = effective_three_way_rm_factors(fac_spec);
+    let dims3 = [factor_levels[0].len().max(1), factor_levels[1].len().max(1), factor_levels[2].len().max(1)];
+    let bet_axes: Vec<usize> = (0..3).filter(|&f| !rm_flags[f]).collect();
+    let wth_axes: Vec<usize> = (0..3).filter(|&f| rm_flags[f]).collect();
+    if wth_axes.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    let make_ids = |axes: &[usize]| -> Vec<usize> {
+        obs_cells
+            .iter()
+            .zip(subj_ids.iter())
+            .map(|(cell, &s)| {
+                let mut id = s;
+                for &ax in axes {
+                    id = id * dims3[ax] + cell[ax];
+                }
+                id
+            })
+            .collect()
+    };
+    if wth_axes.len() == 1 {
+        let subj_bet = make_ids(&bet_axes);
+        return emit_random_intercept_reml_with_policy(out, x_mat, y_vec, &subj_bet, term_slices, fac_spec.df_method, vc_policy, p_fmt, alpha);
+    }
+    // Build Subject(Bet) + every proper non-empty subset W of Wth crossed with Subject(Bet).
+    let mut owned_strata: Vec<(String, String, Vec<usize>)> = Vec::new();
+    owned_strata.push((String::from("subject"), String::from("Subject (random)"), make_ids(&bet_axes)));
+    let full_mask = (1_usize << wth_axes.len()) - 1;
+    for sub_mask in 1..full_mask {
+        let mut axes = bet_axes.clone();
+        let mut s_parts = vec![String::from("subject")];
+        let mut t_parts = vec![String::from("Subject")];
+        for (bit, &ax) in wth_axes.iter().enumerate() {
+            if (sub_mask & (1 << bit)) != 0 {
+                axes.push(ax);
+                s_parts.push(factor_names[ax].clone());
+                t_parts.push(factor_names[ax].clone());
+            }
+        }
+        owned_strata.push((s_parts.join(" × "), t_parts.join(" × "), make_ids(&axes)));
+    }
+    let strata_refs: Vec<(&str, &str, &[usize])> = owned_strata.iter().map(|(s, t, v)| (s.as_str(), t.as_str(), v.as_slice())).collect();
+    emit_multi_vc_rm_reml_with_policy(out, x_mat, y_vec, &strata_refs, term_slices, fac_spec.df_method, vc_policy)
+}
+
+struct UnstructuredClusterSpec {
+    cluster_ids: Vec<usize>,
+    tp_ids: Vec<usize>,
+    tp_labels: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_unstructured_rm_clusters(
+    is_three_way: bool,
+    fac_spec: &FactorialAnovaSpec,
+    n_rows: usize,
+    n_cols: usize,
+    obs_cells: &[Vec<usize>],
+    subj_ids: &[usize],
+    subj_row_ids: &[usize],
+    subj_col_ids: &[usize],
+    row_ids: &[usize],
+    col_ids: &[usize],
+    factor_levels: &[Vec<String>],
+) -> Result<UnstructuredClusterSpec, StatsError> {
+    if is_three_way {
+        let rm_flags = effective_three_way_rm_factors(fac_spec);
+        let bet_axes: Vec<usize> = (0..3).filter(|&f| !rm_flags[f]).collect();
+        let wth_axes: Vec<usize> = (0..3).filter(|&f| rm_flags[f]).collect();
+        if wth_axes.is_empty() {
+            return Err(StatsError::IncompatibleAnalysisSpec {
+                expected: "at least one within-subject repeated-measures factor for Unstructured covariance REML",
+            });
+        }
+        let dims3 = [factor_levels[0].len().max(1), factor_levels[1].len().max(1), factor_levels[2].len().max(1)];
+        let cluster_ids: Vec<usize> = obs_cells
+            .iter()
+            .zip(subj_ids.iter())
+            .map(|(cell, &s)| {
+                let mut id = s;
+                for &ax in &bet_axes {
+                    id = id * dims3[ax] + cell[ax];
+                }
+                id
+            })
+            .collect();
+        let tp_ids: Vec<usize> = obs_cells
+            .iter()
+            .map(|cell| {
+                let mut tp = 0_usize;
+                for &ax in &wth_axes {
+                    tp = tp * dims3[ax] + cell[ax];
+                }
+                tp
+            })
+            .collect();
+        let mut labels: Vec<String> = vec![String::new()];
+        for &ax in &wth_axes {
+            let mut next = Vec::with_capacity(labels.len() * factor_levels[ax].len());
+            for prefix in &labels {
+                for lvl in &factor_levels[ax] {
+                    if prefix.is_empty() {
+                        next.push(lvl.clone());
+                    } else {
+                        next.push(format!("{prefix} × {lvl}"));
+                    }
+                }
+            }
+            labels = next;
+        }
+        return Ok(UnstructuredClusterSpec { cluster_ids, tp_ids, tp_labels: labels });
+    }
+    let (cluster_ids, tp_ids, tp_labels) = match fac_spec.repeated_measures {
+        RepeatedMeasuresDesign::ColumnFactorMatched => (subj_row_ids.to_vec(), col_ids.to_vec(), factor_levels[1].clone()),
+        RepeatedMeasuresDesign::RowFactorMatched => (subj_col_ids.to_vec(), row_ids.to_vec(), factor_levels[0].clone()),
+        _ => {
+            let tps: Vec<usize> = row_ids.iter().zip(col_ids.iter()).map(|(&r, &c)| r * n_cols + c).collect();
+            let mut labels = Vec::with_capacity(n_rows * n_cols);
+            for r_lbl in &factor_levels[0] {
+                for c_lbl in &factor_levels[1] {
+                    labels.push(format!("{r_lbl} × {c_lbl}"));
+                }
+            }
+            (subj_ids.to_vec(), tps, labels)
+        }
+    };
+    Ok(UnstructuredClusterSpec { cluster_ids, tp_ids, tp_labels })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in crate::anova) fn run_rm_grouped_reml(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
@@ -573,7 +990,7 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     }
     let l1_remap: [usize; 2];
     let l2_remap: [usize; 2];
-    let (factor_names, factor_levels, max_order, ab_labels) = if is_three_way {
+    let (factor_names, factor_levels, max_order) = if is_three_way {
         let grouping = grouped.three_way_grouping.as_ref();
         let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
         let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
@@ -585,13 +1002,7 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         l1_remap = r1;
         l2_remap = r2;
         let f3_levels = grouped_row_levels_for(grouped, active_rows);
-        let mut ab_lbls = Vec::with_capacity(4);
-        for a_l in &raw_f1 {
-            for b_l in &raw_f2 {
-                ab_lbls.push(format!("{a_l} × {b_l}"));
-            }
-        }
-        (vec![f1_name, f2_name, f3_name], vec![f1_levels, f2_levels, f3_levels], fac_spec.max_interaction_order.clamp(1, 3), ab_lbls)
+        (vec![f1_name, f2_name, f3_name], vec![f1_levels, f2_levels, f3_levels], fac_spec.max_interaction_order.clamp(1, 3))
     } else {
         l1_remap = [0, 1];
         l2_remap = [0, 1];
@@ -601,7 +1012,6 @@ pub(in crate::anova) fn run_rm_grouped_reml(
             vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
             vec![row_levels, col_levels],
             fac_spec.max_interaction_order.clamp(1, 2),
-            Vec::new(),
         )
     };
 
@@ -611,13 +1021,6 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     let mut subj_ids = Vec::new();
     let mut subj_row_ids = Vec::new();
     let mut subj_col_ids = Vec::new();
-    let mut id_sa = Vec::new();
-    let mut id_sb = Vec::new();
-    let mut id_sab = Vec::new();
-    let mut id_sac = Vec::new();
-    let mut id_sbc = Vec::new();
-    let mut id_sr_a = Vec::new();
-    let mut id_sr_b = Vec::new();
     let mut row_ids = Vec::new();
     let mut col_ids = Vec::new();
 
@@ -636,20 +1039,6 @@ pub(in crate::anova) fn run_rm_grouped_reml(
                 subj_col_ids.push(s_pos * n_cols + c_pos);
                 row_ids.push(r_pos);
                 col_ids.push(c_pos);
-                if is_three_way {
-                    let l1 = l1_remap[c_pos / 2];
-                    let l2 = l2_remap[c_pos % 2];
-                    let n1 = factor_levels[0].len().max(1);
-                    let n2 = factor_levels[1].len().max(1);
-                    id_sa.push(s_pos * n1 + l1);
-                    id_sb.push(s_pos * n2 + l2);
-                    id_sab.push(s_pos * n_cols + c_pos);
-                    id_sac.push((s_pos * n1 + l1) * n_rows + r_pos);
-                    id_sbc.push((s_pos * n2 + l2) * n_rows + r_pos);
-                    let sr = s_pos * n_rows + r_pos;
-                    id_sr_a.push(sr * n1 + l1);
-                    id_sr_b.push(sr * n2 + l2);
-                }
             }
         }
     }
@@ -664,39 +1053,21 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
 
     let (fixed_terms, sigma2_e, df_residual, reml_core, estimator_desc) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
-        let (cluster_ids, tp_ids, tp_labels): (&[usize], Vec<usize>, Vec<String>) = if is_three_way {
-            match fac_spec.repeated_measures {
-                RepeatedMeasuresDesign::RowFactorMatched => (&id_sab, row_ids.clone(), factor_levels[2].clone()),
-                RepeatedMeasuresDesign::ColumnFactorMatched => (&subj_row_ids, col_ids.clone(), ab_labels),
-                _ => {
-                    let tps: Vec<usize> = col_ids.iter().zip(row_ids.iter()).map(|(&c, &r)| c * n_rows + r).collect();
-                    let mut labels = Vec::with_capacity(n_cols * n_rows);
-                    for ab_l in &ab_labels {
-                        for c_l in &factor_levels[2] {
-                            labels.push(format!("{ab_l} × {c_l}"));
-                        }
-                    }
-                    (&subj_ids, tps, labels)
-                }
-            }
-        } else {
-            match fac_spec.repeated_measures {
-                RepeatedMeasuresDesign::ColumnFactorMatched => (&subj_row_ids, col_ids.clone(), factor_levels[1].clone()),
-                RepeatedMeasuresDesign::RowFactorMatched => (&subj_col_ids, row_ids.clone(), factor_levels[0].clone()),
-                _ => {
-                    let tps: Vec<usize> = row_ids.iter().zip(col_ids.iter()).map(|(&r, &c)| r * n_cols + c).collect();
-                    let mut labels = Vec::with_capacity(n_rows * n_cols);
-                    for r_lbl in &factor_levels[0] {
-                        for c_lbl in &factor_levels[1] {
-                            labels.push(format!("{r_lbl} × {c_lbl}"));
-                        }
-                    }
-                    (&subj_ids, tps, labels)
-                }
-            }
-        };
+        let UnstructuredClusterSpec { cluster_ids, tp_ids, tp_labels } = resolve_unstructured_rm_clusters(
+            is_three_way,
+            fac_spec,
+            n_rows,
+            n_cols,
+            &obs_cells,
+            &subj_ids,
+            &subj_row_ids,
+            &subj_col_ids,
+            &row_ids,
+            &col_ids,
+            &factor_levels,
+        )?;
         let (terms, ms_e, df_r, core) =
-            emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?;
+            emit_unstructured_rm_reml(out, &x_mat, &y_vec, &cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?;
         if !dropped_tp_labels.is_empty() {
             let note = format!("Excluded all-missing timepoint(s): {}.", dropped_tp_labels.join(", "));
             for tab in out.tabs.iter_mut().filter(|t| t.id == "unstructured-reml-covariance" || t.id == "unstructured-reml-correlation") {
@@ -721,49 +1092,9 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         ));
         (terms, ms_e, df_r, core, desc)
     } else {
+        let vc_policy = fac_spec.reml_zero_variance_policy;
         let (fixed_terms, sigma2_e, reml_ll, icc_subj, core) = if is_three_way {
-            match fac_spec.repeated_measures {
-                RepeatedMeasuresDesign::BothFactorsMatched => {
-                    let s_a = format!("subject × {}", factor_names[0]);
-                    let s_b = format!("subject × {}", factor_names[1]);
-                    let s_c = format!("subject × {}", factor_names[2]);
-                    let s_ab = format!("subject × {} × {}", factor_names[0], factor_names[1]);
-                    let s_ac = format!("subject × {} × {}", factor_names[0], factor_names[2]);
-                    let s_bc = format!("subject × {} × {}", factor_names[1], factor_names[2]);
-                    let t_a = format!("Subject × {}", factor_names[0]);
-                    let t_b = format!("Subject × {}", factor_names[1]);
-                    let t_c = format!("Subject × {}", factor_names[2]);
-                    let t_ab = format!("Subject × {} × {}", factor_names[0], factor_names[1]);
-                    let t_ac = format!("Subject × {} × {}", factor_names[0], factor_names[2]);
-                    let t_bc = format!("Subject × {} × {}", factor_names[1], factor_names[2]);
-                    let strata = [
-                        ("subject", "Subject (random)", subj_ids.as_slice()),
-                        (s_a.as_str(), t_a.as_str(), id_sa.as_slice()),
-                        (s_b.as_str(), t_b.as_str(), id_sb.as_slice()),
-                        (s_c.as_str(), t_c.as_str(), subj_row_ids.as_slice()),
-                        (s_ab.as_str(), t_ab.as_str(), id_sab.as_slice()),
-                        (s_ac.as_str(), t_ac.as_str(), id_sac.as_slice()),
-                        (s_bc.as_str(), t_bc.as_str(), id_sbc.as_slice()),
-                    ];
-                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
-                }
-                RepeatedMeasuresDesign::ColumnFactorMatched => {
-                    let s_a = format!("subject × {}", factor_names[0]);
-                    let s_b = format!("subject × {}", factor_names[1]);
-                    let t_a = format!("Subject × {}", factor_names[0]);
-                    let t_b = format!("Subject × {}", factor_names[1]);
-                    let strata = [
-                        ("subject", "Subject (random)", subj_row_ids.as_slice()),
-                        (s_a.as_str(), t_a.as_str(), id_sr_a.as_slice()),
-                        (s_b.as_str(), t_b.as_str(), id_sr_b.as_slice()),
-                    ];
-                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
-                }
-                RepeatedMeasuresDesign::RowFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &id_sab, &term_slices, fac_spec.df_method, p_fmt, alpha)?
-                }
-                RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
-            }
+            fit_three_way_cs_reml(out, &x_mat, &y_vec, &obs_cells, &subj_ids, &factor_names, &factor_levels, &term_slices, fac_spec, p_fmt, alpha)?
         } else {
             match fac_spec.repeated_measures {
                 RepeatedMeasuresDesign::BothFactorsMatched => {
@@ -776,14 +1107,30 @@ pub(in crate::anova) fn run_rm_grouped_reml(
                         (sr_name.as_str(), sr_title.as_str(), subj_row_ids.as_slice()),
                         (sc_name.as_str(), sc_title.as_str(), subj_col_ids.as_slice()),
                     ];
-                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
+                    emit_multi_vc_rm_reml_with_policy(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method, vc_policy)?
                 }
-                RepeatedMeasuresDesign::ColumnFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_row_ids, &term_slices, fac_spec.df_method, p_fmt, alpha)?
-                }
-                RepeatedMeasuresDesign::RowFactorMatched => {
-                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_col_ids, &term_slices, fac_spec.df_method, p_fmt, alpha)?
-                }
+                RepeatedMeasuresDesign::ColumnFactorMatched => emit_random_intercept_reml_with_policy(
+                    out,
+                    &x_mat,
+                    &y_vec,
+                    &subj_row_ids,
+                    &term_slices,
+                    fac_spec.df_method,
+                    vc_policy,
+                    p_fmt,
+                    alpha,
+                )?,
+                RepeatedMeasuresDesign::RowFactorMatched => emit_random_intercept_reml_with_policy(
+                    out,
+                    &x_mat,
+                    &y_vec,
+                    &subj_col_ids,
+                    &term_slices,
+                    fac_spec.df_method,
+                    vc_policy,
+                    p_fmt,
+                    alpha,
+                )?,
                 RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
             }
         };
@@ -864,8 +1211,11 @@ pub(in crate::anova) fn run_rm_grouped_reml(
 
 pub(in crate::anova) fn run_multifactor_mv(
     mv: &curvebook_doc::MultipleVariablesTable,
+    out: &mut ResultSheet,
     fac_spec: &FactorialAnovaSpec,
-) -> Result<(FactorialAnovaResult, FactorialObservations, OlsPostHocModel), StatsError> {
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<GroupedFactorialOutcome, StatsError> {
     if fac_spec.repeated_measures != RepeatedMeasuresDesign::None
         || fac_spec.mixed_effects_reml
         || fac_spec.residual_covariance == ResidualCovariance::Unstructured
@@ -959,6 +1309,84 @@ pub(in crate::anova) fn run_multifactor_mv(
         }
     }
     let data = FactorialObservations { factor_names, factor_levels, rows: obs };
-    let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order, fac_spec.ss_type)?;
-    Ok((res, data, model))
+    // Three-way RM on MultipleVariablesTable uses `[factor_0, factor_1, factor_2]` axis order
+    // matching `multifactor_columns`. Require balanced complete replicates (>= 2 per cell) rather
+    // than silently degrading to independent-observations OLS.
+    if fac_spec.three_way
+        && let Some(rm_flags) = fac_spec.three_way_rm_factors
+        && rm_flags.iter().any(|&v| v)
+    {
+        if data.factor_levels.len() != 3 {
+            return Err(StatsError::IncompatibleAnalysisSpec {
+                expected: "exactly 3 categorical factors for three-way repeated-measures ANOVA on MultipleVariablesTable",
+            });
+        }
+        let (la, lb, lc) = (data.factor_levels[0].len(), data.factor_levels[1].len(), data.factor_levels[2].len());
+        let mut cell_buckets = vec![vec![vec![Vec::new(); lc]; lb]; la];
+        for (lvls, y) in &data.rows {
+            cell_buckets[lvls[0]][lvls[1]][lvls[2]].push(*y);
+        }
+        let s_count = cell_buckets[0][0][0].len();
+        if s_count < 2 {
+            return Err(StatsError::InsufficientSampleSize { context: "three-way RM ANOVA replicates per cell", required: 2, actual: s_count });
+        }
+        let balanced = cell_buckets.iter().all(|p| p.iter().all(|r| r.iter().all(|v| v.len() == s_count)));
+        if !balanced {
+            return Err(StatsError::IncompatibleAnalysisSpec {
+                expected: "balanced replicates across all 3-way cells for classical three-way RM ANOVA on MultipleVariablesTable",
+            });
+        }
+        let mut subject_data = vec![vec![vec![vec![0.0_f64; lc]; lb]; la]; s_count];
+        for s in 0..s_count {
+            for a in 0..la {
+                for b in 0..lb {
+                    for c in 0..lc {
+                        subject_data[s][a][b][c] = cell_buckets[a][b][c][s];
+                    }
+                }
+            }
+        }
+        let rm3 = fit_rm_three_way_anova(
+            &subject_data,
+            [data.factor_names[0].as_str(), data.factor_names[1].as_str(), data.factor_names[2].as_str()],
+            rm_flags,
+            fac_spec.sphericity_correction,
+        )?;
+        let sph_tab = push_rm_three_way_sphericity_outputs(out, &rm3, p_fmt, alpha)?;
+        let (_, mut post_model) = fit_factorial_anova_with_model(&data, 3, SumOfSquaresType::TypeIII)?;
+        post_model.ms_resid = rm3.anova.ms_residual;
+        post_model.df_resid = rm3.anova.df_residual;
+        let corr_lbl = match fac_spec.sphericity_correction {
+            RmSphericityCorrection::None => "uncorrected",
+            RmSphericityCorrection::GreenhouseGeisser => "Greenhouse-Geisser corrected",
+            RmSphericityCorrection::HuynhFeldt => "Huynh-Feldt corrected",
+        };
+        let estimator_desc = format!("Classical balanced three-way RM ANOVA ({corr_lbl})");
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(estimator_desc.clone()),
+            format!("Fitted classical balanced three-way RM ANOVA with within-subject flags {:?} and {corr_lbl} sphericity.", rm_flags),
+        ));
+        return Ok(GroupedFactorialOutcome {
+            result: rm3.anova,
+            observations: data,
+            post_hoc: FactorialPostHocContext::Ols(post_model),
+            aux_tabs: sph_tab.into_iter().collect(),
+            estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+        });
+    }
+    let explicit_subsets = fac_spec
+        .formula
+        .as_ref()
+        .map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &fac_spec.multifactor_columns))
+        .transpose()?;
+    let (res, model) = fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order, explicit_subsets, fac_spec.ss_type)?;
+    Ok(GroupedFactorialOutcome {
+        result: res,
+        observations: data,
+        post_hoc: FactorialPostHocContext::Ols(model),
+        aux_tabs: Vec::new(),
+        estimator_note: None,
+    })
 }

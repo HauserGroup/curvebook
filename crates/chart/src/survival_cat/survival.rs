@@ -169,7 +169,8 @@ fn is_survival_result_for(res: &ResultSheet, primary: &SheetId) -> bool {
     res.analysis.source_sheet_id.as_ref() == Some(primary)
         && (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
             || (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
-                && !res.fitted_curves.is_empty()))
+                && (!res.fitted_curves.is_empty()
+                    || res.tabs.iter().any(|t| matches!(t.id.as_str(), "cox-profile-survival" | "cox-baseline-survival")))))
 }
 
 fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<KmCurveData> {
@@ -205,7 +206,8 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
                 r.analysis.source_sheet_id.as_ref() == Some(primary)
                     && r.has_displayable_output()
                     && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
-                    && !r.fitted_curves.is_empty()
+                    && (!r.fitted_curves.is_empty()
+                        || r.tabs.iter().any(|t| matches!(t.id.as_str(), "cox-profile-survival" | "cox-baseline-survival")))
             })
         });
     if km_result.is_none() {
@@ -435,7 +437,25 @@ pub(super) fn compute_km_steps_guarded(label: &str, obs: &[curvebook_doc::Surviv
     compute_km_steps_result(label, obs).ok()
 }
 
+fn cox_profile_label_from_tab(res: &ResultSheet, prof_idx: usize) -> String {
+    if let Some(tab) = res.tabs.iter().find(|t| t.id == "cox-profile-survival") {
+        let s_col = 2 * prof_idx + 2;
+        if let Some(lbl) = tab.column_headers.get(s_col).and_then(|h| h.strip_suffix(" S(t)")).map(str::trim).filter(|s| !s.is_empty()) {
+            return lbl.to_owned();
+        }
+        let h_col = 2 * prof_idx + 1;
+        if let Some(lbl) = tab.column_headers.get(h_col).and_then(|h| h.strip_suffix(" H(t)")).map(str::trim).filter(|s| !s.is_empty()) {
+            return lbl.to_owned();
+        }
+    }
+    format!("Profile {}", prof_idx + 1)
+}
+
 fn result_curve_label(res: &ResultSheet, fc: &curvebook_doc::FittedCurveOverlay, idx: usize) -> String {
+    if let Some(rest) = fc.equation_id.strip_prefix("cox_profile:") {
+        let prof_idx = rest.trim().parse::<usize>().unwrap_or(fc.data_set_index);
+        return cox_profile_label_from_tab(res, prof_idx);
+    }
     match fc.equation_id.as_str() {
         "cox_baseline" => String::from("Baseline"),
         "cox_covariate" => {
@@ -458,11 +478,111 @@ fn result_curve_label(res: &ResultSheet, fc: &curvebook_doc::FittedCurveOverlay,
     }
 }
 
+fn km_result_curve_style(graph: &GraphSheet, fc: &curvebook_doc::FittedCurveOverlay, idx: usize) -> KmResolvedStyle {
+    // `cox_profile:{idx}` overlays carry 0-based profile indices that overlap `cox_baseline` (0)
+    // and `cox_covariate` (1..=p); resolve by flat curve slot `idx` so each profile receives a
+    // distinct palette color instead of colliding with `cox_baseline`.
+    if fc.equation_id.starts_with("cox_profile:") {
+        let default_col = graph.spec.palette.color_at(idx);
+        if let Some(s) = graph.spec.series.get(idx)
+            && let GraphicalDataObject::KaplanMeierStep {
+                line_color,
+                stroke_width_pt,
+                show_censored_ticks,
+                show_greenwood_ci,
+                ci_dashed,
+                display_metric,
+                staircase,
+                error_display,
+            } = s.gdo
+        {
+            return KmResolvedStyle {
+                color: line_color,
+                stroke_width_pt,
+                show_censored_ticks,
+                show_greenwood_ci,
+                ci_dashed,
+                display_metric,
+                staircase,
+                error_display,
+                legend_label: s.legend_label.clone(),
+            };
+        }
+        return KmResolvedStyle {
+            color: default_col,
+            stroke_width_pt: 1.8,
+            show_censored_ticks: false,
+            show_greenwood_ci: false,
+            ci_dashed: false,
+            display_metric: SurvivalDisplayMetric::default(),
+            staircase: true,
+            error_display: None,
+            legend_label: None,
+        };
+    }
+    km_series_style(graph, fc.data_set_index, idx)
+}
+
+fn build_km_from_cox_profile_tab(graph: &GraphSheet, tab: &ResultTab) -> Vec<KmCurveData> {
+    let time_col = tab.column_headers.iter().position(|h| h.eq_ignore_ascii_case("time")).unwrap_or(0);
+    let mut surv_cols: Vec<(usize, String)> = Vec::new();
+    for (ci, hdr) in tab.column_headers.iter().enumerate() {
+        if ci == time_col {
+            continue;
+        }
+        if let Some(prefix) = hdr.strip_suffix(" S(t)").or_else(|| hdr.strip_suffix(" S0(t)")) {
+            let lbl = prefix.trim();
+            surv_cols.push((ci, if lbl.is_empty() { String::from("Baseline") } else { lbl.to_owned() }));
+        } else if hdr.to_ascii_lowercase().contains("survival") {
+            surv_cols.push((ci, hdr.clone()));
+        }
+    }
+    let mut out = Vec::with_capacity(surv_cols.len());
+    for (idx, (scol, label)) in surv_cols.into_iter().enumerate() {
+        let steps: Vec<KmPointStep> = tab
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let t = match row.get(time_col) {
+                    Some(ResultCell::Number { value, .. }) if value.is_finite() => *value,
+                    _ => return None,
+                };
+                let s = match row.get(scol) {
+                    Some(ResultCell::Number { value, .. }) if value.is_finite() => *value,
+                    _ => return None,
+                };
+                Some(KmPointStep { time: t, survival: s, greenwood_se: 0.0, ci_lower: s, ci_upper: s, n_at_risk_before: 0 })
+            })
+            .collect();
+        if steps.is_empty() {
+            continue;
+        }
+        out.push(KmCurveData {
+            sheet_id: None,
+            col_index: idx,
+            label,
+            color: graph.spec.palette.color_at(idx),
+            stroke_width_pt: 1.8,
+            show_censored_ticks: false,
+            show_greenwood_ci: false,
+            ci_dashed: false,
+            display_metric: SurvivalDisplayMetric::default(),
+            staircase: true,
+            error_display: None,
+            n_total: 0,
+            steps,
+            censored_times: Vec::new(),
+            observations: Vec::new(),
+        });
+    }
+    out
+}
+
 fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCurveData> {
     let nar_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::NumberAtRisk);
     let mut out = Vec::with_capacity(res.fitted_curves.len());
-    for (idx, fc) in res.fitted_curves.iter().enumerate() {
-        let style = km_series_style(graph, fc.data_set_index, idx);
+    for (idx, fc) in res.fitted_curves.iter().filter(|fc| !fc.equation_id.eq_ignore_ascii_case("ROC")).enumerate() {
+        let style = km_result_curve_style(graph, fc, idx);
         let canonical_label = result_curve_label(res, fc, idx);
         let label = style.legend_label.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| canonical_label.clone());
         let nar_rows = nar_tab.map_or_else(Vec::new, |tab| cohort_nar_rows(tab, res, idx, &canonical_label));
@@ -511,6 +631,15 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
             censored_times,
             observations: Vec::new(),
         });
+    }
+    if out.is_empty()
+        && let Some(tab) = res
+            .tabs
+            .iter()
+            .find(|t| t.id == "cox-profile-survival")
+            .or_else(|| res.tabs.iter().find(|t| t.id == "cox-baseline-survival" || t.kind == ResultTabKind::BaselineSurvival))
+    {
+        return build_km_from_cox_profile_tab(graph, tab);
     }
     out
 }

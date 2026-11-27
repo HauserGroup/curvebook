@@ -1247,6 +1247,15 @@ pub(crate) fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &Ana
     Ok(())
 }
 
+/// Recompute a single result sheet by [`SheetId`] in place (used by the L5 Monte Carlo engine).
+pub(crate) fn recompute_result_sheet_by_id(doc: &mut ProjectDocument, id: &SheetId, cancelled: Option<&AtomicBool>) -> Result<bool, EngineError> {
+    let Some(res_idx) = doc.result_sheets.iter().position(|rs| rs.id == *id) else {
+        return Ok(false);
+    };
+    let empty = HashSet::new();
+    recompute_result_sheet(doc, res_idx, None, &empty, cancelled).map(|outcome| matches!(outcome, RecomputeOutcome::Updated))
+}
+
 fn recompute_result_sheet(
     doc: &mut ProjectDocument,
     res_idx: usize,
@@ -1371,6 +1380,13 @@ fn recompute_result_sheet(
                 ))
             } else {
                 curvebook_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string())
+            }
+        }
+        AnalysisRecomputeStrategy::MonteCarloEngine => {
+            match crate::monte_carlo::execute_monte_carlo_analysis(doc, &existing, &source_ds, cancelled) {
+                Ok(rs) => Ok(rs),
+                Err(crate::monte_carlo::MonteCarloExecError::Cancelled(err)) => return Err(err),
+                Err(crate::monte_carlo::MonteCarloExecError::Domain(msg)) => Err(msg),
             }
         }
     };
@@ -1530,6 +1546,24 @@ fn resolve_power_analysis_with_info_hooks(
                     patched.sample_size_group2 = Some(n2);
                 }
             }
+            if let Some((name, events)) = lookup_power_info_constant_f64(info, &["Target Events", "target_events", "Events"])? {
+                if events <= 0.0 {
+                    return Err(format!("hooked Info constant `{name}` ({events}) must be strictly positive"));
+                }
+                patched.target_events = Some(events);
+            }
+        }
+        if let Some((name, p1)) = lookup_power_info_constant_f64(info, &["Event Prob Group 1", "event_prob_group1"])? {
+            if !(p1 > 0.0 && p1 <= 1.0) {
+                return Err(format!("hooked Info constant `{name}` ({p1}) must lie in (0, 1]"));
+            }
+            patched.event_prob_group1 = Some(p1);
+        }
+        if let Some((name, p2)) = lookup_power_info_constant_f64(info, &["Event Prob Group 2", "event_prob_group2"])? {
+            if !(p2 > 0.0 && p2 <= 1.0) {
+                return Err(format!("hooked Info constant `{name}` ({p2}) must lie in (0, 1]"));
+            }
+            patched.event_prob_group2 = Some(p2);
         }
     }
     let mut patched_spec = existing.analysis.clone();

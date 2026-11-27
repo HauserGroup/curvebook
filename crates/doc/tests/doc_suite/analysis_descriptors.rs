@@ -8,11 +8,13 @@ use curvebook_doc::analysis::{
     resolve_analysis_descriptor,
 };
 use curvebook_doc::{
-    AnalysisKind, AreaUnderCurveSpec, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod,
-    DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, GlmFamily, GlmSpec, ImportedSnapshotSpec, KappaWeighting,
-    LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec,
-    SimpleLogisticSpec, SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, BlandAltmanSpec, ClusterDirection, ClusterDistance, ClusterLinkage,
+    ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode,
+    FactorialAnovaSpec, FractionOfTotalSpec, GlmFamily, GlmSpec, ImportedSnapshotSpec, KMeansAlgorithm, KappaWeighting, LeveneTestSpec,
+    LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec,
+    RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec,
+    SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -36,6 +38,14 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
                 predictor_columns: vec![2],
                 reference_levels: Vec::new(),
                 tie_method: curvebook_doc::CoxTieMethod::Efron,
+                formula: None,
+                covariate_profiles: Vec::new(),
+                nested_comparison: None,
+                emit_cox_snell_residuals: false,
+                ci_method: RegressionCiMethod::Wald,
+                event_code: None,
+                censored_code: None,
+                treat_other_as: SurvivalOtherValuePolicy::Exclude,
             }),
         ),
         (AnalysisKindId::RocCurve, AnalysisKind::RocCurve(RocSpec::default())),
@@ -45,8 +55,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
                 family: GlmFamily::Linear,
                 response_column: 0,
                 predictor_columns: vec![1],
-                reference_levels: Vec::new(),
-                compute_vif: true,
+                ..GlmSpec::default()
             }),
         ),
         (AnalysisKindId::Multivariate, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
@@ -62,6 +71,10 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
             AnalysisKindId::ImportedSnapshot,
             AnalysisKind::ImportedSnapshot(ImportedSnapshotSpec { original_kind_label: String::from("Imported analysis") }),
         ),
+        (AnalysisKindId::RowStatistics, AnalysisKind::RowStatistics(RowStatisticsSpec::default())),
+        (AnalysisKindId::FractionOfTotal, AnalysisKind::FractionOfTotal(FractionOfTotalSpec::default())),
+        (AnalysisKindId::CurveCalculus, AnalysisKind::CurveCalculus(CurveCalculusSpec::default())),
+        (AnalysisKindId::MonteCarloSimulation, AnalysisKind::MonteCarloSimulation(MonteCarloSpec::default())),
     ]
 }
 
@@ -225,7 +238,10 @@ fn table_compatibility_and_domain_routing_invariants_hold() {
             AnalysisDomainKind::Transform => assert_eq!(desc.recompute_strategy, AnalysisRecomputeStrategy::Transform),
             AnalysisDomainKind::Fit => assert_eq!(desc.recompute_strategy, AnalysisRecomputeStrategy::Fit),
             AnalysisDomainKind::Stats => {
-                assert!(matches!(desc.recompute_strategy, AnalysisRecomputeStrategy::Stats | AnalysisRecomputeStrategy::PowerWithInfoHooks))
+                assert!(matches!(
+                    desc.recompute_strategy,
+                    AnalysisRecomputeStrategy::Stats | AnalysisRecomputeStrategy::PowerWithInfoHooks | AnalysisRecomputeStrategy::MonteCarloEngine
+                ))
             }
         }
     }
@@ -273,13 +289,24 @@ fn lookup_helpers_resolve_every_descriptor_and_reject_unknown_queries() {
 fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
     assert!(AnalysisKindId::Multivariate.descriptor().accepts_canonical_param_key("pcr_outcome_column"));
     let cases = [
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: Some(0) }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(42),
+            pcr_outcome_column: Some(0),
+            retention_rule: PcaRetentionRule::default(),
+            emit_extra_matrices: false,
+        }),
         AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true }),
         AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: Some(6),
+            consensus_optimal_k: false,
+            kmeans_algorithm: KMeansAlgorithm::default(),
+            cluster_direction: ClusterDirection::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
         AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
             imputations_m: 5,
@@ -299,6 +326,12 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
             mv_time_column: Some(0),
             mv_status_column: Some(1),
             mv_group_column: Some(2),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: SurvivalOtherValuePolicy::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
         AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
             time_column: 0,
@@ -306,11 +339,23 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
             predictor_columns: vec![2],
             reference_levels: Vec::new(),
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: RegressionCiMethod::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: SurvivalOtherValuePolicy::default(),
         }),
         AnalysisKind::Transform(TransformAnalysisSpec::Math {
             x_transform: Some(MathTransformPreset::Log10),
             y_transform: None,
             error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: AsymmetricCiTransformPolicy::default(),
         }),
         AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
             zero_anchor: NormalizeAnchor::ColumnMin,
@@ -327,6 +372,7 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
             equation_id: String::from("four_pl"),
             parameters: vec![(String::from("Top"), 100.0)],
             noise: SimulationNoise::None,
+            simulation_mode: None,
         }),
         AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
             seed: 1,
@@ -338,6 +384,11 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
             filter_formula: Some(String::from("[A] > 0")),
             target_archetype: TableKind::Column,
             derived_columns: vec![DerivedColumnFormula::new("D", "[A] * 2")],
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         }),
     ];
     for kind in cases {
@@ -349,5 +400,158 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
                 assert!(desc.accepts_canonical_param_key(key), "descriptor `{}` missing key `{key}`", desc.slug);
             }
         }
+    }
+}
+
+#[test]
+fn r23_additive_extensions_preserve_v8_deserialization_and_round_trip() {
+    use curvebook_doc::{
+        BaselineKind, BaselineOperation, CurveCalculusOp, DiagnosticPlotKind, DistributionTailShade, FactorialComparisonFamilyMode, FormulaTerm,
+        FractionDenominator, GlmDispersionMode, GlmWeightSpec, LognormalRowTestMode, ModelFormulaSpec, MonteCarloHitOp, MonteCarloHitRule,
+        MonteCarloTrackedScalar, OneWayMethod, PharmacologyTransformPreset, PowerEffectSpec, PowerTestFamily, ProportionCiMethod,
+        RelationalConstraint, RelationalConstraintOp, RemlZeroVariancePolicy, RmSphericityCorrection, RowSummaryKind, SheetId, SurvivalPowerMethod,
+        TheoreticalDistributionFamily, TheoreticalDistributionSpec, TwoGroupMethod,
+    };
+
+    // Legacy v8 JSON payloads without any R23 fields must still deserialize cleanly with exact defaults.
+    let legacy_glm: GlmSpec =
+        serde_json::from_str(r#"{"family":"Linear","response_column":0,"predictor_columns":[1,2],"reference_levels":[],"compute_vif":true}"#)
+            .expect("legacy GlmSpec must deserialize");
+    assert_eq!(legacy_glm.formula, None);
+    assert_eq!(legacy_glm.weights, GlmWeightSpec::None);
+    assert_eq!(legacy_glm.dispersion_mode, GlmDispersionMode::Canonical);
+    assert_eq!(legacy_glm.ci_method, RegressionCiMethod::Wald);
+    assert!(!legacy_glm.emit_influence_diagnostics);
+
+    let legacy_factorial: FactorialAnovaSpec = serde_json::from_str(
+        r#"{"three_way":false,"multifactor_columns":[],"response_column":null,"max_interaction_order":2,"ss_type":"TypeIII","repeated_measures":"None","fit_reml_on_missing":true,"compute_effect_sizes":true,"multiplicity":{"method":"None","threshold":0.05,"report_confidence_intervals":true}}"#,
+    )
+    .expect("legacy FactorialAnovaSpec must deserialize");
+    assert_eq!(legacy_factorial.sphericity_correction, RmSphericityCorrection::None);
+    assert_eq!(legacy_factorial.reml_zero_variance_policy, RemlZeroVariancePolicy::BoundAtZero);
+    assert_eq!(legacy_factorial.comparison_family_mode, FactorialComparisonFamilyMode::Standard);
+
+    let legacy_power: PowerAnalysisSpec = serde_json::from_str(
+        r#"{"family":"TwoSampleUnpairedT","solve_target":"SampleSize","tail_mode":"TwoSided","alpha":0.05,"target_power":0.8,"allocation_ratio":1.0,"effect":{"Standardized":0.5},"chi_square_df":1.0,"two_proportions_mode":"PooledNullUnpooledAlt","continuity_correction":false,"correlation_method":"FisherZ"}"#,
+    )
+    .expect("legacy PowerAnalysisSpec must deserialize");
+    assert_eq!(legacy_power.survival_method, SurvivalPowerMethod::Schoenfeld);
+    assert_eq!(legacy_power.target_events, None);
+
+    let legacy_remove_baseline: TransformAnalysisSpec =
+        serde_json::from_str(r#"{"RemoveBaseline":{"baseline_columns":[0],"operation":"Difference"}}"#)
+            .expect("legacy RemoveBaseline must deserialize");
+    assert!(matches!(legacy_remove_baseline, TransformAnalysisSpec::RemoveBaseline { baseline_kind: None, retain_unselected_columns: false, .. }));
+
+    // Rich R23 payloads round-trip cleanly through JSON.
+    let formula = ModelFormulaSpec {
+        include_intercept: true,
+        terms: vec![FormulaTerm::Main(1), FormulaTerm::Interaction2(1, 2), FormulaTerm::Power { column: 1, degree: 2 }, FormulaTerm::Sqrt(2)],
+    };
+    let mut fit = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    fit.relational_constraints.push(RelationalConstraint {
+        lhs_param: String::from("Top"),
+        op: RelationalConstraintOp::GreaterThan,
+        rhs_param: String::from("Bottom"),
+        margin: 1e-3,
+    });
+    fit.plot_distribution = Some(TheoreticalDistributionSpec {
+        family: TheoreticalDistributionFamily::StudentT,
+        parameters: vec![10.0],
+        parameter_hooks: Vec::new(),
+        tail_shade: DistributionTailShade::TwoTailed { lower: -2.228, upper: 2.228 },
+        cumulative: false,
+    });
+    fit.emit_extra_gof = true;
+
+    let kinds = vec![
+        AnalysisKind::RowStatistics(RowStatisticsSpec { summary: RowSummaryKind::MedianPercentiles, upper_percentile: Some(90.0) }),
+        AnalysisKind::FractionOfTotal(FractionOfTotalSpec {
+            denominator: FractionDenominator::AllThree,
+            output_percent: false,
+            ci_method: ProportionCiMethod::Wilson,
+        }),
+        AnalysisKind::CurveCalculus(CurveCalculusSpec { operation: CurveCalculusOp::SmoothSavitzkyGolay { window: 5, order: 2 } }),
+        AnalysisKind::MonteCarloSimulation(MonteCarloSpec {
+            seed: 7,
+            iterations: 250,
+            downstream_result_sheet_id: Some(SheetId::new("fit-1")),
+            tracked_scalars: vec![MonteCarloTrackedScalar {
+                label: String::from("EC50"),
+                result_sheet_id: None,
+                parameter_key: String::from("EC50"),
+                data_set_index: Some(0),
+            }],
+            hit_rules: vec![MonteCarloHitRule { scalar_index: 0, op: MonteCarloHitOp::Between, threshold: 0.1, upper_threshold: Some(10.0) }],
+            exclude_flagged_fits: true,
+        }),
+        AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::OneSampleRatioT { hypothetical: 1.0 }, ..TwoGroupSpec::default() }),
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            method: OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true },
+            ..OneWayAnovaSpec::default()
+        }),
+        AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+            lognormal_mode: LognormalRowTestMode::RatioPaired,
+            ..MultipleRowTestsSpec::default()
+        }),
+        AnalysisKind::GeneralizedLinearModel(GlmSpec { formula: Some(formula.clone()), emit_influence_diagnostics: true, ..GlmSpec::default() }),
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+            k_means_k: Some(3),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: Some(8),
+            consensus_optimal_k: true,
+            kmeans_algorithm: KMeansAlgorithm::HartiganWong,
+            cluster_direction: ClusterDirection::Both,
+            cut_height: Some(2.5),
+            emit_anova_tab: true,
+        }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(1),
+            pcr_outcome_column: None,
+            retention_rule: PcaRetentionRule::CumulativeVariancePercent(85.0),
+            emit_extra_matrices: true,
+        }),
+        AnalysisKind::PowerAnalysis(PowerAnalysisSpec {
+            family: PowerTestFamily::LogRankSurvival,
+            effect: PowerEffectSpec::HazardRatio { hazard_ratio: 0.65, event_prob_group1: Some(0.6), event_prob_group2: Some(0.45) },
+            survival_method: SurvivalPowerMethod::Freedman,
+            ..PowerAnalysisSpec::default()
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: None,
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: Some(PharmacologyTransformPreset::Scatchard),
+            interchange_xy: true,
+            zero_x_substitute: Some(1e-12),
+            asymmetric_ci_policy: AsymmetricCiTransformPolicy::AsymmetricEndpoints,
+        }),
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: Vec::new(),
+            operation: BaselineOperation::Add,
+            baseline_kind: Some(BaselineKind::OlsLinearWithX { first_k: 3, last_k: 3 }),
+            retain_unselected_columns: true,
+        }),
+        AnalysisKind::NonlinearRegression(fit),
+    ];
+    for kind in kinds {
+        let json = serde_json::to_string(&kind).expect("serialize R23 AnalysisKind");
+        let parsed: AnalysisKind = serde_json::from_str(&json).expect("deserialize R23 AnalysisKind");
+        assert_eq!(parsed, kind);
+    }
+
+    for plot in [
+        DiagnosticPlotKind::HomoscedasticityPlot,
+        DiagnosticPlotKind::ActualVsPredictedPlot,
+        DiagnosticPlotKind::ResidualVsRowPlot,
+        DiagnosticPlotKind::GapStatisticPlot,
+        DiagnosticPlotKind::ParameterCorrelationHeatmap,
+        DiagnosticPlotKind::LognormalQqPlot,
+    ] {
+        let json = serde_json::to_string(&plot).expect("serialize DiagnosticPlotKind");
+        let parsed: DiagnosticPlotKind = serde_json::from_str(&json).expect("deserialize DiagnosticPlotKind");
+        assert_eq!(parsed, plot);
     }
 }

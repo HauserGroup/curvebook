@@ -7,13 +7,15 @@
 //!   `noncentral_f_ci`, `noncentral_chi2_ci`),
 //! - Studentized range `q(k, df)` (`studentized_range_*`, `2 <= k <= 200`),
 //! - Exact multivariate Student `t` for Dunnett's test with equal or unequal group sizes (`dunnett_*`),
-//! - Lilliefors-adjusted Kolmogorov–Smirnov normality test distribution (`lilliefors_*`).
+//! - Lilliefors-adjusted Kolmogorov–Smirnov normality test distribution (`lilliefors_*`),
+//! - Two-arm log-rank survival power & required-event formulas (`schoenfeld_logrank_*`, `freedman_logrank_*`).
 
 pub mod core;
 pub mod dunnett;
 pub mod lilliefors;
 pub mod noncentral;
 pub mod studentized_range;
+pub mod survival_power;
 
 pub use core::{
     chi2_cdf, chi2_isf, chi2_ln_pdf, chi2_ln_sf, chi2_pdf, chi2_ppf, chi2_sf, f_cdf, f_isf, f_ln_pdf, f_ln_sf, f_pdf, f_ppf, f_sf, norm_cdf,
@@ -30,4 +32,8 @@ pub use noncentral::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, nct_cdf, nct_sf, no
 pub use studentized_range::{
     max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf, studentized_range_cdf, studentized_range_isf,
     studentized_range_ln_sf, studentized_range_ppf, studentized_range_sf,
+};
+pub use survival_power::{
+    freedman_logrank_detectable_hr, freedman_logrank_events, freedman_logrank_power, schoenfeld_logrank_detectable_hr, schoenfeld_logrank_events,
+    schoenfeld_logrank_power, survival_sample_size_from_events,
 };

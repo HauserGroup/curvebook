@@ -23,7 +23,8 @@ use crate::anova::one_way::{
     compute_sphericity_from_cov_contrast, helmert_contrast_matrix, kronecker_dense, pooled_within_group_cov, unit_row_vector,
 };
 use crate::anova::results::{
-    FactorialAnovaResult, FactorialAnovaTerm, RmSphericityCorrection, RmTwoWayAnovaResult, RmTwoWaySphericities, SphericityResult,
+    FactorialAnovaResult, FactorialAnovaTerm, RmSphericityCorrection, RmThreeWayAnovaResult, RmTwoWayAnovaResult, RmTwoWaySphericities,
+    SphericityResult,
 };
 use crate::error::StatsError;
 
@@ -358,6 +359,258 @@ pub(in crate::anova) fn fit_rm_two_way_anova_with_posthoc(
         subject_data: subject_data.to_vec(),
     };
     Ok((rm_res, post_hoc))
+}
+
+fn compute_three_way_lattice_ss(subject_data: &[Vec<Vec<Vec<f64>>>], dims: [usize; 4], gm: f64, data_max_abs: f64, total_n: usize) -> [f64; 16] {
+    let mut c_vals = [0.0_f64; 16];
+    for (mask, c_slot) in c_vals.iter_mut().enumerate().skip(1) {
+        let mut cell_count = 1_usize;
+        let mut collapse_count = 1_usize;
+        for (bit, &len) in dims.iter().enumerate() {
+            if (mask & (1 << bit)) != 0 {
+                cell_count *= len;
+            } else {
+                collapse_count *= len;
+            }
+        }
+        let mut sums = vec![0.0_f64; cell_count];
+        for (s, subj) in subject_data.iter().enumerate() {
+            for (i, plane) in subj.iter().enumerate() {
+                for (j, row) in plane.iter().enumerate() {
+                    for (k, &v) in row.iter().enumerate() {
+                        let coords = [s, i, j, k];
+                        let mut flat = 0_usize;
+                        for (bit, &coord) in coords.iter().enumerate() {
+                            if (mask & (1 << bit)) != 0 {
+                                flat = flat * dims[bit] + coord;
+                            }
+                        }
+                        sums[flat] += v - gm;
+                    }
+                }
+            }
+        }
+        *c_slot = sums.iter().map(|&tot| tot * tot).sum::<f64>() / (collapse_count as f64);
+    }
+
+    let mut ss_mask = [0.0_f64; 16];
+    for mask in 1..16_usize {
+        let mut acc = 0.0_f64;
+        let pc_m = mask.count_ones();
+        for (sub, &cv) in c_vals.iter().enumerate().take(mask + 1) {
+            if (sub & mask) == sub {
+                let sign = if (pc_m - sub.count_ones()).is_multiple_of(2) { 1.0 } else { -1.0 };
+                acc += sign * cv;
+            }
+        }
+        ss_mask[mask] = clamp_ss_roundoff(acc, data_max_abs, total_n);
+    }
+    ss_mask
+}
+
+fn increment_odometer(coords: &mut [usize], axes: &[usize], dims: [usize; 4]) {
+    for pos in (0..axes.len()).rev() {
+        coords[pos] += 1;
+        if coords[pos] < dims[axes[pos]] {
+            break;
+        }
+        coords[pos] = 0;
+    }
+}
+
+fn compute_three_way_sphericities(
+    subject_data: &[Vec<Vec<Vec<f64>>>],
+    dims: [usize; 4],
+    bet_mask: usize,
+    wth_mask: usize,
+) -> Result<[Option<SphericityResult>; 16], StatsError> {
+    let mut sph_by_wth: [Option<SphericityResult>; 16] = std::array::from_fn(|_| None);
+    if wth_mask == 0 {
+        return Ok(sph_by_wth);
+    }
+    let s_count = dims[0];
+    let bet_axes: Vec<usize> = (1..=3).filter(|&bit| (bet_mask & (1 << bit)) != 0).collect();
+    let wth_axes: Vec<usize> = (1..=3).filter(|&bit| (wth_mask & (1 << bit)) != 0).collect();
+    let g_count: usize = bet_axes.iter().map(|&ax| dims[ax]).product::<usize>().max(1);
+    let w_len: usize = wth_axes.iter().map(|&ax| dims[ax]).product();
+    let mut groups: Vec<Vec<Vec<f64>>> = vec![Vec::with_capacity(s_count); g_count];
+
+    let mut b_coords = vec![0_usize; bet_axes.len()];
+    for grp in &mut groups {
+        for s in 0..s_count {
+            let mut vec_w = Vec::with_capacity(w_len);
+            let mut w_coords = vec![0_usize; wth_axes.len()];
+            for _ in 0..w_len {
+                let mut idx4 = [s, 0, 0, 0];
+                for (&ax, &val) in bet_axes.iter().zip(b_coords.iter()) {
+                    idx4[ax] = val;
+                }
+                for (&ax, &val) in wth_axes.iter().zip(w_coords.iter()) {
+                    idx4[ax] = val;
+                }
+                vec_w.push(subject_data[idx4[0]][idx4[1]][idx4[2]][idx4[3]]);
+                increment_odometer(&mut w_coords, &wth_axes, dims);
+            }
+            grp.push(vec_w);
+        }
+        increment_odometer(&mut b_coords, &bet_axes, dims);
+    }
+
+    let s_pool = pooled_within_group_cov(&groups)?;
+    let n_subj = (g_count * s_count) as f64;
+    let g_f = g_count as f64;
+    let df_e = n_subj - g_f;
+    for w_sub in 1..16_usize {
+        if (w_sub & wth_mask) != w_sub {
+            continue;
+        }
+        let mut m_opt: Option<curvebook_math::linalg::DenseMatrix> = None;
+        for &ax in &wth_axes {
+            let mat = if (w_sub & (1 << ax)) != 0 { helmert_contrast_matrix(dims[ax])? } else { unit_row_vector(dims[ax])? };
+            m_opt = Some(match m_opt {
+                None => mat,
+                Some(prev) => kronecker_dense(&prev, &mat)?,
+            });
+        }
+        if let Some(m_mat) = m_opt {
+            sph_by_wth[w_sub] = Some(compute_sphericity_from_cov_contrast(&s_pool, &m_mat, df_e, n_subj, g_f)?);
+        }
+    }
+    Ok(sph_by_wth)
+}
+
+fn validate_three_way_subject_data(subject_data: &[Vec<Vec<Vec<f64>>>]) -> Result<([usize; 4], f64, f64, usize), StatsError> {
+    let s_count = subject_data.len();
+    if s_count < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "RM three-way subjects", required: 2, actual: s_count });
+    }
+    let a = subject_data[0].len();
+    let b = subject_data[0].first().map_or(0, Vec::len);
+    let c = subject_data[0].first().and_then(|v| v.first()).map_or(0, Vec::len);
+    if a < 2 || b < 2 || c < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "RM three-way factor levels", required: 2, actual: a.min(b).min(c) });
+    }
+    let dims = [s_count, a, b, c];
+    let total_n = s_count * a * b * c;
+    let mut grand_sum = NeumaierSum::new();
+    let mut data_max_abs = 0.0_f64;
+    for subj in subject_data {
+        if subj.len() != a {
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: a, actual: subj.len() }));
+        }
+        for plane in subj {
+            if plane.len() != b {
+                return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: b, actual: plane.len() }));
+            }
+            for row in plane {
+                if row.len() != c {
+                    return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: c, actual: row.len() }));
+                }
+                for &v in row {
+                    if !v.is_finite() {
+                        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "y", value: v }));
+                    }
+                    data_max_abs = data_max_abs.max(v.abs());
+                    grand_sum.add(v);
+                }
+            }
+        }
+    }
+    Ok((dims, grand_sum.total() / (total_n as f64), data_max_abs, total_n))
+}
+
+/// Repeated-measures / mixed three-way ANOVA on complete balanced subject arrays
+/// `subject_data[s][a][b][c]` supporting all 8 within/between factor combinations
+/// (`rm_factors = [rm_a, rm_b, rm_c]`), with exact per-stratum Mauchly, Greenhouse–Geisser,
+/// and Huynh–Feldt (Lecoutre 1991) sphericity diagnostics (Maxwell & Delaney 2004).
+pub fn fit_rm_three_way_anova(
+    subject_data: &[Vec<Vec<Vec<f64>>>],
+    factor_names: [&str; 3],
+    rm_factors: [bool; 3],
+    correction: RmSphericityCorrection,
+) -> Result<RmThreeWayAnovaResult, StatsError> {
+    let (dims, gm, data_max_abs, total_n) = validate_three_way_subject_data(subject_data)?;
+    let s_count = dims[0];
+    let ss_mask = compute_three_way_lattice_ss(subject_data, dims, gm, data_max_abs, total_n);
+    let ss_total: f64 = ss_mask.iter().skip(1).sum();
+
+    let mut bet_mask = 0_usize;
+    let mut wth_mask = 0_usize;
+    for (f_idx, &is_rm) in rm_factors.iter().enumerate() {
+        let bit = 1_usize << (f_idx + 1);
+        if is_rm {
+            wth_mask |= bit;
+        } else {
+            bet_mask |= bit;
+        }
+    }
+
+    let sph_by_wth = compute_three_way_sphericities(subject_data, dims, bet_mask, wth_mask)?;
+
+    let effect_defs: [(usize, String); 7] = [
+        (0b0010, factor_names[0].to_owned()),
+        (0b0100, factor_names[1].to_owned()),
+        (0b1000, factor_names[2].to_owned()),
+        (0b0110, format!("{} × {}", factor_names[0], factor_names[1])),
+        (0b1010, format!("{} × {}", factor_names[0], factor_names[2])),
+        (0b1100, format!("{} × {}", factor_names[1], factor_names[2])),
+        (0b1110, format!("{} × {} × {}", factor_names[0], factor_names[1], factor_names[2])),
+    ];
+
+    let bet_prod: f64 = (1..=3).filter(|&b_i| (bet_mask & (1 << b_i)) != 0).map(|b_i| dims[b_i] as f64).product::<f64>();
+    let mut terms = Vec::with_capacity(7);
+    let mut term_error_dfs = Vec::with_capacity(7);
+    let mut term_error_ss = Vec::with_capacity(7);
+    let mut term_sphericities = Vec::with_capacity(7);
+
+    for (eff_mask, name) in effect_defs {
+        let ss_eff = ss_mask[eff_mask];
+        let df_eff: f64 = (1..=3).filter(|&b_i| (eff_mask & (1 << b_i)) != 0).map(|b_i| (dims[b_i] - 1) as f64).product();
+        let e_wth = eff_mask & wth_mask;
+        let mut e_ss = 0.0_f64;
+        for u in 0..16_usize {
+            if (u & bet_mask) == u {
+                e_ss += ss_mask[1 | u | e_wth];
+            }
+        }
+        let wth_df: f64 = (1..=3).filter(|&b_i| (e_wth & (1 << b_i)) != 0).map(|b_i| (dims[b_i] - 1) as f64).product();
+        let e_df = bet_prod * ((s_count - 1) as f64) * wth_df;
+        let sph_opt = if e_wth != 0 { sph_by_wth[e_wth].clone() } else { None };
+        let ms = ss_eff / df_eff.max(1.0);
+        let ms_e = e_ss / e_df.max(1.0);
+        let (f_val, _) = f_ratio_p(ms, ms_e, df_eff.max(1.0), e_df.max(1.0))?;
+        let p_val = apply_rm_sphericity_p(f_val, df_eff.max(1.0), e_df.max(1.0), sph_opt.as_ref(), correction)?;
+        terms.push(FactorialAnovaTerm {
+            name,
+            ss: ss_eff,
+            df: df_eff,
+            ms,
+            f_statistic: Some(f_val),
+            p_value: Some(p_val),
+            partial_eta_squared: Some(if ss_eff + e_ss > 0.0 { ss_eff / (ss_eff + e_ss) } else { 0.0 }),
+            eta_squared: Some(if ss_total > 0.0 { ss_eff / ss_total } else { 0.0 }),
+        });
+        term_error_dfs.push(e_df);
+        term_error_ss.push(e_ss);
+        term_sphericities.push(sph_opt);
+    }
+
+    let ss_resid = *term_error_ss.last().unwrap_or(&0.0);
+    let df_resid = *term_error_dfs.last().unwrap_or(&1.0);
+    let ms_resid = ss_resid / df_resid.max(1.0);
+    let anova = FactorialAnovaResult {
+        terms,
+        ss_residual: ss_resid,
+        df_residual: df_resid,
+        ms_residual: ms_resid,
+        ss_total,
+        df_total: (total_n - 1) as f64,
+        total_n,
+        unbalanced: false,
+        ss_type: SumOfSquaresType::TypeIII,
+    };
+
+    Ok(RmThreeWayAnovaResult { anova, rm_factors, correction, term_error_dfs, term_error_ss, term_sphericities })
 }
 
 /// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or `BothFactorsMatched`)

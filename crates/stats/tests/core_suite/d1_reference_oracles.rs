@@ -1362,6 +1362,12 @@ fn oracle_end_to_end_run_analysis_sheets() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )
     .unwrap();
@@ -1489,6 +1495,7 @@ fn oracle_end_to_end_run_analysis_multifactor_mv_and_nested() {
             predictor_columns: vec![0, 2],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -1499,7 +1506,13 @@ fn oracle_end_to_end_run_analysis_multifactor_mv_and_nested() {
     let sp_pca = AnalysisSpec::new(
         "res-pca",
         "mv-1",
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(9), pcr_outcome_column: None }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(9),
+            pcr_outcome_column: None,
+            retention_rule: Default::default(),
+            emit_extra_matrices: false,
+        }),
     )
     .unwrap();
     let res_pca = run_analysis(&s_mv, &sp_pca).unwrap();

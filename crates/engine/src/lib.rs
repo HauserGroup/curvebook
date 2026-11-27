@@ -12,10 +12,11 @@ pub use cmd::Caller;
 pub mod dag;
 pub mod guard;
 pub mod methods_report;
+pub mod monte_carlo;
 pub mod path_policy;
 pub use path_policy::{ExternalPathPolicy, PATH_PARAM_KEYS};
 pub mod services;
-pub use services::{BatchCommandStep, BatchStepFailure};
+pub use services::{BatchCommandStep, BatchStepFailure, UserEquationEntry, UserEquationLibrary};
 
 use std::collections::VecDeque;
 use std::fmt;

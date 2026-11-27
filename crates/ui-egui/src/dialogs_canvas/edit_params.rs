@@ -54,7 +54,7 @@ impl Default for TwoGroupSubmethodMemory {
 impl TwoGroupSubmethodMemory {
     pub fn remember(&mut self, method: TwoGroupMethod) {
         match method {
-            TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT => {
+            TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT => {
                 self.saved_two_group_param_unpaired = method;
             }
             TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT => {
@@ -66,7 +66,7 @@ impl TwoGroupSubmethodMemory {
             TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest => {
                 self.saved_two_group_nonparam_paired = method;
             }
-            TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+            TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. } => {}
         }
     }
 
@@ -387,10 +387,13 @@ impl EditAnalysisParametersState {
     pub fn remember_submethods_from_kind(&mut self, kind: &AnalysisKind) {
         match kind {
             AnalysisKind::OneWayAnova(spec) => match spec.method {
-                OneWayMethod::OrdinaryAnova | OneWayMethod::BrownForsytheAndWelch => {
+                OneWayMethod::OrdinaryAnova
+                | OneWayMethod::BrownForsytheAndWelch
+                | OneWayMethod::LognormalOrdinary
+                | OneWayMethod::LognormalWelchBf => {
                     self.saved_one_way_param_unpaired = spec.method;
                 }
-                OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
+                OneWayMethod::RepeatedMeasures { geisser_greenhouse } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
                     self.saved_rm_geisser_greenhouse = geisser_greenhouse;
                 }
                 OneWayMethod::KruskalWallis | OneWayMethod::Friedman => {}

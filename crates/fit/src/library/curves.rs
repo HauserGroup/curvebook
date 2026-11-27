@@ -45,6 +45,8 @@
 //! - Watts, D. G., & Bacon, D. W. (1974). Using an hyperbola as a transition model to fit
 //!   two-regime straight-line data. *Technometrics* 16.
 //! - Huxley, J. S. (1932). *Problems of Relative Growth*. London: Methuen.
+//! - Baker, G. A., & Graves-Morris, P. (1996). *Padé Approximants*, 2nd ed. Cambridge: Cambridge
+//!   University Press.
 
 use crate::library::{BuiltinEquationSpec, ModelMeta, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, safe_exp, spec_ids};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -148,30 +150,20 @@ pub(crate) const CURVE_SPECS: &[BuiltinEquationSpec] = &[
     BuiltinEquationSpec::new("log_gaussian", &[], || Box::new(LogGaussian)),
     BuiltinEquationSpec::new("lognormal_area", &[], || Box::new(LognormalArea)),
     BuiltinEquationSpec::new("cumulative_gaussian", &[], || Box::new(CumulativeGaussian)),
+    BuiltinEquationSpec::new("cumulative_gaussian_percent", &[], || Box::new(CumulativeGaussianScaled::percent())),
+    BuiltinEquationSpec::new("cumulative_gaussian_fraction", &[], || Box::new(CumulativeGaussianScaled::fraction())),
+    BuiltinEquationSpec::new("cumulative_gaussian_counts", &[], || Box::new(CumulativeGaussianCounts)),
     BuiltinEquationSpec::new("lorentzian", &[], || Box::new(LorentzianPeak)),
+    BuiltinEquationSpec::new("sum_of_two_lorentzians", &[], || Box::new(TwoLorentzians)),
     BuiltinEquationSpec::new("weibull_peak", &[], || Box::new(WeibullPeak)),
     // Wave
-    BuiltinEquationSpec::new("sine_wave", &[], || {
-        Box::new(SineWave {
-            meta: ModelMeta::new("sine_wave", "Sine wave", EquationCategory::SineWave, &["Amplitude", "Frequency", "PhaseShift", "Baseline"]),
-            damped: false,
-        })
-    }),
+    BuiltinEquationSpec::new("sine_wave", &[], || Box::new(SineWave)),
     BuiltinEquationSpec::new("standard_sine_wave", &[], || Box::new(StandardSineWave)),
-    BuiltinEquationSpec::new("damped_sine_wave", &[], || {
-        Box::new(SineWave {
-            meta: ModelMeta::new(
-                "damped_sine_wave",
-                "Damped sine wave",
-                EquationCategory::SineWave,
-                &["Amplitude", "Frequency", "PhaseShift", "K", "Baseline"],
-            ),
-            damped: true,
-        })
-    }),
+    BuiltinEquationSpec::new("damped_sine_wave", &[], || Box::new(DampedSineWave)),
     BuiltinEquationSpec::new("sinc_wave", &[], || Box::new(SincWave)),
     // Standard Curves & Polynomials
-    BuiltinEquationSpec::new("straight_line", &[], || {
+    BuiltinEquationSpec::new("horizontal_line", &[], || Box::new(HorizontalLine)),
+    BuiltinEquationSpec::new("straight_line", &["polynomial_1"], || {
         Box::new(StraightLine {
             meta: ModelMeta::new("straight_line", "Straight line", EquationCategory::StandardCurve, &["Slope", "YIntercept"]),
             through_origin: false,
@@ -183,6 +175,7 @@ pub(crate) const CURVE_SPECS: &[BuiltinEquationSpec] = &[
             through_origin: true,
         })
     }),
+    BuiltinEquationSpec::new("pade_1_1", &[], || Box::new(Pade11)),
     BuiltinEquationSpec::new("two_lines_intersection", &[], || Box::new(TwoLinesIntersection)),
     BuiltinEquationSpec::new("segmental_linear", &[], || Box::new(SegmentalLinear)),
     BuiltinEquationSpec::new("hinge_smooth_hyperbolic", &[], || Box::new(SmoothHinge)),
@@ -201,8 +194,16 @@ pub(crate) const CURVE_SPECS: &[BuiltinEquationSpec] = &[
     BuiltinEquationSpec::new("centered_poly_5", &["centered_polynomial_5"], || Box::new(CenteredPolynomial::new(5))),
     BuiltinEquationSpec::new("centered_poly_6", &["centered_polynomial_6"], || Box::new(CenteredPolynomial::new(6))),
     BuiltinEquationSpec::new("semi_log_line", &["semilog_line"], || Box::new(SemiLogLine)),
+    BuiltinEquationSpec::new("semilog_x_lin_y_log", &[], || Box::new(SemilogXLinYLog)),
     BuiltinEquationSpec::new("log_log_line", &["loglog_line"], || Box::new(LogLogLine)),
     BuiltinEquationSpec::new("probit_line", &[], || Box::new(ProbitLine)),
+    // Classic Legacy Reparameterizations
+    BuiltinEquationSpec::new("classic_one_phase_decay", &[], || Box::new(ClassicOnePhaseDecay)),
+    BuiltinEquationSpec::new("classic_two_phase_decay", &[], || Box::new(ClassicTwoPhaseDecay)),
+    BuiltinEquationSpec::new("classic_one_phase_association", &[], || Box::new(ClassicOnePhaseAssociation)),
+    BuiltinEquationSpec::new("classic_two_phase_association", &[], || Box::new(ClassicTwoPhaseAssociation)),
+    BuiltinEquationSpec::new("classic_exponential_growth", &[], || Box::new(ClassicExponentialGrowth)),
+    BuiltinEquationSpec::new("classic_sine_wave", &[], || Box::new(ClassicSineWave)),
 ];
 
 const CURVE_EQUATION_ID_ARRAY: [&str; CURVE_SPECS.len()] = spec_ids::<{ CURVE_SPECS.len() }>(CURVE_SPECS);
@@ -224,7 +225,7 @@ fn all_finite_params(params: &[f64], count: usize) -> bool {
 #[inline]
 fn push_finite_scalar(out: &mut Vec<DerivedScalar>, name: &str, value: f64) {
     if value.is_finite() {
-        out.push(DerivedScalar { name: name.to_owned(), value, units: None });
+        out.push(DerivedScalar::new(name.to_owned(), value, None));
     }
 }
 
@@ -635,6 +636,21 @@ impl ParametricModel for LogisticGrowth {
         let (xmin, xmax) = data_x_min_max(points);
         vec![ymax.max(1.0), ymin.max(1e-3), 3.0 / (xmax - xmin).max(1.0)]
     }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 3 && all_finite_params(params, 3) {
+            let (ym, y0, k) = (params[0], params[1], params[2]);
+            if y0 > 0.0 && ym > y0 && k.abs() > 1e-15 {
+                let x_inflect = ((ym - y0) / y0).ln() / k;
+                push_finite_scalar(&mut out, "InflectionPoint", x_inflect);
+            }
+            push_finite_scalar(&mut out, "YInflection", 0.5 * ym);
+            if k.abs() > 1e-15 {
+                push_finite_scalar(&mut out, "1/k", 1.0 / k);
+            }
+        }
+        out
+    }
 }
 
 /// Gompertz growth `Y = YM * exp(-ln(YM / Y0) * exp(-k * X))` (so `Y(0) = Y0`).
@@ -663,6 +679,24 @@ impl ParametricModel for GompertzGrowth {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
         vec![ymax.max(1.0), ymin.max(1e-3), 2.0 / (xmax - xmin).max(1.0)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 3 && all_finite_params(params, 3) {
+            let (ym, y0, k) = (params[0], params[1], params[2]);
+            if ym > 0.0 && y0 > 0.0 && ym > y0 && k.abs() > 1e-15 {
+                let ln_ratio = (ym / y0).ln();
+                if ln_ratio > 0.0 {
+                    let x_inflect = ln_ratio.ln() / k;
+                    push_finite_scalar(&mut out, "InflectionPoint", x_inflect);
+                }
+            }
+            push_finite_scalar(&mut out, "YInflection", ym / core::f64::consts::E);
+            if k.abs() > 1e-15 {
+                push_finite_scalar(&mut out, "1/k", 1.0 / k);
+            }
+        }
+        out
     }
 }
 
@@ -849,8 +883,8 @@ impl ParametricModel for CumulativeGaussian {
     }
 }
 
-/// Lorentzian (Cauchy) peak `Y = Amplitude / (1 + ((X - Center) / (Width / 2))^2)`, where
-/// `Width` is the full width at half maximum.
+/// Lorentzian (Cauchy) peak `Y = Amplitude / (1 + ((X - Center) / Width)^2)`, where
+/// `Width` is the half-width at half maximum (HWHM) and derived `FWHM = 2 * Width`.
 /// Reference: Lorentzian distribution, Bevington & Robinson (2003) ch. 2.
 struct LorentzianPeak;
 
@@ -862,17 +896,52 @@ impl ParametricModel for LorentzianPeak {
             return None;
         }
         let (amp, center, width) = (params[0], params[1], params[2]);
-        if width.abs() < 1e-15 {
+        if width <= 0.0 {
             return None;
         }
-        let z = (x0 - center) / (0.5 * width);
+        let z = (x0 - center) / width;
         let y = amp / (1.0 + z * z);
         y.is_finite().then_some(y)
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 3) || out.len() < 3 {
+            return false;
+        }
+        let (amp, center, width) = (params[0], params[1], params[2]);
+        if width <= 0.0 {
+            return false;
+        }
+        let z = (x0 - center) / width;
+        let denom = 1.0 + z * z;
+        let inv_d = 1.0 / denom;
+        let inv_d2 = inv_d * inv_d;
+        out[0] = inv_d;
+        out[1] = 2.0 * amp * z * inv_d2 / width;
+        out[2] = 2.0 * amp * z * z * inv_d2 / width;
+        out[..3].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
-        vec![ymax, 0.5 * (xmin + xmax), ((xmax - xmin) / 4.0).max(1e-3)]
+        let peak_x = points
+            .iter()
+            .filter(|p| p.x0().is_finite() && p.y.is_finite())
+            .max_by(|a, b| a.y.total_cmp(&b.y))
+            .map_or(0.5 * (xmin + xmax), |p| p.x0());
+        vec![ymax, peak_x, ((xmax - xmin) / 8.0).max(1e-3)]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(1e-15), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 3 && params[2].is_finite() && params[2] > 0.0 {
+            push_finite_scalar(&mut out, "FWHM", 2.0 * params[2]);
+        }
+        out
     }
 }
 
@@ -911,71 +980,192 @@ impl ParametricModel for WeibullPeak {
     }
 }
 
-/// Sine wave `Y = Baseline + Amplitude * sin(2 * pi * Frequency * X + PhaseShift)` (phase in
-/// radians); the damped variant multiplies the amplitude by `exp(-K * X)`.
-/// Reference: sinusoid fitting, Bloomfield (2000). The damped variant is the under-damped
-/// linear-oscillator form; no single statistical primary source is cited for it.
-struct SineWave {
-    meta: ModelMeta,
-    damped: bool,
-}
+/// Sine wave with nonzero baseline parameterized by `Wavelength`:
+/// `Y = Amplitude * sin(2 * pi * X / Wavelength + PhaseShift) + Baseline` (`Wavelength > 0`,
+/// `PhaseShift` in radians), with derived `Frequency = 1 / Wavelength`.
+/// Reference: sinusoid fitting, Bloomfield (2000).
+struct SineWave;
 
 impl ParametricModel for SineWave {
-    impl_meta_methods!();
+    impl_static_meta!("sine_wave", "Sine wave", EquationCategory::SineWave, ["Amplitude", "Wavelength", "PhaseShift", "Baseline"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
-        let p_len = if self.damped { 5 } else { 4 };
-        if !t.is_finite() || !all_finite_params(params, p_len) {
+        if !t.is_finite() || !all_finite_params(params, 4) {
             return None;
         }
-        let y = if self.damped {
-            let (amp, freq, phase, k, base) = (params[0], params[1], params[2], params[3], params[4]);
-            let e = safe_exp(-k * t)?;
-            base + amp * e * (2.0 * core::f64::consts::PI * freq * t + phase).sin()
-        } else {
-            let (amp, freq, phase, base) = (params[0], params[1], params[2], params[3]);
-            base + amp * (2.0 * core::f64::consts::PI * freq * t + phase).sin()
-        };
+        let (amp, wavelength, phase, base) = (params[0], params[1], params[2], params[3]);
+        if wavelength <= 0.0 {
+            return None;
+        }
+        let y = base + amp * (2.0 * core::f64::consts::PI * t / wavelength + phase).sin();
         y.is_finite().then_some(y)
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (amp, wavelength, phase) = (params[0], params[1], params[2]);
+        if wavelength <= 0.0 {
+            return false;
+        }
+        let angle = 2.0 * core::f64::consts::PI * t / wavelength + phase;
+        let (s, c) = angle.sin_cos();
+        out[0] = s;
+        out[1] = -amp * c * (2.0 * core::f64::consts::PI * t) / (wavelength * wavelength);
+        out[2] = amp * c;
+        out[3] = 1.0;
+        out[..4].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
         let amp = 0.5 * (ymax - ymin);
         let base = 0.5 * (ymax + ymin);
-        let freq = 1.0 / (xmax - xmin).max(1.0);
-        if self.damped { vec![amp, freq, 0.0, 0.1 * freq, base] } else { vec![amp, freq, 0.0, base] }
+        let wavelength = (xmax - xmin).max(1.0);
+        vec![amp, wavelength, 0.0, base]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(1e-15), None), (None, None), (None, None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 2 && params[1].is_finite() && params[1] > 0.0 {
+            push_finite_scalar(&mut out, "Frequency", 1.0 / params[1]);
+        }
+        out
     }
 }
 
-/// Sinc peak `Y = Baseline + Amplitude * sin(u) / u` with `u = (X - Center) / Width`.
-/// Reference: Bracewell (2000), who defines the normalised `sinc x = sin(pi x) / (pi x)`; here the
-/// factor `pi` is absorbed into `Width` (unnormalised sinc).
-struct SincWave;
+/// Damped sine wave parameterized by `Wavelength` (canonical zero-baseline form):
+/// `Y = Amplitude * exp(-K * X) * sin(2 * pi * X / Wavelength + PhaseShift)` (`Wavelength > 0`,
+/// `PhaseShift` in radians), with derived `Frequency = 1 / Wavelength` and `HalfLife = ln(2) / K`.
+/// Reference: Bloomfield (2000); under-damped linear oscillator decay.
+struct DampedSineWave;
 
-impl ParametricModel for SincWave {
-    impl_static_meta!("sinc_wave", "Sinc function", EquationCategory::SineWave, ["Amplitude", "Center", "Width", "Baseline"]);
+impl ParametricModel for DampedSineWave {
+    impl_static_meta!("damped_sine_wave", "Damped sine wave", EquationCategory::SineWave, ["Amplitude", "K", "Wavelength", "PhaseShift"]);
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
-        let x0 = x.first().copied()?;
-        if !x0.is_finite() || !all_finite_params(params, 4) {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 4) {
             return None;
         }
-        let (amp, center, width, base) = (params[0], params[1], params[2], params[3]);
-        if width.abs() < 1e-15 {
+        let (amp, k, wavelength, phase) = (params[0], params[1], params[2], params[3]);
+        if wavelength <= 0.0 {
             return None;
         }
-        let u = (x0 - center) / width;
-        if !u.is_finite() {
-            return None;
-        }
-        let s = if u.abs() < 1e-12 { 1.0 } else { u.sin() / u };
-        let y = base + amp * s;
+        let e = safe_exp(-k * t)?;
+        let y = amp * e * (2.0 * core::f64::consts::PI * t / wavelength + phase).sin();
         y.is_finite().then_some(y)
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (amp, k, wavelength, phase) = (params[0], params[1], params[2], params[3]);
+        if wavelength <= 0.0 {
+            return false;
+        }
+        let Some(e) = safe_exp(-k * t) else {
+            return false;
+        };
+        let angle = 2.0 * core::f64::consts::PI * t / wavelength + phase;
+        let (s, c) = angle.sin_cos();
+        out[0] = e * s;
+        out[1] = -t * amp * e * s;
+        out[2] = -amp * e * c * (2.0 * core::f64::consts::PI * t) / (wavelength * wavelength);
+        out[3] = amp * e * c;
+        out[..4].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
-        vec![ymax - ymin, 0.5 * (xmin + xmax), ((xmax - xmin) / 6.0).max(1e-3), ymin]
+        let amp = ymax.abs().max(ymin.abs()).max(1.0);
+        let span = (xmax - xmin).max(1.0);
+        vec![amp, 0.1 / span, span, 0.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(1e-15), None), (None, None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 3 {
+            if params[2].is_finite() && params[2] > 0.0 {
+                push_finite_scalar(&mut out, "Frequency", 1.0 / params[2]);
+            }
+            if params[1].is_finite() && params[1] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife", core::f64::consts::LN_2 / params[1]);
+            }
+        }
+        out
+    }
+}
+
+/// Sinc wave parameterized by `Wavelength`: `Y = Amplitude * sin(u) / u` with
+/// `u = 2 * pi * X / Wavelength` (`Y = Amplitude` at `u = 0`), with derived `Frequency = 1 / Wavelength`.
+/// Reference: Bracewell (2000).
+struct SincWave;
+
+impl ParametricModel for SincWave {
+    impl_static_meta!("sinc_wave", "Sinc function", EquationCategory::SineWave, ["Amplitude", "Wavelength"]);
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 2) {
+            return None;
+        }
+        let (amp, wavelength) = (params[0], params[1]);
+        if wavelength <= 0.0 {
+            return None;
+        }
+        let u = 2.0 * core::f64::consts::PI * x0 / wavelength;
+        if !u.is_finite() {
+            return None;
+        }
+        let s = if u.abs() < 1e-12 { 1.0 } else { u.sin() / u };
+        let y = amp * s;
+        y.is_finite().then_some(y)
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 2) || out.len() < 2 {
+            return false;
+        }
+        let (amp, wavelength) = (params[0], params[1]);
+        if wavelength <= 0.0 {
+            return false;
+        }
+        let u = 2.0 * core::f64::consts::PI * x0 / wavelength;
+        if !u.is_finite() {
+            return false;
+        }
+        let s = if u.abs() < 1e-12 { 1.0 } else { u.sin() / u };
+        let ds_du = if u.abs() < 1e-6 { -u / 3.0 + (u * u * u) / 30.0 } else { (u * u.cos() - u.sin()) / (u * u) };
+        out[0] = s;
+        out[1] = amp * ds_du * (-u / wavelength);
+        out[..2].iter().all(|v| v.is_finite())
+    }
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        let amp = ymax.abs().max(ymin.abs()).max(1.0);
+        vec![amp, ((xmax - xmin) / 2.0).max(1e-3)]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(1e-15), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 2 && params[1].is_finite() && params[1] > 0.0 {
+            push_finite_scalar(&mut out, "Frequency", 1.0 / params[1]);
+        }
+        out
     }
 }
 
@@ -1883,13 +2073,13 @@ impl ParametricModel for LognormalArea {
             let mode = params[1] * (-sigma * sigma).exp();
             let amp = (params[0] / params[1]) * (0.5 * sigma * sigma).exp();
             if amp.is_finite() {
-                out.push(DerivedScalar { name: "Amplitude".to_owned(), value: amp, units: None });
+                out.push(DerivedScalar::new("Amplitude", amp, None));
             }
             if area.is_finite() {
-                out.push(DerivedScalar { name: "Area".to_owned(), value: area, units: None });
+                out.push(DerivedScalar::new("Area", area, None));
             }
             if mode.is_finite() {
-                out.push(DerivedScalar { name: "Mode".to_owned(), value: mode, units: None });
+                out.push(DerivedScalar::new("Mode", mode, None));
             }
         }
         out
@@ -2099,5 +2289,701 @@ impl ParametricModel for PowerSeriesTwoTerm {
         let (_, ymax) = data_y_min_max(points);
         let scale = if ymax.is_finite() && ymax.abs() > 1e-6 { ymax } else { 1.0 };
         vec![0.5 * scale, 1.0, 0.5 * scale, 2.0]
+    }
+}
+
+/// Rational Padé (1,1) approximant `Y = (A0 + A1 * X) / (1 + B1 * X)`.
+/// Reference: Baker & Graves-Morris (1996).
+struct Pade11;
+
+impl ParametricModel for Pade11 {
+    impl_static_meta!("pade_1_1", "Padé (1,1) approximant", EquationCategory::StandardCurve, ["A0", "A1", "B1"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 3) {
+            return None;
+        }
+        let (a0, a1, b1) = (params[0], params[1], params[2]);
+        let denom = 1.0 + b1 * x0;
+        if !denom.is_finite() || denom.abs() < 1e-15 {
+            return None;
+        }
+        let y = (a0 + a1 * x0) / denom;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 3) || out.len() < 3 {
+            return false;
+        }
+        let (a0, a1, b1) = (params[0], params[1], params[2]);
+        let denom = 1.0 + b1 * x0;
+        if !denom.is_finite() || denom.abs() < 1e-15 {
+            return false;
+        }
+        let inv_d = 1.0 / denom;
+        let y = (a0 + a1 * x0) * inv_d;
+        out[0] = inv_d;
+        out[1] = x0 * inv_d;
+        out[2] = -y * x0 * inv_d;
+        out[..3].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let pairs: Vec<(f64, f64)> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
+        let (slope, intercept) = estimate_ols_from_pairs(&pairs);
+        vec![intercept, slope, 0.0]
+    }
+}
+
+/// Horizontal line (constant null model) `Y = Mean`.
+/// Reference: Draper & Smith (1998).
+struct HorizontalLine;
+
+impl ParametricModel for HorizontalLine {
+    impl_static_meta!("horizontal_line", "Horizontal line", EquationCategory::StandardCurve, ["Mean"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 1) {
+            return None;
+        }
+        Some(params[0])
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 1) || out.is_empty() {
+            return false;
+        }
+        out[0] = 1.0;
+        true
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let mut sum = 0.0_f64;
+        let mut n = 0_usize;
+        for p in points {
+            if p.y.is_finite() {
+                sum += p.y;
+                n += 1;
+            }
+        }
+        vec![if n > 0 { sum / (n as f64) } else { 0.0 }]
+    }
+}
+
+/// Semilog line with linear `X` and base-10 log `Y`: `Y = 10^(Slope * X + YIntercept)`.
+/// Reference: Motulsky & Christopoulos (2004).
+struct SemilogXLinYLog;
+
+impl ParametricModel for SemilogXLinYLog {
+    impl_static_meta!("semilog_x_lin_y_log", "Semilog line (X linear, Y log)", EquationCategory::StandardCurve, ["Slope", "YIntercept"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 2) {
+            return None;
+        }
+        let exp = params[0] * x0 + params[1];
+        if !exp.is_finite() || !(-300.0..=300.0).contains(&exp) {
+            return None;
+        }
+        let y = 10.0_f64.powf(exp);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 2) || out.len() < 2 {
+            return false;
+        }
+        let exp = params[0] * x0 + params[1];
+        if !exp.is_finite() || !(-300.0..=300.0).contains(&exp) {
+            return false;
+        }
+        let y = 10.0_f64.powf(exp);
+        let factor = y * core::f64::consts::LN_10;
+        out[0] = factor * x0;
+        out[1] = factor;
+        out[..2].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let pairs: Vec<(f64, f64)> =
+            points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite() && p.y > 0.0).map(|p| (p.x0(), p.y.log10())).collect();
+        if pairs.len() >= 2 {
+            let (slope, intercept) = estimate_ols_from_pairs(&pairs);
+            if slope.is_finite() && intercept.is_finite() {
+                return vec![slope, intercept];
+            }
+        }
+        vec![0.1, 0.0]
+    }
+}
+
+/// Sum of two HWHM Lorentzian (Cauchy) peaks:
+/// `Y = Amplitude1 / (1 + ((X - Center1) / Width1)^2) + Amplitude2 / (1 + ((X - Center2) / Width2)^2)`.
+/// Reference: Bevington & Robinson (2003) ch. 2.
+struct TwoLorentzians;
+
+impl ParametricModel for TwoLorentzians {
+    impl_static_meta!(
+        "sum_of_two_lorentzians",
+        "Sum of two Lorentzians",
+        EquationCategory::Peak,
+        ["Amplitude1", "Center1", "Width1", "Amplitude2", "Center2", "Width2"]
+    );
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 6) {
+            return None;
+        }
+        let (a1, c1, w1, a2, c2, w2) = (params[0], params[1], params[2], params[3], params[4], params[5]);
+        if w1 <= 0.0 || w2 <= 0.0 {
+            return None;
+        }
+        let z1 = (x0 - c1) / w1;
+        let z2 = (x0 - c2) / w2;
+        let y = a1 / (1.0 + z1 * z1) + a2 / (1.0 + z2 * z2);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 6) || out.len() < 6 {
+            return false;
+        }
+        let (a1, c1, w1, a2, c2, w2) = (params[0], params[1], params[2], params[3], params[4], params[5]);
+        if w1 <= 0.0 || w2 <= 0.0 {
+            return false;
+        }
+        let z1 = (x0 - c1) / w1;
+        let d1 = 1.0 / (1.0 + z1 * z1);
+        out[0] = d1;
+        out[1] = 2.0 * a1 * z1 * d1 * d1 / w1;
+        out[2] = 2.0 * a1 * z1 * z1 * d1 * d1 / w1;
+
+        let z2 = (x0 - c2) / w2;
+        let d2 = 1.0 / (1.0 + z2 * z2);
+        out[3] = d2;
+        out[4] = 2.0 * a2 * z2 * d2 * d2 / w2;
+        out[5] = 2.0 * a2 * z2 * z2 * d2 * d2 / w2;
+        out[..6].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        let span = (xmax - xmin).max(0.0);
+        let width = (span / 12.0).max(1e-3);
+        vec![ymax, xmin + 0.35 * span, width, 0.5 * ymax, xmin + 0.65 * span, width]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(1e-15), None), (None, None), (None, None), (Some(1e-15), None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 6 {
+            if params[2].is_finite() && params[2] > 0.0 {
+                push_finite_scalar(&mut out, "FWHM1", 2.0 * params[2]);
+            }
+            if params[5].is_finite() && params[5] > 0.0 {
+                push_finite_scalar(&mut out, "FWHM2", 2.0 * params[5]);
+            }
+        }
+        out
+    }
+}
+
+/// Fixed-scale Cumulative Gaussian (`100 * Phi((X - Mean) / SD)` or `Phi((X - Mean) / SD)`).
+/// Reference: Finney (1971).
+struct CumulativeGaussianScaled {
+    meta: ModelMeta,
+    scale: f64,
+}
+
+impl CumulativeGaussianScaled {
+    fn percent() -> Self {
+        Self {
+            meta: ModelMeta::new("cumulative_gaussian_percent", "Cumulative Gaussian (percentages)", EquationCategory::Gaussian, &["Mean", "SD"]),
+            scale: 100.0,
+        }
+    }
+
+    fn fraction() -> Self {
+        Self {
+            meta: ModelMeta::new("cumulative_gaussian_fraction", "Cumulative Gaussian (fractions)", EquationCategory::Gaussian, &["Mean", "SD"]),
+            scale: 1.0,
+        }
+    }
+}
+
+impl ParametricModel for CumulativeGaussianScaled {
+    impl_meta_methods!();
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 2) {
+            return None;
+        }
+        let (mean, sd) = (params[0], params[1]);
+        if sd <= 0.0 {
+            return None;
+        }
+        let z = (x0 - mean) / sd;
+        if !z.is_finite() {
+            return None;
+        }
+        let y = self.scale * curvebook_math::dist::norm_cdf(z);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 2) || out.len() < 2 {
+            return false;
+        }
+        let (mean, sd) = (params[0], params[1]);
+        if sd <= 0.0 {
+            return false;
+        }
+        let z = (x0 - mean) / sd;
+        if !z.is_finite() {
+            return false;
+        }
+        let pdf = curvebook_math::dist::norm_pdf(z);
+        out[0] = -self.scale * pdf / sd;
+        out[1] = -self.scale * pdf * z / sd;
+        out[..2].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (xmin, xmax) = data_x_min_max(points);
+        vec![0.5 * (xmin + xmax), ((xmax - xmin) / 6.0).max(1e-3)]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(1e-15), None)]
+    }
+}
+
+/// Cumulative Gaussian scaled to total count `N`: `Y = N * Phi((X - Mean) / SD)`.
+/// Reference: Finney (1971).
+struct CumulativeGaussianCounts;
+
+impl ParametricModel for CumulativeGaussianCounts {
+    impl_static_meta!("cumulative_gaussian_counts", "Cumulative Gaussian (counts)", EquationCategory::Gaussian, ["N", "Mean", "SD"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 3) {
+            return None;
+        }
+        let (n, mean, sd) = (params[0], params[1], params[2]);
+        if sd <= 0.0 {
+            return None;
+        }
+        let z = (x0 - mean) / sd;
+        if !z.is_finite() {
+            return None;
+        }
+        let y = n * curvebook_math::dist::norm_cdf(z);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || !all_finite_params(params, 3) || out.len() < 3 {
+            return false;
+        }
+        let (n, mean, sd) = (params[0], params[1], params[2]);
+        if sd <= 0.0 {
+            return false;
+        }
+        let z = (x0 - mean) / sd;
+        if !z.is_finite() {
+            return false;
+        }
+        let cdf = curvebook_math::dist::norm_cdf(z);
+        let pdf = curvebook_math::dist::norm_pdf(z);
+        out[0] = cdf;
+        out[1] = -n * pdf / sd;
+        out[2] = -n * pdf * z / sd;
+        out[..3].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        vec![ymax.max(1.0), 0.5 * (xmin + xmax), ((xmax - xmin) / 6.0).max(1e-3)]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (None, None), (Some(1e-15), None)]
+    }
+}
+
+/// Classic one-phase exponential decay `Y = Span * exp(-K * X) + Plateau`.
+/// Reference: Seber & Wild (1989) ch. 8; Motulsky & Christopoulos (2004).
+struct ClassicOnePhaseDecay;
+
+impl ParametricModel for ClassicOnePhaseDecay {
+    impl_static_meta!("classic_one_phase_decay", "One-phase exponential decay (classic)", EquationCategory::Exponential, ["Span", "K", "Plateau"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 3) {
+            return None;
+        }
+        let (span, k, plateau) = (params[0], params[1], params[2]);
+        let y = span * safe_exp(-k * t)? + plateau;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 3) || out.len() < 3 {
+            return false;
+        }
+        let (span, k) = (params[0], params[1]);
+        let Some(e) = safe_exp(-k * t) else {
+            return false;
+        };
+        out[0] = e;
+        out[1] = -span * t * e;
+        out[2] = 1.0;
+        out[..3].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        vec![ymax - ymin, 2.0 / (xmax - xmin).max(1.0), ymin]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(0.0), None), (None, None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 3 {
+            push_finite_scalar(&mut out, "Y0", params[0] + params[2]);
+            if params[1].is_finite() && params[1] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife", core::f64::consts::LN_2 / params[1]);
+                push_finite_scalar(&mut out, "Tau", 1.0 / params[1]);
+            }
+        }
+        out
+    }
+}
+
+/// Classic two-phase exponential decay `Y = Span1 * exp(-K1 * X) + Span2 * exp(-K2 * X) + Plateau`.
+/// Reference: Seber & Wild (1989) ch. 8; Motulsky & Christopoulos (2004).
+struct ClassicTwoPhaseDecay;
+
+impl ParametricModel for ClassicTwoPhaseDecay {
+    impl_static_meta!(
+        "classic_two_phase_decay",
+        "Two-phase exponential decay (classic)",
+        EquationCategory::Exponential,
+        ["Span1", "K1", "Span2", "K2", "Plateau"]
+    );
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
+        let (s1, k1, s2, k2, plateau) = (params[0], params[1], params[2], params[3], params[4]);
+        let y = s1 * safe_exp(-k1 * t)? + s2 * safe_exp(-k2 * t)? + plateau;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 5) || out.len() < 5 {
+            return false;
+        }
+        let (s1, k1, s2, k2) = (params[0], params[1], params[2], params[3]);
+        let (Some(e1), Some(e2)) = (safe_exp(-k1 * t), safe_exp(-k2 * t)) else {
+            return false;
+        };
+        out[0] = e1;
+        out[1] = -s1 * t * e1;
+        out[2] = e2;
+        out[3] = -s2 * t * e2;
+        out[4] = 1.0;
+        out[..5].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        let span_x = (xmax - xmin).max(1.0);
+        let half_y = 0.5 * (ymax - ymin);
+        vec![half_y, 4.0 / span_x, half_y, 0.5 / span_x, ymin]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(0.0), None), (None, None), (Some(0.0), None), (None, None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 5 {
+            if params[1].is_finite() && params[1] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife1", core::f64::consts::LN_2 / params[1]);
+            }
+            if params[3].is_finite() && params[3] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife2", core::f64::consts::LN_2 / params[3]);
+            }
+        }
+        out
+    }
+}
+
+/// Classic one-phase exponential association `Y = Ymax * (1 - exp(-K * X))`.
+/// Reference: Seber & Wild (1989) ch. 8; Motulsky & Christopoulos (2004).
+struct ClassicOnePhaseAssociation;
+
+impl ParametricModel for ClassicOnePhaseAssociation {
+    impl_static_meta!("classic_one_phase_association", "One-phase exponential association (classic)", EquationCategory::Exponential, ["Ymax", "K"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 2) {
+            return None;
+        }
+        let (ymax, k) = (params[0], params[1]);
+        let y = ymax * (1.0 - safe_exp(-k * t)?);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 2) || out.len() < 2 {
+            return false;
+        }
+        let (ymax, k) = (params[0], params[1]);
+        let Some(e) = safe_exp(-k * t) else {
+            return false;
+        };
+        out[0] = 1.0 - e;
+        out[1] = ymax * t * e;
+        out[..2].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        vec![ymax, 2.0 / (xmax - xmin).max(1.0)]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(0.0), None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 2 && params[1].is_finite() && params[1] > 0.0 {
+            push_finite_scalar(&mut out, "HalfLife", core::f64::consts::LN_2 / params[1]);
+            push_finite_scalar(&mut out, "Tau", 1.0 / params[1]);
+        }
+        out
+    }
+}
+
+/// Classic two-phase exponential association
+/// `Y = Ymax1 * (1 - exp(-K1 * X)) + Ymax2 * (1 - exp(-K2 * X))`.
+/// Reference: Seber & Wild (1989) ch. 8; Motulsky & Christopoulos (2004).
+struct ClassicTwoPhaseAssociation;
+
+impl ParametricModel for ClassicTwoPhaseAssociation {
+    impl_static_meta!(
+        "classic_two_phase_association",
+        "Two-phase exponential association (classic)",
+        EquationCategory::Exponential,
+        ["Ymax1", "K1", "Ymax2", "K2"]
+    );
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 4) {
+            return None;
+        }
+        let (y1, k1, y2, k2) = (params[0], params[1], params[2], params[3]);
+        let y = y1 * (1.0 - safe_exp(-k1 * t)?) + y2 * (1.0 - safe_exp(-k2 * t)?);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (y1, k1, y2, k2) = (params[0], params[1], params[2], params[3]);
+        let (Some(e1), Some(e2)) = (safe_exp(-k1 * t), safe_exp(-k2 * t)) else {
+            return false;
+        };
+        out[0] = 1.0 - e1;
+        out[1] = y1 * t * e1;
+        out[2] = 1.0 - e2;
+        out[3] = y2 * t * e2;
+        out[..4].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        let span_x = (xmax - xmin).max(1.0);
+        vec![0.5 * ymax, 4.0 / span_x, 0.5 * ymax, 0.5 / span_x]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(0.0), None), (None, None), (Some(0.0), None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 4 {
+            if params[1].is_finite() && params[1] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife1", core::f64::consts::LN_2 / params[1]);
+            }
+            if params[3].is_finite() && params[3] > 0.0 {
+                push_finite_scalar(&mut out, "HalfLife2", core::f64::consts::LN_2 / params[3]);
+            }
+        }
+        out
+    }
+}
+
+/// Classic exponential growth `Y = Start * exp(K * X)`.
+/// Reference: Malthus (1798); Seber & Wild (1989) ch. 7.
+struct ClassicExponentialGrowth;
+
+impl ParametricModel for ClassicExponentialGrowth {
+    impl_static_meta!("classic_exponential_growth", "Exponential growth (classic)", EquationCategory::Exponential, ["Start", "K"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 2) {
+            return None;
+        }
+        let (start, k) = (params[0], params[1]);
+        let y = start * safe_exp(k * t)?;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 2) || out.len() < 2 {
+            return false;
+        }
+        let (start, k) = (params[0], params[1]);
+        let Some(e) = safe_exp(k * t) else {
+            return false;
+        };
+        out[0] = e;
+        out[1] = start * t * e;
+        out[..2].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        estimate_exp_growth_seed(points)
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 2 && params[1].is_finite() && params[1] > 0.0 {
+            push_finite_scalar(&mut out, "DoublingTime", core::f64::consts::LN_2 / params[1]);
+        }
+        out
+    }
+}
+
+/// Classic frequency-parameterized sine wave
+/// `Y = Baseline + Amplitude * sin(2 * pi * Frequency * X + PhaseShift)`.
+/// Reference: Bloomfield (2000).
+struct ClassicSineWave;
+
+impl ParametricModel for ClassicSineWave {
+    impl_static_meta!(
+        "classic_sine_wave",
+        "Sine wave (frequency, classic)",
+        EquationCategory::SineWave,
+        ["Amplitude", "Frequency", "PhaseShift", "Baseline"]
+    );
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || !all_finite_params(params, 4) {
+            return None;
+        }
+        let (amp, freq, phase, base) = (params[0], params[1], params[2], params[3]);
+        let y = base + amp * (2.0 * core::f64::consts::PI * freq * t + phase).sin();
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (amp, freq, phase) = (params[0], params[1], params[2]);
+        let angle = 2.0 * core::f64::consts::PI * freq * t + phase;
+        let (s, c) = angle.sin_cos();
+        out[0] = s;
+        out[1] = amp * c * (2.0 * core::f64::consts::PI * t);
+        out[2] = amp * c;
+        out[3] = 1.0;
+        out[..4].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let (xmin, xmax) = data_x_min_max(points);
+        let amp = 0.5 * (ymax - ymin);
+        let base = 0.5 * (ymax + ymin);
+        let freq = 1.0 / (xmax - xmin).max(1.0);
+        vec![amp, freq, 0.0, base]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 2 && params[1].is_finite() && params[1].abs() > 1e-15 {
+            push_finite_scalar(&mut out, "Wavelength", 1.0 / params[1]);
+        }
+        out
     }
 }

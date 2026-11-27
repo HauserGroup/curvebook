@@ -38,19 +38,21 @@ pub mod spline;
 pub use archetype_convert::{ConversionPreview, TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
 pub use curve::{
     AucOptions, AucResult, CurveSheetOp, DerivativeOrder, PeakSummary, SmoothMethod, apply_curve_calculus_to_sheet, compute_auc, compute_auc_with_se,
-    compute_sheet_auc, differentiate_xy, integrate_xy, smooth_xy,
+    compute_sheet_auc, differentiate_xy, execute_curve_calculus, integrate_xy, savitzky_golay_derivative, smooth_xy,
 };
 pub use error::TransformError;
 pub use formula::{
     BinaryOp, DependencyTarget, Expr, FormulaContext, FormulaValue, ScalarEnv, TableEvalContext, UnaryOp, VarRef, eval_column_expr, eval_scalar_expr,
     evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_formula_for_sheet, extract_dependencies, parse_formula,
-    validate_no_formula_cycle,
+    unlink_calculated_variable, validate_no_formula_cycle,
 };
 pub use import::{ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, apply_import_link_pipeline, detect_link_cycles};
 pub use ops::{
-    BaselineKind, MathTransformOp, PruneMethod, SelectRule, TransformContext, TransformOutput, enforce_summary_mode_matrix,
-    execute_analysis_transform, execute_math_op, execute_math_transform, execute_normalize, execute_prune, execute_remove_baseline,
-    execute_remove_baseline_kind, execute_select, execute_select_with_derived, execute_transform, execute_transpose,
+    BaselineKind, MathTransformOp, MathTransformOptions, PruneMethod, SelectRearrangeOptions, SelectRule, TransformContext, TransformOutput,
+    clopper_pearson_ci, enforce_summary_mode_matrix, execute_analysis_transform, execute_fraction_of_total, execute_math_op, execute_math_transform,
+    execute_math_transform_with_options, execute_normalize, execute_prune, execute_remove_baseline, execute_remove_baseline_kind,
+    execute_remove_baseline_with_options, execute_row_statistics, execute_select, execute_select_and_rearrange, execute_select_with_derived,
+    execute_transform, execute_transpose, quantile_type6_sorted, wilson_score_ci,
 };
 pub use plate_and_tidy::{
     ExtractedPlateValues, PlateGeometry, PlateGridBuildOptions, PlateKineticReducer, PlateMapOutput, PlateMapTemplate, PlateSourceExtraction,
@@ -63,7 +65,7 @@ pub use randomize::{
     SimulatedDistribution, SubjectRandomizationConfig, random_sample_rows, randomize_subjects_to_groups, sample_row_indices,
     simulate_distribution_columns,
 };
-pub use simulate::{evaluate_equation, simulate_xy_sheet};
+pub use simulate::{evaluate_equation, simulate_column_sheet, simulate_contingency_2x2, simulate_xy_sheet};
 pub use spline::{
     CubicPiece, FittedCurveModel, SmoothingSplineFit, execute_spline_lowess, fit_akima_subspline, fit_lowess_curve, fit_natural_cubic_spline,
     fit_point_to_point, fit_smoothing_spline, sample_curve,

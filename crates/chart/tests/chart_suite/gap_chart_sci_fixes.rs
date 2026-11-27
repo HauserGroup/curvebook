@@ -52,6 +52,12 @@ fn km_spec_default() -> SurvivalAnalysisSpec {
         mv_time_column: None,
         mv_status_column: None,
         mv_group_column: None,
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     }
 }
 
@@ -150,6 +156,14 @@ fn gap_02_02_forest_plot_selects_ratio_columns_ahead_of_beta() -> TestResult {
         predictor_columns: vec![2, 3],
         reference_levels: Vec::new(),
         tie_method: curvebook_doc::CoxTieMethod::Efron,
+        formula: None,
+        covariate_profiles: Vec::new(),
+        nested_comparison: None,
+        emit_cox_snell_residuals: false,
+        ci_method: Default::default(),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
     };
     let an = AnalysisSpec::new(SheetId::new("res-cox"), ds.id.clone(), AnalysisKind::Survival(cox_spec.clone()))?;
     let res = run_survival_analysis(&ds, &an, &cox_spec)?;
@@ -197,8 +211,14 @@ fn gap_02_02_forest_plot_selects_ratio_columns_ahead_of_beta() -> TestResult {
         mv_log.variables[1].cells[r] = Cell::number(x);
     }
     let ds_log = DataSheet::new(SheetId::new("log-mv"), "LogMV", TableArchetype::MultipleVariables(mv_log))?;
-    let glm_spec =
-        GlmSpec { family: GlmFamily::Logistic, response_column: 0, predictor_columns: vec![1], reference_levels: Vec::new(), compute_vif: false };
+    let glm_spec = GlmSpec {
+        family: GlmFamily::Logistic,
+        response_column: 0,
+        predictor_columns: vec![1],
+        reference_levels: Vec::new(),
+        compute_vif: false,
+        ..Default::default()
+    };
     let an_log = AnalysisSpec::new(SheetId::new("res-log"), ds_log.id.clone(), AnalysisKind::GeneralizedLinearModel(glm_spec.clone()))?;
     let res_log = run_glm_analysis(&ds_log, &an_log, &glm_spec)?;
     let log_tab = res_log.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals).expect("logistic tab");
@@ -232,8 +252,14 @@ fn gap_02_02_forest_plot_selects_ratio_columns_ahead_of_beta() -> TestResult {
         mv_pois.variables[1].cells[r] = Cell::number(x);
     }
     let ds_pois = DataSheet::new(SheetId::new("pois-mv"), "PoisMV", TableArchetype::MultipleVariables(mv_pois))?;
-    let pois_spec =
-        GlmSpec { family: GlmFamily::Poisson, response_column: 0, predictor_columns: vec![1], reference_levels: Vec::new(), compute_vif: false };
+    let pois_spec = GlmSpec {
+        family: GlmFamily::Poisson,
+        response_column: 0,
+        predictor_columns: vec![1],
+        reference_levels: Vec::new(),
+        compute_vif: false,
+        ..Default::default()
+    };
     let an_pois = AnalysisSpec::new(SheetId::new("res-pois"), ds_pois.id.clone(), AnalysisKind::GeneralizedLinearModel(pois_spec.clone()))?;
     let res_pois = run_glm_analysis(&ds_pois, &an_pois, &pois_spec)?;
     let pois_tab = res_pois.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals).expect("poisson tab");
@@ -349,8 +375,14 @@ fn gap_02_04_forest_pooled_diamond_off_for_covariate_tables() -> TestResult {
 
     // 2. Multiple Linear Regression (GlmFamily::Gaussian) forest plot omits Pooled (FE) by default,
     //    and suppresses + warns even if a legacy spec has forest_show_pooled_diamond = true.
-    let glm_spec =
-        GlmSpec { family: GlmFamily::Linear, response_column: 0, predictor_columns: vec![1, 2], reference_levels: Vec::new(), compute_vif: false };
+    let glm_spec = GlmSpec {
+        family: GlmFamily::Linear,
+        response_column: 0,
+        predictor_columns: vec![1, 2],
+        reference_levels: Vec::new(),
+        compute_vif: false,
+        ..Default::default()
+    };
     let an = AnalysisSpec::new(SheetId::new("res-mlr"), ds.id.clone(), AnalysisKind::GeneralizedLinearModel(glm_spec.clone()))?;
     let res = run_glm_analysis(&ds, &an, &glm_spec)?;
     let mut doc = ProjectDocument::default();
@@ -916,6 +948,7 @@ fn gap_02_11_volcano_respects_significant_flag_and_difference_units() -> TestRes
         nonparametric: false,
         assume_equal_sd: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        ..Default::default()
     };
     let an = AnalysisSpec::new(SheetId::new("res-mr-vol"), ds.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
     let res = run_multiple_row_t_tests_analysis(&ds, &an, &mr_spec)?;
@@ -1164,6 +1197,14 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
         predictor_columns: vec![2, 3],
         reference_levels: Vec::new(),
         tie_method: curvebook_doc::CoxTieMethod::Efron,
+        formula: None,
+        covariate_profiles: Vec::new(),
+        nested_comparison: None,
+        emit_cox_snell_residuals: false,
+        ci_method: Default::default(),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
     };
     let an_cox = AnalysisSpec::new(SheetId::new("res-cox-dirty"), ds_cox.id.clone(), AnalysisKind::Survival(cox_spec.clone()))?;
     let mut res_cox = run_survival_analysis(&ds_cox, &an_cox, &cox_spec)?;
@@ -1250,6 +1291,11 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
         linkage: ClusterLinkage::Complete,
         k_means_k: Some(2),
         k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     };
     let an_cl = AnalysisSpec::new(SheetId::new("res-cl-dirty"), ds_hm.id.clone(), AnalysisKind::Multivariate(cl_spec.clone()))?;
     let mut res_cl = run_multivariate_analysis(&ds_hm, &an_cl, &cl_spec)?;
@@ -1292,6 +1338,7 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
         nonparametric: false,
         assume_equal_sd: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        ..Default::default()
     };
     let an_v = AnalysisSpec::new(SheetId::new("res-v-dirty"), ds_v.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
     let mut res_v = run_multiple_row_t_tests_analysis(&ds_v, &an_v, &mr_spec)?;
@@ -1406,6 +1453,11 @@ fn manhattan_complete_clustering(ds: &DataSheet, res_id: &str) -> TestResult<Res
         linkage: ClusterLinkage::Complete,
         k_means_k: Some(2),
         k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     };
     let an = AnalysisSpec::new(SheetId::new(res_id), ds.id.clone(), AnalysisKind::Multivariate(cl_spec.clone()))?;
     Ok(run_multivariate_analysis(ds, &an, &cl_spec)?)

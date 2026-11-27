@@ -529,6 +529,8 @@ fn translate_normality_tests(content: Option<&JsonMap>, blocking: &mut Vec<Strin
         custom_upper_percentile: None,
         run_normality_battery: true,
         hypothetical_value: None,
+        normality_only: false,
+        emit_qq_tabs: false,
     })
 }
 
@@ -572,7 +574,15 @@ fn translate_math_transform(content: Option<&JsonMap>, blocking: &mut Vec<String
         Some("DELTA_METHOD") => ErrorPropagationMode::FirstOrderDeltaMethod,
         _ => ErrorPropagationMode::ReplicateEndpoints,
     };
-    AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })
+    AnalysisKind::Transform(TransformAnalysisSpec::Math {
+        x_transform,
+        y_transform,
+        error_propagation,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
+    })
 }
 
 fn parse_normalize_anchor(anchor_obj: Option<&JsonMap>, default_anchor: NormalizeAnchor, blocking: &mut Vec<String>) -> NormalizeAnchor {
@@ -615,6 +625,8 @@ fn translate_descriptive(content: Option<&JsonMap>, _blocking: &mut Vec<String>)
         custom_upper_percentile: pct,
         run_normality_battery: false,
         hypothetical_value: None,
+        normality_only: false,
+        emit_qq_tabs: false,
     })
 }
 
@@ -667,6 +679,12 @@ fn translate_survival(content: Option<&JsonMap>, _blocking: &mut Vec<String>) ->
         mv_time_column: None,
         mv_status_column: None,
         mv_group_column: None,
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     })
 }
 

@@ -23,6 +23,7 @@ mod d1_r18_2_identifiability_compare;
 mod d1_r18_3_extended_equations;
 mod d1_r18_4_dsl_builtins_and_init_rules;
 mod d1_r18_5_linear_deming;
+mod d1_r23_6_fit_oracles;
 mod dsl_fuzz_props;
 mod equations_and_dsl_blocks;
 mod pharma_binding_and_dsl;

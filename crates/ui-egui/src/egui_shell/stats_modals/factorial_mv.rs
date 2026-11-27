@@ -159,7 +159,7 @@ pub(super) fn render_multivariate_design_controls(
 ) {
     let MultivariateDesignCtx { doc, ep, spec, mv } = mvx;
     match mv {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, .. } => {
             render_section_title(ui, tokens, "PCA Matrix & Component Retention");
             if render_modal_radio(
                 ui,
@@ -281,7 +281,7 @@ pub(super) fn render_multivariate_design_controls(
                 intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleCorrHeatmap));
             }
         }
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max, .. } => {
             render_section_title(ui, tokens, "Distance Metric & Linkage");
             ui.horizontal_wrapped(|ui| {
                 for (wid, lbl, d) in [

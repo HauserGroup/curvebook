@@ -12,7 +12,7 @@ use curvebook_doc::{
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, try_export_result_sheet_tidy_csv};
 use curvebook_transform::{
     ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, TargetArchetypeKind, apply_import_link_pipeline,
-    evaluate_data_sheet_calculated_variables, validate_no_formula_cycle,
+    evaluate_data_sheet_calculated_variables, unlink_calculated_variable, validate_no_formula_cycle,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -42,7 +42,7 @@ use simulate::{
     run_simulate_distributions, run_simulate_xy,
 };
 
-/// Registered command specifications for the `table` group (29 commands).
+/// Registered command specifications for the `table` group (30 commands).
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
     SPECS
@@ -293,6 +293,17 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: command_schema::<SetCalculatedVariableParams>,
         enabled: has_multivar_sheet,
         run: run_set_calculated_variable,
+    },
+    {
+        id: "table.unlinkCalculatedVariable",
+        label: "Unlink Calculated Variable",
+        menu_path: "Data/Unlink Calculated Variable",
+        summary: "Freeze evaluated values of a calculated variable into an editable entered column and remove its live formula.",
+        beginner: "Converts a formula-driven column into static entered values while preserving its cells, exclusions, and role.",
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
+        input_schema: command_schema::<UnlinkCalculatedVariableParams>,
+        enabled: has_multivar_sheet,
+        run: run_unlink_calculated_variable,
     },
     {
         id: "table.simulateXy",
@@ -3073,6 +3084,92 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             "sheet_id": id.as_str(),
             "column": col_idx,
             "formula": formula,
+            "recalculated_sheets": recalc.recalculated_sheets,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UnlinkCalculatedVariableParams {
+    /// Target MultipleVariables sheet identifier.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Zero-based variable index or column title.
+    col: Option<ColRef>,
+    /// Fallback variable column title when `col` is omitted.
+    title: Option<String>,
+}
+
+fn run_unlink_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: UnlinkCalculatedVariableParams = parse_params(&command_schema::<UnlinkCalculatedVariableParams>(), raw)?;
+    let raw_id = p.sheet_id.clone();
+
+    // Validate target sheet, frozen guard, and column index before mutating so an already-entered column is a clean no-op.
+    {
+        let id = parse_sheet_id(&raw_id)?;
+        let ds = require_data_sheet(&ctx.session.doc, &id)?;
+        ensure_sheet_not_frozen(ds)?;
+        let TableArchetype::MultipleVariables(ref mv) = ds.archetype else {
+            return Err(
+                bad_input(format!("sheet `{id}` is not a MultipleVariables table")).with_remediation("Select a MultipleVariables data sheet.")
+            );
+        };
+        let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
+        if let Some(var) = mv.variables.get(col_idx)
+            && !matches!(var.source, VariableSource::Calculated { .. })
+        {
+            return Ok(CommandOutcome::read_only(
+                "table.unlinkCalculatedVariable",
+                "variable was already unlinked (entered)",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "column": col_idx,
+                    "title": var.title,
+                    "unlinked": false,
+                    "previous_formula": Value::Null,
+                    "role": format!("{:?}", var.role),
+                    "recalculated_sheets": 0,
+                }),
+            ));
+        }
+    }
+
+    let (id, (col_idx, col_title, previous_formula, final_role), recalc) = mutate_doc_data_sheet_and_recalc(ctx, &raw_id, false, |doc, id| {
+        let info_snapshot = doc.data_sheet(id).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
+        let ds = require_unfrozen_data_sheet_mut(doc, id)?;
+        let col_idx = {
+            let TableArchetype::MultipleVariables(ref mv) = ds.archetype else {
+                return Err(
+                    bad_input(format!("sheet `{id}` is not a MultipleVariables table")).with_remediation("Select a MultipleVariables data sheet.")
+                );
+            };
+            resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?
+        };
+        let previous = unlink_calculated_variable(ds, col_idx)?;
+        // Re-evaluate any remaining calculated columns that might reference this column.
+        evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
+        let TableArchetype::MultipleVariables(ref mv) = ds.archetype else {
+            return Err(bad_input(format!("sheet `{id}` is not a MultipleVariables table")));
+        };
+        let var = mv.variables.get(col_idx).ok_or_else(|| bad_input(format!("variable column {col_idx} out of range")))?;
+        Ok((col_idx, var.title.clone(), previous, var.role))
+    })?;
+
+    Ok(CommandOutcome::mutated(
+        "table.unlinkCalculatedVariable",
+        if previous_formula.is_some() {
+            "unlinked calculated variable into static entered values"
+        } else {
+            "variable was already unlinked (entered)"
+        },
+        json!({
+            "sheet_id": id.as_str(),
+            "column": col_idx,
+            "title": col_title,
+            "unlinked": previous_formula.is_some(),
+            "previous_formula": previous_formula,
+            "role": format!("{final_role:?}"),
             "recalculated_sheets": recalc.recalculated_sheets,
         }),
     ))

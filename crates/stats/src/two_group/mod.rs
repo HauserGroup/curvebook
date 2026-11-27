@@ -83,6 +83,7 @@ mod variance;
 #[cfg(test)]
 mod tests;
 
+pub use crate::lognormal::{OneSampleRatioTResult, lognormal_welch_t_test, one_sample_ratio_t_test};
 pub use bland_altman::{BlandAltmanResult, bland_altman};
 pub use multiple_row::{MultipleRowTestEntry, multiple_row_t_tests};
 pub use nonparametric::{

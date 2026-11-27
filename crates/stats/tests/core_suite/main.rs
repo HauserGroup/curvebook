@@ -15,6 +15,8 @@ mod d1_poisson_cox_result_sheets;
 mod d1_r18_6_simple_logistic;
 mod d1_reference_oracles;
 mod engine_smoke;
+mod glm_cox_r23_5_oracles;
+mod lognormal_anova_kmeans_oracles;
 mod parity_g3_g7;
 mod parity_g8_barnard_pb_mi;
 mod power_oracle;

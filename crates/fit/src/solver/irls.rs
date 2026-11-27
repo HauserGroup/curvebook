@@ -121,7 +121,7 @@ pub(in crate::solver) fn fit_poisson_irls(
         reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
     })?;
     let mut total_iters = last_out.iterations;
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
     let k_free = layout.k_free();
     let mut outer_converged = k_free == 0 && last_out.status == FitStatus::Converged;
 
@@ -377,7 +377,7 @@ pub(in crate::solver) fn fit_cauchy_irls(
     // If L2 OLS warm start chased an outlier into an unrepresentative steep step, also launch
     // Cauchy IRLS directly from a Lorentzian-merit simplex search seeded at `init_theta`.
     if k_free > 0 && config.use_simplex_warm_start {
-        let bounds = layout.bounds();
+        let bounds = layout.u_bounds();
         let nm_seed = nelder_mead_optimize(layout, init_theta, 500, 0.05, |th| {
             if ode_fit_budget_exceeded().is_some() {
                 return f64::INFINITY;
@@ -431,7 +431,7 @@ pub(in crate::solver) fn fit_predicted_y_irls(
         last_out.status = FitStatus::ImpossibleWeights;
         return Ok(last_out);
     }
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
     if let Some((w_res, y_hat, ss_no_within)) = eval_residuals_with_domain(model, layout, obs, &last_out.theta, false) {
         last_out.weighted_res = w_res;
         last_out.y_hat = y_hat;

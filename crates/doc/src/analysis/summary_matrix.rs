@@ -287,11 +287,19 @@ pub enum SummaryModeProcedure {
     TransformSimulate = 33,
     /// Deterministic random row sampling without replacement (`TransformAnalysisSpec::RandomSample`).
     TransformRandomSample = 34,
+    /// Per-row replicate summary statistics (`AnalysisKind::RowStatistics`).
+    RowStatistics = 35,
+    /// Row, column, or grand-total proportion/percentage reduction (`AnalysisKind::FractionOfTotal`).
+    FractionOfTotal = 36,
+    /// XY curve differentiation, cumulative integration, and smoothing (`AnalysisKind::CurveCalculus`).
+    CurveCalculus = 37,
+    /// Chained deterministic Monte Carlo simulation (`AnalysisKind::MonteCarloSimulation`).
+    MonteCarloSimulation = 38,
 }
 
 impl SummaryModeProcedure {
-    /// Complete ordered list of all 35 canonical summary-mode matrix procedures.
-    pub const ALL: [Self; 35] = [
+    /// Complete ordered list of all 39 canonical summary-mode matrix procedures.
+    pub const ALL: [Self; 39] = [
         Self::DescriptiveStats,
         Self::OutlierDetection,
         Self::TwoGroupParametricSummary,
@@ -327,6 +335,10 @@ impl SummaryModeProcedure {
         Self::TransformSelectAndTransform,
         Self::TransformSimulate,
         Self::TransformRandomSample,
+        Self::RowStatistics,
+        Self::FractionOfTotal,
+        Self::CurveCalculus,
+        Self::MonteCarloSimulation,
     ];
 
     /// Total number of procedure rows in [`SUMMARY_MODE_MATRIX`].
@@ -371,6 +383,10 @@ impl SummaryModeProcedure {
             Self::TransformSelectAndTransform => &SUMMARY_MODE_MATRIX[32],
             Self::TransformSimulate => &SUMMARY_MODE_MATRIX[33],
             Self::TransformRandomSample => &SUMMARY_MODE_MATRIX[34],
+            Self::RowStatistics => &SUMMARY_MODE_MATRIX[35],
+            Self::FractionOfTotal => &SUMMARY_MODE_MATRIX[36],
+            Self::CurveCalculus => &SUMMARY_MODE_MATRIX[37],
+            Self::MonteCarloSimulation => &SUMMARY_MODE_MATRIX[38],
         }
     }
 
@@ -403,11 +419,13 @@ impl SummaryModeProcedure {
             TwoGroupMethod::PairedT
             | TwoGroupMethod::RatioPairedT
             | TwoGroupMethod::LognormalUnpairedT
+            | TwoGroupMethod::LognormalWelchT
             | TwoGroupMethod::MannWhitneyU
             | TwoGroupMethod::WilcoxonSignedRank
             | TwoGroupMethod::PairedSignTest
             | TwoGroupMethod::KolmogorovSmirnov
-            | TwoGroupMethod::OneSampleWilcoxon { .. } => Self::TwoGroupRawOnly,
+            | TwoGroupMethod::OneSampleWilcoxon { .. }
+            | TwoGroupMethod::OneSampleRatioT { .. } => Self::TwoGroupRawOnly,
         })
     }
 
@@ -417,7 +435,12 @@ impl SummaryModeProcedure {
         }
         Some(match method {
             OneWayMethod::OrdinaryAnova | OneWayMethod::BrownForsytheAndWelch => Self::OneWayAnovaParametricSummary,
-            OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::KruskalWallis | OneWayMethod::Friedman => Self::OneWayAnovaRawOnly,
+            OneWayMethod::RepeatedMeasures { .. }
+            | OneWayMethod::KruskalWallis
+            | OneWayMethod::Friedman
+            | OneWayMethod::LognormalOrdinary
+            | OneWayMethod::LognormalWelchBf
+            | OneWayMethod::LognormalRepeatedMeasures { .. } => Self::OneWayAnovaRawOnly,
         })
     }
 
@@ -477,6 +500,10 @@ impl SummaryModeProcedure {
             AnalysisKind::FitSplineLowess(_) => Self::when(is_xy, Self::FitSplineLowess),
             AnalysisKind::LeveneTest(_) => Self::when(is_col, Self::LeveneTest),
             AnalysisKind::AreaUnderCurve(_) => Self::when(is_xy, Self::AreaUnderCurve),
+            AnalysisKind::RowStatistics(_) => Some(Self::RowStatistics),
+            AnalysisKind::FractionOfTotal(_) => Some(Self::FractionOfTotal),
+            AnalysisKind::CurveCalculus(_) => Self::when(is_xy, Self::CurveCalculus),
+            AnalysisKind::MonteCarloSimulation(_) => Some(Self::MonteCarloSimulation),
             AnalysisKind::NestedComparison(_) | AnalysisKind::Survival(_) | AnalysisKind::ImportedSnapshot(_) => None,
         }
     }
@@ -864,6 +891,38 @@ pub const SUMMARY_MODE_MATRIX: [SummaryModeMatrixRow; SummaryModeProcedure::COUN
         table_kinds: COL_XY_GROUPED,
         reference_citation: "Fisher & Yates (1938) (deterministic row sampling without replacement preserving summary tuples)",
         cells: SummaryModeRowCells::all(SummaryModeSupport::Supported(SummaryModeSemantics::StructuralPreservation)),
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::RowStatistics,
+        analysis_kind_id: AnalysisKindId::RowStatistics,
+        label: "Row statistics (replicate summaries)",
+        table_kinds: COL_XY_GROUPED,
+        reference_citation: "Zar (2010) (reconstructs parametric moments when N/SD present; central value otherwise)",
+        cells: CURVE_CENTRAL_OR_MOMENT_CELLS,
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::FractionOfTotal,
+        analysis_kind_id: AnalysisKindId::FractionOfTotal,
+        label: "Fraction of total",
+        table_kinds: COL_XY_GROUPED,
+        reference_citation: "Wilson (1927); Clopper & Pearson (1934) (operates on primary subcolumn 0 values)",
+        cells: SummaryModeRowCells::all(SummaryModeSupport::Supported(SummaryModeSemantics::CentralLocationOnly)),
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::CurveCalculus,
+        analysis_kind_id: AnalysisKindId::CurveCalculus,
+        label: "Curve calculus (differentiate, integrate, smooth)",
+        table_kinds: XY_ONLY,
+        reference_citation: "Savitzky & Golay (1964); Cleveland (1979); Yeh & Kwan (1978) (operates on central Y curve)",
+        cells: CURVE_CENTRAL_OR_MOMENT_CELLS,
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::MonteCarloSimulation,
+        analysis_kind_id: AnalysisKindId::MonteCarloSimulation,
+        label: "Monte Carlo simulation",
+        table_kinds: COL_XY_GROUPED,
+        reference_citation: "Metropolis & Ulam (1949) (chained seeded simulation independent of source subcolumn mode)",
+        cells: SummaryModeRowCells::all(SummaryModeSupport::Supported(SummaryModeSemantics::TableIndependent)),
     },
 ];
 

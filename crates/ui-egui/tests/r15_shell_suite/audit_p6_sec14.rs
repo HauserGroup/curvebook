@@ -194,7 +194,13 @@ fn fa_sec14_03_pcr_end_to_end_distinct_from_pca_with_leakage_guard_and_methods_r
         let mut spec = AnalysisSpec::new(
             id,
             "mv-pcr",
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: outcome }),
+            AnalysisKind::Multivariate(MultivariateSpec::Pca {
+                standardize: true,
+                parallel_analysis_seed: None,
+                pcr_outcome_column: outcome,
+                retention_rule: Default::default(),
+                emit_extra_matrices: false,
+            }),
         )
         .unwrap();
         spec.selected_data_sets = vec![0, 1, 2];

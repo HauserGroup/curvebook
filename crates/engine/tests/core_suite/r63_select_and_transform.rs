@@ -161,6 +161,11 @@ fn r63_engine_select_and_transform_derived_columns_update_params_and_dag() {
                 DerivedColumnFormula::new("Centered", "center(Response) OVER (PARTITION BY Group)"),
                 DerivedColumnFormula::new("RankInGroup", "rank(Response) OVER (PARTITION BY Group ORDER BY Response DESC)"),
             ],
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         })
     );
     let TableArchetype::Xy(out_xy) = &rs_updated.analyzable_data.as_ref().unwrap().archetype else {

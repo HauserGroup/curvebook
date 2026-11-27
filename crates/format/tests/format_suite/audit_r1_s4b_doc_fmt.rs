@@ -220,6 +220,7 @@ fn r1_s06_06_nonfinite_floats_rejected_across_graphs_layouts_notes_and_analyses(
             equation_id: String::from("line"),
             parameters: params,
             noise,
+            simulation_mode: None,
         })
     };
     let bad_kinds: Vec<(&str, AnalysisKind)> = vec![
@@ -229,6 +230,10 @@ fn r1_s06_06_nonfinite_floats_rejected_across_graphs_layouts_notes_and_analyses(
                 x_transform: Some(MathTransformPreset::LinearScale { slope: f64::NAN, intercept: 0.0 }),
                 y_transform: None,
                 error_propagation: Default::default(),
+                pharmacology_preset: None,
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
             }),
         ),
         (
@@ -237,6 +242,10 @@ fn r1_s06_06_nonfinite_floats_rejected_across_graphs_layouts_notes_and_analyses(
                 x_transform: None,
                 y_transform: Some(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: f64::INFINITY }),
                 error_propagation: Default::default(),
+                pharmacology_preset: None,
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
             }),
         ),
         (
@@ -279,6 +288,12 @@ fn r1_s06_06_nonfinite_floats_rejected_across_graphs_layouts_notes_and_analyses(
                 mv_time_column: None,
                 mv_status_column: None,
                 mv_group_column: None,
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
+                ratio_median_ci: false,
+                mv_status_columns: Vec::new(),
+                mv_group_columns: Vec::new(),
             }),
         ),
         (

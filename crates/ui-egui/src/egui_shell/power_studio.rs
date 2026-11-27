@@ -927,6 +927,7 @@ fn render_stage2_effect(
             }
             PowerTestFamily::TwoSamplePairedT => render_stage2_paired_t_inputs(ui, pw, tokens, meta, intents),
             PowerTestFamily::OneWayAnova => render_stage2_anova_inputs(ui, pw, tokens, meta, intents),
+            PowerTestFamily::LogRankSurvival => {}
             PowerTestFamily::TwoProportions if pw.survival_log_rank => {
                 let s_hr = render_stepper_row(
                     ui,

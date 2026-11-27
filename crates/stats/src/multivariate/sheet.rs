@@ -20,8 +20,8 @@
 //!   *Biometrika*, 86(4), 948-955.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistStatus, ClusterDistance, ClusterLinkage, DataSheet, MultivariateSpec, ResultCell, ResultSheet,
-    ResultTabKind, SubcolumnMode, TableArchetype, VariableRole, XColumnMode,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, DataSheet, KMeansAlgorithm, MultivariateSpec,
+    PValueFormat, PcaRetentionRule, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::student_t_two_sided_p;
@@ -30,12 +30,13 @@ use curvebook_math::sum::SummaryMoments;
 
 use super::clustering::{
     MAX_CLUSTER_K_SWEEP, MAX_CLUSTER_MATRIX_TAB_N, MAX_CLUSTERING_N, compute_mean_silhouette_from_dist, cophenetic_correlation,
-    cophenetic_distance_matrix, count_distinct_by_dist, count_distinct_rows, cut_dendrogram, hierarchical_clustering_from_dist, kmeans_pp_from_dist,
-    pairwise_distance_matrix, pairwise_distance_unchecked,
+    cophenetic_distance_matrix, count_distinct_by_dist, count_distinct_rows, cut_dendrogram, cut_dendrogram_at_height,
+    hierarchical_clustering_from_dist, pairwise_distance_matrix, pairwise_distance_unchecked,
 };
 use super::correlation::correlation_matrix;
+use super::kmeans_consensus::{ConsensusOptimalKResult, consensus_optimal_k, kmeans_feature_anova, kmeans_with_algorithm};
 use super::mice::mice_predictive_mean_matching;
-use super::pca::pca_analysis;
+use super::pca::{compute_pca_extra_matrices, pca_analysis, select_pca_retained_components};
 use super::types::{KMeansResult, MultipleImputationConfig, MultipleImputationResult, PcaResult};
 use crate::common::{
     build_tab, checklist_item, ci_cell, enforce_summary_mode_matrix, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha,
@@ -43,6 +44,278 @@ use crate::common::{
 };
 use crate::error::StatsError;
 use crate::regression::multiple_linear_regression;
+
+fn run_correlation_matrix_branch(
+    out: &mut ResultSheet,
+    sheet: &DataSheet,
+    spec: &AnalysisSpec,
+    spearman_rank: bool,
+    p_fmt: PValueFormat,
+) -> Result<(), StatsError> {
+    let (labels, opt_cols) = extract_optional_columns(sheet, &spec.selected_data_sets)?;
+    let refs: Vec<(&str, &[Option<f64>])> = labels.iter().zip(opt_cols.iter()).map(|(l, v)| (l.as_str(), v.as_slice())).collect();
+    let res = correlation_matrix(&refs, spearman_rank)?;
+
+    let mut tab_r = build_tab(
+        "corr-matrix-r",
+        if spearman_rank { "Spearman correlation matrix (rho)" } else { "Pearson correlation matrix (r)" },
+        ResultTabKind::MainSummary,
+        res.labels.clone(),
+        res.labels.clone(),
+        res.r_matrix.iter().map(|row| row.iter().map(|&v| num_cell(v)).collect()).collect(),
+    );
+    let mut tab_p = build_tab(
+        "corr-matrix-p",
+        "Correlation P values",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        res.labels.clone(),
+        res.labels.clone(),
+        res.p_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
+    );
+    let mut tab_q = build_tab(
+        "corr-matrix-fdr",
+        "BH FDR-adjusted q values",
+        ResultTabKind::MultipleComparisons,
+        res.labels.clone(),
+        res.labels.clone(),
+        res.fdr_q_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
+    );
+    let p_vars = res.labels.len();
+    let mut undefined_pairs = 0_usize;
+    for i in 0..p_vars {
+        for j in (i + 1)..p_vars {
+            if !res.r_matrix[i][j].is_finite() {
+                undefined_pairs += 1;
+            }
+        }
+    }
+    if undefined_pairs > 0 {
+        let msg = format!(
+            "{undefined_pairs} variable pair(s) had undefined correlation (constant column or < 3 complete pairs), omitted from display and excluded from Benjamini-Hochberg FDR adjustment."
+        );
+        tab_r.footnotes.push(msg.clone());
+        tab_p.footnotes.push(msg.clone());
+        tab_q.footnotes.push(msg);
+    }
+    out.tabs.extend([tab_r, tab_p, tab_q]);
+
+    let min_n = res.n_matrix.iter().flat_map(|r| r.iter()).copied().min().unwrap_or(0);
+    out.checklist.push(checklist_item(
+        "Pairwise sample sizes & multiplicity",
+        if min_n >= 10 && undefined_pairs == 0 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        Some(format!("min pairwise n = {min_n}, {} variables, {undefined_pairs} undefined pair(s)", res.labels.len())),
+        if undefined_pairs > 0 {
+            "Defined upper-triangle P values are adjusted via Benjamini-Hochberg; undefined pairs (< 3 complete pairs or zero variance) were excluded from the FDR family."
+        } else {
+            "Upper-triangle P values are adjusted for false discovery rate via Benjamini-Hochberg."
+        },
+    ));
+    Ok(())
+}
+
+fn run_unsupervised_pca_branch(
+    out: &mut ResultSheet,
+    sheet: &DataSheet,
+    spec: &AnalysisSpec,
+    standardize: bool,
+    parallel_analysis_seed: Option<u64>,
+    retention_rule: PcaRetentionRule,
+    emit_extra_matrices: bool,
+) -> Result<(), StatsError> {
+    let (labels, obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, &spec.selected_data_sets)?;
+    let n = rows.len();
+    let p = labels.len();
+    let flat: Vec<f64> = rows.into_iter().flat_map(|r| r.into_iter()).collect();
+    let mat = DenseMatrix::from_row_major(n, p, flat)?;
+    let pca = pca_analysis(&mat, &labels, standardize, parallel_analysis_seed)?;
+    let retained = select_pca_retained_components(&pca, retention_rule)?;
+    append_pca_outputs(out, &pca, labels.clone(), retained, retention_rule);
+    if emit_extra_matrices {
+        let extra = compute_pca_extra_matrices(&mat, &pca)?;
+        let pc_labels: Vec<String> = (1..=pca.eigenvalues.len()).map(|i| format!("PC{i}")).collect();
+        let scaled_rows: Vec<Vec<ResultCell>> = extra.scaled_data.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+        out.tabs.push(build_tab(
+            "pca-standardized-data",
+            if pca.standardized { "PCA standardized data matrix" } else { "PCA centered data matrix" },
+            ResultTabKind::Residuals,
+            labels.clone(),
+            obs_labels.clone(),
+            scaled_rows,
+        ));
+        let cov_rows: Vec<Vec<ResultCell>> = extra.cov_or_corr.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+        out.tabs.push(build_tab(
+            "pca-cov-corr-matrix",
+            if pca.standardized { "PCA correlation matrix" } else { "PCA covariance matrix" },
+            ResultTabKind::CovarianceMatrix,
+            labels.clone(),
+            labels.clone(),
+            cov_rows,
+        ));
+        let cos2_rows: Vec<Vec<ResultCell>> = extra.variable_cos2.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+        out.tabs.push(build_tab(
+            "pca-squared-cosines",
+            "PCA variable squared cosines (cos^2)",
+            ResultTabKind::Diagnostics,
+            pc_labels.clone(),
+            labels.clone(),
+            cos2_rows,
+        ));
+        let contrib_rows: Vec<Vec<ResultCell>> = pca.variable_contributions_pct.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+        out.tabs.push(build_tab(
+            "pca-variable-contributions",
+            "PCA variable contributions (%)",
+            ResultTabKind::Diagnostics,
+            pc_labels.clone(),
+            labels,
+            contrib_rows,
+        ));
+        let score_rows: Vec<Vec<ResultCell>> = pca.scores.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+        out.tabs.push(build_tab("pca-scores", "PCA observation component scores", ResultTabKind::Residuals, pc_labels, obs_labels, score_rows));
+    }
+    Ok(())
+}
+
+fn append_consensus_clustering_tabs(out: &mut ResultSheet, cons: &ConsensusOptimalKResult) {
+    let m_headers = vec![
+        String::from("Clusters (k)"),
+        String::from("Ball-Hall"),
+        String::from("Calinski-Harabasz"),
+        String::from("C-Index"),
+        String::from("Davies-Bouldin"),
+        String::from("Dunn"),
+        String::from("Frey"),
+        String::from("Friedman"),
+        String::from("Hartigan"),
+        String::from("Krzanowski-Lai"),
+        String::from("Marriot"),
+        String::from("McClain"),
+        String::from("Ptbiserial"),
+        String::from("Ratkowsky"),
+        String::from("Rubin"),
+        String::from("Silhouette"),
+        String::from("TraceW"),
+    ];
+    let m_labels: Vec<String> = cons.metrics_by_k.iter().map(|m| format!("k = {}", m.k)).collect();
+    let m_rows: Vec<Vec<ResultCell>> = cons
+        .metrics_by_k
+        .iter()
+        .map(|m| {
+            vec![
+                num_cell(m.k as f64),
+                opt_num_cell(m.ball_hall),
+                opt_num_cell(m.calinski_harabasz),
+                opt_num_cell(m.c_index),
+                opt_num_cell(m.davies_bouldin),
+                opt_num_cell(m.dunn),
+                opt_num_cell(m.frey),
+                opt_num_cell(m.friedman),
+                opt_num_cell(m.hartigan),
+                opt_num_cell(m.krzanowski_lai),
+                opt_num_cell(m.marriot),
+                opt_num_cell(m.mcclain),
+                opt_num_cell(m.ptbiserial),
+                opt_num_cell(m.ratkowsky),
+                opt_num_cell(m.rubin),
+                opt_num_cell(m.silhouette),
+                opt_num_cell(m.trace_w),
+            ]
+        })
+        .collect();
+    out.tabs.push(build_tab("cluster-metrics", "Cluster metrics", ResultTabKind::ModelComparison, m_headers, m_labels, m_rows));
+
+    let v_labels: Vec<String> = cons.index_votes.iter().map(|v| v.index_name.clone()).collect();
+    let v_rows: Vec<Vec<ResultCell>> = cons
+        .index_votes
+        .iter()
+        .map(|v| vec![opt_num_cell(v.voted_k.map(|k| k as f64)), ResultCell::Text(v.skip_reason.clone().unwrap_or_else(|| String::from("Voted")))])
+        .collect();
+    out.tabs.push(build_tab(
+        "consensus-k-votes",
+        "Consensus optimal-k index votes (17 indices)",
+        ResultTabKind::Diagnostics,
+        vec![String::from("Voted k"), String::from("Status")],
+        v_labels,
+        v_rows,
+    ));
+
+    let g_labels: Vec<String> = cons.gap_curve.iter().map(|g| format!("k = {}", g.k)).collect();
+    let g_rows: Vec<Vec<ResultCell>> = cons
+        .gap_curve
+        .iter()
+        .map(|g| vec![num_cell(g.k as f64), num_cell(g.log_w), num_cell(g.expected_log_w), num_cell(g.gap), num_cell(g.se_sim)])
+        .collect();
+    out.tabs.push(build_tab(
+        "gap-statistic",
+        "Gap statistic coordinates (Tibshirani et al. 2001)",
+        ResultTabKind::CurveCoordinates,
+        vec![String::from("Clusters (k)"), String::from("log(W)"), String::from("E[log(W*)]"), String::from("Gap(k)"), String::from("SE(sim)")],
+        g_labels,
+        g_rows,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_column_hierarchical_tabs(
+    out: &mut ResultSheet,
+    rows: &[Vec<f64>],
+    var_labels: &[String],
+    dist_metric: ClusterDistance,
+    link_rule: ClusterLinkage,
+    dist_label: &str,
+    link_label: &str,
+    cut_height: Option<f64>,
+) -> Result<(), StatsError> {
+    let p = var_labels.len();
+    if p < 2 {
+        return Ok(());
+    }
+    let mut col_vecs: Vec<Vec<f64>> = (0..p).map(|j| rows.iter().map(|r| r[j]).collect()).collect();
+    for col in &mut col_vecs {
+        if let Ok(m) = SummaryMoments::from_slice(col)
+            && let Ok(sd) = m.sample_sd()
+            && sd > 1e-15
+        {
+            for v in col.iter_mut() {
+                *v = (*v - m.mean) / sd;
+            }
+        }
+    }
+    let col_dist = pairwise_distance_matrix(&col_vecs, dist_metric)?;
+    let col_merges = hierarchical_clustering_from_dist(&col_dist, link_rule)?;
+    let col_coph = cophenetic_distance_matrix(p, &col_merges)?;
+    if let Some(r_col) = cophenetic_correlation(&col_dist, &col_coph) {
+        push_scalar(out, "cophenetic_r_columns", None, r_col);
+    }
+    let cd_headers = vec![String::from("Left"), String::from("Right"), format!("{link_label} distance"), String::from("Cluster size")];
+    let cd_labels: Vec<String> = (1..=col_merges.len()).map(|s| format!("Merge {s}")).collect();
+    let cd_rows: Vec<Vec<ResultCell>> = col_merges
+        .iter()
+        .map(|m| vec![num_cell(m.left as f64), num_cell(m.right as f64), num_cell(m.distance), num_cell(m.cluster_size as f64)])
+        .collect();
+    out.tabs.push(build_tab(
+        "hierarchical-dendrogram-columns",
+        format!("{link_label} column dendrogram linkage ({dist_label})"),
+        ResultTabKind::ModelComparison,
+        cd_headers,
+        cd_labels,
+        cd_rows,
+    ));
+    if let Some(h) = cut_height {
+        let cut_assigns = cut_dendrogram_at_height(p, &col_merges, h)?;
+        let k_cut = cut_assigns.iter().copied().max().map_or(0, |m| m + 1);
+        push_scalar(out, "Cut-height clusters (columns)", None, k_cut as f64);
+        let cut_rows: Vec<Vec<ResultCell>> = cut_assigns.iter().map(|&c| vec![num_cell((c + 1) as f64)]).collect();
+        out.tabs.push(build_tab(
+            "hierarchical-height-cut-columns",
+            format!("Hierarchical column clusters at height <= {h:.4}"),
+            ResultTabKind::ParametersAndConfidenceIntervals,
+            vec![String::from("Assigned cluster")],
+            var_labels.to_vec(),
+            cut_rows,
+        ));
+    }
+    Ok(())
+}
 
 /// Execute a [`MultivariateSpec`] (`Pca`, `CorrelationMatrix`, or `Clustering`) on a `DataSheet`.
 pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec: &MultivariateSpec) -> Result<ResultSheet, StatsError> {
@@ -52,82 +325,34 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
 
     match mv_spec {
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
-            let (labels, opt_cols) = extract_optional_columns(sheet, &spec.selected_data_sets)?;
-            let refs: Vec<(&str, &[Option<f64>])> = labels.iter().zip(opt_cols.iter()).map(|(l, v)| (l.as_str(), v.as_slice())).collect();
-            let res = correlation_matrix(&refs, *spearman_rank)?;
-
-            let mut tab_r = build_tab(
-                "corr-matrix-r",
-                if *spearman_rank { "Spearman correlation matrix (rho)" } else { "Pearson correlation matrix (r)" },
-                ResultTabKind::MainSummary,
-                res.labels.clone(),
-                res.labels.clone(),
-                res.r_matrix.iter().map(|row| row.iter().map(|&v| num_cell(v)).collect()).collect(),
-            );
-            let mut tab_p = build_tab(
-                "corr-matrix-p",
-                "Correlation P values",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                res.labels.clone(),
-                res.labels.clone(),
-                res.p_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
-            );
-            let mut tab_q = build_tab(
-                "corr-matrix-fdr",
-                "BH FDR-adjusted q values",
-                ResultTabKind::MultipleComparisons,
-                res.labels.clone(),
-                res.labels.clone(),
-                res.fdr_q_matrix.iter().map(|row| row.iter().map(|&v| p_cell_at_alpha(v, p_fmt, spec.confidence_level.alpha())).collect()).collect(),
-            );
-            let p_vars = res.labels.len();
-            let mut undefined_pairs = 0_usize;
-            for i in 0..p_vars {
-                for j in (i + 1)..p_vars {
-                    if !res.r_matrix[i][j].is_finite() {
-                        undefined_pairs += 1;
-                    }
-                }
-            }
-            if undefined_pairs > 0 {
-                let msg = format!(
-                    "{undefined_pairs} variable pair(s) had undefined correlation (constant column or < 3 complete pairs), omitted from display and excluded from Benjamini-Hochberg FDR adjustment."
-                );
-                tab_r.footnotes.push(msg.clone());
-                tab_p.footnotes.push(msg.clone());
-                tab_q.footnotes.push(msg);
-            }
-            out.tabs.extend([tab_r, tab_p, tab_q]);
-
-            let min_n = res.n_matrix.iter().flat_map(|r| r.iter()).copied().min().unwrap_or(0);
-            out.checklist.push(checklist_item(
-                "Pairwise sample sizes & multiplicity",
-                if min_n >= 10 && undefined_pairs == 0 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                Some(format!("min pairwise n = {min_n}, {} variables, {undefined_pairs} undefined pair(s)", res.labels.len())),
-                if undefined_pairs > 0 {
-                    "Defined upper-triangle P values are adjusted via Benjamini-Hochberg; undefined pairs (< 3 complete pairs or zero variance) were excluded from the FDR family."
-                } else {
-                    "Upper-triangle P values are adjusted for false discovery rate via Benjamini-Hochberg."
-                },
-            ));
+            run_correlation_matrix_branch(&mut out, sheet, spec, *spearman_rank, p_fmt)?;
         }
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, retention_rule, emit_extra_matrices } => {
             if let Some(outcome_col) = *pcr_outcome_column {
-                return run_pcr_branch(sheet, spec, *standardize, *parallel_analysis_seed, outcome_col);
+                return run_pcr_branch(sheet, spec, *standardize, *parallel_analysis_seed, outcome_col, *retention_rule);
             }
-            let (labels, rows) = extract_complete_matrix_rows(sheet, &spec.selected_data_sets)?;
-            let n = rows.len();
-            let p = labels.len();
-            let flat: Vec<f64> = rows.into_iter().flat_map(|r| r.into_iter()).collect();
-            let mat = DenseMatrix::from_row_major(n, p, flat)?;
-            let pca = pca_analysis(&mat, &labels, *standardize, *parallel_analysis_seed)?;
-            append_pca_outputs(&mut out, &pca, labels);
+            run_unsupervised_pca_branch(&mut out, sheet, spec, *standardize, *parallel_analysis_seed, *retention_rule, *emit_extra_matrices)?;
         }
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+        MultivariateSpec::Clustering {
+            k_means_k,
+            distance,
+            linkage,
+            k_sweep_max,
+            consensus_optimal_k: use_consensus,
+            kmeans_algorithm,
+            cluster_direction,
+            cut_height,
+            emit_anova_tab,
+        } => {
             if let Some(k_max_req) = k_sweep_max
                 && *k_max_req < 2
             {
                 return Err(StatsError::InvalidParameter { name: "k_sweep_max", value: *k_max_req as f64 });
+            }
+            if let Some(h) = cut_height
+                && (!h.is_finite() || *h < 0.0)
+            {
+                return Err(StatsError::InvalidParameter { name: "cut_height", value: *h });
             }
             let (var_labels, obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, &spec.selected_data_sets)?;
             let n = rows.len();
@@ -137,6 +362,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             let p = var_labels.len();
             let dist_metric = *distance;
             let link_rule = *linkage;
+            let km_algo = *kmeans_algorithm;
 
             let dist_mat = pairwise_distance_matrix(&rows, dist_metric)?;
             let merges = hierarchical_clustering_from_dist(&dist_mat, link_rule)?;
@@ -150,17 +376,25 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             };
             let mut sweep_results: Vec<KMeansResult> = Vec::new();
             for k_try in 2..=k_max {
-                if let Ok(res) = kmeans_pp_from_dist(&rows, k_try, dist_metric, &dist_mat, 0xC105_7E57) {
+                if let Ok(res) = kmeans_with_algorithm(&rows, k_try, dist_metric, km_algo, 0xC105_7E57) {
                     sweep_results.push(res);
                 }
             }
+
+            let consensus_res = if *use_consensus && n >= 4 && k_max >= 2 {
+                Some(consensus_optimal_k(&rows, 2, k_max, dist_metric, km_algo, 0xC105_7E57)?)
+            } else {
+                None
+            };
 
             let km = if let Some(k) = k_means_k {
                 if let Some(found) = sweep_results.iter().find(|r| r.k == *k) {
                     found.clone()
                 } else {
-                    kmeans_pp_from_dist(&rows, *k, dist_metric, &dist_mat, 0xC105_7E57)?
+                    kmeans_with_algorithm(&rows, *k, dist_metric, km_algo, 0xC105_7E57)?
                 }
+            } else if let Some(ref cons) = consensus_res {
+                cons.best_fit.clone()
             } else if let Some(best) = sweep_results
                 .iter()
                 .filter(|r| n < 3 || r.k < n)
@@ -175,7 +409,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             {
                 best.clone()
             } else {
-                kmeans_pp_from_dist(&rows, n_distinct.clamp(1, 2), dist_metric, &dist_mat, 0xC105_7E57)?
+                kmeans_with_algorithm(&rows, n_distinct.clamp(1, 2), dist_metric, km_algo, 0xC105_7E57)?
             };
 
             push_scalar(&mut out, "Clusters (k)", None, km.k as f64);
@@ -184,11 +418,19 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             if let Some(r_coph) = cophenetic_r {
                 push_scalar(&mut out, "cophenetic_r", None, r_coph);
             }
+            if let Some(ref cons) = consensus_res {
+                push_scalar(&mut out, "Consensus optimal k", None, cons.optimal_k as f64);
+            }
 
             let dist_label = cluster_distance_label(dist_metric);
             let link_label = cluster_linkage_label(link_rule);
+            let algo_label = match km_algo {
+                KMeansAlgorithm::Lloyd => "Lloyd",
+                KMeansAlgorithm::HartiganWong => "Hartigan-Wong",
+                KMeansAlgorithm::MacQueen => "MacQueen",
+            };
 
-            if k_means_k.is_some() || k_sweep_max.is_some() || !sweep_results.is_empty() {
+            if k_means_k.is_some() || k_sweep_max.is_some() || !sweep_results.is_empty() || consensus_res.is_some() {
                 let mut c_headers = vec![String::from("Cluster"), String::from("Size")];
                 c_headers.extend(var_labels.iter().map(|l| format!("Centroid ({l})")));
                 let mut c_labels = Vec::with_capacity(km.k);
@@ -202,7 +444,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 }
                 out.tabs.push(build_tab(
                     "kmeans-clusters",
-                    format!("k-means++ cluster centroids ({dist_label})"),
+                    format!("k-means++ cluster centroids ({algo_label}, {dist_label})"),
                     ResultTabKind::MainSummary,
                     c_headers,
                     c_labels,
@@ -224,6 +466,52 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                     assign_rows,
                 ));
 
+                if *emit_anova_tab
+                    && km.k >= 2
+                    && n > km.k
+                    && let Ok(anova_rows) = kmeans_feature_anova(&rows, &var_labels, &km.assignments, km.k)
+                {
+                    let a_labels: Vec<String> = anova_rows.iter().map(|r| r.variable.clone()).collect();
+                    let a_cells: Vec<Vec<ResultCell>> = anova_rows
+                        .iter()
+                        .map(|r| {
+                            vec![
+                                num_cell(r.ss_between),
+                                num_cell(r.df_between),
+                                num_cell(r.ms_between),
+                                num_cell(r.ss_within),
+                                num_cell(r.df_within),
+                                num_cell(r.ms_within),
+                                num_cell(r.f_statistic),
+                                p_cell_at_alpha(r.p_value, p_fmt, spec.confidence_level.alpha()),
+                                num_cell(r.r_squared),
+                            ]
+                        })
+                        .collect();
+                    out.tabs.push(build_tab(
+                        "kmeans-anova",
+                        "K-means cluster ANOVA summary",
+                        ResultTabKind::AnovaTable,
+                        vec![
+                            String::from("SS Between"),
+                            String::from("DF Between"),
+                            String::from("MS Between"),
+                            String::from("SS Within"),
+                            String::from("DF Within"),
+                            String::from("MS Within"),
+                            String::from("F"),
+                            String::from("P value"),
+                            String::from("R squared"),
+                        ],
+                        a_labels,
+                        a_cells,
+                    ));
+                }
+
+                if let Some(ref cons) = consensus_res {
+                    append_consensus_clustering_tabs(&mut out, cons);
+                }
+
                 if !sweep_results.is_empty() {
                     let s_labels: Vec<String> = sweep_results.iter().map(|r| format!("k = {}", r.k)).collect();
                     let s_rows: Vec<Vec<ResultCell>> =
@@ -239,20 +527,41 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 }
             }
 
-            let d_headers = vec![String::from("Left"), String::from("Right"), format!("{link_label} distance"), String::from("Cluster size")];
-            let d_labels: Vec<String> = (1..=merges.len()).map(|s| format!("Merge {s}")).collect();
-            let d_rows: Vec<Vec<ResultCell>> = merges
-                .iter()
-                .map(|m| vec![num_cell(m.left as f64), num_cell(m.right as f64), num_cell(m.distance), num_cell(m.cluster_size as f64)])
-                .collect();
-            out.tabs.push(build_tab(
-                "hierarchical-dendrogram",
-                format!("{link_label} dendrogram linkage ({dist_label})"),
-                ResultTabKind::ModelComparison,
-                d_headers,
-                d_labels,
-                d_rows,
-            ));
+            if matches!(*cluster_direction, ClusterDirection::Rows | ClusterDirection::Both) {
+                let d_headers = vec![String::from("Left"), String::from("Right"), format!("{link_label} distance"), String::from("Cluster size")];
+                let d_labels: Vec<String> = (1..=merges.len()).map(|s| format!("Merge {s}")).collect();
+                let d_rows: Vec<Vec<ResultCell>> = merges
+                    .iter()
+                    .map(|m| vec![num_cell(m.left as f64), num_cell(m.right as f64), num_cell(m.distance), num_cell(m.cluster_size as f64)])
+                    .collect();
+                out.tabs.push(build_tab(
+                    "hierarchical-dendrogram",
+                    format!("{link_label} dendrogram linkage ({dist_label})"),
+                    ResultTabKind::ModelComparison,
+                    d_headers,
+                    d_labels,
+                    d_rows,
+                ));
+
+                if let Some(h) = *cut_height {
+                    let cut_assigns = cut_dendrogram_at_height(n, &merges, h)?;
+                    let k_cut = cut_assigns.iter().copied().max().map_or(0, |m| m + 1);
+                    push_scalar(&mut out, "Cut-height clusters (rows)", None, k_cut as f64);
+                    let cut_rows: Vec<Vec<ResultCell>> = cut_assigns.iter().map(|&c| vec![num_cell((c + 1) as f64)]).collect();
+                    out.tabs.push(build_tab(
+                        "hierarchical-height-cut",
+                        format!("Hierarchical row clusters at height <= {h:.4}"),
+                        ResultTabKind::ParametersAndConfidenceIntervals,
+                        vec![String::from("Assigned cluster")],
+                        obs_labels.clone(),
+                        cut_rows,
+                    ));
+                }
+            }
+
+            if matches!(*cluster_direction, ClusterDirection::Columns | ClusterDirection::Both) {
+                append_column_hierarchical_tabs(&mut out, &rows, &var_labels, dist_metric, link_rule, dist_label, link_label, *cut_height)?;
+            }
 
             let max_hier_k = n.saturating_sub(1).min(8);
             if max_hier_k >= 2 {
@@ -908,7 +1217,7 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
 
 type CompleteMatrixWithNames = (Vec<String>, Vec<String>, Vec<Vec<f64>>);
 
-fn append_pca_outputs(out: &mut ResultSheet, pca: &PcaResult, labels: Vec<String>) {
+fn append_pca_outputs(out: &mut ResultSheet, pca: &PcaResult, labels: Vec<String>, retained_pcs: usize, retention_rule: PcaRetentionRule) {
     if let Some(ev1) = pca.eigenvalues.first() {
         push_scalar(out, "PC1 eigenvalue", None, *ev1);
     }
@@ -916,6 +1225,7 @@ fn append_pca_outputs(out: &mut ResultSheet, pca: &PcaResult, labels: Vec<String
         push_scalar(out, "PC1 variance proportion", None, *vp1);
     }
     push_scalar(out, "Kaiser retained PCs", None, pca.kaiser_components as f64);
+    push_scalar(out, "Retained PCs", None, retained_pcs as f64);
 
     let mut headers = vec![String::from("Eigenvalue"), String::from("Variance %"), String::from("Cumulative %")];
     if pca.parallel_analysis_thresholds.is_some() {
@@ -936,11 +1246,18 @@ fn append_pca_outputs(out: &mut ResultSheet, pca: &PcaResult, labels: Vec<String
     let load_rows: Vec<Vec<ResultCell>> = pca.loadings.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
     out.tabs.push(build_tab("pca-loadings", "PCA component loadings", ResultTabKind::ParametersAndConfidenceIntervals, pc_labels, labels, load_rows));
 
+    let rule_desc = match retention_rule {
+        PcaRetentionRule::KaiserOrParallel => String::from("Kaiser / Parallel Analysis"),
+        PcaRetentionRule::EigenvalueCutoff(c) => format!("Eigenvalue > {c:.4}"),
+        PcaRetentionRule::FixedCount(k) => format!("Fixed {k} component(s)"),
+        PcaRetentionRule::CumulativeVariancePercent(pct) => format!("Cumulative variance >= {pct:.1}%"),
+        PcaRetentionRule::SelectAll => String::from("Select all components"),
+    };
     out.checklist.push(checklist_item(
         "Component retention (Kaiser & Parallel Analysis)",
         ChecklistStatus::Pass,
         Some(format!(
-            "Kaiser = {} PCs{}",
+            "Retained = {retained_pcs} PCs ({rule_desc}); Kaiser = {} PCs{}",
             pca.kaiser_components,
             pca.parallel_analysis_components.map_or(String::new(), |c| format!(", Parallel Analysis = {c} PCs"))
         )),
@@ -999,6 +1316,7 @@ fn run_pcr_branch(
     standardize: bool,
     parallel_analysis_seed: Option<u64>,
     outcome_col: usize,
+    retention_rule: PcaRetentionRule,
 ) -> Result<ResultSheet, StatsError> {
     let pred_indices = validate_pcr_column_indices(sheet, &spec.selected_data_sets, outcome_col)?;
     let p = pred_indices.len();
@@ -1033,7 +1351,7 @@ fn run_pcr_branch(
     if k_avail == 0 {
         return Err(StatsError::InsufficientSampleSize { context: "PCR components", required: 1, actual: 0 });
     }
-    let k_raw = pca.parallel_analysis_components.unwrap_or(pca.kaiser_components).max(1);
+    let k_raw = select_pca_retained_components(&pca, retention_rule)?.max(1);
     let k_ret = k_raw.min(k_avail).min(n.saturating_sub(2)).max(1);
     if n < k_ret + 2 {
         return Err(StatsError::InsufficientSampleSize { context: "PCR observations", required: k_ret + 2, actual: n });
@@ -1114,7 +1432,7 @@ fn run_pcr_branch(
     push_scalar(&mut out, "PCR Retained components", None, k_ret as f64);
     push_scalar(&mut out, "PCR Predictor count", None, p as f64);
     push_scalar(&mut out, "PCR Observation count", None, n as f64);
-    append_pca_outputs(&mut out, &pca, pred_labels);
+    append_pca_outputs(&mut out, &pca, pred_labels, k_ret, retention_rule);
 
     out.tabs.insert(
         0,
@@ -1261,11 +1579,6 @@ fn extract_complete_matrix_rows_with_names(sheet: &DataSheet, selected: &[usize]
     Ok((labels, obs_labels, rows))
 }
 
-fn extract_complete_matrix_rows(sheet: &DataSheet, selected: &[usize]) -> Result<(Vec<String>, Vec<Vec<f64>>), StatsError> {
-    let (labels, _obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, selected)?;
-    Ok((labels, rows))
-}
-
 /// Expose Pearson `r` helper directly for pairwise convenience.
 #[must_use]
 pub fn ci_cell_from_option(ci: Option<(f64, f64)>) -> ResultCell {
@@ -1320,6 +1633,11 @@ mod tests {
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         };
         let spec = AnalysisSpec::new(SheetId::new("res-cl"), SheetId::new("mv-cluster"), AnalysisKind::Multivariate(mv_spec.clone()))?;
         let res = run_multivariate_analysis(&sheet, &spec, &mv_spec)?;

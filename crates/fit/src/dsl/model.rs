@@ -7,22 +7,25 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 
+use curvebook_doc::{ParameterRule, RelationalConstraint};
 use curvebook_math::roots::{RootOptions, brent_root};
 
 use crate::dsl::ast::{CompiledInitRule, CompiledOdeInit, CompiledProgram, DatasetFilter, DslCompileWarning, DslEquationKind, Expr, OpCode};
 use crate::dsl::compile::compile_program_from_indices;
 use crate::dsl::implicit::{implicit_newton_fallback, implicit_probes_and_scale};
-use crate::dsl::limits::{MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_ODE_VM_OPS_PER_EVAL, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES, MAX_VM_STEPS};
+use crate::dsl::limits::{MAX_DSL_SOURCE_BYTES, MAX_ODE_VM_OPS_PER_EVAL, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES, MAX_VM_STEPS};
 use crate::dsl::ode::{
     NEXT_ODE_MODEL_ID, OdeRhsSource, consume_ode_fit_rk_step, consume_ode_fit_vm_ops, eval_ode_on_side, ode_fit_budget_exceeded,
     store_cached_ode_trajectory, take_cached_ode_trajectory,
 };
 use crate::dsl::statements::{
-    DslSection, EqItem, ParsedStatement, ResolvedEquationBody, byte_offset_in_line, collect_free_idents, compile_initial_rules, compile_transforms,
-    compute_dataset_stats, is_builtin_constant_or_var, parse_dataset_prefix, parse_section_header, parse_statement, parse_statement_with_locs,
-    resolve_equation_branches, strip_comment,
+    DslSection, EqItem, ParsedConstraints, ParsedStatement, ResolvedEquationBody, byte_offset_in_line, collect_free_idents, compile_initial_rules,
+    compile_transforms, compute_dataset_stats, is_builtin_constant_or_var, join_continued_lines, parse_constraints_section, parse_dataset_prefix,
+    parse_section_header, parse_statement, parse_statement_with_locs, resolve_equation_branches, strip_comment,
 };
-use crate::dsl::vm::{VmInput, eval_bytecode, eval_bytecode_with_budget, eval_bytecode_with_locals};
+use crate::dsl::vm::{
+    CurveTransformHost, VmInput, eval_bytecode, eval_bytecode_with_budget, eval_bytecode_with_curve_host, eval_bytecode_with_locals,
+};
 use crate::error::FitError;
 use crate::library::ParametricModel;
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -47,6 +50,9 @@ pub struct CompiledDslModel {
     pub(in crate::dsl) column_title_values: Vec<f64>,
     pub(in crate::dsl) transforms: Vec<(String, usize, CompiledProgram)>,
     pub(in crate::dsl) transform_local_count: usize,
+    pub(in crate::dsl) constraint_rules: Vec<ParameterRule>,
+    pub(in crate::dsl) constraint_relations: Vec<RelationalConstraint>,
+    pub(in crate::dsl) mandatory_constants: Vec<String>,
     pub(in crate::dsl) warnings: Vec<DslCompileWarning>,
 }
 
@@ -77,25 +83,31 @@ impl CompiledDslModel {
         let mut parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)> = Vec::new();
         let mut raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)> = Vec::new();
         let mut raw_transform_lines: Vec<(usize, String, Expr)> = Vec::new();
+        let mut raw_constraint_lines: Vec<(usize, String)> = Vec::new();
         let mut initial_hints = HashMap::new();
         let mut ident_locs: HashMap<String, (usize, usize)> = HashMap::new();
         let mut total_dataset_indices = 0_usize;
 
-        for (idx, raw_line) in source.lines().enumerate() {
-            let line_no = idx + 1;
-            if line_no > MAX_DSL_LINES {
-                return Err(FitError::DslCompileError {
-                    message: format!("Custom equation exceeds maximum line limit ({MAX_DSL_LINES})"),
-                    line: line_no,
-                    column: 1,
-                });
-            }
+        let logical_lines = join_continued_lines(source)?;
+        for (line_no, raw_line) in &logical_lines {
+            let line_no = *line_no;
             let trimmed = strip_comment(raw_line, line_no, &mut initial_hints)?;
             if trimmed.is_empty() {
                 continue;
             }
             if let Some(next_section) = parse_section_header(trimmed, line_no)? {
                 section = next_section;
+                continue;
+            }
+            if section == DslSection::Constraints {
+                if trimmed.starts_with('<') {
+                    return Err(FitError::DslCompileError {
+                        message: "Dataset selectors are not supported in [Constraints]".to_owned(),
+                        line: line_no,
+                        column: 1,
+                    });
+                }
+                raw_constraint_lines.push((line_no, trimmed.to_owned()));
                 continue;
             }
             let (filter, rest) = parse_dataset_prefix(trimmed, line_no)?;
@@ -167,6 +179,7 @@ impl CompiledDslModel {
                         }
                     }
                 }
+                DslSection::Constraints => {}
             }
         }
 
@@ -296,6 +309,8 @@ impl CompiledDslModel {
 
         let (initial_rules, init_local_count) = compile_initial_rules(raw_init_lines, &param_order, &param_map, &mut total_opcodes)?;
         let (transforms, transform_local_count) = compile_transforms(raw_transform_lines, &param_map, &mut total_opcodes)?;
+        let ParsedConstraints { parameter_rules: constraint_rules, relational_constraints: constraint_relations, mandatory_constants } =
+            parse_constraints_section(&raw_constraint_lines, &param_order)?;
 
         Ok(Self {
             name: id.clone(),
@@ -315,6 +330,9 @@ impl CompiledDslModel {
             column_title_values: Vec::new(),
             transforms,
             transform_local_count,
+            constraint_rules,
+            constraint_relations,
+            mandatory_constants,
             warnings,
         })
     }
@@ -621,6 +639,100 @@ impl CompiledDslModel {
         store_cached_ode_trajectory(traj);
         result
     }
+
+    /// Invert `Y(x; params) = y_target` for `x` on dataset `ds_idx` via outward multi-scale bracket
+    /// scanning followed by Brent's method (1973). Used by `X[expr]` inside `[Transforms]`.
+    pub(in crate::dsl) fn solve_curve_x(&self, y_target: f64, params: &[f64], ds_idx: usize) -> Option<f64> {
+        if !y_target.is_finite() {
+            return None;
+        }
+        let g = |x: f64| -> f64 { self.eval(&[x], params, ds_idx).map_or(f64::NAN, |y| y - y_target) };
+        let g0 = g(0.0);
+        if g0 == 0.0 {
+            return Some(0.0);
+        }
+        let mut pos_probes: Vec<f64> = Vec::with_capacity(160);
+        for k in 1..=20 {
+            pos_probes.push(0.25 * (k as f64));
+        }
+        for k in 6..=40 {
+            pos_probes.push(k as f64);
+        }
+        for exp in -6..=6_i32 {
+            let base = 10.0_f64.powi(exp);
+            for mult in [1.0, 2.0, 5.0] {
+                pos_probes.push(base * mult);
+            }
+        }
+        for &p in params {
+            if p.is_finite() && p != 0.0 {
+                let ap = p.abs();
+                for mult in [0.25, 0.5, 1.0, 2.0, 4.0] {
+                    let cand = ap * mult;
+                    if cand.is_finite() && cand > 0.0 {
+                        pos_probes.push(cand);
+                    }
+                }
+            }
+        }
+        pos_probes.sort_by(f64::total_cmp);
+        pos_probes.dedup_by(|a, b| (*a - *b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0));
+
+        let refine = |lo: f64, hi: f64| -> Option<f64> {
+            let scale = lo.abs().max(hi.abs()).max(1.0);
+            let root = brent_root(&g, lo, hi, RootOptions { abs_tol: 1e-13 * scale, rel_tol: 1e-12, max_iters: 120 }).ok()?;
+            if !root.is_finite() {
+                return None;
+            }
+            let r_val = g(root);
+            let f_lo = g(lo);
+            let f_hi = g(hi);
+            if !r_val.is_finite() || !f_lo.is_finite() || !f_hi.is_finite() {
+                return None;
+            }
+            let ref_mag = f_lo.abs().max(f_hi.abs()).max(y_target.abs()).max(1.0);
+            (r_val.abs() <= 1e-6 * ref_mag).then_some(root)
+        };
+
+        for sign in [1.0_f64, -1.0_f64] {
+            let mut prev_x: Option<f64> = g0.is_finite().then_some(0.0);
+            let mut prev_g = g0;
+            for &m in &pos_probes {
+                let x = sign * m;
+                let gx = g(x);
+                if gx.is_finite() {
+                    if gx == 0.0 {
+                        return Some(x);
+                    }
+                    if let Some(px) = prev_x
+                        && (prev_g > 0.0) != (gx > 0.0)
+                        && let Some(root) = refine(px.min(x), px.max(x))
+                    {
+                        return Some(root);
+                    }
+                    prev_x = Some(x);
+                    prev_g = gx;
+                }
+            }
+        }
+        None
+    }
+}
+
+struct DslCurveHost<'a> {
+    model: &'a CompiledDslModel,
+    params: &'a [f64],
+    ds_idx: usize,
+}
+
+impl CurveTransformHost for DslCurveHost<'_> {
+    fn eval_curve_y(&self, x: f64) -> Option<f64> {
+        self.model.eval(&[x], self.params, self.ds_idx)
+    }
+
+    fn solve_curve_x(&self, y_target: f64) -> Option<f64> {
+        self.model.solve_curve_x(y_target, self.params, self.ds_idx)
+    }
 }
 
 struct OdeEvalBudget {
@@ -716,21 +828,38 @@ impl ParametricModel for CompiledDslModel {
         Self::initial_guess_with_column_titles(self, points, titles)
     }
 
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        self.constraint_rules.clone()
+    }
+
+    fn default_relational_constraints(&self) -> Vec<RelationalConstraint> {
+        self.constraint_relations.clone()
+    }
+
+    fn mandatory_constant_params(&self) -> &[String] {
+        &self.mandatory_constants
+    }
+
     fn uses_sheet_dataset_index(&self) -> bool {
         true
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        self.derived_transforms_for_dataset(params, 0)
+    }
+
+    fn derived_transforms_for_dataset(&self, params: &[f64], dataset_index: usize) -> Vec<DerivedScalar> {
         let mut out = Vec::with_capacity(self.transforms.len());
         let mut locals = vec![None; self.transform_local_count];
+        let host = DslCurveHost { model: self, params, ds_idx: dataset_index };
         for (name, slot, prog) in &self.transforms {
-            if let Some(val) = eval_bytecode_with_locals(prog, &[0.0], f64::NAN, params, 0, &mut locals)
+            if let Some(val) = eval_bytecode_with_curve_host(prog, &[0.0], f64::NAN, params, dataset_index, &mut locals, &host)
                 && val.is_finite()
             {
                 if *slot < locals.len() {
                     locals[*slot] = Some(val);
                 }
-                out.push(DerivedScalar { name: name.clone(), value: val, units: None });
+                out.push(DerivedScalar::new(name.clone(), val, None));
             } else if *slot < locals.len() {
                 locals[*slot] = None;
             }

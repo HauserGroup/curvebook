@@ -170,12 +170,14 @@ fn audit_07_08_multiple_row_parity_nonparametric_df_and_df1_t_tests() {
         nonparametric: false,
         assume_equal_sd: true,
         multiplicity: MultiplicitySpec::default(),
+        ..Default::default()
     });
     let unpaired = AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
         paired: false,
         nonparametric: false,
         assume_equal_sd: true,
         multiplicity: MultiplicitySpec::default(),
+        ..Default::default()
     });
 
     // Odd column selections on Column (5, 7, 5-of-8) and MV (5 numeric, Label+3) reject with paired_selected_columns.
@@ -260,6 +262,7 @@ fn audit_multiple_row_nonparametric_empty_df_and_underpopulated_skip() {
         nonparametric: false,
         assume_equal_sd: true,
         multiplicity: MultiplicitySpec::default(),
+        ..Default::default()
     });
     // Nonparametric multiple-row tests emit Empty df; parametric keeps finite df; under-populated row skipped cleanly.
     let grp_np =

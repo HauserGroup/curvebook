@@ -39,20 +39,25 @@
 
 mod clustering;
 mod correlation;
+mod kmeans_consensus;
 mod mice;
 mod pca;
 mod sheet;
 mod types;
 
 pub use clustering::{
-    MAX_CLUSTERING_N, compute_mean_silhouette_from_dist, cophenetic_correlation, cophenetic_distance_matrix, cut_dendrogram, hierarchical_clustering,
-    hierarchical_clustering_pairwise_complete, hierarchical_clustering_with_metrics, kmeans_pp, kmeans_pp_with_distance, pairwise_distance_matrix,
-    pairwise_distance_value,
+    MAX_CLUSTERING_N, compute_mean_silhouette_from_dist, cophenetic_correlation, cophenetic_distance_matrix, cut_dendrogram,
+    cut_dendrogram_at_height, hierarchical_clustering, hierarchical_clustering_pairwise_complete, hierarchical_clustering_with_metrics, kmeans_pp,
+    kmeans_pp_with_distance, pairwise_distance_matrix, pairwise_distance_value,
 };
 pub use correlation::{correlation_matrix, kendall_tau_b, pearson_correlation, spearman_correlation};
-pub use curvebook_doc::{ClusterDistance, ClusterLinkage};
+pub use curvebook_doc::{ClusterDirection, ClusterDistance, ClusterLinkage, KMeansAlgorithm, PcaRetentionRule};
+pub use kmeans_consensus::{
+    ConsensusIndexVote, ConsensusOptimalKResult, GapCurvePoint, KMeansFeatureAnovaRow, KMeansValidityIndices, compute_gap_statistic,
+    compute_kmeans_validity_indices, consensus_optimal_k, kmeans_feature_anova, kmeans_with_algorithm, kmeans_with_centers,
+};
 pub use mice::{mice_predictive_mean_matching, rubin_pool_estimates};
-pub use pca::pca_analysis;
+pub use pca::{PcaExtraMatrices, compute_pca_extra_matrices, pca_analysis, select_pca_retained_components};
 pub use sheet::{ci_cell_from_option, run_multivariate_analysis};
 pub use types::{
     CorrelationMatrixResult, CorrelationPairResult, DendrogramMerge, KMeansResult, LinkageMethod, MultipleImputationConfig, MultipleImputationResult,

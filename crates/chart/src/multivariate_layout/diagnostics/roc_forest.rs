@@ -11,7 +11,10 @@ use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
 use curvebook_text::{RichText, parse_markup};
 
 use super::super::multivariate::{cell_token, column_categorical_levels};
-use super::{find_matching_result_where_checked, has_blocked_matching_result, raw_matching_results, resolve_source_data_sheet_checked};
+use super::{
+    find_header_col, find_matching_result_where_checked, has_blocked_matching_result, raw_matching_results, resolve_source_data_sheet_checked,
+    result_cell_num,
+};
 use crate::markers::emit_marker;
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, ScenePrimitive, TextAnchor};
 use crate::survival_cat::{
@@ -67,6 +70,7 @@ pub(in crate::multivariate_layout) fn compile_roc_curve(graph: &GraphSheet, doc:
     let mut curve_p = Path2D::new();
     let mut area_p = Path2D::new();
     let mut started = false;
+    let mut last_px = r.right();
     for &(fpr, tpr) in &points {
         let (Some((_, px)), Some((_, py))) =
             (x_axis.map_value(crate::clamp_f64_safe(fpr, 0.0, 1.0)), y_axis.map_value(crate::clamp_f64_safe(tpr, 0.0, 1.0)))
@@ -82,9 +86,10 @@ pub(in crate::multivariate_layout) fn compile_roc_curve(graph: &GraphSheet, doc:
             path_line(&mut curve_p, PointPt::new(px, py));
             path_line(&mut area_p, PointPt::new(px, py));
         }
+        last_px = px;
     }
     if started {
-        path_line(&mut area_p, PointPt::new(r.right(), r.bottom()));
+        path_line(&mut area_p, PointPt::new(last_px, r.bottom()));
         path_close(&mut area_p);
         scene.primitives.push(ScenePrimitive::Path { path: area_p, fill: Some(alpha_fill(color, 34)), stroke: None, clip: Some(r) });
         scene.primitives.push(ScenePrimitive::Path {
@@ -117,7 +122,33 @@ fn is_roc_or_logistic_analysis(kind: &AnalysisKind) -> bool {
 
 fn is_roc_auc_scalar_key(key: &str) -> bool {
     let norm = key.trim().to_ascii_lowercase().replace([' ', '-'], "_");
-    matches!(norm.as_str(), "roc_auc" | "auc")
+    matches!(norm.as_str(), "roc_auc" | "auc" | "area_under_roc_curve_(auc)")
+}
+
+fn find_roc_coords_tab(res: &ResultSheet) -> Option<&ResultTab> {
+    res.tabs.iter().find(|t| t.id == "glm-logistic-roc")
+}
+
+fn extract_roc_points_from_tab(tab: &ResultTab) -> Vec<(f64, f64)> {
+    let Some(fpr_col) = find_header_col(&tab.column_headers, |h| h.contains("1 - specificity") || h.contains("1-specificity") || h == "fpr") else {
+        return Vec::new();
+    };
+    let Some(tpr_col) = find_header_col(&tab.column_headers, |h| h.contains("sensitivity") || h == "tpr") else {
+        return Vec::new();
+    };
+    let mut pts: Vec<(f64, f64)> = tab
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let fpr = result_cell_num(row.get(fpr_col)?)?;
+            let tpr = result_cell_num(row.get(tpr_col)?)?;
+            Some((fpr, tpr))
+        })
+        .collect();
+    if pts.len() >= 2 && pts.first().is_some_and(|a| pts.last().is_some_and(|b| a.0 > b.0)) {
+        pts.reverse();
+    }
+    pts
 }
 
 fn resolve_roc_auc_scalar(res: &ResultSheet, curve_ds_idx: usize, single_roc_curve: bool) -> Option<f64> {
@@ -133,14 +164,25 @@ fn extract_roc_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Ve
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     let roc_res =
         find_matching_result_where_checked(graph, doc, warnings, |r| r.fitted_curves.iter().any(|fc| fc.equation_id.eq_ignore_ascii_case("ROC")))
+            .or_else(|| find_matching_result_where_checked(graph, doc, warnings, |r| find_roc_coords_tab(r).is_some()))
             .or_else(|| find_matching_result_where_checked(graph, doc, warnings, |r| is_roc_or_logistic_analysis(&r.analysis.kind)));
 
     if let Some(res) = roc_res {
         let roc_curves: Vec<&FittedCurveOverlay> = res.fitted_curves.iter().filter(|fc| fc.equation_id.eq_ignore_ascii_case("ROC")).collect();
         if let Some(curve) = roc_curves.iter().copied().find(|fc| fc.data_set_index == ds_idx).or_else(|| roc_curves.first().copied()) {
-            let pts: Vec<(f64, f64)> = curve.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect();
+            let mut pts: Vec<(f64, f64)> = curve.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect();
             if pts.len() >= 2 {
+                if pts.first().is_some_and(|a| pts.last().is_some_and(|b| a.0 > b.0)) {
+                    pts.reverse();
+                }
                 let auc = resolve_roc_auc_scalar(res, curve.data_set_index, roc_curves.len() == 1).unwrap_or_else(|| trapezoidal_auc(&pts));
+                return Some((pts, auc));
+            }
+        }
+        if let Some(tab) = find_roc_coords_tab(res) {
+            let pts = extract_roc_points_from_tab(tab);
+            if pts.len() >= 2 {
+                let auc = resolve_roc_auc_scalar(res, ds_idx, true).unwrap_or_else(|| trapezoidal_auc(&pts));
                 return Some((pts, auc));
             }
         }

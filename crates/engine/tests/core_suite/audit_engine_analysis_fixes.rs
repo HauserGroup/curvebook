@@ -188,7 +188,7 @@ fn audit_58_transform_rejects_unknown_operation_and_anchors() {
         &[
             ("transform.run", json!({ "source_sheet_id": "xy2", "kind": "normalize", "hundred_anchor": "maximum" })),
             ("transform.run", json!({ "source_sheet_id": "xy2", "kind": "normalize", "zero_anchor": "bogus" })),
-            ("transform.run", json!({ "source_sheet_id": "xy2", "kind": "remove_baseline", "operation": "multiply" })),
+            ("transform.run", json!({ "source_sheet_id": "xy2", "kind": "remove_baseline", "operation": "exponentiate" })),
         ],
     );
     run_cmds(
@@ -206,13 +206,21 @@ fn audit_58_transform_rejects_unknown_operation_and_anchors() {
                 "transform.run",
                 json!({ "sheet_id": "base-ok2", "source_sheet_id": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "pctchange" }),
             ),
+            (
+                "transform.run",
+                json!({ "sheet_id": "base-add", "source_sheet_id": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "add" }),
+            ),
+            (
+                "transform.run",
+                json!({ "sheet_id": "base-mul", "source_sheet_id": "xy2", "kind": "remove_baseline", "baseline_columns": [0], "operation": "multiply" }),
+            ),
         ],
     );
     assert_bad_inputs(
         &mut session,
         &[
             ("analysis.updateParams", json!({ "sheet_id": "norm-ok", "zero_anchor": "minimum" })),
-            ("analysis.updateParams", json!({ "sheet_id": "base-ok", "operation": "add" })),
+            ("analysis.updateParams", json!({ "sheet_id": "base-ok", "operation": "bogus_op" })),
         ],
     );
 }

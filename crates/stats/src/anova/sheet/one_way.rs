@@ -9,9 +9,9 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, DataSheet, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec,
-    OneWayAnovaSpec, OneWayMethod, PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SummaryPointError,
-    TableArchetype,
+    AnalysisKind, AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, CiBound, DataSheet, MixedModelDfMethod, MultiplicityMethod,
+    MultiplicitySpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, RemlZeroVariancePolicy, ResidualCovariance, ResultCell, ResultSheet, ResultTab,
+    ResultTabKind, SummaryPointError, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
@@ -30,18 +30,19 @@ use crate::anova::posthoc::{
     compare_independent_contrast_family, factorial_design_vector, mark_pair_significance, push_pairwise_outputs_with_footnote, zero_se_pair,
 };
 use crate::anova::reml::{
-    RemlContrastCore, cluster_ids_to_g_matrix, fit_multi_vc_reml_with_method_and_core, fit_random_intercept_reml_with_method_and_core,
+    RemlContrastCore, cluster_ids_to_g_matrix, fit_multi_vc_reml_with_policy_and_core, fit_random_intercept_reml_with_policy_and_core,
 };
 use crate::anova::reml_unstructured::fit_unstructured_rm_reml_with_method_and_core;
 use crate::anova::results::{FactorialAnovaTerm, OneWayAnovaResult, UnstructuredFallbackReason, VarianceHomogeneityResult};
 use crate::anova::sheet::factorial::push_reml_df_scalars;
 use crate::column::shapiro_wilk;
 use crate::common::{
-    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
+    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
     enforce_summary_mode_matrix, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
     rank_with_ties, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
+use crate::lognormal::validate_and_ln_transform;
 use crate::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, compare_dunn_ranks, compare_groups_pairwise_with_confidence,
     compare_groups_with_confidence, linear_trend_test, try_adjust_p_values, welch_pair_se_df,
@@ -54,7 +55,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
 
-    if matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman) {
+    if matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. } | OneWayMethod::Friedman) {
         return run_rm_one_way_anova_sheet(sheet, &mut out, anova_spec, confidence, p_fmt);
     }
 
@@ -204,7 +205,72 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 "Kruskal-Wallis compares group rank distributions without assuming Gaussian residuals.",
             ));
         }
-        OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman => {}
+        OneWayMethod::LognormalOrdinary => {
+            let res = raw_res_opt.ok_or(StatsError::RequiresRawReplicates)?;
+            push_scalar(&mut out, "F", None, res.f_statistic);
+            push_scalar(&mut out, "P value", None, res.p_value);
+            push_scalar(&mut out, "R squared", None, res.r_squared);
+            push_scalar(&mut out, "MS residual", None, res.ms_within);
+            push_scalar(&mut out, "Eta squared", None, res.effect_sizes.eta_squared);
+            push_scalar(&mut out, "Omega squared", None, res.effect_sizes.omega_squared);
+
+            let mut main_tab = build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt);
+            main_tab.title = String::from("Lognormal one-way ANOVA summary");
+            main_tab.footnotes.push(String::from(
+                "Ordinary one-way ANOVA evaluated on natural-log-transformed strictly positive observations ln(Y); pairwise contrasts are back-transformed to geometric mean ratios (A / B).",
+            ));
+            out.tabs.push(main_tab);
+            out.tabs.push(build_lognormal_group_summary_tab("group-geometric-means", "Group geometric means", &group_inputs));
+            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, false, p_fmt, confidence.alpha()));
+            append_one_way_multiplicity(
+                &mut out,
+                &group_inputs,
+                res.ms_within,
+                res.df_within,
+                res.ss_total,
+                &anova_spec.multiplicity,
+                p_fmt,
+                confidence,
+            )?;
+            augment_pairwise_tabs_with_lognormal_ratios(&mut out, confidence);
+            append_one_way_checklist(&mut out, &res, &group_inputs, &raw_slices_owned, false, confidence.alpha());
+        }
+        OneWayMethod::LognormalWelchBf => {
+            let base = raw_res_opt.ok_or(StatsError::RequiresRawReplicates)?;
+            let uv = unequal_variance_one_way_anova(&group_inputs)?;
+            push_scalar(&mut out, "Welch W", None, uv.welch_w);
+            push_scalar(&mut out, "Welch P value", None, uv.welch_p);
+            push_scalar(&mut out, "Brown-Forsythe F*", None, uv.brown_forsythe_f_star);
+            push_scalar(&mut out, "Brown-Forsythe P value", None, uv.brown_forsythe_p);
+
+            let uv_tab = TabBuilder::new("unequal-var-anova", "Lognormal Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable)
+                .headers(["Statistic", "DFn", "DFd", "P value"])
+                .row(
+                    "Brown-Forsythe ANOVA",
+                    [
+                        num_cell(uv.brown_forsythe_f_star),
+                        num_cell(uv.brown_forsythe_df1),
+                        num_cell(uv.brown_forsythe_df2),
+                        p_cell_at_alpha(uv.brown_forsythe_p, p_fmt, confidence.alpha()),
+                    ],
+                )
+                .row(
+                    "Welch's ANOVA",
+                    [num_cell(uv.welch_w), num_cell(uv.welch_df1), num_cell(uv.welch_df2), p_cell_at_alpha(uv.welch_p, p_fmt, confidence.alpha())],
+                )
+                .footnote(
+                    "Brown-Forsythe and Welch unequal-variance one-way ANOVA evaluated on ln(Y); pairwise contrasts are back-transformed to geometric mean ratios (A / B).",
+                )
+                .build();
+            out.tabs.push(uv_tab);
+            out.tabs.push(build_lognormal_group_summary_tab("group-geometric-means", "Group geometric means", &group_inputs));
+            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, false, p_fmt, confidence.alpha()));
+
+            append_welch_multiplicity(&mut out, &group_inputs, &base, &anova_spec.multiplicity, p_fmt, confidence)?;
+            augment_pairwise_tabs_with_lognormal_ratios(&mut out, confidence);
+            append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
+        }
+        OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. } | OneWayMethod::Friedman => {}
     }
 
     append_ignored_text_checklist_and_footnote(&mut out, "one-way ANOVA", &ignored_non_numeric);
@@ -300,7 +366,22 @@ pub(in crate::anova) fn emit_random_intercept_reml(
     p_fmt: PValueFormat,
     alpha: f64,
 ) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
-    let (reml, core) = fit_random_intercept_reml_with_method_and_core(x_mat, y_vec, cluster_ids, term_slices, df_method)?;
+    emit_random_intercept_reml_with_policy(out, x_mat, y_vec, cluster_ids, term_slices, df_method, RemlZeroVariancePolicy::BoundAtZero, p_fmt, alpha)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::anova) fn emit_random_intercept_reml_with_policy(
+    out: &mut ResultSheet,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    cluster_ids: &[usize],
+    term_slices: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
+    let (reml, core) = fit_random_intercept_reml_with_policy_and_core(x_mat, y_vec, cluster_ids, term_slices, df_method, policy)?;
     push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
     push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
     push_scalar(out, "REML ICC", None, reml.icc);
@@ -324,8 +405,22 @@ pub(in crate::anova) fn emit_random_intercept_reml(
         vc_tab.push_footnote(
             "Warning: random-intercept REML optimization hit the upper variance-ratio boundary or did not converge to an interior optimum.",
         );
+    } else if reml.sigma2_random < 0.0 {
+        vc_tab.push_footnote("Unbounded REML policy permitted a negative random-intercept variance component while preserving positive-definite V.");
     } else if reml.at_boundary {
-        vc_tab.push_footnote("Random-intercept variance component converged at the lower constraint boundary (sigma^2_random = 0).");
+        let msg = match policy {
+            RemlZeroVariancePolicy::BoundAtZero => {
+                "Random-intercept variance component converged at the lower constraint boundary (sigma^2_random = 0)."
+            }
+            RemlZeroVariancePolicy::DropZeroRandomTerm => {
+                "Random-intercept variance component converged at zero and was dropped (DropZeroRandomTerm policy; reduced OLS fixed-effects df applied)."
+            }
+            RemlZeroVariancePolicy::LegacyFallback => {
+                "Random-intercept variance component converged at zero; fell back to ordinary ANOVA residual df (LegacyFallback policy)."
+            }
+            RemlZeroVariancePolicy::Unbounded => "Random-intercept variance component converged at zero.",
+        };
+        vc_tab.push_footnote(msg);
     }
     out.tabs.push(vc_tab.build());
     out.checklist.push(append_reml_boundary_checklist(reml.converged, reml.at_boundary, reml.sigma2_random, reml.sigma2_error));
@@ -358,20 +453,21 @@ pub(in crate::anova) fn append_reml_boundary_checklist(converged: bool, at_bound
     }
 }
 
-pub(in crate::anova) fn emit_multi_vc_rm_reml(
+pub(in crate::anova) fn emit_multi_vc_rm_reml_with_policy(
     out: &mut ResultSheet,
     x_mat: &DenseMatrix,
     y_vec: &[f64],
     strata: &[(&str, &str, &[usize])],
     term_slices: &[(&str, usize, usize)],
     df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
 ) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
     let mut specs = Vec::with_capacity(strata.len());
     for &(scalar_name, _, ids) in strata {
         let (g_mat, rank_c) = cluster_ids_to_g_matrix(ids)?;
         specs.push((scalar_name, g_mat, rank_c));
     }
-    let (mres, core) = fit_multi_vc_reml_with_method_and_core(x_mat, y_vec, &specs, term_slices, df_method)?;
+    let (mres, core) = fit_multi_vc_reml_with_policy_and_core(x_mat, y_vec, &specs, term_slices, df_method, policy)?;
     let sum_rand: f64 = mres.variance_components.iter().map(|(_, v)| *v).sum();
     let tot = sum_rand + mres.sigma2_error;
     let frac_of_tot = |v: f64| if tot > 0.0 { v / tot } else { 0.0 };
@@ -389,7 +485,8 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
         .headers(["Component", "Variance", "SD", "% of total"]);
     for (idx, (_, row_title, _)) in strata.iter().enumerate() {
         let var = mres.variance_components.get(idx).map_or(0.0, |(_, v)| *v);
-        vc_tab.push_row(*row_title, [text_cell(*row_title), num_cell(var), num_cell(var.sqrt()), num_cell(100.0 * frac_of_tot(var))]);
+        let sd_cell = if var >= 0.0 { num_cell(var.sqrt()) } else { ResultCell::Empty };
+        vc_tab.push_row(*row_title, [text_cell(*row_title), num_cell(var), sd_cell, num_cell(100.0 * frac_of_tot(var))]);
     }
     vc_tab.push_row(
         "Residual",
@@ -399,8 +496,20 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
         vc_tab.push_footnote(
             "Warning: multi-variance-component REML optimization did not converge within the iteration budget; variance-component and df estimates may be approximate.",
         );
+    } else if mres.variance_components.iter().any(|(_, v)| *v < 0.0) {
+        vc_tab.push_footnote("Unbounded REML policy permitted negative variance component estimate(s) while preserving positive-definite V.");
     } else if mres.at_boundary {
-        vc_tab.push_footnote("One or more random variance components converged at the zero constraint boundary (sigma^2 = 0).");
+        let msg = match policy {
+            RemlZeroVariancePolicy::BoundAtZero => "One or more random variance components converged at the zero constraint boundary (sigma^2 = 0).",
+            RemlZeroVariancePolicy::DropZeroRandomTerm => {
+                "Zero-variance random term(s) were dropped and the reduced mixed model was refitted (DropZeroRandomTerm policy)."
+            }
+            RemlZeroVariancePolicy::LegacyFallback => {
+                "Random variance component hit zero boundary; fell back to ordinary OLS fixed-effects ANOVA (LegacyFallback policy)."
+            }
+            RemlZeroVariancePolicy::Unbounded => "One or more random variance components converged near zero.",
+        };
+        vc_tab.push_footnote(msg);
     }
     out.tabs.push(vc_tab.build());
     let metric = Some(format!("sum sigma^2_random = {sum_rand:.6}, sigma^2_error = {:.6}", mres.sigma2_error));
@@ -642,18 +751,45 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         row_trt.push(opt_num_cell(trt_term.partial_eta_squared));
         row_res.push(ResultCell::Empty);
     }
-    let gg_not_applied_under_cs = matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: true })
-        && anova_spec.residual_covariance == ResidualCovariance::CompoundSymmetry;
-    let mut rm_tab = TabBuilder::new("rm-one-way-anova", "RM one-way ANOVA (Mixed-effects REML)", ResultTabKind::AnovaTable)
+    let is_lognormal = matches!(anova_spec.method, OneWayMethod::LognormalRepeatedMeasures { .. });
+    let gg_not_applied_under_cs = matches!(
+        anova_spec.method,
+        OneWayMethod::RepeatedMeasures { geisser_greenhouse: true } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true }
+    ) && anova_spec.residual_covariance == ResidualCovariance::CompoundSymmetry;
+    let rm_title = if is_lognormal { "Lognormal RM one-way ANOVA (Mixed-effects REML)" } else { "RM one-way ANOVA (Mixed-effects REML)" };
+    let mut rm_tab = TabBuilder::new("rm-one-way-anova", rm_title, ResultTabKind::AnovaTable)
         .headers(headers)
         .row("Treatment (between columns)", row_trt)
         .row("Residual (REML)", row_res);
+    if is_lognormal {
+        rm_tab.push_footnote(
+            "Lognormal RM mixed-effects REML evaluated on ln(Y); pairwise contrasts are back-transformed to geometric mean ratios (A / B).",
+        );
+    }
     if gg_not_applied_under_cs {
         rm_tab.push_footnote(
             "Warning: Geisser-Greenhouse non-sphericity adjustment was not applied under CompoundSymmetry REML (which assumes equal within-subject variance and correlation); Unstructured residual covariance models arbitrary within-subject covariances without assuming sphericity.",
         );
     }
     out.tabs.push(rm_tab.build());
+    if is_lognormal {
+        let mut cond_inputs = Vec::with_capacity(k);
+        for (pos, &col_idx) in indices.iter().enumerate() {
+            let vals: Vec<f64> = scan.y_vec.iter().zip(scan.cond_ids.iter()).filter(|&(_, &c)| c == pos).map(|(&y, _)| y).collect();
+            if let Ok(m) = SummaryMoments::from_slice(&vals) {
+                cond_inputs.push(GroupComparisonInput {
+                    index: col_idx,
+                    label: col_tab.data_sets[col_idx].title.clone(),
+                    n: vals.len() as f64,
+                    mean: m.mean,
+                    sd: m.sample_sd().unwrap_or(0.0),
+                });
+            }
+        }
+        if !cond_inputs.is_empty() {
+            out.tabs.push(build_lognormal_group_summary_tab("condition-geometric-means", "Condition geometric means", &cond_inputs));
+        }
+    }
 
     let (_, row_proj) = build_xtx_pinv_and_proj(&x_mat)?;
     let reml_model = RemlContrastModel {
@@ -733,6 +869,9 @@ pub(in crate::anova) fn run_rm_one_way_reml(
                     pairs,
                 })?;
                 push_pairwise_outputs_with_footnote(out, &details, "multiple-comparisons", "Multiple comparisons", p_fmt, confidence, fam_note);
+                if is_lognormal {
+                    augment_pairwise_tabs_with_lognormal_ratios(out, confidence);
+                }
             }
         }
     }
@@ -788,9 +927,23 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
         return Err(StatsError::RequiresRawReplicates);
     }
     let indices = try_resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len())?;
-    let scan = scan_rm_one_way_column_table(col_tab, &indices);
+    let mut scan = scan_rm_one_way_column_table(col_tab, &indices);
+    let is_lognormal = matches!(anova_spec.method, OneWayMethod::LognormalRepeatedMeasures { .. });
+    if is_lognormal {
+        if let Some(&bad) = scan.y_vec.iter().find(|&&v| !v.is_finite() || v <= 0.0) {
+            return Err(StatsError::InvalidParameter { name: "lognormal_x", value: bad });
+        }
+        for v in &mut scan.y_vec {
+            *v = v.ln();
+        }
+        for row in &mut scan.blocks {
+            for v in row {
+                *v = v.ln();
+            }
+        }
+    }
 
-    if let OneWayMethod::RepeatedMeasures { .. } = anova_spec.method {
+    if matches!(anova_spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }) {
         validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
         if scan.y_vec.is_empty() {
             return Err(StatsError::EmptyInput);
@@ -807,12 +960,13 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
 
     let rm_analysis_name = match anova_spec.method {
         OneWayMethod::RepeatedMeasures { .. } => "Repeated-measures one-way ANOVA",
+        OneWayMethod::LognormalRepeatedMeasures { .. } => "Lognormal repeated-measures one-way ANOVA",
         OneWayMethod::Friedman => "Friedman test",
         _ => "Repeated-measures analysis",
     };
 
     match anova_spec.method {
-        OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
+        OneWayMethod::RepeatedMeasures { geisser_greenhouse } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
             let rm = rm_one_way_anova(blocks)?;
             let p_eff = if geisser_greenhouse { rm.p_greenhouse_geisser } else { rm.p_uncorrected };
             push_scalar(out, "F (treatment)", None, rm.f_treatment);
@@ -821,59 +975,63 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
             push_scalar(out, "Huynh-Feldt epsilon", None, rm.sphericity.huynh_feldt_eps);
             push_scalar(out, "Partial eta squared", None, rm.partial_eta_squared);
 
-            out.tabs.push(
-                TabBuilder::new("rm-one-way-anova", "RM one-way ANOVA", ResultTabKind::AnovaTable)
-                    .headers(["SS", "df", "MS", "F", "P value", "G-G P", "H-F P"])
-                    .row(
-                        "Treatment (between columns)",
-                        [
-                            num_cell(rm.ss_treatment),
-                            num_cell(rm.df_treatment),
-                            num_cell(rm.ms_treatment),
-                            num_cell(rm.f_treatment),
-                            p_cell_at_alpha(rm.p_uncorrected, p_fmt, confidence.alpha()),
-                            p_cell_at_alpha(rm.p_greenhouse_geisser, p_fmt, confidence.alpha()),
-                            p_cell_at_alpha(rm.p_huynh_feldt, p_fmt, confidence.alpha()),
-                        ],
-                    )
-                    .row(
-                        "Individual (subjects)",
-                        [
-                            num_cell(rm.ss_subjects),
-                            num_cell(rm.df_subjects),
-                            num_cell(rm.ms_subjects),
-                            num_cell(rm.f_subjects),
-                            p_cell_at_alpha(rm.p_subjects, p_fmt, confidence.alpha()),
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                        ],
-                    )
-                    .row(
-                        "Residual (random)",
-                        [
-                            num_cell(rm.ss_residual),
-                            num_cell(rm.df_residual),
-                            num_cell(rm.ms_residual),
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                        ],
-                    )
-                    .row(
-                        "Total",
-                        [
-                            num_cell(rm.ss_total),
-                            num_cell(rm.df_treatment + rm.df_subjects + rm.df_residual),
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                            ResultCell::Empty,
-                        ],
-                    )
-                    .build(),
-            );
+            let rm_title = if is_lognormal { "Lognormal RM one-way ANOVA" } else { "RM one-way ANOVA" };
+            let mut rm_tab = TabBuilder::new("rm-one-way-anova", rm_title, ResultTabKind::AnovaTable)
+                .headers(["SS", "df", "MS", "F", "P value", "G-G P", "H-F P"])
+                .row(
+                    "Treatment (between columns)",
+                    [
+                        num_cell(rm.ss_treatment),
+                        num_cell(rm.df_treatment),
+                        num_cell(rm.ms_treatment),
+                        num_cell(rm.f_treatment),
+                        p_cell_at_alpha(rm.p_uncorrected, p_fmt, confidence.alpha()),
+                        p_cell_at_alpha(rm.p_greenhouse_geisser, p_fmt, confidence.alpha()),
+                        p_cell_at_alpha(rm.p_huynh_feldt, p_fmt, confidence.alpha()),
+                    ],
+                )
+                .row(
+                    "Individual (subjects)",
+                    [
+                        num_cell(rm.ss_subjects),
+                        num_cell(rm.df_subjects),
+                        num_cell(rm.ms_subjects),
+                        num_cell(rm.f_subjects),
+                        p_cell_at_alpha(rm.p_subjects, p_fmt, confidence.alpha()),
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                    ],
+                )
+                .row(
+                    "Residual (random)",
+                    [
+                        num_cell(rm.ss_residual),
+                        num_cell(rm.df_residual),
+                        num_cell(rm.ms_residual),
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                    ],
+                )
+                .row(
+                    "Total",
+                    [
+                        num_cell(rm.ss_total),
+                        num_cell(rm.df_treatment + rm.df_subjects + rm.df_residual),
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                        ResultCell::Empty,
+                    ],
+                );
+            if is_lognormal {
+                rm_tab.push_footnote(
+                    "Lognormal RM one-way ANOVA evaluated on natural-log-transformed strictly positive observations ln(Y); pairwise contrasts are back-transformed to geometric mean ratios (A / B).",
+                );
+            }
+            out.tabs.push(rm_tab.build());
 
             // Group summaries from complete blocks for multiplicity.
             let mut inputs = Vec::with_capacity(indices.len());
@@ -887,6 +1045,9 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     mean: m.mean,
                     sd: m.sample_sd().unwrap_or(0.0),
                 });
+            }
+            if is_lognormal {
+                out.tabs.push(build_lognormal_group_summary_tab("condition-geometric-means", "Condition geometric means", &inputs));
             }
             if geisser_greenhouse && anova_spec.multiplicity.method != MultiplicityMethod::None {
                 match anova_spec.multiplicity.method {
@@ -902,6 +1063,9 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                 }
             } else {
                 append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
+            }
+            if is_lognormal {
+                augment_pairwise_tabs_with_lognormal_ratios(out, confidence);
             }
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
@@ -989,6 +1153,9 @@ pub(in crate::anova) fn extract_one_way_inputs(
     if let TableArchetype::Column(col_tab) = &sheet.archetype
         && col_tab.subcolumn_mode.supports_parametric_moments()
     {
+        if matches!(method, OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf) {
+            return Err(StatsError::RequiresRawReplicates);
+        }
         let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
         let mut inputs = Vec::with_capacity(indices.len());
         for idx in indices {
@@ -1032,8 +1199,17 @@ pub(in crate::anova) fn extract_one_way_inputs(
     let cols = extract_numeric_columns(sheet, selected)?;
     let ignored_non_numeric: Vec<(String, usize)> =
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
-    let raw_slices: Vec<Vec<f64>> = cols.iter().map(|c| c.values.clone()).collect();
-    let paired: Vec<(&str, &[f64])> = cols.iter().map(|c| (c.label.as_str(), c.values.as_slice())).collect();
+    let is_lognormal = matches!(method, OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf);
+    let raw_slices: Vec<Vec<f64>> = if is_lognormal {
+        let mut out_logs = Vec::with_capacity(cols.len());
+        for c in &cols {
+            out_logs.push(validate_and_ln_transform(&c.values, "lognormal_x")?);
+        }
+        out_logs
+    } else {
+        cols.iter().map(|c| c.values.clone()).collect()
+    };
+    let paired: Vec<(&str, &[f64])> = cols.iter().zip(raw_slices.iter()).map(|(c, v)| (c.label.as_str(), v.as_slice())).collect();
     if matches!(method, OneWayMethod::KruskalWallis) {
         if cols.len() < 2 {
             return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: cols.len() });
@@ -1065,6 +1241,53 @@ pub(in crate::anova) fn extract_one_way_inputs(
         })
         .collect();
     Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
+}
+
+pub(in crate::anova) fn build_lognormal_group_summary_tab(id: &str, title: &str, log_inputs: &[GroupComparisonInput]) -> ResultTab {
+    let mut tab =
+        TabBuilder::new(id, title, ResultTabKind::DescriptiveSummary).headers(["N", "Geometric Mean", "Geometric SD Factor", "Mean (ln)", "SD (ln)"]);
+    for g in log_inputs {
+        tab.push_row(g.label.clone(), [num_cell(g.n), num_cell(g.mean.exp()), num_cell(g.sd.exp()), num_cell(g.mean), num_cell(g.sd)]);
+    }
+    tab.build()
+}
+
+pub(in crate::anova) fn augment_pairwise_tabs_with_lognormal_ratios(out: &mut ResultSheet, confidence: ConfidenceLevel) {
+    let pct = confidence.percent();
+    for tab in &mut out.tabs {
+        if tab.kind != ResultTabKind::MultipleComparisons || tab.column_headers.first().map(String::as_str) != Some("Mean Diff.") {
+            continue;
+        }
+        tab.column_headers[0] = String::from("Log Mean Diff.");
+        let ci_col = tab.column_headers.iter().position(|h| h.contains("CI of Diff."));
+        if let Some(ci_idx) = ci_col {
+            tab.column_headers[ci_idx] = format!("{pct}% CI of Log Diff.");
+        }
+        tab.column_headers.push(String::from("Geometric Mean Ratio (A / B)"));
+        tab.column_headers.push(format!("{pct}% CI of Ratio"));
+        for row in &mut tab.rows {
+            let ratio_cell = match row.first() {
+                Some(ResultCell::Number { value: diff, .. }) if diff.is_finite() => {
+                    let r = diff.exp();
+                    if r.is_finite() { num_cell(r) } else { ResultCell::Empty }
+                }
+                _ => ResultCell::Empty,
+            };
+            let ratio_ci_cell = match ci_col.and_then(|idx| row.get(idx)) {
+                Some(ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) }) => {
+                    let lo = lower.exp();
+                    let hi = upper.exp();
+                    if lo.is_finite() && hi.is_finite() { ci_cell(lo, hi) } else { ResultCell::Empty }
+                }
+                _ => ResultCell::Empty,
+            };
+            row.push(ratio_cell);
+            row.push(ratio_ci_cell);
+        }
+        tab.footnotes.push(String::from(
+            "Back-transformed geometric mean ratios (GM_A / GM_B = exp(log mean diff.)) and asymmetric confidence intervals exp(CI_log) are computed from natural-log-scale contrasts.",
+        ));
+    }
 }
 
 pub(in crate::anova) fn build_variance_homogeneity_tab(

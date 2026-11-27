@@ -9,6 +9,7 @@
 //!   the correct number of factors to retain. *Educational and Psychological Measurement*, 55(3),
 //!   377-393.
 
+use curvebook_doc::PcaRetentionRule;
 use curvebook_math::linalg::{DenseMatrix, svd};
 use curvebook_math::rng::DeterministicRng;
 use curvebook_math::sum::SummaryMoments;
@@ -16,6 +17,104 @@ use curvebook_math::sum::SummaryMoments;
 use super::types::PcaResult;
 use crate::common::quantile_sorted;
 use crate::error::StatsError;
+
+/// Determine the number of retained principal components according to [`PcaRetentionRule`]
+/// (Jolliffe 2002; Horn 1965).
+pub fn select_pca_retained_components(pca: &PcaResult, rule: PcaRetentionRule) -> Result<usize, StatsError> {
+    let k_avail = pca.eigenvalues.len();
+    if k_avail == 0 {
+        return Ok(0);
+    }
+    match rule {
+        PcaRetentionRule::KaiserOrParallel => Ok(pca.parallel_analysis_components.unwrap_or(pca.kaiser_components)),
+        PcaRetentionRule::EigenvalueCutoff(cutoff) => {
+            if !cutoff.is_finite() || cutoff < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "eigenvalue_cutoff", value: cutoff });
+            }
+            Ok(pca.eigenvalues.iter().filter(|&&ev| ev > cutoff).count())
+        }
+        PcaRetentionRule::FixedCount(count) => {
+            if count == 0 {
+                return Err(StatsError::InvalidParameter { name: "fixed_component_count", value: 0.0 });
+            }
+            Ok(count.min(k_avail))
+        }
+        PcaRetentionRule::CumulativeVariancePercent(pct) => {
+            if !pct.is_finite() || pct <= 0.0 || pct > 100.0 {
+                return Err(StatsError::InvalidParameter { name: "cumulative_variance_percent", value: pct });
+            }
+            let target = pct / 100.0;
+            for (idx, &cum) in pca.cumulative_proportion.iter().enumerate() {
+                if cum + 1e-12 >= target {
+                    return Ok(idx + 1);
+                }
+            }
+            Ok(k_avail)
+        }
+        PcaRetentionRule::SelectAll => Ok(k_avail),
+    }
+}
+
+/// Compute additional PCA diagnostic matrices (centered/standardized data, empirical covariance
+/// or correlation matrix, and variable squared cosines `cos^2` across components; Jolliffe 2002).
+pub struct PcaExtraMatrices {
+    /// Centered (or standardized when `pca.standardized == true`) `n x p` data matrix.
+    pub scaled_data: Vec<Vec<f64>>,
+    /// Empirical `p x p` correlation matrix (`standardized == true`) or covariance matrix (`false`).
+    pub cov_or_corr: Vec<Vec<f64>>,
+    /// Variable squared cosines `cos^2` (`p x k_comp`), summing to `1.0` across all retained PCs.
+    pub variable_cos2: Vec<Vec<f64>>,
+}
+
+/// Compute centered/standardized input data, `p x p` covariance/correlation matrix, and variable
+/// squared cosines (`cos^2`) for a fitted [`PcaResult`] (Jolliffe 2002).
+pub fn compute_pca_extra_matrices(data: &DenseMatrix, pca: &PcaResult) -> Result<PcaExtraMatrices, StatsError> {
+    let n = data.nrows();
+    let p = data.ncols();
+    if n != pca.n || p != pca.p {
+        return Err(StatsError::DimensionMismatch { expected: pca.n, actual: n });
+    }
+    let mut scaled_cols = Vec::with_capacity(p);
+    let mut col_vars = Vec::with_capacity(p);
+    for c in 0..p {
+        let mut col = Vec::with_capacity(n);
+        for r in 0..n {
+            col.push(data.get(r, c).unwrap_or(0.0));
+        }
+        let m = SummaryMoments::from_slice(&col)?;
+        let sd = m.sample_sd().unwrap_or(0.0);
+        let denom = if pca.standardized { sd.max(1e-30) } else { 1.0 };
+        col_vars.push(if pca.standardized { 1.0 } else { sd * sd });
+        scaled_cols.push(col.into_iter().map(|v| (v - m.mean) / denom).collect::<Vec<_>>());
+    }
+    let mut scaled_data = vec![vec![0.0_f64; p]; n];
+    for r in 0..n {
+        for c in 0..p {
+            scaled_data[r][c] = scaled_cols[c][r];
+        }
+    }
+    let inv_nm1 = 1.0 / ((n - 1).max(1) as f64);
+    let mut cov_or_corr = vec![vec![0.0_f64; p]; p];
+    for i in 0..p {
+        for j in i..p {
+            let dot: f64 = scaled_cols[i].iter().zip(scaled_cols[j].iter()).map(|(&a, &b)| a * b).sum();
+            let val = dot * inv_nm1;
+            cov_or_corr[i][j] = val;
+            cov_or_corr[j][i] = val;
+        }
+    }
+    let k_comp = pca.eigenvalues.len();
+    let mut variable_cos2 = vec![vec![0.0_f64; k_comp]; p];
+    for i in 0..p {
+        let var_i = col_vars[i];
+        for j in 0..k_comp {
+            let load = pca.loadings[i][j];
+            let ev = pca.eigenvalues[j];
+            variable_cos2[i][j] = if var_i > 0.0 { (load * load * ev / var_i).clamp(0.0, 1.0) } else { 0.0 };
+        }
+    }
+    Ok(PcaExtraMatrices { scaled_data, cov_or_corr, variable_cos2 })
+}
 
 /// Principal Component Analysis via SVD of centered (and optionally standardized) `n x p` matrix
 /// (Jolliffe 2002).

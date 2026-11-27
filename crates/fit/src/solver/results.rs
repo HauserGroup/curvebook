@@ -7,8 +7,8 @@
 use std::num::NonZeroUsize;
 
 use curvebook_doc::{
-    CiBound, ConvergenceStrictness, FitMethod, FittedCurveOverlay, IdentifiabilityMode, OutlierHandling, ParameterRule, ReplicateFitMode,
-    WeightingScheme, WeightingSource,
+    CiBound, ConvergenceStrictness, FitMethod, FittedCurveOverlay, IdentifiabilityMode, OutlierHandling, ParameterRule, RelationalConstraint,
+    ReplicateFitMode, WeightingScheme, WeightingSource,
 };
 use curvebook_math::ConfidenceLevel;
 
@@ -28,6 +28,9 @@ pub struct SolverConfig {
     pub weighting: WeightingScheme,
     /// Per-parameter sharing scopes, constants, hooks, initial overrides, and inclusive box bounds.
     pub parameter_rules: Vec<ParameterRule>,
+    /// Parameter-vs-parameter relational inequality constraints (e.g. `KFast > KSlow`, `KdLo >= KdHi + 1.0`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relational_constraints: Vec<RelationalConstraint>,
     /// Two-sided confidence level for Wald, profile-likelihood, and band intervals (default `0.95` / 95%).
     pub confidence: ConfidenceLevel,
     /// Maximum Levenberg–Marquardt trust-region / IRLS outer iterations before reporting `FitStatus::HitMaxIters`.
@@ -90,6 +93,7 @@ impl Default for SolverConfig {
             method: FitMethod::LeastSquares,
             weighting: WeightingScheme::None,
             parameter_rules: Vec::new(),
+            relational_constraints: Vec::new(),
             confidence: ConfidenceLevel::DEFAULT_95,
             max_iters: 1_000,
             compute_profile_ci: true,
@@ -150,6 +154,35 @@ impl SolverConfig {
 
 pub(in crate::solver) fn default_fit_method() -> FitMethod {
     FitMethod::LeastSquares
+}
+
+pub(in crate::solver) const fn default_nan() -> f64 {
+    f64::NAN
+}
+
+/// Poisson nonlinear regression likelihood, deviance, pseudo-$R^2$, and dispersion diagnostics.
+///
+/// Reference: McCullagh, P. & Nelder, J. A. (1989). *Generalized Linear Models*, 2nd ed. Chapman & Hall.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PoissonNonlinearGof {
+    /// Negative log-likelihood at the fitted Poisson MLE: $-\sum \ln P(y_i \mid \hat{\mu}_i)$.
+    pub nll: f64,
+    /// Saturated model negative log-likelihood: $-\sum \ln P(y_i \mid y_i)$.
+    pub nll_saturated: f64,
+    /// Null (intercept-only $\mu_0 = \bar{y}$) negative log-likelihood.
+    pub nll_null: f64,
+    /// Residual Poisson deviance $D = 2 (\text{NLL} - \text{NLL}_{\text{sat}})$.
+    pub deviance: f64,
+    /// Null model Poisson deviance $D_0 = 2 (\text{NLL}_{\text{null}} - \text{NLL}_{\text{sat}})$.
+    pub null_deviance: f64,
+    /// Deviance pseudo-$R^2 = 1 - D / D_0$ (`NaN` when $D_0 \le 0$).
+    #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
+    pub pseudo_r2_deviance: f64,
+    /// Pearson chi-square statistic $\chi^2 = \sum (y_i - \hat{\mu}_i)^2 / \hat{\mu}_i$.
+    pub pearson_chi2: f64,
+    /// Estimated dispersion parameter $\hat{\phi} = \chi^2 / \text{df}$ (`NaN` when `df == 0`).
+    #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
+    pub dispersion: f64,
 }
 
 pub(in crate::solver) fn deserialize_f64_or_nan<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -608,6 +641,30 @@ pub struct NonlinearFitResult {
     /// even when weighted least squares or Poisson deviance is active (`NaN` when total SS is zero; Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
+    /// Unweighted adjusted coefficient of determination $R^2_{\text{adj}} = 1 - (1 - R^2)(n - 1)/\text{df}$
+    /// (`NaN` when `df == 0` or `n <= 1`).
+    #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
+    pub adj_r_squared: f64,
+    /// Unweighted root-mean-square error $\text{RMSE} = \sqrt{\text{rss} / n}$ in original $Y$ units (`NaN` when `n == 0`).
+    #[serde(default = "default_nan", deserialize_with = "deserialize_f64_or_nan")]
+    pub rmse: f64,
+    /// Weighted coefficient of determination $R^2_w = 1 - \text{SS}_w / \text{TSS}_w$
+    /// (Willett & Singer 1988) for least-squares fits; `None` for Poisson or Robust fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weighted_r_squared: Option<f64>,
+    /// Weighted adjusted $R^2_{w,\text{adj}} = 1 - (1 - R^2_w)(n - 1)/\text{df}$ for least-squares fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weighted_adj_r_squared: Option<f64>,
+    /// Weighted root-mean-square error $\sqrt{\text{SS}_w / n}$ for least-squares fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weighted_rmse: Option<f64>,
+    /// Weighted residual standard deviation $S_{y.x,w} = \sqrt{\text{SS}_w / \text{df}}$ for least-squares fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weighted_sy_x: Option<f64>,
+    /// Poisson nonlinear regression likelihood, deviance, pseudo-$R^2$, and dispersion diagnostics
+    /// (populated under [`FitMethod::PoissonDeviance`], `None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poisson_gof: Option<PoissonNonlinearGof>,
     /// Corrected Akaike Information Criterion ($\text{AIC}_c$, Burnham & Anderson 2002); `None` when `RobustCauchy` or insufficient residual df.
     pub aic_c: Option<f64>,
     /// Schwarz Bayesian Information Criterion ($\text{BIC}$); `None` when `RobustCauchy` or zero observations.

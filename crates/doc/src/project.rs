@@ -505,6 +505,16 @@ impl ProjectDocument {
             {
                 deps.push(info_id.clone());
             }
+            if let crate::AnalysisKind::MonteCarloSimulation(mc) = &rs.analysis.kind {
+                if let Some(down_id) = &mc.downstream_result_sheet_id {
+                    deps.push(down_id.clone());
+                }
+                for scalar in &mc.tracked_scalars {
+                    if let Some(res_id) = &scalar.result_sheet_id {
+                        deps.push(res_id.clone());
+                    }
+                }
+            }
         } else if let Some(gs) = self.graph_sheet(id) {
             deps.push(gs.spec.primary_source_sheet_id.clone());
             for series in &gs.spec.series {

@@ -48,6 +48,9 @@
                 "Contingency": {
                   "type": "object"
                 },
+                "CurveCalculus": {
+                  "type": "object"
+                },
                 "DescriptiveStats": {
                   "type": "object"
                 },
@@ -55,6 +58,9 @@
                   "type": "object"
                 },
                 "FitSplineLowess": {
+                  "type": "object"
+                },
+                "FractionOfTotal": {
                   "type": "object"
                 },
                 "GeneralizedLinearModel": {
@@ -67,6 +73,9 @@
                   "type": "object"
                 },
                 "LinearRegression": {
+                  "type": "object"
+                },
+                "MonteCarloSimulation": {
                   "type": "object"
                 },
                 "MultipleRowTTests": {
@@ -94,6 +103,9 @@
                   "type": "object"
                 },
                 "RocCurve": {
+                  "type": "object"
+                },
+                "RowStatistics": {
                   "type": "object"
                 },
                 "SimpleLogisticRegression": {
@@ -1348,9 +1360,63 @@
                 "RegressionSlope"
               ],
               "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "properties": {
+                "HazardRatio": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "event_prob_group1": {
+                      "maximum": 1.0,
+                      "minimum": 0.0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "event_prob_group2": {
+                      "maximum": 1.0,
+                      "minimum": 0.0,
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "hazard_ratio": {
+                      "minimum": 2.2250738585072014e-308,
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "hazard_ratio"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "HazardRatio"
+              ],
+              "type": "object"
             }
           ],
           "title": "PowerEffectSpec"
+        },
+        "event_prob_group1": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "event_prob_group2": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "family": {
           "enum": [
@@ -1361,7 +1427,8 @@
             "TwoProportions",
             "Correlation",
             "ChiSquare",
-            "SimpleLinearRegression"
+            "SimpleLinearRegression",
+            "LogRankSurvival"
           ],
           "title": "PowerTestFamily",
           "type": "string"
@@ -1406,6 +1473,14 @@
           "title": "PowerSolveTarget",
           "type": "string"
         },
+        "survival_method": {
+          "enum": [
+            "Schoenfeld",
+            "Freedman"
+          ],
+          "title": "SurvivalPowerMethod",
+          "type": "string"
+        },
         "tail_mode": {
           "oneOf": [
             {
@@ -1430,6 +1505,13 @@
             }
           ],
           "title": "PowerTailMode"
+        },
+        "target_events": {
+          "minimum": 0.0,
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "target_power": {
           "maximum": 1.0,

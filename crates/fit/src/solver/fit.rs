@@ -22,7 +22,8 @@ use crate::solver::datasets::{fit_independent_datasets, fit_single_or_shared};
 use crate::solver::identifiability;
 use crate::solver::identifiability::Assessment;
 use crate::solver::inference::{
-    compute_r_squared, rout_detect_outliers_mb2006, unscaled_cov_for_stable_subspace, unscaled_cov_from_diag_or_j, wald_ci_bounds,
+    compute_adj_r_squared, compute_r_squared, compute_rmse, rout_detect_outliers_mb2006, unscaled_cov_for_stable_subspace,
+    unscaled_cov_from_diag_or_j, wald_ci_bounds,
 };
 use crate::solver::irls::{finalize_cauchy_weighted_residuals, fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
 use crate::solver::layout::{
@@ -96,7 +97,7 @@ pub fn fit_nonlinear(
         }
     }
 
-    let layout = ParameterLayout::build(model, active_datasets, hooks, &config.parameter_rules)?;
+    let layout = ParameterLayout::build_with_constraints(model, active_datasets, hooks, &config.parameter_rules, &config.relational_constraints)?;
     let k_free = layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
     let obs = build_observations_with_source(active_datasets, config.weighting, config.weighting_source, use_rep_moments)?;
@@ -118,9 +119,9 @@ pub(in crate::solver) fn fit_plot_function_only(
     hooks: &HookContext,
     config: &SolverConfig,
 ) -> Result<NonlinearFitResult, FitError> {
-    let layout = ParameterLayout::build(model, datasets, hooks, &config.parameter_rules)?;
+    let layout = ParameterLayout::build_with_constraints(model, datasets, hooks, &config.parameter_rules, &config.relational_constraints)?;
     let k_free = layout.k_free();
-    let theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
+    let theta: Vec<f64> = layout.u_to_theta(&layout.u_init());
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let mut parameters = Vec::with_capacity(k_free);
@@ -165,12 +166,12 @@ pub(in crate::solver) fn fit_plot_function_only(
 
     for (ds_local_idx, ds) in datasets.iter().enumerate() {
         let ds_params = layout.expand_params(&theta, ds_local_idx);
-        derived_scalars.push(model.derived_transforms(&ds_params));
+        let eval_ds_idx = model_dataset_index(model, ds_local_idx, ds.data_set_index);
+        derived_scalars.push(model.derived_transforms_for_dataset(&ds_params, eval_ds_idx));
         let mut ds_yh = Vec::with_capacity(ds.points.len());
         let mut ds_res = Vec::with_capacity(ds.points.len());
         let mut ds_y_vals = Vec::with_capacity(ds.points.len());
         let mut ds_rss = NeumaierSum::new();
-        let eval_ds_idx = model_dataset_index(model, ds_local_idx, ds.data_set_index);
         for pt in &ds.points {
             let Some(yh) = model.eval(&pt.x, &ds_params, eval_ds_idx) else {
                 if let Some(err) = ode_budget_error() {
@@ -288,6 +289,8 @@ pub(in crate::solver) fn fit_plot_function_only(
         0.0
     };
     let r_squared = compute_r_squared(raw_rss, tss, y_vals_all.len());
+    let adj_r_squared = compute_adj_r_squared(r_squared, total_obs, df);
+    let rmse = compute_rmse(raw_rss, total_obs);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -307,6 +310,13 @@ pub(in crate::solver) fn fit_plot_function_only(
         rsd,
         rsdr: None,
         r_squared,
+        adj_r_squared,
+        rmse,
+        weighted_r_squared: None,
+        weighted_adj_r_squared: None,
+        weighted_rmse: None,
+        weighted_sy_x: None,
+        poisson_gof: None,
         aic_c: None,
         bic: None,
         parameters,

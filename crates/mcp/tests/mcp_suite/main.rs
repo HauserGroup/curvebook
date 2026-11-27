@@ -21,4 +21,5 @@ mod pzfx_and_archive_export;
 mod r17_1_mcp_xlsx;
 mod r17_4_mcp_usability;
 mod r19_5_mcp_export_warnings;
+mod r23_wave3a_mcp;
 mod r45_robust_mcp;

@@ -41,6 +41,7 @@
 //! ```
 
 pub mod diagnostics;
+pub mod distribution_plot;
 pub mod dsl;
 pub mod error;
 pub mod library;
@@ -57,6 +58,7 @@ pub use diagnostics::{
     compute_information_criteria, compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test,
     lilliefors_ks_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
+pub use distribution_plot::{ShadedDistributionSeries, TheoreticalDistributionPlot, evaluate_theoretical_distribution};
 pub use dsl::{CompiledDslModel, DslEquationKind, integrate_rk45};
 pub use error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 pub use library::{EquationCatalogEntry, ParametricModel, get_builtin_model, list_builtin_equations};
@@ -73,10 +75,10 @@ pub use result::{
 pub use solver::{
     FitFlagOutcome, FittedDatasetResult, FittedParameterSummary, GreedyHessianReduction, HorizontalLineClassification,
     HorizontalLineComparisonReport, HorizontalLineDatasetDiagnostic, HorizontalLineModel, InferenceAvailability, InterpolatedUnknown,
-    ModelComparisonOutcome, ModelComparisonQuestionResult, ModelComparisonResult, NonlinearFitResult, SolverConfig, SynchronizedComparisonRequest,
-    assemble_objective_hessian, compare_models, compare_models_checked, compare_models_question, compare_models_synchronized,
-    compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, greedy_hessian_reduction, hessian_condition_number, hessian_kappa_threshold,
-    is_fit_well_defined, ordered_nested_roles,
+    ModelComparisonOutcome, ModelComparisonQuestionResult, ModelComparisonResult, NonlinearFitResult, PoissonNonlinearGof, SolverConfig,
+    SynchronizedComparisonRequest, assemble_objective_hessian, compare_models, compare_models_checked, compare_models_question,
+    compare_models_synchronized, compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, greedy_hessian_reduction, hessian_condition_number,
+    hessian_kappa_threshold, is_fit_well_defined, ordered_nested_roles,
 };
 pub use tex_format::{
     format_linear_regression_equation_tex, format_model_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs,

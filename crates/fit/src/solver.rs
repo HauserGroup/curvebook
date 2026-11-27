@@ -83,5 +83,5 @@ pub use identifiability::{
 };
 pub use results::{
     FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, ModelComparisonOutcome, ModelComparisonResult,
-    NonlinearFitResult, SolverConfig,
+    NonlinearFitResult, PoissonNonlinearGof, SolverConfig,
 };

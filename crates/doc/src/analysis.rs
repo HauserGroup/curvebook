@@ -24,6 +24,53 @@ const fn default_true() -> bool {
     true
 }
 
+fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+    *value == T::default()
+}
+
+// ============================================================================
+// Shared Model Formula Specification (`GlmSpec`, `CoxProportionalHazards`, `FactorialAnovaSpec`)
+// ============================================================================
+
+/// Single term in a linear predictor formula shared by [`GlmSpec`],
+/// [`SurvivalAnalysisSpec::CoxProportionalHazards`], and [`FactorialAnovaSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FormulaTerm {
+    /// Main effect of zero-based predictor column index `0`.
+    Main(usize),
+    /// Two-way interaction between predictor column indices `(a, b)`.
+    Interaction2(usize, usize),
+    /// Three-way interaction among predictor column indices `(a, b, c)`.
+    Interaction3(usize, usize, usize),
+    /// Polynomial power transform `X_column^degree` (for example `degree = 2` or `3`).
+    Power {
+        /// Zero-based continuous predictor column index.
+        column: usize,
+        /// Positive integer exponent (`>= 2`).
+        degree: u8,
+    },
+    /// Square-root transform `sqrt(X_col)` of a non-negative continuous column.
+    Sqrt(usize),
+}
+
+/// Explicit linear-predictor formula specification shared across generalized linear models,
+/// Cox proportional hazards models, and selective-term factorial ANOVA.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ModelFormulaSpec {
+    /// When `true` (default), includes an intercept column in the design matrix (ignored by Cox PH baseline hazard).
+    #[serde(default = "default_true")]
+    pub include_intercept: bool,
+    /// Ordered model terms compiled into the design matrix.
+    #[serde(default)]
+    pub terms: Vec<FormulaTerm>,
+}
+
+impl Default for ModelFormulaSpec {
+    fn default() -> Self {
+        Self { include_intercept: true, terms: Vec::new() }
+    }
+}
+
 // ============================================================================
 // Multiplicity & FDR Specifications (`docs/implementation/statistics-implementation.md` §4)
 // ============================================================================
@@ -211,6 +258,154 @@ pub enum BaselineOperation {
     /// Unitless fractional change `(Y - Baseline) / Baseline`.
     #[serde(alias = "fraction", alias = "fractional_change", alias = "fractionalchange")]
     FractionalChange,
+    /// Additive combination `Y + Baseline`.
+    #[serde(alias = "add", alias = "sum")]
+    Add,
+    /// Multiplicative scaling `Y * Baseline`.
+    #[serde(alias = "multiply", alias = "product")]
+    Multiply,
+}
+
+/// Generalized baseline source for [`TransformAnalysisSpec::RemoveBaseline`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum BaselineKind {
+    /// Row-by-row mean across `columns`.
+    ColumnsRowWise(Vec<usize>),
+    /// Single grand mean across `columns` and all rows.
+    ColumnsMean(Vec<usize>),
+    /// Constant scalar baseline.
+    Constant(f64),
+    /// Per-column mean over inclusive row slice `start_row..=end_row`.
+    RowRangeMean {
+        /// Zero-based inclusive starting row index of the baseline window.
+        start_row: usize,
+        /// Zero-based inclusive ending row index of the baseline window (`end_row >= start_row`).
+        end_row: usize,
+    },
+    /// Per-column linear baseline interpolated between active-observation centroids `(x_start, y_start)`
+    /// across rows `0..first_k` and `(x_end, y_end)` across rows `(row_count - last_k)..row_count`.
+    FirstAndLastLinear {
+        /// Number of leading rows (`>= 1`) whose active observations define `(x_start, y_start)`.
+        first_k: usize,
+        /// Number of trailing rows (`>= 1`) whose active observations define `(x_end, y_end)`.
+        last_k: usize,
+    },
+    /// Paired every-other-column baseline matching adjacent column pairs `(2k, 2k + 1)`.
+    PairedEveryOtherColumn,
+    /// Per-column ordinary least-squares linear baseline fitted against *X* over the first
+    /// `first_k` and last `last_k` rows.
+    OlsLinearWithX {
+        /// Number of leading rows (`>= 1`) included in the OLS baseline fit.
+        first_k: usize,
+        /// Number of trailing rows (`>= 1`) included in the OLS baseline fit.
+        last_k: usize,
+    },
+}
+
+/// Classical linearizing pharmacology and enzyme-kinetics XY transforms.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum PharmacologyTransformPreset {
+    /// Lineweaver–Burk double-reciprocal transform `(1/X, 1/Y)`.
+    #[serde(alias = "lineweaver_burk")]
+    LineweaverBurk,
+    /// Eadie–Hofstee linearizing transform `(Y/X, Y)`.
+    #[serde(alias = "eadie_hofstee")]
+    EadieHofstee,
+    /// Hanes–Woolf linearizing transform `(X, X/Y)`.
+    #[serde(alias = "hanes_woolf")]
+    HanesWoolf,
+    /// Scatchard binding transform `(Y, Y/X)` (`Bound` vs `Bound/Free`).
+    #[serde(alias = "scatchard")]
+    Scatchard,
+    /// Hill linearizing transform `(log10(X), log10(Y / (Y_max - Y)))`.
+    Hill {
+        /// Optional upper asymptote `Y_max`; `None` uses the observed series maximum.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        y_max: Option<f64>,
+    },
+}
+
+/// Policy controlling how pre-summarized confidence-interval error bars propagate under nonlinear transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum AsymmetricCiTransformPolicy {
+    /// Delegate to `error_propagation` (`ReplicateEndpoints` or `FirstOrderDeltaMethod`).
+    #[default]
+    #[serde(alias = "default")]
+    Default,
+    /// Preserve exact asymmetric confidence limits `[g(lower), g(upper)]`, reversing order on monotone decreasing transforms.
+    #[serde(alias = "asymmetric_endpoints", alias = "exact_endpoints")]
+    AsymmetricEndpoints,
+    /// Omit transformed confidence-interval limits when nonlinear scaling invalidates symmetric spread.
+    #[serde(alias = "omit")]
+    Omit,
+}
+
+/// Sampling constraint design for `2 × 2` contingency-table Monte Carlo simulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ContingencySimDesign {
+    /// Multinomial sampling with fixed grand total `N` and cell probabilities `[p00, p01, p10, p11]`.
+    #[default]
+    #[serde(alias = "fixed_grand_total")]
+    FixedGrandTotal,
+    /// Independent binomial sampling per row with fixed row totals `[n_row0, n_row1]`.
+    #[serde(alias = "fixed_row_totals")]
+    FixedRowTotals,
+    /// Independent binomial sampling per column with fixed column totals `[n_col0, n_col1]`.
+    #[serde(alias = "fixed_column_totals")]
+    FixedColumnTotals,
+    /// Independent Poisson draws for each cell given expected counts `[lambda00, lambda01, lambda10, lambda11]`.
+    #[serde(alias = "poisson_counts", alias = "poisson")]
+    PoissonCounts,
+}
+
+/// Parameters for deterministic Monte Carlo simulation of a `2 × 2` contingency table.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ContingencySimulationSpec {
+    /// Sampling design constraint (`FixedGrandTotal`, `FixedRowTotals`, `FixedColumnTotals`, or `PoissonCounts`).
+    #[serde(default)]
+    pub design: ContingencySimDesign,
+    /// Row-major cell probabilities or expected Poisson rates `[a, b, c, d]`.
+    #[serde(default)]
+    pub cell_params: [f64; 4],
+    /// Fixed grand total `[N]` or marginal totals `[m0, m1]` (unused by `PoissonCounts`).
+    #[serde(default)]
+    pub fixed_totals: Vec<usize>,
+}
+
+/// Parameters for deterministic Monte Carlo simulation of a multi-group [`TableKind::Column`] table
+/// with optional random subject effects and outlier contamination.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ColumnSimulationSpec {
+    /// True population means `mu_g` for each simulated column.
+    #[serde(default)]
+    pub column_means: Vec<f64>,
+    /// Optional dynamic [`HookSource`] mean overrides aligned with `column_means`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooked_means: Vec<Option<HookSource>>,
+    /// Within-group residual standard deviation (`>= 0`).
+    #[serde(default)]
+    pub within_sd: f64,
+    /// Optional subject/row random-effect standard deviation (`>= 0`) inducing matched-row correlation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub random_effect_sd: Option<f64>,
+    /// Fraction of simulated cells in `[0, 1]` contaminated as outliers.
+    #[serde(default)]
+    pub outlier_fraction: f64,
+    /// Additive outlier shift expressed in multiples of `within_sd`.
+    #[serde(default)]
+    pub outlier_shift_sd: f64,
+}
+
+/// Target table archetype and generative model for [`TransformAnalysisSpec::Simulate`].
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SimulationMode {
+    /// Classic XY parametric curve simulation (default).
+    #[default]
+    XyCurve,
+    /// Simulated `2 × 2` contingency count table.
+    Contingency2x2(ContingencySimulationSpec),
+    /// Simulated multi-group [`TableKind::Column`] table with optional random effects and outliers.
+    Column(ColumnSimulationSpec),
 }
 
 /// Monte Carlo scatter model for `Simulate Data`.
@@ -262,6 +457,18 @@ pub enum TransformAnalysisSpec {
         y_transform: Option<MathTransformPreset>,
         /// Strategy for transforming pre-summarized `Mean + SD/SEM` spread subcolumns.
         error_propagation: ErrorPropagationMode,
+        /// Optional biochemical/pharmacology linearizing transform preset applied to `(X, Y)` pairs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pharmacology_preset: Option<PharmacologyTransformPreset>,
+        /// When `true`, exchanges *X* and *Y* coordinates during the transform.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        interchange_xy: bool,
+        /// Optional finite substitute replacing `X == 0` prior to logarithmic *X* transforms (for example `1e-12`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        zero_x_substitute: Option<f64>,
+        /// Policy governing asymmetric confidence-interval propagation under nonlinear transforms.
+        #[serde(default, skip_serializing_if = "is_default")]
+        asymmetric_ci_policy: AsymmetricCiTransformPolicy,
     },
     /// Linear rescaling mapping `[zero_anchor, hundred_anchor]` onto `[0, 100]` (when `output_percent == true`) or `[0, 1]` (unit fraction).
     Normalize {
@@ -278,8 +485,14 @@ pub enum TransformAnalysisSpec {
     RemoveBaseline {
         /// Zero-based indices of designated baseline columns (averaged row-by-row when multiple baseline columns are supplied).
         baseline_columns: Vec<usize>,
-        /// Algebraic baseline combination rule (`Difference`, `Ratio`, `PercentChange`, or `FractionalChange`).
+        /// Algebraic baseline combination rule (`Difference`, `Ratio`, `PercentChange`, `FractionalChange`, `Add`, or `Multiply`).
         operation: BaselineOperation,
+        /// Optional generalized baseline definition overriding `baseline_columns` (`None` uses `BaselineKind::ColumnsRowWise(baseline_columns)`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        baseline_kind: Option<BaselineKind>,
+        /// When `true`, preserves unselected columns unchanged in the output table instead of dropping them.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        retain_unselected_columns: bool,
     },
     /// Matrix transposition swapping rows and data-set columns.
     Transpose {
@@ -302,12 +515,27 @@ pub enum TransformAnalysisSpec {
         /// Additional calculated columns appended during projection.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         derived_columns: Vec<DerivedColumnFormula>,
+        /// When `true`, drops rows with any missing/excluded value across selected variables during extraction.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        complete_rows_only: bool,
+        /// Optional zero-based subject/block identifier column aligning matched subjects across groups.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subject_column: Option<usize>,
+        /// Optional zero-based column supplying custom row titles on the rearranged output table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        row_title_column: Option<usize>,
+        /// Optional zero-based frequency/count column when extracting a [`TableKind::Contingency`] table.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contingency_count_column: Option<usize>,
+        /// When `true`, prefixes rearranged column/row labels with source variable names.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        include_variable_name_prefixes: bool,
     },
-    /// Deterministic Monte Carlo XY curve simulation using `curvebook-math::DeterministicRng`.
+    /// Deterministic Monte Carlo XY curve, `2 × 2` contingency, or column simulation using `curvebook-math::DeterministicRng`.
     Simulate {
         /// 64-bit SplitMix64/Xoshiro256** PRNG seed ensuring bit-reproducible simulated replicates across platforms.
         seed: u64,
-        /// Number of *X* grid rows (`>= 1`) spaced linearly across `[x_min, x_max]`.
+        /// Number of *X* grid rows (`>= 1`) spaced linearly across `[x_min, x_max]` (or rows per column in `Column` mode).
         row_count: usize,
         /// Number of raw replicate *Y* subcolumns simulated per row (`1..=MAX_SUBCOLUMNS`).
         replicates: usize,
@@ -321,6 +549,9 @@ pub enum TransformAnalysisSpec {
         parameters: Vec<(String, f64)>,
         /// Random error distribution superimposed on the true curve `f(X)`.
         noise: SimulationNoise,
+        /// Optional simulation target mode (`None` or `Some(SimulationMode::XyCurve)` uses XY curve simulation).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        simulation_mode: Option<SimulationMode>,
     },
     /// Deterministic simple or stratified without-replacement random row sub-sampling.
     RandomSample {
@@ -335,6 +566,254 @@ pub enum TransformAnalysisSpec {
         #[serde(default = "default_true")]
         proportional_allocation: bool,
     },
+}
+
+/// Per-row summary statistic family emitted by [`RowStatisticsSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum RowSummaryKind {
+    /// Row arithmetic mean and sample SD (with active replicate count `N`).
+    #[default]
+    #[serde(alias = "mean_sd")]
+    MeanSd,
+    /// Row arithmetic mean and SEM (with active replicate count `N`).
+    #[serde(alias = "mean_sem")]
+    MeanSem,
+    /// Row arithmetic mean and coefficient of variation `%CV` (with active replicate count `N`).
+    #[serde(alias = "mean_cv")]
+    MeanCv,
+    /// Row arithmetic mean and two-sided Student-*t* confidence interval at [`AnalysisSpec::confidence_level`].
+    #[serde(alias = "mean_ci")]
+    MeanCi,
+    /// Row arithmetic mean with minimum and maximum bounds.
+    #[serde(alias = "mean_min_max")]
+    MeanMinMax,
+    /// Row sum (total) across active replicates.
+    #[serde(alias = "total", alias = "sum")]
+    Total,
+    /// Row median with Q1/Q3 quartiles and IQR.
+    #[serde(alias = "median_quartiles")]
+    MedianQuartiles,
+    /// Row median with minimum and maximum bounds.
+    #[serde(alias = "median_min_max")]
+    MedianMinMax,
+    /// Row median with symmetric custom percentiles (`100 - upper_percentile` and `upper_percentile`).
+    #[serde(alias = "median_percentiles")]
+    MedianPercentiles,
+    /// Row geometric mean and geometric SD factor over strictly positive replicates.
+    #[serde(alias = "geometric_mean_sd", alias = "geomean_sd")]
+    GeometricMeanSd,
+    /// Row geometric mean and back-transformed confidence interval over strictly positive replicates.
+    #[serde(alias = "geometric_mean_ci", alias = "geomean_ci")]
+    GeometricMeanCi,
+}
+
+/// Row-wise replicate summary statistics specification (`crates/transform`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct RowStatisticsSpec {
+    /// Summary statistic family computed across each row's active replicates.
+    pub summary: RowSummaryKind,
+    /// Optional upper percentile in `(50.0, 100.0)` used by [`RowSummaryKind::MedianPercentiles`] (defaults to `90.0` when `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_percentile: Option<f64>,
+}
+
+impl Default for RowStatisticsSpec {
+    fn default() -> Self {
+        Self { summary: RowSummaryKind::MeanSd, upper_percentile: None }
+    }
+}
+
+/// Denominator basis for [`FractionOfTotalSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum FractionDenominator {
+    /// Divide each cell by its column total.
+    #[default]
+    #[serde(alias = "column", alias = "column_total")]
+    ColumnTotal,
+    /// Divide each cell by its row total.
+    #[serde(alias = "row", alias = "row_total")]
+    RowTotal,
+    /// Divide each cell by the table grand total.
+    #[serde(alias = "grand", alias = "grand_total", alias = "total")]
+    GrandTotal,
+    /// Compute column, row, and grand-total fractions in separate output tabs.
+    #[serde(alias = "all", alias = "all_three")]
+    AllThree,
+}
+
+/// Binomial confidence-interval method for integer-count [`FractionOfTotalSpec`] outputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ProportionCiMethod {
+    /// Omit binomial proportion confidence intervals.
+    #[default]
+    #[serde(alias = "none")]
+    None,
+    /// Wilson (1927) score interval for binomial proportions.
+    #[serde(alias = "wilson")]
+    Wilson,
+    /// Exact Clopper–Pearson (1934) beta-quantile binomial confidence interval.
+    #[serde(alias = "clopper_pearson", alias = "exact")]
+    ClopperPearson,
+}
+
+/// Fraction-of-total reduction specification (`crates/transform`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct FractionOfTotalSpec {
+    /// Normalization denominator (`ColumnTotal`, `RowTotal`, `GrandTotal`, or `AllThree`).
+    pub denominator: FractionDenominator,
+    /// When `true`, outputs percentages (`0..=100`); when `false`, outputs unit fractions (`0..=1`).
+    pub output_percent: bool,
+    /// Optional binomial proportion confidence-interval method for non-negative integer count tables.
+    pub ci_method: ProportionCiMethod,
+}
+
+impl Default for FractionOfTotalSpec {
+    fn default() -> Self {
+        Self { denominator: FractionDenominator::ColumnTotal, output_percent: true, ci_method: ProportionCiMethod::None }
+    }
+}
+
+/// Numerical differentiation, cumulative integration, or smoothing operator on XY curves.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CurveCalculusOp {
+    /// First numerical derivative `dY/dX` along ordered *X*.
+    #[default]
+    #[serde(alias = "first_derivative", alias = "derivative")]
+    FirstDerivative,
+    /// Second numerical derivative `d^2Y/dX^2` along ordered *X*.
+    #[serde(alias = "second_derivative")]
+    SecondDerivative,
+    /// Cumulative trapezoidal integral `int_{x_0}^x (Y(t) - baseline) dt`.
+    CumulativeIntegral {
+        /// Horizontal reference baseline subtracted prior to integration (default `0.0`).
+        #[serde(default)]
+        baseline: f64,
+    },
+    /// Savitzky–Golay polynomial local smoothing filter (Savitzky & Golay 1964).
+    SmoothSavitzkyGolay {
+        /// Odd smoothing neighborhood width (`>= 3`).
+        window: usize,
+        /// Polynomial degree (`< window`, commonly `2` or `3`).
+        order: usize,
+    },
+    /// Centered unweighted moving-average smoothing over `window` adjacent points.
+    SmoothMovingAverage {
+        /// Positive smoothing window width (`>= 2`).
+        window: usize,
+    },
+    /// Cleveland (1979) locally weighted scatterplot smoothing (LOWESS).
+    SmoothLowess {
+        /// Neighborhood span fraction in `(0, 1]`.
+        span: f64,
+        /// Number of Tukey bisquare robustness iterations (default `3`).
+        #[serde(default = "default_lowess_robustness_iters")]
+        robustness_iters: usize,
+    },
+}
+
+/// XY curve differentiation, cumulative integration, and smoothing specification (`crates/transform::curve`).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CurveCalculusSpec {
+    /// Numerical differentiation, integration, or smoothing operator applied to each selected XY series.
+    pub operation: CurveCalculusOp,
+}
+
+/// Comparison predicate applied to a tracked scalar in [`MonteCarloHitRule`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum MonteCarloHitOp {
+    /// Strictly less than `threshold` (`value < threshold`).
+    #[default]
+    #[serde(alias = "lt", alias = "less_than")]
+    LessThan,
+    /// Less than or equal to `threshold` (`value <= threshold`).
+    #[serde(alias = "le", alias = "less_or_equal")]
+    LessOrEqual,
+    /// Strictly greater than `threshold` (`value > threshold`).
+    #[serde(alias = "gt", alias = "greater_than")]
+    GreaterThan,
+    /// Greater than or equal to `threshold` (`value >= threshold`).
+    #[serde(alias = "ge", alias = "greater_or_equal")]
+    GreaterOrEqual,
+    /// Inclusive interval predicate (`threshold <= value <= upper_threshold`).
+    #[serde(alias = "between")]
+    Between,
+}
+
+/// Downstream result scalar recorded on every iteration of a [`MonteCarloSpec`] run.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct MonteCarloTrackedScalar {
+    /// Output column label for the tracked scalar in the Monte Carlo summary tabs.
+    pub label: String,
+    /// Downstream `ResultSheet` supplying this scalar (`None` uses [`MonteCarloSpec::downstream_result_sheet_id`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_sheet_id: Option<SheetId>,
+    /// Scalar key looked up via [`crate::ResultSheet::lookup_scalar`].
+    pub parameter_key: String,
+    /// Optional zero-based dataset index within the downstream result sheet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_set_index: Option<usize>,
+}
+
+/// Hit classification predicate evaluated against one entry in [`MonteCarloSpec::tracked_scalars`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MonteCarloHitRule {
+    /// Zero-based index into [`MonteCarloSpec::tracked_scalars`].
+    pub scalar_index: usize,
+    /// Comparison operator (`LessThan`, `LessOrEqual`, `GreaterThan`, `GreaterOrEqual`, or `Between`).
+    pub op: MonteCarloHitOp,
+    /// Primary cutoff (or lower bound for [`MonteCarloHitOp::Between`]).
+    pub threshold: f64,
+    /// Inclusive upper bound when `op == MonteCarloHitOp::Between`; `None` for single-sided operators.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upper_threshold: Option<f64>,
+}
+
+const fn default_mc_iterations() -> usize {
+    1_000
+}
+
+/// Chained Monte Carlo simulation specification orchestrated by `curvebook-engine` (`L5`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct MonteCarloSpec {
+    /// Deterministic 64-bit master PRNG seed deriving reproducible per-iteration seeds.
+    pub seed: u64,
+    /// Number of Monte Carlo iterations (`1..=Self::MAX_ITERATIONS`, default `1_000`).
+    #[serde(default = "default_mc_iterations")]
+    pub iterations: usize,
+    /// Downstream `ResultSheet` re-evaluated on each simulated dataset; `None` summarizes simulated data only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downstream_result_sheet_id: Option<SheetId>,
+    /// Ordered downstream scalars recorded on every iteration.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracked_scalars: Vec<MonteCarloTrackedScalar>,
+    /// Conjunction of predicates partitioning simulated iterations into `Hits`, `Not Hits`, and `All`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hit_rules: Vec<MonteCarloHitRule>,
+    /// When `true`, skips iterations whose downstream nonlinear fit was labeled `"Flagged"`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclude_flagged_fits: bool,
+}
+
+impl MonteCarloSpec {
+    /// Hard upper safety limit on iterations per Monte Carlo execution (`100_000`).
+    pub const MAX_ITERATIONS: usize = 100_000;
+}
+
+impl Default for MonteCarloSpec {
+    fn default() -> Self {
+        Self {
+            seed: 42,
+            iterations: default_mc_iterations(),
+            downstream_result_sheet_id: None,
+            tracked_scalars: Vec::new(),
+            hit_rules: Vec::new(),
+            exclude_flagged_fits: false,
+        }
+    }
 }
 
 // ============================================================================
@@ -364,11 +843,24 @@ pub struct DescriptiveSpec {
     pub run_normality_battery: bool,
     /// Optional null location `mu_0` in data units triggering one-sample Student *t* and Wilcoxon signed-rank tests alongside descriptive moments; `None` omits one-sample hypothesis tests.
     pub hypothetical_value: Option<f64>,
+    /// When `true`, runs as a standalone Normality & Lognormality analysis omitting univariate descriptive moment tables.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub normality_only: bool,
+    /// When `true`, emits Normal and Lognormal Q–Q coordinate tabs alongside normality/lognormality test tables.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub emit_qq_tabs: bool,
 }
 
 impl Default for DescriptiveSpec {
     fn default() -> Self {
-        Self { aggregation: SubcolumnAggregation::RowMeans, custom_upper_percentile: None, run_normality_battery: true, hypothetical_value: None }
+        Self {
+            aggregation: SubcolumnAggregation::RowMeans,
+            custom_upper_percentile: None,
+            run_normality_battery: true,
+            hypothetical_value: None,
+            normality_only: false,
+            emit_qq_tabs: false,
+        }
     }
 }
 
@@ -420,6 +912,13 @@ pub enum TwoGroupMethod {
     },
     /// Exact binomial sign test on the signs of non-zero paired differences `(A_r - B_r)` (Dixon & Mood 1946).
     PairedSignTest,
+    /// One-sample ratio *t*-test on `ln(Y / hypothetical)` across strictly positive observations, reporting the geometric mean ratio and back-transformed CI.
+    OneSampleRatioT {
+        /// Strictly positive null geometric mean / hypothetical value (`> 0.0`).
+        hypothetical: f64,
+    },
+    /// Unpaired Welch unequal-variance *t*-test on natural-log-transformed strictly positive observations (`ln(Y)`), reporting the geometric mean ratio and back-transformed CI.
+    LognormalWelchT,
 }
 
 /// Two-group (or one-sample) hypothesis test specification (`Column` or `MultipleVariables` sheets).
@@ -472,6 +971,29 @@ impl Default for BlandAltmanSpec {
     }
 }
 
+/// Lognormal or ratio transformation mode for row-wise [`MultipleRowTestsSpec`] comparisons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum LognormalRowTestMode {
+    /// Analyze raw untransformed observations (default).
+    #[default]
+    #[serde(alias = "none")]
+    None,
+    /// Analyze natural-log-transformed strictly positive observations (`ln(Y)`) and back-transform geometric mean ratios.
+    #[serde(alias = "lognormal")]
+    Lognormal,
+    /// Perform paired ratio *t*-tests on `ln(B / A)` across strictly positive matched subcolumns.
+    #[serde(alias = "ratio_paired", alias = "ratio")]
+    RatioPaired,
+}
+
+impl LognormalRowTestMode {
+    /// Return `true` when `self` is [`Self::None`].
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
 /// Row-wise multiple two-group t-test or nonparametric comparison specification.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultipleRowTestsSpec {
@@ -487,11 +1009,20 @@ pub struct MultipleRowTestsSpec {
     /// Multiplicity or FDR procedure applied across the family of tested rows (commonly `BenjaminiHochbergFdr`, `TwoStageBkyFdr`, or `HolmSidak` for Volcano plots).
     #[serde(default)]
     pub multiplicity: MultiplicitySpec,
+    /// Optional lognormal or ratio-paired log-space transformation mode (defaults to `LognormalRowTestMode::None`).
+    #[serde(default, skip_serializing_if = "LognormalRowTestMode::is_none")]
+    pub lognormal_mode: LognormalRowTestMode,
 }
 
 impl Default for MultipleRowTestsSpec {
     fn default() -> Self {
-        Self { paired: false, nonparametric: false, assume_equal_sd: true, multiplicity: MultiplicitySpec::default() }
+        Self {
+            paired: false,
+            nonparametric: false,
+            assume_equal_sd: true,
+            multiplicity: MultiplicitySpec::default(),
+            lognormal_mode: LognormalRowTestMode::None,
+        }
     }
 }
 
@@ -713,6 +1244,18 @@ pub enum OneWayMethod {
     KruskalWallis,
     /// Nonparametric Friedman rank test across complete matched subject blocks (Friedman 1937).
     Friedman,
+    /// Ordinary homoscedastic one-way ANOVA on natural-log-transformed strictly positive observations (`ln(Y)`), back-transforming geometric mean ratios.
+    #[serde(alias = "lognormal_ordinary", alias = "lognormal_one_way_anova")]
+    LognormalOrdinary,
+    /// Heteroscedastic Brown–Forsythe and Welch one-way ANOVA on natural-log-transformed strictly positive observations (`ln(Y)`).
+    #[serde(alias = "lognormal_welch_bf", alias = "lognormal_welch_anova")]
+    LognormalWelchBf,
+    /// Repeated-measures one-way ANOVA (or REML mixed model) on natural-log-transformed strictly positive observations (`ln(Y)`).
+    LognormalRepeatedMeasures {
+        /// When `true`, multiplies omnibus `(df_treatment, df_residual)` by the Greenhouse–Geisser sphericity estimate `epsilon_hat`.
+        #[serde(default)]
+        geisser_greenhouse: bool,
+    },
 }
 
 /// Denominator degrees-of-freedom approximation for REML mixed-effects ANOVA and nested models.
@@ -790,6 +1333,63 @@ pub enum ResidualCovariance {
     Unstructured,
 }
 
+/// Sphericity epsilon adjustment applied to repeated-measures ANOVA *F*-test *p*-values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum RmSphericityCorrection {
+    /// Uncorrected standard ANOVA *F*-test degrees of freedom assuming exact sphericity (`epsilon = 1`).
+    #[default]
+    #[serde(alias = "none")]
+    None,
+    /// Multiply numerator and denominator degrees of freedom by Greenhouse–Geisser `epsilon_hat` (Greenhouse & Geisser 1959).
+    #[serde(alias = "greenhouse_geisser", alias = "geisser_greenhouse", alias = "gg")]
+    GreenhouseGeisser,
+    /// Multiply numerator and denominator degrees of freedom by Huynh–Feldt / Lecoutre `epsilon_tilde` (Huynh & Feldt 1976; Lecoutre 1991).
+    #[serde(alias = "huynh_feldt", alias = "hf")]
+    HuynhFeldt,
+}
+
+/// Policy for handling zero or negative random-effect variance components in REML mixed models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum RemlZeroVariancePolicy {
+    /// Constrain random-effect variance components to be `>= 0` (standard bounded REML, default).
+    #[default]
+    #[serde(alias = "bound_at_zero", alias = "bounded")]
+    BoundAtZero,
+    /// Drop random-effect terms whose variance component converges to zero and refit the reduced model.
+    #[serde(alias = "drop_zero_random_term", alias = "drop")]
+    DropZeroRandomTerm,
+    /// Allow unconstrained negative variance component estimates.
+    #[serde(alias = "unbounded")]
+    Unbounded,
+    /// Fall back to ordinary ANOVA / legacy moment-based EMS when REML hits the zero boundary.
+    #[serde(alias = "legacy_fallback", alias = "fallback")]
+    LegacyFallback,
+}
+
+/// Family partitioning mode for post-hoc multiple comparisons in factorial ANOVA.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum FactorialComparisonFamilyMode {
+    /// Standard simple-effects / main-effects comparison families (default).
+    #[default]
+    #[serde(alias = "standard")]
+    Standard,
+    /// Compare only cell means differing in exactly one factor level.
+    #[serde(alias = "cells_differing_by_one_factor", alias = "one_factor_diff")]
+    CellsDifferingByOneFactor,
+    /// Treat each simple-effect slice (per row or per column) as its own comparison family.
+    #[serde(alias = "per_slice_families", alias = "per_slice")]
+    PerSliceFamilies,
+    /// Partition comparisons into separate families per two-factor margin.
+    #[serde(alias = "two_factor_families")]
+    TwoFactorFamilies,
+    /// Pool all pairwise comparisons across the factorial table into one grand family.
+    #[serde(alias = "single_grand_family", alias = "grand_family")]
+    SingleGrandFamily,
+    /// Compare only explicit cell index pairs listed in [`FactorialAnovaSpec::preselected_pairs`].
+    #[serde(alias = "preselected_pairs", alias = "preselected")]
+    PreselectedPairs,
+}
+
 /// Two-way, three-way (`2 × 2 × K`), or general `N`-way multifactor ANOVA / REML mixed-model specification.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FactorialAnovaSpec {
@@ -820,6 +1420,33 @@ pub struct FactorialAnovaSpec {
     pub compute_effect_sizes: bool,
     /// Post-hoc cell/simple-effect/main-effect multiple-comparisons configuration.
     pub multiplicity: MultiplicitySpec,
+    /// Sphericity epsilon adjustment (`None`, `GreenhouseGeisser`, or `HuynhFeldt`) applied to RM factorial *F*-tests.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub sphericity_correction: RmSphericityCorrection,
+    /// Policy when REML mixed-effects variance components converge to zero or negative values.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub reml_zero_variance_policy: RemlZeroVariancePolicy,
+    /// Family partitioning rule for post-hoc factorial multiple comparisons.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub comparison_family_mode: FactorialComparisonFamilyMode,
+    /// Explicit `(cell_a, cell_b)` index pairs evaluated when `comparison_family_mode == FactorialComparisonFamilyMode::PreselectedPairs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preselected_pairs: Vec<(usize, usize)>,
+    /// When `true`, reverses pairwise contrast subtraction order (`B - A` instead of `A - B`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub swap_direction: bool,
+    /// When `true`, runs Spearman rank heteroscedasticity testing of `|residual|` vs predicted values.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub heteroscedasticity_test: bool,
+    /// Optional explicit selective-term [`ModelFormulaSpec`] overriding `max_interaction_order` on `MultipleVariables` factorial ANOVA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<ModelFormulaSpec>,
+    /// Optional explicit three-way repeated-measures flags `[factor_0, factor_1, factor_2]` (`[factor1_rm, factor2_rm, row_rm]` on `GroupedTable`; matching `multifactor_columns[0..3]` on `MultipleVariablesTable`) covering all 8 three-way RM topologies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub three_way_rm_factors: Option<[bool; 3]>,
+    /// When `true`, emits a consolidated tidy data tab for downstream inspection/graphing of three-way tables.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub emit_consolidated_data_tab: bool,
 }
 
 impl Default for FactorialAnovaSpec {
@@ -837,6 +1464,15 @@ impl Default for FactorialAnovaSpec {
             fit_reml_on_missing: true,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec::default(),
+            sphericity_correction: RmSphericityCorrection::None,
+            reml_zero_variance_policy: RemlZeroVariancePolicy::BoundAtZero,
+            comparison_family_mode: FactorialComparisonFamilyMode::Standard,
+            preselected_pairs: Vec::new(),
+            swap_direction: false,
+            heteroscedasticity_test: false,
+            formula: None,
+            three_way_rm_factors: None,
+            emit_consolidated_data_tab: false,
         }
     }
 }
@@ -945,6 +1581,46 @@ pub enum CoxTieMethod {
     Exact,
 }
 
+/// Handling policy for status column values matching neither `event_code` nor `censored_code` in survival analyses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum SurvivalOtherValuePolicy {
+    /// Ignore/exclude observations whose status value matches neither code (default).
+    #[default]
+    #[serde(alias = "exclude", alias = "ignore")]
+    Exclude,
+    /// Treat unrecognized status values as right-censored.
+    #[serde(alias = "censor", alias = "censored")]
+    Censor,
+    /// Treat unrecognized status values as events/failures.
+    #[serde(alias = "event", alias = "failure")]
+    Event,
+}
+
+/// Confidence-interval calculation method for GLM and Cox proportional hazards regression parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum RegressionCiMethod {
+    /// Symmetric asymptotic Wald confidence interval `beta_hat ± z * SE` (default).
+    #[default]
+    #[serde(alias = "wald")]
+    Wald,
+    /// Asymmetrical Venzon–Moolgavkar profile-likelihood confidence interval.
+    #[serde(alias = "profile_likelihood", alias = "profile")]
+    ProfileLikelihood,
+}
+
+/// Named covariate profile used to predict survival curves `S(t | x_0)` from a Cox proportional hazards model.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct CovariateProfile {
+    /// Human-readable profile label displayed in output curve headers.
+    pub label: String,
+    /// Explicit `(column_index, value)` assignments for continuous covariates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub numeric_values: Vec<(usize, f64)>,
+    /// Explicit `(column_index, level_label)` assignments for categorical covariates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub categorical_values: Vec<(usize, String)>,
+}
+
 /// Time-to-event Kaplan–Meier or multivariable Cox proportional hazards specification (`crates/stats::survival`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SurvivalAnalysisSpec {
@@ -969,6 +1645,24 @@ pub enum SurvivalAnalysisSpec {
         /// Optional zero-based categorical cohort/arm column index when running on a [`TableKind::MultipleVariables`] sheet; `None` analyzes a single pooled cohort or uses `SurvivalTable::cohorts`.
         #[serde(default)]
         mv_group_column: Option<usize>,
+        /// Optional custom numeric code representing an observed event (defaults to `1.0` when `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_code: Option<f64>,
+        /// Optional custom numeric code representing right-censoring (defaults to `0.0` when `None`; swapping with `event_code` enables reverse-KM follow-up).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        censored_code: Option<f64>,
+        /// Policy applied to numeric status values matching neither `event_code` nor `censored_code`.
+        #[serde(default, skip_serializing_if = "is_default")]
+        treat_other_as: SurvivalOtherValuePolicy,
+        /// When `true`, reports the ratio of median survival times and its confidence interval for two-group comparisons.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ratio_median_ci: bool,
+        /// Optional multiple status column indices for `MultipleVariables` multi-endpoint Kaplan–Meier analysis.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mv_status_columns: Vec<usize>,
+        /// Optional multiple grouping column indices for stratified `MultipleVariables` Kaplan–Meier analysis.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        mv_group_columns: Vec<usize>,
     },
     /// Semi-parametric multivariable Cox proportional hazards model `h(t | X) = h_0(t) exp(X beta)` on a [`TableKind::MultipleVariables`] sheet (Cox 1972).
     CoxProportionalHazards {
@@ -982,6 +1676,30 @@ pub enum SurvivalAnalysisSpec {
         reference_levels: Vec<(usize, String)>,
         /// Tied-failure partial-likelihood handling (`Breslow`, `Efron`, or `Exact`).
         tie_method: CoxTieMethod,
+        /// Optional explicit [`ModelFormulaSpec`] supporting 2-/3-way interactions and nonlinear predictor terms.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        formula: Option<ModelFormulaSpec>,
+        /// Optional covariate profiles for predicted survival curves `S_hat(t | x_0)`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        covariate_profiles: Vec<CovariateProfile>,
+        /// Optional reduced nested [`ModelFormulaSpec`] evaluated via partial-likelihood ratio test against the primary model.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        nested_comparison: Option<ModelFormulaSpec>,
+        /// When `true`, emits Cox–Snell and covariate residual diagnostic tabs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_cox_snell_residuals: bool,
+        /// Confidence-interval method (`Wald` or `ProfileLikelihood`) for hazard ratios and coefficients.
+        #[serde(default, skip_serializing_if = "is_default")]
+        ci_method: RegressionCiMethod,
+        /// Optional custom numeric code representing an observed event (defaults to `1.0` when `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_code: Option<f64>,
+        /// Optional custom numeric code representing right-censoring (defaults to `0.0` when `None`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        censored_code: Option<f64>,
+        /// Policy applied to numeric status values matching neither `event_code` nor `censored_code`.
+        #[serde(default, skip_serializing_if = "is_default")]
+        treat_other_as: SurvivalOtherValuePolicy,
     },
 }
 
@@ -1017,6 +1735,33 @@ pub enum GlmFamily {
     Poisson,
 }
 
+/// Observation weighting specification for [`GlmSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum GlmWeightSpec {
+    /// Unweighted estimation (default).
+    #[default]
+    None,
+    /// Analytical response/predictor weighting scheme (`1/Y^2`, `1/|Y|`, `1/|Y|^k`, `1/|X|`, `1/X^2`).
+    Scheme(WeightingScheme),
+    /// Explicit zero-based non-negative weight column index on the source sheet.
+    Column(usize),
+}
+
+/// Dispersion / covariance estimation mode for [`GlmSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum GlmDispersionMode {
+    /// Canonical model dispersion (`phi = 1` for Logistic/Poisson, residual MSE for Linear; default).
+    #[default]
+    #[serde(alias = "canonical")]
+    Canonical,
+    /// Quasi-Poisson Pearson chi-square dispersion scaling (`phi_hat = X^2 / df`).
+    #[serde(alias = "quasi_poisson", alias = "quasipoisson")]
+    QuasiPoisson,
+    /// Heteroscedasticity-consistent sandwich covariance estimator (Huber–White HC).
+    #[serde(alias = "robust_sandwich", alias = "sandwich", alias = "hc")]
+    RobustSandwich,
+}
+
 /// Multivariable Generalized Linear Model specification (`MultipleVariables`, `Xy`, or `Column` sheets).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GlmSpec {
@@ -1030,6 +1775,46 @@ pub struct GlmSpec {
     pub reference_levels: Vec<(usize, String)>,
     /// When `true`, computes Variance Inflation Factors (`VIF_j = 1 / (1 - R_j^2)`) across predictors to diagnose multicollinearity.
     pub compute_vif: bool,
+    /// Optional explicit [`ModelFormulaSpec`] supporting intercept toggle, 2-/3-way interactions, powers, and square roots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<ModelFormulaSpec>,
+    /// Optional reduced nested [`ModelFormulaSpec`] compared against the primary model via Extra-SS *F* (Linear) or deviance LRT (Logistic/Poisson) and `Delta AICc`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_comparison: Option<ModelFormulaSpec>,
+    /// Observation weighting specification (`None`, analytical `WeightingScheme`, or explicit weight column).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub weights: GlmWeightSpec,
+    /// Dispersion / covariance estimation mode (`Canonical`, `QuasiPoisson`, or `RobustSandwich`).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub dispersion_mode: GlmDispersionMode,
+    /// Optional classification probability cutoff in `(0, 1)` for Logistic GLMs (`None` defaults to `0.5`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification_cutoff: Option<f64>,
+    /// Confidence-interval method (`Wald` or `ProfileLikelihood`) for regression parameters and odds/rate ratios.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub ci_method: RegressionCiMethod,
+    /// When `true`, emits row-level leverage `h_ii`, Cook's `D`, DFBETAs, and standardized/studentized/deviance residuals.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub emit_influence_diagnostics: bool,
+}
+
+impl Default for GlmSpec {
+    fn default() -> Self {
+        Self {
+            family: GlmFamily::Linear,
+            response_column: 0,
+            predictor_columns: Vec::new(),
+            reference_levels: Vec::new(),
+            compute_vif: true,
+            formula: None,
+            nested_comparison: None,
+            weights: GlmWeightSpec::None,
+            dispersion_mode: GlmDispersionMode::Canonical,
+            classification_cutoff: None,
+            ci_method: RegressionCiMethod::Wald,
+            emit_influence_diagnostics: false,
+        }
+    }
 }
 
 /// Pairwise distance metric for hierarchical and multivariate clustering.
@@ -1077,6 +1862,52 @@ pub enum ClusterLinkage {
     Median,
 }
 
+/// Partitioning algorithm for *k*-means clustering inside [`MultivariateSpec::Clustering`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum KMeansAlgorithm {
+    /// Classical Lloyd (1982) batch assignment and centroid update iterations (default).
+    #[default]
+    #[serde(alias = "lloyd")]
+    Lloyd,
+    /// Hartigan–Wong (1979) live-transfer greedy local search minimizing within-cluster SSE.
+    #[serde(alias = "hartigan_wong", alias = "hw")]
+    HartiganWong,
+    /// MacQueen (1967) incremental online centroid update algorithm.
+    #[serde(alias = "macqueen", alias = "mac_queen")]
+    MacQueen,
+}
+
+/// Clustering orientation for hierarchical clustering inside [`MultivariateSpec::Clustering`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ClusterDirection {
+    /// Cluster rows / observations (default).
+    #[default]
+    #[serde(alias = "rows")]
+    Rows,
+    /// Cluster columns / variables.
+    #[serde(alias = "columns", alias = "cols")]
+    Columns,
+    /// Cluster both rows and columns independently (biclustering / clustered heatmap).
+    #[serde(alias = "both")]
+    Both,
+}
+
+/// Component retention criterion for Principal Component Analysis ([`MultivariateSpec::Pca`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PcaRetentionRule {
+    /// Default Kaiser (`lambda > 1` when standardized) or Horn parallel-analysis rule when a seed is provided.
+    #[default]
+    KaiserOrParallel,
+    /// Retain all principal components with eigenvalue strictly greater than the specified threshold.
+    EigenvalueCutoff(f64),
+    /// Retain an explicit fixed number of leading principal components (`>= 1`).
+    FixedCount(usize),
+    /// Retain the smallest prefix of components explaining at least the target cumulative variance percentage in `(0, 100]`.
+    CumulativeVariancePercent(f64),
+    /// Retain every non-trivial principal component.
+    SelectAll,
+}
+
 /// Exploratory multivariate analysis or Rubin multiple-imputation specification (`crates/stats::multivariate`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
@@ -1090,6 +1921,12 @@ pub enum MultivariateSpec {
         /// Optional zero-based continuous outcome variable column index enabling supervised Principal Component Regression (PCR); `None` runs unsupervised PCA.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pcr_outcome_column: Option<usize>,
+        /// Principal component retention rule (`KaiserOrParallel`, `EigenvalueCutoff`, `FixedCount`, `CumulativeVariancePercent`, or `SelectAll`).
+        #[serde(default, skip_serializing_if = "is_default")]
+        retention_rule: PcaRetentionRule,
+        /// When `true`, emits additional diagnostic matrix tabs (standardized data, covariance/correlation, squared cosines, and contributions).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_extra_matrices: bool,
     },
     /// Pairwise correlation matrix across continuous columns with two-sided *p*-values and Fisher-*z* confidence intervals.
     CorrelationMatrix {
@@ -1109,6 +1946,21 @@ pub enum MultivariateSpec {
         /// Optional upper cluster count `K_max >= 2` for a `k = 2..=K_max` elbow/silhouette sweep; `None` uses the default bounded sweep when applicable.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_sweep_max: Option<usize>,
+        /// When `true`, evaluates the 17-index consensus optimal-*k* suite (including Tibshirani et al. 2001 Gap statistic) and emits cluster metrics tabs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        consensus_optimal_k: bool,
+        /// Partitioning algorithm used for *k*-means (`Lloyd`, `HartiganWong`, or `MacQueen`).
+        #[serde(default, skip_serializing_if = "is_default")]
+        kmeans_algorithm: KMeansAlgorithm,
+        /// Orientation for hierarchical clustering (`Rows`, `Columns`, or `Both`).
+        #[serde(default, skip_serializing_if = "is_default")]
+        cluster_direction: ClusterDirection,
+        /// Optional dendrogram cut height extracting flat cluster assignments from hierarchical merges.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cut_height: Option<f64>,
+        /// When `true`, emits a one-way ANOVA feature-separation summary tab across *k*-means clusters.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        emit_anova_tab: bool,
     },
     /// Chained-equations / predictive-mean-matching Multiple Imputation with Rubin's (1987) pooling rules across `m` completed datasets.
     MultipleImputation {
@@ -1597,6 +2449,114 @@ impl ModelComparisonSpec {
     }
 }
 
+/// Inequality relation enforced between two fitted parameters by [`RelationalConstraint`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum RelationalConstraintOp {
+    /// Strict ordering `lhs > rhs + margin`.
+    #[default]
+    #[serde(alias = "gt", alias = "greater_than")]
+    GreaterThan,
+    /// Non-strict ordering `lhs >= rhs + margin`.
+    #[serde(alias = "ge", alias = "greater_or_equal")]
+    GreaterOrEqual,
+    /// Strict ordering `lhs < rhs - margin`.
+    #[serde(alias = "lt", alias = "less_than")]
+    LessThan,
+    /// Non-strict ordering `lhs <= rhs - margin`.
+    #[serde(alias = "le", alias = "less_or_equal")]
+    LessOrEqual,
+}
+
+/// Relational inequality constraint between two named equation parameters (for example `KFast > KSlow`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RelationalConstraint {
+    /// Left-hand parameter name matched against `ParametricModel::param_names`.
+    pub lhs_param: String,
+    /// Ordering relation between `lhs_param` and `rhs_param`.
+    pub op: RelationalConstraintOp,
+    /// Right-hand parameter name matched against `ParametricModel::param_names`.
+    pub rhs_param: String,
+    /// Non-negative separation margin `epsilon >= 0.0` (default `0.0`).
+    #[serde(default)]
+    pub margin: f64,
+}
+
+/// Theoretical probability distribution family evaluated by [`TheoreticalDistributionSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum TheoreticalDistributionFamily {
+    /// Continuous Gaussian/normal distribution `N(mean, sd^2)`.
+    #[default]
+    #[serde(alias = "normal", alias = "gaussian")]
+    Normal,
+    /// Continuous Student's *t* distribution with `df` degrees of freedom.
+    #[serde(alias = "student_t", alias = "t")]
+    StudentT,
+    /// Continuous Fisher–Snedecor *F* distribution with `(df1, df2)` degrees of freedom.
+    #[serde(alias = "f", alias = "fisher_f")]
+    FisherF,
+    /// Continuous chi-square distribution with `df` degrees of freedom.
+    #[serde(alias = "chi_square", alias = "chi2")]
+    ChiSquare,
+    /// Discrete binomial probability mass function `Binomial(n, p)`.
+    #[serde(alias = "binomial")]
+    Binomial,
+    /// Discrete Poisson probability mass function `Poisson(lambda)`.
+    #[serde(alias = "poisson")]
+    Poisson,
+}
+
+/// Tail- or interval-shading region applied to continuous [`TheoreticalDistributionSpec`] curves.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum DistributionTailShade {
+    /// No shaded tail region (default).
+    #[default]
+    None,
+    /// Shade lower tail `X <= cutoff`.
+    LowerTail {
+        /// Upper boundary of the lower shaded region.
+        cutoff: f64,
+    },
+    /// Shade upper tail `X >= cutoff`.
+    UpperTail {
+        /// Lower boundary of the upper shaded region.
+        cutoff: f64,
+    },
+    /// Shade both outer tails `X <= lower` and `X >= upper`.
+    TwoTailed {
+        /// Upper boundary of the lower tail.
+        lower: f64,
+        /// Lower boundary of the upper tail.
+        upper: f64,
+    },
+    /// Shade central interval `lower <= X <= upper`.
+    Between {
+        /// Inclusive lower endpoint.
+        lower: f64,
+        /// Inclusive upper endpoint.
+        upper: f64,
+    },
+}
+
+/// Theoretical continuous PDF/CDF or discrete PMF function-plotting specification (§6.2).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct TheoreticalDistributionSpec {
+    /// Probability distribution family (`Normal`, `StudentT`, `FisherF`, `ChiSquare`, `Binomial`, or `Poisson`).
+    #[serde(default)]
+    pub family: TheoreticalDistributionFamily,
+    /// Ordered distribution parameters (`[mean, sd]`, `[df]`, `[df1, df2]`, `[n, p]`, or `[lambda]`).
+    #[serde(default)]
+    pub parameters: Vec<f64>,
+    /// Optional dynamic [`HookSource`] overrides aligned with `parameters`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameter_hooks: Vec<Option<HookSource>>,
+    /// Optional tail- or central-interval shading for continuous distributions.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub tail_shade: DistributionTailShade,
+    /// When `true`, evaluates the cumulative distribution function (CDF) instead of the PDF/PMF.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cumulative: bool,
+}
+
 /// Complete nonlinear regression specification (`crates/fit`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NonlinearFitSpec {
@@ -1723,6 +2683,15 @@ pub struct NonlinearFitSpec {
     /// Automated 6-rule fit-quality flag criteria labeling dubious fits `"Flagged"` (§2.5.4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fit_flag_rules: Option<FitFlagRules>,
+    /// Relational parameter inequality constraints enforced via smooth gap reparameterization (`theta_a > theta_b + margin`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relational_constraints: Vec<RelationalConstraint>,
+    /// Optional theoretical probability distribution plotting configuration (`Plot a function` §6.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_distribution: Option<TheoreticalDistributionSpec>,
+    /// When `true`, emits extended goodness-of-fit metrics (Adjusted `R^2`, Weighted `R^2`, RMSE, and Poisson pseudo-`R^2` / NLL / dispersion).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub emit_extra_gof: bool,
 }
 
 impl NonlinearFitSpec {
@@ -1779,6 +2748,9 @@ impl NonlinearFitSpec {
             create_summary_graph: false,
             output_significant_digits: None,
             fit_flag_rules: None,
+            relational_constraints: Vec::new(),
+            plot_distribution: None,
+            emit_extra_gof: false,
         }
     }
 
@@ -2061,11 +3033,14 @@ pub enum PowerTestFamily {
     /// Simple linear regression slope test via exact noncentral-*F* / *t* (`df_1 = 1`, `df_2 = n - 2`, Cohen's `f^2 = R^2 / (1 - R^2)`).
     #[serde(alias = "simplelinearregression", alias = "linearregression", alias = "regression")]
     SimpleLinearRegression,
+    /// Two-arm log-rank survival comparison via Schoenfeld (1983) or Freedman (1982) event/sample-size formulas (Hazard Ratio).
+    #[serde(alias = "logrank", alias = "log_rank", alias = "logranksurvival", alias = "survival")]
+    LogRankSurvival,
 }
 
 impl PowerTestFamily {
-    /// All eight supported power-analysis test families.
-    pub const ALL: [Self; 8] = [
+    /// All nine supported power-analysis test families.
+    pub const ALL: [Self; 9] = [
         Self::TwoSampleUnpairedT,
         Self::TwoSamplePairedT,
         Self::OneSampleT,
@@ -2074,6 +3049,7 @@ impl PowerTestFamily {
         Self::Correlation,
         Self::ChiSquare,
         Self::SimpleLinearRegression,
+        Self::LogRankSurvival,
     ];
 
     /// Neutral display label for titles, inspectors, and methods reports.
@@ -2088,6 +3064,7 @@ impl PowerTestFamily {
             Self::Correlation => "Pearson correlation",
             Self::ChiSquare => "Chi-square test",
             Self::SimpleLinearRegression => "Simple linear regression",
+            Self::LogRankSurvival => "Log-rank survival test",
         }
     }
 
@@ -2102,6 +3079,7 @@ impl PowerTestFamily {
             Self::Correlation => "Pearson r",
             Self::ChiSquare => "Cohen's w",
             Self::SimpleLinearRegression => "Cohen's f^2",
+            Self::LogRankSurvival => "Hazard ratio (HR)",
         }
     }
 
@@ -2110,6 +3088,18 @@ impl PowerTestFamily {
     pub const fn supports_one_sided(self) -> bool {
         !matches!(self, Self::OneWayAnova | Self::ChiSquare)
     }
+}
+
+/// Required-events approximation formula for [`PowerTestFamily::LogRankSurvival`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum SurvivalPowerMethod {
+    /// Schoenfeld (1983) log-hazard-ratio score approximation (default).
+    #[default]
+    #[serde(alias = "schoenfeld")]
+    Schoenfeld,
+    /// Freedman (1982) hazard-ratio proportion approximation.
+    #[serde(alias = "freedman")]
+    Freedman,
 }
 
 /// Direction for one-sided power hypothesis alternatives (`H1: theta > theta_0` vs `<`).
@@ -2231,6 +3221,17 @@ pub enum PowerEffectSpec {
         /// Residual error standard deviation `sigma_epsilon > 0`.
         sigma_eps: f64,
     },
+    /// Hazard ratio (`HR > 0`, `HR != 1`) and optional per-arm cumulative event probabilities for [`PowerTestFamily::LogRankSurvival`].
+    HazardRatio {
+        /// Alternative hazard ratio `HR = lambda_2 / lambda_1 > 0` (`HR != 1.0`).
+        hazard_ratio: f64,
+        /// Optional cumulative event probability in arm 1 (`(0, 1]`) for converting required events to sample size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_prob_group1: Option<f64>,
+        /// Optional cumulative event probability in arm 2 (`(0, 1]`) for converting required events to sample size.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_prob_group2: Option<f64>,
+    },
 }
 
 /// First-class L1 document specification for statistical power, sample-size, and
@@ -2272,6 +3273,18 @@ pub struct PowerAnalysisSpec {
     /// Optional linked `InfoSheet` supplying parameter hooks; `None` when standalone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub info_sheet_id: Option<SheetId>,
+    /// Survival required-events approximation formula (`Schoenfeld` or `Freedman`) for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub survival_method: SurvivalPowerMethod,
+    /// Optional target or available total event count `D > 0` for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_events: Option<f64>,
+    /// Optional cumulative event probability `p_1 in (0, 1]` in arm 1 for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_prob_group1: Option<f64>,
+    /// Optional cumulative event probability `p_2 in (0, 1]` in arm 2 for [`PowerTestFamily::LogRankSurvival`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_prob_group2: Option<f64>,
 }
 
 impl Default for PowerAnalysisSpec {
@@ -2292,6 +3305,10 @@ impl Default for PowerAnalysisSpec {
             continuity_correction: false,
             correlation_method: CorrelationPowerMethod::FisherZ,
             info_sheet_id: None,
+            survival_method: SurvivalPowerMethod::Schoenfeld,
+            target_events: None,
+            event_prob_group1: None,
+            event_prob_group2: None,
         }
     }
 }
@@ -2324,6 +3341,15 @@ impl PowerAnalysisSpec {
         if !self.chi_square_df.is_finite() {
             return Some("power.chi_square_df");
         }
+        if self.target_events.is_some_and(|v| !v.is_finite()) {
+            return Some("power.target_events");
+        }
+        if self.event_prob_group1.is_some_and(|v| !v.is_finite()) {
+            return Some("power.event_prob_group1");
+        }
+        if self.event_prob_group2.is_some_and(|v| !v.is_finite()) {
+            return Some("power.event_prob_group2");
+        }
         match &self.effect {
             PowerEffectSpec::Unspecified => None,
             PowerEffectSpec::Standardized(v) => (!v.is_finite()).then_some("power.effect.standardized"),
@@ -2349,6 +3375,14 @@ impl PowerAnalysisSpec {
             PowerEffectSpec::RSquared(v) => (!v.is_finite()).then_some("power.effect.r_squared"),
             PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
                 (!beta1.is_finite() || !sigma_x.is_finite() || !sigma_eps.is_finite()).then_some("power.effect.regression_slope")
+            }
+            PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+                if !hazard_ratio.is_finite() || event_prob_group1.is_some_and(|v| !v.is_finite()) || event_prob_group2.is_some_and(|v| !v.is_finite())
+                {
+                    Some("power.effect.hazard_ratio")
+                } else {
+                    None
+                }
             }
         }
     }
@@ -2392,6 +3426,21 @@ impl PowerAnalysisSpec {
         {
             return Err(invalid("power.num_groups must be >= 2"));
         }
+        if let Some(d) = self.target_events
+            && d <= 0.0
+        {
+            return Err(invalid("power.target_events must be > 0"));
+        }
+        if let Some(p) = self.event_prob_group1
+            && (p <= 0.0 || p > 1.0)
+        {
+            return Err(invalid("power.event_prob_group1 must lie in (0, 1]"));
+        }
+        if let Some(p) = self.event_prob_group2
+            && (p <= 0.0 || p > 1.0)
+        {
+            return Err(invalid("power.event_prob_group2 must lie in (0, 1]"));
+        }
         match &self.effect {
             PowerEffectSpec::MeanDiffAndSd { sd, sd_group2, within_pair_correlation, .. } => {
                 if *sd <= 0.0 || sd_group2.is_some_and(|s| s <= 0.0) {
@@ -2423,6 +3472,14 @@ impl PowerAnalysisSpec {
             }
             PowerEffectSpec::RegressionSlope { sigma_x, sigma_eps, .. } if *sigma_x <= 0.0 || *sigma_eps <= 0.0 => {
                 return Err(invalid("power.effect regression SDs must be > 0"));
+            }
+            PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+                if *hazard_ratio <= 0.0 {
+                    return Err(invalid("power.effect hazard_ratio must be > 0"));
+                }
+                if event_prob_group1.is_some_and(|p| p <= 0.0 || p > 1.0) || event_prob_group2.is_some_and(|p| p <= 0.0 || p > 1.0) {
+                    return Err(invalid("power.effect survival event probabilities must lie in (0, 1]"));
+                }
             }
             _ => {}
         }
@@ -2473,6 +3530,10 @@ impl<'de> serde::Deserialize<'de> for PowerAnalysisSpec {
             correlation_method: CorrelationPowerMethod,
             effect: PowerEffectSpec,
             info_sheet_id: Option<SheetId>,
+            survival_method: SurvivalPowerMethod,
+            target_events: Option<f64>,
+            event_prob_group1: Option<f64>,
+            event_prob_group2: Option<f64>,
         }
 
         impl Default for RawPowerAnalysisSpec {
@@ -2494,6 +3555,10 @@ impl<'de> serde::Deserialize<'de> for PowerAnalysisSpec {
                     correlation_method: d.correlation_method,
                     effect: d.effect,
                     info_sheet_id: d.info_sheet_id,
+                    survival_method: d.survival_method,
+                    target_events: d.target_events,
+                    event_prob_group1: d.event_prob_group1,
+                    event_prob_group2: d.event_prob_group2,
                 }
             }
         }
@@ -2515,6 +3580,10 @@ impl<'de> serde::Deserialize<'de> for PowerAnalysisSpec {
             correlation_method: raw.correlation_method,
             effect: raw.effect,
             info_sheet_id: raw.info_sheet_id,
+            survival_method: raw.survival_method,
+            target_events: raw.target_events,
+            event_prob_group1: raw.event_prob_group1,
+            event_prob_group2: raw.event_prob_group2,
         };
         spec.validate_domain().map_err(serde::de::Error::custom)?;
         Ok(spec)
@@ -2536,8 +3605,19 @@ impl crate::schema::JsonSchema for PowerTestFamily {
             "Correlation",
             "ChiSquare",
             "SimpleLinearRegression",
+            "LogRankSurvival",
         ])
         .with_title("PowerTestFamily")
+    }
+}
+
+impl crate::schema::JsonSchema for SurvivalPowerMethod {
+    fn schema_name() -> &'static str {
+        "SurvivalPowerMethod"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        crate::schema::enum_schema(&["Schoenfeld", "Freedman"]).with_title("SurvivalPowerMethod")
     }
 }
 
@@ -2662,6 +3742,22 @@ impl crate::schema::JsonSchema for PowerEffectSpec {
                 &["RegressionSlope"],
                 false,
             ),
+            object_schema(
+                vec![(
+                    "HazardRatio",
+                    object_schema(
+                        vec![
+                            ("hazard_ratio", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+                            ("event_prob_group1", nullable_schema(number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))),
+                            ("event_prob_group2", nullable_schema(number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))),
+                        ],
+                        &["hazard_ratio"],
+                        false,
+                    ),
+                )],
+                &["HazardRatio"],
+                false,
+            ),
         ])
         .with_title("PowerEffectSpec")
     }
@@ -2691,6 +3787,10 @@ impl crate::schema::JsonSchema for PowerAnalysisSpec {
                 ("continuity_correction", bool_schema()),
                 ("correlation_method", CorrelationPowerMethod::json_schema()),
                 ("info_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
+                ("survival_method", SurvivalPowerMethod::json_schema()),
+                ("target_events", nullable_schema(number_schema().with_minimum_f64(0.0))),
+                ("event_prob_group1", nullable_schema(number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))),
+                ("event_prob_group2", nullable_schema(number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))),
             ],
             &[
                 "family",
@@ -2774,6 +3874,14 @@ pub enum AnalysisKind {
     AreaUnderCurve(AreaUnderCurveSpec),
     /// Preserved read-only result snapshot imported from an external file format ([`ImportedSnapshotSpec`]).
     ImportedSnapshot(ImportedSnapshotSpec),
+    /// Per-row replicate summary statistics (totals, means with SD/SEM/%CV/CI, medians/percentiles, geometric means; [`RowStatisticsSpec`]).
+    RowStatistics(RowStatisticsSpec),
+    /// Row, column, or grand-total proportion/percentage reduction with optional binomial CIs ([`FractionOfTotalSpec`]).
+    FractionOfTotal(FractionOfTotalSpec),
+    /// XY curve numerical differentiation, cumulative integration, and smoothing ([`CurveCalculusSpec`]).
+    CurveCalculus(CurveCalculusSpec),
+    /// Chained deterministic Monte Carlo simulation over a downstream analysis ([`MonteCarloSpec`]).
+    MonteCarloSimulation(MonteCarloSpec),
 }
 
 impl AnalysisKind {
@@ -2792,7 +3900,13 @@ impl AnalysisKind {
                 TransformAnalysisSpec::Simulate { .. } => String::from("Simulated data"),
                 TransformAnalysisSpec::RandomSample { .. } => String::from("Random sample"),
             },
-            Self::DescriptiveStats(_) => String::from("Descriptive statistics"),
+            Self::DescriptiveStats(d) => {
+                if d.normality_only {
+                    String::from("Normality and lognormality tests")
+                } else {
+                    String::from("Descriptive statistics")
+                }
+            }
             Self::OutlierDetection(OutlierSpec::Grubbs { .. }) => String::from("Identify outliers (Grubbs)"),
             Self::OutlierDetection(OutlierSpec::Rout { .. }) => String::from("Identify outliers (ROUT)"),
             Self::TwoGroupComparison(s) => match s.method {
@@ -2807,13 +3921,18 @@ impl AnalysisKind {
                 TwoGroupMethod::OneSampleT { .. } => String::from("One-sample t test"),
                 TwoGroupMethod::OneSampleWilcoxon { .. } => String::from("One-sample Wilcoxon test"),
                 TwoGroupMethod::PairedSignTest => String::from("Sign test"),
+                TwoGroupMethod::OneSampleRatioT { .. } => String::from("One-sample ratio t test"),
+                TwoGroupMethod::LognormalWelchT => String::from("Lognormal Welch's t test"),
             },
             Self::BlandAltman(_) => String::from("Bland-Altman method comparison"),
-            Self::MultipleRowTTests(s) => match (s.nonparametric, s.paired) {
-                (false, false) => String::from("Multiple unpaired t tests"),
-                (false, true) => String::from("Multiple paired t tests"),
-                (true, false) => String::from("Multiple Mann-Whitney tests"),
-                (true, true) => String::from("Multiple Wilcoxon tests"),
+            Self::MultipleRowTTests(s) => match (s.nonparametric, s.paired, s.lognormal_mode) {
+                (false, _, LognormalRowTestMode::RatioPaired) => String::from("Multiple ratio paired t tests"),
+                (false, false, LognormalRowTestMode::Lognormal) => String::from("Multiple lognormal t tests"),
+                (false, true, LognormalRowTestMode::Lognormal) => String::from("Multiple paired lognormal t tests"),
+                (false, false, LognormalRowTestMode::None) => String::from("Multiple unpaired t tests"),
+                (false, true, LognormalRowTestMode::None) => String::from("Multiple paired t tests"),
+                (true, false, _) => String::from("Multiple Mann-Whitney tests"),
+                (true, true, _) => String::from("Multiple Wilcoxon tests"),
             },
             Self::PassingBablok(_) => String::from("Passing-Bablok regression"),
             Self::OneWayAnova(s) => match s.method {
@@ -2822,6 +3941,9 @@ impl AnalysisKind {
                 OneWayMethod::RepeatedMeasures { .. } => String::from("RM one-way ANOVA"),
                 OneWayMethod::KruskalWallis => String::from("Kruskal-Wallis test"),
                 OneWayMethod::Friedman => String::from("Friedman test"),
+                OneWayMethod::LognormalOrdinary => String::from("Lognormal one-way ANOVA"),
+                OneWayMethod::LognormalWelchBf => String::from("Lognormal Brown-Forsythe and Welch ANOVA"),
+                OneWayMethod::LognormalRepeatedMeasures { .. } => String::from("Lognormal RM one-way ANOVA"),
             },
             Self::FactorialAnova(s) => {
                 if !s.multifactor_columns.is_empty() {
@@ -2881,6 +4003,17 @@ impl AnalysisKind {
                 let trimmed = s.original_kind_label.trim();
                 if trimmed.is_empty() { String::from("Imported result") } else { trimmed.to_owned() }
             }
+            Self::RowStatistics(_) => String::from("Row statistics"),
+            Self::FractionOfTotal(_) => String::from("Fraction of total"),
+            Self::CurveCalculus(c) => match c.operation {
+                CurveCalculusOp::FirstDerivative => String::from("First derivative"),
+                CurveCalculusOp::SecondDerivative => String::from("Second derivative"),
+                CurveCalculusOp::CumulativeIntegral { .. } => String::from("Cumulative integral"),
+                CurveCalculusOp::SmoothSavitzkyGolay { .. } => String::from("Smooth curve (Savitzky-Golay)"),
+                CurveCalculusOp::SmoothMovingAverage { .. } => String::from("Smooth curve (moving average)"),
+                CurveCalculusOp::SmoothLowess { .. } => String::from("Smooth curve (LOWESS)"),
+            },
+            Self::MonteCarloSimulation(_) => String::from("Monte Carlo simulation"),
         }
     }
 
@@ -2914,10 +4047,20 @@ impl AnalysisKind {
                     out.push(h.clone());
                 }
             }
+            Self::Transform(TransformAnalysisSpec::Simulate { simulation_mode: Some(SimulationMode::Column(col_sim)), .. }) => {
+                for hook in col_sim.hooked_means.iter().flatten() {
+                    out.push(hook.clone());
+                }
+            }
             Self::NonlinearRegression(fit) => {
                 for rule in &fit.parameter_rules {
                     if let ParameterScope::HookedConstant(h) = &rule.scope {
                         out.push(h.clone());
+                    }
+                }
+                if let Some(dist) = &fit.plot_distribution {
+                    for hook in dist.parameter_hooks.iter().flatten() {
+                        out.push(hook.clone());
                     }
                 }
             }
@@ -2934,6 +4077,16 @@ impl AnalysisKind {
             && let Some(info_id) = &p.info_sheet_id
         {
             ids.push(info_id.clone());
+        }
+        if let Self::MonteCarloSimulation(mc) = self {
+            if let Some(down_id) = &mc.downstream_result_sheet_id {
+                ids.push(down_id.clone());
+            }
+            for scalar in &mc.tracked_scalars {
+                if let Some(res_id) = &scalar.result_sheet_id {
+                    ids.push(res_id.clone());
+                }
+            }
         }
         ids.sort();
         ids.dedup();

@@ -298,6 +298,10 @@ fn v9_dag_clean_recalculate_all_preserves_imported_linked_to_up_to_date_computed
         x_transform: None,
         y_transform: Some(MathTransformPreset::LinearScale { slope: 2.0, intercept: 0.0 }),
         error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
     });
     let tx_res = ResultSheet::new(AnalysisSpec::new("tx-1", "xy-1", math_kind).unwrap()).unwrap();
     doc.add_result_sheet(tx_res).unwrap();

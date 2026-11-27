@@ -17,8 +17,9 @@ use crate::solver::fit::{finalize_fit_uncertainty, solve_lm_by_method};
 use crate::solver::identifiability;
 use crate::solver::identifiability::Assessment;
 use crate::solver::inference::{
-    compute_r_squared, compute_residual_diagnostics, compute_studentized_residuals, information_criteria_from_poisson_ll,
-    poisson_information_criteria, poisson_log_likelihood_from_obs, predicted_y_neg_log_weight_sum, rout_detect_outliers_mb2006,
+    compute_adj_r_squared, compute_poisson_gof, compute_r_squared, compute_residual_diagnostics, compute_rmse, compute_studentized_residuals,
+    compute_weighted_gof, information_criteria_from_poisson_ll, poisson_information_criteria, poisson_log_likelihood_from_obs,
+    predicted_y_neg_log_weight_sum, rout_detect_outliers_mb2006,
 };
 use crate::solver::irls::{finalize_cauchy_weighted_residuals, fit_cauchy_irls, fit_poisson_irls, fit_predicted_y_irls};
 use crate::solver::layout::{
@@ -38,8 +39,14 @@ pub(in crate::solver) fn fit_single_or_shared(
 ) -> Result<NonlinearFitResult, FitError> {
     let k_free = layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
-    let init_theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
-    let (mut lm_out, rout_result, n_outliers_excluded) = solve_lm_by_method(model, &layout, &mut obs, &init_theta, config)?;
+    let init_u: Vec<f64> = layout.u_init();
+    let (mut lm_out, rout_result, n_outliers_excluded) = solve_lm_by_method(model, &layout, &mut obs, &init_u, config)?;
+    let rel_bound_hits = layout.relational_bound_hits(&lm_out.theta);
+    if layout.has_relational {
+        let theta_orig = layout.u_to_theta(&lm_out.theta);
+        lm_out.j_mat = layout.jacobian_u_to_orig(&lm_out.j_mat, &theta_orig);
+        lm_out.theta = theta_orig;
+    }
 
     let ss_within_total = if use_rep_moments { obs_ss_within(&obs) } else { 0.0 };
     lm_out.weighted_ss += ss_within_total;
@@ -57,6 +64,7 @@ pub(in crate::solver) fn fit_single_or_shared(
         &unc.hougaard,
         &unc.profile_cis,
         &unc.identifiability.unstable,
+        &rel_bound_hits,
         inference_availability,
         report_all,
     );
@@ -80,17 +88,19 @@ pub(in crate::solver) fn fit_single_or_shared(
     }
     let tss = tss_acc.total();
     let is_robust = config.method == FitMethod::RobustCauchy;
+    let is_poisson = config.method == FitMethod::PoissonDeviance;
     let r_squared = compute_r_squared(raw_rss, tss, n_obs);
+    let adj_r_squared = compute_adj_r_squared(r_squared, n_obs, df);
+    let rmse = compute_rmse(raw_rss, n_obs);
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let w_gof = if !is_robust && !is_poisson { compute_weighted_gof(&obs, lm_out.weighted_ss, n_obs, df) } else { Default::default() };
+    let poisson_gof = if is_poisson { compute_poisson_gof(&obs, &lm_out.y_hat, df) } else { None };
 
-    let predicted_y_neg_log_weight_sum = if !is_robust && config.method != FitMethod::PoissonDeviance && config.uses_predicted_y_weighting() {
-        predicted_y_neg_log_weight_sum(&obs)
-    } else {
-        None
-    };
+    let predicted_y_neg_log_weight_sum =
+        if !is_robust && !is_poisson && config.uses_predicted_y_weighting() { predicted_y_neg_log_weight_sum(&obs) } else { None };
     let ic = if is_robust {
         None
-    } else if config.method == FitMethod::PoissonDeviance {
+    } else if is_poisson {
         poisson_information_criteria(&obs, &lm_out.y_hat, k_free)
     } else if let Some(neg_log_w) = predicted_y_neg_log_weight_sum {
         compute_information_criteria_with_log_weight_penalty(lm_out.weighted_ss, neg_log_w, n_obs, k_free).ok()
@@ -113,6 +123,8 @@ pub(in crate::solver) fn fit_single_or_shared(
         &all_stud,
         &DatasetAssemblyConfig {
             cov_unscaled: if df > 0 { unc.cov_unscaled.as_ref() } else { None },
+            cov: &cov,
+            parameters: &parameters,
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd,
@@ -170,6 +182,13 @@ pub(in crate::solver) fn fit_single_or_shared(
         rsd,
         rsdr,
         r_squared,
+        adj_r_squared,
+        rmse,
+        weighted_r_squared: w_gof.weighted_r_squared,
+        weighted_adj_r_squared: w_gof.weighted_adj_r_squared,
+        weighted_rmse: w_gof.weighted_rmse,
+        weighted_sy_x: w_gof.weighted_sy_x,
+        poisson_gof,
         aic_c: ic.as_ref().map(|x| x.aicc),
         bic: ic.as_ref().map(|x| x.bic),
         parameters,
@@ -193,6 +212,7 @@ pub(in crate::solver) fn fit_single_or_shared(
 pub(in crate::solver) struct SingleDatasetOutcome {
     pub(in crate::solver) layout: ParameterLayout,
     pub(in crate::solver) theta: Vec<f64>,
+    pub(in crate::solver) rel_bound_hits: Vec<bool>,
     pub(in crate::solver) status: FitStatus,
     pub(in crate::solver) iterations: usize,
     pub(in crate::solver) weighted_ss: f64,
@@ -218,7 +238,7 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     column_titles: Option<&[f64]>,
 ) -> Result<SingleDatasetOutcome, FitError> {
     let ds_slice = std::slice::from_ref(ds);
-    let ds_layout = ParameterLayout::build_with_column_titles(model, ds_slice, hooks, ds_rules, column_titles)?;
+    let ds_layout = ParameterLayout::build_with_options(model, ds_slice, hooks, ds_rules, &config.relational_constraints, column_titles)?;
     let p_d = ds_layout.k_free();
     let use_rep_moments = uses_replicate_summary_moments(config);
     let mut ds_obs = build_observations_with_source(ds_slice, config.weighting, config.weighting_source, use_rep_moments)?;
@@ -227,19 +247,19 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     if n_d < min_d {
         return Err(FitError::InsufficientData { required: min_d, actual: n_d });
     }
-    let init_theta: Vec<f64> = seed_override.map_or_else(|| ds_layout.free_slots.iter().map(|s| s.init).collect(), |s| s.to_vec());
+    let init_u: Vec<f64> = seed_override.map_or_else(|| ds_layout.u_init(), |s| ds_layout.theta_to_u(s));
 
     let mut lm_out = match config.method {
         FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
             if config.uses_predicted_y_weighting() {
-                fit_predicted_y_irls(model, &ds_layout, &mut ds_obs, &init_theta, config)?
+                fit_predicted_y_irls(model, &ds_layout, &mut ds_obs, &init_u, config)?
             } else {
-                solve_with_warm_start(model, &ds_layout, &ds_obs, &init_theta, config)?
+                solve_with_warm_start(model, &ds_layout, &ds_obs, &init_u, config)?
             }
         }
-        FitMethod::PoissonDeviance => fit_poisson_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
+        FitMethod::PoissonDeviance => fit_poisson_irls(model, &ds_layout, &ds_obs, &init_u, config)?,
         FitMethod::RobustCauchy => {
-            let mut out = fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_theta, config)?;
+            let mut out = fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_u, config)?;
             if config.uses_predicted_y_weighting() {
                 if !apply_predicted_y_weights(&mut ds_obs, &out.y_hat, config.weighting) {
                     out.status = FitStatus::ImpossibleWeights;
@@ -250,12 +270,32 @@ pub(in crate::solver) fn solve_single_dataset_unit(
             out
         }
     };
+    let rel_bound_hits = ds_layout.relational_bound_hits(&lm_out.theta);
+    if ds_layout.has_relational {
+        let theta_orig = ds_layout.u_to_theta(&lm_out.theta);
+        lm_out.j_mat = ds_layout.jacobian_u_to_orig(&lm_out.j_mat, &theta_orig);
+        lm_out.theta = theta_orig;
+    }
 
     let ss_within_d = if use_rep_moments { obs_ss_within(&ds_obs) } else { 0.0 };
     lm_out.weighted_ss += ss_within_d;
     let df_d = n_d.saturating_sub(p_d);
     let unc = finalize_fit_uncertainty(model, &ds_layout, &ds_obs, &mut lm_out, df_d, ss_within_d, config)?;
     let cov = unc.cov;
+    let is_robust = config.method == FitMethod::RobustCauchy;
+    let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
+    let report_all = config.identifiability_mode == Some(IdentifiabilityMode::ReportAll);
+    let sub_parameters = build_fitted_parameter_summaries(
+        &ds_layout,
+        &lm_out.theta,
+        &cov,
+        &unc.hougaard,
+        &unc.profile_cis,
+        &unc.identifiability.unstable,
+        &rel_bound_hits,
+        inference_availability,
+        report_all,
+    );
 
     let mut raw_rss_d = NeumaierSum::new();
     for (rec, &yh) in ds_obs.iter().zip(lm_out.y_hat.iter()) {
@@ -263,8 +303,8 @@ pub(in crate::solver) fn solve_single_dataset_unit(
         raw_rss_d.add((rec.rep_n as f64) * diff * diff);
         raw_rss_d.add(rec.raw_ss_within);
     }
-    let rsd_d = if df_d > 0 && config.method != FitMethod::RobustCauchy { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
-    let stud_d = if config.method == FitMethod::RobustCauchy {
+    let rsd_d = if df_d > 0 && !is_robust { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
+    let stud_d = if is_robust {
         Vec::new()
     } else {
         compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous)
@@ -279,6 +319,8 @@ pub(in crate::solver) fn solve_single_dataset_unit(
         &stud_d,
         &DatasetAssemblyConfig {
             cov_unscaled: if df_d > 0 { unc.cov_unscaled.as_ref() } else { None },
+            cov: &cov,
+            parameters: &sub_parameters,
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd: rsd_d,
@@ -322,6 +364,7 @@ pub(in crate::solver) fn solve_single_dataset_unit(
     Ok(SingleDatasetOutcome {
         layout: ds_layout,
         theta: lm_out.theta,
+        rel_bound_hits,
         status: lm_out.status,
         iterations: lm_out.iterations,
         weighted_ss: lm_out.weighted_ss,
@@ -391,6 +434,7 @@ pub(in crate::solver) fn fit_independent_datasets(
     let mut global_hougaard = vec![f64::NAN; k_free];
     let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
     let mut global_unstable = vec![false; k_free];
+    let mut global_rel_bound_hits = vec![false; k_free];
     let mut identifiability = FitIdentifiability::NotAssessed;
     let mut global_cov_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
     let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
@@ -439,6 +483,7 @@ pub(in crate::solver) fn fit_independent_datasets(
                 global_hougaard[*g_slot] = sub.hougaard[*l_slot];
                 global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
                 global_unstable[*g_slot] = sub.identifiability.unstable.get(*l_slot).copied().unwrap_or(false);
+                global_rel_bound_hits[*g_slot] = sub.rel_bound_hits.get(*l_slot).copied().unwrap_or(false);
             }
         }
         if !is_robust && !sub.cov.covariance_matrix.is_empty() {
@@ -510,6 +555,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         &global_hougaard,
         &global_profile_cis,
         &global_unstable,
+        &global_rel_bound_hits,
         inference_availability,
         report_all,
     );
@@ -525,8 +571,13 @@ pub(in crate::solver) fn fit_independent_datasets(
         tss_acc.add(ss_w);
     }
     let tss = tss_acc.total();
+    let is_poisson = config.method == FitMethod::PoissonDeviance;
     let r_squared = compute_r_squared(raw_rss, tss, n_obs);
+    let adj_r_squared = compute_adj_r_squared(r_squared, n_obs, df);
+    let rmse = compute_rmse(raw_rss, n_obs);
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let w_gof = if !is_robust && !is_poisson { compute_weighted_gof(&all_obs, weighted_ss, n_obs, df) } else { Default::default() };
+    let poisson_gof = if is_poisson { compute_poisson_gof(&all_obs, &all_y_hat, df) } else { None };
     let rsdr = compute_independent_rsdr(is_robust, &ds_results, &all_obs, &all_raw_residuals, k_free);
     let (predicted_y_neg_log_weight_sum, ic) = compute_independent_ic(config, &all_obs, weighted_ss, n_obs, k_free, all_poisson_ll);
 
@@ -550,6 +601,13 @@ pub(in crate::solver) fn fit_independent_datasets(
         rsd,
         rsdr,
         r_squared,
+        adj_r_squared,
+        rmse,
+        weighted_r_squared: w_gof.weighted_r_squared,
+        weighted_adj_r_squared: w_gof.weighted_adj_r_squared,
+        weighted_rmse: w_gof.weighted_rmse,
+        weighted_sy_x: w_gof.weighted_sy_x,
+        poisson_gof,
         aic_c: ic.as_ref().map(|x| x.aicc),
         bic: ic.as_ref().map(|x| x.bic),
         parameters,

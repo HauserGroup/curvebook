@@ -160,6 +160,12 @@ fn r35_surv_oe_hr_genuine_mh_and_peto_oracles() {
                 mv_time_column: None,
                 mv_status_column: None,
                 mv_group_column: None,
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
+                ratio_median_ci: false,
+                mv_status_columns: Vec::new(),
+                mv_group_columns: Vec::new(),
             }),
         )
         .unwrap()

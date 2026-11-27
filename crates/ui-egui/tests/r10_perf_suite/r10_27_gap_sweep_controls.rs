@@ -154,7 +154,7 @@ fn gwf_19_transform_modals_transpose_prune_and_select_and_transform() -> TestRes
     let mv_rs = driver.state().app.document().result_sheets.last().ok_or("missing MV SelectAndTransform result")?;
     assert_eq!((mv_rs.status.clone(), mv_rs.analysis.selected_data_sets.clone()), (ResultStatus::UpToDate, vec![0, 2]));
     match &mv_rs.analysis.kind {
-        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns }) => {
+        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns, .. }) => {
             assert_eq!((filter_formula.as_deref(), *target_archetype, derived_columns.len()), (Some("[Dose] > 1"), TableKind::Grouped, 1));
             assert_eq!((derived_columns[0].title.as_str(), derived_columns[0].formula.as_str()), ("LogDose", "ln([Dose] + 1)"));
         }

@@ -744,7 +744,7 @@ impl AnalyzeDialogState {
                     fac.response_column = response_col;
                 }
             }
-            AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max }) => {
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max, .. }) => {
                 *k_means_k = self.cluster_k_means_k;
                 *distance = self.cluster_distance;
                 *linkage = self.cluster_linkage;
@@ -764,12 +764,12 @@ impl AnalyzeDialogState {
                     *predictor_columns = predictor_cols;
                 }
             }
-            AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation }) => {
+            AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, .. }) => {
                 *x_transform = self.transform_x;
                 *y_transform = self.transform_y;
                 *error_propagation = self.transform_error_propagation;
             }
-            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation }) => {
+            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation, .. }) => {
                 *baseline_columns = self.baseline_columns.clone();
                 *operation = self.baseline_operation;
             }
@@ -857,7 +857,7 @@ impl AnalyzeDialogState {
 
     fn populate_survival_kind(&self, surv: &mut SurvivalAnalysisSpec, response_col: Option<usize>, predictor_cols: &[usize]) {
         match surv {
-            SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, tie_method } => {
+            SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, tie_method, .. } => {
                 let numeric_cols: Vec<usize> = self
                     .variable_candidates
                     .iter()

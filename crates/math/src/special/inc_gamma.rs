@@ -343,6 +343,30 @@ pub fn reg_gamma_q(a: f64, x: f64) -> Result<f64, MathError> {
     }
 }
 
+/// Lower regularized incomplete gamma function `P(a, x) = gamma(a, x) / Gamma(a)` in `[0, 1]`
+/// (DLMF §8.2.4).
+///
+/// Alias for [`reg_gamma_p`] exposed for formula and custom-DSL evaluators.
+///
+/// # Errors
+/// Returns [`MathError::InvalidParameter`] if `a <= 0`, [`MathError::DomainError`] if `x < 0` or
+/// `NaN`, or [`MathError::NotConverged`] if an expansion exceeds its iteration cap.
+pub fn igamma(a: f64, x: f64) -> Result<f64, MathError> {
+    reg_gamma_p(a, x)
+}
+
+/// Upper regularized incomplete gamma function `Q(a, x) = Gamma(a, x) / Gamma(a)` in `[0, 1]`
+/// (DLMF §8.2.4).
+///
+/// Alias for [`reg_gamma_q`] exposed for formula and custom-DSL evaluators.
+///
+/// # Errors
+/// Returns [`MathError::InvalidParameter`] if `a <= 0`, [`MathError::DomainError`] if `x < 0` or
+/// `NaN`, or [`MathError::NotConverged`] if an expansion exceeds its iteration cap.
+pub fn igammac(a: f64, x: f64) -> Result<f64, MathError> {
+    reg_gamma_q(a, x)
+}
+
 /// Natural logarithm of the lower regularized incomplete gamma `ln P(a, x)`, remaining finite even
 /// when `P(a, x)` underflows `f64` for very small `x` or huge `a`.
 ///

@@ -335,6 +335,11 @@ fn r1_s08_11_malformed_dendrogram_tabs_do_not_panic_under_compile_graph() {
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
     )
     .unwrap();

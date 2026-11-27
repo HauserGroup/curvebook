@@ -25,10 +25,10 @@
 //!   angular arcsine square-root transformations).
 
 use curvebook_doc::{
-    Cell, CellValue, DataSetColumn, DataSheet, DocError, ErrorPropagationMode, InfoSheet, MathTransformPreset, ResultCell, SubcolumnMode,
-    TableArchetype, TableKind, XColumnMode,
+    AsymmetricCiTransformPolicy, Cell, CellValue, DataSetColumn, DataSheet, DocError, ErrorPropagationMode, InfoSheet, MathTransformPreset,
+    PharmacologyTransformPreset, ResultCell, SubcolumnMode, TableArchetype, TableKind, XColumnMode,
 };
-use curvebook_math::dist;
+use curvebook_math::{dist, sum};
 
 use crate::error::TransformError;
 use crate::formula::{Expr, ScalarEnv, eval_scalar_expr, parse_formula};
@@ -82,6 +82,20 @@ pub enum MathTransformOp {
     UserExpression(String),
 }
 
+/// Extended options for [`execute_math_transform_with_options`] corresponding to the additive
+/// fields of [`curvebook_doc::TransformAnalysisSpec::Math`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MathTransformOptions {
+    /// Optional biochemical/pharmacology linearizing transform preset (`LineweaverBurk`, `EadieHofstee`, `HanesWoolf`, `Scatchard`, `Hill`).
+    pub pharmacology_preset: Option<PharmacologyTransformPreset>,
+    /// When `true`, swaps *X* and *Y* columns on a single-dataset `XyTable`.
+    pub interchange_xy: bool,
+    /// Optional finite value substituted for `X == 0.0` before applying *X* or pharmacology transforms.
+    pub zero_x_substitute: Option<f64>,
+    /// Policy governing confidence-interval / spread propagation on pre-summarized subcolumns.
+    pub asymmetric_ci_policy: AsymmetricCiTransformPolicy,
+}
+
 enum CompiledOp {
     Preset(MathTransformPreset),
     Multiply(f64),
@@ -90,6 +104,9 @@ enum CompiledOp {
     Subtract(f64),
     Antilog(f64),
     UserExpr(Expr),
+    HanesWoolfY,
+    HillY { y_max: f64 },
+    DivideByX,
 }
 
 impl CompiledOp {
@@ -153,6 +170,18 @@ impl CompiledOp {
             Self::Subtract(c) => v - c,
             Self::Antilog(base) => base.powf(v),
             Self::UserExpr(expr) => eval_user_expr(expr, v, x_ctx, is_x_axis, info)?,
+            Self::HanesWoolfY => {
+                let x = x_ctx?;
+                (x.is_finite() && v != 0.0).then(|| x / v)?
+            }
+            Self::HillY { y_max } => {
+                let denom = y_max - v;
+                (v > 0.0 && denom > 0.0).then(|| (v / denom).log10())?
+            }
+            Self::DivideByX => {
+                let x = x_ctx?;
+                (x.is_finite() && x != 0.0).then(|| v / x)?
+            }
         };
         out.is_finite().then_some(out)
     }
@@ -167,6 +196,18 @@ impl CompiledOp {
             Self::Divide(c) => 1.0 / *c,
             Self::Add(_) | Self::Subtract(_) => 1.0,
             Self::Antilog(base) => base.powf(v) * base.ln(),
+            Self::HanesWoolfY => {
+                let x = x_ctx?;
+                (x.is_finite() && v != 0.0).then(|| -x / (v * v))?
+            }
+            Self::HillY { y_max } => {
+                let denom = y_max - v;
+                (v > 0.0 && denom > 0.0).then(|| y_max / (v * denom * std::f64::consts::LN_10))?
+            }
+            Self::DivideByX => {
+                let x = x_ctx?;
+                (x.is_finite() && x != 0.0).then(|| 1.0 / x)?
+            }
             Self::UserExpr(expr) => {
                 let h = if v != 0.0 { 1e-6 * v.abs() } else { 1e-6 };
                 if h == 0.0 || !h.is_finite() {
@@ -306,10 +347,42 @@ pub fn execute_math_transform(
     error_propagation: ErrorPropagationMode,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    execute_math_transform_with_options(source, x_op, y_op, error_propagation, &MathTransformOptions::default(), ctx)
+}
+
+/// Apply optional mathematical transforms on X and/or Y columns together with pharmacology
+/// linearizing presets, `X == 0` substitution, X/Y interchange, and asymmetric CI error policies.
+pub fn execute_math_transform_with_options(
+    source: &DataSheet,
+    x_op: Option<&MathTransformOp>,
+    y_op: Option<&MathTransformOp>,
+    error_propagation: ErrorPropagationMode,
+    options: &MathTransformOptions,
+    ctx: &TransformContext<'_>,
+) -> Result<TransformOutput, TransformError> {
     source.archetype.validate()?;
     if matches!(source.archetype, TableArchetype::Survival(_)) && y_op.is_some() {
         return Err(TransformError::IncompatibleTable { operation: "math_transform_y", kind: TableKind::Survival });
     }
+    if let Some(sub) = options.zero_x_substitute
+        && !sub.is_finite()
+    {
+        return Err(TransformError::InvalidSpec { message: format!("zero_x_substitute must be finite, got {sub}") });
+    }
+    if let Some(preset) = options.pharmacology_preset {
+        if !matches!(source.archetype, TableArchetype::Xy(_)) {
+            return Err(TransformError::IncompatibleTable { operation: "pharmacology transform preset", kind: source.kind() });
+        }
+        if let PharmacologyTransformPreset::Hill { y_max: Some(ym) } = preset
+            && !ym.is_finite()
+        {
+            return Err(TransformError::InvalidSpec { message: format!("Hill y_max must be finite, got {ym}") });
+        }
+    }
+    if options.interchange_xy && !matches!(source.archetype, TableArchetype::Xy(_)) {
+        return Err(TransformError::IncompatibleTable { operation: "interchange X and Y", kind: source.kind() });
+    }
+
     let compiled_x = x_op.map(CompiledOp::compile).transpose()?;
     let compiled_y = y_op.map(CompiledOp::compile).transpose()?;
 
@@ -324,7 +397,26 @@ pub fn execute_math_transform(
     let mut transformed_cells = 0_usize;
     let info = ctx.primary_info_sheet();
 
-    let x_values_before: Vec<Option<f64>> = match &source.archetype {
+    if let Some(sub) = options.zero_x_substitute {
+        apply_zero_x_substitution(&mut out.archetype, sub, &mut transformed_cells)?;
+    }
+
+    if let Some(preset) = options.pharmacology_preset {
+        let col_count = out.archetype.column_count();
+        let selected = ctx.active_columns(col_count)?;
+        apply_pharmacology_preset(
+            &mut out,
+            preset,
+            &selected,
+            error_propagation,
+            options.asymmetric_ci_policy,
+            info,
+            &mut transformed_cells,
+            &mut warnings,
+        )?;
+    }
+
+    let x_values_before: Vec<Option<f64>> = match &out.archetype {
         TableArchetype::Xy(xy) => (0..xy.row_count()).map(|r| xy.raw_x_value_at(r)).collect(),
         _ => Vec::new(),
     };
@@ -332,7 +424,7 @@ pub fn execute_math_transform(
     if let Some(ref cx) = compiled_x {
         match &mut out.archetype {
             TableArchetype::Xy(xy) => {
-                transform_xy_x_axis(xy, cx, error_propagation, info, &mut transformed_cells, &mut warnings);
+                transform_xy_x_axis(xy, cx, error_propagation, options.asymmetric_ci_policy, info, &mut transformed_cells, &mut warnings);
             }
             TableArchetype::Survival(srv) => {
                 for (r, time_cell) in srv.times.iter_mut().enumerate() {
@@ -361,6 +453,7 @@ pub fn execute_math_transform(
             &selected,
             cy,
             error_propagation,
+            options.asymmetric_ci_policy,
             &x_values_before,
             info,
             &mut transformed_cells,
@@ -370,6 +463,12 @@ pub fn execute_math_transform(
         for &(row, col) in &swapped {
             crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
         }
+    }
+
+    if options.interchange_xy {
+        let col_count = out.archetype.column_count();
+        let selected = ctx.active_columns(col_count)?;
+        apply_interchange_xy(&mut out, &selected)?;
     }
 
     out.prune_stale_plate_well_origins();
@@ -386,18 +485,11 @@ pub fn execute_math_transform(
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
 }
 
-fn transform_xy_x_axis(
-    xy: &mut curvebook_doc::XyTable,
-    op: &CompiledOp,
-    err_mode: ErrorPropagationMode,
-    info: Option<&InfoSheet>,
-    count: &mut usize,
-    warnings: &mut Vec<String>,
-) {
-    let rows = xy.row_count();
-    let sub_mode = match xy.x_mode {
+fn materialize_xy_x_cells(xy: &mut curvebook_doc::XyTable) -> SubcolumnMode {
+    match xy.x_mode {
         XColumnMode::Numbers { subcolumn_mode } => subcolumn_mode,
         XColumnMode::DateOrElapsedTime { .. } | XColumnMode::GeneratedSequence { .. } => {
+            let rows = xy.row_count();
             let mut materialized = Vec::with_capacity(rows);
             for r in 0..rows {
                 materialized.push(vec![xy.materialized_x_cell_at(r)]);
@@ -406,12 +498,241 @@ fn transform_xy_x_axis(
             xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
             SubcolumnMode::Single
         }
+    }
+}
+
+fn apply_zero_x_substitution(arch: &mut TableArchetype, substitute: f64, count: &mut usize) -> Result<(), TransformError> {
+    match arch {
+        TableArchetype::Xy(xy) => {
+            let _ = materialize_xy_x_cells(xy);
+            for row_cells in &mut xy.x_cells {
+                for cell in row_cells {
+                    if cell.value.finite_f64() == Some(0.0) {
+                        cell.value = CellValue::Number(substitute);
+                        *count += 1;
+                    }
+                }
+            }
+            Ok(())
+        }
+        TableArchetype::Survival(srv) => {
+            for (r, cell) in srv.times.iter_mut().enumerate() {
+                if cell.value.finite_f64() == Some(0.0) {
+                    if substitute < 0.0 {
+                        return Err(TransformError::Doc(DocError::InvalidCellValue {
+                            archetype: TableKind::Survival,
+                            row: r,
+                            col: 0,
+                            reason: "elapsed survival time must be >= 0",
+                        }));
+                    }
+                    cell.value = CellValue::Number(substitute);
+                    *count += 1;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn xy_primary_y_per_row(xy: &curvebook_doc::XyTable, col: usize) -> Vec<Option<f64>> {
+    let Some(ds) = xy.data_sets.get(col) else {
+        return Vec::new();
     };
+    (0..xy.row_count())
+        .map(|r| {
+            let subs = ds.cells.get(r)?;
+            if xy.y_subcolumn_mode.is_pre_summarized() || xy.y_subcolumn_mode == SubcolumnMode::Single {
+                subs.first().and_then(Cell::active_number)
+            } else {
+                let active: Vec<f64> = subs.iter().filter_map(Cell::active_number).collect();
+                if active.is_empty() { None } else { sum::mean(&active).ok() }
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pharmacology_preset(
+    out: &mut DataSheet,
+    preset: PharmacologyTransformPreset,
+    selected: &[usize],
+    err_mode: ErrorPropagationMode,
+    ci_policy: AsymmetricCiTransformPolicy,
+    info: Option<&InfoSheet>,
+    count: &mut usize,
+    warnings: &mut Vec<String>,
+) -> Result<(), TransformError> {
+    let TableArchetype::Xy(xy) = &mut out.archetype else {
+        return Err(TransformError::IncompatibleTable { operation: "pharmacology transform preset", kind: out.kind() });
+    };
+    let _ = materialize_xy_x_cells(xy);
+    let x_before: Vec<Option<f64>> = (0..xy.row_count()).map(|r| xy.raw_x_value_at(r)).collect();
+
+    match preset {
+        PharmacologyTransformPreset::LineweaverBurk => {
+            let recip = CompiledOp::Preset(MathTransformPreset::Reciprocal);
+            transform_xy_x_axis(xy, &recip, err_mode, ci_policy, info, count, warnings);
+            let swapped = transform_archetype_y(&mut out.archetype, selected, &recip, err_mode, ci_policy, &x_before, info, count, warnings)?;
+            remap_swapped_error_notes_batch(&mut out.exclusion_notes, &swapped);
+            for &(row, col) in &swapped {
+                crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
+            }
+        }
+        PharmacologyTransformPreset::HanesWoolf => {
+            let op = CompiledOp::HanesWoolfY;
+            let swapped = transform_archetype_y(&mut out.archetype, selected, &op, err_mode, ci_policy, &x_before, info, count, warnings)?;
+            remap_swapped_error_notes_batch(&mut out.exclusion_notes, &swapped);
+            for &(row, col) in &swapped {
+                crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
+            }
+        }
+        PharmacologyTransformPreset::Hill { y_max } => {
+            let mut col_y_max = Vec::with_capacity(selected.len());
+            for &c in selected {
+                let ym = match y_max {
+                    Some(v) => v,
+                    None => {
+                        let vals: Vec<f64> = xy_primary_y_per_row(xy, c).into_iter().flatten().collect();
+                        vals.into_iter().reduce(f64::max).ok_or_else(|| TransformError::InvalidInput {
+                            message: format!("Hill transform column {c} has no active numeric values to infer Y_max"),
+                        })?
+                    }
+                };
+                col_y_max.push((c, ym));
+            }
+            let log10 = CompiledOp::Preset(MathTransformPreset::Log10);
+            transform_xy_x_axis(xy, &log10, err_mode, ci_policy, info, count, warnings);
+            let convert_asymmetric = ci_policy == AsymmetricCiTransformPolicy::AsymmetricEndpoints
+                && xy.y_subcolumn_mode.supports_parametric_moments()
+                && selected.len() == xy.data_sets.len();
+            if convert_asymmetric {
+                let old_mode = xy.y_subcolumn_mode;
+                for &(c, ym) in &col_y_max {
+                    let hill_y = CompiledOp::HillY { y_max: ym };
+                    if let Some(ds) = xy.data_sets.get_mut(c) {
+                        for (r, row_cells) in ds.cells.iter_mut().enumerate() {
+                            let x_val = x_before.get(r).copied().flatten();
+                            convert_parametric_row_to_asymmetric_ci(row_cells, old_mode, &hill_y, x_val, false, info, r, c, count, warnings);
+                        }
+                    }
+                }
+                xy.y_subcolumn_mode = SubcolumnMode::UpperLowerLimits;
+            } else {
+                let mut all_swapped = Vec::new();
+                for &(c, ym) in &col_y_max {
+                    let hill_y = CompiledOp::HillY { y_max: ym };
+                    let swapped = transform_archetype_y(&mut out.archetype, &[c], &hill_y, err_mode, ci_policy, &x_before, info, count, warnings)?;
+                    all_swapped.extend(swapped);
+                }
+                remap_swapped_error_notes_batch(&mut out.exclusion_notes, &all_swapped);
+                for &(row, col) in &all_swapped {
+                    crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
+                }
+            }
+        }
+        PharmacologyTransformPreset::EadieHofstee => {
+            if selected.len() != 1 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("Eadie-Hofstee transform requires a single selected dataset (got {})", selected.len()),
+                });
+            }
+            let c = selected[0];
+            let y_primary = xy_primary_y_per_row(xy, c);
+            xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+            xy.x_title = String::from("Y / X");
+            xy.x_cells = (0..xy.row_count())
+                .map(|r| match (x_before.get(r).copied().flatten(), y_primary.get(r).copied().flatten()) {
+                    (Some(x), Some(y)) if x != 0.0 && (y / x).is_finite() => {
+                        *count += 1;
+                        vec![Cell::number(y / x)]
+                    }
+                    (Some(_), Some(_)) => {
+                        warnings.push(format!("row {r}: Eadie-Hofstee X = Y / X undefined for X = 0; cell blanked"));
+                        vec![Cell::empty()]
+                    }
+                    _ => vec![Cell::empty()],
+                })
+                .collect();
+        }
+        PharmacologyTransformPreset::Scatchard => {
+            if selected.len() != 1 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("Scatchard transform requires a single selected dataset (got {})", selected.len()),
+                });
+            }
+            let c = selected[0];
+            let y_primary = xy_primary_y_per_row(xy, c);
+            xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+            xy.x_title = String::from("Bound (Y)");
+            xy.x_cells = (0..xy.row_count())
+                .map(|r| match y_primary.get(r).copied().flatten() {
+                    Some(y) if y.is_finite() => {
+                        *count += 1;
+                        vec![Cell::number(y)]
+                    }
+                    _ => vec![Cell::empty()],
+                })
+                .collect();
+            let div_x = CompiledOp::DivideByX;
+            let swapped = transform_archetype_y(&mut out.archetype, &[c], &div_x, err_mode, ci_policy, &x_before, info, count, warnings)?;
+            remap_swapped_error_notes_batch(&mut out.exclusion_notes, &swapped);
+            for &(row, col) in &swapped {
+                crate::randomize::remap_swapped_error_origins(&mut out.plate_well_origins, &[row], col);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_interchange_xy(out: &mut DataSheet, selected: &[usize]) -> Result<(), TransformError> {
+    if selected.len() != 1 {
+        return Err(TransformError::InvalidSpec {
+            message: format!("Interchange X and Y requires a single selected Y dataset (got {})", selected.len()),
+        });
+    }
+    let col = selected[0];
+    let TableArchetype::Xy(xy) = &mut out.archetype else {
+        return Err(TransformError::IncompatibleTable { operation: "interchange X and Y", kind: out.kind() });
+    };
+    let old_x_sub_mode = materialize_xy_x_cells(xy);
+    let old_y_sub_mode = xy.y_subcolumn_mode;
+    let Some(mut target_ds) = xy.data_sets.get(col).cloned() else {
+        return Err(TransformError::InvalidSpec { message: format!("selected dataset index {col} out of bounds") });
+    };
+    std::mem::swap(&mut xy.x_title, &mut target_ds.title);
+    std::mem::swap(&mut xy.x_cells, &mut target_ds.cells);
+    xy.x_mode = XColumnMode::Numbers { subcolumn_mode: old_y_sub_mode };
+    xy.y_subcolumn_mode = old_x_sub_mode;
+    xy.data_sets = vec![target_ds];
+    out.exclusion_notes.clear();
+    out.plate_well_origins.clear();
+    Ok(())
+}
+
+fn transform_xy_x_axis(
+    xy: &mut curvebook_doc::XyTable,
+    op: &CompiledOp,
+    err_mode: ErrorPropagationMode,
+    ci_policy: AsymmetricCiTransformPolicy,
+    info: Option<&InfoSheet>,
+    count: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    let sub_mode = materialize_xy_x_cells(xy);
+    if ci_policy == AsymmetricCiTransformPolicy::AsymmetricEndpoints && sub_mode.supports_parametric_moments() {
+        for (r, row_cells) in xy.x_cells.iter_mut().enumerate() {
+            convert_parametric_row_to_asymmetric_ci(row_cells, sub_mode, op, None, true, info, r, 0, count, warnings);
+        }
+        xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::UpperLowerLimits };
+        return;
+    }
 
     for (r, row_cells) in xy.x_cells.iter_mut().enumerate() {
         let mut temp_col =
             DataSetColumn { title: xy.x_title.clone(), cells: vec![row_cells.clone()], subcolumn_titles: Vec::new(), display_decimals: None };
-        transform_row_slice(&mut temp_col.cells[0], sub_mode, op, err_mode, None, true, info, r, 0, count, warnings);
+        transform_row_slice(&mut temp_col.cells[0], sub_mode, op, err_mode, ci_policy, None, true, info, r, 0, count, warnings);
         *row_cells = temp_col.cells.swap_remove(0);
     }
 }
@@ -422,17 +743,59 @@ fn transform_archetype_y(
     selected: &[usize],
     op: &CompiledOp,
     err_mode: ErrorPropagationMode,
+    ci_policy: AsymmetricCiTransformPolicy,
     x_ctx: &[Option<f64>],
     info: Option<&InfoSheet>,
     count: &mut usize,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<(usize, usize)>, TransformError> {
     let swapped = match arch {
-        TableArchetype::Xy(t) => transform_dataset_vec(&mut t.data_sets, t.y_subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
-        TableArchetype::Column(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
-        TableArchetype::Grouped(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
+        TableArchetype::Xy(t) => {
+            if ci_policy == AsymmetricCiTransformPolicy::AsymmetricEndpoints
+                && t.y_subcolumn_mode.supports_parametric_moments()
+                && selected.len() == t.data_sets.len()
+            {
+                let old_mode = t.y_subcolumn_mode;
+                for &c in selected {
+                    if let Some(ds) = t.data_sets.get_mut(c) {
+                        for (r, row_cells) in ds.cells.iter_mut().enumerate() {
+                            let x_val = x_ctx.get(r).copied().flatten();
+                            convert_parametric_row_to_asymmetric_ci(row_cells, old_mode, op, x_val, false, info, r, c, count, warnings);
+                        }
+                    }
+                }
+                t.y_subcolumn_mode = SubcolumnMode::UpperLowerLimits;
+                Vec::new()
+            } else {
+                transform_dataset_vec(&mut t.data_sets, t.y_subcolumn_mode, selected, op, err_mode, ci_policy, x_ctx, info, count, warnings)
+            }
+        }
+        TableArchetype::Column(t) => {
+            transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, ci_policy, x_ctx, info, count, warnings)
+        }
+        TableArchetype::Grouped(t) => {
+            if ci_policy == AsymmetricCiTransformPolicy::AsymmetricEndpoints
+                && t.subcolumn_mode.supports_parametric_moments()
+                && selected.len() == t.data_sets.len()
+            {
+                let old_mode = t.subcolumn_mode;
+                for &c in selected {
+                    if let Some(ds) = t.data_sets.get_mut(c) {
+                        for (r, row_cells) in ds.cells.iter_mut().enumerate() {
+                            let x_val = x_ctx.get(r).copied().flatten();
+                            convert_parametric_row_to_asymmetric_ci(row_cells, old_mode, op, x_val, false, info, r, c, count, warnings);
+                        }
+                    }
+                }
+                t.subcolumn_mode = SubcolumnMode::UpperLowerLimits;
+                Vec::new()
+            } else {
+                transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, ci_policy, x_ctx, info, count, warnings)
+            }
+        }
         TableArchetype::Contingency(t) => {
-            let swapped = transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, x_ctx, info, count, warnings);
+            let swapped =
+                transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, ci_policy, x_ctx, info, count, warnings);
             t.validate_counts()?;
             swapped
         }
@@ -440,7 +803,8 @@ fn transform_archetype_y(
             return Err(TransformError::IncompatibleTable { operation: "math_transform_y", kind: TableKind::Survival });
         }
         TableArchetype::PartsOfWhole(t) => {
-            let swapped = transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, x_ctx, info, count, warnings);
+            let swapped =
+                transform_dataset_vec(&mut t.data_sets, SubcolumnMode::Single, selected, op, err_mode, ci_policy, x_ctx, info, count, warnings);
             validate_parts_of_whole_non_negative(t)?;
             swapped
         }
@@ -449,7 +813,7 @@ fn transform_archetype_y(
                 if let Some(grp) = t.groups.get_mut(c) {
                     let mode = SubcolumnMode::RawReplicates(grp.biological_unit_count().max(1));
                     for (r, row_cells) in grp.cells.iter_mut().enumerate() {
-                        transform_row_slice(row_cells, mode, op, err_mode, None, false, info, r, c, count, warnings);
+                        transform_row_slice(row_cells, mode, op, err_mode, ci_policy, None, false, info, r, c, count, warnings);
                     }
                 }
             }
@@ -461,7 +825,7 @@ fn transform_archetype_y(
                     if let Some(var) = mv.variables.get_mut(c) {
                         for (r, cell) in var.cells.iter_mut().enumerate() {
                             let mut one = [cell.clone()];
-                            transform_row_slice(&mut one, SubcolumnMode::Single, op, err_mode, None, false, info, r, c, count, warnings);
+                            transform_row_slice(&mut one, SubcolumnMode::Single, op, err_mode, ci_policy, None, false, info, r, c, count, warnings);
                             *cell = one[0].clone();
                         }
                     }
@@ -475,12 +839,87 @@ fn transform_archetype_y(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn convert_parametric_row_to_asymmetric_ci(
+    row_cells: &mut [Cell],
+    mode: SubcolumnMode,
+    op: &CompiledOp,
+    x_val: Option<f64>,
+    is_x_axis: bool,
+    info: Option<&InfoSheet>,
+    row_idx: usize,
+    col_idx: usize,
+    count: &mut usize,
+    warnings: &mut Vec<String>,
+) {
+    if row_cells.len() < 3 {
+        return;
+    }
+    let mean_excl = row_cells[0].excluded;
+    let Some(mean_in) = row_cells[0].value.finite_f64() else {
+        row_cells[1].value = CellValue::Empty;
+        row_cells[2].value = CellValue::Empty;
+        return;
+    };
+    let Some(mean_out) = op.eval(mean_in, x_val, is_x_axis, info) else {
+        row_cells[0].value = CellValue::Empty;
+        row_cells[1].value = CellValue::Empty;
+        row_cells[2].value = CellValue::Empty;
+        if !mean_excl {
+            warnings.push(format!("row {row_idx} col {col_idx}: mean {mean_in} outside transform domain"));
+        }
+        return;
+    };
+    row_cells[0] = Cell { value: CellValue::Number(mean_out), excluded: mean_excl };
+    *count += 1;
+
+    let spread_in = row_cells[1].value.finite_f64();
+    let n_in = row_cells[2].value.finite_f64();
+    let sem_in = match (mode, spread_in, n_in) {
+        (SubcolumnMode::MeanSemN, Some(sem), Some(n)) if n >= 2.0 && sem >= 0.0 => Some((sem, n)),
+        (SubcolumnMode::MeanSdN, Some(sd), Some(n)) if n >= 2.0 && sd >= 0.0 => Some((sd / n.sqrt(), n)),
+        (SubcolumnMode::MeanCvN, Some(cv), Some(n)) if n >= 2.0 && cv >= 0.0 && mean_in != 0.0 => {
+            Some((((cv / 100.0) * mean_in.abs()) / n.sqrt(), n))
+        }
+        _ => None,
+    };
+
+    let Some((sem, n)) = sem_in else {
+        row_cells[1].value = CellValue::Empty;
+        row_cells[2].value = CellValue::Empty;
+        return;
+    };
+    let Ok(t_crit) = dist::student_t_two_sided_isf(0.05, n - 1.0) else {
+        row_cells[1].value = CellValue::Empty;
+        row_cells[2].value = CellValue::Empty;
+        return;
+    };
+    let ci_lo_in = mean_in - t_crit * sem;
+    let ci_hi_in = mean_in + t_crit * sem;
+    let t_lo = op.eval(ci_lo_in, x_val, is_x_axis, info);
+    let t_hi = op.eval(ci_hi_in, x_val, is_x_axis, info);
+    let reverses = op.derivative(mean_in, x_val, is_x_axis, info).is_some_and(|d| d < 0.0);
+    let (lo_out, hi_out) = match (t_lo, t_hi) {
+        (Some(a), Some(b)) if a > b => (Some(b), Some(a)),
+        (Some(a), Some(b)) => (Some(a), Some(b)),
+        (Some(a), None) if reverses => (None, Some(a)),
+        (None, Some(b)) if reverses => (Some(b), None),
+        other => other,
+    };
+    if lo_out.is_none() || hi_out.is_none() {
+        warnings.push(format!("row {row_idx} col {col_idx}: asymmetric 95% CI endpoint outside transform domain; bound blanked"));
+    }
+    row_cells[1] = Cell { value: lo_out.map_or(CellValue::Empty, CellValue::Number), excluded: false };
+    row_cells[2] = Cell { value: hi_out.map_or(CellValue::Empty, CellValue::Number), excluded: false };
+}
+
+#[allow(clippy::too_many_arguments)]
 fn transform_dataset_vec(
     data_sets: &mut [DataSetColumn],
     mode: SubcolumnMode,
     selected: &[usize],
     op: &CompiledOp,
     err_mode: ErrorPropagationMode,
+    ci_policy: AsymmetricCiTransformPolicy,
     x_ctx: &[Option<f64>],
     info: Option<&InfoSheet>,
     count: &mut usize,
@@ -493,7 +932,7 @@ fn transform_dataset_vec(
         };
         for (r, row_cells) in ds.cells.iter_mut().enumerate() {
             let x_val = x_ctx.get(r).copied().flatten();
-            if transform_row_slice(row_cells, mode, op, err_mode, x_val, false, info, r, c, count, warnings) {
+            if transform_row_slice(row_cells, mode, op, err_mode, ci_policy, x_val, false, info, r, c, count, warnings) {
                 swapped.push((r, c));
             }
         }
@@ -507,6 +946,7 @@ fn transform_row_slice(
     mode: SubcolumnMode,
     op: &CompiledOp,
     err_mode: ErrorPropagationMode,
+    ci_policy: AsymmetricCiTransformPolicy,
     x_val: Option<f64>,
     is_x_axis: bool,
     info: Option<&InfoSheet>,
@@ -515,6 +955,32 @@ fn transform_row_slice(
     count: &mut usize,
     warnings: &mut Vec<String>,
 ) -> bool {
+    if ci_policy == AsymmetricCiTransformPolicy::Omit && mode.is_pre_summarized() {
+        if let Some(first) = row_cells.first_mut() {
+            transform_single_cell(first, op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
+        }
+        let mut omitted = false;
+        if let Some(c1) = row_cells.get_mut(1)
+            && !c1.is_empty()
+        {
+            c1.value = CellValue::Empty;
+            omitted = true;
+        }
+        if !mode.supports_parametric_moments()
+            && let Some(c2) = row_cells.get_mut(2)
+            && !c2.is_empty()
+        {
+            c2.value = CellValue::Empty;
+            omitted = true;
+        }
+        if omitted {
+            warnings.push(format!("row {row_idx} col {col_idx}: error/CI subcolumns omitted under AsymmetricCiTransformPolicy::Omit"));
+        }
+        return false;
+    }
+
+    let eff_err_mode =
+        if ci_policy == AsymmetricCiTransformPolicy::AsymmetricEndpoints { ErrorPropagationMode::ReplicateEndpoints } else { err_mode };
     match mode {
         SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
             for cell in row_cells.iter_mut() {
@@ -523,10 +989,10 @@ fn transform_row_slice(
             false
         }
         SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN | SubcolumnMode::MeanSd | SubcolumnMode::MeanSem => {
-            transform_parametric_summary(row_cells, mode, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
+            transform_parametric_summary(row_cells, mode, op, eff_err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
             false
         }
-        SubcolumnMode::MeanLowHigh => transform_mean_low_high(row_cells, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings),
+        SubcolumnMode::MeanLowHigh => transform_mean_low_high(row_cells, op, eff_err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings),
         SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
             transform_explicit_limits(row_cells, op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings)
         }

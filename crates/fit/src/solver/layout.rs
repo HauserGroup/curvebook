@@ -1,10 +1,18 @@
-//! Free-parameter layout (global sharing, constraints, bounds), observation records, and point weighting.
+//! Free-parameter layout (global sharing, constraints, bounds, relational reparameterization),
+//! observation records, and point weighting.
 //!
 //! References:
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
+//! - Nocedal, J. & Wright, S. J. (2006). *Numerical Optimization*, 2nd ed. Springer.
 
-use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme, WeightingSource, parse_column_title_numeric_hook};
+use std::collections::{BTreeMap, VecDeque};
+
+use curvebook_doc::{
+    FitMethod, ParameterRule, ParameterScope, RelationalConstraint, RelationalConstraintOp, WeightingScheme, WeightingSource,
+    parse_column_title_numeric_hook,
+};
+use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::ode_fit_budget_exceeded;
@@ -30,6 +38,15 @@ pub(in crate::solver) enum ParamBinding {
     Fixed(f64),
 }
 
+/// Normalized directed relational inequality `theta[high] - theta[low] >= min_gap`.
+#[derive(Debug, Clone, Copy)]
+pub(in crate::solver) struct RelationalEdge {
+    pub(in crate::solver) high: usize,
+    pub(in crate::solver) low: usize,
+    pub(in crate::solver) min_gap: f64,
+    pub(in crate::solver) strict: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(in crate::solver) struct ParameterLayout {
     pub(in crate::solver) p_model: usize,
@@ -37,39 +54,44 @@ pub(in crate::solver) struct ParameterLayout {
     pub(in crate::solver) bindings: Vec<Vec<ParamBinding>>,
     pub(in crate::solver) free_slots: Vec<FreeSlot>,
     pub(in crate::solver) fixed_constants: Vec<(String, f64, Vec<ParameterNote>)>,
+    pub(in crate::solver) rel_edges: Vec<RelationalEdge>,
+    pub(in crate::solver) rel_parents: Vec<Vec<(usize, f64)>>,
+    pub(in crate::solver) topo_order: Vec<usize>,
+    pub(in crate::solver) has_relational: bool,
 }
 
 impl ParameterLayout {
+    #[cfg(test)]
     pub(in crate::solver) fn build(
         model: &dyn ParametricModel,
         datasets: &[DatasetSeries],
         hooks: &HookContext,
         rules: &[ParameterRule],
     ) -> Result<Self, FitError> {
-        Self::build_with_column_titles(model, datasets, hooks, rules, None)
+        Self::build_with_options(model, datasets, hooks, rules, &[], None)
     }
 
-    pub(in crate::solver) fn build_with_column_titles(
+    pub(in crate::solver) fn build_with_constraints(
         model: &dyn ParametricModel,
         datasets: &[DatasetSeries],
         hooks: &HookContext,
         rules: &[ParameterRule],
+        relational_constraints: &[RelationalConstraint],
+    ) -> Result<Self, FitError> {
+        Self::build_with_options(model, datasets, hooks, rules, relational_constraints, None)
+    }
+
+    pub(in crate::solver) fn build_with_options(
+        model: &dyn ParametricModel,
+        datasets: &[DatasetSeries],
+        hooks: &HookContext,
+        rules: &[ParameterRule],
+        relational_constraints: &[RelationalConstraint],
         override_column_titles: Option<&[f64]>,
     ) -> Result<Self, FitError> {
         let param_names = model.param_names();
-        let mut seen_rule_names: Vec<&str> = Vec::with_capacity(rules.len());
-        for rule in rules {
-            if !param_names.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)) {
-                return Err(FitError::InvalidParameter {
-                    name: "parameter_rules",
-                    reason: format!("Unknown parameter rule `{}` (expected one of: {})", rule.name, param_names.join(", ")),
-                });
-            }
-            if seen_rule_names.iter().any(|prev| prev.eq_ignore_ascii_case(&rule.name)) {
-                return Err(FitError::InvalidParameter { name: "parameter_rules", reason: format!("Duplicate parameter rule for `{}`", rule.name) });
-            }
-            seen_rule_names.push(&rule.name);
-        }
+        validate_rules_and_mandatory_constants(model, param_names, rules)?;
+
         let p_model = param_names.len();
         let n_datasets = datasets.len();
         let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
@@ -126,39 +148,8 @@ impl ParameterLayout {
                     fixed_constants.push((pname.clone(), val, vec![ParameterNote::Hooked]));
                 }
                 Some(ParameterScope::PerDatasetConstant(pairs)) => {
-                    for &(_, val) in pairs {
-                        if !val.is_finite() {
-                            return Err(FitError::InvalidParameter {
-                                name: "parameter_rules",
-                                reason: format!("Non-finite per-dataset constant for `{pname}`"),
-                            });
-                        }
-                    }
-                    for (ds_idx, ds) in datasets.iter().enumerate() {
-                        if let Some(&(_, val)) = pairs.iter().rev().find(|&&(idx, _)| idx == ds.data_set_index) {
-                            bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
-                            let label = if n_datasets > 1 { per_dataset_parameter_key(pname, ds.data_set_index) } else { pname.clone() };
-                            fixed_constants.push((label, val, vec![ParameterNote::Constant]));
-                        } else if let Some(eq_val) = equal_bound {
-                            bindings[ds_idx][p_idx] = ParamBinding::Fixed(eq_val);
-                            let label = if n_datasets > 1 { per_dataset_parameter_key(pname, ds.data_set_index) } else { pname.clone() };
-                            fixed_constants.push((label, eq_val, vec![ParameterNote::Constant]));
-                        } else {
-                            let slot = free_slots.len();
-                            let init_v =
-                                rule.and_then(|r| r.initial_override).unwrap_or_else(|| per_ds_init[ds_idx].get(p_idx).copied().unwrap_or(1.0));
-                            free_slots.push(FreeSlot {
-                                ds_local_idx: Some(ds_idx),
-                                dataset_idx: Some(ds.data_set_index),
-                                name: pname.clone(),
-                                lower: lb,
-                                upper: ub,
-                                init: clamp_to_bounds(init_v, lb, ub),
-                                is_shared: false,
-                            });
-                            bindings[ds_idx][p_idx] = ParamBinding::Free(slot);
-                        }
-                    }
+                    let init_ctx = ParamBindCtx { model, datasets, p_idx, pname, rule, lb, ub, equal_bound, per_ds_init: &per_ds_init };
+                    bind_per_dataset_constants(&init_ctx, pairs, &mut bindings, &mut free_slots, &mut fixed_constants)?;
                 }
                 Some(ParameterScope::ColumnTitleConstant) => {
                     for (ds_idx, ds) in datasets.iter().enumerate() {
@@ -174,7 +165,17 @@ impl ParameterLayout {
                     }
                 }
                 Some(ParameterScope::SharedGlobal) => {
-                    if let Some(eq_val) = equal_bound {
+                    let any_used = datasets
+                        .iter()
+                        .enumerate()
+                        .any(|(ds_idx, ds)| model.param_used_in_dataset(p_idx, model_dataset_index(model, ds_idx, ds.data_set_index)));
+                    if !any_used && n_datasets > 0 {
+                        let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
+                        let clamped = clamp_to_bounds(init_v, lb, ub);
+                        for ds_row in &mut bindings {
+                            ds_row[p_idx] = ParamBinding::Fixed(clamped);
+                        }
+                    } else if let Some(eq_val) = equal_bound {
                         for ds_row in &mut bindings {
                             ds_row[p_idx] = ParamBinding::Fixed(eq_val);
                         }
@@ -197,49 +198,21 @@ impl ParameterLayout {
                     }
                 }
                 None | Some(ParameterScope::Local) => {
-                    if let Some(eq_val) = equal_bound {
-                        for ds_row in &mut bindings {
-                            ds_row[p_idx] = ParamBinding::Fixed(eq_val);
-                        }
-                        fixed_constants.push((pname.clone(), eq_val, vec![ParameterNote::Constant]));
-                    } else if n_datasets <= 1 {
-                        let slot = free_slots.len();
-                        let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
-                        let ds_ext_idx = datasets.first().map_or(0, |d| d.data_set_index);
-                        free_slots.push(FreeSlot {
-                            ds_local_idx: Some(0),
-                            dataset_idx: Some(ds_ext_idx),
-                            name: pname.clone(),
-                            lower: lb,
-                            upper: ub,
-                            init: clamp_to_bounds(init_v, lb, ub),
-                            is_shared: false,
-                        });
-                        if let Some(ds_row) = bindings.first_mut() {
-                            ds_row[p_idx] = ParamBinding::Free(slot);
-                        }
-                    } else {
-                        for (ds_idx, ds) in datasets.iter().enumerate() {
-                            let slot = free_slots.len();
-                            let init_v =
-                                rule.and_then(|r| r.initial_override).unwrap_or_else(|| per_ds_init[ds_idx].get(p_idx).copied().unwrap_or(1.0));
-                            free_slots.push(FreeSlot {
-                                ds_local_idx: Some(ds_idx),
-                                dataset_idx: Some(ds.data_set_index),
-                                name: pname.clone(),
-                                lower: lb,
-                                upper: ub,
-                                init: clamp_to_bounds(init_v, lb, ub),
-                                is_shared: false,
-                            });
-                            bindings[ds_idx][p_idx] = ParamBinding::Free(slot);
-                        }
-                    }
+                    let init_ctx = ParamBindCtx { model, datasets, p_idx, pname, rule, lb, ub, equal_bound, per_ds_init: &per_ds_init };
+                    bind_local_parameter(&init_ctx, &default_init, &mut bindings, &mut free_slots, &mut fixed_constants);
                 }
             }
         }
 
-        Ok(Self { p_model, n_datasets, bindings, free_slots, fixed_constants })
+        // Merge model default relational constraints (e.g. DSL `[Constraints]`) with caller-supplied constraints.
+        let mut merged_constraints = model.default_relational_constraints();
+        merged_constraints.extend(relational_constraints.iter().cloned());
+        let raw_edges = collect_relational_edges(model, datasets, param_names, &bindings, &mut free_slots, &merged_constraints)?;
+
+        let (rel_edges, rel_parents, topo_order) = compile_relational_dag(&mut free_slots, raw_edges)?;
+        let has_relational = !rel_edges.is_empty();
+
+        Ok(Self { p_model, n_datasets, bindings, free_slots, fixed_constants, rel_edges, rel_parents, topo_order, has_relational })
     }
 
     pub(in crate::solver) fn k_free(&self) -> usize {
@@ -248,6 +221,340 @@ impl ParameterLayout {
 
     pub(in crate::solver) fn bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         self.free_slots.iter().map(|s| (s.lower, s.upper)).collect()
+    }
+
+    /// Optimizer-space box bounds (`u`-space). Equal to [`Self::bounds`] when no relational
+    /// constraints are present; otherwise child slots carry their gap lower bound `min_gap`.
+    pub(in crate::solver) fn u_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        if !self.has_relational {
+            return self.bounds();
+        }
+        let mut out = Vec::with_capacity(self.free_slots.len());
+        for (j, slot) in self.free_slots.iter().enumerate() {
+            let parents = &self.rel_parents[j];
+            if parents.is_empty() {
+                out.push((slot.lower, slot.upper));
+            } else if parents.len() == 1 {
+                let (p, min_gap) = parents[0];
+                let ub = match (slot.upper, self.free_slots[p].lower) {
+                    (Some(u_j), Some(l_p)) => Some((u_j - l_p).max(min_gap)),
+                    _ => None,
+                };
+                out.push((Some(min_gap), ub));
+            } else {
+                out.push((Some(0.0), None));
+            }
+        }
+        out
+    }
+
+    /// Feasible initial vector in optimizer `u`-space respecting both box bounds and relational
+    /// inequality constraints.
+    pub(in crate::solver) fn u_init(&self) -> Vec<f64> {
+        let mut theta: Vec<f64> = self.free_slots.iter().map(|s| clamp_to_bounds(s.init, s.lower, s.upper)).collect();
+        if !self.has_relational {
+            return theta;
+        }
+        for &j in &self.topo_order {
+            let parents = &self.rel_parents[j];
+            if !parents.is_empty() {
+                let mut req_min = f64::NEG_INFINITY;
+                for &(p, eps) in parents {
+                    let cand = theta[p] + eps;
+                    if cand > req_min {
+                        req_min = cand;
+                    }
+                }
+                if theta[j] < req_min {
+                    let bump = if req_min.abs() > 1e-6 { 0.05 * req_min.abs() } else { 1e-2 };
+                    let target = req_min + bump;
+                    theta[j] = match self.free_slots[j].upper {
+                        Some(u) => target.min(u).max(req_min),
+                        None => target,
+                    };
+                }
+                theta[j] = clamp_to_bounds(theta[j], self.free_slots[j].lower, self.free_slots[j].upper);
+            }
+        }
+        let mut u = self.theta_to_u(&theta);
+        project_theta(&mut u, &self.u_bounds());
+        u
+    }
+
+    /// Map optimizer `u`-space vector to original parameter vector `theta_orig`.
+    pub(in crate::solver) fn u_to_theta_into(&self, u: &[f64], theta_out: &mut [f64]) {
+        if !self.has_relational {
+            theta_out.copy_from_slice(u);
+            return;
+        }
+        for &j in &self.topo_order {
+            let parents = &self.rel_parents[j];
+            theta_out[j] = if parents.is_empty() {
+                u[j]
+            } else if parents.len() == 1 {
+                theta_out[parents[0].0] + u[j]
+            } else {
+                let base = parents.iter().map(|&(p, eps)| theta_out[p] + eps).fold(f64::NEG_INFINITY, f64::max);
+                base + u[j]
+            };
+        }
+    }
+
+    /// Map optimizer `u`-space vector to original parameter vector `theta_orig`.
+    pub(in crate::solver) fn u_to_theta(&self, u: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0_f64; u.len()];
+        self.u_to_theta_into(u, &mut out);
+        out
+    }
+
+    /// Map feasible original parameter vector `theta_orig` into optimizer `u`-space.
+    pub(in crate::solver) fn theta_to_u(&self, theta: &[f64]) -> Vec<f64> {
+        if !self.has_relational {
+            return theta.to_vec();
+        }
+        let mut u = vec![0.0_f64; theta.len()];
+        for &j in &self.topo_order {
+            let parents = &self.rel_parents[j];
+            u[j] = if parents.is_empty() {
+                theta[j]
+            } else if parents.len() == 1 {
+                theta[j] - theta[parents[0].0]
+            } else {
+                let base = parents.iter().map(|&(p, eps)| theta[p] + eps).fold(f64::NEG_INFINITY, f64::max);
+                (theta[j] - base).max(0.0)
+            };
+        }
+        u
+    }
+
+    /// Verify original-space box bounds for a decoded `theta_orig` vector.
+    pub(in crate::solver) fn check_orig_bounds(&self, theta: &[f64]) -> bool {
+        for (slot, &val) in self.free_slots.iter().zip(theta.iter()) {
+            if !val.is_finite() {
+                return false;
+            }
+            if let Some(l) = slot.lower
+                && val < l - 1e-12 * l.abs().max(1.0)
+            {
+                return false;
+            }
+            if let Some(u) = slot.upper
+                && val > u + 1e-12 * u.abs().max(1.0)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Reverse-mode chain rule `g_u = T^T g_orig` mapping original-space parameter gradients to
+    /// optimizer `u`-space gradients.
+    pub(in crate::solver) fn apply_chain_rule_grad(&self, g_orig: &[f64], g_u: &mut [f64], theta_orig: &[f64]) {
+        g_u.copy_from_slice(g_orig);
+        if !self.has_relational {
+            return;
+        }
+        for &j in self.topo_order.iter().rev() {
+            let parents = &self.rel_parents[j];
+            if parents.is_empty() {
+                continue;
+            }
+            let gj = g_u[j];
+            if parents.len() == 1 {
+                g_u[parents[0].0] += gj;
+            } else {
+                let mut best_p = parents[0].0;
+                let mut best_val = f64::NEG_INFINITY;
+                for &(p, eps) in parents {
+                    let cand = theta_orig[p] + eps;
+                    if cand > best_val {
+                        best_val = cand;
+                        best_p = p;
+                    }
+                }
+                g_u[best_p] += gj;
+            }
+        }
+    }
+
+    /// Exact inverse chain-rule Jacobian transform `J_orig = J_u * T^{-1}` back to original
+    /// parameter coordinates so asymptotic covariance `s^2 (J_orig^T J_orig)^{-1}` equals
+    /// `T * Cov_u * T^T` without matrix inversion.
+    pub(in crate::solver) fn jacobian_u_to_orig(&self, j_u: &DenseMatrix, theta_orig: &[f64]) -> DenseMatrix {
+        if !self.has_relational {
+            return j_u.clone();
+        }
+        let n = j_u.nrows();
+        let k = j_u.ncols();
+        let mut j_orig = j_u.clone();
+        for &j in &self.topo_order {
+            if j >= k {
+                continue;
+            }
+            let parents = &self.rel_parents[j];
+            if parents.is_empty() {
+                continue;
+            }
+            let parent = if parents.len() == 1 {
+                parents[0].0
+            } else {
+                let mut best_p = parents[0].0;
+                let mut best_val = f64::NEG_INFINITY;
+                for &(p, eps) in parents {
+                    let cand = theta_orig[p] + eps;
+                    if cand > best_val {
+                        best_val = cand;
+                        best_p = p;
+                    }
+                }
+                best_p
+            };
+            if parent < k {
+                for r in 0..n {
+                    let v_j = j_u.get(r, j).unwrap_or(0.0);
+                    if let Some(cell) = j_orig.get_mut(r, parent) {
+                        *cell -= v_j;
+                    }
+                }
+            }
+        }
+        j_orig
+    }
+
+    /// Flag slots whose relational lower-bound gap `u[j] >= min_gap` is active at `u`.
+    pub(in crate::solver) fn relational_bound_hits(&self, u: &[f64]) -> Vec<bool> {
+        let mut hits = vec![false; self.free_slots.len()];
+        if !self.has_relational {
+            return hits;
+        }
+        let ub = self.u_bounds();
+        for j in 0..self.free_slots.len() {
+            if !self.rel_parents[j].is_empty()
+                && let Some(lb) = ub[j].0
+                && (u[j] - lb).abs() <= 1e-9 * lb.abs().max(1.0)
+            {
+                hits[j] = true;
+            }
+        }
+        hits
+    }
+
+    /// Build a reduced [`ParameterLayout`] holding `theta_orig[fixed_idx] = fixed_val` (and every
+    /// `u in extra_fixed` at `orig_theta[u]`) fixed, turning adjacent relational edges into box
+    /// bounds while keeping remaining free-to-free relational edges active.
+    pub(in crate::solver) fn fix_slots_for_profile(
+        &self,
+        fixed_idx: usize,
+        fixed_val: f64,
+        extra_fixed: &[usize],
+        orig_theta: &[f64],
+    ) -> Option<(Self, Vec<usize>)> {
+        let k = self.free_slots.len();
+        if fixed_idx >= k || !fixed_val.is_finite() || orig_theta.len() < k {
+            return None;
+        }
+        let target_slot = &self.free_slots[fixed_idx];
+        if target_slot.lower.is_some_and(|l| fixed_val < l) || target_slot.upper.is_some_and(|u| fixed_val > u) {
+            return None;
+        }
+
+        let mut fixed_val_by_slot: Vec<Option<f64>> = vec![None; k];
+        fixed_val_by_slot[fixed_idx] = Some(fixed_val);
+        for &u in extra_fixed {
+            if u < k && u != fixed_idx {
+                let v = orig_theta[u];
+                if !v.is_finite() {
+                    return None;
+                }
+                fixed_val_by_slot[u] = Some(v);
+            }
+        }
+
+        let mut old_to_new: Vec<Option<usize>> = vec![None; k];
+        let mut new_to_old: Vec<usize> = Vec::with_capacity(k);
+        let mut sub_slots: Vec<FreeSlot> = Vec::with_capacity(k);
+        for (old_idx, slot) in self.free_slots.iter().enumerate() {
+            if fixed_val_by_slot[old_idx].is_none() {
+                let new_idx = sub_slots.len();
+                old_to_new[old_idx] = Some(new_idx);
+                new_to_old.push(old_idx);
+                let mut cloned = slot.clone();
+                cloned.init = clamp_to_bounds(orig_theta[old_idx], cloned.lower, cloned.upper);
+                sub_slots.push(cloned);
+            }
+        }
+
+        let mut sub_bindings = vec![vec![ParamBinding::Fixed(0.0); self.p_model]; self.n_datasets];
+        for d in 0..self.n_datasets {
+            for p in 0..self.p_model {
+                sub_bindings[d][p] = match self.bindings[d][p] {
+                    ParamBinding::Fixed(v) => ParamBinding::Fixed(v),
+                    ParamBinding::Free(old_s) => {
+                        if let Some(fv) = fixed_val_by_slot[old_s] {
+                            ParamBinding::Fixed(fv)
+                        } else {
+                            ParamBinding::Free(old_to_new[old_s]?)
+                        }
+                    }
+                };
+            }
+        }
+
+        let mut sub_edges: Vec<RelationalEdge> = Vec::new();
+        for edge in &self.rel_edges {
+            match (fixed_val_by_slot[edge.high], fixed_val_by_slot[edge.low]) {
+                (Some(v_hi), Some(v_lo)) => {
+                    let ok = if edge.strict && edge.min_gap <= 1e-15 { v_hi > v_lo } else { v_hi >= v_lo + edge.min_gap };
+                    if !ok {
+                        return None;
+                    }
+                }
+                (None, Some(v_lo)) => {
+                    let nh = old_to_new[edge.high]?;
+                    let min_hi = v_lo + edge.min_gap;
+                    let slot = &mut sub_slots[nh];
+                    slot.lower = Some(slot.lower.map_or(min_hi, |l| l.max(min_hi)));
+                    if let (Some(l), Some(u)) = (slot.lower, slot.upper)
+                        && l > u
+                    {
+                        return None;
+                    }
+                    slot.init = clamp_to_bounds(slot.init, slot.lower, slot.upper);
+                }
+                (Some(v_hi), None) => {
+                    let nl = old_to_new[edge.low]?;
+                    let max_lo = v_hi - edge.min_gap;
+                    let slot = &mut sub_slots[nl];
+                    slot.upper = Some(slot.upper.map_or(max_lo, |u| u.min(max_lo)));
+                    if let (Some(l), Some(u)) = (slot.lower, slot.upper)
+                        && l > u
+                    {
+                        return None;
+                    }
+                    slot.init = clamp_to_bounds(slot.init, slot.lower, slot.upper);
+                }
+                (None, None) => {
+                    let nh = old_to_new[edge.high]?;
+                    let nl = old_to_new[edge.low]?;
+                    sub_edges.push(RelationalEdge { high: nh, low: nl, min_gap: edge.min_gap, strict: edge.strict });
+                }
+            }
+        }
+
+        let (rel_edges, rel_parents, topo_order) = compile_relational_dag(&mut sub_slots, sub_edges).ok()?;
+        let has_relational = !rel_edges.is_empty();
+        let sub_layout = Self {
+            p_model: self.p_model,
+            n_datasets: self.n_datasets,
+            bindings: sub_bindings,
+            free_slots: sub_slots,
+            fixed_constants: Vec::new(),
+            rel_edges,
+            rel_parents,
+            topo_order,
+            has_relational,
+        };
+        Some((sub_layout, new_to_old))
     }
 
     pub(in crate::solver) fn expand_params(&self, theta: &[f64], ds_idx: usize) -> Vec<f64> {
@@ -272,6 +579,368 @@ impl ParameterLayout {
             self.expand_params_into(theta, ds_idx, &mut flat_out[start..(start + self.p_model)]);
         }
     }
+
+    /// Decode optimizer `u`-space coordinates into original parameter space, validate original
+    /// box bounds when relational constraints are active, and fill `flat_out`.
+    pub(in crate::solver) fn fill_all_params_u(&self, u: &[f64], flat_out: &mut [f64]) -> bool {
+        if !self.has_relational {
+            self.fill_all_params(u, flat_out);
+            return true;
+        }
+        let theta = self.u_to_theta(u);
+        if !self.check_orig_bounds(&theta) {
+            return false;
+        }
+        self.fill_all_params(&theta, flat_out);
+        true
+    }
+}
+
+type CompiledRelationalDag = (Vec<RelationalEdge>, Vec<Vec<(usize, f64)>>, Vec<usize>);
+type FixedConstantEntry = (String, f64, Vec<ParameterNote>);
+
+struct ParamBindCtx<'a> {
+    model: &'a dyn ParametricModel,
+    datasets: &'a [DatasetSeries],
+    p_idx: usize,
+    pname: &'a str,
+    rule: Option<&'a ParameterRule>,
+    lb: Option<f64>,
+    ub: Option<f64>,
+    equal_bound: Option<f64>,
+    per_ds_init: &'a [Vec<f64>],
+}
+
+fn validate_rules_and_mandatory_constants(model: &dyn ParametricModel, param_names: &[String], rules: &[ParameterRule]) -> Result<(), FitError> {
+    let mut seen_rule_names: Vec<&str> = Vec::with_capacity(rules.len());
+    for rule in rules {
+        if !param_names.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)) {
+            return Err(FitError::InvalidParameter {
+                name: "parameter_rules",
+                reason: format!("Unknown parameter rule `{}` (expected one of: {})", rule.name, param_names.join(", ")),
+            });
+        }
+        if seen_rule_names.iter().any(|prev| prev.eq_ignore_ascii_case(&rule.name)) {
+            return Err(FitError::InvalidParameter { name: "parameter_rules", reason: format!("Duplicate parameter rule for `{}`", rule.name) });
+        }
+        seen_rule_names.push(&rule.name);
+    }
+
+    // Validate mandatory constant parameters declared by the model (e.g. DSL `[Constraints]` prompts).
+    for req_name in model.mandatory_constant_params() {
+        let explicit = rules.iter().find(|r| r.name.eq_ignore_ascii_case(req_name));
+        let is_bound_const = explicit.is_some_and(|r| {
+            matches!(
+                r.scope,
+                ParameterScope::Constant(_)
+                    | ParameterScope::HookedConstant(_)
+                    | ParameterScope::PerDatasetConstant(_)
+                    | ParameterScope::ColumnTitleConstant
+            ) || matches!((r.lower_bound, r.upper_bound), (Some(l), Some(u)) if l == u)
+        });
+        if !is_bound_const {
+            return Err(FitError::InvalidParameter {
+                name: "parameter_rules",
+                reason: format!("Parameter `{req_name}` is a mandatory constant and must be fixed to a numeric or hooked value before fitting"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn bind_per_dataset_constants(
+    ctx: &ParamBindCtx<'_>,
+    pairs: &[(usize, f64)],
+    bindings: &mut [Vec<ParamBinding>],
+    free_slots: &mut Vec<FreeSlot>,
+    fixed_constants: &mut Vec<FixedConstantEntry>,
+) -> Result<(), FitError> {
+    let n_datasets = ctx.datasets.len();
+    for &(_, val) in pairs {
+        if !val.is_finite() {
+            return Err(FitError::InvalidParameter {
+                name: "parameter_rules",
+                reason: format!("Non-finite per-dataset constant for `{}`", ctx.pname),
+            });
+        }
+    }
+    for (ds_idx, ds) in ctx.datasets.iter().enumerate() {
+        let eval_ds = model_dataset_index(ctx.model, ds_idx, ds.data_set_index);
+        if let Some(&(_, val)) = pairs.iter().rev().find(|&&(idx, _)| idx == ds.data_set_index) {
+            bindings[ds_idx][ctx.p_idx] = ParamBinding::Fixed(val);
+            let label = if n_datasets > 1 { per_dataset_parameter_key(ctx.pname, ds.data_set_index) } else { ctx.pname.to_owned() };
+            fixed_constants.push((label, val, vec![ParameterNote::Constant]));
+        } else if !ctx.model.param_used_in_dataset(ctx.p_idx, eval_ds) {
+            let init_v = ctx.rule.and_then(|r| r.initial_override).unwrap_or_else(|| ctx.per_ds_init[ds_idx].get(ctx.p_idx).copied().unwrap_or(1.0));
+            bindings[ds_idx][ctx.p_idx] = ParamBinding::Fixed(clamp_to_bounds(init_v, ctx.lb, ctx.ub));
+        } else if let Some(eq_val) = ctx.equal_bound {
+            bindings[ds_idx][ctx.p_idx] = ParamBinding::Fixed(eq_val);
+            let label = if n_datasets > 1 { per_dataset_parameter_key(ctx.pname, ds.data_set_index) } else { ctx.pname.to_owned() };
+            fixed_constants.push((label, eq_val, vec![ParameterNote::Constant]));
+        } else {
+            let slot = free_slots.len();
+            let init_v = ctx.rule.and_then(|r| r.initial_override).unwrap_or_else(|| ctx.per_ds_init[ds_idx].get(ctx.p_idx).copied().unwrap_or(1.0));
+            free_slots.push(FreeSlot {
+                ds_local_idx: Some(ds_idx),
+                dataset_idx: Some(ds.data_set_index),
+                name: ctx.pname.to_owned(),
+                lower: ctx.lb,
+                upper: ctx.ub,
+                init: clamp_to_bounds(init_v, ctx.lb, ctx.ub),
+                is_shared: false,
+            });
+            bindings[ds_idx][ctx.p_idx] = ParamBinding::Free(slot);
+        }
+    }
+    Ok(())
+}
+
+fn bind_local_parameter(
+    ctx: &ParamBindCtx<'_>,
+    default_init: &[f64],
+    bindings: &mut [Vec<ParamBinding>],
+    free_slots: &mut Vec<FreeSlot>,
+    fixed_constants: &mut Vec<FixedConstantEntry>,
+) {
+    let n_datasets = ctx.datasets.len();
+    if let Some(eq_val) = ctx.equal_bound {
+        for ds_row in bindings.iter_mut() {
+            ds_row[ctx.p_idx] = ParamBinding::Fixed(eq_val);
+        }
+        fixed_constants.push((ctx.pname.to_owned(), eq_val, vec![ParameterNote::Constant]));
+    } else if n_datasets <= 1 {
+        let eval_ds = ctx.datasets.first().map_or(0, |d| model_dataset_index(ctx.model, 0, d.data_set_index));
+        let init_v = ctx.rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(ctx.p_idx).copied().unwrap_or(1.0));
+        if n_datasets == 1 && !ctx.model.param_used_in_dataset(ctx.p_idx, eval_ds) {
+            if let Some(ds_row) = bindings.first_mut() {
+                ds_row[ctx.p_idx] = ParamBinding::Fixed(clamp_to_bounds(init_v, ctx.lb, ctx.ub));
+            }
+        } else {
+            let slot = free_slots.len();
+            let ds_ext_idx = ctx.datasets.first().map_or(0, |d| d.data_set_index);
+            free_slots.push(FreeSlot {
+                ds_local_idx: Some(0),
+                dataset_idx: Some(ds_ext_idx),
+                name: ctx.pname.to_owned(),
+                lower: ctx.lb,
+                upper: ctx.ub,
+                init: clamp_to_bounds(init_v, ctx.lb, ctx.ub),
+                is_shared: false,
+            });
+            if let Some(ds_row) = bindings.first_mut() {
+                ds_row[ctx.p_idx] = ParamBinding::Free(slot);
+            }
+        }
+    } else {
+        for (ds_idx, ds) in ctx.datasets.iter().enumerate() {
+            let eval_ds = model_dataset_index(ctx.model, ds_idx, ds.data_set_index);
+            let init_v = ctx.rule.and_then(|r| r.initial_override).unwrap_or_else(|| ctx.per_ds_init[ds_idx].get(ctx.p_idx).copied().unwrap_or(1.0));
+            if !ctx.model.param_used_in_dataset(ctx.p_idx, eval_ds) {
+                bindings[ds_idx][ctx.p_idx] = ParamBinding::Fixed(clamp_to_bounds(init_v, ctx.lb, ctx.ub));
+                continue;
+            }
+            let slot = free_slots.len();
+            free_slots.push(FreeSlot {
+                ds_local_idx: Some(ds_idx),
+                dataset_idx: Some(ds.data_set_index),
+                name: ctx.pname.to_owned(),
+                lower: ctx.lb,
+                upper: ctx.ub,
+                init: clamp_to_bounds(init_v, ctx.lb, ctx.ub),
+                is_shared: false,
+            });
+            bindings[ds_idx][ctx.p_idx] = ParamBinding::Free(slot);
+        }
+    }
+}
+
+fn collect_relational_edges(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    param_names: &[String],
+    bindings: &[Vec<ParamBinding>],
+    free_slots: &mut [FreeSlot],
+    merged_constraints: &[RelationalConstraint],
+) -> Result<Vec<RelationalEdge>, FitError> {
+    let mut raw_edges: Vec<RelationalEdge> = Vec::new();
+    for rc in merged_constraints {
+        if !rc.margin.is_finite() || rc.margin < 0.0 {
+            return Err(FitError::InvalidParameter {
+                name: "relational_constraints",
+                reason: format!("Relational constraint margin must be finite and >= 0 (got {})", rc.margin),
+            });
+        }
+        let Some(p_lhs) = param_names.iter().position(|p| p.eq_ignore_ascii_case(&rc.lhs_param)) else {
+            return Err(FitError::InvalidParameter {
+                name: "relational_constraints",
+                reason: format!("Unknown parameter `{}` in relational constraint", rc.lhs_param),
+            });
+        };
+        let Some(p_rhs) = param_names.iter().position(|p| p.eq_ignore_ascii_case(&rc.rhs_param)) else {
+            return Err(FitError::InvalidParameter {
+                name: "relational_constraints",
+                reason: format!("Unknown parameter `{}` in relational constraint", rc.rhs_param),
+            });
+        };
+        if p_lhs == p_rhs {
+            return Err(FitError::InvalidParameter {
+                name: "relational_constraints",
+                reason: format!("Relational constraint cannot relate `{}` to itself", rc.lhs_param),
+            });
+        }
+        let (p_hi, p_lo, strict) = match rc.op {
+            RelationalConstraintOp::GreaterThan => (p_lhs, p_rhs, true),
+            RelationalConstraintOp::GreaterOrEqual => (p_lhs, p_rhs, false),
+            RelationalConstraintOp::LessThan => (p_rhs, p_lhs, true),
+            RelationalConstraintOp::LessOrEqual => (p_rhs, p_lhs, false),
+        };
+        let eps = if strict && rc.margin == 0.0 { 1e-15_f64 } else { rc.margin };
+
+        for (ds_idx, ds) in datasets.iter().enumerate() {
+            let eval_ds = model_dataset_index(model, ds_idx, ds.data_set_index);
+            if !model.param_used_in_dataset(p_hi, eval_ds) || !model.param_used_in_dataset(p_lo, eval_ds) {
+                continue;
+            }
+            match (&bindings[ds_idx][p_hi], &bindings[ds_idx][p_lo]) {
+                (ParamBinding::Fixed(v_hi), ParamBinding::Fixed(v_lo)) => {
+                    let ok = if strict { *v_hi > *v_lo + rc.margin } else { *v_hi >= *v_lo + rc.margin };
+                    if !ok {
+                        return Err(FitError::InvalidParameter {
+                            name: "relational_constraints",
+                            reason: format!(
+                                "Fixed constants violate relational constraint `{}` ({v_hi}) vs `{}` ({v_lo}) with margin {}",
+                                param_names[p_hi], param_names[p_lo], rc.margin
+                            ),
+                        });
+                    }
+                }
+                (ParamBinding::Free(s_hi), ParamBinding::Fixed(v_lo)) => {
+                    let min_hi = *v_lo + eps;
+                    let slot = &mut free_slots[*s_hi];
+                    slot.lower = Some(slot.lower.map_or(min_hi, |l| l.max(min_hi)));
+                    if let (Some(l), Some(u)) = (slot.lower, slot.upper)
+                        && l > u
+                    {
+                        return Err(FitError::InvalidParameter {
+                            name: "relational_constraints",
+                            reason: format!("Relational constraint makes bounds infeasible for `{}` ([{l}, {u}])", slot.name),
+                        });
+                    }
+                    slot.init = clamp_to_bounds(slot.init, slot.lower, slot.upper);
+                }
+                (ParamBinding::Fixed(v_hi), ParamBinding::Free(s_lo)) => {
+                    let max_lo = *v_hi - eps;
+                    let slot = &mut free_slots[*s_lo];
+                    slot.upper = Some(slot.upper.map_or(max_lo, |u| u.min(max_lo)));
+                    if let (Some(l), Some(u)) = (slot.lower, slot.upper)
+                        && l > u
+                    {
+                        return Err(FitError::InvalidParameter {
+                            name: "relational_constraints",
+                            reason: format!("Relational constraint makes bounds infeasible for `{}` ([{l}, {u}])", slot.name),
+                        });
+                    }
+                    slot.init = clamp_to_bounds(slot.init, slot.lower, slot.upper);
+                }
+                (ParamBinding::Free(s_hi), ParamBinding::Free(s_lo)) => {
+                    if s_hi == s_lo {
+                        return Err(FitError::InvalidParameter {
+                            name: "relational_constraints",
+                            reason: "Relational constraint cannot link a parameter slot to itself".to_owned(),
+                        });
+                    }
+                    raw_edges.push(RelationalEdge { high: *s_hi, low: *s_lo, min_gap: eps, strict });
+                }
+            }
+        }
+    }
+    Ok(raw_edges)
+}
+
+fn compile_relational_dag(free_slots: &mut [FreeSlot], raw_edges: Vec<RelationalEdge>) -> Result<CompiledRelationalDag, FitError> {
+    let k = free_slots.len();
+    if raw_edges.is_empty() {
+        return Ok((Vec::new(), vec![Vec::new(); k], (0..k).collect()));
+    }
+    // Deduplicate (low, high) pairs, retaining the tightest min_gap.
+    let mut edge_map: BTreeMap<(usize, usize), (f64, bool)> = BTreeMap::new();
+    for e in raw_edges {
+        edge_map
+            .entry((e.low, e.high))
+            .and_modify(|(gap, strict)| {
+                if e.min_gap > *gap {
+                    *gap = e.min_gap;
+                }
+                *strict |= e.strict;
+            })
+            .or_insert((e.min_gap, e.strict));
+    }
+
+    let mut edges = Vec::with_capacity(edge_map.len());
+    let mut parents: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    let mut children: Vec<Vec<(usize, f64)>> = vec![Vec::new(); k];
+    let mut indeg = vec![0_usize; k];
+
+    for ((low, high), (min_gap, strict)) in edge_map {
+        edges.push(RelationalEdge { high, low, min_gap, strict });
+        parents[high].push((low, min_gap));
+        children[low].push((high, min_gap));
+        indeg[high] += 1;
+    }
+
+    let mut queue: VecDeque<usize> = (0..k).filter(|&i| indeg[i] == 0).collect();
+    let mut topo_order = Vec::with_capacity(k);
+    while let Some(u) = queue.pop_front() {
+        topo_order.push(u);
+        for &(v, _) in &children[u] {
+            indeg[v] -= 1;
+            if indeg[v] == 0 {
+                queue.push_back(v);
+            }
+        }
+    }
+    if topo_order.len() != k {
+        return Err(FitError::InvalidParameter {
+            name: "relational_constraints",
+            reason: "Cyclic or contradictory relational inequality constraints detected".to_owned(),
+        });
+    }
+
+    // Propagate lower bounds forward and upper bounds backward to reject infeasible bound combinations early.
+    for &j in &topo_order {
+        for &(p, eps) in &parents[j] {
+            if let Some(lp) = free_slots[p].lower {
+                let req = lp + eps;
+                free_slots[j].lower = Some(free_slots[j].lower.map_or(req, |l| l.max(req)));
+            }
+        }
+        if let (Some(l), Some(u)) = (free_slots[j].lower, free_slots[j].upper)
+            && l > u
+        {
+            return Err(FitError::InvalidParameter {
+                name: "relational_constraints",
+                reason: format!("Relational constraint makes bounds infeasible for `{}` ([{l}, {u}])", free_slots[j].name),
+            });
+        }
+    }
+    for &j in topo_order.iter().rev() {
+        if let Some(uj) = free_slots[j].upper {
+            for &(p, eps) in &parents[j] {
+                let req = uj - eps;
+                free_slots[p].upper = Some(free_slots[p].upper.map_or(req, |u| u.min(req)));
+                if let (Some(l), Some(u)) = (free_slots[p].lower, free_slots[p].upper)
+                    && l > u
+                {
+                    return Err(FitError::InvalidParameter {
+                        name: "relational_constraints",
+                        reason: format!("Relational constraint makes bounds infeasible for `{}` ([{l}, {u}])", free_slots[p].name),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok((edges, parents, topo_order))
 }
 
 #[inline]

@@ -21,16 +21,42 @@ use crate::solver::inference::obs_y_ss;
 use crate::solver::layout::{ObsRecord, ParamBinding, ParameterLayout, model_dataset_index, obs_is_sweep_ordered, ode_budget_error, project_theta};
 use crate::solver::results::SolverConfig;
 
-pub(in crate::solver) fn eval_predictions_ordered(
+pub(in crate::solver) fn eval_predictions_ordered_orig(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
-    theta: &[f64],
+    theta_orig: &[f64],
     flat_params: &mut [f64],
     slot_ds: Option<usize>,
     y_hat_out: &mut [f64],
 ) -> bool {
-    layout.fill_all_params(theta, flat_params);
+    layout.fill_all_params(theta_orig, flat_params);
+    eval_predictions_with_flat_params(model, layout, obs, flat_params, slot_ds, y_hat_out)
+}
+
+pub(in crate::solver) fn eval_predictions_ordered(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    u: &[f64],
+    flat_params: &mut [f64],
+    slot_ds: Option<usize>,
+    y_hat_out: &mut [f64],
+) -> bool {
+    if !layout.fill_all_params_u(u, flat_params) {
+        return false;
+    }
+    eval_predictions_with_flat_params(model, layout, obs, flat_params, slot_ds, y_hat_out)
+}
+
+fn eval_predictions_with_flat_params(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    flat_params: &[f64],
+    slot_ds: Option<usize>,
+    y_hat_out: &mut [f64],
+) -> bool {
     let p_m = layout.p_model;
 
     if obs_is_sweep_ordered(obs, slot_ds) {
@@ -114,11 +140,11 @@ pub(in crate::solver) fn eval_predictions_into(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
-    theta: &[f64],
+    theta_orig: &[f64],
     flat_params: &mut [f64],
     y_hat_out: &mut [f64],
 ) -> bool {
-    eval_predictions_ordered(model, layout, obs, theta, flat_params, None, y_hat_out)
+    eval_predictions_ordered_orig(model, layout, obs, theta_orig, flat_params, None, y_hat_out)
 }
 
 pub(in crate::solver) fn mat_get(m: &DenseMatrix, r: usize, c: usize) -> f64 {
@@ -170,6 +196,69 @@ pub(in crate::solver) fn compute_jacobian(
     compute_jacobian_subset(model, layout, obs, theta, y_hat0, bounds, &all_slots)
 }
 
+fn try_analytical_jacobian_subset(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    active_slots: &[usize],
+    slot_to_col: &[Option<usize>],
+) -> Option<DenseMatrix> {
+    let n = obs.len();
+    let k_sub = active_slots.len();
+    let mut j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
+    let p_m = layout.p_model;
+    let k_free = layout.k_free();
+    let theta_orig = layout.u_to_theta(theta);
+    let mut flat_params = vec![0.0_f64; layout.n_datasets * p_m];
+    layout.fill_all_params(&theta_orig, &mut flat_params);
+
+    let mut grad_buf = vec![0.0_f64; p_m];
+    let mut g_orig_k = vec![0.0_f64; k_free];
+    let mut g_u_k = vec![0.0_f64; k_free];
+    for (i, rec) in obs.iter().enumerate() {
+        grad_buf.fill(0.0);
+        let start = rec.ds_local_idx * p_m;
+        let ds_arg = model_dataset_index(model, rec.ds_local_idx, rec.point.data_set_index);
+        if !model.grad(&rec.point.x, &flat_params[start..(start + p_m)], ds_arg, &mut grad_buf) {
+            return None;
+        }
+        if layout.has_relational {
+            g_orig_k.fill(0.0);
+            for (p_idx, &g_val) in grad_buf.iter().enumerate().take(p_m) {
+                if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx] {
+                    let next_val = g_orig_k[slot] + g_val;
+                    if !g_val.is_finite() || !next_val.is_finite() {
+                        return None;
+                    }
+                    g_orig_k[slot] = next_val;
+                }
+            }
+            layout.apply_chain_rule_grad(&g_orig_k, &mut g_u_k, &theta_orig);
+            for (col, &slot) in active_slots.iter().enumerate() {
+                let weighted_g = rec.sqrt_weight * g_u_k[slot];
+                if !weighted_g.is_finite() {
+                    return None;
+                }
+                mat_set(&mut j_mat, i, col, weighted_g);
+            }
+        } else {
+            for (p_idx, &g_val) in grad_buf.iter().enumerate().take(p_m) {
+                if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx]
+                    && let Some(col) = slot_to_col.get(slot).copied().flatten()
+                {
+                    let next_val = mat_get(&j_mat, i, col) + rec.sqrt_weight * g_val;
+                    if !g_val.is_finite() || !next_val.is_finite() {
+                        return None;
+                    }
+                    mat_set(&mut j_mat, i, col, next_val);
+                }
+            }
+        }
+    }
+    Some(j_mat)
+}
+
 /// Compute weighted Jacobian columns strictly for `active_slots` (`N x active_slots.len()`),
 /// never perturbing held-fixed parameters (used by full LM and reduced profile-likelihood LM;
 /// `AUD-03-10`). Falls back to finite differences if analytical `model.grad` yields non-finite entries.
@@ -184,9 +273,8 @@ pub(in crate::solver) fn compute_jacobian_subset(
 ) -> Option<DenseMatrix> {
     let n = obs.len();
     let k_sub = active_slots.len();
-    let mut j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
     if k_sub == 0 {
-        return Some(j_mat);
+        return DenseMatrix::zeros(n, 0).ok();
     }
 
     let mut slot_to_col = vec![None; layout.k_free()];
@@ -196,43 +284,13 @@ pub(in crate::solver) fn compute_jacobian_subset(
         }
     }
 
-    // Try analytical gradient path first across all observations.
-    let p_m = layout.p_model;
-    let mut flat_params = vec![0.0_f64; layout.n_datasets * p_m];
-    layout.fill_all_params(theta, &mut flat_params);
-
-    let mut grad_buf = vec![0.0_f64; p_m];
-    let mut analytical_ok = true;
-    for (i, rec) in obs.iter().enumerate() {
-        grad_buf.fill(0.0);
-        let start = rec.ds_local_idx * p_m;
-        let ds_arg = model_dataset_index(model, rec.ds_local_idx, rec.point.data_set_index);
-        if !model.grad(&rec.point.x, &flat_params[start..(start + p_m)], ds_arg, &mut grad_buf) {
-            analytical_ok = false;
-            break;
-        }
-        for (p_idx, &g_val) in grad_buf.iter().enumerate().take(p_m) {
-            if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx]
-                && let Some(col) = slot_to_col.get(slot).copied().flatten()
-            {
-                let next_val = mat_get(&j_mat, i, col) + rec.sqrt_weight * g_val;
-                if !g_val.is_finite() || !next_val.is_finite() {
-                    analytical_ok = false;
-                    break;
-                }
-                mat_set(&mut j_mat, i, col, next_val);
-            }
-        }
-        if !analytical_ok {
-            break;
-        }
-    }
-    if analytical_ok {
+    if let Some(j_mat) = try_analytical_jacobian_subset(model, layout, obs, theta, active_slots, &slot_to_col) {
         return Some(j_mat);
     }
 
     // Scale-aware central difference Jacobian (with bounded one-sided fallback when near domain/box edges).
-    j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
+    let mut j_mat = DenseMatrix::zeros(n, k_sub).ok()?;
+    let mut flat_params = vec![0.0_f64; layout.n_datasets * layout.p_model];
     let eps_central = 1e-6_f64;
     let eps_forward = 1.5e-8_f64;
     let mut work = theta.to_vec();
@@ -241,6 +299,7 @@ pub(in crate::solver) fn compute_jacobian_subset(
 
     for (col, &slot) in active_slots.iter().enumerate() {
         let info = &layout.free_slots[slot];
+        let fd_slot_ds = if layout.has_relational { None } else { info.ds_local_idx };
         let xj = theta[slot];
         let (lb, ub) = bounds[slot];
         let h_c = fd_step_size(xj, eps_central, lb, ub);
@@ -250,18 +309,18 @@ pub(in crate::solver) fn compute_jacobian_subset(
 
         if can_plus {
             work[slot] = xj + h_c;
-            can_plus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
+            can_plus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, fd_slot_ds, &mut yp);
         }
         if can_minus {
             work[slot] = xj - h_c;
-            can_minus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut ym);
+            can_minus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, fd_slot_ds, &mut ym);
         }
         work[slot] = xj;
 
         if can_plus && can_minus {
             let inv_2h = 1.0 / (2.0 * h_c);
             for (i, rec) in obs.iter().enumerate() {
-                if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
+                if fd_slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
                     let jv = rec.sqrt_weight * (yp[i] - ym[i]) * inv_2h;
                     if !jv.is_finite() {
                         return None;
@@ -282,7 +341,7 @@ pub(in crate::solver) fn compute_jacobian_subset(
                 continue;
             }
             work[slot] = x_try;
-            let ok = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
+            let ok = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, fd_slot_ds, &mut yp);
             work[slot] = xj;
             if ok {
                 found_sign = Some(sign);
@@ -292,7 +351,7 @@ pub(in crate::solver) fn compute_jacobian_subset(
         let sign = found_sign?;
         let inv_h = sign / h_f;
         for (i, rec) in obs.iter().enumerate() {
-            if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
+            if fd_slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
                 let jv = rec.sqrt_weight * (yp[i] - y_hat0[i]) * inv_h;
                 if !jv.is_finite() {
                     return None;
@@ -377,7 +436,7 @@ pub(in crate::solver) fn run_trust_region_lm_with_options(
     let LmRunOptions { max_iters, init_factor, require_positive_mean, strictness } = opts;
     let n = obs.len();
     let k = layout.k_free();
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
     let mut theta = theta_init.to_vec();
     project_theta(&mut theta, &bounds);
 
@@ -1005,7 +1064,7 @@ where
     if k == 0 {
         return Some(Vec::new());
     }
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
 
     let mut simplex: Vec<(Vec<f64>, f64)> = Vec::with_capacity(k + 1);
     let mut v0 = seed.to_vec();
@@ -1124,7 +1183,7 @@ pub(in crate::solver) fn nelder_mead_rescue_with_domain(
     max_evals: usize,
     require_positive_mean: bool,
 ) -> Option<Vec<f64>> {
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
     nelder_mead_optimize(layout, seed, max_evals, 0.05, |th| {
         if ode_fit_budget_exceeded().is_some() {
             return f64::INFINITY;
@@ -1141,7 +1200,7 @@ pub(in crate::solver) fn nelder_mead_poisson_feasibility_rescue(
     obs: &[ObsRecord],
     seed: &[f64],
 ) -> Option<Vec<f64>> {
-    let bounds = layout.bounds();
+    let bounds = layout.u_bounds();
     let y_scale = obs.iter().map(|o| o.point.y.abs()).fold(0.0_f64, f64::max).max(1e-6);
     let eps_pos = 1e-4 * y_scale;
     let cand = nelder_mead_optimize(layout, seed, 400, 1.0, |th| {

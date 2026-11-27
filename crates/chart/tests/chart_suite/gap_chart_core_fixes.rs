@@ -220,7 +220,15 @@ fn gap_01_03_dirty_embedded_result_tables_and_analyzable_data_omitted_with_warni
     let tr_spec = AnalysisSpec::new(
         "res-tr-dirty",
         "d-xy",
-        AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: None, y_transform: None, error_propagation: Default::default() }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: None,
+            error_propagation: Default::default(),
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
+        }),
     )
     .unwrap();
     let mut tr_res = ResultSheet::new(tr_spec).unwrap();
@@ -718,6 +726,10 @@ fn analyzable_data_chaining_across_mv_survival_contingency_pow_and_diagnostics()
                     x_transform: None,
                     y_transform: None,
                     error_propagation: ErrorPropagationMode::default(),
+                    pharmacology_preset: None,
+                    interchange_xy: false,
+                    zero_x_substitute: None,
+                    asymmetric_ci_policy: Default::default(),
                 }),
             )
             .expect("spec"),

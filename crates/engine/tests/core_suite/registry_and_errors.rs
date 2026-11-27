@@ -55,13 +55,13 @@ fn is_valid_command_id_format(id: &str) -> bool {
 fn registry_matches_command_id_category_effect_and_schema_spec() {
     let built = cmd::build_registry().expect("registry build must succeed with zero duplicates");
     let reg = cmd::registry();
-    assert_eq!(built.len(), 110, "expected 110 registered commands");
-    assert_eq!(reg.len(), 110);
+    assert_eq!(built.len(), 116, "expected 116 registered commands");
+    assert_eq!(reg.len(), 116);
 
     let built_ids: BTreeSet<&str> = built.specs().map(|s| s.id).collect();
     let reg_ids: BTreeSet<&str> = reg.specs().map(|s| s.id).collect();
     assert_eq!(built_ids, reg_ids, "cmd::build_registry() IDs must match cmd::registry() 1:1");
-    assert_eq!(reg_ids.len(), 110, "command IDs must be unique across all 110 commands");
+    assert_eq!(reg_ids.len(), 116, "command IDs must be unique across all 116 commands");
 
     let mut group_total = 0usize;
     for &group in CommandGroup::all() {
@@ -70,7 +70,7 @@ fn registry_matches_command_id_category_effect_and_schema_spec() {
         assert!(!group_specs.is_empty(), "group `{}` has zero commands", group.as_str());
         group_total += group_specs.len();
     }
-    assert_eq!(group_total, 110, "CommandGroup::all() partition must sum to 110");
+    assert_eq!(group_total, 116, "CommandGroup::all() partition must sum to 116");
 
     let markdown = cmd::render_commands_markdown();
     assert!(markdown.starts_with("# CurveBook Command Reference\n"));

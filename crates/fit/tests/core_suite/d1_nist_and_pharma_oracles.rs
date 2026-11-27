@@ -241,12 +241,13 @@ fn pharma_5pl_asymmetric_richards_oracle() {
     let model = get_builtin_model("log_agonist_vs_response_5pl").unwrap();
     for (true_s, tag) in [(2.4_f64, "S=2.4"), (0.45_f64, "S=0.45")] {
         let (true_b, true_t, true_xb, true_h) = (5.0_f64, 105.0, -7.4, 1.25);
+        let exp_ec = true_xb - (2_f64.powf(1.0 / true_s) - 1.0).log10() / true_h;
         let y: Vec<f64> = log_c.iter().map(|&x| true_b + (true_t - true_b) / (1.0 + 10_f64.powf((true_xb - x) * true_h)).powf(true_s)).collect();
         let cfg = SolverConfig {
             parameter_rules: vec![
                 rule_local_bounds("Bottom", Some(5.0), None, None),
                 rule_local_bounds("Top", Some(105.0), None, None),
-                rule_local_bounds("LogXb", Some(-7.2), None, None),
+                rule_local_bounds("LogEC50", Some(exp_ec + 0.2), None, None),
                 rule_local_bounds("HillSlope", Some(1.0), Some(0.05), Some(10.0)),
                 rule_local_bounds("S", Some(1.0), Some(1e-3), Some(20.0)),
             ],
@@ -261,15 +262,14 @@ fn pharma_5pl_asymmetric_richards_oracle() {
             &[
                 ("Bottom", true_b, 1e-5, 1e-6),
                 ("Top", true_t, 1e-5, 1e-6),
-                ("LogXb", true_xb, 1e-5, 1e-6),
+                ("LogEC50", exp_ec, 1e-5, 1e-6),
                 ("HillSlope", true_h, 1e-5, 1e-6),
                 ("S", true_s, 1e-5, 1e-6),
             ],
             tag,
         );
 
-        let exp_ec = true_xb - (2_f64.powf(1.0 / true_s) - 1.0).log10() / true_h;
-        assert_approx_eq(find_derived(&res, 0, "LogEC50"), exp_ec, 1e-6, 1e-6, &format!("{tag} LogEC50"));
+        assert_approx_eq(find_derived(&res, 0, "LogXb"), true_xb, 1e-6, 1e-6, &format!("{tag} LogXb"));
         assert_approx_eq(find_derived(&res, 0, "EC50"), 10_f64.powf(exp_ec), 1e-11, 1e-5, &format!("{tag} EC50"));
         assert_approx_eq(eval_model_at(model.as_ref(), &res, 0, exp_ec), 0.5 * (true_b + true_t), 1e-4, 1e-5, &format!("{tag} Y(EC50)"));
         assert!((eval_model_at(model.as_ref(), &res, 0, true_xb) - 0.5 * (true_b + true_t)).abs() > 5.0);
@@ -369,12 +369,14 @@ fn pharma_cheng_prusoff_one_site_and_two_sites_ki_oracle() {
                     * (frac_hi / (1.0 + 10_f64.powf(x - (log_ki1 + shift))) + (1.0 - frac_hi) / (1.0 + 10_f64.powf(x - (log_ki2 + shift))))
         })
         .collect();
-    let mut rules2 = hook_rules;
-    rules2.extend([
+    let rules2 = vec![
+        rule_hook("HotNM", HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-1")), constant_name: "HotConc_nM".to_owned() }),
+        rule_hook("HotKdNMHi", HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-1")), constant_name: "HotKd_nM".to_owned() }),
+        rule_hook("HotKdNMLo", HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-1")), constant_name: "HotKd_nM".to_owned() }),
         rule_local_bounds("FractionHi", Some(0.5), Some(0.0), Some(1.0)),
-        rule_local_bounds("LogKi_1", Some(-9.5), None, None),
-        rule_local_bounds("LogKi_2", Some(-6.5), None, None),
-    ]);
+        rule_local_bounds("LogKiHi", Some(-9.5), None, None),
+        rule_local_bounds("LogKiLo", Some(-6.5), None, None),
+    ];
     let m2 = get_builtin_model("two_sites_fit_ki").unwrap();
     let res2 = fit_nonlinear(
         m2.as_ref(),
@@ -387,7 +389,7 @@ fn pharma_cheng_prusoff_one_site_and_two_sites_ki_oracle() {
     assert_params_approx(
         &res2,
         0,
-        &[("FractionHi", frac_hi, 1e-5, 1e-5), ("LogKi_1", log_ki1, 1e-5, 1e-5), ("LogKi_2", log_ki2, 1e-5, 1e-5)],
+        &[("FractionHi", frac_hi, 1e-5, 1e-5), ("LogKiHi", log_ki1, 1e-5, 1e-5), ("LogKiLo", log_ki2, 1e-5, 1e-5)],
         "TwoSites",
     );
 }

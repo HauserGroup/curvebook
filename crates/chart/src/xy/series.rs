@@ -7,6 +7,7 @@ use curvebook_doc::{
 use curvebook_math::AxisScale;
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
+use super::distribution::{DistributionOverlayMeta, render_distribution_overlay, resolve_direct_distribution_meta};
 use super::fit_overlay::{FittedOverlayData, OverlayDrawTarget, render_fitted_curve_overlay, resolve_fitted_overlay};
 use super::{
     AxisErrorTarget, LegendItem, SegmentedAxis, configure_plot_rect, emit_directional_error_bar, format_point_value, is_log_like,
@@ -47,6 +48,7 @@ struct ExtractedXySeries {
     label: String,
     default_color: Rgba8,
     fitted_overlay: Option<FittedOverlayData>,
+    direct_distribution: Option<(DistributionOverlayMeta, Vec<curvebook_doc::CurveSamplePoint>)>,
     rout_outliers: Vec<RoutOutlier>,
 }
 
@@ -101,7 +103,8 @@ pub fn compile_xy_graph_with_options(
     let has_y2 = graph.spec.y2_axis.is_some() || has_y2_series || matches!(graph.spec.frame_preset, FramePreset::DualYSecondaryRight);
     let extracted = extract_all_xy_series(graph, doc, &mut scene.warnings);
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
-    let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, extracted.iter().map(|d| d.label.as_str()), doc, info_id);
+    let all_legend_labels = collect_xy_legend_labels(&extracted);
+    let legend_box_w = crate::scales::auto_legend_box_width_pt(&graph.spec.legend, all_legend_labels.iter().map(String::as_str), doc, info_id);
     let fit_summary_w = crate::fit_summary::reserved_adjacent_fit_summary_width_pt(graph, doc, scene.width_pt, has_y2, &options.fit_summary);
     let right_gutter_w = match (legend_box_w, fit_summary_w) {
         (Some(a), Some(b)) => Some(a.max(b)),
@@ -155,35 +158,7 @@ pub fn compile_xy_graph_with_options(
         }
     }
 
-    let mut legend_items = Vec::new();
-    for (series_spec, data) in graph.spec.series.iter().zip(extracted.iter()) {
-        legend_items.push(LegendItem {
-            label: data.label.clone(),
-            marker: match &series_spec.gdo {
-                GraphicalDataObject::ScatterAndLine { marker, .. } => *marker,
-                GraphicalDataObject::AlignedDotPlot { marker, .. } => Some(*marker),
-                _ => None,
-            },
-            line_color: match &series_spec.gdo {
-                GraphicalDataObject::ScatterAndLine { line: Some(l), .. } => Some(l.color),
-                _ if data.fitted_overlay.is_some() => Some(data.default_color),
-                _ => None,
-            },
-            line_dash: match &series_spec.gdo {
-                GraphicalDataObject::ScatterAndLine { line: Some(l), .. } => l.dash_style,
-                _ => LineDashStyle::Solid,
-            },
-            swatch_fill: match &series_spec.gdo {
-                GraphicalDataObject::ScatterAndLine { area_fill: Some(af), .. } => Some(af.fill_color),
-                GraphicalDataObject::BarWithReplicates { fill_color, .. } => Some(*fill_color),
-                _ => None,
-            },
-            swatch_border: match &series_spec.gdo {
-                GraphicalDataObject::BarWithReplicates { border_color, .. } => Some(*border_color),
-                _ => None,
-            },
-        });
-    }
+    let legend_items = build_xy_legend_items(&graph.spec, &extracted);
 
     let legend_bounds = render_legend_and_annotations_with_offset(scene, graph, doc, &legend_items, 0.0)?;
     if options.fit_summary.enabled {
@@ -203,6 +178,105 @@ pub fn compile_xy_graph_with_options(
         }
     }
     Ok(())
+}
+
+fn collect_xy_legend_labels(extracted: &[ExtractedXySeries]) -> Vec<String> {
+    let mut labels: Vec<String> = extracted.iter().map(|d| d.label.clone()).collect();
+    for d in extracted {
+        let auto_shades = d
+            .fitted_overlay
+            .as_ref()
+            .and_then(|ov| ov.distribution.as_ref())
+            .or_else(|| d.direct_distribution.as_ref().map(|(m, _)| m))
+            .map(|m| m.auto_shades.as_slice())
+            .unwrap_or(&[]);
+        for sh in auto_shades {
+            if !labels.iter().any(|l| l == &sh.label) {
+                labels.push(sh.label.clone());
+            }
+        }
+    }
+    labels
+}
+
+fn build_xy_legend_items(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -> Vec<LegendItem> {
+    let mut legend_items = Vec::new();
+    for (series_spec, data) in spec.series.iter().zip(extracted.iter()) {
+        let dist_meta =
+            data.fitted_overlay.as_ref().and_then(|ov| ov.distribution.as_ref()).or_else(|| data.direct_distribution.as_ref().map(|(m, _)| m));
+        let is_shade_series = dist_meta.is_some_and(|m| m.is_shade_series);
+        let is_continuous_dist = dist_meta.is_some_and(|m| !m.is_discrete && !m.is_shade_series);
+        let is_discrete_pmf_bar = dist_meta.is_some_and(|m| m.is_discrete && !m.cumulative && !m.is_shade_series)
+            && matches!(series_spec.gdo, GraphicalDataObject::BarWithReplicates { .. });
+        let curve_color = crate::fit_summary::resolved_series_curve_color(series_spec, data.default_color);
+        let shade_swatch_color = if is_shade_series {
+            let explicit_fill = match &series_spec.gdo {
+                GraphicalDataObject::ScatterAndLine { area_fill: Some(af), .. } => Some(af.fill_color),
+                _ => Some(curve_color),
+            };
+            Some(super::distribution::shade_accent_color(spec.palette, curve_color, explicit_fill))
+        } else {
+            None
+        };
+        legend_items.push(LegendItem {
+            label: data.label.clone(),
+            marker: if is_shade_series || (is_continuous_dist && (data.direct_distribution.is_some() || !series_spec.show_raw_data)) {
+                None
+            } else {
+                match &series_spec.gdo {
+                    GraphicalDataObject::ScatterAndLine { marker, .. } => *marker,
+                    GraphicalDataObject::AlignedDotPlot { marker, .. } => Some(*marker),
+                    _ => None,
+                }
+            },
+            line_color: if is_shade_series || is_discrete_pmf_bar {
+                None
+            } else {
+                match &series_spec.gdo {
+                    GraphicalDataObject::ScatterAndLine { line: Some(l), .. } => Some(l.color),
+                    _ if data.fitted_overlay.is_some() || data.direct_distribution.is_some() => Some(curve_color),
+                    _ => None,
+                }
+            },
+            line_dash: match &series_spec.gdo {
+                GraphicalDataObject::ScatterAndLine { line: Some(l), .. } => l.dash_style,
+                _ => LineDashStyle::Solid,
+            },
+            swatch_fill: if let Some(sc) = shade_swatch_color {
+                Some(sc.with_alpha(120))
+            } else {
+                match &series_spec.gdo {
+                    GraphicalDataObject::ScatterAndLine { area_fill: Some(af), .. } => Some(af.fill_color),
+                    GraphicalDataObject::BarWithReplicates { fill_color, .. } => Some(*fill_color),
+                    _ => None,
+                }
+            },
+            swatch_border: if let Some(sc) = shade_swatch_color {
+                Some(sc)
+            } else {
+                match &series_spec.gdo {
+                    GraphicalDataObject::BarWithReplicates { border_color, .. } => Some(*border_color),
+                    _ => None,
+                }
+            },
+        });
+        if let Some(dm) = dist_meta {
+            let shade_col = super::distribution::shade_accent_color(spec.palette, curve_color, None);
+            for sh in &dm.auto_shades {
+                if !legend_items.iter().any(|it| it.label == sh.label) {
+                    legend_items.push(LegendItem {
+                        label: sh.label.clone(),
+                        marker: None,
+                        line_color: None,
+                        line_dash: LineDashStyle::Solid,
+                        swatch_fill: Some(shade_col.with_alpha(120)),
+                        swatch_border: Some(shade_col),
+                    });
+                }
+            }
+        }
+    }
+    legend_items
 }
 
 fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<ExtractedXySeries> {
@@ -228,8 +302,10 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         {
             if let Some(ds) = xy.data_sets.get(series_spec.data_set_index) {
                 fallback_label = ds.title.clone();
-                extract_xy_table_series(xy, series_spec, &mut active_x_rows, &mut points, &mut replicates, warnings);
-            } else {
+                if series_spec.show_raw_data || series_spec.regression_overlay.is_none() {
+                    extract_xy_table_series(xy, series_spec, &mut active_x_rows, &mut points, &mut replicates, warnings);
+                }
+            } else if series_spec.show_raw_data || series_spec.regression_overlay.is_none() {
                 warnings.push(ChartWarning::new(
                     "missing_data_set",
                     format!("data set index {} out of bounds in '{}'", series_spec.data_set_index, sheet.id),
@@ -237,7 +313,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             }
         }
 
-        let (fitted_overlay, rout_outliers) = match resolve_fitted_overlay(doc, series_spec, warnings) {
+        let (fitted_overlay, rout_outliers) = match resolve_fitted_overlay(doc, &graph.spec.series, series_spec, warnings) {
             Some((overlay, outliers)) => {
                 let markers = sheet_opt.map_or_else(Vec::new, |sheet| resolve_rout_outliers(sheet, series_spec.data_set_index, outliers));
                 (Some(overlay), markers)
@@ -248,6 +324,32 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         let label = match fitted_overlay.as_ref().and_then(|ov| ov.imported_label.as_deref()) {
             Some(tag) => format!("{base_label} [{tag}]"),
             None => base_label,
+        };
+        let direct_distribution = if fitted_overlay.is_none()
+            && let Some(res) = doc.result_sheet(&series_spec.source_sheet_id)
+            && res.has_displayable_output()
+        {
+            let has_sibling_shade = graph.spec.series.iter().any(|s| s.data_set_index >= 1 && s.source_sheet_id == series_spec.source_sheet_id);
+            resolve_direct_distribution_meta(res, series_spec.data_set_index, has_sibling_shade).map(|(meta, curve_pts)| {
+                let pts = if curve_pts.is_empty() {
+                    points
+                        .iter()
+                        .map(|p| curvebook_doc::CurveSamplePoint {
+                            x: p.x_center,
+                            y: p.y_center,
+                            ci_lower: None,
+                            ci_upper: None,
+                            pred_lower: None,
+                            pred_upper: None,
+                        })
+                        .collect()
+                } else {
+                    curve_pts
+                };
+                (meta, pts)
+            })
+        } else {
+            None
         };
         out.push(ExtractedXySeries {
             series_index: idx,
@@ -261,6 +363,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             label,
             default_color: color,
             fitted_overlay,
+            direct_distribution,
             rout_outliers,
         });
     }
@@ -393,6 +496,9 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
             }
         }
         if let Some(ov) = &item.fitted_overlay {
+            if ov.distribution.is_some() {
+                target_y.push(0.0);
+            }
             for cp in &ov.curve.points {
                 x_vals.push(cp.x + dx);
                 target_y.push(cp.y);
@@ -412,6 +518,13 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
                         target_y.push(hi);
                     }
                 }
+            }
+        }
+        if let Some((_, dist_pts)) = &item.direct_distribution {
+            target_y.push(0.0);
+            for cp in dist_pts {
+                x_vals.push(cp.x + dx);
+                target_y.push(cp.y);
             }
         }
     }
@@ -447,8 +560,28 @@ fn render_xy_series(
             &mut scene.primitives,
             &mut scene.warnings,
             ov,
+            spec,
+            graph_spec.palette,
             OverlayDrawTarget { x_axis, y_axis, color: curve_color, clip, dx_data, dx_pt, dy_pt },
         );
+        if ov.distribution.is_some() && ov.spec.result_sheet_id == spec.source_sheet_id {
+            return;
+        }
+    }
+
+    // 1b. Direct §6.2 theoretical distribution `ResultSheet` sourced via `analyzable_data`.
+    if let Some((dist_meta, dist_pts)) = &data.direct_distribution {
+        let curve_color = crate::fit_summary::resolved_series_curve_color(spec, data.default_color);
+        render_distribution_overlay(
+            &mut scene.primitives,
+            &mut scene.warnings,
+            dist_pts,
+            dist_meta,
+            spec,
+            graph_spec.palette,
+            OverlayDrawTarget { x_axis, y_axis, color: curve_color, clip, dx_data, dx_pt, dy_pt },
+        );
+        return;
     }
 
     if !spec.show_raw_data {

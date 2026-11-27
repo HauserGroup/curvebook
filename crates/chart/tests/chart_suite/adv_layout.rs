@@ -42,6 +42,12 @@ fn build_survival_doc(with_result_sheet: bool) -> TestResult<(ProjectDocument, G
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         };
         let mut spec = AnalysisSpec::new(SheetId::new("km-res"), ds.id.clone(), AnalysisKind::Survival(surv_spec.clone()))?;
         spec.selected_data_sets = vec![0, 1];

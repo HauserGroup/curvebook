@@ -124,17 +124,7 @@ pub struct SphericityResult {
     pub huynh_feldt_eps: f64,
 }
 
-/// Sphericity epsilon adjustment applied to repeated-measures two-way *F*-test *p*-values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum RmSphericityCorrection {
-    /// Uncorrected standard ANOVA *F*-test degrees of freedom assuming exact sphericity ($\varepsilon = 1$).
-    #[default]
-    None,
-    /// Multiply numerator and denominator degrees of freedom by Greenhouse–Geisser $\hat{\varepsilon}$ (Greenhouse & Geisser 1959).
-    GreenhouseGeisser,
-    /// Multiply numerator and denominator degrees of freedom by Huynh–Feldt / Lecoutre $\tilde{\varepsilon}$ (Huynh & Feldt 1976; Lecoutre 1991).
-    HuynhFeldt,
-}
+pub use curvebook_doc::RmSphericityCorrection;
 
 /// Per-factor sphericity diagnostics for two-way repeated-measures and split-plot ANOVA.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -161,6 +151,24 @@ pub struct RmTwoWayAnovaResult {
     pub correction: RmSphericityCorrection,
     /// Uncorrected denominator error degrees of freedom `[df_err_row, df_err_col, df_err_interaction]` before epsilon scaling.
     pub term_error_dfs: [f64; 3],
+}
+
+/// Three-way balanced repeated-measures / mixed ANOVA output supporting all 8 within/between
+/// factor combinations (`[rm_a, rm_b, rm_c]`) with per-stratum sphericity diagnostics.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RmThreeWayAnovaResult {
+    /// Underlying three-way ANOVA table (`terms` ordered `[A, B, C, A×B, A×C, B×C, A×B×C]` with *P* values adjusted by `correction`).
+    pub anova: FactorialAnovaResult,
+    /// Which of the three factors `[A, B, C]` are repeated measures (within-subject).
+    pub rm_factors: [bool; 3],
+    /// Sphericity correction rule applied to within-subject `anova.terms` *P* values.
+    pub correction: RmSphericityCorrection,
+    /// Uncorrected denominator error degrees of freedom aligned 1-to-1 with `anova.terms`.
+    pub term_error_dfs: Vec<f64>,
+    /// Denominator error sums of squares aligned 1-to-1 with `anova.terms`.
+    pub term_error_ss: Vec<f64>,
+    /// Per-term Mauchly, Greenhouse–Geisser, and Huynh–Feldt sphericity diagnostics (`None` for purely between-subject effects).
+    pub term_sphericities: Vec<Option<SphericityResult>>,
 }
 
 /// Repeated-measures one-way ANOVA output.

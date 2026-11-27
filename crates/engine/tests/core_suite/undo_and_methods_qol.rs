@@ -343,6 +343,12 @@ fn qol6_survival_km_and_cox_reports() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )
     .unwrap();
@@ -355,6 +361,14 @@ fn qol6_survival_km_and_cox_reports() {
             predictor_columns: vec![0, 1],
             reference_levels: Vec::new(),
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         }),
     )
     .unwrap();
@@ -466,7 +480,13 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
     let mut pca_spec = AnalysisSpec::new(
         "res-pca",
         "mv-1",
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }),
+        AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(42),
+            pcr_outcome_column: None,
+            retention_rule: Default::default(),
+            emit_extra_matrices: false,
+        }),
     )
     .unwrap();
     pca_spec.selected_data_sets = vec![0, 1, 2];

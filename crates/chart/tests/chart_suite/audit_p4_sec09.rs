@@ -381,6 +381,12 @@ fn fa_sec09_06_failed_results_and_strict_template_hooks() -> TestResult {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )?)?;
     failed_km.status = ResultStatus::Failed { code: ErrorCode::BadInput, message: String::from("failed km") };
@@ -725,6 +731,12 @@ fn fa_sec09_09_survival_censoring_nan_and_contingency_log() -> TestResult {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )?)?;
     km_res.status = ResultStatus::UpToDate;

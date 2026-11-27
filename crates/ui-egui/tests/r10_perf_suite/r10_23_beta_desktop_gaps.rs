@@ -142,6 +142,7 @@ fn build_mv_cohort_app() -> Result<UiApp, String> {
             predictor_columns: vec![1, 2],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )
     .map_err(|e| e.to_string())?;

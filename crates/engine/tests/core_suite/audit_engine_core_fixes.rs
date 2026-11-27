@@ -743,7 +743,12 @@ fn audit_74_broken_dependents_and_cross_sheet_hooks_stay_failed_on_recalc() -> T
     doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new(
         "base_a",
         "ds_a",
-        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Difference }),
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: BaselineOperation::Difference,
+            baseline_kind: None,
+            retain_unselected_columns: false,
+        }),
     )?)?)?;
 
     let mut s = Session::from_document(doc);

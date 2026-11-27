@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use curvebook_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource, default_column_label};
+use curvebook_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableRole, VariableSource, default_column_label};
 
 use crate::error::TransformError;
 use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, is_builtin_constant, resolve_mv_column};
@@ -190,6 +190,33 @@ pub fn evaluate_data_sheet_calculated_variables(sheet: &mut DataSheet, info_shee
         TableArchetype::MultipleVariables(mv) => evaluate_calculated_variables(mv, info_sheet),
         _ => Ok(Vec::new()),
     }
+}
+
+/// Freeze a calculated variable column in a `MultipleVariables` [`DataSheet`] into directly entered
+/// values (`VariableSource::Entered`), detaching its formula while preserving evaluated cells,
+/// exclusion flags, and inferred column role.
+///
+/// Returns `Ok(Some(previous_formula))` when the column was calculated, or `Ok(None)` if it was
+/// already manually entered.
+pub fn unlink_calculated_variable(sheet: &mut DataSheet, col: usize) -> Result<Option<String>, TransformError> {
+    sheet.ensure_mutable()?;
+    let TableArchetype::MultipleVariables(mv) = &mut sheet.archetype else {
+        return Err(TransformError::IncompatibleTable { operation: "unlink_calculated_variable", kind: sheet.archetype.kind() });
+    };
+    let n_cols = mv.variables.len();
+    let Some(var) = mv.variables.get_mut(col) else {
+        return Err(TransformError::InvalidSpec { message: format!("column index {col} out of bounds for table with {n_cols} variables") });
+    };
+    let previous = match std::mem::replace(&mut var.source, VariableSource::Entered) {
+        VariableSource::Calculated { formula } => Some(formula),
+        VariableSource::Entered => None,
+    };
+    if previous.is_some() || var.role == VariableRole::Calculated {
+        var.role = VariableRole::Continuous;
+        var.role_inferred = true;
+        var.refresh_inferred_role();
+    }
+    Ok(previous)
 }
 
 fn col_display_name(table: &MultipleVariablesTable, idx: usize) -> String {

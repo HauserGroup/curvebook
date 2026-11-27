@@ -266,6 +266,7 @@ fn statistical_glm_cox_pca_clustering_survival_and_r9_modals() -> BoxRes {
             predictor_columns: vec![2],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )?);
     let cox_id = SheetId::try_new("res-cox")?;
@@ -279,6 +280,14 @@ fn statistical_glm_cox_pca_clustering_survival_and_r9_modals() -> BoxRes {
             predictor_columns: vec![2, 4],
             reference_levels: Vec::new(),
             tie_method: curvebook_doc::CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         }),
     )?);
     let surv2_id = SheetId::try_new("surv-2grp")?;
@@ -297,6 +306,12 @@ fn statistical_glm_cox_pca_clustering_survival_and_r9_modals() -> BoxRes {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )?);
     let pre_id = SheetId::try_new("col-presum")?;
@@ -487,6 +502,7 @@ fn all_14_beta_locales_backdrop_capture_and_scrollbar_non_overlap_at_640x420_and
             predictor_columns: vec![2, 4],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         }),
     )?);
     let fit_id = SheetId::try_new("res-loc-fit")?;
@@ -895,6 +911,14 @@ fn aud_10_stat_params_locale_cancel_cox_multirow_and_mi_regressions() -> BoxRes 
             predictor_columns: vec![3],
             reference_levels: vec![],
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         }),
     )?;
     (acox.canvas_dialogs.edit_params.result_sheet_id, acox.canvas_dialogs.edit_params.draft, acox.canvas_dialogs.active_dialog) =

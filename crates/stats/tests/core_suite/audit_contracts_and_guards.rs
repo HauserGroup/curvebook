@@ -100,6 +100,12 @@ fn audit_32_unified_selected_data_sets_validation_matrix() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         })],
         &[9],
         &[0, 0],
@@ -118,6 +124,14 @@ fn audit_32_unified_selected_data_sets_validation_matrix() {
                 predictor_columns: vec![1],
                 reference_levels: vec![],
                 tie_method: CoxTieMethod::Breslow,
+                formula: None,
+                covariate_profiles: Vec::new(),
+                nested_comparison: None,
+                emit_cox_snell_residuals: false,
+                ci_method: Default::default(),
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
             }),
             AnalysisKind::GeneralizedLinearModel(GlmSpec {
                 family: GlmFamily::Linear,
@@ -125,15 +139,27 @@ fn audit_32_unified_selected_data_sets_validation_matrix() {
                 predictor_columns: vec![1],
                 reference_levels: vec![],
                 compute_vif: false,
+                ..Default::default()
             }),
             AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 1, y_column: 0 }),
             AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: None }),
+            AnalysisKind::Multivariate(MultivariateSpec::Pca {
+                standardize: true,
+                parallel_analysis_seed: None,
+                pcr_outcome_column: None,
+                retention_rule: Default::default(),
+                emit_extra_matrices: false,
+            }),
             AnalysisKind::Multivariate(MultivariateSpec::Clustering {
                 k_means_k: Some(2),
                 distance: ClusterDistance::Euclidean,
                 linkage: ClusterLinkage::Ward,
                 k_sweep_max: None,
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: Default::default(),
+                cut_height: None,
+                emit_anova_tab: false,
             }),
             AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
                 imputations_m: 3,
@@ -156,6 +182,7 @@ fn audit_32_unified_selected_data_sets_validation_matrix() {
             predictor_columns: vec![0],
             reference_levels: vec![],
             compute_vif: false,
+            ..Default::default()
         })],
         &[9],
         &[0, 0],
@@ -478,6 +505,7 @@ fn audit_82_alpha_aware_pvalue_stars_across_all_families() {
             predictor_columns: vec![1],
             reference_levels: vec![],
             compute_vif: false,
+            ..Default::default()
         }),
         99.0,
     )
@@ -525,6 +553,12 @@ fn audit_82_alpha_aware_pvalue_stars_across_all_families() {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
         99.0,
     )
@@ -602,6 +636,7 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
             predictor_columns: vec![1],
             reference_levels: vec![],
             compute_vif: false,
+            ..Default::default()
         }),
         AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 1, y_column: 0 }),
     ] {
@@ -662,6 +697,14 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
             predictor_columns: vec![2, 3],
             reference_levels: vec![(2, "A".into())],
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         }),
     )
     .unwrap();
@@ -677,6 +720,12 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
             mv_time_column: Some(0),
             mv_status_column: Some(1),
             mv_group_column: Some(2),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     )
     .unwrap();
@@ -738,6 +787,7 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
                 predictor_columns: vec![0],
                 reference_levels: vec![],
                 compute_vif: false,
+                ..Default::default()
             }),
         ),
         (
@@ -749,6 +799,7 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
                 predictor_columns: vec![0],
                 reference_levels: vec![],
                 compute_vif: false,
+                ..Default::default()
             }),
         ),
         (
@@ -760,6 +811,14 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
                 predictor_columns: vec![2],
                 reference_levels: vec![],
                 tie_method: CoxTieMethod::Efron,
+                formula: None,
+                covariate_profiles: Vec::new(),
+                nested_comparison: None,
+                emit_cox_snell_residuals: false,
+                ci_method: Default::default(),
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
             }),
         ),
         (
@@ -770,6 +829,11 @@ fn audit_ignored_text_listwise_finite_and_diagnostics_only_contracts() {
                 distance: ClusterDistance::Euclidean,
                 linkage: ClusterLinkage::Ward,
                 k_sweep_max: Some(3),
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: Default::default(),
+                cut_height: None,
+                emit_anova_tab: false,
             }),
         ),
         ("ROCLow", &roc_low, AnalysisKind::RocCurve(RocSpec::default())),

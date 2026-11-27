@@ -145,6 +145,7 @@ fn r10_28_wf15_power_studio_family_aliases_and_cmd_t_reentry() -> TestRes {
         continuity_correction: false,
         correlation_method: Default::default(),
         info_sheet_id: None,
+        ..Default::default()
     };
     let mut edit_spec =
         AnalysisSpec::new("Power Plan", power_rs.analysis.source_sheet_id.expect("power source"), AnalysisKind::PowerAnalysis(custom_spec)).unwrap();
@@ -370,6 +371,12 @@ fn r10_28_wf06_chained_result_sheet_mv_survival_exposes_data_tab_and_role_picker
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         }),
     );
 

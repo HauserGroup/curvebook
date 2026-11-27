@@ -1241,6 +1241,7 @@ fn aud_08_09_13_canvas_rulers_equation_tex_find_bar_and_split_results() -> BoxRe
             predictor_columns: vec![1],
             reference_levels: vec![],
             compute_vif: false,
+            ..GlmSpec::default()
         }),
         &[("beta0", -1.0, 0), ("beta1", 0.5, 0)],
         Some(roc),

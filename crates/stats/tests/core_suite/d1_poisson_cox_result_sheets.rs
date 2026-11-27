@@ -126,6 +126,7 @@ fn poisson_glm_result_sheet_matches_r_with_explicit_reference_and_zeros() {
             predictor_columns: vec![1, 2],
             reference_levels: vec![(1, String::from("Focused"))],
             compute_vif: false,
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -494,6 +495,14 @@ fn cox_ph_result_sheets_match_r_across_tie_methods_and_efron_baseline() {
                 predictor_columns: vec![2, 3],
                 reference_levels: vec![(2, String::from("ArmA"))],
                 tie_method,
+                formula: None,
+                covariate_profiles: Vec::new(),
+                nested_comparison: None,
+                emit_cox_snell_residuals: false,
+                ci_method: Default::default(),
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
             }),
         )
         .unwrap();

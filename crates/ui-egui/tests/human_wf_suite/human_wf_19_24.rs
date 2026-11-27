@@ -376,6 +376,12 @@ fn wf21_human_kaplan_meier_survival_logistic_and_r4() -> TestRes {
         mv_time_column: None,
         mv_status_column: None,
         mv_group_column: None,
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     }))
     .map_err(|e| e.to_string())?;
     run.verify_reference(
@@ -425,6 +431,7 @@ fn wf21_human_kaplan_meier_survival_logistic_and_r4() -> TestRes {
         predictor_columns: vec![1, 2, 3],
         reference_levels: Vec::new(),
         compute_vif: true,
+        ..Default::default()
     }))
     .map_err(|e| e.to_string())?;
     run.verify_reference(
@@ -548,6 +555,8 @@ fn wf22_human_pca_clustering_glm_volcano_format_points() -> TestRes {
         standardize: false,
         parallel_analysis_seed: Some(7),
         pcr_outcome_column: None,
+        retention_rule: Default::default(),
+        emit_extra_matrices: false,
     }))
     .map_err(|e| e.to_string())?;
     run.verify_reference(
@@ -563,6 +572,11 @@ fn wf22_human_pca_clustering_glm_volcano_format_points() -> TestRes {
         distance: Default::default(),
         linkage: ClusterLinkage::Complete,
         k_sweep_max: Some(6),
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     }))
     .map_err(|e| e.to_string())?;
     run.verify_reference(
@@ -579,6 +593,7 @@ fn wf22_human_pca_clustering_glm_volcano_format_points() -> TestRes {
         predictor_columns: vec![0, 1, 2],
         reference_levels: Vec::new(),
         compute_vif: true,
+        ..Default::default()
     }))
     .map_err(|e| e.to_string())?;
     run.verify_reference(

@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 110
+Registered commands: 116
 
 ## Project & Files (`project`)
 
@@ -498,6 +498,14 @@ Registered commands: 110
 - **Beginner note:** Create synthetic XY curves with optional Gaussian, relative CV, or Poisson noise.
 - **Parameters:** `auto_info` (boolean|null), `cv_percent` (number|null), `equation_id` (string|null), `graph_sheet_id` (string|null), `noise_kind` (string|null), `noise_sd` (number|null), `parameters` (any), `replicates` (integer|null), `row_count` (integer|null), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `x_max` (number|null), `x_min` (number|null)
 
+### `table.unlinkCalculatedVariable` — Unlink Calculated Variable
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Data/Unlink Calculated Variable`
+- **Summary:** Freeze evaluated values of a calculated variable into an editable entered column and remove its live formula.
+- **Beginner note:** Converts a formula-driven column into static entered values while preserving its cells, exclusions, and role.
+- **Parameters:** `col` (any), `sheet_id*` (string), `title` (string|null)
+
 ## Info & Constants (`info`)
 
 ### `info.removeConstant` — Remove Info Constant
@@ -532,7 +540,7 @@ Registered commands: 110
 - **Menu:** `Analyze/Add Analysis`
 - **Summary:** Attach and compute a new analysis of any domain (transform, stats, or regression) for a data sheet.
 - **Beginner note:** Adds a new live analysis sheet linked to an input table and computes its initial results.
-- **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `cluster_direction` (any), `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `consensus_optimal_k` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `downstream_result_sheet_id` (any), `emit_extra_gof` (any), `emit_qq_tabs` (any), `equation_id` (any), `exclude_flagged_fits` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `hit_rules` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `iterations` (any), `kind` (any), `kmeans_algorithm` (any), `lognormal_mode` (any), `method` (any), `multiplicity` (any), `normality_only` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_distribution` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `relational_constraints` (any), `reml_zero_variance_policy` (any), `repeated_measures` (any), `residual_covariance` (any), `retention_rule` (any), `seed` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `sphericity_correction` (any), `standard_addition` (any), `summary_parameter` (any), `survival_method` (any), `title` (any), `tracked_scalars` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
 
 ### `analysis.exportCsv` — Export Result Sheet CSV
 
@@ -564,7 +572,7 @@ Registered commands: 110
 - **Menu:** `Analyze/Analyze Data`
 - **Summary:** Create and run a new analysis sheet, recalculate an existing result sheet by ID, or recalculate the project when empty.
 - **Beginner note:** Runs a new analysis when source and kind are provided, or refreshes an existing analysis sheet.
-- **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `cluster_direction` (any), `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `consensus_optimal_k` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `downstream_result_sheet_id` (any), `emit_extra_gof` (any), `emit_qq_tabs` (any), `equation_id` (any), `exclude_flagged_fits` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `hit_rules` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `iterations` (any), `kind` (any), `kmeans_algorithm` (any), `lognormal_mode` (any), `method` (any), `multiplicity` (any), `normality_only` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_distribution` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `relational_constraints` (any), `reml_zero_variance_policy` (any), `repeated_measures` (any), `residual_covariance` (any), `retention_rule` (any), `seed` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `sphericity_correction` (any), `standard_addition` (any), `summary_parameter` (any), `survival_method` (any), `title` (any), `tracked_scalars` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
 
 ### `analysis.updateParams` — Change Analysis Parameters
 
@@ -583,13 +591,53 @@ Registered commands: 110
 - **Beginner note:** Refreshes every analysis sheet so all tables, stats, and curve fits match the latest data.
 - **Parameters:** (none)
 
+### `fit.cloneBuiltinEquation` — Clone Built-in Equation
+
+- **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `Analyze/User Equations/Clone Built-in...`
+- **Summary:** Clone a built-in equation into an editable DSL template.
+- **Beginner note:** Generates editable DSL source (with constraints and transforms) from any built-in curve-fitting equation.
+- **Parameters:** `builtin_id*` (string), `dir` (any), `new_id` (any), `new_name` (any), `overwrite` (any), `save` (any)
+
+### `fit.deleteUserEquation` — Delete User Equation
+
+- **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `Analyze/User Equations/Delete`
+- **Summary:** Delete a saved custom equation by ID.
+- **Beginner note:** Deletes a custom equation from the local user equation library.
+- **Parameters:** `dir` (any), `id*` (string)
+
+### `fit.getUserEquation` — Get User Equation
+
+- **Effects:** `READS_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `Analyze/User Equations/Get`
+- **Summary:** Get a saved custom DSL equation by ID.
+- **Beginner note:** Fetches the DSL source, parameter names, and metadata for one saved user equation.
+- **Parameters:** `dir` (any), `id*` (string)
+
+### `fit.listUserEquations` — List User Equations
+
+- **Effects:** `READS_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `Analyze/User Equations/List`
+- **Summary:** List saved custom DSL equations.
+- **Beginner note:** Lists all custom curve-fitting equations saved in the local user equation library.
+- **Parameters:** `dir` (any)
+
 ### `fit.run` — Run Curve Fit / Regression
 
 - **Effects:** `MUTATES_DOCUMENT`
 - **Menu:** `Analyze/Fit Curve`
 - **Summary:** Create and execute linear, Deming, built-in nonlinear, global shared-parameter, or custom DSL regression.
 - **Beginner note:** Fits a linear or nonlinear dose-response/kinetic curve with confidence bands and model comparisons.
-- **Parameters:** `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `equation_id` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `kind` (any), `method` (any), `multiplicity` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `standard_addition` (any), `summary_parameter` (any), `title` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+- **Parameters:** `cluster_direction` (any), `comparison` (any), `comparison_method` (any), `comparison_question` (any), `confidence_percent` (any), `consensus_optimal_k` (any), `create_summary_graph` (any), `custom_dsl` (any), `deming_error` (any), `df_method` (any), `downstream_result_sheet_id` (any), `emit_extra_gof` (any), `emit_qq_tabs` (any), `equation_id` (any), `exclude_flagged_fits` (any), `extend_line_to_x_intercept` (any), `fit_flag_rules` (any), `fixed_point` (any), `flag_r_squared_below` (any), `hit_rules` (any), `identifiability_mode` (any), `identify_unstable_parameters` (any), `iterations` (any), `kind` (any), `kmeans_algorithm` (any), `lognormal_mode` (any), `method` (any), `multiplicity` (any), `normality_only` (any), `output_significant_digits` (any), `overwrite` (any), `p_value_format` (any), `parameter_rules` (any), `plot_distribution` (any), `plot_segments` (any), `plot_x_max` (any), `plot_x_min` (any), `prefer_well_defined_fit` (any), `relational_constraints` (any), `reml_zero_variance_policy` (any), `repeated_measures` (any), `residual_covariance` (any), `retention_rule` (any), `seed` (any), `selected_data_sets` (any), `sheet_id` (any), `show_standard_errors` (any), `source_sheet_id` (any), `spec` (any), `sphericity_correction` (any), `standard_addition` (any), `summary_parameter` (any), `survival_method` (any), `title` (any), `tracked_scalars` (any), `weighting` (any), `x_range_filter` (any), `y_range_filter` (any)
+
+### `fit.saveUserEquation` — Save User Equation
+
+- **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `Analyze/User Equations/Save...`
+- **Summary:** Validate and atomically save a custom DSL equation.
+- **Beginner note:** Compiles and saves a custom curve-fitting equation for reuse across projects.
+- **Parameters:** `category` (any), `cloned_from_builtin` (any), `description` (any), `dir` (any), `dsl_source*` (string), `id*` (string), `name*` (string), `overwrite` (any)
 
 ### `result.generateReport` — Generate Methods Report
 
@@ -613,7 +661,7 @@ Registered commands: 110
 - **Menu:** `Analyze/Statistical Test`
 - **Summary:** Create and execute a hypothesis test, ANOVA, contingency, survival, ROC, GLM, or multivariate analysis.
 - **Beginner note:** Runs a statistical test on a compatible data sheet and stores tables, P values, and assumption checks.
-- **Parameters:** `confidence_percent` (any), `df_method` (any), `kind` (any), `multiplicity` (any), `overwrite` (any), `p_value_format` (any), `repeated_measures` (any), `residual_covariance` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
+- **Parameters:** `cluster_direction` (any), `confidence_percent` (any), `consensus_optimal_k` (any), `df_method` (any), `downstream_result_sheet_id` (any), `emit_qq_tabs` (any), `exclude_flagged_fits` (any), `hit_rules` (any), `iterations` (any), `kind` (any), `kmeans_algorithm` (any), `lognormal_mode` (any), `multiplicity` (any), `normality_only` (any), `overwrite` (any), `p_value_format` (any), `reml_zero_variance_policy` (any), `repeated_measures` (any), `residual_covariance` (any), `retention_rule` (any), `seed` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `sphericity_correction` (any), `survival_method` (any), `title` (any), `tracked_scalars` (any)
 
 ### `transform.run` — Run Transformation
 
@@ -621,7 +669,7 @@ Registered commands: 110
 - **Menu:** `Analyze/Transform`
 - **Summary:** Create and execute a mathematical, normalization, baseline, transpose, prune, select, or simulation transformation sheet.
 - **Beginner note:** Runs a reproducible data transformation pipeline on a data sheet and writes the output to a linked result sheet.
-- **Parameters:** `confidence_percent` (any), `create_graph` (any), `graph_sheet_id` (any), `kind` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id` (any), `spec` (any), `title` (any)
+- **Parameters:** `ci_method` (any), `confidence_percent` (any), `create_graph` (any), `denominator` (any), `graph_sheet_id` (any), `kind` (any), `operation` (any), `output_percent` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `simulation_mode` (any), `source_sheet_id` (any), `spec` (any), `summary` (any), `title` (any), `upper_percentile` (any)
 
 ## Graphs & Styling (`graph`)
 

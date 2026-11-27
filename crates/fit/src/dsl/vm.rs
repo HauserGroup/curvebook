@@ -17,6 +17,11 @@ use crate::dsl::special::{
     parse_bessel_order,
 };
 
+pub(in crate::dsl) trait CurveTransformHost {
+    fn eval_curve_y(&self, x: f64) -> Option<f64>;
+    fn solve_curve_x(&self, y_target: f64) -> Option<f64>;
+}
+
 pub(in crate::dsl) struct VmInput<'a> {
     pub(in crate::dsl) x: &'a [f64],
     pub(in crate::dsl) y: f64,
@@ -41,6 +46,19 @@ pub(in crate::dsl) fn eval_bytecode_with_locals(
     eval_bytecode_with_bufs(prog, x, y, params, ds_idx, locals, &mut stack)
 }
 
+pub(in crate::dsl) fn eval_bytecode_with_curve_host(
+    prog: &CompiledProgram,
+    x: &[f64],
+    y: f64,
+    params: &[f64],
+    ds_idx: usize,
+    locals: &mut [Option<f64>],
+    host: &dyn CurveTransformHost,
+) -> Option<f64> {
+    let mut stack: Vec<f64> = Vec::with_capacity(32);
+    eval_bytecode_with_budget_and_host(prog, &VmInput { x, y, params, ds_idx }, locals, &mut stack, MAX_VM_STEPS, Some(host)).0
+}
+
 pub(in crate::dsl) fn eval_bytecode_with_bufs(
     prog: &CompiledProgram,
     x: &[f64],
@@ -50,7 +68,7 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
     locals: &mut [Option<f64>],
     stack: &mut Vec<f64>,
 ) -> Option<f64> {
-    eval_bytecode_with_budget(prog, &VmInput { x, y, params, ds_idx }, locals, stack, MAX_VM_STEPS).0
+    eval_bytecode_with_budget_and_host(prog, &VmInput { x, y, params, ds_idx }, locals, stack, MAX_VM_STEPS, None).0
 }
 
 fn catch_defined_fault(try_scopes: &mut Vec<(usize, usize)>, stack: &mut Vec<f64>, ip: &mut usize) -> bool {
@@ -70,6 +88,17 @@ pub(in crate::dsl) fn eval_bytecode_with_budget(
     locals: &mut [Option<f64>],
     stack: &mut Vec<f64>,
     max_steps: usize,
+) -> (Option<f64>, usize) {
+    eval_bytecode_with_budget_and_host(prog, input, locals, stack, max_steps, None)
+}
+
+fn eval_bytecode_with_budget_and_host(
+    prog: &CompiledProgram,
+    input: &VmInput<'_>,
+    locals: &mut [Option<f64>],
+    stack: &mut Vec<f64>,
+    max_steps: usize,
+    curve_host: Option<&dyn CurveTransformHost>,
 ) -> (Option<f64>, usize) {
     stack.clear();
     let mut try_scopes: Vec<(usize, usize)> = Vec::new();
@@ -197,6 +226,32 @@ pub(in crate::dsl) fn eval_bytecode_with_budget(
             OpCode::ExitDefinedScope => {
                 let _ = try_scopes.pop();
             }
+            OpCode::EvalCurveY => {
+                let Some(x_val) = stack.pop() else {
+                    return (None, steps);
+                };
+                let res_opt = if x_val.is_finite() { curve_host.and_then(|h| h.eval_curve_y(x_val)) } else { None };
+                let Some(res) = res_opt.filter(|v| v.is_finite()) else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
+                    return (None, steps);
+                };
+                stack.push(res);
+            }
+            OpCode::SolveCurveX => {
+                let Some(y_target) = stack.pop() else {
+                    return (None, steps);
+                };
+                let res_opt = if y_target.is_finite() { curve_host.and_then(|h| h.solve_curve_x(y_target)) } else { None };
+                let Some(res) = res_opt.filter(|v| v.is_finite()) else {
+                    if catch_defined_fault(&mut try_scopes, stack, &mut ip) {
+                        continue;
+                    }
+                    return (None, steps);
+                };
+                stack.push(res);
+            }
             OpCode::Halt => break,
         }
         ip += 1;
@@ -321,7 +376,33 @@ pub(in crate::dsl) fn eval_builtin_counted(bf: BuiltinFn, a: &[f64], max_work: u
         BuiltinFn::Atanh => a[0].atanh(),
         BuiltinFn::Floor => a[0].floor(),
         BuiltinFn::Ceil => a[0].ceil(),
-        BuiltinFn::Round => a[0].round(),
+        BuiltinFn::Round => {
+            if a.len() == 1 {
+                a[0].round()
+            } else {
+                let x = a[0];
+                let digits = a[1];
+                if !digits.is_finite() {
+                    return (None, 1);
+                }
+                let d = digits.trunc();
+                if d == 0.0 || !x.is_finite() {
+                    x.round()
+                } else if d > 300.0 {
+                    x
+                } else if d < -300.0 {
+                    0.0
+                } else {
+                    let scale = 10.0_f64.powf(d);
+                    if scale.is_finite() && scale > 0.0 {
+                        let scaled = x * scale;
+                        if scaled.is_finite() { scaled.round() / scale } else { x }
+                    } else {
+                        return (None, 1);
+                    }
+                }
+            }
+        }
         BuiltinFn::Trunc => a[0].trunc(),
         BuiltinFn::Sign => {
             if a[0] > 0.0 {

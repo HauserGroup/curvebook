@@ -6,6 +6,7 @@
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - McCullagh, P. & Nelder, J. A. (1989). *Generalized Linear Models*, 2nd ed. Chapman & Hall.
+//! - Willett, J. B. & Singer, J. D. (1988). Another cautionary note about $R^2$: its use in weighted least-squares regression analysis. *The American Statistician* 42(3), 236–238.
 //! - Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123.
 
 use curvebook_doc::{CiBound, FitMethod};
@@ -23,7 +24,7 @@ use crate::error::FitError;
 use crate::solver::irls::compute_unscaled_cov;
 use crate::solver::layout::ObsRecord;
 use crate::solver::lm::{mat_get, mat_set};
-use crate::solver::results::{FittedDatasetResult, SolverConfig};
+use crate::solver::results::{FittedDatasetResult, PoissonNonlinearGof, SolverConfig};
 use crate::types::DataPoint;
 
 pub(in crate::solver) fn obs_y_ss(obs: &[ObsRecord]) -> f64 {
@@ -145,6 +146,133 @@ pub(in crate::solver) fn predicted_y_neg_log_weight_sum(obs: &[ObsRecord]) -> Op
 /// Unweighted coefficient of determination `R^2 = 1 - rss / tss` (`NaN` when `tss <= 0` or `n <= 1`).
 pub(in crate::solver) fn compute_r_squared(raw_rss: f64, tss: f64, n_obs: usize) -> f64 {
     if n_obs > 1 && tss > 0.0 && tss.is_finite() && raw_rss.is_finite() { 1.0 - raw_rss / tss } else { f64::NAN }
+}
+
+/// Adjusted coefficient of determination `1 - (1 - R^2) * (n - 1) / df` (`NaN` when `df == 0` or `n <= 1`).
+pub(in crate::solver) fn compute_adj_r_squared(r_squared: f64, n_obs: usize, df: usize) -> f64 {
+    if n_obs > 1 && df > 0 && r_squared.is_finite() { 1.0 - (1.0 - r_squared) * ((n_obs - 1) as f64) / (df as f64) } else { f64::NAN }
+}
+
+/// Root-mean-square error `sqrt(rss / n)` (`NaN` when `n == 0` or `rss` invalid).
+pub(in crate::solver) fn compute_rmse(rss: f64, n_obs: usize) -> f64 {
+    if n_obs > 0 && rss.is_finite() && rss >= 0.0 { (rss / (n_obs as f64)).sqrt() } else { f64::NAN }
+}
+
+/// Weighted goodness-of-fit metrics per Willett & Singer (1988).
+#[derive(Debug, Clone, Copy, Default)]
+pub(in crate::solver) struct WeightedGofMetrics {
+    pub(in crate::solver) weighted_r_squared: Option<f64>,
+    pub(in crate::solver) weighted_adj_r_squared: Option<f64>,
+    pub(in crate::solver) weighted_rmse: Option<f64>,
+    pub(in crate::solver) weighted_sy_x: Option<f64>,
+}
+
+/// Compute Willett & Singer (1988) Weighted $R^2$, Weighted Adjusted $R^2$, Weighted RMSE,
+/// and Weighted $S_{y.x}$ using the observation weights active at convergence.
+pub(in crate::solver) fn compute_weighted_gof(obs: &[ObsRecord], weighted_ss: f64, n_obs: usize, df: usize) -> WeightedGofMetrics {
+    if obs.is_empty() || n_obs == 0 || !weighted_ss.is_finite() || weighted_ss < 0.0 {
+        return WeightedGofMetrics::default();
+    }
+    let mut sum_w = NeumaierSum::new();
+    let mut sum_wy = NeumaierSum::new();
+    for rec in obs {
+        let w = rec.sqrt_weight * rec.sqrt_weight;
+        if !w.is_finite() || w < 0.0 || !rec.point.y.is_finite() {
+            return WeightedGofMetrics::default();
+        }
+        sum_w.add(w);
+        sum_wy.add(w * rec.point.y);
+    }
+    let w_tot = sum_w.total();
+    let weighted_r_squared = if n_obs > 1 && w_tot > 0.0 && w_tot.is_finite() {
+        let y_bar_w = sum_wy.total() / w_tot;
+        let mut wtss_acc = NeumaierSum::new();
+        for rec in obs {
+            let w = rec.sqrt_weight * rec.sqrt_weight;
+            let d = rec.point.y - y_bar_w;
+            wtss_acc.add(w * d * d);
+            wtss_acc.add(rec.ss_within);
+        }
+        let wtss = wtss_acc.total();
+        if wtss > 0.0 && wtss.is_finite() { Some(1.0 - weighted_ss / wtss) } else { None }
+    } else {
+        None
+    };
+    let weighted_adj_r_squared = weighted_r_squared.and_then(|wr2| {
+        let adj = compute_adj_r_squared(wr2, n_obs, df);
+        adj.is_finite().then_some(adj)
+    });
+    let weighted_rmse = {
+        let v = compute_rmse(weighted_ss, n_obs);
+        v.is_finite().then_some(v)
+    };
+    let weighted_sy_x = if df > 0 {
+        let v = (weighted_ss / (df as f64)).sqrt();
+        v.is_finite().then_some(v)
+    } else {
+        None
+    };
+    WeightedGofMetrics { weighted_r_squared, weighted_adj_r_squared, weighted_rmse, weighted_sy_x }
+}
+
+/// Compute full Poisson nonlinear regression GOF metrics (`nll`, `nll_saturated`, `nll_null`,
+/// `deviance`, `null_deviance`, `pseudo_r2_deviance`, `pearson_chi2`, `dispersion`;
+/// McCullagh & Nelder 1989).
+pub(in crate::solver) fn compute_poisson_gof(obs: &[ObsRecord], y_hat: &[f64], df: usize) -> Option<PoissonNonlinearGof> {
+    if obs.is_empty() || obs.len() != y_hat.len() {
+        return None;
+    }
+    let mut sum_y = NeumaierSum::new();
+    for rec in obs {
+        if !rec.point.y.is_finite() || rec.point.y < 0.0 {
+            return None;
+        }
+        sum_y.add(rec.point.y);
+    }
+    let y_bar = sum_y.total() / (obs.len() as f64);
+    let mut nll_mod = NeumaierSum::new();
+    let mut nll_sat = NeumaierSum::new();
+    let mut nll_null = NeumaierSum::new();
+    let mut dev_mod = NeumaierSum::new();
+    let mut dev_null = NeumaierSum::new();
+    let mut pearson = NeumaierSum::new();
+
+    for (rec, &mu) in obs.iter().zip(y_hat.iter()) {
+        let y = rec.point.y;
+        if !mu.is_finite() || mu <= 0.0 {
+            return None;
+        }
+        let lg = ln_gamma(y + 1.0).ok()?;
+        let y_ln_mu = if y > 0.0 { y * mu.ln() } else { 0.0 };
+        nll_mod.add(-(y_ln_mu - mu - lg));
+
+        let y_ln_y = if y > 0.0 { y * y.ln() } else { 0.0 };
+        nll_sat.add(-(y_ln_y - y - lg));
+
+        let y_ln_bar = if y > 0.0 && y_bar > 0.0 { y * y_bar.ln() } else { 0.0 };
+        nll_null.add(-(y_ln_bar - y_bar - lg));
+
+        dev_mod.add(2.0 * deviance_bd0(y, mu));
+        if y_bar > 0.0 {
+            dev_null.add(2.0 * deviance_bd0(y, y_bar));
+        }
+
+        let r = y - mu;
+        pearson.add((r * r) / mu);
+    }
+
+    let nll = nll_mod.total();
+    let nll_saturated = nll_sat.total();
+    let nll_null_val = nll_null.total();
+    let deviance = dev_mod.total();
+    let null_deviance = dev_null.total();
+    let pearson_chi2 = pearson.total();
+    if !nll.is_finite() || !nll_saturated.is_finite() || !deviance.is_finite() || !pearson_chi2.is_finite() {
+        return None;
+    }
+    let pseudo_r2_deviance = if null_deviance > 0.0 && null_deviance.is_finite() { 1.0 - deviance / null_deviance } else { f64::NAN };
+    let dispersion = if df > 0 { pearson_chi2 / (df as f64) } else { f64::NAN };
+    Some(PoissonNonlinearGof { nll, nll_saturated, nll_null: nll_null_val, deviance, null_deviance, pseudo_r2_deviance, pearson_chi2, dispersion })
 }
 
 /// Internally studentised residuals `e_i / (s * sqrt(1 - h_ii))` with tangent-plane leverage

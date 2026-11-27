@@ -165,6 +165,10 @@ fn math_transform_and_error_propagation_vs_finite_difference() {
             x_transform: None,
             y_transform: Some(MathTransformPreset::Log10),
             error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
         },
         &ctx,
     )
@@ -223,7 +227,12 @@ fn normalize_baseline_transpose_prune_and_select() {
     let analysis = AnalysisSpec::new(
         "an1",
         "s1",
-        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Difference }),
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: BaselineOperation::Difference,
+            baseline_kind: None,
+            retain_unselected_columns: false,
+        }),
     )
     .unwrap();
     let base_xy = as_xy(execute_analysis_transform(&xy, &analysis, &ctx).unwrap().analyzable_data.as_ref().unwrap()).clone();
@@ -271,6 +280,11 @@ fn normalize_baseline_transpose_prune_and_select() {
             filter_formula: Some(String::from("X >= 2 AND X <= 3")),
             target_archetype: TableKind::Column,
             derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         },
         &ctx,
     )
@@ -308,6 +322,7 @@ fn simulate_deterministic_equations_and_noise() {
         equation_id: String::from("linear"),
         parameters: vec![(String::from("slope"), 2.0), (String::from("intercept"), 1.0)],
         noise: SimulationNoise::Poisson,
+        simulation_mode: None,
     };
     assert_eq!(execute_transform(&s1, &spec, &TransformContext::default()).unwrap().data_sheet.archetype.row_count(), 5);
 }
@@ -476,6 +491,11 @@ fn select_and_transform_selected_columns_into_xy_column_and_grouped() {
             filter_formula: Some(String::from("Dose > 0 && Response > Baseline")),
             target_archetype: TableKind::Xy,
             derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         },
         &ctx_xy,
     )

@@ -191,6 +191,25 @@ pub(in crate::solver) fn solve_profile_subproblem(
     extra_fixed: &[usize],
     ss_within: f64,
 ) -> Option<ProfileStep> {
+    if layout.has_relational {
+        let (sub_layout, new_to_old) = layout.fix_slots_for_profile(fixed_idx, fixed_val, extra_fixed, seed)?;
+        let sub_k = sub_layout.k_free();
+        let mut work = seed.to_vec();
+        work[fixed_idx] = fixed_val;
+        if sub_k == 0 {
+            let (_, _, ss) = eval_residuals(model, &sub_layout, obs, &[])?;
+            return Some(ProfileStep { objective: ss + ss_within, theta: work, converged: true });
+        }
+        let mut sub_u = sub_layout.u_init();
+        let sub_bounds = sub_layout.u_bounds();
+        let map_all: Vec<usize> = (0..sub_k).collect();
+        let state = run_reduced_lm_with_domain(model, &sub_layout, obs, &mut sub_u, &map_all, &sub_bounds, 200, false)?;
+        let sub_theta = sub_layout.u_to_theta(&sub_u);
+        for (&orig_i, &v) in new_to_old.iter().zip(sub_theta.iter()) {
+            work[orig_i] = v;
+        }
+        return Some(ProfileStep { objective: state.ss_curr + ss_within, theta: work, converged: state.converged });
+    }
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();
@@ -217,6 +236,85 @@ pub(in crate::solver) fn solve_profile_subproblem_poisson(
     fixed_val: f64,
     extra_fixed: &[usize],
 ) -> Option<ProfileStep> {
+    if layout.has_relational {
+        let (sub_layout, new_to_old) = layout.fix_slots_for_profile(fixed_idx, fixed_val, extra_fixed, seed)?;
+        let sub_k = sub_layout.k_free();
+        let mut out_theta = seed.to_vec();
+        out_theta[fixed_idx] = fixed_val;
+        if sub_k == 0 {
+            let (_, init_y_hat, _) = eval_residuals_with_domain(model, &sub_layout, obs, &[], true)?;
+            let dev = poisson_deviance(obs, &init_y_hat)?;
+            return Some(ProfileStep { objective: dev, theta: out_theta, converged: true });
+        }
+        let mut sub_u = sub_layout.u_init();
+        let sub_bounds = sub_layout.u_bounds();
+        let map_all: Vec<usize> = (0..sub_k).collect();
+        let (_, mut curr_y_hat, _) = eval_residuals_with_domain(model, &sub_layout, obs, &sub_u, true)?;
+        let mut work_obs = obs.to_vec();
+        let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat)?;
+        let mut irls_converged = false;
+        for _ in 0..20 {
+            if assign_poisson_irls_weights(&mut work_obs, &curr_y_hat).is_err() {
+                return None;
+            }
+            let mut trial = sub_u.clone();
+            let Some(state) = run_reduced_lm_with_domain(model, &sub_layout, &work_obs, &mut trial, &map_all, &sub_bounds, 80, true) else {
+                irls_converged = false;
+                break;
+            };
+            if let Some(next_dev) = poisson_deviance(&work_obs, &state.y_hat)
+                && next_dev <= curr_dev
+            {
+                let rel_change = (curr_dev - next_dev).abs() / curr_dev.max(1.0);
+                sub_u = trial;
+                curr_y_hat = state.y_hat;
+                curr_dev = next_dev;
+                if rel_change < 1e-10 && state.converged {
+                    irls_converged = true;
+                    break;
+                }
+                continue;
+            }
+            let mut improved = false;
+            let mut alpha = 0.5_f64;
+            for _ in 0..8 {
+                let mut blended: Vec<f64> = sub_u.iter().zip(trial.iter()).map(|(&a, &b)| a + alpha * (b - a)).collect();
+                project_theta(&mut blended, &sub_bounds);
+                if let Some((_, blend_yh, _)) = eval_residuals_with_domain(model, &sub_layout, &work_obs, &blended, true)
+                    && let Some(blend_dev) = poisson_deviance(&work_obs, &blend_yh)
+                    && blend_dev < curr_dev
+                {
+                    let rel_change = (curr_dev - blend_dev).abs() / curr_dev.max(1.0);
+                    sub_u = blended;
+                    curr_y_hat = blend_yh;
+                    curr_dev = blend_dev;
+                    improved = true;
+                    if rel_change < 1e-10 && state.converged {
+                        irls_converged = true;
+                    }
+                    break;
+                }
+                alpha *= 0.5;
+            }
+            if irls_converged || !improved {
+                if !improved && state.converged {
+                    let theta_scale = sub_u.iter().zip(trial.iter()).map(|(&a, &b)| a.abs().max(b.abs())).fold(0.0_f64, f64::max);
+                    let abs_floor = (1e-8 * theta_scale).max(1e-12);
+                    let max_step =
+                        sub_u.iter().zip(trial.iter()).map(|(&a, &b)| (b - a).abs() / a.abs().max(b.abs()).max(abs_floor)).fold(0.0_f64, f64::max);
+                    if max_step < 1e-8 {
+                        irls_converged = true;
+                    }
+                }
+                break;
+            }
+        }
+        let sub_theta = sub_layout.u_to_theta(&sub_u);
+        for (&orig_i, &v) in new_to_old.iter().zip(sub_theta.iter()) {
+            out_theta[orig_i] = v;
+        }
+        return poisson_deviance(&work_obs, &curr_y_hat).map(|dev| ProfileStep { objective: dev, theta: out_theta, converged: irls_converged });
+    }
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();

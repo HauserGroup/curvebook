@@ -5,6 +5,7 @@ use curvebook_math::AxisScale;
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::RichText;
 
+use super::distribution::{DistributionOverlayMeta, render_distribution_overlay, resolve_distribution_overlay_meta};
 use super::series::build_connecting_path;
 use super::{SegmentedAxis, is_log_like, stroke_with_dash};
 use crate::scales::{ResolvedSegment, scale_inverse, scale_transform};
@@ -15,10 +16,12 @@ pub(super) struct FittedOverlayData {
     pub(super) spec: RegressionOverlaySpec,
     pub(super) curve: FittedCurveOverlay,
     pub(super) imported_label: Option<String>,
+    pub(super) distribution: Option<DistributionOverlayMeta>,
 }
 
 pub(super) fn resolve_fitted_overlay<'a>(
     doc: &'a ProjectDocument,
+    all_series: &[SeriesSpec],
     series: &SeriesSpec,
     warnings: &mut Vec<ChartWarning>,
 ) -> Option<(FittedOverlayData, &'a [SourceCellId])> {
@@ -79,8 +82,12 @@ pub(super) fn resolve_fitted_overlay<'a>(
     } else {
         None
     };
+    let has_sibling_shade = all_series
+        .iter()
+        .any(|s| s.data_set_index >= 1 && s.regression_overlay.as_ref().is_some_and(|ov| ov.result_sheet_id == spec.result_sheet_id));
+    let distribution = resolve_distribution_overlay_meta(res, &effective_curve, has_sibling_shade);
     let outliers = if res.has_displayable_output() { res.eliminated_outliers.as_slice() } else { &[] };
-    Some((FittedOverlayData { spec: effective_spec, curve: effective_curve, imported_label }, outliers))
+    Some((FittedOverlayData { spec: effective_spec, curve: effective_curve, imported_label, distribution }, outliers))
 }
 
 #[derive(Clone, Copy)]
@@ -98,8 +105,14 @@ pub(super) fn render_fitted_curve_overlay(
     primitives: &mut Vec<ScenePrimitive>,
     warnings: &mut Vec<ChartWarning>,
     overlay: &FittedOverlayData,
+    series_spec: &SeriesSpec,
+    palette: curvebook_palette::PaletteId,
     target: OverlayDrawTarget<'_>,
 ) {
+    if let Some(dist_meta) = &overlay.distribution {
+        render_distribution_overlay(primitives, warnings, &overlay.curve.points, dist_meta, series_spec, palette, target);
+        return;
+    }
     let mut src: Vec<CurveSamplePoint> = overlay
         .curve
         .points
@@ -229,7 +242,7 @@ fn resample_curve_for_x_segment(src: &[CurveSamplePoint], seg_x: &ResolvedSegmen
     out
 }
 
-fn interpolate_curve_sample(src: &[CurveSamplePoint], x: f64, use_log_x: bool) -> Option<CurveSamplePoint> {
+pub(super) fn interpolate_curve_sample(src: &[CurveSamplePoint], x: f64, use_log_x: bool) -> Option<CurveSamplePoint> {
     let first = src.first()?;
     let last = src.last()?;
     if x < first.x - 1e-12 || x > last.x + 1e-12 {

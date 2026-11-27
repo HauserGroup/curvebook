@@ -2806,6 +2806,12 @@ mod tests {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         };
         let mut s_rs = ResultSheet::new(AnalysisSpec::new("s-1", "ds-s", AnalysisKind::Survival(surv_spec)).unwrap()).unwrap();
         let s_tab = ResultTab {

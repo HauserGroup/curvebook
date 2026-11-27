@@ -41,6 +41,10 @@ pub(in crate::dsl) enum TokenKind {
     Caret,
     LParen,
     RParen,
+    LBracket,
+    RBracket,
+    LBrace,
+    RBrace,
     Comma,
     Eq,
     EqEq,
@@ -313,6 +317,10 @@ pub enum OpCode {
     EnterDefinedScope(usize),
     /// Leave the innermost `is_defined(expr)` fault-catching scope normally.
     ExitDefinedScope,
+    /// Evaluate the fitted curve `Y(x; theta)` at the `x` value popped from the stack (valid only in `[Transforms]`).
+    EvalCurveY,
+    /// Invert the fitted curve `Y(x; theta) = y_target` for `x` given `y_target` popped from the stack (valid only in `[Transforms]`).
+    SolveCurveX,
     /// Terminate VM execution and return top of stack.
     Halt,
 }

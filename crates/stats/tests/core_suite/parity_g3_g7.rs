@@ -195,6 +195,7 @@ fn multiple_row_t_tests_emits_tabs_scalars_and_volcano_records() {
             nonparametric: false,
             assume_equal_sd: false,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -229,6 +230,7 @@ fn multiple_row_t_tests_emits_tabs_scalars_and_volcano_records() {
             nonparametric: false,
             assume_equal_sd: false,
             multiplicity: MultiplicitySpec::default(),
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -327,6 +329,12 @@ fn kaplan_meier_mv_explicit_single_and_autodetect() {
             mv_time_column: t_c,
             mv_status_column: s_c,
             mv_group_column: g_c,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         })
     };
 
@@ -388,6 +396,14 @@ fn cox_ph_emits_baseline_survival_and_log_minus_log_tabs() {
                 predictor_columns: vec![2, 3],
                 reference_levels: vec![],
                 tie_method,
+                formula: None,
+                covariate_profiles: Vec::new(),
+                nested_comparison: None,
+                emit_cox_snell_residuals: false,
+                ci_method: Default::default(),
+                event_code: None,
+                censored_code: None,
+                treat_other_as: Default::default(),
             }),
         )
         .unwrap();
@@ -431,6 +447,7 @@ fn multiple_row_tests_student_nonparametric_and_mv_archetypes() {
             nonparametric: false,
             assume_equal_sd: true,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::TwoStageBkyFdr, threshold: 0.05, report_confidence_intervals: false },
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -446,6 +463,7 @@ fn multiple_row_tests_student_nonparametric_and_mv_archetypes() {
             nonparametric: true,
             assume_equal_sd: false,
             multiplicity: MultiplicitySpec::default(),
+            ..Default::default()
         }),
     )
     .unwrap();
@@ -459,6 +477,7 @@ fn multiple_row_tests_student_nonparametric_and_mv_archetypes() {
             nonparametric: true,
             assume_equal_sd: false,
             multiplicity: MultiplicitySpec::default(),
+            ..Default::default()
         }),
     )
     .unwrap();

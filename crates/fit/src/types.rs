@@ -174,6 +174,23 @@ pub struct DerivedScalar {
     pub value: f64,
     /// Optional physical unit label matching the fitted axis scale (`None` when dimensionless).
     pub units: Option<String>,
+    /// Optional asymptotic standard error (delta method; omitted under robust loss or unavailable covariance).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub se: Option<f64>,
+    /// Optional lower confidence-interval limit at the analysis confidence level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_lower: Option<f64>,
+    /// Optional upper confidence-interval limit at the analysis confidence level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci_upper: Option<f64>,
+}
+
+impl DerivedScalar {
+    /// Construct a derived scalar without standard error or confidence limits.
+    #[must_use]
+    pub fn new(name: impl Into<String>, value: f64, units: Option<String>) -> Self {
+        Self { name: name.into(), value, units, se: None, ci_lower: None, ci_upper: None }
+    }
 }
 
 /// Runtime context for resolving [`HookSource`] references (`InfoConstant`, `ResultScalar`,
@@ -726,6 +743,8 @@ struct MvGroupEntry {
     y_title: String,
     tokens: Vec<String>,
     points: Vec<DataPoint>,
+    unknowns_y: Vec<UnknownResponse>,
+    unknowns_x: Vec<(usize, f64)>,
 }
 
 #[cfg(test)]
@@ -870,6 +889,13 @@ pub(crate) fn resolve_mv_columns_multi(
     Ok(MvResolvedColumns { x_cols, y_cols: resolved_y_cols, group_cols })
 }
 
+#[derive(Default)]
+struct MvGroupBucket {
+    points: Vec<DataPoint>,
+    unknowns_y: Vec<UnknownResponse>,
+    unknowns_x: Vec<(usize, f64)>,
+}
+
 pub(crate) fn extract_from_multivar_multi_with_y_map(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
@@ -895,9 +921,55 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
         let Some(y_var) = mv.variables.get(y_col) else {
             continue;
         };
-        let mut grouped: BTreeMap<Vec<String>, Vec<DataPoint>> = BTreeMap::new();
+        let mut grouped: BTreeMap<Vec<String>, MvGroupBucket> = BTreeMap::new();
         for row in 0..n_rows {
-            let Some(y_val) = y_var.cells.get(row).and_then(Cell::active_number) else {
+            let mut key_tokens = Vec::with_capacity(group_cols.len());
+            let mut all_groups = true;
+            for &gc in &group_cols {
+                if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
+                    key_tokens.push(tok);
+                } else {
+                    all_groups = false;
+                    break;
+                }
+            }
+            if !all_groups {
+                continue;
+            }
+
+            let y_cell = y_var.cells.get(row);
+            let y_opt = y_cell.and_then(Cell::active_number);
+            let y_blank = y_cell.is_none_or(|c| !c.excluded && c.is_empty());
+
+            if x_cols.len() == 1 {
+                let x_cell = mv.variables.get(x_cols[0]).and_then(|v| v.cells.get(row));
+                let x_opt = x_cell.and_then(Cell::active_number);
+                let x_blank = x_cell.is_none_or(|c| !c.excluded && c.is_empty());
+                match (x_opt, y_opt) {
+                    (Some(xv), Some(yv)) => {
+                        grouped.entry(key_tokens).or_default().points.push(DataPoint {
+                            x: vec![xv],
+                            y: yv,
+                            sd: None,
+                            n: None,
+                            explicit_weight: None,
+                            source_subcolumn: 0,
+                            data_set_index: 0,
+                            row,
+                        });
+                    }
+                    (None, Some(yv)) if x_blank => {
+                        grouped.entry(key_tokens).or_default().unknowns_y.push(UnknownResponse::Single((row, yv)));
+                    }
+                    (Some(xv), None) if y_blank => {
+                        grouped.entry(key_tokens).or_default().unknowns_x.push((row, xv));
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            let Some(y_val) = y_opt else {
                 continue;
             };
             let mut xs = Vec::with_capacity(x_cols.len());
@@ -913,20 +985,7 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
             if !all_x {
                 continue;
             }
-            let mut key_tokens = Vec::with_capacity(group_cols.len());
-            let mut all_groups = true;
-            for &gc in &group_cols {
-                if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
-                    key_tokens.push(tok);
-                } else {
-                    all_groups = false;
-                    break;
-                }
-            }
-            if !all_groups {
-                continue;
-            }
-            grouped.entry(key_tokens).or_default().push(DataPoint {
+            grouped.entry(key_tokens).or_default().points.push(DataPoint {
                 x: xs,
                 y: y_val,
                 sd: None,
@@ -938,7 +997,7 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
             });
         }
 
-        let mut entries: Vec<(Vec<String>, Vec<DataPoint>)> = grouped.into_iter().collect();
+        let mut entries: Vec<(Vec<String>, MvGroupBucket)> = grouped.into_iter().filter(|(_, b)| !b.points.is_empty()).collect();
         if !group_cols.is_empty() {
             entries.sort_by(|(ka, _), (kb, _)| {
                 for (pos, (ta, tb)) in ka.iter().zip(kb.iter()).enumerate() {
@@ -952,8 +1011,8 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
                 ka.cmp(kb)
             });
         }
-        for (tokens, points) in entries {
-            all_entries.push(MvGroupEntry { y_col, y_title: y_var.title.clone(), tokens, points });
+        for (tokens, MvGroupBucket { points, unknowns_y, unknowns_x }) in entries {
+            all_entries.push(MvGroupEntry { y_col, y_title: y_var.title.clone(), tokens, points, unknowns_y, unknowns_x });
         }
     }
 
@@ -971,7 +1030,8 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
     let mut out = Vec::with_capacity(keep_indices.len());
     let mut y_col_map = HashMap::with_capacity(keep_indices.len());
     for idx in keep_indices {
-        let Some(MvGroupEntry { y_col, y_title, tokens, points: mut pts }) = indexed.get_mut(idx).and_then(Option::take) else {
+        let Some(MvGroupEntry { y_col, y_title, tokens, points: mut pts, unknowns_y, unknowns_x }) = indexed.get_mut(idx).and_then(Option::take)
+        else {
             continue;
         };
         for p in &mut pts {
@@ -990,8 +1050,8 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
             data_set_index: idx,
             label,
             points: pts,
-            unknowns_y: Vec::new(),
-            unknowns_x: Vec::new(),
+            unknowns_y,
+            unknowns_x,
             is_pre_summarized: false,
             column_title_value: title_val,
         });

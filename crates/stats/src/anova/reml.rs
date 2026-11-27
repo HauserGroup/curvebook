@@ -21,7 +21,7 @@
 //!   hypotheses in generalized least squares analyses of unbalanced split-plot experiments.
 //!   *Journal of Statistical Computation and Simulation* 54(4):363–378. doi:10.1080/00949659608811740
 
-use curvebook_doc::MixedModelDfMethod;
+use curvebook_doc::{MixedModelDfMethod, RemlZeroVariancePolicy};
 use curvebook_math::dist::{chi2_sf, f_sf};
 use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
@@ -261,8 +261,14 @@ pub(in crate::anova) fn ri_precompute_clusters(x: &DenseMatrix, y: &[f64], clust
 
 pub(in crate::anova) type RiProfileEval = (f64, f64, DenseMatrix, Vec<f64>);
 
-pub(in crate::anova) fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n_minus_p: f64, tau_raw: f64) -> Result<RiProfileEval, StatsError> {
-    let tau = tau_raw.max(0.0);
+pub(in crate::anova) fn ri_eval_profile(
+    clusters: &[RiClusterStats],
+    p: usize,
+    n_minus_p: f64,
+    tau_raw: f64,
+    allow_negative: bool,
+) -> Result<RiProfileEval, StatsError> {
+    let tau = if allow_negative { tau_raw } else { tau_raw.max(0.0) };
     let mut xtvx = vec![0.0_f64; p * p];
     let mut xtvy = vec![0.0_f64; p];
     let mut ln_det_v = 0.0_f64;
@@ -271,6 +277,9 @@ pub(in crate::anova) fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n
     // when cluster means dominate within-cluster spread and tau is very large.
     for cl in clusters {
         let factor = 1.0 + cl.m_c * tau;
+        if !factor.is_finite() || factor <= 1e-12 {
+            return Err(StatsError::InvalidParameter { name: "reml_tau", value: tau });
+        }
         let a_c = 1.0 / factor;
         let w_bet = cl.m_c * a_c;
         ln_det_v += factor.ln();
@@ -810,12 +819,36 @@ pub fn fit_random_intercept_reml_with_df_method(
     fit_random_intercept_reml_with_method_and_core(x, y, cluster_ids, terms, df_method).map(|(res, _)| res)
 }
 
+/// Variant of [`fit_random_intercept_reml`] selecting both denominator *df* method and
+/// zero/negative variance-component boundary policy.
+pub fn fit_random_intercept_reml_with_policy(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
+) -> Result<MixedRemlResult, StatsError> {
+    fit_random_intercept_reml_with_policy_and_core(x, y, cluster_ids, terms, df_method, policy).map(|(res, _)| res)
+}
+
 pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     x: &DenseMatrix,
     y: &[f64],
     cluster_ids: &[usize],
     terms: &[(&str, usize, usize)],
     df_method: MixedModelDfMethod,
+) -> Result<(MixedRemlResult, RemlContrastCore), StatsError> {
+    fit_random_intercept_reml_with_policy_and_core(x, y, cluster_ids, terms, df_method, RemlZeroVariancePolicy::BoundAtZero)
+}
+
+pub(in crate::anova) fn fit_random_intercept_reml_with_policy_and_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
 ) -> Result<(MixedRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
@@ -847,7 +880,7 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     let clusters = ri_precompute_clusters(&x_red, &y_scaled, cluster_ids);
     let eval_u = |u: f64| -> Result<(f64, RiProfileEval), StatsError> {
         let tau = u.exp_m1().max(0.0);
-        let ev = ri_eval_profile(&clusters, p_eff, n_minus_p, tau)?;
+        let ev = ri_eval_profile(&clusters, p_eff, n_minus_p, tau, false)?;
         Ok((tau, ev))
     };
 
@@ -904,19 +937,91 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     }
     let cand_u = 0.5 * (a_u + b_u);
     let (cand_tau, cand_eval) = eval_u(cand_u)?;
-    let (u_hat, tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
-        (cand_u, cand_tau, cand_eval)
-    } else if best_ll > ll_zero + 1e-12 {
-        (best_u, best_u.exp_m1().max(0.0), eval_u(best_u)?.1)
-    } else {
-        (0.0, 0.0, zero_eval)
-    };
+    let (mut u_hat, mut tau_hat, (mut opt_ll, mut sigma2_e_scaled, mut xtvx_rel_inv, mut beta_scaled)) =
+        if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
+            (cand_u, cand_tau, cand_eval)
+        } else if best_ll > ll_zero + 1e-12 {
+            (best_u, best_u.exp_m1().max(0.0), eval_u(best_u)?.1)
+        } else {
+            (0.0, 0.0, zero_eval)
+        };
+
+    // Unbounded policy: search negative variance ratio tau in (-1 / max_c m_c, 0] while keeping V SPD.
+    let mut neg_converged = true;
+    if policy == RemlZeroVariancePolicy::Unbounded && tau_hat <= 1e-12 {
+        let m_max = clusters.iter().map(|c| c.m_c).fold(1.0_f64, f64::max);
+        if m_max > 1.0 {
+            let tau_lo_lim = -(1.0 - 1e-5) / m_max;
+            let n_neg = 48_usize;
+            let neg_step = (0.0 - tau_lo_lim) / (n_neg as f64);
+            let mut best_neg_tau = 0.0_f64;
+            let mut best_neg_ll = opt_ll;
+            for i in 1..=n_neg {
+                let t_try = -(i as f64) * neg_step;
+                if t_try <= tau_lo_lim {
+                    continue;
+                }
+                if let Ok((ll_n, _, _, _)) = ri_eval_profile(&clusters, p_eff, n_minus_p, t_try, true)
+                    && ll_n > best_neg_ll
+                {
+                    best_neg_ll = ll_n;
+                    best_neg_tau = t_try;
+                }
+            }
+            if best_neg_tau < 0.0 {
+                let mut lo_t = (best_neg_tau - neg_step).max(tau_lo_lim);
+                let mut hi_t = (best_neg_tau + neg_step).min(0.0);
+                let mut ct = hi_t - phi_gold * (hi_t - lo_t);
+                let mut dt = lo_t + phi_gold * (hi_t - lo_t);
+                let mut fc = ri_eval_profile(&clusters, p_eff, n_minus_p, ct, true).map_or(f64::NEG_INFINITY, |e| e.0);
+                let mut fd = ri_eval_profile(&clusters, p_eff, n_minus_p, dt, true).map_or(f64::NEG_INFINITY, |e| e.0);
+                for _ in 0..80 {
+                    if fc < fd {
+                        lo_t = ct;
+                        ct = dt;
+                        fc = fd;
+                        dt = lo_t + phi_gold * (hi_t - lo_t);
+                        fd = ri_eval_profile(&clusters, p_eff, n_minus_p, dt, true).map_or(f64::NEG_INFINITY, |e| e.0);
+                    } else {
+                        hi_t = dt;
+                        dt = ct;
+                        fd = fc;
+                        ct = hi_t - phi_gold * (hi_t - lo_t);
+                        fc = ri_eval_profile(&clusters, p_eff, n_minus_p, ct, true).map_or(f64::NEG_INFINITY, |e| e.0);
+                    }
+                }
+                let mid_t = 0.5 * (lo_t + hi_t);
+                if let Ok(neg_ev) = ri_eval_profile(&clusters, p_eff, n_minus_p, mid_t, true)
+                    && neg_ev.0 > opt_ll + 1e-12
+                {
+                    tau_hat = mid_t;
+                    u_hat = (1.0 + tau_hat).max(1e-12).ln();
+                    opt_ll = neg_ev.0;
+                    sigma2_e_scaled = neg_ev.1;
+                    xtvx_rel_inv = neg_ev.2;
+                    beta_scaled = neg_ev.3;
+                    neg_converged = (hi_t - lo_t).abs() <= 1e-7;
+                }
+            }
+        }
+    }
+
     let hit_upper_bound = u_hat >= REML_LOG1P_TAU_MAX - 1e-4;
-    let at_boundary = tau_hat == 0.0 || hit_upper_bound;
-    let converged = !hit_upper_bound && (b_u - a_u).abs() <= 1e-8 && opt_ll.is_finite();
+    let at_boundary = (tau_hat == 0.0 && policy != RemlZeroVariancePolicy::Unbounded) || hit_upper_bound;
+    let converged = !hit_upper_bound && (b_u - a_u).abs() <= 1e-8 && neg_converged && opt_ll.is_finite();
 
     let lrt_chi2 = (2.0 * (opt_ll - ll_zero)).max(0.0);
-    let lrt_p = if tau_hat > 0.0 && lrt_chi2 > 0.0 { 0.5 * chi2_sf(lrt_chi2, 1.0)? } else { 1.0 };
+    let lrt_p = if lrt_chi2 > 0.0 {
+        if policy == RemlZeroVariancePolicy::Unbounded {
+            chi2_sf(lrt_chi2, 1.0)?
+        } else if tau_hat > 0.0 {
+            0.5 * chi2_sf(lrt_chi2, 1.0)?
+        } else {
+            1.0
+        }
+    } else {
+        1.0
+    };
 
     let sigma2_e = sigma2_e_scaled * y_scale * y_scale;
     let sigma2_u = tau_hat * sigma2_e;
@@ -925,7 +1030,12 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     let beta: Vec<f64> = beta_scaled.into_iter().map(|b| b * y_scale).collect();
     let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
 
-    let fisher = ri_build_fisher_mats(&clusters, p_eff, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
+    let drop_to_ols = tau_hat == 0.0 && matches!(policy, RemlZeroVariancePolicy::DropZeroRandomTerm | RemlZeroVariancePolicy::LegacyFallback);
+    let fisher = if drop_to_ols {
+        OwnedRemlFisherMats { info_e: DenseMatrix::zeros(0, 0)?, w_info_inv: None, m_mats: Vec::new(), q_term: RemlFisherQ::None }
+    } else {
+        ri_build_fisher_mats(&clusters, p_eff, n, tau_hat, sigma2_e, &xtvx_rel_inv)?
+    };
     let ((fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
         eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, &reduced_terms, n_minus_p, df_method)?;
     core.col_map = col_map;
@@ -1035,6 +1145,62 @@ pub(in crate::anova) fn multi_vc_em_step(st: &MultiVcEvalState, gs: &[DenseMatri
     next
 }
 
+fn v_is_well_conditioned_spd(gs: &[DenseMatrix], theta: &[f64], min_eig_ratio: f64) -> bool {
+    if theta.is_empty() || !theta[0].is_finite() || theta[0] <= 1e-12 {
+        return false;
+    }
+    let n = gs[0].nrows();
+    let Ok(mut v_data) = checked_dense_vec(n, n) else {
+        return false;
+    };
+    for (&th, g) in theta.iter().zip(gs.iter()) {
+        for (dst, &gv) in v_data.iter_mut().zip(g.as_slice().iter()) {
+            *dst += th * gv;
+        }
+    }
+    let shift = min_eig_ratio * theta[0];
+    for i in 0..n {
+        v_data[i * n + i] -= shift;
+    }
+    let Ok(v_raw) = DenseMatrix::from_row_major(n, n, v_data) else {
+        return false;
+    };
+    let Ok(v_sym) = symmetrize_dense(&v_raw) else {
+        return false;
+    };
+    cholesky(&v_sym).is_ok()
+}
+
+fn solve_info_step(info: &DenseMatrix, grad: &[f64]) -> Result<Vec<f64>, StatsError> {
+    if let Ok(chol) = cholesky(info)
+        && let Ok(sol) = chol.solve(grad)
+    {
+        return Ok(sol);
+    }
+    let eig = sym_eigen(info)?;
+    let max_ev = eig.eigenvalues.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max).max(1e-12);
+    let qtg = eig.eigenvectors.t_matvec(grad)?;
+    let scaled: Vec<f64> = qtg.iter().zip(eig.eigenvalues.iter()).map(|(&c, &ev)| c / ev.max(1e-6 * max_ev)).collect();
+    Ok(eig.eigenvectors.matvec(&scaled)?)
+}
+
+fn expected_info_submatrix(p_mat: &DenseMatrix, gs: &[DenseMatrix], free: &[usize]) -> Result<DenseMatrix, StatsError> {
+    let nf = free.len();
+    let mut pg_free = Vec::with_capacity(nf);
+    for &k in free {
+        pg_free.push(p_mat.matmul(&gs[k])?);
+    }
+    let mut ie_data = vec![0.0_f64; nf * nf];
+    for i in 0..nf {
+        for j in i..nf {
+            let val = 0.5 * trace_product(&pg_free[i], &pg_free[j]);
+            ie_data[i * nf + j] = val;
+            ie_data[j * nf + i] = val;
+        }
+    }
+    symmetrize_dense(&DenseMatrix::from_row_major(nf, nf, ie_data)?)
+}
+
 pub(in crate::anova) fn multi_vc_ai_step(
     x: &DenseMatrix,
     y: &[f64],
@@ -1042,10 +1208,11 @@ pub(in crate::anova) fn multi_vc_ai_step(
     dofs: &[f64],
     theta: &mut [f64],
     n_minus_p: f64,
+    allow_negative: bool,
 ) -> Result<(bool, bool), StatsError> {
     let st = multi_vc_eval_state(x, y, gs, theta)?;
     let n_vc = theta.len();
-    let free: Vec<usize> = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st.score[k] > 1e-9).collect();
+    let free: Vec<usize> = if allow_negative { (0..n_vc).collect() } else { (0..n_vc).filter(|&k| theta[k] > 1e-11 || st.score[k] > 1e-9).collect() };
     if free.is_empty() {
         return Ok((true, true));
     }
@@ -1063,16 +1230,20 @@ pub(in crate::anova) fn multi_vc_ai_step(
         }
     }
     let ai_f = symmetrize_dense(&DenseMatrix::from_row_major(nf, nf, ai_f_data)?)?;
-    let mut step_f = if let Ok(chol) = cholesky(&ai_f)
-        && let Ok(sol) = chol.solve(&g_f)
-    {
-        sol
+
+    // Check whether Average Information is well-conditioned SPD; when a random effect has zero
+    // empirical BLUP (G_k P y = 0), AI loses rank whereas Expected Fisher Information stays SPD.
+    let ai_well_conditioned = !allow_negative
+        && sym_eigen(&ai_f).is_ok_and(|eig| {
+            let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+            let min_ev = eig.eigenvalues.iter().copied().fold(f64::INFINITY, f64::min);
+            max_ev > 1e-12 && min_ev > 1e-6 * max_ev
+        });
+    let mut step_f = if ai_well_conditioned {
+        solve_info_step(&ai_f, &g_f)?
     } else {
-        let eig = sym_eigen(&ai_f)?;
-        let max_ev = eig.eigenvalues.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max).max(1e-12);
-        let qtg = eig.eigenvectors.t_matvec(&g_f)?;
-        let scaled: Vec<f64> = qtg.iter().zip(eig.eigenvalues.iter()).map(|(&c, &ev)| c / ev.max(1e-8 * max_ev)).collect();
-        eig.eigenvectors.matvec(&scaled)?
+        let ie_f = expected_info_submatrix(&st.p_mat, gs, &free)?;
+        solve_info_step(&ie_f, &g_f)?
     };
     let directional: f64 = step_f.iter().zip(g_f.iter()).map(|(&d, &g)| d * g).sum();
     if directional <= 0.0 || !directional.is_finite() {
@@ -1084,10 +1255,23 @@ pub(in crate::anova) fn multi_vc_ai_step(
         step[k] = df;
     }
 
+    let max_halvings = if allow_negative { 45 } else { 25 };
     let mut alpha = 1.0_f64;
-    for _ in 0..25 {
-        let mut cand: Vec<f64> = theta.iter().zip(step.iter()).map(|(&t, &d)| (t + alpha * d).max(0.0)).collect();
+    for _ in 0..max_halvings {
+        let mut cand: Vec<f64> = theta
+            .iter()
+            .zip(step.iter())
+            .enumerate()
+            .map(|(idx, (&t, &d))| {
+                let v = t + alpha * d;
+                if allow_negative && idx > 0 { v } else { v.max(0.0) }
+            })
+            .collect();
         cand[0] = cand[0].max(1e-12);
+        if allow_negative && !v_is_well_conditioned_spd(gs, &cand, 1e-4) {
+            alpha *= 0.5;
+            continue;
+        }
         if let Ok(st_c) = multi_vc_eval_state(x, y, gs, &cand)
             && st_c.ll >= st.ll - 1e-13
         {
@@ -1097,7 +1281,8 @@ pub(in crate::anova) fn multi_vc_ai_step(
             if c_scale.is_finite() && c_scale > 1e-12 {
                 let mut cand_r: Vec<f64> = cand.iter().map(|&v| v * c_scale).collect();
                 cand_r[0] = cand_r[0].max(1e-12);
-                if let Ok(st_r) = multi_vc_eval_state(x, y, gs, &cand_r)
+                if (!allow_negative || v_is_well_conditioned_spd(gs, &cand_r, 1e-4))
+                    && let Ok(st_r) = multi_vc_eval_state(x, y, gs, &cand_r)
                     && st_r.ll > chosen_ll
                 {
                     chosen = cand_r;
@@ -1110,6 +1295,10 @@ pub(in crate::anova) fn multi_vc_ai_step(
             return Ok((max_delta < 1e-11 && !improved, true));
         }
         alpha *= 0.5;
+    }
+
+    if allow_negative {
+        return Ok((true, true));
     }
 
     // Backtracking failed: take one guaranteed-monotone EM step.
@@ -1129,7 +1318,8 @@ pub fn fit_multi_vc_reml(
     random_effects: &[(&str, DenseMatrix, usize)],
     terms: &[(&str, usize, usize)],
 ) -> Result<MultiVcRemlResult, StatsError> {
-    fit_multi_vc_reml_with_method_and_core(x, y, random_effects, terms, MixedModelDfMethod::KenwardRoger).map(|(res, _)| res)
+    fit_multi_vc_reml_with_policy_and_core(x, y, random_effects, terms, MixedModelDfMethod::KenwardRoger, RemlZeroVariancePolicy::BoundAtZero)
+        .map(|(res, _)| res)
 }
 
 /// Variant of [`fit_multi_vc_reml`] selecting Kenward–Roger vs Fai–Cornelius Satterthwaite fixed-effect inference.
@@ -1140,15 +1330,29 @@ pub fn fit_multi_vc_reml_with_df_method(
     terms: &[(&str, usize, usize)],
     df_method: MixedModelDfMethod,
 ) -> Result<MultiVcRemlResult, StatsError> {
-    fit_multi_vc_reml_with_method_and_core(x, y, random_effects, terms, df_method).map(|(res, _)| res)
+    fit_multi_vc_reml_with_policy_and_core(x, y, random_effects, terms, df_method, RemlZeroVariancePolicy::BoundAtZero).map(|(res, _)| res)
 }
 
-pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
+/// Variant of [`fit_multi_vc_reml`] selecting both denominator *df* method and zero/negative
+/// variance-component boundary policy.
+pub fn fit_multi_vc_reml_with_policy(
     x: &DenseMatrix,
     y: &[f64],
     random_effects: &[(&str, DenseMatrix, usize)],
     terms: &[(&str, usize, usize)],
     df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
+) -> Result<MultiVcRemlResult, StatsError> {
+    fit_multi_vc_reml_with_policy_and_core(x, y, random_effects, terms, df_method, policy).map(|(res, _)| res)
+}
+
+pub(in crate::anova) fn fit_multi_vc_reml_with_policy_and_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    random_effects: &[(&str, DenseMatrix, usize)],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+    policy: RemlZeroVariancePolicy,
 ) -> Result<(MultiVcRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
@@ -1192,37 +1396,79 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
         names.push((*name).to_owned());
     }
 
+    let allow_negative = policy == RemlZeroVariancePolicy::Unbounded;
     let var0 = solve_linear_least_squares(&x_red, &y_scaled).map_or(1.0, |(sol, _)| (sol.rss / n_minus_p).max(1e-6));
-    let mut theta = vec![(var0 / (n_vc as f64)).max(1e-8); n_vc];
-    for _ in 0..25 {
-        if let Ok(st) = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta) {
-            theta = multi_vc_em_step(&st, &gs, &dofs, &theta, true);
-        } else {
-            break;
+    let mut theta = if allow_negative {
+        let mut t = vec![0.0_f64; n_vc];
+        t[0] = var0.max(1e-8);
+        t
+    } else {
+        vec![(var0 / (n_vc as f64)).max(1e-8); n_vc]
+    };
+    if !allow_negative {
+        for _ in 0..25 {
+            if let Ok(st) = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta) {
+                theta = multi_vc_em_step(&st, &gs, &dofs, &theta, true);
+            } else {
+                break;
+            }
         }
     }
     let mut loop_converged = false;
     for _ in 0..80 {
-        let (step_conv, used_ai) = multi_vc_ai_step(&x_red, &y_scaled, &gs, &dofs, &mut theta, n_minus_p)?;
+        let (step_conv, used_ai) = multi_vc_ai_step(&x_red, &y_scaled, &gs, &dofs, &mut theta, n_minus_p, allow_negative)?;
         if step_conv {
             let st_chk = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta)?;
-            let max_g = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st_chk.score[k] > 1e-9).map(|k| st_chk.score[k].abs()).fold(0.0_f64, f64::max);
+            let max_g = (0..n_vc)
+                .filter(|&k| allow_negative || theta[k] > 1e-11 || st_chk.score[k] > 1e-9)
+                .map(|k| st_chk.score[k].abs())
+                .fold(0.0_f64, f64::max);
             if max_g.is_finite() && max_g < 1e-5 {
                 loop_converged = true;
                 break;
             }
-            if used_ai {
+            if used_ai && !allow_negative {
                 // Stalled AI backtrack away from stationarity: advance with a monotone EM step.
                 let em_next = multi_vc_em_step(&st_chk, &gs, &dofs, &theta, false);
                 theta.copy_from_slice(&em_next);
+            } else if allow_negative {
+                break;
             }
         }
     }
 
+    // DropZeroRandomTerm: if any random VC converged at zero, drop those random terms and refit.
+    if policy == RemlZeroVariancePolicy::DropZeroRandomTerm && !random_effects.is_empty() {
+        let kept_indices: Vec<usize> = (0..random_effects.len()).filter(|&idx| theta[1 + idx] > 1e-11).collect();
+        if kept_indices.len() < random_effects.len() {
+            if kept_indices.is_empty() {
+                return fit_multi_vc_ols_fallback(&x_red, &y_scaled, y_scale, &names, &reduced_terms, col_map, n_minus_p, df_method);
+            }
+            let reduced_re: Vec<(&str, DenseMatrix, usize)> = kept_indices.iter().map(|&i| random_effects[i].clone()).collect();
+            let (mut sub_res, sub_core) =
+                fit_multi_vc_reml_with_policy_and_core(x, y, &reduced_re, terms, df_method, RemlZeroVariancePolicy::DropZeroRandomTerm)?;
+            let mut full_vcs = vec![0.0_f64; random_effects.len()];
+            for (pos, &orig_idx) in kept_indices.iter().enumerate() {
+                if let Some(&(_, v)) = sub_res.variance_components.get(pos) {
+                    full_vcs[orig_idx] = v;
+                }
+            }
+            sub_res.variance_components = names.into_iter().zip(full_vcs).collect();
+            sub_res.at_boundary = true;
+            return Ok((sub_res, sub_core));
+        }
+    }
+
+    // LegacyFallback: if any random VC hit zero boundary, fall back to ordinary OLS fixed-effects ANOVA.
+    if policy == RemlZeroVariancePolicy::LegacyFallback && theta.iter().skip(1).any(|&v| v <= 1e-11) {
+        return fit_multi_vc_ols_fallback(&x_red, &y_scaled, y_scale, &names, &reduced_terms, col_map, n_minus_p, df_method);
+    }
+
     let st = multi_vc_eval_state(&x_red, &y_scaled, &gs, &theta)?;
-    let max_active_grad = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st.score[k] > 1e-9).map(|k| st.score[k].abs()).fold(0.0_f64, f64::max);
+    let max_active_grad =
+        (0..n_vc).filter(|&k| allow_negative || theta[k] > 1e-11 || st.score[k] > 1e-9).map(|k| st.score[k].abs()).fold(0.0_f64, f64::max);
     let converged = st.ll.is_finite() && max_active_grad.is_finite() && (loop_converged || max_active_grad < 1e-9);
-    let at_boundary = theta.iter().any(|&v| v <= 1e-11);
+    let at_boundary = !allow_negative && theta.iter().any(|&v| v <= 1e-11);
 
     let mut ie_data = vec![0.0_f64; n_vc * n_vc];
     let mut m_mats = Vec::with_capacity(n_vc);
@@ -1277,6 +1523,50 @@ pub(in crate::anova) fn fit_multi_vc_reml_with_method_and_core(
         kenward_roger_df,
         converged,
         at_boundary,
+    };
+    Ok((res, core))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fit_multi_vc_ols_fallback(
+    x_red: &DenseMatrix,
+    y_scaled: &[f64],
+    y_scale: f64,
+    names: &[String],
+    reduced_terms: &[RemlTermContrast],
+    col_map: Vec<Option<usize>>,
+    n_minus_p: f64,
+    df_method: MixedModelDfMethod,
+) -> Result<(MultiVcRemlResult, RemlContrastCore), StatsError> {
+    let n = x_red.nrows();
+    let id_n = DenseMatrix::identity(n)?;
+    let (sol, _) = solve_linear_least_squares(x_red, y_scaled)?;
+    let sigma2_e_scaled = (sol.rss / n_minus_p).max(1e-30);
+    let st = multi_vc_eval_state(x_red, y_scaled, &[id_n], &[sigma2_e_scaled])?;
+    let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::zeros(0, 0)?, w_info_inv: None, m_mats: Vec::new(), q_term: RemlFisherQ::None };
+    let sigma2_error = sigma2_e_scaled * y_scale * y_scale;
+    let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
+        eval_reml_wald_terms_for_df(&st.phi, &st.beta, sigma2_e_scaled, &fisher, reduced_terms, n_minus_p, df_method)?;
+    core.y_scale = y_scale;
+    core.col_map = col_map;
+    for term in &mut fixed_terms {
+        if let Some(f_val) = term.f_statistic {
+            let ms = f_val * sigma2_error;
+            term.ms = ms;
+            term.ss = ms * term.df;
+        }
+    }
+    let variance_components = names.iter().map(|nm| (nm.clone(), 0.0_f64)).collect();
+    let reml_log_lik = st.ll - n_minus_p * y_scale.ln();
+    let res = MultiVcRemlResult {
+        variance_components,
+        sigma2_error,
+        reml_log_lik,
+        fixed_terms,
+        satterthwaite_df,
+        kenward_roger_df,
+        converged: true,
+        at_boundary: true,
     };
     Ok((res, core))
 }

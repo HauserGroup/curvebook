@@ -971,7 +971,7 @@ fn sample_distribution_value(rng: &mut DeterministicRng, dist: SimulatedDistribu
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u64, TransformError> {
+pub(crate) fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u64, TransformError> {
     if trials > MAX_BINOMIAL_TRIALS {
         return Err(TransformError::InvalidSpec {
             message: format!("Binomial trials ({trials}) exceeds exact f64 integer bound {MAX_BINOMIAL_TRIALS}"),

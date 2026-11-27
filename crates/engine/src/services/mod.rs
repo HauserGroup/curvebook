@@ -6,12 +6,18 @@
 //! transport crate.
 
 mod batch;
+pub mod equation_library;
 mod export;
 mod fit_diagnostics;
 mod formats;
 mod inspect;
 
 pub use batch::{BatchCommandStep, BatchStepFailure, command_step_writes_filesystem};
+pub use equation_library::{
+    MAX_USER_EQUATION_LIBRARY_BYTES, MAX_USER_EQUATIONS, SaveUserEquationRequest, USER_EQUATION_LIBRARY_FILE_NAME,
+    USER_EQUATION_LIBRARY_SCHEMA_VERSION, UserEquationEntry, UserEquationLibrary, UserEquationStoreFile, ValidatedUserEquation,
+    clone_builtin_equation_template, normalize_user_equation_id, validate_user_equation_dsl, validate_user_equation_id,
+};
 pub use export::{
     DEFAULT_EXPORT_DPI, DEFAULT_PREVIEW_DPI, DocumentExportFormat, EmfSheetKind, ExportArtifactFormat, ExportArtifactRequest, ExportOptionsSpec,
     ExportTarget, ExportedArtifact, MAX_FONT_FILE_BYTES, MAX_RASTER_DPI, MIN_RASTER_DPI, PZFX_EXPORT_DATA_ONLY_NOTICE, PZFX_EXPORT_STRUCTURE_NOTICE,

@@ -381,6 +381,7 @@ fn r2_s08_03_bubble_and_diagnostic_plots_honor_point_overrides_brushing_and_subc
         nonparametric: false,
         assume_equal_sd: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        ..Default::default()
     };
     let an_mr = AnalysisSpec::new(SheetId::new("res-mr"), ds_vol.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
     let res_mr = run_multiple_row_t_tests_analysis(&ds_vol, &an_mr, &mr_spec)?;
@@ -468,8 +469,17 @@ fn r2_s08_05_clustered_heatmap_respects_selected_data_sets() -> TestResult {
     }
     let ds = DataSheet::new(SheetId::new("hm-sel-ds"), "Subset", TableArchetype::MultipleVariables(mv))?;
 
-    let clust_spec =
-        MultivariateSpec::Clustering { k_means_k: None, distance: ClusterDistance::Euclidean, linkage: ClusterLinkage::Ward, k_sweep_max: None };
+    let clust_spec = MultivariateSpec::Clustering {
+        k_means_k: None,
+        distance: ClusterDistance::Euclidean,
+        linkage: ClusterLinkage::Ward,
+        k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
+    };
     let mut an = AnalysisSpec::new(SheetId::new("res-clust-sel"), ds.id.clone(), AnalysisKind::Multivariate(clust_spec.clone()))?;
     an.selected_data_sets = vec![0, 2];
     let clust_res = run_multivariate_analysis(&ds, &an, &clust_spec)?;

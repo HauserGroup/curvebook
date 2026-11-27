@@ -49,7 +49,7 @@ Subcolumn compatibility and layout notes:
 
 ## `=` calculated variables & formula language {#calculated-variables}
 
-Data tables support live formula evaluation (`table.setCalculatedVariable`) through an AST-verified parser, evaluator, and dependency graph.
+Data tables support live formula evaluation (`table.setCalculatedVariable`) through an AST-verified parser, evaluator, and dependency graph. To freeze computed cells into ordinary static editable values while preserving undo/redo history and invalidating downstream analyses cleanly, run `table.unlinkCalculatedVariable`.
 
 ### Formula references & constants {#formula-references}
 
@@ -78,15 +78,15 @@ Data tables support live formula evaluation (`table.setCalculatedVariable`) thro
 
 ### Supported functions & clauses {#formula-functions}
 
-- **Arithmetic, rounding & clamping:** `abs`, `sqrt`, `cbrt`, `sqr`, `pow(x, p)`, `clamp(x, lo, hi)`, `floor`, `ceil`, `round(x[, digits])`, `trunc`, `int` (alias of `floor`), `sign` / `sgn`, `min(...)`, `max(...)`, `sum(...)`, `mean(...)`.
-- **Logarithmic, exponential & trigonometric:** `ln`, `log(x[, base])`, `log10`, `log2`, `exp`, `exp10`, `sin`, `cos`, `tan`, `asin` / `arcsin`, `acos` / `arccos`, `atan` / `arctan`, `atan2` / `arctan2`, `sinh`, `cosh`, `tanh`.
-- **Special & statistical transforms:** `erf`, `erfc`, `lgamma`, `logit(p)` (for $p \in (0, 1)$), `probit(p)` ($5 + \Phi^{-1}(p)$, Finney probit scale), `norm_ppf` / `norm_inv` / `qnorm` / `inv_norm`, `arcsin_sqrt(p)` ($\arcsin\sqrt{p}$ for $p \in [0, 1]$).
+- **Arithmetic, rounding & clamping:** `abs`, `sqrt`, `cbrt`, `sqr`, `pow(x, p)`, `mod(x, y)`, `clamp(x, lo, hi)`, `floor`, `ceil`, `round(x[, digits])`, `trunc`, `int`, `sign` / `sgn`, `rad(deg)`, `deg(rad)`, `perc(x)`, `fact(n)`, `pi([n])`, `min(...)`, `max(...)`, `sum(...)`, `mean(...)`.
+- **Logarithmic, exponential, trigonometric & hyperbolic:** `ln`, `log(x[, base])`, `log10`, `log2`, `exp`, `exp10`, `sin`, `cos`, `tan`, `asin` / `arcsin`, `acos` / `arccos`, `atan` / `arctan`, `atan2` / `arctan2`, `sinh`, `cosh`, `tanh`, `asinh` / `arcsinh`, `acosh` / `arccosh`, `atanh` / `arctanh`.
+- **Special, statistical, text & seeded random functions:** `erf`, `erfc`, `gamma`, `lgamma` / `gammaln` / `lngamma`, `igamma(a, x)`, `igammac(a, x)`, `beta(a, b)`, `ibeta(a, b, x)`, `psi` / `digamma`, `besselj(n, x)`, `bessely(n, x)`, `besseli(n, x)`, `besselk(n, x)`, `hypgeometricm` / `hyp1f1`, `hypgeometricu` / `confluent_u`, `hypgeometricf` / `hyp2f1`, `logit(p)` (for $p \in (0, 1)$), `probit(p)` ($5 + \Phi^{-1}(p)$, Finney probit scale), `norm_ppf` / `norm_inv` / `qnorm` / `inv_norm`, `arcsin_sqrt(p)` ($\arcsin\sqrt{p}$ for $p \in [0, 1]$), `concatenate(...)` / `concat(...)` (bounded text concatenation), `gauss(...)` and `rnd(...)` (deterministic seeded PRNG variates), and `nan` / `null`.
 - **Logical & missing-value handling:** `if(cond, then_expr, else_expr)` (evaluates only the chosen branch), `isnan(x)`, `isvalid(x)` / `is_defined(x)`, `coalesce(a, b, ...)`, variadic `and(...)`, `or(...)`, `not(x)`.
 - **Whole-column aggregates:** `sum`, `mean`, `count` (active numeric cells), `counta` (active non-empty numeric or text cells), `sd` / `stdev`, `sem` / `stderr`, `var`, `median`, `iqr`, `min_col` / `col_min`, `max_col` / `col_max`, `geo_mean`, `percentile(col, p)` / `quantile(col, p)`.
 - **Conditional `*if` aggregates:** `countif`, `countaif`, `sumif`, `meanif`, `minif`, `maxif`, `stdevif` / `sdif`, `stderrif` / `semif`. Argument order is `(values, condition)` (or `countif(condition)` / `countif(values, condition)`), matching rows where `condition` is finite and nonzero. `countaif` counts active non-empty numeric or text cells matching the predicate.
 - **Window functions:** `row_number()`, `rank()`, `dense_rank()`, `center(expr)`, `standardize(expr)` / `zscore(expr)`, `cumsum(expr)`, `cumprod(expr)`, `cummean(expr)`, `lag(expr[, offset[, default]])`, `lead(expr[, offset[, default]])`, `diff(expr[, offset])`, `rolling_mean(expr, window)` / `moving_avg(expr, window)`, `rolling_sum(expr, window)`.
 - **Filter & window clauses:** `FILTER (WHERE <cond>)` / `WHERE <cond>` (inside aggregates and `OVER (...)`), plus `OVER ([PARTITION BY ...] [ORDER BY <expr> [ASC|DESC] [NULLS FIRST|LAST]] [ROWS <frame>])` supporting `UNBOUNDED PRECEDING`, `<k> PRECEDING`, `CURRENT ROW`, `<k> FOLLOWING`, and `UNBOUNDED FOLLOWING`.
-- **Evaluator scope & error propagation:** Values are 64-bit numbers, text, or missing. String-manipulation and date/calendar arithmetic functions are not present in Beta. Empty cells, excluded cells, division by zero, out-of-domain inputs (`ln(-1)`, `sqrt(-1)`, `probit(0)`), non-finite intermediates (`NaN`, `±Inf`), and type mismatches propagate deterministically as missing (stored as an empty cell).
+- **Evaluator scope & error propagation:** Values are 64-bit numbers, text, or missing. Date/calendar arithmetic functions are not present in Beta. Empty cells, excluded cells, division by zero, out-of-domain inputs (`ln(-1)`, `sqrt(-1)`, `probit(0)`), non-finite intermediates (`NaN`, `±Inf`), and type mismatches propagate deterministically as missing (stored as an empty cell).
 
 ---
 
@@ -98,14 +98,15 @@ CurveBook executes derived transforms without modifying upstream raw cells (`tra
 |---|---|
 | **Math transforms** | Element-wise transforms over $X$ or $Y$ (logs, powers, trig/logit/probit, linear scaling, concentration to $-\log\text{M}$). |
 | **Normalize** | Scales each dataset between 0% and 100% (or 0.0 to 1.0) using selectable anchor definitions. |
-| **Remove baseline** | Subtracts or ratios designated baseline columns as difference, ratio, percent change, or fractional change. |
+| **Remove baseline** | Subtracts or ratios baselines across row-wise columns, column means, constants, row-range means, linear first/last anchors, OLS-with-X trends, or paired controls as difference, ratio, percent change, or fractional change. |
+| **Row statistics & fraction of total** | Collapses per-row replicates into totals, means (SD/SEM/%CV/CI/min–max), medians (quartiles/percentiles), or geometric means, or computes row/column/grand proportions and percentages with Wilson or Clopper–Pearson CIs. |
 | **Transpose & select-and-transform** | Swaps rows and columns, subsets or reorders rows/columns, filters by predicate, or transforms columns. |
-| **Curve calculus & AUC** | Smooths, differentiates, integrates, or computes trapezoidal Area Under the Curve on continuous curves. |
+| **Curve calculus & AUC** | Computes first/second derivatives, cumulative integrals, Savitzky–Golay / moving-average / LOWESS smoothing, or trapezoidal Area Under the Curve on continuous XY curves. |
 | **Archetype conversion** | Converts tables among Column, Grouped, XY, Multiple Variables, and Contingency with a non-mutating preview. |
 | **Microplate mapping** | Maps 96-well or 384-well grids, sheets, or analyzable results into typed tables with well provenance. |
 | **Tidy long-to-wide pivot** | Reshapes long-format rows into typed XY, Column, or Grouped replicate subcolumns. |
 | **Randomization & row sampling** | Runs seeded treatment-arm allocation and uniform or stratified $k$-of-$N$ row sampling. |
-| **Distribution & XY simulation** | Generates seeded random columns or synthetic noisy XY curves deterministically. |
+| **Simulation & Monte Carlo** | Generates seeded random columns, noisy XY curves, or $2 \times 2$ contingency tables deterministically, and chains them into bounded Monte Carlo studies (`MonteCarloSimulation`). |
 | **4-stage linked import pipeline** | Reconciles linked sheets or text through filter → reshape/transpose → baseline → exclusions. |
 
 Options, edge cases, and safety guards:

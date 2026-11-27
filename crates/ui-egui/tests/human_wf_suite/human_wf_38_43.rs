@@ -103,6 +103,7 @@ fn wf38_human_kmeans_clustering_silhouette_elbow_and_scatter() -> TestRes {
                 k_sweep_max: Some(km),
                 distance: ClusterDistance::Euclidean,
                 linkage: ClusterLinkage::Complete,
+                ..
             }) => *km,
             other => return Err(format!("WF-38 expected auto-k Complete clustering, got {other:?}")),
         };
@@ -149,6 +150,11 @@ fn wf38_human_kmeans_clustering_silhouette_elbow_and_scatter() -> TestRes {
         linkage: ClusterLinkage::Complete,
         k_means_k: None,
         k_sweep_max: Some(k_sweep_max),
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {
@@ -247,6 +253,14 @@ fn wf39_human_cox_ph_efron_ties_and_covariate_curves() -> TestRes {
         predictor_columns: vec![2, 3],
         tie_method: CoxTieMethod::Breslow,
         reference_levels: Vec::new(),
+        formula: None,
+        covariate_profiles: Vec::new(),
+        nested_comparison: None,
+        emit_cox_snell_residuals: false,
+        ci_method: Default::default(),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {
@@ -339,6 +353,7 @@ fn wf40_human_multiple_linear_regression_type_iii_and_vif() -> TestRes {
         predictor_columns: vec![1, 3],
         compute_vif: true,
         reference_levels: Vec::new(),
+        ..Default::default()
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {
@@ -419,6 +434,7 @@ fn wf41_human_multiple_logistic_classification_and_roc() -> TestRes {
         predictor_columns: vec![1, 2, 3],
         compute_vif: true,
         reference_levels: Vec::new(),
+        ..Default::default()
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {
@@ -512,6 +528,7 @@ fn wf42_human_poisson_count_glm_dispersion_and_vif() -> TestRes {
         predictor_columns: vec![1, 2, 3],
         compute_vif: true,
         reference_levels: Vec::new(),
+        ..Default::default()
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {
@@ -637,6 +654,10 @@ fn wf43_human_xy_serial_dilution_constrained_4pl_and_auc() -> TestRes {
         x_transform: Some(MathTransformPreset::Log10),
         y_transform: None,
         error_propagation: Default::default(),
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
     });
     let fit_kind = AnalysisKind::NonlinearRegression(NonlinearFitSpec {
         parameter_rules: vec![

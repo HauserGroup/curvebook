@@ -303,6 +303,10 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             x_transform: None,
             y_transform: Some(MathTransformPreset::Log10),
             error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
         })),
         "transform.normalize" => Some(AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
             zero_anchor: NormalizeAnchor::ColumnMin,
@@ -313,6 +317,8 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "transform.baseline" => Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
             baseline_columns: vec![0],
             operation: BaselineOperation::Difference,
+            baseline_kind: None,
+            retain_unselected_columns: false,
         })),
         "transform.transpose" => Some(AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true })),
         "transform.prune" => Some(AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows: 2, average_window: false })),
@@ -320,6 +326,11 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             filter_formula: None,
             target_archetype: TableKind::Column,
             derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
         })),
         "transform.simulate" => Some(AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
             seed: 42,
@@ -335,6 +346,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
                 (String::from("HillSlope"), 1.0),
             ],
             noise: curvebook_doc::SimulationNoise::Gaussian { sd: 4.0 },
+            simulation_mode: None,
         })),
         "transform.random_sample" => Some(AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
             seed: 1,
@@ -362,6 +374,12 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             mv_time_column: None,
             mv_status_column: None,
             mv_group_column: None,
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
+            ratio_median_ci: false,
+            mv_status_columns: Vec::new(),
+            mv_group_columns: Vec::new(),
         })),
         "stats.survival_cox" => Some(AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
             time_column: 0,
@@ -369,6 +387,14 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             predictor_columns: vec![2],
             reference_levels: Vec::new(),
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         })),
         "stats.contingency" => Some(AnalysisKind::Contingency(ContingencySpec::default())),
         "stats.glm" | "stats.multiple_regression" => Some(AnalysisKind::GeneralizedLinearModel(GlmSpec {
@@ -377,16 +403,26 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             predictor_columns: vec![1],
             reference_levels: Vec::new(),
             compute_vif: true,
+            ..Default::default()
         })),
-        "stats.pca" | "stats.pcr" | "pca" | "pcr" => {
-            Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7), pcr_outcome_column: None }))
-        }
+        "stats.pca" | "stats.pcr" | "pca" | "pcr" => Some(AnalysisKind::Multivariate(MultivariateSpec::Pca {
+            standardize: true,
+            parallel_analysis_seed: Some(7),
+            pcr_outcome_column: None,
+            retention_rule: Default::default(),
+            emit_extra_matrices: false,
+        })),
         "stats.corr_matrix" | "stats.correlation" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
             distance: curvebook_doc::ClusterDistance::default(),
             linkage: curvebook_doc::ClusterLinkage::default(),
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         })),
         "stats.multiple_row_t_tests" => Some(AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())),
         "stats.bland_altman" => Some(AnalysisKind::BlandAltman(BlandAltmanSpec::default())),

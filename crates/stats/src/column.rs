@@ -1010,11 +1010,33 @@ pub struct NormalityTestOutcome {
     pub passed: bool,
 }
 
-/// Complete four-test normality battery plus optional lognormal comparison.
+/// Preferred parametric distribution indicated by the Normal vs. Lognormal relative likelihood.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PreferredDistribution {
+    /// Gaussian normal distribution has higher maximized log-likelihood (`ll_normal >= ll_lognormal`).
+    Normal,
+    /// Lognormal distribution has higher maximized log-likelihood (`ll_lognormal > ll_normal`).
+    Lognormal,
+}
+
+impl PreferredDistribution {
+    /// Human-readable display label (`"Normal"` or `"Lognormal"`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Lognormal => "Lognormal",
+        }
+    }
+}
+
+/// Complete four-test normality battery plus optional lognormal comparison and relative likelihood.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalityBatteryResult {
     /// Number of finite active values evaluated (`n`).
     pub n: usize,
+    /// Number of finite values that are non-positive (`<= 0.0`) and therefore impossible under a lognormal distribution.
+    pub n_impossible_nonpositive: usize,
     /// D'Agostino–Pearson omnibus $K^2$ test on raw values (`None` when `n < 8`).
     pub dagostino_pearson: Option<NormalityTestOutcome>,
     /// Royston (1992/1995) Shapiro–Wilk *W* test on raw values (`None` when `n < 3` or `n > 5000`).
@@ -1031,8 +1053,22 @@ pub struct NormalityBatteryResult {
     pub lognormal_anderson_darling: Option<NormalityTestOutcome>,
     /// Lilliefors KS *D* test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
     pub lognormal_kolmogorov_smirnov: Option<NormalityTestOutcome>,
+    /// Maximized Gaussian log-likelihood on raw values (`None` when `n < 3`, non-positive data, or zero variance).
+    pub ll_normal: Option<f64>,
+    /// Maximized Lognormal log-likelihood on strictly positive values including the Jacobian `-\sum \ln(x_i)`.
+    pub ll_lognormal: Option<f64>,
     /// `ln(L_normal / L_lognormal)`: positive favors normal, negative favors lognormal (`None` when `n < 3`, non-positive data, or degenerate variance).
     pub normal_vs_lognormal_log_lr: Option<f64>,
+    /// Likelihood ratio `L_normal / L_lognormal = exp(log_lr)`.
+    pub normal_vs_lognormal_lr: Option<f64>,
+    /// Reciprocal likelihood ratio `L_lognormal / L_normal = exp(-log_lr)`.
+    pub lognormal_vs_normal_lr: Option<f64>,
+    /// Akaike/relative-likelihood probability `P(Normal) = 1 / (1 + exp(-log_lr))` in `[0, 1]`.
+    pub prob_normal: Option<f64>,
+    /// Akaike/relative-likelihood probability `P(Lognormal) = 1 / (1 + exp(log_lr))` in `[0, 1]`.
+    pub prob_lognormal: Option<f64>,
+    /// Preferred parametric distribution (`Normal` if `log_lr >= 0.0`, `Lognormal` otherwise).
+    pub preferred_distribution: Option<PreferredDistribution>,
 }
 
 /// D'Agostino–Pearson omnibus `K^2` normality test (`n >= 8`).
@@ -1119,26 +1155,28 @@ pub fn lilliefors_ks(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome,
     Ok(NormalityTestOutcome { test_name: String::from("Kolmogorov-Smirnov (Lilliefors)"), statistic: d_max, p_value, passed: p_value > alpha })
 }
 
-/// Evaluate all four normality tests on `values` and (if strictly positive) on `ln(values)`.
+/// Evaluate all four normality tests on `values` and (if strictly positive) on `ln(values)`,
+/// together with the Normal vs. Lognormal maximized log-likelihood ratio and relative probabilities.
 pub fn normality_battery(values: &[f64], alpha: f64) -> Result<NormalityBatteryResult, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
+    let n_impossible_nonpositive = values.iter().filter(|&&v| v <= 0.0).count();
     let dagostino_pearson = dagostino_pearson_k2(values, alpha).ok();
     let shapiro_wilk_res = shapiro_wilk(values, alpha).ok();
     let anderson_darling_res = anderson_darling(values, alpha).ok();
     let ks_res = lilliefors_ks(values, alpha).ok();
 
-    let (ln_dp, ln_sw, ln_ad, ln_ks, log_lr) = if values.iter().all(|&v| v > 0.0) && n >= 3 {
+    let (ln_dp, ln_sw, ln_ad, ln_ks, ll_pair) = if n_impossible_nonpositive == 0 && n >= 3 {
         let logs: Vec<f64> = values.iter().map(|v| v.ln()).collect();
         let m_x = SummaryMoments::from_slice(values)?;
         let m_l = SummaryMoments::from_slice(&logs)?;
-        let lr = if m_x.css > 0.0 && m_l.css > 0.0 {
+        let ll = if m_x.css > 0.0 && m_l.css > 0.0 {
             let nf = n as f64;
             let var_x = m_x.css / nf;
             let var_l = m_l.css / nf;
             let ll_norm = -0.5 * nf * ((std::f64::consts::TAU * var_x).ln() + 1.0);
             let ll_lognorm = -0.5 * nf * ((std::f64::consts::TAU * var_l).ln() + 1.0) - m_l.sum;
-            Some(ll_norm - ll_lognorm)
+            Some((ll_norm, ll_lognorm))
         } else {
             None
         };
@@ -1147,14 +1185,31 @@ pub fn normality_battery(values: &[f64], alpha: f64) -> Result<NormalityBatteryR
             shapiro_wilk(&logs, alpha).ok(),
             anderson_darling(&logs, alpha).ok(),
             lilliefors_ks(&logs, alpha).ok(),
-            lr,
+            ll,
         )
     } else {
         (None, None, None, None, None)
     };
 
+    let (ll_normal, ll_lognormal, log_lr, lr_norm, lr_lognorm, prob_normal, prob_lognormal, preferred) = match ll_pair {
+        Some((ll_n, ll_l)) => {
+            let diff = ll_n - ll_l;
+            let (p_n, p_l) = if diff >= 0.0 {
+                let e = (-diff).exp();
+                (1.0 / (1.0 + e), e / (1.0 + e))
+            } else {
+                let e = diff.exp();
+                (e / (1.0 + e), 1.0 / (1.0 + e))
+            };
+            let pref = if diff >= 0.0 { PreferredDistribution::Normal } else { PreferredDistribution::Lognormal };
+            (Some(ll_n), Some(ll_l), Some(diff), Some(diff.exp()), Some((-diff).exp()), Some(p_n), Some(p_l), Some(pref))
+        }
+        None => (None, None, None, None, None, None, None, None),
+    };
+
     Ok(NormalityBatteryResult {
         n,
+        n_impossible_nonpositive,
         dagostino_pearson,
         shapiro_wilk: shapiro_wilk_res,
         anderson_darling: anderson_darling_res,
@@ -1163,7 +1218,14 @@ pub fn normality_battery(values: &[f64], alpha: f64) -> Result<NormalityBatteryR
         lognormal_shapiro_wilk: ln_sw,
         lognormal_anderson_darling: ln_ad,
         lognormal_kolmogorov_smirnov: ln_ks,
+        ll_normal,
+        ll_lognormal,
         normal_vs_lognormal_log_lr: log_lr,
+        normal_vs_lognormal_lr: lr_norm,
+        lognormal_vs_normal_lr: lr_lognorm,
+        prob_normal,
+        prob_lognormal,
+        preferred_distribution: preferred,
     })
 }
 
@@ -1821,39 +1883,67 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     for series in &raw_series {
         summaries.push(summarize_column(&series.label, &series.values, series.excluded_count, conf, desc.custom_upper_percentile)?);
     }
-    res.tabs.push(build_descriptive_tab(&summaries, conf));
+    if !desc.normality_only {
+        res.tabs.push(build_descriptive_tab(&summaries, conf));
+    }
 
     for (series, s) in raw_series.iter().zip(&summaries) {
         let ds_idx = Some(series.data_set_index);
         push_scalar(&mut res, "N", ds_idx, s.n as f64);
-        push_scalar(&mut res, "Mean", ds_idx, s.mean);
-        push_scalar(&mut res, "Median", ds_idx, s.median);
-        if let Some(sd) = s.sd {
-            push_scalar(&mut res, "SD", ds_idx, sd);
-        }
-        if let Some(sem) = s.sem {
-            push_scalar(&mut res, "SEM", ds_idx, sem);
+        if !desc.normality_only {
+            push_scalar(&mut res, "Mean", ds_idx, s.mean);
+            push_scalar(&mut res, "Median", ds_idx, s.median);
+            if let Some(sd) = s.sd {
+                push_scalar(&mut res, "SD", ds_idx, sd);
+            }
+            if let Some(sem) = s.sem {
+                push_scalar(&mut res, "SEM", ds_idx, sem);
+            }
         }
     }
 
-    if desc.run_normality_battery {
+    if desc.run_normality_battery || desc.normality_only {
         let mut batteries = Vec::with_capacity(raw_series.len());
         for series in &raw_series {
             batteries.push(normality_battery(&series.values, conf.alpha())?);
+        }
+        for (series, bat) in raw_series.iter().zip(&batteries) {
+            let ds_idx = Some(series.data_set_index);
+            push_scalar(&mut res, "ImpossibleNonPositiveCount", ds_idx, bat.n_impossible_nonpositive as f64);
+            if let Some(log_lr) = bat.normal_vs_lognormal_log_lr {
+                push_scalar(&mut res, "NormalVsLognormalLogLR", ds_idx, log_lr);
+            }
+            if let Some(p_n) = bat.prob_normal {
+                push_scalar(&mut res, "PNormal", ds_idx, p_n);
+            }
+            if let Some(p_l) = bat.prob_lognormal {
+                push_scalar(&mut res, "PLognormal", ds_idx, p_l);
+            }
         }
         res.tabs.push(build_normality_tab(&summaries, &batteries, p_fmt, conf.alpha()));
         append_normality_checklist(&mut res.checklist, &summaries, &batteries, conf.alpha());
     }
 
-    if let Some(mu0) = desc.hypothetical_value {
+    if !desc.normality_only
+        && let Some(mu0) = desc.hypothetical_value
+    {
         append_one_sample_tab(&mut res, &raw_series, mu0, conf, p_fmt)?;
     }
 
-    if let Some(qq_tab) = build_normal_qq_tab(&raw_series)? {
+    if (desc.run_normality_battery || desc.normality_only || desc.emit_qq_tabs)
+        && let Some(qq_tab) = build_normal_qq_tab(&raw_series)?
+    {
         res.tabs.push(qq_tab);
     }
+    if (desc.emit_qq_tabs || desc.normality_only)
+        && let Some(ln_qq_tab) = build_lognormal_qq_tab(&raw_series)?
+    {
+        res.tabs.push(ln_qq_tab);
+    }
 
-    append_row_descriptive_stats(&mut res, sheet, &spec.selected_data_sets, desc.aggregation)?;
+    if !desc.normality_only {
+        append_row_descriptive_stats(&mut res, sheet, &spec.selected_data_sets, desc.aggregation)?;
+    }
 
     if summaries.iter().all(|s| s.n < 3) {
         res.checklist.push(checklist_item(
@@ -2089,6 +2179,51 @@ fn build_normal_qq_tab(raw_series: &[IndexedRawSeries]) -> Result<Option<ResultT
             tab.push_row(
                 format!("{label} #{}", idx + 1),
                 [text_cell(label.clone()), num_cell((idx + 1) as f64), num_cell(exp_n), num_cell(obs_n), opt_num_cell(exp_ln), opt_num_cell(obs_ln)],
+            );
+            row_count += 1;
+        }
+    }
+
+    Ok((row_count > 0).then(|| tab.build()))
+}
+
+fn build_lognormal_qq_tab(raw_series: &[IndexedRawSeries]) -> Result<Option<ResultTab>, StatsError> {
+    if raw_series.is_empty() {
+        return Ok(None);
+    }
+    let mut tab = TabBuilder::new("lognormal-qq", "Lognormal Q-Q Quantiles", ResultTabKind::NormalQq).headers([
+        "Data Set",
+        "Order Index",
+        "Lognormal Expected (ln)",
+        "Lognormal Observed ln(Y)",
+        "Lognormal Expected (original scale)",
+        "Observed Y",
+    ]);
+    let mut row_count = 0_usize;
+
+    for series in raw_series {
+        let label = &series.label;
+        let vals = &series.values;
+        if vals.is_empty() {
+            continue;
+        }
+        let Ok(lognormal_pairs) = qq_expected_quantiles(vals, true) else {
+            tab.push_footnote(format!("{label}: lognormal Q-Q coordinates omitted because one or more values are <= 0."));
+            continue;
+        };
+        for (idx, &(exp_ln, obs_ln)) in lognormal_pairs.iter().enumerate() {
+            let exp_orig = exp_ln.exp();
+            let obs_orig = obs_ln.exp();
+            tab.push_row(
+                format!("{label} #{}", idx + 1),
+                [
+                    text_cell(label.clone()),
+                    num_cell((idx + 1) as f64),
+                    num_cell(exp_ln),
+                    num_cell(obs_ln),
+                    if exp_orig.is_finite() { num_cell(exp_orig) } else { ResultCell::Empty },
+                    if obs_orig.is_finite() { num_cell(obs_orig) } else { ResultCell::Empty },
+                ],
             );
             row_count += 1;
         }
@@ -2428,6 +2563,14 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
     .build()
 }
 
+fn finite_ratio_cell(val: Option<f64>) -> ResultCell {
+    match val {
+        Some(v) if v.is_finite() => num_cell(v),
+        Some(v) if v.is_infinite() && v.is_sign_positive() => text_cell("> 1e308"),
+        _ => ResultCell::Empty,
+    }
+}
+
 fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityBatteryResult], p_fmt: PValueFormat, alpha: f64) -> ResultTab {
     let stat_cells = |f: fn(&NormalityBatteryResult) -> Option<&NormalityTestOutcome>| {
         batteries.iter().map(move |b| f(b).map_or(ResultCell::Empty, |o| num_cell(o.statistic)))
@@ -2437,6 +2580,7 @@ fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityB
     };
     TabBuilder::new("normality", "Normality & Lognormality Tests", ResultTabKind::Diagnostics)
         .headers(summaries.iter().map(|s| s.label.as_str()))
+        .row("Number of impossible (<=0)", batteries.iter().map(|b| num_cell(b.n_impossible_nonpositive as f64)))
         .row("D'Agostino-Pearson K2", stat_cells(|b| b.dagostino_pearson.as_ref()))
         .row("D'Agostino-Pearson P", p_cells(|b| b.dagostino_pearson.as_ref()))
         .row("Shapiro-Wilk W", stat_cells(|b| b.shapiro_wilk.as_ref()))
@@ -2445,7 +2589,20 @@ fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityB
         .row("Anderson-Darling P", p_cells(|b| b.anderson_darling.as_ref()))
         .row("Kolmogorov-Smirnov D", stat_cells(|b| b.kolmogorov_smirnov.as_ref()))
         .row("Kolmogorov-Smirnov P", p_cells(|b| b.kolmogorov_smirnov.as_ref()))
+        .row("Lognormal D'Agostino-Pearson K2", stat_cells(|b| b.lognormal_dagostino_pearson.as_ref()))
+        .row("Lognormal D'Agostino-Pearson P", p_cells(|b| b.lognormal_dagostino_pearson.as_ref()))
+        .row("Lognormal Shapiro-Wilk W", stat_cells(|b| b.lognormal_shapiro_wilk.as_ref()))
+        .row("Lognormal Shapiro-Wilk P", p_cells(|b| b.lognormal_shapiro_wilk.as_ref()))
+        .row("Lognormal Anderson-Darling A2*", stat_cells(|b| b.lognormal_anderson_darling.as_ref()))
+        .row("Lognormal Anderson-Darling P", p_cells(|b| b.lognormal_anderson_darling.as_ref()))
+        .row("Lognormal Kolmogorov-Smirnov D", stat_cells(|b| b.lognormal_kolmogorov_smirnov.as_ref()))
+        .row("Lognormal Kolmogorov-Smirnov P", p_cells(|b| b.lognormal_kolmogorov_smirnov.as_ref()))
         .row("Normal vs. Lognormal log-LR", batteries.iter().map(|b| opt_num_cell(b.normal_vs_lognormal_log_lr)))
+        .row("Likelihood ratio (Normal/Lognormal)", batteries.iter().map(|b| finite_ratio_cell(b.normal_vs_lognormal_lr)))
+        .row("Likelihood ratio (Lognormal/Normal)", batteries.iter().map(|b| finite_ratio_cell(b.lognormal_vs_normal_lr)))
+        .row("P(Normal)", batteries.iter().map(|b| opt_num_cell(b.prob_normal)))
+        .row("P(Lognormal)", batteries.iter().map(|b| opt_num_cell(b.prob_lognormal)))
+        .row("Preferred distribution", batteries.iter().map(|b| b.preferred_distribution.map_or(ResultCell::Empty, |p| text_cell(p.label()))))
         .build()
 }
 

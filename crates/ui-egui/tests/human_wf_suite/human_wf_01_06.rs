@@ -364,6 +364,10 @@ fn wf02_human_normalize_to_result_sheet_chaining_and_log_x() -> TestRes {
         x_transform: Some(MathTransformPreset::Log10),
         y_transform: None,
         error_propagation: curvebook_doc::ErrorPropagationMode::ReplicateEndpoints,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
     }))
     .map_err(|e| e.to_string())?;
     let desc_kind = serde_json::to_value(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).map_err(|e| e.to_string())?;
@@ -704,6 +708,8 @@ fn wf05_human_transform_pca_and_clustering_pipeline() -> TestRes {
         standardize: true,
         parallel_analysis_seed: None,
         pcr_outcome_column: None,
+        retention_rule: Default::default(),
+        emit_extra_matrices: false,
     }))
     .map_err(|e| e.to_string())?;
     let clust_kind = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
@@ -711,6 +717,11 @@ fn wf05_human_transform_pca_and_clustering_pipeline() -> TestRes {
         distance: curvebook_doc::ClusterDistance::Manhattan,
         linkage: curvebook_doc::ClusterLinkage::Complete,
         k_sweep_max: Some(7),
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     }))
     .map_err(|e| e.to_string())?;
 
@@ -831,6 +842,12 @@ fn wf06_human_prune_descriptive_survival_imputation_reactive() -> TestRes {
         mv_time_column: Some(1),
         mv_status_column: Some(2),
         mv_group_column: Some(0),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     }))
     .map_err(|e| e.to_string())?;
 

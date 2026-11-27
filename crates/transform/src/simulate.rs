@@ -6,7 +6,8 @@
 //! 1913; Seber & Wild 1989).
 
 use curvebook_doc::{
-    Cell, DataSheet, MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_rows,
+    Cell, ColumnDesignHint, ColumnSimulationSpec, ColumnTable, ContingencySimDesign, ContingencySimulationSpec, ContingencyTable, DataSheet,
+    MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_data_sets, validate_rows,
     validate_subcolumns,
 };
 use curvebook_math::DeterministicRng;
@@ -14,6 +15,7 @@ use curvebook_math::DeterministicRng;
 use crate::error::TransformError;
 use crate::formula::{Expr, ScalarEnv, eval_scalar_expr, parse_formula};
 use crate::import::MAX_IMPORT_CELLS;
+use crate::randomize::sample_binomial;
 
 /// Pre-compiled simulation equation so built-in parameter lookup/validation and custom formula
 /// parsing occur once per simulation rather than once per row.
@@ -264,6 +266,191 @@ pub fn simulate_xy_sheet(
     }
 
     let sheet = DataSheet::new(sheet_id, title, TableArchetype::Xy(xy))?;
+    Ok(sheet)
+}
+
+/// Deterministically simulate a `2 × 2` [`ContingencyTable`] [`DataSheet`] under one of the four
+/// canonical sampling designs (`FixedGrandTotal`, `FixedRowTotals`, `FixedColumnTotals`, or
+/// `PoissonCounts`) using `curvebook_math::DeterministicRng`.
+#[allow(clippy::cast_precision_loss)]
+pub fn simulate_contingency_2x2(sheet_id: &str, title: &str, seed: u64, spec: &ContingencySimulationSpec) -> Result<DataSheet, TransformError> {
+    for (idx, &v) in spec.cell_params.iter().enumerate() {
+        if !v.is_finite() || v < 0.0 {
+            return Err(TransformError::InvalidSpec { message: format!("contingency cell_params[{idx}] must be finite and >= 0, got {v}") });
+        }
+    }
+
+    let mut rng = DeterministicRng::from_seed(seed);
+    let [p00, p01, p10, p11] = spec.cell_params;
+    let counts: [f64; 4] = match spec.design {
+        ContingencySimDesign::FixedGrandTotal => {
+            if spec.fixed_totals.len() != 1 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("FixedGrandTotal expects exactly 1 entry in fixed_totals ([N]), got {}", spec.fixed_totals.len()),
+                });
+            }
+            let total_n = spec.fixed_totals[0] as u64;
+            let sum_p = p00 + p01 + p10 + p11;
+            if sum_p <= 0.0 || !sum_p.is_finite() {
+                return Err(TransformError::InvalidSpec { message: String::from("FixedGrandTotal cell_params must sum to a positive finite value") });
+            }
+            if (sum_p - 1.0).abs() > 1e-6 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("FixedGrandTotal cell_params probabilities must sum to 1.0 (got {sum_p})"),
+                });
+            }
+            let probs = [p00 / sum_p, p01 / sum_p, p10 / sum_p, p11 / sum_p];
+            let mut rem = total_n;
+            let mut rem_p = 1.0_f64;
+            let mut drawn = [0_u64; 4];
+            for i in 0..3 {
+                let cond_p = if rem_p > 0.0 { (probs[i] / rem_p).clamp(0.0, 1.0) } else { 0.0 };
+                let k = sample_binomial(&mut rng, rem, cond_p)?;
+                drawn[i] = k;
+                rem = rem.saturating_sub(k);
+                rem_p = (rem_p - probs[i]).max(0.0);
+            }
+            drawn[3] = rem;
+            [drawn[0] as f64, drawn[1] as f64, drawn[2] as f64, drawn[3] as f64]
+        }
+        ContingencySimDesign::FixedRowTotals => {
+            if spec.fixed_totals.len() != 2 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("FixedRowTotals expects 2 entries in fixed_totals ([n_row0, n_row1]), got {}", spec.fixed_totals.len()),
+                });
+            }
+            let s0 = p00 + p01;
+            let s1 = p10 + p11;
+            if s0 <= 0.0 || s1 <= 0.0 || !s0.is_finite() || !s1.is_finite() {
+                return Err(TransformError::InvalidSpec { message: String::from("FixedRowTotals requires positive probability mass in each row") });
+            }
+            let n0 = spec.fixed_totals[0] as u64;
+            let n1 = spec.fixed_totals[1] as u64;
+            let c00 = sample_binomial(&mut rng, n0, (p00 / s0).clamp(0.0, 1.0))?;
+            let c01 = n0.saturating_sub(c00);
+            let c10 = sample_binomial(&mut rng, n1, (p10 / s1).clamp(0.0, 1.0))?;
+            let c11 = n1.saturating_sub(c10);
+            [c00 as f64, c01 as f64, c10 as f64, c11 as f64]
+        }
+        ContingencySimDesign::FixedColumnTotals => {
+            if spec.fixed_totals.len() != 2 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("FixedColumnTotals expects 2 entries in fixed_totals ([n_col0, n_col1]), got {}", spec.fixed_totals.len()),
+                });
+            }
+            let s0 = p00 + p10;
+            let s1 = p01 + p11;
+            if s0 <= 0.0 || s1 <= 0.0 || !s0.is_finite() || !s1.is_finite() {
+                return Err(TransformError::InvalidSpec {
+                    message: String::from("FixedColumnTotals requires positive probability mass in each column"),
+                });
+            }
+            let n0 = spec.fixed_totals[0] as u64;
+            let n1 = spec.fixed_totals[1] as u64;
+            let c00 = sample_binomial(&mut rng, n0, (p00 / s0).clamp(0.0, 1.0))?;
+            let c10 = n0.saturating_sub(c00);
+            let c01 = sample_binomial(&mut rng, n1, (p01 / s1).clamp(0.0, 1.0))?;
+            let c11 = n1.saturating_sub(c01);
+            [c00 as f64, c01 as f64, c10 as f64, c11 as f64]
+        }
+        ContingencySimDesign::PoissonCounts => {
+            let c00 = sample_noisy_observation(&mut rng, p00, SimulationNoise::Poisson)?;
+            let c01 = sample_noisy_observation(&mut rng, p01, SimulationNoise::Poisson)?;
+            let c10 = sample_noisy_observation(&mut rng, p10, SimulationNoise::Poisson)?;
+            let c11 = sample_noisy_observation(&mut rng, p11, SimulationNoise::Poisson)?;
+            [c00, c01, c10, c11]
+        }
+    };
+
+    let mut tbl = ContingencyTable::new(2, 2)?;
+    tbl.row_titles = vec![String::from("Row 1"), String::from("Row 2")];
+    tbl.data_sets[0].title = String::from("Column 1");
+    tbl.data_sets[1].title = String::from("Column 2");
+    tbl.data_sets[0].cells[0][0] = Cell::number(counts[0]);
+    tbl.data_sets[1].cells[0][0] = Cell::number(counts[1]);
+    tbl.data_sets[0].cells[1][0] = Cell::number(counts[2]);
+    tbl.data_sets[1].cells[1][0] = Cell::number(counts[3]);
+    tbl.validate_counts()?;
+
+    let sheet = DataSheet::new(sheet_id, title, TableArchetype::Contingency(tbl))?;
+    sheet.validate()?;
+    Ok(sheet)
+}
+
+/// Deterministically simulate a multi-group [`ColumnTable`] [`DataSheet`] with optional matched-row
+/// random subject effects and additive outlier contamination.
+///
+/// When `resolved_means` is `Some(slice)`, it overrides `spec.column_means` (used after resolving
+/// dynamic [`ColumnSimulationSpec::hooked_means`] in [`crate::ops::execute_transform`]).
+pub fn simulate_column_sheet(
+    sheet_id: &str,
+    title: &str,
+    seed: u64,
+    row_count: usize,
+    spec: &ColumnSimulationSpec,
+    resolved_means: Option<&[f64]>,
+) -> Result<DataSheet, TransformError> {
+    if row_count == 0 || row_count > MAX_ROWS {
+        validate_rows(row_count)?;
+        if row_count == 0 {
+            return Err(TransformError::InvalidSpec { message: String::from("column simulation row_count must be >= 1") });
+        }
+    }
+    let means = resolved_means.unwrap_or(&spec.column_means);
+    if means.is_empty() {
+        return Err(TransformError::InvalidSpec { message: String::from("ColumnSimulationSpec requires at least 1 column mean") });
+    }
+    validate_data_sets(means.len())?;
+    for (idx, &m) in means.iter().enumerate() {
+        if !m.is_finite() {
+            return Err(TransformError::InvalidSpec { message: format!("column mean[{idx}] must be finite, got {m}") });
+        }
+    }
+    if !spec.within_sd.is_finite() || spec.within_sd < 0.0 {
+        return Err(TransformError::InvalidSpec { message: format!("column simulation within_sd must be finite and >= 0, got {}", spec.within_sd) });
+    }
+    let re_sd = spec.random_effect_sd.unwrap_or(0.0);
+    if !re_sd.is_finite() || re_sd < 0.0 {
+        return Err(TransformError::InvalidSpec { message: format!("column simulation random_effect_sd must be finite and >= 0, got {re_sd}") });
+    }
+    if !spec.outlier_fraction.is_finite() || !(0.0..=1.0).contains(&spec.outlier_fraction) {
+        return Err(TransformError::InvalidSpec {
+            message: format!("column simulation outlier_fraction must be in [0, 1], got {}", spec.outlier_fraction),
+        });
+    }
+    if !spec.outlier_shift_sd.is_finite() {
+        return Err(TransformError::InvalidSpec {
+            message: format!("column simulation outlier_shift_sd must be finite, got {}", spec.outlier_shift_sd),
+        });
+    }
+    check_simulation_cell_budget(row_count, means.len(), 1, 0)?;
+
+    let design_hint = if re_sd > 0.0 { ColumnDesignHint::PairedRepeatedMeasures } else { ColumnDesignHint::UnpairedReplicates };
+    let mut table = ColumnTable::new(design_hint, means.len(), row_count)?;
+    for (c, ds) in table.data_sets.iter_mut().enumerate() {
+        ds.title = format!("Group {}", c + 1);
+    }
+
+    let mut rng = DeterministicRng::from_seed(seed);
+    let outlier_shift = if spec.within_sd > 0.0 { spec.outlier_shift_sd * spec.within_sd } else { spec.outlier_shift_sd };
+
+    for r in 0..row_count {
+        let subject_effect = if re_sd > 0.0 { rng.normal(0.0, re_sd)? } else { 0.0 };
+        for (c, &mu) in means.iter().enumerate() {
+            let residual = if spec.within_sd > 0.0 { rng.normal(0.0, spec.within_sd)? } else { 0.0 };
+            let mut y = mu + subject_effect + residual;
+            if spec.outlier_fraction > 0.0 && rng.next_f64() < spec.outlier_fraction {
+                y += outlier_shift;
+            }
+            if !y.is_finite() {
+                return Err(TransformError::EvalError { message: format!("simulated column observation overflowed at row {r} col {c}") });
+            }
+            table.data_sets[c].cells[r][0] = Cell::number(y);
+        }
+    }
+
+    let sheet = DataSheet::new(sheet_id, title, TableArchetype::Column(table))?;
+    sheet.validate()?;
     Ok(sheet)
 }
 
@@ -527,6 +714,7 @@ mod tests {
             equation_id: String::from("linear"),
             parameters: vec![],
             noise: Sn::None,
+            simulation_mode: Default::default(),
         };
         assert!(matches!(execute_transform(&seed_sheet, &spec, &TransformContext::default()), Err(TransformError::InvalidSpec { .. })));
         assert_eq!(check_simulation_cell_budget(1_000_000, 1, 9, 1).unwrap(), MAX_IMPORT_CELLS);

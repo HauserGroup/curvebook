@@ -81,7 +81,7 @@ fn pick_unassigned_furthest_point(
     best_idx
 }
 
-fn seed_kmeans_pp_centroids(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, seed: u64) -> Vec<Vec<f64>> {
+pub(super) fn seed_kmeans_pp_centroids(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, seed: u64) -> Vec<Vec<f64>> {
     let n = rows.len();
     let mut rng = DeterministicRng::from_seed(seed);
     let mut centroids = Vec::with_capacity(k);
@@ -171,7 +171,7 @@ fn recompute_cluster_centroid(rows: &[Vec<f64>], assignments: &[usize], c_idx: u
     }
 }
 
-fn repair_empty_clusters(rows: &[Vec<f64>], assignments: &mut [usize], centroids: &mut [Vec<f64>], distance: ClusterDistance) -> bool {
+pub(super) fn repair_empty_clusters(rows: &[Vec<f64>], assignments: &mut [usize], centroids: &mut [Vec<f64>], distance: ClusterDistance) -> bool {
     let k = centroids.len();
     let d = rows.first().map_or(0, Vec::len);
     let mut counts = vec![0_usize; k];
@@ -1054,6 +1054,57 @@ pub fn cut_dendrogram(n: usize, merges: &[DendrogramMerge], k: usize) -> Result<
                 assignments[leaf] = cluster_id;
             }
             cluster_id += 1;
+        }
+    }
+    Ok(assignments)
+}
+
+/// Cut an `n`-leaf hierarchical merge schedule at dissimilarity height `cut_height >= 0.0`,
+/// merging every step whose height is `<= cut_height` and returning zero-based flat cluster
+/// labels `0..k_cut` ordered by each cluster's smallest observation index.
+pub fn cut_dendrogram_at_height(n: usize, merges: &[DendrogramMerge], cut_height: f64) -> Result<Vec<usize>, StatsError> {
+    if n < 2 || merges.len() != n - 1 {
+        return Err(StatsError::DimensionMismatch { expected: n.saturating_sub(1), actual: merges.len() });
+    }
+    if !cut_height.is_finite() || cut_height < 0.0 {
+        return Err(StatsError::InvalidParameter { name: "cut_height", value: cut_height });
+    }
+    let mut node_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    let mut active_roots: Vec<bool> = vec![true; n + merges.len()];
+    for (step, merge) in merges.iter().enumerate() {
+        let left_slot = if merge.left < 0 { (-merge.left - 1) as usize } else { n + (merge.left as usize) };
+        let right_slot = if merge.right < 0 { (-merge.right - 1) as usize } else { n + (merge.right as usize) };
+        if left_slot >= node_members.len() || right_slot >= node_members.len() {
+            return Err(StatsError::InvalidParameter { name: "dendrogram_merge_ref", value: step as f64 });
+        }
+        let mut combined = node_members[left_slot].clone();
+        combined.extend_from_slice(&node_members[right_slot]);
+        if merge.distance <= cut_height {
+            active_roots[left_slot] = false;
+            active_roots[right_slot] = false;
+        } else {
+            active_roots[n + step] = false;
+        }
+        node_members.push(combined);
+    }
+
+    let mut clusters: Vec<Vec<usize>> = node_members
+        .into_iter()
+        .enumerate()
+        .filter_map(|(slot, mut members)| {
+            if active_roots.get(slot).copied().unwrap_or(false) {
+                members.sort_unstable();
+                Some(members)
+            } else {
+                None
+            }
+        })
+        .collect();
+    clusters.sort_by_key(|m| m.first().copied().unwrap_or(usize::MAX));
+    let mut assignments = vec![0_usize; n];
+    for (cid, members) in clusters.iter().enumerate() {
+        for &leaf in members {
+            assignments[leaf] = cid;
         }
     }
     Ok(assignments)

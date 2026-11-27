@@ -1076,6 +1076,22 @@ fn retain_strings(items: &[String], indices: &[usize]) -> Vec<String> {
     indices.iter().map(|&r| items.get(r).cloned().unwrap_or_default()).collect()
 }
 
+/// Extended Extract & Rearrange options corresponding to the additive fields of
+/// [`curvebook_doc::TransformAnalysisSpec::SelectAndTransform`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct SelectRearrangeOptions {
+    /// When `true`, drops any row containing a missing or excluded value across selected columns.
+    pub complete_rows_only: bool,
+    /// Optional zero-based subject/block identifier column aligning matched subjects across groups.
+    pub subject_column: Option<usize>,
+    /// Optional zero-based column supplying custom row titles on the rearranged output table.
+    pub row_title_column: Option<usize>,
+    /// Optional zero-based integer count column when aggregating a [`TableKind::Contingency`] table.
+    pub contingency_count_column: Option<usize>,
+    /// When `true`, prefixes rearranged column/row titles with source variable names.
+    pub include_variable_name_prefixes: bool,
+}
+
 /// Filter rows according to [`SelectRule`]s and optionally project into `target_archetype`.
 pub fn execute_select(
     source: &DataSheet,
@@ -1095,9 +1111,28 @@ pub fn execute_select_with_derived(
     target_archetype: TableKind,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    execute_select_and_rearrange(source, rules, derived_columns, target_archetype, &SelectRearrangeOptions::default(), ctx)
+}
+
+/// Filter rows according to [`SelectRule`]s, evaluate derived columns, and extract or rearrange
+/// into `target_archetype` honoring [`SelectRearrangeOptions`] (`Complete Rows Only`, subject
+/// alignment, custom row titles, contingency count aggregation, and variable-name prefixes).
+pub fn execute_select_and_rearrange(
+    source: &DataSheet,
+    rules: &[SelectRule],
+    derived_columns: &[DerivedColumnFormula],
+    target_archetype: TableKind,
+    options: &SelectRearrangeOptions,
+    ctx: &TransformContext<'_>,
+) -> Result<TransformOutput, TransformError> {
     source.archetype.validate()?;
     let row_count = source.archetype.row_count();
     let base_selected_cols = ctx.active_columns(source.archetype.column_count())?;
+
+    let mut effective_rules = rules.to_vec();
+    if options.complete_rows_only && !effective_rules.contains(&SelectRule::ExcludeMissing) {
+        effective_rules.push(SelectRule::ExcludeMissing);
+    }
 
     let mut parsed_derived: Vec<(String, Expr)> = Vec::with_capacity(derived_columns.len());
     for dc in derived_columns {
@@ -1110,7 +1145,7 @@ pub fn execute_select_with_derived(
         parsed_derived.push((title.to_owned(), expr));
     }
 
-    let predicate_needs_derived = predicate_depends_on_derived(rules, &source.archetype, &parsed_derived);
+    let predicate_needs_derived = predicate_depends_on_derived(&effective_rules, &source.archetype, &parsed_derived);
 
     let mut working = source.clone();
     let mut output_cols = base_selected_cols.clone();
@@ -1125,7 +1160,7 @@ pub fn execute_select_with_derived(
             }
         }
         let mut keep_mask = vec![true; row_count];
-        for rule in rules {
+        for rule in &effective_rules {
             apply_select_rule(&working, rule, &base_selected_cols, &mut keep_mask, ctx)?;
         }
         kept_indices = keep_mask.iter().enumerate().filter_map(|(r, &k)| k.then_some(r)).collect();
@@ -1136,7 +1171,7 @@ pub fn execute_select_with_derived(
         working.prune_stale_plate_well_origins();
     } else {
         let mut keep_mask = vec![true; row_count];
-        for rule in rules {
+        for rule in &effective_rules {
             apply_select_rule(source, rule, &base_selected_cols, &mut keep_mask, ctx)?;
         }
         kept_indices = keep_mask.iter().enumerate().filter_map(|(r, &k)| k.then_some(r)).collect();
@@ -1154,57 +1189,197 @@ pub fn execute_select_with_derived(
         }
     }
 
+    let working_col_count = working.archetype.column_count();
+    validate_rearrange_column_indices(options, working_col_count)?;
+
+    let custom_row_titles = options.row_title_column.map(|c| extract_column_labels(&working.archetype, c));
+    let subject_row_titles = options.subject_column.map(|c| extract_column_labels(&working.archetype, c));
     let (id, title) = ctx.derived_ids(source, "select", "Selected");
     let mut warnings = Vec::new();
-    let (projected, projected_notes, projected_origins) = if working.kind() == target_archetype {
-        let (remapped_notes, remapped_origins) = if !ctx.selected_data_sets.is_empty() || !parsed_derived.is_empty() {
-            retain_columns(&mut working.archetype, &output_cols)?;
+
+    if let Some(projected) = try_mv_specialized_rearrange(&working.archetype, &output_cols, target_archetype, options, &mut warnings)? {
+        return finalize_select_output(
+            id,
+            title,
+            projected,
+            Vec::new(),
+            Vec::new(),
+            row_count,
+            kept_indices.len(),
+            target_archetype,
+            parsed_derived.len(),
+            warnings,
+        );
+    }
+
+    let effective_output_cols = exclude_row_title_col(&output_cols, options.row_title_column);
+
+    let (mut projected, projected_notes, projected_origins) = if working.kind() == target_archetype {
+        let needs_col_filter = !ctx.selected_data_sets.is_empty() || !parsed_derived.is_empty() || effective_output_cols.len() != working_col_count;
+        let (remapped_notes, remapped_origins) = if needs_col_filter {
+            retain_columns(&mut working.archetype, &effective_output_cols)?;
             (
-                remap_selected_column_notes(&working.exclusion_notes, &output_cols, false),
-                remap_selected_column_origins(&working.plate_well_origins, &output_cols, false),
+                remap_selected_column_notes(&working.exclusion_notes, &effective_output_cols, false),
+                remap_selected_column_origins(&working.plate_well_origins, &effective_output_cols, false),
             )
         } else {
             (working.exclusion_notes.clone(), working.plate_well_origins.clone())
         };
         (working.archetype, remapped_notes, remapped_origins)
     } else {
-        let y_subs = match &working.archetype {
-            TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
-            TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
-            TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
-            TableArchetype::Nested(t) => {
-                output_cols.iter().filter_map(|&c| t.groups.get(c).map(curvebook_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
-            }
-            _ => 1,
-        };
-        let x_subs = match &working.archetype {
-            TableArchetype::Xy(t) => t.x_mode.subcolumn_count(),
-            _ => 1,
-        };
-        let max_subs = y_subs.max(x_subs);
-        if max_subs > 1 {
-            warnings.push(format!(
-                "source table carries {max_subs} subcolumns per column; projecting to {} retained primary subcolumn 0 only",
-                target_archetype.label()
-            ));
-        }
-        let has_external_axis = matches!(&working.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_));
-        let drops_axis_target = matches!(target_archetype, TableKind::Contingency | TableKind::PartsOfWhole);
-        let include_axis = has_external_axis && !drops_axis_target;
-        if has_external_axis && drops_axis_target {
-            warnings.push(format!("source X / Time column omitted when projecting to {} (counts/proportions target)", target_archetype.label()));
-        }
-        let axis_shift = if include_axis && !matches!(target_archetype, TableKind::Xy | TableKind::Survival) {
-            ProjectedAxisShift::PrependExternalAxis
-        } else if !has_external_axis && matches!(target_archetype, TableKind::Xy | TableKind::Survival) && output_cols.len() >= 2 {
-            ProjectedAxisShift::ConsumeFirstColumnAsAxis
-        } else {
-            ProjectedAxisShift::None
-        };
-        let remapped_notes = remap_projected_column_notes(&working.exclusion_notes, &output_cols, axis_shift, target_archetype, &mut warnings);
-        let remapped_origins = remap_projected_column_origins(&working.plate_well_origins, &output_cols, axis_shift);
-        (project_archetype(&working.archetype, target_archetype, &output_cols, include_axis)?, remapped_notes, remapped_origins)
+        project_selected_archetype(&working, target_archetype, &effective_output_cols, &mut warnings)?
     };
+
+    apply_post_rearrange_labels(&mut projected, &source.title, custom_row_titles, subject_row_titles, options.include_variable_name_prefixes);
+
+    finalize_select_output(
+        id,
+        title,
+        projected,
+        projected_notes,
+        projected_origins,
+        row_count,
+        kept_indices.len(),
+        target_archetype,
+        parsed_derived.len(),
+        warnings,
+    )
+}
+
+fn validate_rearrange_column_indices(options: &SelectRearrangeOptions, working_col_count: usize) -> Result<(), TransformError> {
+    for (label, col_opt) in [
+        ("subject_column", options.subject_column),
+        ("row_title_column", options.row_title_column),
+        ("contingency_count_column", options.contingency_count_column),
+    ] {
+        if let Some(c) = col_opt
+            && c >= working_col_count
+        {
+            return Err(TransformError::InvalidSpec { message: format!("{label} index {c} exceeds column count {working_col_count}") });
+        }
+    }
+    Ok(())
+}
+
+fn try_mv_specialized_rearrange(
+    arch: &TableArchetype,
+    output_cols: &[usize],
+    target_archetype: TableKind,
+    options: &SelectRearrangeOptions,
+    warnings: &mut Vec<String>,
+) -> Result<Option<TableArchetype>, TransformError> {
+    let TableArchetype::MultipleVariables(mv) = arch else {
+        return Ok(None);
+    };
+    if target_archetype == TableKind::Contingency
+        && let Some(count_col) = options.contingency_count_column
+    {
+        return Ok(Some(rearrange_mv_to_contingency(mv, output_cols, count_col, options.row_title_column, options.include_variable_name_prefixes)?));
+    }
+    if let Some(subj_col) = options.subject_column
+        && matches!(target_archetype, TableKind::Column | TableKind::Grouped)
+    {
+        return Ok(Some(rearrange_mv_by_subject(
+            mv,
+            output_cols,
+            subj_col,
+            options.row_title_column,
+            target_archetype,
+            options.include_variable_name_prefixes,
+            warnings,
+        )?));
+    }
+    Ok(None)
+}
+
+fn exclude_row_title_col(output_cols: &[usize], row_title_column: Option<usize>) -> Vec<usize> {
+    if let Some(rt_col) = row_title_column {
+        let filtered: Vec<usize> = output_cols.iter().copied().filter(|&c| c != rt_col).collect();
+        if filtered.is_empty() { output_cols.to_vec() } else { filtered }
+    } else {
+        output_cols.to_vec()
+    }
+}
+
+fn project_selected_archetype(
+    working: &DataSheet,
+    target_archetype: TableKind,
+    effective_output_cols: &[usize],
+    warnings: &mut Vec<String>,
+) -> Result<(TableArchetype, Vec<CellExclusionNote>, Vec<PlateCellOrigin>), TransformError> {
+    let y_subs = match &working.archetype {
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Nested(t) => effective_output_cols
+            .iter()
+            .filter_map(|&c| t.groups.get(c).map(curvebook_doc::NestedGroupColumn::biological_unit_count))
+            .max()
+            .unwrap_or(1),
+        _ => 1,
+    };
+    let x_subs = match &working.archetype {
+        TableArchetype::Xy(t) => t.x_mode.subcolumn_count(),
+        _ => 1,
+    };
+    let max_subs = y_subs.max(x_subs);
+    if max_subs > 1 {
+        warnings.push(format!(
+            "source table carries {max_subs} subcolumns per column; projecting to {} retained primary subcolumn 0 only",
+            target_archetype.label()
+        ));
+    }
+    let has_external_axis = matches!(&working.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_));
+    let drops_axis_target = matches!(target_archetype, TableKind::Contingency | TableKind::PartsOfWhole);
+    let include_axis = has_external_axis && !drops_axis_target;
+    if has_external_axis && drops_axis_target {
+        warnings.push(format!("source X / Time column omitted when projecting to {} (counts/proportions target)", target_archetype.label()));
+    }
+    let axis_shift = if include_axis && !matches!(target_archetype, TableKind::Xy | TableKind::Survival) {
+        ProjectedAxisShift::PrependExternalAxis
+    } else if !has_external_axis && matches!(target_archetype, TableKind::Xy | TableKind::Survival) && effective_output_cols.len() >= 2 {
+        ProjectedAxisShift::ConsumeFirstColumnAsAxis
+    } else {
+        ProjectedAxisShift::None
+    };
+    let remapped_notes = remap_projected_column_notes(&working.exclusion_notes, effective_output_cols, axis_shift, target_archetype, warnings);
+    let remapped_origins = remap_projected_column_origins(&working.plate_well_origins, effective_output_cols, axis_shift);
+    Ok((project_archetype(&working.archetype, target_archetype, effective_output_cols, include_axis)?, remapped_notes, remapped_origins))
+}
+
+fn apply_post_rearrange_labels(
+    projected: &mut TableArchetype,
+    source_title: &str,
+    custom_row_titles: Option<Vec<String>>,
+    subject_row_titles: Option<Vec<String>>,
+    include_variable_name_prefixes: bool,
+) {
+    if let Some(titles) = custom_row_titles {
+        apply_custom_row_titles(projected, titles);
+    } else if let Some(subj_titles) = subject_row_titles {
+        apply_custom_row_titles(projected, subj_titles);
+        if let TableArchetype::Column(col_t) = projected {
+            col_t.design_hint = ColumnDesignHint::PairedRepeatedMeasures;
+        }
+    }
+    if include_variable_name_prefixes {
+        prefix_column_titles(projected, source_title);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_select_output(
+    id: String,
+    title: String,
+    projected: TableArchetype,
+    projected_notes: Vec<CellExclusionNote>,
+    projected_origins: Vec<PlateCellOrigin>,
+    original_rows: usize,
+    selected_rows: usize,
+    target_archetype: TableKind,
+    derived_count: usize,
+    warnings: Vec<String>,
+) -> Result<TransformOutput, TransformError> {
     let mut out = DataSheet::new(id, title, projected)?;
     out.exclusion_notes = projected_notes;
     out.prune_stale_exclusion_notes();
@@ -1212,17 +1387,312 @@ pub fn execute_select_with_derived(
     out.prune_stale_plate_well_origins();
 
     let mut summary_rows = vec![
-        ("Original rows", ResultCell::Number { value: row_count as f64, prefix: None, units: None }),
-        ("Selected rows", ResultCell::Number { value: kept_indices.len() as f64, prefix: None, units: None }),
+        ("Original rows", ResultCell::Number { value: original_rows as f64, prefix: None, units: None }),
+        ("Selected rows", ResultCell::Number { value: selected_rows as f64, prefix: None, units: None }),
         ("Target archetype", ResultCell::Text(String::from(target_archetype.label()))),
     ];
-    if !parsed_derived.is_empty() {
-        summary_rows.push(("Derived columns", ResultCell::Number { value: parsed_derived.len() as f64, prefix: None, units: None }));
+    if derived_count > 0 {
+        summary_rows.push(("Derived columns", ResultCell::Number { value: derived_count as f64, prefix: None, units: None }));
     }
     out.archetype.validate()?;
 
     let summary_tab = build_summary_tab("Select and transform summary", summary_rows, warnings.clone());
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
+}
+
+fn cell_label_text(cell: &Cell) -> Option<String> {
+    if cell.excluded {
+        return None;
+    }
+    match &cell.value {
+        CellValue::Empty => None,
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        CellValue::Number(v) if v.is_finite() => {
+            let norm = if *v == 0.0 { 0.0 } else { *v };
+            Some(format!("{norm}"))
+        }
+        CellValue::Number(_) => None,
+    }
+}
+
+fn extract_column_labels(arch: &TableArchetype, col: usize) -> Vec<String> {
+    let rows = arch.row_count();
+    (0..rows).map(|r| arch.data_cell(CellCoord::new(r, col, 0)).and_then(cell_label_text).unwrap_or_default()).collect()
+}
+
+fn apply_custom_row_titles(arch: &mut TableArchetype, mut titles: Vec<String>) {
+    let rows = arch.row_count();
+    titles.resize_with(rows, String::new);
+    let expanded = titles.iter().any(|s| !s.trim().is_empty());
+    match arch {
+        TableArchetype::Xy(t) => {
+            t.row_titles = titles;
+            t.row_titles_expanded = expanded;
+        }
+        TableArchetype::Column(t) => {
+            t.row_titles = titles;
+            t.row_titles_expanded = expanded;
+        }
+        TableArchetype::Grouped(t) => t.row_titles = titles,
+        TableArchetype::Contingency(t) => t.row_titles = titles,
+        TableArchetype::Survival(t) => t.row_titles = titles,
+        TableArchetype::PartsOfWhole(t) => t.slice_labels = titles,
+        TableArchetype::MultipleVariables(t) => {
+            t.row_titles = titles;
+            t.row_titles_expanded = expanded;
+        }
+        TableArchetype::Nested(t) => t.row_titles = titles,
+    }
+}
+
+fn prefix_column_titles(arch: &mut TableArchetype, prefix: &str) {
+    let p = prefix.trim();
+    if p.is_empty() {
+        return;
+    }
+    let apply = |t: &mut String| {
+        if !t.starts_with(&format!("{p}: ")) {
+            *t = format!("{p}: {t}");
+        }
+    };
+    match arch {
+        TableArchetype::Xy(t) => t.data_sets.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::Column(t) => t.data_sets.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::Grouped(t) => t.data_sets.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::Contingency(t) => t.data_sets.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::Survival(t) => t.cohorts.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.iter_mut().for_each(|d| apply(&mut d.title)),
+        TableArchetype::MultipleVariables(t) => t.variables.iter_mut().for_each(|v| apply(&mut v.title)),
+        TableArchetype::Nested(t) => t.groups.iter_mut().for_each(|g| apply(&mut g.title)),
+    }
+}
+
+fn format_level_label(var_title: &str, level: &str, include_prefix: bool) -> String {
+    if include_prefix && !var_title.trim().is_empty() { format!("{}: {level}", var_title.trim()) } else { level.to_owned() }
+}
+
+fn rearrange_mv_to_contingency(
+    mv: &MultipleVariablesTable,
+    output_cols: &[usize],
+    count_col: usize,
+    row_title_col: Option<usize>,
+    include_prefixes: bool,
+) -> Result<TableArchetype, TransformError> {
+    let factor_cols: Vec<usize> = output_cols.iter().copied().filter(|&c| c != count_col && Some(c) != row_title_col).collect();
+    if factor_cols.len() < 2 {
+        return Err(TransformError::InvalidSpec {
+            message: String::from("Contingency rearrangement with contingency_count_column requires 2 grouping columns plus the count column"),
+        });
+    }
+    let row_var = &mv.variables[factor_cols[0]];
+    let col_var = &mv.variables[factor_cols[1]];
+    let cnt_var = &mv.variables[count_col];
+
+    let mut row_levels: Vec<String> = Vec::new();
+    let mut row_map: HashMap<String, usize> = HashMap::new();
+    let mut col_levels: Vec<String> = Vec::new();
+    let mut col_map: HashMap<String, usize> = HashMap::new();
+    let mut counts: HashMap<(usize, usize), f64> = HashMap::new();
+
+    for r in 0..mv.row_count() {
+        let (Some(rl), Some(cl)) = (cell_label_text(&row_var.cells[r]), cell_label_text(&col_var.cells[r])) else {
+            continue;
+        };
+        let Some(cnt) = cnt_var.cells[r].active_number() else {
+            continue;
+        };
+        if cnt < 0.0 || cnt.fract() != 0.0 {
+            return Err(TransformError::InvalidInput { message: format!("row {r}: contingency count must be a non-negative integer, got {cnt}") });
+        }
+        let r_idx = *row_map.entry(rl.clone()).or_insert_with(|| {
+            let idx = row_levels.len();
+            row_levels.push(rl);
+            idx
+        });
+        let c_idx = *col_map.entry(cl.clone()).or_insert_with(|| {
+            let idx = col_levels.len();
+            col_levels.push(cl);
+            idx
+        });
+        let entry = counts.entry((r_idx, c_idx)).or_insert(0.0);
+        *entry += cnt;
+    }
+
+    if row_levels.is_empty() || col_levels.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("no valid categorical count rows available to build Contingency table") });
+    }
+    let mut tbl = ContingencyTable::new(col_levels.len(), row_levels.len())?;
+    tbl.row_factor_title = row_var.title.clone();
+    tbl.column_factor_title = col_var.title.clone();
+    tbl.row_titles = row_levels.iter().map(|lvl| format_level_label(&row_var.title, lvl, include_prefixes)).collect();
+    for (c_idx, cl) in col_levels.iter().enumerate() {
+        tbl.data_sets[c_idx].title = format_level_label(&col_var.title, cl, include_prefixes);
+        for r_idx in 0..row_levels.len() {
+            let total = counts.get(&(r_idx, c_idx)).copied().unwrap_or(0.0);
+            tbl.data_sets[c_idx].cells[r_idx][0] = Cell::number(total);
+        }
+    }
+    tbl.validate_counts()?;
+    Ok(TableArchetype::Contingency(tbl))
+}
+
+fn rearrange_mv_by_subject(
+    mv: &MultipleVariablesTable,
+    output_cols: &[usize],
+    subject_col: usize,
+    row_title_col: Option<usize>,
+    target: TableKind,
+    include_prefixes: bool,
+    warnings: &mut Vec<String>,
+) -> Result<TableArchetype, TransformError> {
+    let remaining: Vec<usize> = output_cols.iter().copied().filter(|&c| c != subject_col && Some(c) != row_title_col).collect();
+    let subj_var = &mv.variables[subject_col];
+    let title_var = row_title_col.map(|c| &mv.variables[c]);
+
+    let is_numeric_var = |c: usize| -> bool {
+        let var = &mv.variables[c];
+        matches!(var.role, VariableRole::Continuous | VariableRole::Calculated) && var.cells.iter().any(|cell| cell.active_number().is_some())
+    };
+    let val_col =
+        remaining.iter().copied().rev().find(|&c| is_numeric_var(c)).ok_or_else(|| TransformError::InvalidSpec {
+            message: String::from("subject rearrangement requires at least one numeric value variable"),
+        })?;
+    let group_cols: Vec<usize> = remaining.into_iter().filter(|&c| c != val_col).collect();
+
+    if target == TableKind::Column {
+        let Some(&grp_col) = group_cols.first() else {
+            return Err(TransformError::InvalidSpec {
+                message: String::from("Column rearrangement with subject_column requires a grouping variable and a numeric value variable"),
+            });
+        };
+        let grp_var = &mv.variables[grp_col];
+        let val_var = &mv.variables[val_col];
+
+        let mut subjects: Vec<String> = Vec::new();
+        let mut subj_titles: Vec<String> = Vec::new();
+        let mut subj_map: HashMap<String, usize> = HashMap::new();
+        let mut groups: Vec<String> = Vec::new();
+        let mut grp_map: HashMap<String, usize> = HashMap::new();
+        let mut buckets: HashMap<(usize, usize), Vec<f64>> = HashMap::new();
+
+        for r in 0..mv.row_count() {
+            let (Some(sid), Some(gl)) = (cell_label_text(&subj_var.cells[r]), cell_label_text(&grp_var.cells[r])) else {
+                continue;
+            };
+            let Some(val) = val_var.cells[r].active_number() else {
+                continue;
+            };
+            let custom_lbl = title_var.and_then(|tv| cell_label_text(&tv.cells[r])).unwrap_or_else(|| sid.clone());
+            let s_idx = *subj_map.entry(sid).or_insert_with(|| {
+                let idx = subjects.len();
+                subjects.push(custom_lbl.clone());
+                subj_titles.push(custom_lbl);
+                idx
+            });
+            let g_idx = *grp_map.entry(gl.clone()).or_insert_with(|| {
+                let idx = groups.len();
+                groups.push(gl);
+                idx
+            });
+            buckets.entry((s_idx, g_idx)).or_default().push(val);
+        }
+
+        if subjects.is_empty() || groups.is_empty() {
+            return Err(TransformError::InvalidInput { message: String::from("no valid subject-group observations available for rearrangement") });
+        }
+        let mut tbl = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, groups.len(), subjects.len())?;
+        tbl.row_titles = subj_titles;
+        tbl.row_titles_expanded = true;
+        let mut dup_cells = 0_usize;
+        for (g_idx, gl) in groups.iter().enumerate() {
+            tbl.data_sets[g_idx].title = format_level_label(&grp_var.title, gl, include_prefixes);
+            for s_idx in 0..subjects.len() {
+                if let Some(vals) = buckets.get(&(s_idx, g_idx)) {
+                    if vals.len() > 1 {
+                        dup_cells += 1;
+                    }
+                    if let Ok(m) = sum::mean(vals) {
+                        tbl.data_sets[g_idx].cells[s_idx][0] = Cell::number(m);
+                    }
+                }
+            }
+        }
+        if dup_cells > 0 {
+            warnings.push(format!("averaged duplicate observations in {dup_cells} subject x group cell(s) during rearrangement"));
+        }
+        tbl.validate()?;
+        return Ok(TableArchetype::Column(tbl));
+    }
+
+    // Grouped rearrangement with subject_column: 2 grouping factors + subjects as replicate subcolumns.
+    if group_cols.len() < 2 {
+        return Err(TransformError::InvalidSpec {
+            message: String::from("Grouped rearrangement with subject_column requires 2 grouping variables plus a numeric value variable"),
+        });
+    }
+    let row_var = &mv.variables[group_cols[0]];
+    let col_var = &mv.variables[group_cols[1]];
+    let val_var = &mv.variables[val_col];
+
+    let mut row_levels: Vec<String> = Vec::new();
+    let mut row_map: HashMap<String, usize> = HashMap::new();
+    let mut col_levels: Vec<String> = Vec::new();
+    let mut col_map: HashMap<String, usize> = HashMap::new();
+    let mut subj_levels: Vec<String> = Vec::new();
+    let mut subj_map: HashMap<String, usize> = HashMap::new();
+    let mut buckets: HashMap<(usize, usize, usize), Vec<f64>> = HashMap::new();
+
+    for r in 0..mv.row_count() {
+        let (Some(sid), Some(rl), Some(cl)) =
+            (cell_label_text(&subj_var.cells[r]), cell_label_text(&row_var.cells[r]), cell_label_text(&col_var.cells[r]))
+        else {
+            continue;
+        };
+        let Some(val) = val_var.cells[r].active_number() else {
+            continue;
+        };
+        let s_idx = *subj_map.entry(sid.clone()).or_insert_with(|| {
+            let idx = subj_levels.len();
+            subj_levels.push(sid);
+            idx
+        });
+        let r_idx = *row_map.entry(rl.clone()).or_insert_with(|| {
+            let idx = row_levels.len();
+            row_levels.push(rl);
+            idx
+        });
+        let c_idx = *col_map.entry(cl.clone()).or_insert_with(|| {
+            let idx = col_levels.len();
+            col_levels.push(cl);
+            idx
+        });
+        buckets.entry((r_idx, c_idx, s_idx)).or_default().push(val);
+    }
+
+    if row_levels.is_empty() || col_levels.is_empty() || subj_levels.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("no valid grouped subject observations available for rearrangement") });
+    }
+    let mut tbl = GroupedTable::new(SubcolumnMode::RawReplicates(subj_levels.len()), col_levels.len(), row_levels.len())?;
+    tbl.row_factor_title = row_var.title.clone();
+    tbl.column_factor_title = col_var.title.clone();
+    tbl.row_titles = row_levels.iter().map(|lvl| format_level_label(&row_var.title, lvl, include_prefixes)).collect();
+    for (c_idx, cl) in col_levels.iter().enumerate() {
+        tbl.data_sets[c_idx].title = format_level_label(&col_var.title, cl, include_prefixes);
+        for r_idx in 0..row_levels.len() {
+            for s_idx in 0..subj_levels.len() {
+                if let Some(vals) = buckets.get(&(r_idx, c_idx, s_idx))
+                    && let Ok(m) = sum::mean(vals)
+                {
+                    tbl.data_sets[c_idx].cells[r_idx][s_idx] = Cell::number(m);
+                }
+            }
+        }
+    }
+    tbl.validate()?;
+    Ok(TableArchetype::Grouped(tbl))
 }
 
 #[derive(Clone, Copy)]
@@ -1623,6 +2093,15 @@ fn row_col_active_number(arch: &TableArchetype, row: usize, col: usize) -> Optio
 
 fn retain_col_vec<T: Clone>(items: &[T], selected: &[usize]) -> Vec<T> {
     selected.iter().filter_map(|&c| items.get(c).cloned()).collect()
+}
+
+pub(crate) fn retain_sheet_columns_in_place(sheet: &mut DataSheet, selected: &[usize]) -> Result<(), TransformError> {
+    retain_columns(&mut sheet.archetype, selected)?;
+    sheet.exclusion_notes = remap_selected_column_notes(&sheet.exclusion_notes, selected, false);
+    sheet.prune_stale_exclusion_notes();
+    sheet.plate_well_origins = remap_selected_column_origins(&sheet.plate_well_origins, selected, false);
+    sheet.prune_stale_plate_well_origins();
+    Ok(())
 }
 
 fn retain_columns(arch: &mut TableArchetype, selected: &[usize]) -> Result<(), TransformError> {

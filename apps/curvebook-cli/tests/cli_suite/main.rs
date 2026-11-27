@@ -20,6 +20,7 @@ mod r16_5_cli_and_callers;
 mod r17_1_cli_xlsx;
 mod r17_4_stdio_workflows;
 mod r17_5_cli_warnings;
+mod r23_wave3a_cli;
 mod r45_robust_cli;
 mod r73_mcp_surface_and_headless;
 mod slice0_vertical_gate;

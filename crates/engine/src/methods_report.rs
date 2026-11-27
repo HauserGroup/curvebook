@@ -7,17 +7,22 @@
 use std::fmt::Write as _;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, Cell, ChecklistItem, ChecklistStatus, CiBound,
-    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DataSetColumn,
-    DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, IdentifiabilityMode,
-    KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
-    ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
-    PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
-    PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
-    SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec,
-    TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
+    AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation, BlandAltmanSpec, Cell,
+    ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySimDesign,
+    ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSetColumn, DataSheet,
+    DescriptiveSpec, DistributionTailShade, ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, FractionDenominator,
+    FractionOfTotalSpec, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode, KMeansAlgorithm, KappaWeighting,
+    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
+    ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec,
+    PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec,
+    PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
+    PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy, RepeatedMeasuresDesign,
+    ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RmSphericityCorrection, RocCiMethod,
+    RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise, SplineLowessMethod, SplineLowessSpec,
+    SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype,
+    TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
+    WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -728,7 +733,127 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
             let label = if s.original_kind_label.trim().is_empty() { "Imported analysis" } else { s.original_kind_label.as_str() };
             vec![ReportBlock::Paragraph(vec![plain(format!("Preserved external result snapshot ({label}); not computed by CurveBook."))])]
         }
+        AnalysisKind::RowStatistics(s) => describe_row_statistics(s, spec.confidence_level.percent()),
+        AnalysisKind::FractionOfTotal(s) => describe_fraction_of_total(s, spec.confidence_level.percent()),
+        AnalysisKind::CurveCalculus(s) => describe_curve_calculus(s),
+        AnalysisKind::MonteCarloSimulation(s) => describe_monte_carlo(s),
     }
+}
+
+fn describe_row_statistics(s: &RowStatisticsSpec, conf_percent: f64) -> Vec<ReportBlock> {
+    let conf_pct = format_exact_float(conf_percent);
+    let summary_desc = match s.summary {
+        RowSummaryKind::MeanSd => String::from("arithmetic mean, sample standard deviation (SD), and active replicate count N"),
+        RowSummaryKind::MeanSem => String::from("arithmetic mean, standard error of the mean (SEM), and active replicate count N"),
+        RowSummaryKind::MeanCv => String::from("arithmetic mean, percentage coefficient of variation (%CV), and active replicate count N"),
+        RowSummaryKind::MeanCi => format!("arithmetic mean and two-sided Student's t {conf_pct}% confidence interval"),
+        RowSummaryKind::MeanMinMax => String::from("arithmetic mean with minimum and maximum bounds"),
+        RowSummaryKind::Total => String::from("row-wise sum (total) across active replicates"),
+        RowSummaryKind::MedianQuartiles => {
+            String::from("median with first/third quartiles (Q1, Q3) and interquartile range (IQR; Hyndman-Fan type 6)")
+        }
+        RowSummaryKind::MedianMinMax => String::from("median with minimum and maximum bounds"),
+        RowSummaryKind::MedianPercentiles => {
+            let upper = s.upper_percentile.unwrap_or(90.0);
+            let lower = 100.0 - upper;
+            format!("median with symmetric {}th and {}th percentiles (Hyndman-Fan type 6)", format_exact_float(lower), format_exact_float(upper))
+        }
+        RowSummaryKind::GeometricMeanSd => String::from("geometric mean and geometric SD factor over strictly positive replicates"),
+        RowSummaryKind::GeometricMeanCi => {
+            format!("geometric mean and back-transformed {conf_pct}% confidence interval over strictly positive replicates")
+        }
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Row-wise replicate summary statistics computed the {summary_desc} across active replicates in each row, exposing an analyzable summary table for downstream analyses."
+    ))])]
+}
+
+fn describe_fraction_of_total(s: &FractionOfTotalSpec, conf_percent: f64) -> Vec<ReportBlock> {
+    let scale = if s.output_percent { "percentages (0% to 100%)" } else { "unit fractions (0.0 to 1.0)" };
+    let denom = match s.denominator {
+        FractionDenominator::ColumnTotal => "column totals",
+        FractionDenominator::RowTotal => "row totals",
+        FractionDenominator::GrandTotal => "the table grand total",
+        FractionDenominator::AllThree => "column, row, and grand totals in separate output tabs",
+    };
+    let ci_note = match s.ci_method {
+        ProportionCiMethod::None => String::new(),
+        ProportionCiMethod::Wilson => format!(
+            " Binomial proportion {}% confidence intervals were computed for non-negative integer count tables using the Wilson (1927) score interval.",
+            format_exact_float(conf_percent)
+        ),
+        ProportionCiMethod::ClopperPearson => format!(
+            " Binomial proportion {}% confidence intervals were computed for non-negative integer count tables using the exact Clopper-Pearson (1934) beta-quantile interval.",
+            format_exact_float(conf_percent)
+        ),
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Fraction-of-total reduction expressed each active cell as {scale} relative to {denom}, exposing an analyzable table for downstream analyses.{ci_note}"
+    ))])]
+}
+
+fn describe_curve_calculus(s: &CurveCalculusSpec) -> Vec<ReportBlock> {
+    let op_desc = match s.operation {
+        CurveCalculusOp::FirstDerivative => {
+            String::from("first numerical differentiation (dY/dX) using centered/endpoint finite differences along sorted X coordinates")
+        }
+        CurveCalculusOp::SecondDerivative => String::from("second numerical differentiation (d^2Y/dX^2) along sorted X coordinates"),
+        CurveCalculusOp::CumulativeIntegral { baseline } => {
+            format!("cumulative trapezoidal integration above horizontal baseline Y = {} along sorted X coordinates", format_exact_float(baseline))
+        }
+        CurveCalculusOp::SmoothSavitzkyGolay { window, order } => {
+            format!("Savitzky-Golay (1964) local polynomial smoothing (window = {window} points, polynomial order = {order})")
+        }
+        CurveCalculusOp::SmoothMovingAverage { window } => format!("centered unweighted moving-average smoothing (window = {window} points)"),
+        CurveCalculusOp::SmoothLowess { span, robustness_iters } => format!(
+            "Cleveland (1979) LOWESS local linear smoothing (span fraction = {}, {} Tukey bisquare robustness iteration(s))",
+            format_exact_float(span),
+            robustness_iters
+        ),
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "XY curve calculus applied {op_desc} independently to each selected series, exposing an analyzable output table for downstream analyses."
+    ))])]
+}
+
+fn describe_monte_carlo(s: &MonteCarloSpec) -> Vec<ReportBlock> {
+    let mut parts = vec![format!(
+        "A deterministic chained Monte Carlo simulation (Metropolis & Ulam 1949; Robert & Casella 2004) executed {} iteration(s) from master seed {} using SplitMix64/Xoshiro256** per-iteration seed derivation.",
+        s.iterations, s.seed
+    )];
+    if let Some(ref ds_id) = s.downstream_result_sheet_id {
+        parts.push(format!("Each simulated dataset re-evaluated downstream analysis sheet `{}`.", ds_id.as_str()));
+    }
+    if !s.tracked_scalars.is_empty() {
+        let labels: Vec<&str> = s.tracked_scalars.iter().map(|t| t.label.as_str()).collect();
+        parts.push(format!("Tracked scalars recorded per iteration: {}.", labels.join(", ")));
+    }
+    if !s.hit_rules.is_empty() {
+        let rule_descs: Vec<String> = s
+            .hit_rules
+            .iter()
+            .map(|r| {
+                let name = s.tracked_scalars.get(r.scalar_index).map_or("scalar", |t| t.label.as_str());
+                match r.op {
+                    MonteCarloHitOp::LessThan => format!("{name} < {}", format_exact_float(r.threshold)),
+                    MonteCarloHitOp::LessOrEqual => format!("{name} <= {}", format_exact_float(r.threshold)),
+                    MonteCarloHitOp::GreaterThan => format!("{name} > {}", format_exact_float(r.threshold)),
+                    MonteCarloHitOp::GreaterOrEqual => format!("{name} >= {}", format_exact_float(r.threshold)),
+                    MonteCarloHitOp::Between => {
+                        format!("{} <= {name} <= {}", format_exact_float(r.threshold), format_exact_float(r.upper_threshold.unwrap_or(r.threshold)))
+                    }
+                }
+            })
+            .collect();
+        parts
+            .push(format!("Iterations were partitioned into Hits, Not Hits, and All summaries under the conjunction: {}.", rule_descs.join(" AND ")));
+    } else {
+        parts.push(String::from("Summary statistics and per-iteration tables were emitted for All, Hits, and Not Hits partitions."));
+    }
+    if s.exclude_flagged_fits {
+        parts.push(String::from("Iterations with flagged, ambiguous, or non-converged downstream nonlinear fits were excluded from summaries."));
+    }
+    vec![ReportBlock::Paragraph(vec![plain(parts.join(" "))])]
 }
 
 fn describe_two_group(s: &TwoGroupSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
@@ -775,17 +900,26 @@ fn describe_two_group(s: &TwoGroupSpec, source_ds: Option<&DataSheet>) -> Vec<Re
         TwoGroupMethod::PairedSignTest => String::from(
             "An exact two-sample paired sign test evaluated positive versus negative within-pair differences against a binomial null proportion of 0.5 and reported the median difference with an exact order-statistic confidence interval (excluding zero-difference ties from the binomial trial count).",
         ),
+        TwoGroupMethod::OneSampleRatioT { hypothetical } => format!(
+            "A one-sample ratio t-test evaluated natural-logarithm-transformed ratios relative to hypothetical geometric mean {}, reporting the back-transformed geometric mean ratio and confidence interval.",
+            format_exact_float(hypothetical)
+        ),
+        TwoGroupMethod::LognormalWelchT => String::from(
+            "An unpaired Welch lognormal t-test was performed on natural-logarithm-transformed observations with Welch-Satterthwaite degrees of freedom, reporting the back-transformed geometric mean ratio and confidence interval.",
+        ),
     };
 
     let mut runs = vec![plain(format!("Hypothesis testing was {tail_text}. {method_desc}"))];
     match s.method {
-        TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT if s.compute_effect_sizes => {
+        TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT
+            if s.compute_effect_sizes =>
+        {
             runs.push(plain(" Standardized effect size indices (Cohen's d, Hedges' g, Glass's delta, and R^2) were computed."));
         }
         TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT if s.compute_effect_sizes => {
             runs.push(plain(" Standardized paired effect size indices (Cohen's d_z and Hedges' g_z) were computed."));
         }
-        TwoGroupMethod::OneSampleT { .. } => {
+        TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleRatioT { .. } => {
             runs.push(plain(" Standardized effect size index (Hedges' g) was computed."));
         }
         _ => {}
@@ -803,12 +937,24 @@ fn describe_two_group(s: &TwoGroupSpec, source_ds: Option<&DataSheet>) -> Vec<Re
 }
 
 fn describe_multiple_row_tests(s: &MultipleRowTestsSpec, res: &ResultSheet) -> Vec<ReportBlock> {
-    let family = match (s.nonparametric, s.paired, s.assume_equal_sd) {
-        (true, true, _) => "Wilcoxon matched-pairs signed-rank tests",
-        (true, false, _) => "Mann-Whitney U rank-sum tests",
-        (false, true, _) => "paired Student's t-tests",
-        (false, false, true) => "unpaired Student's t-tests assuming equal SD",
-        (false, false, false) => "Welch's unpaired t-tests without assuming equal SD",
+    let family = match (s.nonparametric, s.lognormal_mode, s.paired, s.assume_equal_sd) {
+        (true, _, true, _) => "Wilcoxon matched-pairs signed-rank tests",
+        (true, _, false, _) => "Mann-Whitney U rank-sum tests",
+        (false, LognormalRowTestMode::RatioPaired, _, _) => {
+            "ratio paired t-tests on natural-logarithm-transformed positive pairs (reporting geometric mean ratios)"
+        }
+        (false, LognormalRowTestMode::Lognormal, true, _) => {
+            "lognormal paired t-tests on natural-logarithm-transformed positive pairs (reporting geometric mean ratios)"
+        }
+        (false, LognormalRowTestMode::Lognormal, false, true) => {
+            "unpaired lognormal Student's t-tests assuming equal log-scale SD (reporting geometric mean ratios)"
+        }
+        (false, LognormalRowTestMode::Lognormal, false, false) => {
+            "unpaired lognormal Welch t-tests without assuming equal log-scale SD (reporting geometric mean ratios)"
+        }
+        (false, LognormalRowTestMode::None, true, _) => "paired Student's t-tests",
+        (false, LognormalRowTestMode::None, false, true) => "unpaired Student's t-tests assuming equal SD",
+        (false, LognormalRowTestMode::None, false, false) => "Welch's unpaired t-tests without assuming equal SD",
     };
     let mut runs = vec![plain(format!("Row-wise two-group comparisons were evaluated using {family}. "))];
     let mult_spec = MultiplicitySpec { report_confidence_intervals: false, ..s.multiplicity };
@@ -857,7 +1003,7 @@ enum RmEstimator {
 }
 
 fn resolve_one_way_rm_estimator(s: &OneWayAnovaSpec, res: &ResultSheet) -> RmEstimator {
-    if !matches!(s.method, OneWayMethod::RepeatedMeasures { .. }) {
+    if !matches!(s.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }) {
         return RmEstimator::None;
     }
     if res.tabs.iter().any(|t| t.id == "unstructured-reml-covariance" || t.id == "unstructured-reml-correlation") {
@@ -895,20 +1041,48 @@ fn describe_one_way_anova(s: &OneWayAnovaSpec, res: &ResultSheet, source_ds: Opt
         OneWayMethod::Friedman => {
             vec![plain("Matched subject blocks were compared using the nonparametric Friedman rank test with Kendall's W concordance.")]
         }
+        OneWayMethod::LognormalOrdinary => vec![plain(
+            "Strictly positive group observations were natural-logarithm transformed and compared using ordinary one-way ANOVA, reporting back-transformed geometric mean ratios.",
+        )],
+        OneWayMethod::LognormalWelchBf => vec![plain(
+            "Strictly positive group observations were natural-logarithm transformed and compared using Welch and Brown-Forsythe heteroscedastic one-way ANOVA, reporting back-transformed geometric mean ratios.",
+        )],
+        OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
+            let df_lbl = df_method_label(s.df_method);
+            match resolve_one_way_rm_estimator(s, res) {
+                RmEstimator::UnstructuredReml => vec![plain(format!(
+                    "Strictly positive matched observations were natural-logarithm transformed and analyzed via a mixed-effects REML model with unstructured residual covariance and {df_lbl} degrees of freedom, reporting back-transformed geometric mean ratios."
+                ))],
+                RmEstimator::CompoundSymmetryReml => vec![plain(format!(
+                    "Strictly positive matched observations were natural-logarithm transformed and analyzed via a compound-symmetry mixed-effects REML model with {df_lbl} degrees of freedom, reporting back-transformed geometric mean ratios."
+                ))],
+                RmEstimator::ClassicalBalancedOls | RmEstimator::None => {
+                    let gg = if geisser_greenhouse { "with Geisser-Greenhouse sphericity correction" } else { "assuming sphericity" };
+                    vec![plain(format!(
+                        "Strictly positive matched observations were natural-logarithm transformed and analyzed via repeated-measures one-way ANOVA {gg}, reporting back-transformed geometric mean ratios."
+                    ))]
+                }
+            }
+        }
     };
 
     match s.method {
-        OneWayMethod::OrdinaryAnova if s.compute_effect_sizes => {
+        OneWayMethod::OrdinaryAnova | OneWayMethod::LognormalOrdinary if s.compute_effect_sizes => {
             runs.push(plain(" Variance-explained effect sizes (eta-squared, partial eta-squared, omega-squared, and Cohen's f) were computed."));
         }
-        OneWayMethod::RepeatedMeasures { .. } => {
+        OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. } => {
             let rm_est = resolve_one_way_rm_estimator(s, res);
             let is_reml = matches!(rm_est, RmEstimator::CompoundSymmetryReml | RmEstimator::UnstructuredReml);
             if !is_reml || s.compute_effect_sizes {
                 runs.push(plain(" Variance-explained effect size (partial eta-squared) was computed."));
             }
         }
-        OneWayMethod::OrdinaryAnova | OneWayMethod::BrownForsytheAndWelch | OneWayMethod::KruskalWallis | OneWayMethod::Friedman => {}
+        OneWayMethod::OrdinaryAnova
+        | OneWayMethod::LognormalOrdinary
+        | OneWayMethod::BrownForsytheAndWelch
+        | OneWayMethod::LognormalWelchBf
+        | OneWayMethod::KruskalWallis
+        | OneWayMethod::Friedman => {}
     }
 
     append_one_way_posthoc_runs(&mut runs, s, res, source_ds);
@@ -941,7 +1115,7 @@ fn describe_rm_one_way_header(s: &OneWayAnovaSpec, res: &ResultSheet, geisser_gr
 fn append_one_way_posthoc_runs(runs: &mut Vec<TextRun>, s: &OneWayAnovaSpec, res: &ResultSheet, source_ds: Option<&DataSheet>) {
     let has_ci = result_has_posthoc_ci(res);
     match s.method {
-        OneWayMethod::OrdinaryAnova => {
+        OneWayMethod::OrdinaryAnova | OneWayMethod::LognormalOrdinary => {
             append_control_clause(runs, &s.multiplicity, source_ds);
             runs.push(plain(" "));
             if s.multiplicity.method == MultiplicityMethod::LinearTrend {
@@ -952,7 +1126,7 @@ fn append_one_way_posthoc_runs(runs: &mut Vec<TextRun>, s: &OneWayAnovaSpec, res
                 runs.extend(describe_multiplicity_runs(&s.multiplicity, has_ci));
             }
         }
-        OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
+        OneWayMethod::RepeatedMeasures { geisser_greenhouse } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
             if matches!(
                 s.multiplicity.method,
                 MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3 | MultiplicityMethod::DunnRankSum
@@ -987,7 +1161,7 @@ fn append_one_way_posthoc_runs(runs: &mut Vec<TextRun>, s: &OneWayAnovaSpec, res
                 runs.extend(describe_multiplicity_runs(&s.multiplicity, has_ci));
             }
         }
-        OneWayMethod::BrownForsytheAndWelch => {
+        OneWayMethod::BrownForsytheAndWelch | OneWayMethod::LognormalWelchBf => {
             append_welch_posthoc_runs(runs, &s.multiplicity, res, source_ds, has_ci);
         }
         OneWayMethod::KruskalWallis => {
@@ -1169,6 +1343,63 @@ fn describe_factorial_anova(s: &FactorialAnovaSpec, res: &ResultSheet, source_ds
         runs.push(plain(" Response variable: "));
         runs.push(code(resp_lbl));
         runs.push(plain("."));
+    }
+    match s.sphericity_correction {
+        RmSphericityCorrection::None => {}
+        RmSphericityCorrection::GreenhouseGeisser => {
+            runs.push(plain(" Repeated-measures F-test P values applied the Greenhouse-Geisser (1959) epsilon sphericity correction."));
+        }
+        RmSphericityCorrection::HuynhFeldt => {
+            runs.push(plain(" Repeated-measures F-test P values applied the Huynh-Feldt / Lecoutre epsilon sphericity correction."));
+        }
+    }
+    match s.reml_zero_variance_policy {
+        RemlZeroVariancePolicy::BoundAtZero => {}
+        RemlZeroVariancePolicy::DropZeroRandomTerm => {
+            runs.push(plain(" Zero random-effect variance components in REML were dropped and the reduced model was refitted."));
+        }
+        RemlZeroVariancePolicy::Unbounded => {
+            runs.push(plain(" REML random-effect variance components were estimated without a lower zero bound."));
+        }
+        RemlZeroVariancePolicy::LegacyFallback => {
+            runs.push(plain(" REML zero-variance boundary fits fell back to classical moment-based ANOVA."));
+        }
+    }
+    if let Some(flags) = s.three_way_rm_factors {
+        runs.push(plain(format!(
+            " Explicit three-way repeated-measures topology flags [factor_0={}, factor_1={}, factor_2={}] were applied.",
+            flags[0], flags[1], flags[2]
+        )));
+    }
+    if s.formula.is_some() {
+        runs.push(plain(" An explicit selective-term model formula controlled included main effects and interactions."));
+    }
+    match s.comparison_family_mode {
+        FactorialComparisonFamilyMode::Standard => {}
+        FactorialComparisonFamilyMode::CellsDifferingByOneFactor => {
+            runs.push(plain(" Post-hoc comparisons restricted contrasts to cell means differing in one factor level."));
+        }
+        FactorialComparisonFamilyMode::PerSliceFamilies => {
+            runs.push(plain(" Post-hoc multiplicity correction partitioned comparisons into per-slice simple-effect families."));
+        }
+        FactorialComparisonFamilyMode::TwoFactorFamilies => {
+            runs.push(plain(" Post-hoc multiplicity correction partitioned comparisons into two-factor marginal families."));
+        }
+        FactorialComparisonFamilyMode::SingleGrandFamily => {
+            runs.push(plain(" Post-hoc multiplicity correction pooled all contrasts into a single grand family."));
+        }
+        FactorialComparisonFamilyMode::PreselectedPairs => {
+            runs.push(plain(format!(" Post-hoc comparisons evaluated {} preselected cell pair(s).", s.preselected_pairs.len())));
+        }
+    }
+    if s.swap_direction {
+        runs.push(plain(" Pairwise contrast direction was reversed (B - A)."));
+    }
+    if s.heteroscedasticity_test {
+        runs.push(plain(" Residual heteroscedasticity was assessed via Spearman rank correlation of |residual| against predicted values."));
+    }
+    if s.emit_consolidated_data_tab {
+        runs.push(plain(" A consolidated tidy data tab was emitted."));
     }
     if s.compute_effect_sizes {
         let is_reml = matches!(rm_estimator, RmEstimator::UnstructuredReml | RmEstimator::CompoundSymmetryReml);
@@ -1413,6 +1644,7 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
             mv_time_column,
             mv_status_column,
             mv_group_column,
+            ..
         } => {
             let ci_mode = if *asymmetrical_greenwood_ci {
                 "asymmetrical log-log transformed Greenwood confidence intervals"
@@ -1448,6 +1680,37 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
                     plain("."),
                 ]);
             }
+            if let SurvivalAnalysisSpec::KaplanMeier {
+                event_code,
+                censored_code,
+                treat_other_as,
+                ratio_median_ci,
+                mv_status_columns,
+                mv_group_columns,
+                ..
+            } = s
+            {
+                if event_code.is_some() || censored_code.is_some() || *treat_other_as != SurvivalOtherValuePolicy::Exclude {
+                    let ev = event_code.map_or_else(|| String::from("1"), format_exact_float);
+                    let cen = censored_code.map_or_else(|| String::from("0"), format_exact_float);
+                    let other_lbl = match treat_other_as {
+                        SurvivalOtherValuePolicy::Exclude => "excluded",
+                        SurvivalOtherValuePolicy::Censor => "treated as right-censored",
+                        SurvivalOtherValuePolicy::Event => "treated as events",
+                    };
+                    runs.push(plain(format!(" Custom status coding used event={ev}, censored={cen} (other values {other_lbl}).")));
+                }
+                if *ratio_median_ci {
+                    runs.push(plain(" Ratio of median survival times with confidence interval was computed."));
+                }
+                if !mv_status_columns.is_empty() || !mv_group_columns.is_empty() {
+                    runs.push(plain(format!(
+                        " Multi-endpoint/stratified multivariable extraction used {} status column(s) and {} grouping column(s).",
+                        mv_status_columns.len().max(usize::from(mv_status_column.is_some())),
+                        mv_group_columns.len().max(usize::from(mv_group_column.is_some()))
+                    )));
+                }
+            }
             let has_pairwise = res.tabs.iter().any(|t| t.id == "survival-pairwise");
             if res.is_computed_up_to_date() && !has_pairwise {
                 runs.push(plain(" Fewer than three active cohorts were analyzed, so pairwise log-rank post-hoc comparisons were not computed."));
@@ -1456,7 +1719,21 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
             }
             vec![ReportBlock::Paragraph(runs)]
         }
-        SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, tie_method, .. } => {
+        SurvivalAnalysisSpec::CoxProportionalHazards {
+            time_column,
+            status_column,
+            predictor_columns,
+            tie_method,
+            formula,
+            covariate_profiles,
+            nested_comparison,
+            emit_cox_snell_residuals,
+            ci_method,
+            event_code,
+            censored_code,
+            treat_other_as,
+            ..
+        } => {
             let tie_lbl = match tie_method {
                 CoxTieMethod::Breslow => "Breslow",
                 CoxTieMethod::Efron => "Efron",
@@ -1475,6 +1752,26 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
             runs.push(plain(format!(
                 ") using {tie_lbl} tie handling. Reported outputs include regression coefficients (beta), Wald z-statistics, hazard ratios with confidence intervals, Harrell's concordance index (C-index), likelihood-ratio omnibus test, and Schoenfeld residual proportional-hazards tests."
             )));
+            if *ci_method == RegressionCiMethod::ProfileLikelihood {
+                runs.push(plain(" Hazard-ratio and coefficient confidence intervals used asymmetrical profile partial likelihood."));
+            }
+            if formula.is_some() {
+                runs.push(plain(" An explicit model formula specified interaction/nonlinear covariate terms."));
+            }
+            if nested_comparison.is_some() {
+                runs.push(plain(" Nested model comparison evaluated a partial-likelihood ratio test against a reduced specification."));
+            }
+            if !covariate_profiles.is_empty() {
+                runs.push(plain(format!(" Predicted survival curves were generated for {} covariate profile(s).", covariate_profiles.len())));
+            }
+            if *emit_cox_snell_residuals {
+                runs.push(plain(" Cox-Snell and covariate residual diagnostics were emitted."));
+            }
+            if event_code.is_some() || censored_code.is_some() || *treat_other_as != SurvivalOtherValuePolicy::Exclude {
+                let ev = event_code.map_or_else(|| String::from("1"), format_exact_float);
+                let cen = censored_code.map_or_else(|| String::from("0"), format_exact_float);
+                runs.push(plain(format!(" Custom status coding used event={ev}, censored={cen}.")));
+            }
             vec![ReportBlock::Paragraph(runs)]
         }
     }
@@ -1565,6 +1862,39 @@ fn describe_glm(s: &GlmSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> 
     let mut runs = vec![plain("Multivariable modeling of response "), code(resp_lbl), plain(" on predictors (")];
     push_code_list(&mut runs, s.predictor_columns.iter().map(|&c| column_title_at(source_ds, c)));
     runs.push(plain(format!(") used {family_desc}.{vif_note}")));
+    match s.weights {
+        GlmWeightSpec::None => {}
+        GlmWeightSpec::Scheme(_) => runs.push(plain(" Weighted least squares (WLS) used analytical observation weighting.")),
+        GlmWeightSpec::Column(col) => {
+            runs.push(plain(" Weighted estimation used explicit observation weights from "));
+            runs.push(code(column_title_at(source_ds, col)));
+            runs.push(plain("."));
+        }
+    }
+    match s.dispersion_mode {
+        GlmDispersionMode::Canonical => {}
+        GlmDispersionMode::QuasiPoisson => {
+            runs.push(plain(" Overdispersion was adjusted using quasi-Poisson Pearson chi-square dispersion scaling (phi_hat = X^2 / df)."));
+        }
+        GlmDispersionMode::RobustSandwich => {
+            runs.push(plain(" Standard errors used Huber-White heteroscedasticity-consistent sandwich covariance."));
+        }
+    }
+    if s.ci_method == RegressionCiMethod::ProfileLikelihood {
+        runs.push(plain(" Parameter confidence intervals used Venzon-Moolgavkar profile likelihood."));
+    }
+    if s.formula.is_some() {
+        runs.push(plain(" An explicit model formula specified intercept, interaction, or nonlinear predictor terms."));
+    }
+    if s.nested_comparison.is_some() {
+        runs.push(plain(" Nested model comparison tested a reduced formula via Extra-SS F or likelihood-ratio deviance test and Delta AICc."));
+    }
+    if let Some(cut) = s.classification_cutoff {
+        runs.push(plain(format!(" Logistic classification used probability cutoff {}.", format_exact_float(cut))));
+    }
+    if s.emit_influence_diagnostics {
+        runs.push(plain(" Row-level leverage (h_ii), Cook's D, DFBETAs, and residual diagnostics were emitted."));
+    }
     vec![ReportBlock::Paragraph(runs)]
 }
 
@@ -1582,14 +1912,29 @@ fn resolve_mi_effective_settings(res: &ResultSheet, requested_m: usize, requeste
 
 fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
     match s {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column } => {
+        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, retention_rule, emit_extra_matrices } => {
             let matrix_kind =
                 if *standardize { "standardized correlation matrix (z-scored variables)" } else { "unstandardized sample covariance matrix" };
-            let pa_note = match parallel_analysis_seed {
-                Some(seed) => format!(
-                    " Component retention combined the Kaiser criterion (eigenvalue >= 1) with Horn's parallel analysis at the 95th percentile (RNG seed {seed})."
-                ),
-                None => String::from(" Component retention was evaluated using the Kaiser eigenvalue criterion."),
+            let pa_note = match retention_rule {
+                PcaRetentionRule::KaiserOrParallel => match parallel_analysis_seed {
+                    Some(seed) => format!(
+                        " Component retention combined the Kaiser criterion (eigenvalue >= 1) with Horn's parallel analysis at the 95th percentile (RNG seed {seed})."
+                    ),
+                    None => String::from(" Component retention was evaluated using the Kaiser eigenvalue criterion."),
+                },
+                PcaRetentionRule::EigenvalueCutoff(cut) => {
+                    format!(" Component retention kept all principal components with eigenvalue > {}.", format_exact_float(*cut))
+                }
+                PcaRetentionRule::FixedCount(n) => format!(" Component retention kept the leading {n} principal component(s)."),
+                PcaRetentionRule::CumulativeVariancePercent(pct) => {
+                    format!(" Component retention kept the minimal prefix explaining >= {}% cumulative variance.", format_exact_float(*pct))
+                }
+                PcaRetentionRule::SelectAll => String::from(" All non-trivial principal components were retained."),
+            };
+            let extra_note = if *emit_extra_matrices {
+                " Extended diagnostic matrices (standardized data, covariance/correlation, squared cosines, and variable contributions) were emitted."
+            } else {
+                ""
             };
             let prose = if let Some(outcome_col) = pcr_outcome_column {
                 let outcome_name = column_title_at(source_ds, *outcome_col);
@@ -1599,13 +1944,15 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
                     )),
                     code(&outcome_name),
                     plain(format!(
-                        " (column {outcome_col}) to prevent target leakage.{pa_note} Retained orthogonal component scores were then regressed on "
+                        " (column {outcome_col}) to prevent target leakage.{pa_note}{extra_note} Retained orthogonal component scores were then regressed on "
                     )),
                     code(outcome_name),
                     plain(" by ordinary least squares and back-transformed onto the original predictor scale."),
                 ]
             } else {
-                vec![plain(format!("Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}"))]
+                vec![plain(format!(
+                    "Principal component analysis (PCA) decomposed the {matrix_kind} across complete multivariate rows.{pa_note}{extra_note}"
+                ))]
             };
             vec![ReportBlock::Paragraph(prose)]
         }
@@ -1615,7 +1962,17 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
                 "Pairwise associations were quantified via {corr_kind} using pairwise complete observations, with upper-triangle P values adjusted for false discovery rate via the Benjamini-Hochberg procedure."
             ))])]
         }
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+        MultivariateSpec::Clustering {
+            k_means_k,
+            distance,
+            linkage,
+            k_sweep_max,
+            consensus_optimal_k,
+            kmeans_algorithm,
+            cluster_direction,
+            cut_height,
+            emit_anova_tab,
+        } => {
             let dist_desc = match distance {
                 ClusterDistance::Euclidean => "Euclidean distance",
                 ClusterDistance::Manhattan => "Manhattan (L1) distance",
@@ -1635,12 +1992,32 @@ fn describe_multivariate(s: &MultivariateSpec, res: &ResultSheet, source_ds: Opt
                 || String::from("a candidate-k WCSS elbow and mean-silhouette sweep (k >= 2)"),
                 |k_max| format!("a candidate-k WCSS elbow and mean-silhouette sweep up to k = {k_max}"),
             );
-            let mode = match k_means_k {
-                Some(k) => format!("with k-means++ partitioning into k = {k} clusters alongside {sweep_desc}"),
-                None => format!("with k-means++ partitioning selecting the cluster count maximizing mean silhouette across {sweep_desc}"),
+            let algo_note = match kmeans_algorithm {
+                KMeansAlgorithm::Lloyd => "",
+                KMeansAlgorithm::HartiganWong => " using the Hartigan-Wong (1979) live-transfer algorithm",
+                KMeansAlgorithm::MacQueen => " using the MacQueen (1967) incremental update algorithm",
             };
+            let mode = match k_means_k {
+                Some(k) => format!("with k-means++ partitioning{algo_note} into k = {k} clusters alongside {sweep_desc}"),
+                None => format!("with k-means++ partitioning{algo_note} selecting the cluster count maximizing mean silhouette across {sweep_desc}"),
+            };
+            let mut extra = String::new();
+            if *consensus_optimal_k {
+                extra.push_str(" Optimal cluster count was additionally evaluated by the 17-index consensus suite (including the Tibshirani et al. 2001 Gap statistic).");
+            }
+            match cluster_direction {
+                ClusterDirection::Rows => {}
+                ClusterDirection::Columns => extra.push_str(" Hierarchical clustering operated on variables (columns)."),
+                ClusterDirection::Both => extra.push_str(" Biclustering clustered both rows and columns independently."),
+            }
+            if let Some(h) = cut_height {
+                let _ = write!(extra, " Dendrogram tree cut applied at height {}.", format_exact_float(*h));
+            }
+            if *emit_anova_tab {
+                extra.push_str(" A one-way ANOVA feature-separation summary tab across clusters was emitted.");
+            }
             vec![ReportBlock::Paragraph(vec![plain(format!(
-                "Unsupervised multivariate clustering was performed on complete observations using {dist_desc} and {link_desc} hierarchical agglomerative linkage (with cophenetic correlation), paired {mode}."
+                "Unsupervised multivariate clustering was performed on complete observations using {dist_desc} and {link_desc} hierarchical agglomerative linkage (with cophenetic correlation), paired {mode}.{extra}"
             ))])]
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
@@ -2084,7 +2461,44 @@ fn describe_model_comparison_question_manuscript(method: ModelComparisonMethod, 
     }
 }
 
+fn describe_theoretical_distribution_plot(dist: &TheoreticalDistributionSpec) -> Vec<ReportBlock> {
+    let fam_lbl = match dist.family {
+        TheoreticalDistributionFamily::Normal => "Normal (Gaussian)",
+        TheoreticalDistributionFamily::StudentT => "Student's t",
+        TheoreticalDistributionFamily::FisherF => "Fisher-Snedecor F",
+        TheoreticalDistributionFamily::ChiSquare => "Chi-square",
+        TheoreticalDistributionFamily::Binomial => "Binomial",
+        TheoreticalDistributionFamily::Poisson => "Poisson",
+    };
+    let mode_lbl = if dist.cumulative {
+        "cumulative distribution function (CDF)"
+    } else if matches!(dist.family, TheoreticalDistributionFamily::Binomial | TheoreticalDistributionFamily::Poisson) {
+        "probability mass function (PMF)"
+    } else {
+        "probability density function (PDF)"
+    };
+    let params_str: Vec<String> = dist.parameters.iter().map(|&p| format_exact_float(p)).collect();
+    let shade_note = match dist.tail_shade {
+        DistributionTailShade::None => String::new(),
+        DistributionTailShade::LowerTail { cutoff } => format!(" Shaded lower tail X <= {}.", format_exact_float(cutoff)),
+        DistributionTailShade::UpperTail { cutoff } => format!(" Shaded upper tail X >= {}.", format_exact_float(cutoff)),
+        DistributionTailShade::TwoTailed { lower, upper } => {
+            format!(" Shaded outer tails X <= {} and X >= {}.", format_exact_float(lower), format_exact_float(upper))
+        }
+        DistributionTailShade::Between { lower, upper } => {
+            format!(" Shaded central interval [{}, {}].", format_exact_float(lower), format_exact_float(upper))
+        }
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Theoretical {fam_lbl} {mode_lbl} was evaluated across a deterministic grid (parameters: [{}]), emitting an analyzable coordinate table and summary scalars.{shade_note}",
+        params_str.join(", ")
+    ))])]
+}
+
 fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec<ReportBlock> {
+    if let Some(dist_spec) = &s.plot_distribution {
+        return describe_theoretical_distribution_plot(dist_spec);
+    }
     let mut blocks = Vec::new();
 
     // 1. Model identity and mathematical equation formula
@@ -2360,7 +2774,33 @@ fn append_nonlinear_identifiability_and_flags(s: &NonlinearFitSpec, extras: &mut
         if let Some(v) = rules.max_rout_outliers {
             parts.push(format!("ROUT outliers > {v}"));
         }
-        extras.push(vec![plain(format!("Automated fit-quality flag rules: {}.", parts.join(", ")))]);
+        let excl_note = if rules.exclude_flagged_from_summary { " (flagged fits excluded from Monte Carlo summaries)" } else { "" };
+        extras.push(vec![plain(format!("Automated fit-quality flag rules: {}{excl_note}.", parts.join(", ")))]);
+    }
+    if !s.relational_constraints.is_empty() {
+        let rel_parts: Vec<String> = s
+            .relational_constraints
+            .iter()
+            .map(|r| {
+                let op = match r.op {
+                    RelationalConstraintOp::GreaterThan => ">",
+                    RelationalConstraintOp::GreaterOrEqual => ">=",
+                    RelationalConstraintOp::LessThan => "<",
+                    RelationalConstraintOp::LessOrEqual => "<=",
+                };
+                if r.margin == 0.0 {
+                    format!("{} {op} {}", r.lhs_param, r.rhs_param)
+                } else {
+                    format!("{} {op} {} + {}", r.lhs_param, r.rhs_param, format_exact_float(r.margin))
+                }
+            })
+            .collect();
+        extras.push(vec![plain(format!("Relational parameter ordering constraints enforced: {}.", rel_parts.join(", ")))]);
+    }
+    if s.emit_extra_gof {
+        extras.push(vec![plain(
+            "Extended goodness-of-fit diagnostics (Adjusted R^2, Weighted R^2, RMSE, and Poisson deviance metrics where applicable) were reported.",
+        )]);
     }
     if let Some(param) = s.summary_parameter.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
         extras.push(vec![plain("Parameter summary table emitted for "), code(param), plain(".")]);
@@ -2471,6 +2911,12 @@ fn describe_model_comparison_runs(cmp: &ModelComparisonSpec) -> Vec<TextRun> {
 }
 
 fn describe_descriptive(s: &DescriptiveSpec) -> Vec<ReportBlock> {
+    if s.normality_only {
+        let qq_note = if s.emit_qq_tabs { " Normal and lognormal Q-Q coordinate tables were emitted." } else { "" };
+        return vec![ReportBlock::Paragraph(vec![plain(format!(
+            "Normality and lognormality assessment ran the four-test battery (D'Agostino-Pearson, Shapiro-Wilk, Kolmogorov-Smirnov/Lilliefors, and Anderson-Darling) on both raw and natural-logarithm-transformed strictly positive observations, together with exact Jacobian-corrected AICc relative likelihood comparing Gaussian versus lognormal distributions.{qq_note}"
+        ))])];
+    }
     let agg = match s.aggregation {
         SubcolumnAggregation::RowMeans => "row replicate means",
         SubcolumnAggregation::PerSubcolumn => "individual replicate subcolumns",
@@ -2481,11 +2927,12 @@ fn describe_descriptive(s: &DescriptiveSpec) -> Vec<ReportBlock> {
     } else {
         ""
     };
+    let qq_note = if s.emit_qq_tabs { " Normal and lognormal Q-Q coordinate tables were emitted." } else { "" };
     let hypo = s.hypothetical_value.map_or_else(String::new, |v| {
         format!(" One-sample t and Wilcoxon tests evaluated departures from hypothetical reference {}.", format_exact_float(v))
     });
     vec![ReportBlock::Paragraph(vec![plain(format!(
-        "Descriptive statistics (mean, SD, SEM, median, IQR, range, geometric mean, and confidence intervals) summarized {agg}.{norm}{hypo}"
+        "Descriptive statistics (mean, SD, SEM, median, IQR, range, geometric mean, and confidence intervals) summarized {agg}.{norm}{qq_note}{hypo}"
     ))])]
 }
 
@@ -2507,14 +2954,48 @@ fn describe_outlier_detection(s: &OutlierSpec) -> Vec<ReportBlock> {
 
 fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
     let runs = match s {
-        TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation } => {
+        TransformAnalysisSpec::Math {
+            x_transform,
+            y_transform,
+            error_propagation,
+            pharmacology_preset,
+            interchange_xy,
+            zero_x_substitute,
+            asymmetric_ci_policy,
+        } => {
             let x_str = x_transform.map_or_else(|| String::from("none"), |p| format_math_preset(p, "X"));
             let y_str = y_transform.map_or_else(|| String::from("none"), |p| format_math_preset(p, "Y"));
             let err_str = match error_propagation {
                 ErrorPropagationMode::ReplicateEndpoints => "replicate endpoint propagation",
                 ErrorPropagationMode::FirstOrderDeltaMethod => "first-order Taylor delta method",
             };
-            vec![plain(format!("Mathematical table transformation (X: {x_str}; Y: {y_str}) with {err_str} for summary error columns."))]
+            let mut extra = String::new();
+            if let Some(preset) = pharmacology_preset {
+                let lbl = match preset {
+                    PharmacologyTransformPreset::LineweaverBurk => "Lineweaver-Burk (1/X, 1/Y)",
+                    PharmacologyTransformPreset::EadieHofstee => "Eadie-Hofstee (Y/X, Y)",
+                    PharmacologyTransformPreset::HanesWoolf => "Hanes-Woolf (X, X/Y)",
+                    PharmacologyTransformPreset::Scatchard => "Scatchard (Y, Y/X)",
+                    PharmacologyTransformPreset::Hill { .. } => "Hill (log10 X, log10(Y / (Y_max - Y)))",
+                };
+                let _ = write!(extra, " Pharmacology linearizing preset: {lbl}.");
+            }
+            if *interchange_xy {
+                extra.push_str(" X and Y coordinates were interchanged.");
+            }
+            if let Some(sub) = zero_x_substitute {
+                let _ = write!(extra, " Zero X values were substituted with {} prior to logarithmic transformation.", format_exact_float(*sub));
+            }
+            match asymmetric_ci_policy {
+                AsymmetricCiTransformPolicy::Default => {}
+                AsymmetricCiTransformPolicy::AsymmetricEndpoints => {
+                    extra.push_str(" Nonlinear confidence intervals preserved exact transformed asymmetric endpoints.");
+                }
+                AsymmetricCiTransformPolicy::Omit => {
+                    extra.push_str(" Transformed confidence intervals were omitted under nonlinear scaling.");
+                }
+            }
+            vec![plain(format!("Mathematical table transformation (X: {x_str}; Y: {y_str}) with {err_str} for summary error columns.{extra}"))]
         }
         TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set } => {
             let scale = if *output_percent { "0% to 100%" } else { "0.0 to 1.0" };
@@ -2525,14 +3006,31 @@ fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
                 format_anchor(hundred_anchor)
             ))]
         }
-        TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation } => {
+        TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation, baseline_kind, retain_unselected_columns } => {
             let op_lbl = match operation {
                 BaselineOperation::Difference => "difference",
                 BaselineOperation::Ratio => "ratio",
                 BaselineOperation::PercentChange => "percent change",
                 BaselineOperation::FractionalChange => "fractional change",
+                BaselineOperation::Add => "addition",
+                BaselineOperation::Multiply => "multiplication",
             };
-            vec![plain(format!("Baseline removal ({op_lbl}) relative to baseline column indices {baseline_columns:?}."))]
+            let source_desc = match baseline_kind {
+                None => format!("baseline column indices {baseline_columns:?}"),
+                Some(BaselineKind::ColumnsRowWise(cols)) => format!("row-wise mean of baseline columns {cols:?}"),
+                Some(BaselineKind::ColumnsMean(cols)) => format!("grand mean of baseline columns {cols:?}"),
+                Some(BaselineKind::Constant(v)) => format!("constant scalar baseline {}", format_exact_float(*v)),
+                Some(BaselineKind::RowRangeMean { start_row, end_row }) => format!("per-column mean across rows {start_row}..={end_row}"),
+                Some(BaselineKind::FirstAndLastLinear { first_k, last_k }) => {
+                    format!("linear baseline interpolated across first {first_k} and last {last_k} rows")
+                }
+                Some(BaselineKind::PairedEveryOtherColumn) => String::from("paired every-other-column baselines"),
+                Some(BaselineKind::OlsLinearWithX { first_k, last_k }) => {
+                    format!("OLS linear baseline against X fitted on first {first_k} and last {last_k} rows")
+                }
+            };
+            let retain = if *retain_unselected_columns { " Unselected columns were retained unchanged." } else { "" };
+            vec![plain(format!("Baseline removal ({op_lbl}) relative to {source_desc}.{retain}"))]
         }
         TransformAnalysisSpec::Transpose { swap_row_and_column_titles } => {
             vec![plain(format!("Matrix transposition (swap row/column titles = {swap_row_and_column_titles})."))]
@@ -2540,35 +3038,84 @@ fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
         TransformAnalysisSpec::PruneRows { every_k_rows, average_window } => {
             vec![plain(format!("Periodic row pruning every {every_k_rows} row(s) (average_window = {average_window})."))]
         }
-        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns } => {
+        TransformAnalysisSpec::SelectAndTransform {
+            filter_formula,
+            target_archetype,
+            derived_columns,
+            complete_rows_only,
+            subject_column,
+            row_title_column,
+            contingency_count_column,
+            include_variable_name_prefixes,
+            ..
+        } => {
             let flt = filter_formula.as_deref().unwrap_or("none");
+            let mut extra = Vec::new();
+            if *complete_rows_only {
+                extra.push(String::from("complete-case row filtering"));
+            }
+            if let Some(col) = subject_column {
+                extra.push(format!("subject/block column {col}"));
+            }
+            if let Some(col) = row_title_column {
+                extra.push(format!("row-title column {col}"));
+            }
+            if let Some(col) = contingency_count_column {
+                extra.push(format!("contingency count column {col}"));
+            }
+            if *include_variable_name_prefixes {
+                extra.push(String::from("variable-name column prefixes"));
+            }
+            let extra_clause = if extra.is_empty() { String::new() } else { format!(" with {}", extra.join(", ")) };
             if derived_columns.is_empty() {
-                vec![plain(format!("Subset selection and archetype reshape into {} (filter: {flt}).", target_archetype.label()))]
+                vec![plain(format!("Subset selection and archetype reshape into {}{extra_clause} (filter: {flt}).", target_archetype.label()))]
             } else {
                 let names: Vec<&str> = derived_columns.iter().map(|d| d.title.as_str()).collect();
                 vec![plain(format!(
-                    "Subset selection, derived column transforms ({}), and archetype reshape into {} (filter: {flt}).",
+                    "Subset selection, derived column transforms ({}), and archetype reshape into {}{extra_clause} (filter: {flt}).",
                     names.join(", "),
                     target_archetype.label()
                 ))]
             }
         }
-        TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, noise, .. } => {
-            let noise_str = match noise {
-                SimulationNoise::None => String::from("noise-free"),
-                SimulationNoise::Gaussian { sd } => format!("Gaussian noise (SD = {})", format_exact_float(*sd)),
-                SimulationNoise::RelativePercent { cv_percent } => format!("relative noise (%CV = {})", format_exact_float(*cv_percent)),
-                SimulationNoise::Poisson => String::from("Poisson count noise"),
-            };
-            vec![
-                plain("Monte Carlo curve simulation for "),
-                code(equation_id),
-                plain(format!(
-                    " ({row_count} rows x {replicates} replicates, X in [{}, {}], {noise_str}, RNG seed = {seed}).",
-                    format_exact_float(*x_min),
-                    format_exact_float(*x_max)
-                )),
-            ]
+        TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, noise, simulation_mode, .. } => {
+            match simulation_mode {
+                Some(SimulationMode::Contingency2x2(spec)) => {
+                    let design_lbl = match spec.design {
+                        ContingencySimDesign::FixedGrandTotal => "multinomial fixed grand total",
+                        ContingencySimDesign::FixedRowTotals => "independent binomial fixed row totals",
+                        ContingencySimDesign::FixedColumnTotals => "independent binomial fixed column totals",
+                        ContingencySimDesign::PoissonCounts => "independent Poisson cell counts",
+                    };
+                    vec![plain(format!("Monte Carlo 2x2 contingency table simulation using {design_lbl} sampling (RNG seed = {seed})."))]
+                }
+                Some(SimulationMode::Column(spec)) => {
+                    let re_note =
+                        spec.random_effect_sd.map_or_else(String::new, |sd| format!(", subject random-effect SD = {}", format_exact_float(sd)));
+                    vec![plain(format!(
+                        "Monte Carlo multi-group column simulation ({} group(s) x {row_count} rows, within-group SD = {}{re_note}, RNG seed = {seed}).",
+                        spec.column_means.len(),
+                        format_exact_float(spec.within_sd)
+                    ))]
+                }
+                None | Some(SimulationMode::XyCurve) => {
+                    let noise_str = match noise {
+                        SimulationNoise::None => String::from("noise-free"),
+                        SimulationNoise::Gaussian { sd } => format!("Gaussian noise (SD = {})", format_exact_float(*sd)),
+                        SimulationNoise::RelativePercent { cv_percent } => format!("relative noise (%CV = {})", format_exact_float(*cv_percent)),
+                        SimulationNoise::Poisson => String::from("Poisson count noise"),
+                    };
+                    vec![
+                        plain("Monte Carlo curve simulation for "),
+                        code(equation_id),
+                        plain(format!(
+                            " ({row_count} rows x {replicates} replicates, X in [{}, {}], {noise_str}, RNG seed = {seed}).",
+                            format_exact_float(*x_min),
+                            format_exact_float(*x_max)
+                        )),
+                    ]
+                }
+            }
         }
         TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } => {
             let strat_desc = match stratify_column {
@@ -3878,6 +4425,13 @@ pub fn describe_power_analysis_spec(spec: &PowerAnalysisSpec) -> String {
         PowerTestFamily::ChiSquare => {
             format!("{} (df = {})", spec.family.label(), format_exact_float(spec.chi_square_df))
         }
+        PowerTestFamily::LogRankSurvival => {
+            let surv_lbl = match spec.survival_method {
+                curvebook_doc::SurvivalPowerMethod::Schoenfeld => "Schoenfeld log-rank formula",
+                curvebook_doc::SurvivalPowerMethod::Freedman => "Freedman log-rank formula",
+            };
+            format!("{} ({surv_lbl})", spec.family.label())
+        }
         PowerTestFamily::TwoSampleUnpairedT
         | PowerTestFamily::TwoSamplePairedT
         | PowerTestFamily::OneSampleT
@@ -3915,6 +4469,16 @@ pub fn describe_power_analysis_spec(spec: &PowerAnalysisSpec) -> String {
             format_exact_float(*sigma_x),
             format_exact_float(*sigma_eps)
         ),
+        PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+            let mut extra = format!("hazard ratio HR = {}", format_exact_float(*hazard_ratio));
+            if let Some(p1) = event_prob_group1 {
+                let _ = write!(extra, ", event prob group 1 = {}", format_exact_float(*p1));
+            }
+            if let Some(p2) = event_prob_group2 {
+                let _ = write!(extra, ", event prob group 2 = {}", format_exact_float(*p2));
+            }
+            extra
+        }
     };
     let mut parts = vec![format!(
         "A priori power and sample-size planning solved for {target_desc} under {family_detail} using {tail_desc} significance level alpha = {}",
@@ -3929,6 +4493,12 @@ pub fn describe_power_analysis_spec(spec: &PowerAnalysisSpec) -> String {
         } else {
             parts.push(format!("sample size n = {} (allocation ratio k = {})", format_exact_float(n1), format_exact_float(spec.allocation_ratio)));
         }
+    }
+    if let Some(ev) = spec.target_events {
+        parts.push(format!("target events D = {}", format_exact_float(ev)));
+    }
+    if let (Some(p1), Some(p2)) = (spec.event_prob_group1, spec.event_prob_group2) {
+        parts.push(format!("cumulative event probabilities p1 = {}, p2 = {}", format_exact_float(p1), format_exact_float(p2)));
     }
     parts.push(effect_desc);
     format!("{}.", parts.join("; "))

@@ -58,7 +58,7 @@ pub mod nist;
 pub mod pharma;
 
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
-use curvebook_doc::ParameterRule;
+use curvebook_doc::{ParameterRule, RelationalConstraint};
 
 /// Shared metadata descriptor for multi-variant [`ParametricModel`] implementations.
 #[derive(Debug, Clone)]
@@ -127,9 +127,30 @@ pub trait ParametricModel: Send + Sync {
     fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
         Vec::new()
     }
+    /// Optional default relational inequality constraints (e.g. from custom DSL `[Constraints]`
+    /// blocks such as `KFast > KSlow`).
+    fn default_relational_constraints(&self) -> Vec<RelationalConstraint> {
+        Vec::new()
+    }
+    /// Optional parameter names that MUST be bound as fixed/hooked/column-title constants by the
+    /// caller before fitting (e.g. custom DSL `[Constraints]` mandatory-constant prompts).
+    fn mandatory_constant_params(&self) -> &[String] {
+        &[]
+    }
+    /// Whether parameter `param_idx` enters the model evaluation for `dataset_index` (ordinal
+    /// index when `uses_sheet_dataset_index()` is `false`, or raw sheet index otherwise).
+    /// Models with dataset-branching equations (such as `operational_model_agonist` `<A>` vs `<~A>`)
+    /// override this so unused per-dataset local slots are omitted from the free parameter vector.
+    fn param_used_in_dataset(&self, _param_idx: usize, _dataset_index: usize) -> bool {
+        true
+    }
     /// Derived scalar transforms (e.g., `EC50`, `t_half`, `Span`, inflection point).
     fn derived_transforms(&self, _params: &[f64]) -> Vec<DerivedScalar> {
         Vec::new()
+    }
+    /// Dataset-aware derived scalar transforms; defaults to [`ParametricModel::derived_transforms`].
+    fn derived_transforms_for_dataset(&self, params: &[f64], _dataset_index: usize) -> Vec<DerivedScalar> {
+        self.derived_transforms(params)
     }
 }
 
@@ -307,7 +328,7 @@ mod tests {
         let catalog = list_builtin_equations();
         let catalog_ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(catalog_ids, expected_ids);
-        assert_eq!(catalog.len(), 68 + 56 + 27);
+        assert_eq!(catalog.len(), 74 + 69 + 27);
 
         // Spot-check representative aliases across all three families (including hyphen/case normalization).
         assert_eq!(get_builtin_model("4PL").unwrap().id(), "log_agonist_vs_response_4pl");

@@ -2053,6 +2053,8 @@ fn apply_filter_baseline(grid: &mut [Vec<Cell>], base_col: usize, op: BaselineOp
                         (v - base_val) / base_val
                     }
                 }
+                BaselineOperation::Add => v + base_val,
+                BaselineOperation::Multiply => v * base_val,
             };
             cell.value = CellValue::from_finite_or_empty(res);
         }

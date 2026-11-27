@@ -95,9 +95,16 @@ fn r63_window_order_by_and_rows_frame_bounds() {
         assert_formula_rows(&s, use_info.then_some(&info), expr, checks, 1e-12);
     }
 
-    // SQL default RANGE peer behavior when ORDER BY is present without ROWS:
+    // ORDER BY without explicit ROWS evaluates over the full partition (running frames require explicit ROWS):
     let ties = mv_sheet("ties", &[("T", &[num(1.0), num(2.0), num(2.0), num(3.0)]), ("V", &[num(10.0), num(20.0), num(30.0), num(40.0)])]);
-    assert_formula_rows(&ties, None, "sum(V) OVER (ORDER BY T)", &[(0, Num(10.0)), (1, Num(60.0)), (2, Num(60.0)), (3, Num(100.0))], 1e-12);
+    assert_formula_rows(&ties, None, "sum(V) OVER (ORDER BY T)", &[(0, Num(100.0)), (1, Num(100.0)), (2, Num(100.0)), (3, Num(100.0))], 1e-12);
+    assert_formula_rows(
+        &ties,
+        None,
+        "sum(V) OVER (ORDER BY T ROWS UNBOUNDED PRECEDING)",
+        &[(0, Num(10.0)), (1, Num(30.0)), (2, Num(60.0)), (3, Num(100.0))],
+        1e-12,
+    );
 }
 
 #[test]
@@ -236,14 +243,28 @@ fn r63_contextual_keywords_diagnostics_and_zero_row_safety() {
         &s,
         None,
         "sum(Rows) WHERE Filter == 1 OVER (PARTITION BY Over ORDER BY Order ASC)",
-        &[(2, Num(0.0)), (1, Num(20.0)), (0, Num(30.0))],
+        &[(2, Num(30.0)), (1, Num(30.0)), (0, Num(30.0))],
         1e-12,
     );
     assert_formula_rows(
         &s,
         None,
         "sum(Rows) WHERE Filter == 1 OVER (PARTITION BY Over ORDER BY Order DESC)",
-        &[(0, Num(10.0)), (1, Num(30.0)), (2, Num(30.0))],
+        &[(0, Num(30.0)), (1, Num(30.0)), (2, Num(30.0))],
+        1e-12,
+    );
+    assert_formula_rows(
+        &s,
+        None,
+        "sum(Rows) WHERE Filter == 1 OVER (PARTITION BY Over ORDER BY Order ASC ROWS UNBOUNDED PRECEDING)",
+        &[(2, Missing), (1, Num(20.0)), (0, Num(30.0))],
+        1e-12,
+    );
+    assert_formula_rows(
+        &s,
+        None,
+        "sum(Rows) WHERE Filter == 1 OVER (PARTITION BY Over ORDER BY Order DESC ROWS UNBOUNDED PRECEDING)",
+        &[(0, Num(10.0)), (1, Num(30.0)), (2, Missing)],
         1e-12,
     );
 
@@ -286,6 +307,11 @@ fn r63_select_and_transform_derived_columns_windowed_conditional_and_chained() {
             DerivedColumnFormula::new("FoldVsCtrl", "Response / mean(Response) FILTER (WHERE Role == \"Ctrl\") OVER (PARTITION BY Batch)"),
             DerivedColumnFormula::new("FoldZ", "zscore(FoldVsCtrl) OVER (PARTITION BY Batch)"),
         ],
+        complete_rows_only: false,
+        subject_column: None,
+        row_title_column: None,
+        contingency_count_column: None,
+        include_variable_name_prefixes: false,
     };
     let out = execute_transform(&s, &spec, &ctx).unwrap();
     let xy = as_xy(&out.data_sheet);
@@ -299,6 +325,11 @@ fn r63_select_and_transform_derived_columns_windowed_conditional_and_chained() {
         filter_formula: Some(String::from("abs(RespZ) <= 1.0")),
         target_archetype: TableKind::MultipleVariables,
         derived_columns: vec![DerivedColumnFormula::new("RespZ", "zscore(Response) OVER (PARTITION BY Batch)")],
+        complete_rows_only: false,
+        subject_column: None,
+        row_title_column: None,
+        contingency_count_column: None,
+        include_variable_name_prefixes: false,
     };
     let mv_out = execute_transform(&s, &spec_filter, &TransformContext::default()).unwrap();
     let out_mv = as_mv(&mv_out.data_sheet);

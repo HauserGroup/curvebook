@@ -474,6 +474,60 @@ pub(crate) const PHARMA_SPECS: &[BuiltinEquationSpec] = &[
         })
     }),
     BuiltinEquationSpec::new("morrison_tight_binding_ki", &["morrison"], || Box::new(MorrisonKi)),
+    // Classic Legacy Reparameterizations
+    BuiltinEquationSpec::new("classic_one_site_binding", &[], || {
+        Box::new(OneSiteBinding {
+            meta: ModelMeta::new(
+                "classic_one_site_binding",
+                "One-site binding (hyperbola, classic)",
+                EquationCategory::ReceptorBinding,
+                &["Bmax", "Kd"],
+            ),
+            with_hill: false,
+            with_ns: false,
+        })
+    }),
+    BuiltinEquationSpec::new("classic_two_site_binding", &[], || Box::new(ClassicTwoSiteBinding)),
+    BuiltinEquationSpec::new("classic_sigmoidal_dose_response", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "classic_sigmoidal_dose_response",
+                "Sigmoidal dose-response (classic)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "LogEC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: false,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("classic_sigmoidal_dose_response_variable_slope", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "classic_sigmoidal_dose_response_variable_slope",
+                "Sigmoidal dose-response, variable slope (classic)",
+                EquationCategory::DoseResponseStimulation,
+                &["Bottom", "Top", "LogEC50", "HillSlope"],
+            ),
+            variable_slope: true,
+            is_inhibition: false,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("classic_one_site_competition", &[], || {
+        Box::new(LogDoseResponse {
+            meta: ModelMeta::new(
+                "classic_one_site_competition",
+                "One-site competition (classic)",
+                EquationCategory::ReceptorBinding,
+                &["Bottom", "Top", "LogEC50"],
+            ),
+            variable_slope: false,
+            is_inhibition: true,
+            normalized: false,
+        })
+    }),
+    BuiltinEquationSpec::new("classic_two_site_competition", &[], || Box::new(ClassicTwoSiteCompetition)),
 ];
 
 const PHARMA_EQUATION_ID_ARRAY: [&str; PHARMA_SPECS.len()] = spec_ids::<{ PHARMA_SPECS.len() }>(PHARMA_SPECS);
@@ -522,7 +576,7 @@ fn all_finite_params(params: &[f64], count: usize) -> bool {
 #[inline]
 fn push_finite_scalar(out: &mut Vec<DerivedScalar>, name: &str, value: f64) {
     if value.is_finite() {
-        out.push(DerivedScalar { name: name.to_owned(), value, units: None });
+        out.push(DerivedScalar::new(name.to_owned(), value, None));
     }
 }
 
@@ -781,11 +835,29 @@ impl ParametricModel for LinearDoseResponse {
     }
 }
 
-/// Five-parameter (asymmetric) logistic:
+/// Compute `log10(2^(1/s) - 1)` stably across extreme positive asymmetry exponents `s > 0`.
+#[inline]
+fn five_pl_log10_asym_term(s: f64) -> Option<f64> {
+    if !s.is_finite() || s <= 0.0 {
+        return None;
+    }
+    let val = if (s - 1.0).abs() <= 1e-15 {
+        0.0
+    } else if s < 0.01 {
+        let ln_term = (-core::f64::consts::LN_2 / s).exp();
+        core::f64::consts::LOG10_2 / s + (-ln_term).ln_1p() / core::f64::consts::LN_10
+    } else if s > 1e100 {
+        core::f64::consts::LN_2.log10() - s.log10()
+    } else {
+        (core::f64::consts::LN_2 / s).exp_m1().log10()
+    };
+    val.is_finite().then_some(val)
+}
+
+/// Five-parameter (asymmetric) logistic parameterized directly in `LogEC50`:
+/// `LogXb = LogEC50 + (1 / HillSlope) * log10(2^(1/S) - 1)`,
 /// `Y = Bottom + (Top - Bottom) / (1 + 10^((LogXb - X) * HillSlope))^S`; `S = 1` gives the 4PL.
-/// Derived `LogEC50 = LogXb - log10(2^(1/S) - 1) / HillSlope` (the X giving half the span).
-/// Reference: Richards (1959) generalised logistic; the asymmetry-exponent form used for
-/// dose-response is that of Gottschalk & Dunn (2005), here with log10 X.
+/// Reference: Richards (1959); Gottschalk & Dunn (2005); Liao & Liu (2009).
 struct RichardsFivePl;
 
 impl ParametricModel for RichardsFivePl {
@@ -793,17 +865,19 @@ impl ParametricModel for RichardsFivePl {
         "log_agonist_vs_response_5pl",
         "Asymmetric (five parameters) log(agonist) vs. response",
         EquationCategory::DoseResponseStimulation,
-        ["Bottom", "Top", "LogXb", "HillSlope", "S"]
+        ["Bottom", "Top", "LogEC50", "HillSlope", "S"]
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         if !x0.is_finite() || !all_finite_params(params, 5) {
             return None;
         }
-        let (bottom, top, log_xb, hill, s) = (params[0], params[1], params[2], params[3], params[4]);
-        if s <= 0.0 {
+        let (bottom, top, log_ec50, hill, s) = (params[0], params[1], params[2], params[3], params[4]);
+        if s <= 0.0 || hill.abs() < 1e-12 {
             return None;
         }
+        let log10_term = five_pl_log10_asym_term(s)?;
+        let log_xb = log_ec50 + log10_term / hill;
         let u = (log_xb - x0) * hill * core::f64::consts::LN_10;
         if !u.is_finite() {
             return None;
@@ -832,25 +906,19 @@ impl ParametricModel for RichardsFivePl {
         if params.len() < 5 {
             return out;
         }
-        let (log_xb, hill, s) = (params[2], params[3], params[4]);
-        if log_xb.is_finite() && hill.is_finite() && s.is_finite() && s > 0.0 && hill.abs() > 1e-12 {
-            let log10_term = if s == 1.0 {
-                0.0
-            } else if s < 0.01 {
-                let ln_term = (-core::f64::consts::LN_2 / s).exp();
-                core::f64::consts::LOG10_2 / s + (-ln_term).ln_1p() / core::f64::consts::LN_10
-            } else if s > 1e100 {
-                core::f64::consts::LN_2.log10() - s.log10()
-            } else {
-                (core::f64::consts::LN_2 / s).exp_m1().log10()
-            };
-            let log_ec50 = log_xb - log10_term / hill;
-            if log_ec50.is_finite() {
-                push_finite_scalar(&mut out, "LogEC50", log_ec50);
-                if let Some(ec50) = safe_pow10(log_ec50) {
-                    push_finite_scalar(&mut out, "EC50", ec50);
-                }
-            }
+        let (bottom, top, log_ec50, hill, s) = (params[0], params[1], params[2], params[3], params[4]);
+        if let Some(ec50) = safe_pow10(log_ec50) {
+            push_finite_scalar(&mut out, "EC50", ec50);
+        }
+        if log_ec50.is_finite()
+            && hill.is_finite()
+            && hill.abs() > 1e-12
+            && let Some(log10_term) = five_pl_log10_asym_term(s)
+        {
+            push_finite_scalar(&mut out, "LogXb", log_ec50 + log10_term / hill);
+        }
+        if bottom.is_finite() && top.is_finite() {
+            push_finite_scalar(&mut out, "Span", top - bottom);
         }
         out
     }
@@ -1092,9 +1160,9 @@ impl ParametricModel for GaddumSchild {
     }
 }
 
-/// Agonist 4PL whose EC50 is shifted by an allosteric modulator (affinity cooperativity `alpha`,
-/// modulator dissociation constant `Kb`): `EC50' = EC50 * (1 + B/Kb) / (1 + alpha * B/Kb)`.
-/// Reference: allosteric ternary complex model, Ehlert (1988).
+/// Agonist 4PL whose EC50 is shifted by an allosteric modulator parameterized in `LogKB` and
+/// `Logalpha`: `LogEC50' = LogEC50 + log10((1 + ModConc / 10^LogKB) / (1 + 10^Logalpha * ModConc / 10^LogKB))`.
+/// Reference: allosteric ternary complex model, Ehlert (1988); Christopoulos & Kenakin (2002).
 struct AllostericEc50Shift;
 
 impl ParametricModel for AllostericEc50Shift {
@@ -1102,32 +1170,42 @@ impl ParametricModel for AllostericEc50Shift {
         "allosteric_ec50_shift",
         "Allosteric EC50 shift",
         EquationCategory::DoseResponseStimulation,
-        ["Bottom", "Top", "LogEC50", "HillSlope", "Kb", "alpha", "ModConc"]
+        ["Bottom", "Top", "LogEC50", "HillSlope", "LogKB", "Logalpha", "ModConc"]
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         if !x0.is_finite() || !all_finite_params(params, 7) {
             return None;
         }
-        let (bottom, top, log_ec50, hill, kb, alpha, mod_conc) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
-        if kb <= 0.0 || alpha <= 0.0 || mod_conc < 0.0 {
+        let (bottom, top, log_ec50, hill, log_kb, log_alpha, mod_conc) =
+            (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
+        if mod_conc < 0.0 {
             return None;
         }
-        let ratio = (1.0 + mod_conc / kb) / (1.0 + alpha * mod_conc / kb);
-        if !ratio.is_finite() || ratio <= 0.0 {
-            return None;
-        }
-        let shifted = log_ec50 + ratio.log10();
+        let shifted = if mod_conc == 0.0 {
+            log_ec50
+        } else {
+            let kb = safe_pow10(log_kb)?;
+            let alpha = safe_pow10(log_alpha)?;
+            if kb <= 0.0 || alpha <= 0.0 {
+                return None;
+            }
+            let ratio = (1.0 + mod_conc / kb) / (1.0 + alpha * mod_conc / kb);
+            if !ratio.is_finite() || ratio <= 0.0 {
+                return None;
+            }
+            log_ec50 + ratio.log10()
+        };
         let (sig, _) = sigmoid_from_log_x(x0, shifted, hill)?;
         let y = bottom + (top - bottom) * sig;
         y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, 1e-6, 0.5, 0.0]
+        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, -6.0, -0.5, 0.0]
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-30), None), (Some(1e-30), None), (Some(0.0), None)]
+        vec![(None, None), (None, None), (None, None), (None, None), (None, None), (None, None), (Some(0.0), None)]
     }
     fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
         vec![
@@ -1135,16 +1213,37 @@ impl ParametricModel for AllostericEc50Shift {
             shared_global_rule("Top"),
             shared_global_rule("LogEC50"),
             shared_global_rule("HillSlope"),
-            shared_global_rule("Kb"),
-            shared_global_rule("alpha"),
+            shared_global_rule("LogKB"),
+            shared_global_rule("Logalpha"),
         ]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 6 {
+            if let Some(ec50) = safe_pow10(params[2]) {
+                push_finite_scalar(&mut out, "EC50", ec50);
+            }
+            if let Some(kb) = safe_pow10(params[4]) {
+                push_finite_scalar(&mut out, "KB", kb);
+            }
+            if let Some(alpha) = safe_pow10(params[5]) {
+                push_finite_scalar(&mut out, "alpha", alpha);
+            }
+            if params[0].is_finite() && params[1].is_finite() {
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
+            }
+        }
+        out
     }
 }
 
-/// Operational model of agonism with transducer slope `n`, `X = log10[A]`:
-/// `E = Basal + (Emax - Basal) * tau^n [A]^n / (([A] + KA)^n + tau^n [A]^n)`.
-/// Reference: Black & Leff (1983); the slope-`n` form is Black, Leff, Shankley & Wood (1985).
-/// `Emax` is the system maximum (`Em`), not the agonist's observed maximum.
+/// Black–Leff operational model of partial agonism (`X = log10[A]`):
+/// - Dataset 0 (`<A>`, full agonist reference): `Y = Basal + (EffectMax - Basal) / (1 + 10^((LogEC50 - X) * n))`
+/// - Datasets `>= 1` (`<~A>`, partial agonists): `Y = Basal + (EffectMax - Basal) / (1 + ((10^LogKA + 10^X) / (10^(LogTau + X)))^n)`.
+///
+/// Shares `Basal`, `EffectMax`, and transducer slope `n` globally by default while omitting unused
+/// `<A>` / `<~A>` local slots via [`ParametricModel::param_used_in_dataset`].
+/// Reference: Black & Leff (1983); Black, Leff, Shankley & Wood (1985); Motulsky & Christopoulos (2004).
 struct OperationalAgonism;
 
 impl ParametricModel for OperationalAgonism {
@@ -1152,46 +1251,133 @@ impl ParametricModel for OperationalAgonism {
         "operational_model_agonist",
         "Black–Leff operational model, partial agonist",
         EquationCategory::DoseResponseStimulation,
-        ["Basal", "Emax", "LogKA", "LogTau", "n"]
+        ["Basal", "EffectMax", "LogEC50", "LogKA", "LogTau", "n"]
     );
-    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+    fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
-        if !x0.is_finite() || !all_finite_params(params, 5) {
+        if !x0.is_finite() || params.len() < 6 || !params[..6].iter().all(|p| p.is_finite()) {
             return None;
         }
-        let a = safe_pow10(x0)?;
-        let ka = safe_pow10(params[2])?;
-        let tau = safe_pow10(params[3])?;
-        eval_operational_response(a, params[0], params[1], ka, tau, params[4])
+        let (basal, emax, n) = (params[0], params[1], params[5]);
+        if n <= 0.0 {
+            return None;
+        }
+        if dataset_index == 0 {
+            let log_ec50 = params[2];
+            if !log_ec50.is_finite() {
+                return None;
+            }
+            let (sig, _) = sigmoid_from_log_x(x0, log_ec50, n)?;
+            let y = basal + (emax - basal) * sig;
+            y.is_finite().then_some(y)
+        } else {
+            let (log_ka, log_tau) = (params[3], params[4]);
+            if !log_ka.is_finite() || !log_tau.is_finite() {
+                return None;
+            }
+            let a = safe_pow10(x0)?;
+            let ka = safe_pow10(log_ka)?;
+            let tau = safe_pow10(log_tau)?;
+            eval_operational_response(a, basal, emax, ka, tau, n)
+        }
     }
-    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+    fn grad(&self, x: &[f64], params: &[f64], dataset_index: usize, out: &mut [f64]) -> bool {
         let Some(&x0) = x.first() else {
             return false;
         };
-        if !x0.is_finite() || !all_finite_params(params, 5) || out.len() < 5 {
+        if !x0.is_finite() || params.len() < 6 || out.len() < 6 || !params[..6].iter().all(|p| p.is_finite()) {
             return false;
         }
-        let (Some(a), Some(ka), Some(tau)) = (safe_pow10(x0), safe_pow10(params[2]), safe_pow10(params[3])) else {
+        let (basal, emax, n) = (params[0], params[1], params[5]);
+        if n <= 0.0 {
             return false;
-        };
-        grad_operational_response(a, [params[0], params[1], ka, tau, params[4]], true, out)
+        }
+        if dataset_index == 0 {
+            let log_ec50 = params[2];
+            if !log_ec50.is_finite() {
+                return false;
+            }
+            let Some((sig, p)) = sigmoid_from_log_x(x0, log_ec50, n) else {
+                return false;
+            };
+            let sig_deriv = if p.is_infinite() {
+                0.0
+            } else if p <= 1.0 {
+                (p / (1.0 + p)) / (1.0 + p)
+            } else {
+                let inv = 1.0 / p;
+                (inv / (1.0 + inv)) / (1.0 + inv)
+            };
+            let span = emax - basal;
+            let common = -span * sig_deriv * core::f64::consts::LN_10;
+            out[0] = 1.0 - sig;
+            out[1] = sig;
+            out[2] = common * n;
+            out[3] = 0.0;
+            out[4] = 0.0;
+            out[5] = common * (log_ec50 - x0);
+            out[..6].iter().all(|v| v.is_finite())
+        } else {
+            let (log_ka, log_tau) = (params[3], params[4]);
+            if !log_ka.is_finite() || !log_tau.is_finite() {
+                return false;
+            }
+            let (Some(a), Some(ka), Some(tau)) = (safe_pow10(x0), safe_pow10(log_ka), safe_pow10(log_tau)) else {
+                return false;
+            };
+            let mut g5 = [0.0_f64; 5];
+            if !grad_operational_response(a, [basal, emax, ka, tau, n], true, &mut g5) {
+                return false;
+            }
+            out[0] = g5[0];
+            out[1] = g5[1];
+            out[2] = 0.0;
+            out[3] = g5[2];
+            out[4] = g5[3];
+            out[5] = g5[4];
+            out[..6].iter().all(|v| v.is_finite())
+        }
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points), 0.5, 1.0]
+        let mid = estimate_x_at_ymid(points);
+        vec![ymin, ymax, mid, mid + 1.0, 0.3, 1.0]
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(None, None), (None, None), (None, None), (None, None), (Some(1e-4), None)]
+        vec![(None, None), (None, None), (None, None), (None, None), (None, None), (Some(1e-4), None)]
+    }
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![shared_global_rule("Basal"), shared_global_rule("EffectMax"), shared_global_rule("n")]
+    }
+    fn param_used_in_dataset(&self, param_idx: usize, dataset_index: usize) -> bool {
+        match param_idx {
+            2 => dataset_index == 0,
+            3 | 4 => dataset_index > 0,
+            _ => true,
+        }
     }
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        self.derived_transforms_for_dataset(params, 1)
+    }
+    fn derived_transforms_for_dataset(&self, params: &[f64], dataset_index: usize) -> Vec<DerivedScalar> {
         let mut out = Vec::new();
-        if params.len() >= 4 {
-            if let Some(ka) = safe_pow10(params[2]) {
+        if params.len() < 6 {
+            return out;
+        }
+        if dataset_index == 0 {
+            if let Some(ec50) = safe_pow10(params[2]) {
+                push_finite_scalar(&mut out, "EC50", ec50);
+            }
+        } else {
+            if let Some(ka) = safe_pow10(params[3]) {
                 push_finite_scalar(&mut out, "KA", ka);
             }
-            if let Some(tau) = safe_pow10(params[3]) {
+            if let Some(tau) = safe_pow10(params[4]) {
                 push_finite_scalar(&mut out, "Tau", tau);
             }
+        }
+        if params[0].is_finite() && params[1].is_finite() {
+            push_finite_scalar(&mut out, "Span", params[1] - params[0]);
         }
         out
     }
@@ -1396,9 +1582,10 @@ impl ParametricModel for CompetitionOneSiteKi {
     }
 }
 
-/// Two-site competition: `FractionHi`-weighted sum of two one-site curves, each IC50 converted to
-/// Ki with the Cheng & Prusoff (1973) correction (assumes the radioligand has the same `Kd` at
-/// both sites). Reference: Motulsky & Christopoulos (2004).
+/// Two-site competition with independent Cheng & Prusoff (1973) radioligand `Kd` per site:
+/// `LogIC50Hi = LogKiHi + log10(1 + HotNM / HotKdNMHi)`,
+/// `LogIC50Lo = LogKiLo + log10(1 + HotNM / HotKdNMLo)`.
+/// Reference: Cheng & Prusoff (1973); Motulsky & Christopoulos (2004).
 struct CompetitionTwoSiteKi;
 
 impl ParametricModel for CompetitionTwoSiteKi {
@@ -1406,27 +1593,64 @@ impl ParametricModel for CompetitionTwoSiteKi {
         "two_sites_fit_ki",
         "Two-site competitive binding (Ki)",
         EquationCategory::ReceptorBinding,
-        ["Top", "Bottom", "FractionHi", "LogKi_1", "LogKi_2", "HotConc_nM", "HotKd_nM"]
+        ["Top", "Bottom", "FractionHi", "LogKiHi", "LogKiLo", "HotNM", "HotKdNMHi", "HotKdNMLo"]
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
-        if !x0.is_finite() || !all_finite_params(params, 7) {
+        if !x0.is_finite() || !all_finite_params(params, 8) {
             return None;
         }
-        let (top, bottom, f_hi, log_ki1, log_ki2, hot_conc, hot_kd) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
-        if hot_conc < 0.0 || hot_kd <= 0.0 {
+        let (top, bottom, f_hi, log_ki_hi, log_ki_lo, hot_nm, hot_kd_hi, hot_kd_lo) =
+            (params[0], params[1], params[2], params[3], params[4], params[5], params[6], params[7]);
+        if hot_nm < 0.0 || hot_kd_hi <= 0.0 || hot_kd_lo <= 0.0 {
             return None;
         }
-        let shift = (1.0 + hot_conc / hot_kd).log10();
-        let (s1, _) = sigmoid_from_log_x(x0, log_ki1 + shift, -1.0)?;
-        let (s2, _) = sigmoid_from_log_x(x0, log_ki2 + shift, -1.0)?;
+        let log_ic50_hi = log_ki_hi + (1.0 + hot_nm / hot_kd_hi).log10();
+        let log_ic50_lo = log_ki_lo + (1.0 + hot_nm / hot_kd_lo).log10();
+        let (s1, _) = sigmoid_from_log_x(x0, log_ic50_hi, -1.0)?;
+        let (s2, _) = sigmoid_from_log_x(x0, log_ic50_lo, -1.0)?;
         let y = bottom + (top - bottom) * (f_hi * s1 + (1.0 - f_hi) * s2);
         y.is_finite().then_some(y)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let m = estimate_x_at_ymid(points);
-        vec![ymax, ymin, 0.5, m - 1.0, m + 1.0, 1.0, 1.0]
+        vec![ymax, ymin, 0.5, m - 1.0, m + 1.0, 1.0, 1.0, 10.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![
+            (None, None),
+            (None, None),
+            (Some(0.0), Some(1.0)),
+            (None, None),
+            (None, None),
+            (Some(0.0), None),
+            (Some(1e-30), None),
+            (Some(1e-30), None),
+        ]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 8 {
+            let (top, bottom, log_ki_hi, log_ki_lo, hot_nm, hot_kd_hi, hot_kd_lo) =
+                (params[0], params[1], params[3], params[4], params[5], params[6], params[7]);
+            if let Some(ki_hi) = safe_pow10(log_ki_hi) {
+                push_finite_scalar(&mut out, "KiHi", ki_hi);
+            }
+            if let Some(ki_lo) = safe_pow10(log_ki_lo) {
+                push_finite_scalar(&mut out, "KiLo", ki_lo);
+            }
+            if hot_nm >= 0.0 && hot_kd_hi > 0.0 && log_ki_hi.is_finite() {
+                push_finite_scalar(&mut out, "LogIC50Hi", log_ki_hi + (1.0 + hot_nm / hot_kd_hi).log10());
+            }
+            if hot_nm >= 0.0 && hot_kd_lo > 0.0 && log_ki_lo.is_finite() {
+                push_finite_scalar(&mut out, "LogIC50Lo", log_ki_lo + (1.0 + hot_nm / hot_kd_lo).log10());
+            }
+            if top.is_finite() && bottom.is_finite() {
+                push_finite_scalar(&mut out, "Span", top - bottom);
+            }
+        }
+        out
     }
 }
 
@@ -1454,7 +1678,10 @@ impl ParametricModel for DissociationOnePhase {
     }
 }
 
-/// Single-exponential association `Y = Ymax * (1 - exp(-Kobs * t))`.
+/// Association kinetics at a single radioligand concentration parameterized in `Kon` (M^-1 min^-1)
+/// and `Bmax`, given fixed `Koff` (min^-1) and `Hotnm` (nM):
+/// `L = Hotnm * 1e-9`, `Kd = Koff / Kon`, `Kobs = Kon * L + Koff`, `occ = L / (L + Kd)`,
+/// `Y = (occ * Bmax) * (1 - exp(-Kobs * t))`.
 /// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
 struct AssociationOneConc;
 
@@ -1463,22 +1690,86 @@ impl ParametricModel for AssociationOneConc {
         "association_kinetics_one_conc",
         "One phase association (one concentration of hot)",
         EquationCategory::ReceptorBinding,
-        ["Ymax", "Kobs"]
+        ["Kon", "Bmax", "Koff", "Hotnm"]
     );
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
-        let (ymax, kobs) = (params[0], params[1]);
-        if !t.is_finite() || !ymax.is_finite() || !kobs.is_finite() {
+        if !t.is_finite() || !all_finite_params(params, 4) {
             return None;
         }
+        let (kon, bmax, koff, hotnm) = (params[0], params[1], params[2], params[3]);
+        if kon <= 0.0 || koff < 0.0 || hotnm < 0.0 {
+            return None;
+        }
+        let l = hotnm * 1e-9;
+        let kobs = kon * l + koff;
+        if !kobs.is_finite() || kobs <= 0.0 {
+            return None;
+        }
+        let occ = (kon * l) / kobs;
         let e = safe_exp(-kobs * t)?;
-        let y = ymax * (1.0 - e);
+        let y = (occ * bmax) * (1.0 - e);
         y.is_finite().then_some(y)
+    }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        if !t.is_finite() || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (kon, bmax, koff, hotnm) = (params[0], params[1], params[2], params[3]);
+        if kon <= 0.0 || koff < 0.0 || hotnm < 0.0 {
+            return false;
+        }
+        let l = hotnm * 1e-9;
+        let u = kon * l;
+        let kobs = u + koff;
+        if !kobs.is_finite() || kobs <= 0.0 {
+            return false;
+        }
+        let Some(e) = safe_exp(-kobs * t) else {
+            return false;
+        };
+        let one_minus_e = 1.0 - e;
+        let inv_kobs = 1.0 / kobs;
+        let inv_kobs2 = inv_kobs * inv_kobs;
+        let occ = u * inv_kobs;
+        let eq = bmax * occ;
+        let d_du = bmax * (koff * inv_kobs2) * one_minus_e + eq * t * e;
+        out[0] = d_du * l;
+        out[1] = occ * one_minus_e;
+        out[2] = -bmax * (u * inv_kobs2) * one_minus_e + eq * t * e;
+        out[3] = d_du * kon * 1e-9;
+        out[..4].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
-        vec![ymax, 2.0 / (xmax - xmin).max(1.0)]
+        let kobs_est = 2.0 / (xmax - xmin).max(1.0);
+        vec![1e6, ymax.max(1.0), 0.01_f64.min(0.5 * kobs_est), 10.0]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(1e-12), None), (Some(0.0), None), (Some(0.0), None), (Some(0.0), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 4 && all_finite_params(params, 4) {
+            let (kon, bmax, koff, hotnm) = (params[0], params[1], params[2], params[3]);
+            if kon > 0.0 && koff >= 0.0 {
+                push_finite_scalar(&mut out, "Kd", koff / kon);
+            }
+            if kon > 0.0 && koff >= 0.0 && hotnm >= 0.0 {
+                let l = hotnm * 1e-9;
+                let kobs = kon * l + koff;
+                if kobs > 0.0 {
+                    push_finite_scalar(&mut out, "Kobs", kobs);
+                    push_finite_scalar(&mut out, "Eq", bmax * (kon * l / kobs));
+                    push_finite_scalar(&mut out, "HalfLife", core::f64::consts::LN_2 / kobs);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -3669,9 +3960,13 @@ fn grad_operational_response(a: f64, params: [f64; 5], log_ka_tau: bool, out: &m
 }
 
 /// Black–Leff operational model of partial agonism on linear concentration `X = [A] >= 0`:
-/// `Y = Basal + (Emax - Basal) / (1 + ((KA + X) / (Tau * X))^n)`.
+/// - Dataset 0 (`<A>`, full agonist reference): `Y = Basal + (EffectMax - Basal) / (1 + (EC50 / X)^n)`
+/// - Datasets `>= 1` (`<~A>`, partial agonists): `Y = Basal + (EffectMax - Basal) / (1 + ((KA + X) / (Tau * X))^n)`.
 ///
-/// Reference: Black & Leff (1983); Black, Leff, Shankley & Wood (1985).
+/// Shares `Basal`, `EffectMax`, and `n` globally by default while omitting unused `<A>`/`<~A>`
+/// local slots via [`ParametricModel::param_used_in_dataset`].
+///
+/// Reference: Black & Leff (1983); Black, Leff, Shankley & Wood (1985); Motulsky & Christopoulos (2004).
 struct OperationalAgonismConc;
 
 impl ParametricModel for OperationalAgonismConc {
@@ -3679,45 +3974,132 @@ impl ParametricModel for OperationalAgonismConc {
         "operational_model_agonist_conc",
         "Black\u{2013}Leff operational model, partial agonist ([A])",
         EquationCategory::DoseResponseStimulation,
-        ["Basal", "Emax", "KA", "Tau", "n"]
+        ["Basal", "EffectMax", "EC50", "KA", "Tau", "n"]
     );
 
-    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+    fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
         let a = x.first().copied()?;
-        if params.len() < 5 || !params[..5].iter().all(|v| v.is_finite()) {
+        if !a.is_finite() || a < 0.0 || params.len() < 6 || !params[..6].iter().all(|p| p.is_finite()) {
             return None;
         }
-        eval_operational_response(a, params[0], params[1], params[2], params[3], params[4])
+        let (basal, emax, n) = (params[0], params[1], params[5]);
+        if n <= 0.0 {
+            return None;
+        }
+        if dataset_index == 0 {
+            let ec50 = params[2];
+            if !ec50.is_finite() || ec50 <= 0.0 {
+                return None;
+            }
+            let sig = sigmoid_from_conc(a, ec50, n)?;
+            let y = basal + (emax - basal) * sig;
+            y.is_finite().then_some(y)
+        } else {
+            let (ka, tau) = (params[3], params[4]);
+            if !ka.is_finite() || !tau.is_finite() {
+                return None;
+            }
+            eval_operational_response(a, basal, emax, ka, tau, n)
+        }
     }
 
-    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+    fn grad(&self, x: &[f64], params: &[f64], dataset_index: usize, out: &mut [f64]) -> bool {
         let Some(&a) = x.first() else {
             return false;
         };
-        if params.len() < 5 || !params[..5].iter().all(|v| v.is_finite()) {
+        if !a.is_finite() || a < 0.0 || params.len() < 6 || out.len() < 6 || !params[..6].iter().all(|p| p.is_finite()) {
             return false;
         }
-        grad_operational_response(a, [params[0], params[1], params[2], params[3], params[4]], false, out)
+        let (basal, emax, n) = (params[0], params[1], params[5]);
+        if n <= 0.0 {
+            return false;
+        }
+        if dataset_index == 0 {
+            let ec50 = params[2];
+            if !ec50.is_finite() || ec50 <= 0.0 {
+                return false;
+            }
+            let Some(sig) = sigmoid_from_conc(a, ec50, n) else {
+                return false;
+            };
+            out[0] = 1.0 - sig;
+            out[1] = sig;
+            out[3] = 0.0;
+            out[4] = 0.0;
+            if a == 0.0 {
+                out[2] = 0.0;
+                out[5] = 0.0;
+                return true;
+            }
+            let dsig = sig * (1.0 - sig);
+            let span = emax - basal;
+            out[2] = -span * dsig * n / ec50;
+            out[5] = span * dsig * (a.ln() - ec50.ln());
+            out[..6].iter().all(|v| v.is_finite())
+        } else {
+            let (ka, tau) = (params[3], params[4]);
+            if !ka.is_finite() || !tau.is_finite() {
+                return false;
+            }
+            let mut g5 = [0.0_f64; 5];
+            if !grad_operational_response(a, [basal, emax, ka, tau, n], false, &mut g5) {
+                return false;
+            }
+            out[0] = g5[0];
+            out[1] = g5[1];
+            out[2] = 0.0;
+            out[3] = g5[2];
+            out[4] = g5[3];
+            out[5] = g5[4];
+            out[..6].iter().all(|v| v.is_finite())
+        }
     }
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_positive_x_midpoint(points, 1e-30), 3.0, 1.0]
+        let mid = estimate_positive_x_midpoint(points, 1e-30);
+        vec![ymin, ymax, mid, 10.0 * mid, 2.0, 1.0]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
-        vec![(None, None), (None, None), (Some(1e-30), None), (Some(1e-30), None), (Some(1e-4), None)]
+        vec![(None, None), (None, None), (Some(1e-30), None), (Some(1e-30), None), (Some(1e-30), None), (Some(1e-4), None)]
+    }
+
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        vec![shared_global_rule("Basal"), shared_global_rule("EffectMax"), shared_global_rule("n")]
+    }
+
+    fn param_used_in_dataset(&self, param_idx: usize, dataset_index: usize) -> bool {
+        match param_idx {
+            2 => dataset_index == 0,
+            3 | 4 => dataset_index > 0,
+            _ => true,
+        }
     }
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        self.derived_transforms_for_dataset(params, 1)
+    }
+
+    fn derived_transforms_for_dataset(&self, params: &[f64], dataset_index: usize) -> Vec<DerivedScalar> {
         let mut out = Vec::new();
-        if params.len() >= 4 {
+        if params.len() < 6 {
+            return out;
+        }
+        if dataset_index == 0 {
             if params[2].is_finite() && params[2] > 0.0 {
-                push_finite_scalar(&mut out, "LogKA", params[2].log10());
+                push_finite_scalar(&mut out, "LogEC50", params[2].log10());
             }
+        } else {
             if params[3].is_finite() && params[3] > 0.0 {
-                push_finite_scalar(&mut out, "LogTau", params[3].log10());
+                push_finite_scalar(&mut out, "LogKA", params[3].log10());
             }
+            if params[4].is_finite() && params[4] > 0.0 {
+                push_finite_scalar(&mut out, "LogTau", params[4].log10());
+            }
+        }
+        if params[0].is_finite() && params[1].is_finite() {
+            push_finite_scalar(&mut out, "Span", params[1] - params[0]);
         }
         out
     }
@@ -4026,10 +4408,113 @@ impl ParametricModel for AllostericModulatorCompetition {
         let mut out = Vec::new();
         if params.len() >= 3 {
             if let Some(kb) = safe_pow10(params[1]) {
-                out.push(DerivedScalar { name: "KB".to_owned(), value: kb, units: None });
+                out.push(DerivedScalar::new("KB", kb, None));
             }
             if let Some(alpha) = safe_pow10(params[2]) {
-                out.push(DerivedScalar { name: "Alpha".to_owned(), value: alpha, units: None });
+                out.push(DerivedScalar::new("Alpha", alpha, None));
+            }
+        }
+        out
+    }
+}
+
+/// Classic two-site saturation binding `Y = Bmax1 * X / (Kd1 + X) + Bmax2 * X / (Kd2 + X)`.
+/// Reference: Langmuir (1918); Hulme & Trevethick (2010).
+struct ClassicTwoSiteBinding;
+
+impl ParametricModel for ClassicTwoSiteBinding {
+    impl_static_meta!("classic_two_site_binding", "Two-site binding (classic)", EquationCategory::ReceptorBinding, ["Bmax1", "Kd1", "Bmax2", "Kd2"]);
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let c = x.first().copied()?;
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, 4) {
+            return None;
+        }
+        let (b1, kd1, b2, kd2) = (params[0], params[1], params[2], params[3]);
+        if kd1 <= 0.0 || kd2 <= 0.0 {
+            return None;
+        }
+        let y = b1 * (c / (kd1 + c)) + b2 * (c / (kd2 + c));
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&c) = x.first() else {
+            return false;
+        };
+        if !c.is_finite() || c < 0.0 || !all_finite_params(params, 4) || out.len() < 4 {
+            return false;
+        }
+        let (b1, kd1, b2, kd2) = (params[0], params[1], params[2], params[3]);
+        if kd1 <= 0.0 || kd2 <= 0.0 {
+            return false;
+        }
+        let d1 = kd1 + c;
+        let d2 = kd2 + c;
+        out[0] = c / d1;
+        out[1] = -(b1 * c) / (d1 * d1);
+        out[2] = c / d2;
+        out[3] = -(b2 * c) / (d2 * d2);
+        out[..4].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let kd = estimate_positive_x_midpoint(points, 1e-30);
+        vec![0.5 * ymax, 0.2 * kd, 0.5 * ymax, 5.0 * kd]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(1e-30), None), (None, None), (Some(1e-30), None)]
+    }
+}
+
+/// Classic two-site competitive binding:
+/// `Y = Bottom + (Top - Bottom) * (Fraction_1 / (1 + 10^(X - LogEC50_1)) + (1 - Fraction_1) / (1 + 10^(X - LogEC50_2)))`.
+/// Reference: Motulsky & Christopoulos (2004).
+struct ClassicTwoSiteCompetition;
+
+impl ParametricModel for ClassicTwoSiteCompetition {
+    impl_static_meta!(
+        "classic_two_site_competition",
+        "Two-site competition (classic)",
+        EquationCategory::ReceptorBinding,
+        ["Bottom", "Top", "Fraction_1", "LogEC50_1", "LogEC50_2"]
+    );
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || !all_finite_params(params, 5) {
+            return None;
+        }
+        let (bottom, top, frac1, log_ec1, log_ec2) = (params[0], params[1], params[2], params[3], params[4]);
+        let (s1, _) = sigmoid_from_log_x(x0, log_ec1, -1.0)?;
+        let (s2, _) = sigmoid_from_log_x(x0, log_ec2, -1.0)?;
+        let y = bottom + (top - bottom) * (frac1 * s1 + (1.0 - frac1) * s2);
+        y.is_finite().then_some(y)
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let m = estimate_x_at_ymid(points);
+        vec![ymin, ymax, 0.5, m - 1.0, m + 1.0]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(0.0), Some(1.0)), (None, None), (None, None)]
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::new();
+        if params.len() >= 5 {
+            if let Some(ec1) = safe_pow10(params[3]) {
+                push_finite_scalar(&mut out, "EC50_1", ec1);
+            }
+            if let Some(ec2) = safe_pow10(params[4]) {
+                push_finite_scalar(&mut out, "EC50_2", ec2);
+            }
+            if params[0].is_finite() && params[1].is_finite() {
+                push_finite_scalar(&mut out, "Span", params[1] - params[0]);
             }
         }
         out

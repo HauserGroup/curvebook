@@ -1029,7 +1029,11 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         | AnalysisKind::SimpleLogisticRegression(_)
         | AnalysisKind::LeveneTest(_)
         | AnalysisKind::AreaUnderCurve(_)
-        | AnalysisKind::ImportedSnapshot(_) => {}
+        | AnalysisKind::ImportedSnapshot(_)
+        | AnalysisKind::RowStatistics(_)
+        | AnalysisKind::FractionOfTotal(_)
+        | AnalysisKind::CurveCalculus(_)
+        | AnalysisKind::MonteCarloSimulation(_) => {}
     }
 }
 

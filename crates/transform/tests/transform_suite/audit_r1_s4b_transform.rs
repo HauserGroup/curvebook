@@ -46,9 +46,17 @@ fn r1_s04_10_curve_calculus_aligns_sparse_and_unsorted_datasets() {
 fn r1_s04_11_remove_baseline_warns_on_single_and_excluded_cells() {
     let ctx = TransformContext::default();
     let col = col_sheet("col_rb", &[("B", &[num(2.0), empty(), num(0.0), excl(5.0)]), ("T", &[num(10.0), num(20.0), num(30.0), excl(40.0)])]);
-    let out =
-        execute_transform(&col, &TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Ratio }, &ctx)
-            .unwrap();
+    let out = execute_transform(
+        &col,
+        &TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: BaselineOperation::Ratio,
+            baseline_kind: None,
+            retain_unselected_columns: false,
+        },
+        &ctx,
+    )
+    .unwrap();
     assert_eq!(out.warnings.len(), 3, "expected warnings on row 2 col 0, row 1 col 1, row 2 col 1 only: {:?}", out.warnings);
     assert!(!out.warnings.iter().any(|w| w.contains("row 3")), "excluded row 3 must not warn: {:?}", out.warnings);
     let res = as_col(&out.data_sheet);
@@ -106,7 +114,17 @@ fn r1_s04_11_remove_baseline_warns_across_presummarized_subcolumn_modes() {
     let ctx = TransformContext::default();
     for c in cases {
         let s = grouped_sheet(c.id, c.mode, &[], &[("Base", c.base_rows), ("Trt", c.trt_rows)]);
-        let out = execute_transform(&s, &TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: c.op }, &ctx).unwrap();
+        let out = execute_transform(
+            &s,
+            &TransformAnalysisSpec::RemoveBaseline {
+                baseline_columns: vec![0],
+                operation: c.op,
+                baseline_kind: None,
+                retain_unselected_columns: false,
+            },
+            &ctx,
+        )
+        .unwrap();
         if c.exact_warnings {
             assert_eq!(out.warnings.len(), c.min_warnings, "{}: {:?}", c.id, out.warnings);
         } else {

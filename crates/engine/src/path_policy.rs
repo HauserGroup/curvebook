@@ -285,7 +285,7 @@ impl ExternalPathPolicy {
         }
     }
 
-    fn resolve_target_path(&self, raw_path: &str, label: &str) -> Result<PathBuf, EngineError> {
+    pub(crate) fn resolve_target_path(&self, raw_path: &str, label: &str) -> Result<PathBuf, EngineError> {
         validate_raw_path(raw_path, label)?;
         match self {
             Self::Unconstrained => Ok(PathBuf::from(raw_path)),

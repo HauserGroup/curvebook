@@ -344,6 +344,11 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
             distance: ClusterDistance::Euclidean,
             linkage: ClusterLinkage::Ward,
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
     )?;
     let mut cl_res = ResultSheet::new(cl_spec)?;

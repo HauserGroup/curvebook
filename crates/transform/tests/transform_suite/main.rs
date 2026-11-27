@@ -11,6 +11,7 @@ mod audit_r2_s04;
 mod audit_w2_sec03_fixes;
 mod audit_w2_transform_ops;
 mod d1_curve_transforms;
+mod d1_formula_and_reduction;
 mod d1_normalization;
 mod d1_r18_7_spline_lowess;
 mod d1_randomization;

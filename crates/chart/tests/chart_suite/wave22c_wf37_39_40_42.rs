@@ -54,6 +54,14 @@ fn cox_ph_baseline_and_covariate_survival_curves_compile() -> TestResult {
         predictor_columns: vec![2, 3],
         reference_levels: vec![(3, String::from("Ctrl"))],
         tie_method: CoxTieMethod::Breslow,
+        formula: None,
+        covariate_profiles: Vec::new(),
+        nested_comparison: None,
+        emit_cox_snell_residuals: false,
+        ci_method: Default::default(),
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
     };
     let analysis_spec = AnalysisSpec::new(SheetId::new("res-cox"), ds.id.clone(), AnalysisKind::Survival(cox_spec.clone()))?;
     let cox_res = run_survival_analysis(&ds, &analysis_spec, &cox_spec)?;
@@ -129,7 +137,14 @@ fn glm_linear_poisson_logistic_residuals_and_qq_compile() -> TestResult {
         ("pois", GlmFamily::Poisson, 2usize, "glm-poisson-residuals"),
         ("log", GlmFamily::Logistic, 3usize, "glm-logistic-predictions"),
     ] {
-        let glm_spec = GlmSpec { family, response_column: resp_col, predictor_columns: vec![0], reference_levels: Vec::new(), compute_vif: false };
+        let glm_spec = GlmSpec {
+            family,
+            response_column: resp_col,
+            predictor_columns: vec![0],
+            reference_levels: Vec::new(),
+            compute_vif: false,
+            ..Default::default()
+        };
         let spec =
             AnalysisSpec::new(SheetId::new(format!("res-glm-{suffix}")), ds.id.clone(), AnalysisKind::GeneralizedLinearModel(glm_spec.clone()))?;
         let res = run_glm_analysis(&ds, &spec, &glm_spec)?;
@@ -229,8 +244,17 @@ fn heatmap_uses_linked_clustering_distance_and_linkage() -> TestResult {
     );
 
     // 2. Linked Clustering ResultSheet (Pearson / Complete): RowSmallPos & RowScaledPos must become adjacent.
-    let clust_spec =
-        MultivariateSpec::Clustering { k_means_k: Some(2), distance: ClusterDistance::Pearson, linkage: ClusterLinkage::Complete, k_sweep_max: None };
+    let clust_spec = MultivariateSpec::Clustering {
+        k_means_k: Some(2),
+        distance: ClusterDistance::Pearson,
+        linkage: ClusterLinkage::Complete,
+        k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
+    };
     let mut analysis = AnalysisSpec::new(SheetId::new("res-clust-pearson"), ds.id.clone(), AnalysisKind::Multivariate(clust_spec.clone()))?;
     analysis.selected_data_sets = vec![1, 2, 3];
     let clust_res = run_multivariate_analysis(&ds, &analysis, &clust_spec)?;

@@ -10,7 +10,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::dsl::{
-    BinaryOp, DatasetFilter, DslSection, Expr, MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES, UnaryOp, is_valid_ident,
+    BinaryOp, DatasetFilter, DslSection, Expr, MAX_DSL_SOURCE_BYTES, MAX_TOTAL_DATASET_INDICES, UnaryOp, is_valid_ident, join_continued_lines,
     parse_dataset_prefix, parse_expr_collecting_locs, parse_section_header, split_top_level_assignment,
 };
 use crate::library::normalize_id;
@@ -419,15 +419,17 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "agonist_vs_response_normalized_var" => {
             format!("Y = \\frac{{100}}{{1 + ({} / X)^{{{}}}}}", ctx.val("EC50", "\\text{EC}_{50}"), ctx.val("HillSlope", "\\text{HillSlope}"),)
         }
-        "log_agonist_vs_response_5pl" | "5pl" => format!(
-            "Y = {} + \\frac{{{} - {}}}{{(1 + 10^{{({} - X) \\cdot {}}})^{{{}}}}}",
-            ctx.val("Bottom", "\\text{Bottom}"),
-            ctx.val("Top", "\\text{Top}"),
-            ctx.val("Bottom", "\\text{Bottom}"),
-            ctx.val("LogXb", "\\log X_b"),
-            ctx.factor("HillSlope", "\\text{HillSlope}"),
-            ctx.val("S", "S"),
-        ),
+        "log_agonist_vs_response_5pl" | "5pl" => {
+            let s_val = ctx.val("S", "S");
+            format!(
+                "Y = {} + \\frac{{{} - {}}}{{(1 + (2^{{1 / {s_val}}} - 1) \\cdot 10^{{({} - X) \\cdot {}}})^{{{s_val}}}}}",
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("Top", "\\text{Top}"),
+                ctx.val("Bottom", "\\text{Bottom}"),
+                ctx.val("LogEC50", "\\log\\text{EC}_{50}"),
+                ctx.factor("HillSlope", "\\text{HillSlope}"),
+            )
+        }
         "agonist_vs_response_5pl" => {
             let s_val = ctx.val("S", "S");
             format!(
@@ -573,10 +575,10 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         ),
         "allosteric_ec50_shift" => {
             let mod_c = ctx.val("ModConc", "\\text{ModConc}");
-            let kb = ctx.denom("Kb", "K_b");
-            let alpha = ctx.val("alpha", "\\alpha");
+            let log_kb = ctx.val("LogKB", "\\log K_B");
+            let log_alpha = ctx.val("Logalpha", "\\log\\alpha");
             format!(
-                "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} + \\log(\\frac{{1 + {mod_c} / {kb}}}{{1 + {alpha} \\cdot {mod_c} / {kb}}}) - X) \\cdot {}}}}}",
+                "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} + \\log(\\frac{{1 + {mod_c} / 10^{{{log_kb}}}}}{{1 + 10^{{{log_alpha}}} \\cdot {mod_c} / 10^{{{log_kb}}}}}) - X) \\cdot {}}}}}",
                 ctx.val("Bottom", "\\text{Bottom}"),
                 ctx.val("Top", "\\text{Top}"),
                 ctx.val("Bottom", "\\text{Bottom}"),
@@ -599,22 +601,41 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         }
         "operational_model_agonist" => {
             let basal = ctx.val("Basal", "\\text{Basal}");
-            let emax = ctx.val("Emax", "E_{\\max}");
+            let emax = ctx.val("EffectMax", "\\text{Effect}_{\\max}");
+            let log_ec50 = ctx.val("LogEC50", "\\log\\text{EC}_{50}");
             let log_ka = ctx.val("LogKA", "\\log K_A");
             let log_tau = ctx.val("LogTau", "\\log\\tau");
             let n = ctx.val("n", "n");
             format!(
-                "Y = {basal} + \\frac{{({emax} - {basal}) \\cdot (10^{{{log_tau} + X}})^{{{n}}}}}{{(10^{{{log_tau} + X}})^{{{n}}} + (10^{{X}} + 10^{{{log_ka}}})^{{{n}}}}}"
+                "Y_{{\\text{{full}}}} = {basal} + \\frac{{{emax} - {basal}}}{{1 + 10^{{({log_ec50} - X) \\cdot {n}}}}}, \\quad Y_{{\\text{{partial}}}} = {basal} + \\frac{{{emax} - {basal}}}{{1 + (\\frac{{10^{{{log_ka}}} + 10^{{X}}}}{{10^{{{log_tau} + X}}}})^{{{n}}}}}"
             )
         }
         "operational_model_agonist_conc" => {
             let basal = ctx.val("Basal", "\\text{Basal}");
-            let emax = ctx.val("Emax", "E_{\\max}");
+            let emax = ctx.val("EffectMax", "\\text{Effect}_{\\max}");
+            let ec50 = ctx.val("EC50", "\\text{EC}_{50}");
             let ka = ctx.val("KA", "K_A");
             let tau = ctx.val("Tau", "\\tau");
             let n = ctx.val("n", "n");
-            format!("Y = {basal} + \\frac{{{emax} - {basal}}}{{1 + (\\frac{{{ka} + X}}{{{tau} \\cdot X}})^{{{n}}}}}")
+            format!(
+                "Y_{{\\text{{full}}}} = {basal} + \\frac{{{emax} - {basal}}}{{1 + ({ec50} / X)^{{{n}}}}}, \\quad Y_{{\\text{{partial}}}} = {basal} + \\frac{{{emax} - {basal}}}{{1 + (\\frac{{{ka} + X}}{{{tau} \\cdot X}})^{{{n}}}}}"
+            )
         }
+        "classic_sigmoidal_dose_response" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{{} - X}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("LogEC50", "\\log\\text{EC}_{50}"),
+        ),
+        "classic_sigmoidal_dose_response_variable_slope" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{({} - X) \\cdot {}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("LogEC50", "\\log\\text{EC}_{50}"),
+            ctx.factor("HillSlope", "\\text{HillSlope}"),
+        ),
         "operational_model_depletion_log" => {
             let basal = ctx.val("Basal", "\\text{Basal}");
             let emax = ctx.val("EffectMax", "\\text{Effect}_{\\max}");
@@ -708,7 +729,33 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
 
 fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
     let s = match id {
-        "one_site_specific_binding" => format!("Y = \\frac{{{} \\cdot X}}{{{} + X}}", ctx.val("Bmax", "B_{\\max}"), ctx.val("Kd", "K_d")),
+        "one_site_specific_binding" | "classic_one_site_binding" => {
+            format!("Y = \\frac{{{} \\cdot X}}{{{} + X}}", ctx.val("Bmax", "B_{\\max}"), ctx.val("Kd", "K_d"))
+        }
+        "classic_two_site_binding" => format!(
+            "Y = \\frac{{{} \\cdot X}}{{{} + X}} + \\frac{{{} \\cdot X}}{{{} + X}}",
+            ctx.val("Bmax1", "B_{\\max,1}"),
+            ctx.val("Kd1", "K_{d,1}"),
+            ctx.val("Bmax2", "B_{\\max,2}"),
+            ctx.val("Kd2", "K_{d,2}"),
+        ),
+        "classic_one_site_competition" => format!(
+            "Y = {} + \\frac{{{} - {}}}{{1 + 10^{{X - {}}}}}",
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("Top", "\\text{Top}"),
+            ctx.val("Bottom", "\\text{Bottom}"),
+            ctx.val("LogEC50", "\\log\\text{EC}_{50}"),
+        ),
+        "classic_two_site_competition" => {
+            let bot = ctx.val("Bottom", "\\text{Bottom}");
+            let top = ctx.val("Top", "\\text{Top}");
+            let f1 = ctx.val("Fraction_1", "\\text{Fraction}_1");
+            format!(
+                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{f1}}}{{1 + 10^{{X - {}}}}} + \\frac{{1 - {f1}}}{{1 + 10^{{X - {}}}}})",
+                ctx.val("LogEC50_1", "\\log\\text{EC}_{50,1}"),
+                ctx.val("LogEC50_2", "\\log\\text{EC}_{50,2}"),
+            )
+        }
         "one_site_specific_hill" => {
             let h = ctx.val("h", "h");
             format!("Y = \\frac{{{} \\cdot X^{{{h}}}}}{{{}^{{{h}}} + X^{{{h}}}}}", ctx.val("Bmax", "B_{\\max}"), ctx.pow_base("Kd", "K_d"))
@@ -824,12 +871,13 @@ fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             let bot = ctx.val("Bottom", "\\text{Bottom}");
             let top = ctx.val("Top", "\\text{Top}");
             let f_hi = ctx.val("FractionHi", "\\text{Fraction}_{\\text{Hi}}");
-            let hot = ctx.val("HotConc_nM", "\\text{HotConc}_{\\text{nM}}");
-            let kd = ctx.denom("HotKd_nM", "\\text{HotKd}_{\\text{nM}}");
+            let hot = ctx.val("HotNM", "\\text{HotNM}");
+            let kd_hi = ctx.denom("HotKdNMHi", "K_{d,\\text{Hi}}");
+            let kd_lo = ctx.denom("HotKdNMLo", "K_{d,\\text{Lo}}");
             format!(
-                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{f_hi}}}{{1 + 10^{{X - {} - \\log(1 + {hot} / {kd})}}}} + \\frac{{1 - {f_hi}}}{{1 + 10^{{X - {} - \\log(1 + {hot} / {kd})}}}})",
-                ctx.val("LogKi_1", "\\log K_{i,1}"),
-                ctx.val("LogKi_2", "\\log K_{i,2}"),
+                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{f_hi}}}{{1 + 10^{{X - {} - \\log(1 + {hot} / {kd_hi})}}}} + \\frac{{1 - {f_hi}}}{{1 + 10^{{X - {} - \\log(1 + {hot} / {kd_lo})}}}})",
+                ctx.val("LogKiHi", "\\log K_{i,\\text{Hi}}"),
+                ctx.val("LogKiLo", "\\log K_{i,\\text{Lo}}"),
             )
         }
         "dissociation_one_phase" => {
@@ -837,7 +885,14 @@ fn format_binding_kinetics_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             format!("Y = ({} - {ns}) \\cdot \\exp(-{} \\cdot X) + {ns}", ctx.val("Y0", "Y_0"), ctx.val("Koff", "K_{\\text{off}}"),)
         }
         "association_kinetics_one_conc" => {
-            format!("Y = {} \\cdot (1 - \\exp(-{} \\cdot X))", ctx.val("Ymax", "Y_{\\max}"), ctx.val("Kobs", "K_{\\text{obs}}"),)
+            let bmax = ctx.val("Bmax", "B_{\\max}");
+            let kon = ctx.val("Kon", "K_{\\text{on}}");
+            let kon_f = ctx.factor("Kon", "K_{\\text{on}}");
+            let koff = ctx.val("Koff", "K_{\\text{off}}");
+            let l = format!("({} \\cdot 10^{{-9}})", ctx.val("Hotnm", "\\text{Hot}_{\\text{nM}}"));
+            format!(
+                "Y = \\frac{{{bmax} \\cdot {kon_f} \\cdot {l}}}{{{kon} \\cdot {l} + {koff}}} \\cdot (1 - \\exp(-({kon} \\cdot {l} + {koff}) \\cdot X))"
+            )
         }
         "association_kinetics_two_conc" => {
             let bmax = ctx.val("Bmax", "B_{\\max}");
@@ -1086,6 +1141,33 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.val("alpha", "\\alpha"),
             ctx.val("beta", "\\beta"),
         ),
+        "classic_one_phase_decay" => format!(
+            "Y = {} \\cdot \\exp(-{} \\cdot X) + {}",
+            ctx.val("Span", "\\text{Span}"),
+            ctx.val("K", "K"),
+            ctx.val("Plateau", "\\text{Plateau}"),
+        ),
+        "classic_two_phase_decay" => format!(
+            "Y = {} \\cdot \\exp(-{} \\cdot X) + {} \\cdot \\exp(-{} \\cdot X) + {}",
+            ctx.val("Span1", "\\text{Span}_1"),
+            ctx.val("K1", "K_1"),
+            ctx.val("Span2", "\\text{Span}_2"),
+            ctx.val("K2", "K_2"),
+            ctx.val("Plateau", "\\text{Plateau}"),
+        ),
+        "classic_one_phase_association" => {
+            format!("Y = {} \\cdot (1 - \\exp(-{} \\cdot X))", ctx.val("Ymax", "Y_{\\max}"), ctx.val("K", "K"))
+        }
+        "classic_two_phase_association" => format!(
+            "Y = {} \\cdot (1 - \\exp(-{} \\cdot X)) + {} \\cdot (1 - \\exp(-{} \\cdot X))",
+            ctx.val("Ymax1", "Y_{\\max,1}"),
+            ctx.val("K1", "K_1"),
+            ctx.val("Ymax2", "Y_{\\max,2}"),
+            ctx.val("K2", "K_2"),
+        ),
+        "classic_exponential_growth" => {
+            format!("Y = {} \\cdot \\exp({} \\cdot X)", ctx.val("Start", "\\text{Start}"), ctx.val("K", "K"))
+        }
         _ => return None,
     };
     Some(s)
@@ -1144,11 +1226,27 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
                 ctx.val("SD", "\\text{SD}"),
             )
         }
+        "cumulative_gaussian_percent" => {
+            format!("Y = 100 \\cdot \\Phi(\\frac{{X - {}}}{{{}}})", ctx.val("Mean", "\\text{Mean}"), ctx.val("SD", "\\text{SD}"),)
+        }
+        "cumulative_gaussian_fraction" => format!("Y = \\Phi(\\frac{{X - {}}}{{{}}})", ctx.val("Mean", "\\text{Mean}"), ctx.val("SD", "\\text{SD}"),),
+        "cumulative_gaussian_counts" => {
+            format!("Y = {} \\cdot \\Phi(\\frac{{X - {}}}{{{}}})", ctx.val("N", "N"), ctx.val("Mean", "\\text{Mean}"), ctx.val("SD", "\\text{SD}"),)
+        }
         "lorentzian" => format!(
-            "Y = \\frac{{{}}}{{1 + (\\frac{{X - {}}}{{0.5 \\cdot {}}})^{{2}}}}",
+            "Y = \\frac{{{}}}{{1 + (\\frac{{X - {}}}{{{}}})^{{2}}}}",
             ctx.val("Amplitude", "\\text{Amplitude}"),
             ctx.val("Center", "\\text{Center}"),
-            ctx.factor("Width", "\\text{Width}"),
+            ctx.val("Width", "\\text{Width}"),
+        ),
+        "sum_of_two_lorentzians" => format!(
+            "Y = \\frac{{{}}}{{1 + (\\frac{{X - {}}}{{{}}})^{{2}}}} + \\frac{{{}}}{{1 + (\\frac{{X - {}}}{{{}}})^{{2}}}}",
+            ctx.val("Amplitude1", "A_1"),
+            ctx.val("Center1", "c_1"),
+            ctx.val("Width1", "w_1"),
+            ctx.val("Amplitude2", "A_2"),
+            ctx.val("Center2", "c_2"),
+            ctx.val("Width2", "w_2"),
         ),
         "voigt" | "voigt_peak" => format!(
             "Y = {} \\cdot ({} \\cdot \\frac{{1}}{{1 + (\\frac{{X - {}}}{{{}}})^{{2}}}} + (1 - {}) \\cdot \\exp(-\\ln(2) \\cdot (\\frac{{X - {}}}{{{}}})^{{2}}))",
@@ -1169,6 +1267,13 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             )
         }
         "sine_wave" => format!(
+            "Y = {} \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{{}}} + {}) + {}",
+            ctx.val("Amplitude", "\\text{Amplitude}"),
+            ctx.val("Wavelength", "\\text{Wavelength}"),
+            ctx.val("PhaseShift", "\\text{PhaseShift}"),
+            ctx.val("Baseline", "\\text{Baseline}"),
+        ),
+        "classic_sine_wave" => format!(
             "Y = {} + {} \\cdot \\sin(2\\pi \\cdot {} \\cdot X + {})",
             ctx.val("Baseline", "\\text{Baseline}"),
             ctx.val("Amplitude", "\\text{Amplitude}"),
@@ -1182,21 +1287,15 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             ctx.val("PhaseShift", "\\text{PhaseShift}"),
         ),
         "damped_sine_wave" => format!(
-            "Y = {} + {} \\cdot \\exp(-{} \\cdot X) \\cdot \\sin(2\\pi \\cdot {} \\cdot X + {})",
-            ctx.val("Baseline", "\\text{Baseline}"),
+            "Y = {} \\cdot \\exp(-{} \\cdot X) \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{{}}} + {})",
             ctx.val("Amplitude", "\\text{Amplitude}"),
             ctx.val("K", "K"),
-            ctx.factor("Frequency", "\\text{Frequency}"),
+            ctx.val("Wavelength", "\\text{Wavelength}"),
             ctx.val("PhaseShift", "\\text{PhaseShift}"),
         ),
         "sinc_wave" => {
-            let w = ctx.denom("Width", "\\text{Width}");
-            let c = ctx.val("Center", "\\text{Center}");
-            format!(
-                "Y = {} + {} \\cdot \\frac{{\\sin((X - {c}) / {w})}}{{(X - {c}) / {w}}}",
-                ctx.val("Baseline", "\\text{Baseline}"),
-                ctx.val("Amplitude", "\\text{Amplitude}"),
-            )
+            let wl = ctx.denom("Wavelength", "\\text{Wavelength}");
+            format!("Y = {} \\cdot \\frac{{\\sin(2\\pi \\cdot X / {wl})}}{{2\\pi \\cdot X / {wl}}}", ctx.val("Amplitude", "\\text{Amplitude}"),)
         }
         _ => return None,
     };
@@ -1205,8 +1304,10 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
 
 fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
     let s = match id {
-        "straight_line" => format_polynomial_equation_tex(1, false, ctx.params, ctx.substituted, ctx.sig_figs),
+        "horizontal_line" => format!("Y = {}", ctx.val("Mean", "\\text{Mean}")),
+        "straight_line" | "polynomial_1" => format_polynomial_equation_tex(1, false, ctx.params, ctx.substituted, ctx.sig_figs),
         "line_through_origin" => format_polynomial_equation_tex(1, true, ctx.params, ctx.substituted, ctx.sig_figs),
+        "pade_1_1" => format!("Y = \\frac{{{} + {} \\cdot X}}{{1 + {} \\cdot X}}", ctx.val("A0", "A_0"), ctx.val("A1", "A_1"), ctx.val("B1", "B_1"),),
         "two_lines_intersection" => format!(
             "Y = {} + {} \\cdot (X - {})",
             ctx.val("YCross", "Y_{\\text{cross}}"),
@@ -1250,6 +1351,9 @@ fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "logarithmic_curve" => format!("Y = {} \\cdot \\ln(X) + {}", ctx.val("a", "a"), ctx.val("b", "b")),
         "semi_log_line" | "semilog_line" => {
             format!("Y = {} \\cdot \\log(X) + {}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}"))
+        }
+        "semilog_x_lin_y_log" => {
+            format!("Y = 10^{{{} \\cdot X + {}}}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}"))
         }
         "log_log_line" | "loglog_line" => {
             format!("Y = 10^{{{} \\cdot \\log(X) + {}}}", ctx.val("Slope", "\\text{Slope}"), ctx.val("LogYIntercept", "\\text{LogYIntercept}"))
@@ -1371,22 +1475,6 @@ impl OdeLhsKind {
     }
 }
 
-#[derive(Clone, Debug)]
-enum DslRawStmt<'a> {
-    OdeDerivative { lhs: OdeLhsKind, rhs: &'a str },
-    OdeInitialOrLocal { lhs_trim: &'a str, rhs: &'a str },
-    ExplicitY { rhs: &'a str },
-    Local { name: &'a str, rhs: &'a str },
-    Implicit { lhs: &'a str, rhs: &'a str },
-    Bare { expr: &'a str },
-}
-
-impl DslRawStmt<'_> {
-    fn is_output(&self) -> bool {
-        matches!(self, Self::OdeDerivative { .. } | Self::ExplicitY { .. } | Self::Implicit { .. } | Self::Bare { .. })
-    }
-}
-
 fn format_custom_dsl_tex(src: &str, params: &[(String, f64)], data_set_index: Option<usize>, substituted: bool, sig_figs: usize) -> String {
     if src.len() > MAX_DSL_SOURCE_BYTES {
         return "Y = f_{\\text{custom}}(X)".to_string();
@@ -1401,31 +1489,45 @@ fn format_custom_dsl_tex(src: &str, params: &[(String, f64)], data_set_index: Op
     normalize_tex_signs(&tex)
 }
 
-struct SelectedDslScript<'a> {
-    locals: Vec<(&'a str, &'a str)>,
-    target: DslRawStmt<'a>,
+struct SelectedDslScript {
+    locals: Vec<(String, String)>,
+    target: DslRawStmtOwned,
 }
 
-fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<SelectedDslScript<'_>> {
-    let mut parsed: Vec<(DatasetFilter, DslRawStmt<'_>)> = Vec::new();
+#[derive(Clone, Debug)]
+enum DslRawStmtOwned {
+    OdeDerivative { lhs: OdeLhsKind, rhs: String },
+    OdeInitialOrLocal { lhs_trim: String, rhs: String },
+    ExplicitY { rhs: String },
+    Local { name: String, rhs: String },
+    Implicit { lhs: String, rhs: String },
+    Bare { expr: String },
+}
+
+impl DslRawStmtOwned {
+    fn is_output(&self) -> bool {
+        matches!(self, Self::OdeDerivative { .. } | Self::ExplicitY { .. } | Self::Implicit { .. } | Self::Bare { .. })
+    }
+}
+
+fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<SelectedDslScript> {
+    let logical_lines = join_continued_lines(src).ok()?;
+    let mut parsed: Vec<(DatasetFilter, DslRawStmtOwned)> = Vec::new();
     let mut total_dataset_indices = 0_usize;
     let mut in_equation = true;
-    for (idx, raw_line) in src.lines().enumerate() {
-        if idx >= MAX_DSL_LINES {
-            break;
-        }
+    for (line_no, raw_line) in &logical_lines {
         let stripped = strip_dsl_comment(raw_line).trim();
         if stripped.is_empty() {
             continue;
         }
         if stripped.starts_with('[') && stripped.ends_with(']') {
-            in_equation = matches!(parse_section_header(stripped, idx + 1), Ok(Some(DslSection::Equation)));
+            in_equation = matches!(parse_section_header(stripped, *line_no), Ok(Some(DslSection::Equation)));
             continue;
         }
         if !in_equation {
             continue;
         }
-        let (filter, body) = parse_dataset_prefix(stripped, idx + 1).unwrap_or((DatasetFilter::Any, stripped));
+        let (filter, body) = parse_dataset_prefix(stripped, *line_no).unwrap_or((DatasetFilter::Any, stripped));
         let filter_len = match &filter {
             DatasetFilter::Any => 0,
             DatasetFilter::Include(v) | DatasetFilter::Exclude(v) => v.len(),
@@ -1444,7 +1546,7 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
         return None;
     }
 
-    let has_ode = parsed.iter().any(|(_, st)| matches!(st, DslRawStmt::OdeDerivative { .. }));
+    let has_ode = parsed.iter().any(|(_, st)| matches!(st, DslRawStmtOwned::OdeDerivative { .. }));
     let target_ds = data_set_index.unwrap_or(0);
 
     let chosen_idx = pick_target_stmt_index(&parsed, target_ds)?;
@@ -1467,9 +1569,9 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
             continue;
         }
         match stmt {
-            DslRawStmt::Local { name, rhs } => locals.push((*name, *rhs)),
-            DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } if !has_ode && is_valid_ident(lhs_trim) => {
-                locals.push((*lhs_trim, *rhs));
+            DslRawStmtOwned::Local { name, rhs } => locals.push((name.clone(), rhs.clone())),
+            DslRawStmtOwned::OdeInitialOrLocal { lhs_trim, rhs } if !has_ode && is_valid_ident(lhs_trim) => {
+                locals.push((lhs_trim.clone(), rhs.clone()));
             }
             _ => {}
         }
@@ -1478,7 +1580,7 @@ fn select_dsl_script(src: &str, data_set_index: Option<usize>) -> Option<Selecte
     Some(SelectedDslScript { locals, target: parsed[chosen_idx].1.clone() })
 }
 
-fn pick_target_stmt_index(parsed: &[(DatasetFilter, DslRawStmt<'_>)], target_ds: usize) -> Option<usize> {
+fn pick_target_stmt_index(parsed: &[(DatasetFilter, DslRawStmtOwned)], target_ds: usize) -> Option<usize> {
     let scoped_match = parsed.iter().rposition(|(f, st)| st.is_output() && *f != DatasetFilter::Any && f.matches(target_ds));
     if scoped_match.is_some() {
         return scoped_match;
@@ -1490,23 +1592,25 @@ fn pick_target_stmt_index(parsed: &[(DatasetFilter, DslRawStmt<'_>)], target_ds:
     parsed.iter().rposition(|(_, st)| st.is_output()).or_else(|| parsed.len().checked_sub(1))
 }
 
-fn classify_dsl_line(line: &str) -> DslRawStmt<'_> {
+fn classify_dsl_line(line: &str) -> DslRawStmtOwned {
     let Some((lhs_raw, rhs_raw)) = split_top_level_assignment(line) else {
-        return DslRawStmt::Bare { expr: line.trim() };
+        return DslRawStmtOwned::Bare { expr: line.trim().to_owned() };
     };
     let lhs_trim = lhs_raw.trim();
     let rhs_trim = rhs_raw.trim();
     let lhs_compact: String = lhs_trim.chars().filter(|c| !c.is_whitespace()).collect();
     let lhs_upper = lhs_compact.to_ascii_uppercase();
     match lhs_upper.as_str() {
-        "DY/DX" | "D(Y,X)" => DslRawStmt::OdeDerivative { lhs: OdeLhsKind::DyDx, rhs: rhs_trim },
-        "DY/DT" | "D(Y,T)" => DslRawStmt::OdeDerivative { lhs: OdeLhsKind::DyDt, rhs: rhs_trim },
-        "Y'" => DslRawStmt::OdeDerivative { lhs: OdeLhsKind::YPrime, rhs: rhs_trim },
-        "Y" => DslRawStmt::ExplicitY { rhs: rhs_trim },
-        "Y0" => DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs: rhs_trim },
-        _ if lhs_upper.starts_with("Y(") && lhs_upper.ends_with(')') => DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs: rhs_trim },
-        _ if is_valid_ident(lhs_trim) => DslRawStmt::Local { name: lhs_trim, rhs: rhs_trim },
-        _ => DslRawStmt::Implicit { lhs: lhs_trim, rhs: rhs_trim },
+        "DY/DX" | "D(Y,X)" => DslRawStmtOwned::OdeDerivative { lhs: OdeLhsKind::DyDx, rhs: rhs_trim.to_owned() },
+        "DY/DT" | "D(Y,T)" => DslRawStmtOwned::OdeDerivative { lhs: OdeLhsKind::DyDt, rhs: rhs_trim.to_owned() },
+        "Y'" | "Y'(X)" | "Y'(T)" => DslRawStmtOwned::OdeDerivative { lhs: OdeLhsKind::YPrime, rhs: rhs_trim.to_owned() },
+        "Y" => DslRawStmtOwned::ExplicitY { rhs: rhs_trim.to_owned() },
+        "Y0" => DslRawStmtOwned::OdeInitialOrLocal { lhs_trim: lhs_trim.to_owned(), rhs: rhs_trim.to_owned() },
+        _ if (lhs_upper.starts_with("Y(") && lhs_upper.ends_with(')')) || (lhs_upper.starts_with("Y[") && lhs_upper.ends_with(']')) => {
+            DslRawStmtOwned::OdeInitialOrLocal { lhs_trim: lhs_trim.to_owned(), rhs: rhs_trim.to_owned() }
+        }
+        _ if is_valid_ident(lhs_trim) => DslRawStmtOwned::Local { name: lhs_trim.to_owned(), rhs: rhs_trim.to_owned() },
+        _ => DslRawStmtOwned::Implicit { lhs: lhs_trim.to_owned(), rhs: rhs_trim.to_owned() },
     }
 }
 
@@ -1529,36 +1633,36 @@ struct DslRenderEnv<'a> {
     can_inline: bool,
 }
 
-fn render_selected_dsl_script(script: &SelectedDslScript<'_>, ctx: &EqCtx<'_>) -> String {
+fn render_selected_dsl_script(script: &SelectedDslScript, ctx: &EqCtx<'_>) -> String {
     let mut env: HashMap<String, (Expr, usize)> = HashMap::new();
     let mut shadowed: HashSet<&str> = HashSet::new();
     let mut parsed_locals: Vec<(&str, &str, Option<Expr>)> = Vec::with_capacity(script.locals.len());
     let mut all_locals_parsed = true;
 
-    for &(name, rhs_src) in &script.locals {
+    for (name, rhs_src) in &script.locals {
         if let Some(raw_expr) = parse_algebraic_expr(rhs_src) {
             if let Some(resolved) = inline_locals_iterative(&raw_expr, &env, MAX_DSL_INLINED_NODES) {
-                env.insert(name.to_string(), resolved);
-                shadowed.insert(name);
+                env.insert(name.clone(), resolved);
+                shadowed.insert(name.as_str());
             } else {
                 all_locals_parsed = false;
             }
-            parsed_locals.push((name, rhs_src, Some(raw_expr)));
+            parsed_locals.push((name.as_str(), rhs_src.as_str(), Some(raw_expr)));
         } else {
             all_locals_parsed = false;
-            parsed_locals.push((name, rhs_src, None));
+            parsed_locals.push((name.as_str(), rhs_src.as_str(), None));
         }
     }
 
     let render_env = DslRenderEnv { can_inline: all_locals_parsed && !env.is_empty(), env, shadowed, parsed_locals };
 
     match &script.target {
-        DslRawStmt::ExplicitY { rhs } => render_lhs_rhs_dsl("Y", None, rhs, &render_env, ctx),
-        DslRawStmt::OdeDerivative { lhs, rhs } => render_lhs_rhs_dsl(lhs.to_tex(), None, rhs, &render_env, ctx),
-        DslRawStmt::OdeInitialOrLocal { lhs_trim, rhs } => render_lhs_rhs_dsl(&tex_ident(lhs_trim), None, rhs, &render_env, ctx),
-        DslRawStmt::Local { name, rhs } => render_lhs_rhs_dsl(&tex_ident(name), None, rhs, &render_env, ctx),
-        DslRawStmt::Implicit { lhs, rhs } => render_lhs_rhs_dsl("", Some(lhs), rhs, &render_env, ctx),
-        DslRawStmt::Bare { expr } => {
+        DslRawStmtOwned::ExplicitY { rhs } => render_lhs_rhs_dsl("Y", None, rhs, &render_env, ctx),
+        DslRawStmtOwned::OdeDerivative { lhs, rhs } => render_lhs_rhs_dsl(lhs.to_tex(), None, rhs, &render_env, ctx),
+        DslRawStmtOwned::OdeInitialOrLocal { lhs_trim, rhs } => render_lhs_rhs_dsl(&tex_ident(lhs_trim), None, rhs, &render_env, ctx),
+        DslRawStmtOwned::Local { name, rhs } => render_lhs_rhs_dsl(&tex_ident(name), None, rhs, &render_env, ctx),
+        DslRawStmtOwned::Implicit { lhs, rhs } => render_lhs_rhs_dsl("", Some(lhs), rhs, &render_env, ctx),
+        DslRawStmtOwned::Bare { expr } => {
             if let Some(raw_rhs) = parse_algebraic_expr(expr) {
                 if render_env.can_inline
                     && let Some((inlined_rhs, _)) = inline_locals_iterative(&raw_rhs, &render_env.env, MAX_DSL_INLINED_NODES)

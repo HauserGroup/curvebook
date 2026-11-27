@@ -42,6 +42,7 @@ fn glm_kind(family: GlmFamily, compute_vif: bool, predictors: Vec<usize>) -> Ana
         predictor_columns: predictors,
         reference_levels: Vec::new(),
         compute_vif,
+        ..Default::default()
     })
 }
 
@@ -78,6 +79,14 @@ fn wf39_cox_categorical_reference_levels_aic_covariance_and_breslow_overlays() {
             predictor_columns: vec![2, 3],
             reference_levels: refs,
             tie_method: CoxTieMethod::Breslow,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: Default::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: Default::default(),
         })
     };
     let res_low = run_kind(&sheet, cox_kind(vec![(2, String::from("LowDose"))])).unwrap();

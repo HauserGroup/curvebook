@@ -30,6 +30,14 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
         GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot) => diagnostics::compile_forest_plot(graph, doc, scene),
         GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot) => diagnostics::compile_residual_plot(graph, doc, scene),
         GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot) => diagnostics::compile_normal_qq_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::HomoscedasticityPlot) => diagnostics::compile_homoscedasticity_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ActualVsPredictedPlot) => diagnostics::compile_actual_vs_predicted_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ResidualVsRowPlot) => diagnostics::compile_residual_vs_row_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot) => diagnostics::compile_gap_statistic_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap) => {
+            diagnostics::compile_parameter_correlation_heatmap(graph, doc, scene)
+        }
+        GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => diagnostics::compile_lognormal_qq_plot(graph, doc, scene),
         _ => {
             scene.warnings.push(ChartWarning::new("unexpected_graph_kind", "non-multivariate graph kind dispatched"));
             draw_empty_open_frame(scene);

@@ -388,6 +388,7 @@ fn volcano_plot_consumes_multiple_row_t_tests_result_sheet() -> TestResult {
         nonparametric: false,
         assume_equal_sd: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::BenjaminiHochbergFdr, threshold: 0.05, report_confidence_intervals: false },
+        ..Default::default()
     };
     let an_spec = AnalysisSpec::new(SheetId::new("mr-res"), ds.id.clone(), AnalysisKind::MultipleRowTTests(mr_spec))?;
     let mut mr_res = run_multiple_row_t_tests_analysis(&ds, &an_spec, &mr_spec)?;

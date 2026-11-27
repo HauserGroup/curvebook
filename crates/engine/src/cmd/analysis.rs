@@ -3,15 +3,17 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisDomainKind, AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, CellValue, ChecklistStatus,
-    ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError,
-    ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphSheet, HookSource, KappaWeighting, LeveneCenter,
-    LeveneTestSpec, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec,
+    AnalysisDomainKind, AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineOperation, BlandAltmanSpec,
+    CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusOp,
+    CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod,
+    FractionOfTotalSpec, GlmFamily, GlmSpec, GraphSheet, HookSource, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec,
+    LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
     MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec,
-    PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec,
-    SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
-    TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign,
+    ResultSheet, ResultStatus, RocCiMethod, RocSpec, RowStatisticsSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
+    SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TableKind, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -31,6 +33,7 @@ use super::params::{
 use super::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
 use crate::dag;
 use crate::methods_report::{ReportFormat, ReportScope, generate_methods_report_with_scope};
+use crate::services::{SaveUserEquationRequest, UserEquationLibrary, clone_builtin_equation_template};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +189,61 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: schema_stats_pvalue_stack,
         enabled: has_analyzable_data_sheet,
         run: run_stats_pvalue_stack,
+    },
+    {
+        id: "fit.listUserEquations",
+        label: "List User Equations",
+        menu_path: "Analyze/User Equations/List",
+        summary: "List saved custom DSL equations.",
+        beginner: "Lists all custom curve-fitting equations saved in the local user equation library.",
+        effects: Effects::READS_FILESYSTEM.with(Effects::IDEMPOTENT),
+        input_schema: schema_user_equation_list,
+        enabled: always_enabled,
+        run: run_fit_list_user_equations,
+    },
+    {
+        id: "fit.getUserEquation",
+        label: "Get User Equation",
+        menu_path: "Analyze/User Equations/Get",
+        summary: "Get a saved custom DSL equation by ID.",
+        beginner: "Fetches the DSL source, parameter names, and metadata for one saved user equation.",
+        effects: Effects::READS_FILESYSTEM.with(Effects::IDEMPOTENT),
+        input_schema: schema_user_equation_id_only,
+        enabled: always_enabled,
+        run: run_fit_get_user_equation,
+    },
+    {
+        id: "fit.saveUserEquation",
+        label: "Save User Equation",
+        menu_path: "Analyze/User Equations/Save...",
+        summary: "Validate and atomically save a custom DSL equation.",
+        beginner: "Compiles and saves a custom curve-fitting equation for reuse across projects.",
+        effects: EXPORT_EFFECTS,
+        input_schema: schema_user_equation_save,
+        enabled: always_enabled,
+        run: run_fit_save_user_equation,
+    },
+    {
+        id: "fit.deleteUserEquation",
+        label: "Delete User Equation",
+        menu_path: "Analyze/User Equations/Delete",
+        summary: "Delete a saved custom equation by ID.",
+        beginner: "Deletes a custom equation from the local user equation library.",
+        effects: EXPORT_EFFECTS,
+        input_schema: schema_user_equation_id_only,
+        enabled: always_enabled,
+        run: run_fit_delete_user_equation,
+    },
+    {
+        id: "fit.cloneBuiltinEquation",
+        label: "Clone Built-in Equation",
+        menu_path: "Analyze/User Equations/Clone Built-in...",
+        summary: "Clone a built-in equation into an editable DSL template.",
+        beginner: "Generates editable DSL source (with constraints and transforms) from any built-in curve-fitting equation.",
+        effects: EXPORT_EFFECTS,
+        input_schema: schema_user_equation_clone_builtin,
+        enabled: always_enabled,
+        run: run_fit_clone_builtin_equation,
     },
 );
 
@@ -350,6 +408,43 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
             nullable_schema(str_schema("REML residual covariance structure for repeated-measures ANOVA (`compound_symmetry`, `unstructured`)")),
         ));
         props.push(("df_method", nullable_schema(str_schema("REML denominator degrees-of-freedom method (`kenward_roger`, `satterthwaite`)"))));
+        props.push(("lognormal_mode", nullable_schema(str_schema("Row-wise lognormal mode (`none`, `lognormal`, `ratio_paired`)"))));
+        props.push(("normality_only", nullable_schema(bool_schema("Run normality/lognormality battery and relative likelihood only"))));
+        props.push(("emit_qq_tabs", nullable_schema(bool_schema("Emit normal and lognormal Q-Q coordinate tabs"))));
+        props.push((
+            "sphericity_correction",
+            nullable_schema(str_schema("RM ANOVA sphericity adjustment (`none`, `greenhouse_geisser`, `huynh_feldt`)")),
+        ));
+        props.push((
+            "reml_zero_variance_policy",
+            nullable_schema(str_schema("REML zero-variance handling (`bound_at_zero`, `drop_zero_random_term`, `unbounded`, `legacy_fallback`)")),
+        ));
+        props.push(("consensus_optimal_k", nullable_schema(bool_schema("Evaluate 17-index consensus optimal-k suite with Gap statistic"))));
+        props.push(("kmeans_algorithm", nullable_schema(str_schema("K-means algorithm (`lloyd`, `hartigan_wong`, `macqueen`)"))));
+        props.push(("cluster_direction", nullable_schema(str_schema("Hierarchical clustering direction (`rows`, `columns`, `both`)"))));
+        props.push(("retention_rule", nullable_schema(any_json_schema("PCA component retention rule"))));
+        props.push(("survival_method", nullable_schema(str_schema("Log-rank survival power formula (`schoenfeld`, `freedman`)"))));
+        props.push(("seed", nullable_schema(int_schema("Deterministic PRNG seed", Some(0), None))));
+        props.push((
+            "iterations",
+            nullable_schema(int_schema("Monte Carlo iteration count (1..=100000)", Some(1), Some(MonteCarloSpec::MAX_ITERATIONS as i64))),
+        ));
+        props.push((
+            "downstream_result_sheet_id",
+            nullable_schema(non_empty_str_schema("Downstream ResultSheet ID re-evaluated per Monte Carlo iteration")),
+        ));
+        props.push((
+            "tracked_scalars",
+            nullable_schema(array_schema("Tracked downstream scalars for Monte Carlo simulation", json!({ "type": "object" }), None, None)),
+        ));
+        props.push((
+            "hit_rules",
+            nullable_schema(array_schema("Conjunction hit predicates for Monte Carlo simulation", json!({ "type": "object" }), None, None)),
+        ));
+        props.push((
+            "exclude_flagged_fits",
+            nullable_schema(bool_schema("Exclude flagged, ambiguous, or non-converged fits from Monte Carlo summaries")),
+        ));
     }
     if include_fit_extras {
         props.push(("equation_id", nullable_schema(non_empty_str_schema(
@@ -440,7 +535,26 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
         ));
         props.push((
             "fit_flag_rules",
-            nullable_schema(any_json_schema("Automated 6-rule fit-quality flag criteria (`min_r_squared`, `min_observations`, `max_dependency`, `min_normality_p`, `min_runs_or_lof_p`, `max_rout_outliers`)")),
+            nullable_schema(any_json_schema("Automated 6-rule fit-quality flag criteria (`min_r_squared`, `min_observations`, `max_dependency`, `min_normality_p`, `min_runs_or_lof_p`, `max_rout_outliers`, `exclude_flagged_from_summary`)")),
+        ));
+        props.push((
+            "relational_constraints",
+            nullable_schema(array_schema(
+                "Relational parameter inequality constraints (e.g. `KFast > KSlow`)",
+                json!({ "type": "object" }),
+                None,
+                None,
+            )),
+        ));
+        props.push((
+            "plot_distribution",
+            nullable_schema(any_json_schema(
+                "Theoretical probability distribution plot specification (`Normal`, `StudentT`, `FisherF`, `ChiSquare`, `Binomial`, `Poisson`)",
+            )),
+        ));
+        props.push((
+            "emit_extra_gof",
+            nullable_schema(bool_schema("Emit extended goodness-of-fit metrics (Adjusted R^2, Weighted R^2, RMSE, Poisson GOF)")),
         ));
     }
     obj_schema(props, &[], true)
@@ -448,7 +562,7 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
 
 fn schema_transform_run() -> Value {
     let mut schema = schema_analysis_base(
-        "Transform kind (`math`, `normalize`, `remove_baseline`, `transpose`, `prune_rows`, `select_and_transform`, `simulate`, `random_sample`) or typed object",
+        "Transform kind (`math`, `normalize`, `remove_baseline`, `transpose`, `prune_rows`, `select_and_transform`, `simulate`, `random_sample`, `row_statistics`, `fraction_of_total`, `curve_calculus`, `auc`, `fit_spline_lowess`) or typed object",
         false,
         false,
     );
@@ -461,13 +575,32 @@ fn schema_transform_run() -> Value {
             String::from("graph_sheet_id"),
             nullable_schema(non_empty_str_schema("Optional explicit GraphSheet ID created when `create_graph` is true")),
         );
+        props.insert(
+            String::from("summary"),
+            nullable_schema(str_schema("RowStatistics summary kind (e.g. `mean_sd`, `mean_ci`, `median_quartiles`, `geometric_mean_sd`)")),
+        );
+        props.insert(
+            String::from("upper_percentile"),
+            nullable_schema(num_schema("Upper percentile in (50, 100) for `median_percentiles`", Some(50.0), Some(100.0))),
+        );
+        props.insert(
+            String::from("denominator"),
+            nullable_schema(str_schema("FractionOfTotal denominator (`column_total`, `row_total`, `grand_total`, `all_three`)")),
+        );
+        props.insert(String::from("output_percent"), nullable_schema(bool_schema("Output percentages (0..100) rather than unit fractions (0..1)")));
+        props.insert(String::from("ci_method"), nullable_schema(str_schema("Binomial proportion CI method (`none`, `wilson`, `clopper_pearson`)")));
+        props.insert(String::from("operation"), nullable_schema(any_json_schema("Baseline operation or CurveCalculusOp (`first_derivative`, `second_derivative`, `CumulativeIntegral`, `SmoothSavitzkyGolay`, `SmoothMovingAverage`, `SmoothLowess`)")));
+        props.insert(
+            String::from("simulation_mode"),
+            nullable_schema(any_json_schema("Simulation target mode (`XyCurve`, `Contingency2x2`, or `Column`)")),
+        );
     }
     schema
 }
 
 fn schema_stats_run() -> Value {
     schema_analysis_base(
-        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `rout`, `grubbs`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
+        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `rout`, `grubbs`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
         false,
         true,
     )
@@ -646,6 +779,220 @@ fn schema_result_generate_report() -> Value {
     )
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserEquationListParams {
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+fn schema_user_equation_list() -> Value {
+    obj_schema(
+        vec![("dir", nullable_schema(non_empty_str_schema("Optional config directory override (defaults to CURVEBOOK_CONFIG_DIR)")))],
+        &[],
+        false,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserEquationIdParams {
+    id: String,
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+fn schema_user_equation_id_only() -> Value {
+    obj_schema(
+        vec![
+            ("id", non_empty_str_schema("User equation identifier slug")),
+            ("dir", nullable_schema(non_empty_str_schema("Optional config directory override (defaults to CURVEBOOK_CONFIG_DIR)"))),
+        ],
+        &["id"],
+        false,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserEquationSaveParams {
+    id: String,
+    name: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    dsl_source: String,
+    #[serde(default)]
+    cloned_from_builtin: Option<String>,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+fn schema_user_equation_save() -> Value {
+    obj_schema(
+        vec![
+            ("id", non_empty_str_schema("Canonical user equation identifier slug (letters, digits, `_`, `-`)")),
+            ("name", non_empty_str_schema("Human-readable equation display name")),
+            ("category", nullable_schema(non_empty_str_schema("Optional equation category label"))),
+            ("description", nullable_schema(str_schema("Optional equation description or citation notes"))),
+            ("dsl_source", non_empty_str_schema("Custom equation DSL source (supports `[InitialValues]`, `[Constraints]`, `[Transforms]`)")),
+            ("cloned_from_builtin", nullable_schema(non_empty_str_schema("Optional source built-in equation ID"))),
+            ("overwrite", nullable_schema(bool_schema("Replace an existing user equation with the same ID (default false)"))),
+            ("dir", nullable_schema(non_empty_str_schema("Optional config directory override (defaults to CURVEBOOK_CONFIG_DIR)"))),
+        ],
+        &["id", "name", "dsl_source"],
+        false,
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UserEquationCloneBuiltinParams {
+    builtin_id: String,
+    #[serde(default)]
+    new_id: Option<String>,
+    #[serde(default)]
+    new_name: Option<String>,
+    #[serde(default)]
+    save: Option<bool>,
+    #[serde(default)]
+    overwrite: Option<bool>,
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+fn schema_user_equation_clone_builtin() -> Value {
+    obj_schema(
+        vec![
+            ("builtin_id", non_empty_str_schema("Canonical built-in equation ID or alias to clone")),
+            ("new_id", nullable_schema(non_empty_str_schema("Optional custom equation ID (defaults to `<builtin_id>_custom`)"))),
+            ("new_name", nullable_schema(non_empty_str_schema("Optional display name (defaults to `<Built-in Name> (Custom)`)"))),
+            ("save", nullable_schema(bool_schema("Persist cloned equation into the user equation library immediately (default true)"))),
+            ("overwrite", nullable_schema(bool_schema("Overwrite existing user equation with the same ID when `save` is true (default false)"))),
+            ("dir", nullable_schema(non_empty_str_schema("Optional config directory override (defaults to CURVEBOOK_CONFIG_DIR)"))),
+        ],
+        &["builtin_id"],
+        false,
+    )
+}
+
+fn resolve_user_equation_library(policy: &ExternalPathPolicy, dir_override: Option<&str>) -> Result<UserEquationLibrary, EngineError> {
+    if let Some(raw_dir) = dir_override {
+        let resolved = policy.resolve_target_path(raw_dir, "user equation library directory")?;
+        return Ok(UserEquationLibrary::new(resolved));
+    }
+    match policy {
+        ExternalPathPolicy::RejectExternal => Err(EngineError::with_code(
+            ErrorCode::PathEscape,
+            "external filesystem access to the user equation library is disabled by session path policy",
+        )),
+        #[cfg(not(target_arch = "wasm32"))]
+        ExternalPathPolicy::Workdir(guard) => Ok(UserEquationLibrary::new(guard.canonical_root().to_path_buf())),
+        ExternalPathPolicy::Unconstrained => UserEquationLibrary::open_default(),
+    }
+}
+
+fn run_fit_list_user_equations(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let params: UserEquationListParams = parse_params(&schema_user_equation_list(), raw)?;
+    let lib = resolve_user_equation_library(&ctx.session.path_policy, params.dir.as_deref())?;
+    let equations = lib.list()?;
+    Ok(CommandOutcome::read_only(
+        "fit.listUserEquations",
+        format!("listed {} user equation(s)", equations.len()),
+        json!({
+            "count": equations.len(),
+            "store_path": lib.store_path().to_string_lossy(),
+            "equations": equations,
+        }),
+    ))
+}
+
+fn run_fit_get_user_equation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let params: UserEquationIdParams = parse_params(&schema_user_equation_id_only(), raw)?;
+    let lib = resolve_user_equation_library(&ctx.session.path_policy, params.dir.as_deref())?;
+    let entry = lib.get(&params.id)?.ok_or_else(|| {
+        EngineError::with_code(ErrorCode::NotFound, format!("user equation `{}` not found", params.id))
+            .with_remediation("List saved equations with `fit.listUserEquations` or save one with `fit.saveUserEquation`.")
+    })?;
+    Ok(CommandOutcome::read_only(
+        "fit.getUserEquation",
+        format!("loaded user equation `{}`", entry.id),
+        json!({
+            "equation": entry,
+            "store_path": lib.store_path().to_string_lossy(),
+        }),
+    ))
+}
+
+fn run_fit_save_user_equation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let params: UserEquationSaveParams = parse_params(&schema_user_equation_save(), raw)?;
+    let lib = resolve_user_equation_library(&ctx.session.path_policy, params.dir.as_deref())?;
+    let entry = lib.save(SaveUserEquationRequest {
+        id: params.id,
+        name: params.name,
+        category: params.category,
+        description: params.description,
+        dsl_source: params.dsl_source,
+        cloned_from_builtin: params.cloned_from_builtin,
+        overwrite: params.overwrite.unwrap_or(false),
+    })?;
+    Ok(CommandOutcome::read_only(
+        "fit.saveUserEquation",
+        format!("saved user equation `{}`", entry.id),
+        json!({
+            "equation": entry,
+            "store_path": lib.store_path().to_string_lossy(),
+        }),
+    ))
+}
+
+fn run_fit_delete_user_equation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let params: UserEquationIdParams = parse_params(&schema_user_equation_id_only(), raw)?;
+    let lib = resolve_user_equation_library(&ctx.session.path_policy, params.dir.as_deref())?;
+    let deleted = lib.delete(&params.id)?;
+    Ok(CommandOutcome::read_only(
+        "fit.deleteUserEquation",
+        if deleted { format!("deleted user equation `{}`", params.id) } else { format!("user equation `{}` was not present", params.id) },
+        json!({
+            "id": params.id,
+            "deleted": deleted,
+            "store_path": lib.store_path().to_string_lossy(),
+        }),
+    ))
+}
+
+fn run_fit_clone_builtin_equation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let params: UserEquationCloneBuiltinParams = parse_params(&schema_user_equation_clone_builtin(), raw)?;
+    let should_save = params.save.unwrap_or(true);
+    if should_save {
+        let lib = resolve_user_equation_library(&ctx.session.path_policy, params.dir.as_deref())?;
+        let entry =
+            lib.clone_builtin_and_save(&params.builtin_id, params.new_id.as_deref(), params.new_name.as_deref(), params.overwrite.unwrap_or(false))?;
+        Ok(CommandOutcome::read_only(
+            "fit.cloneBuiltinEquation",
+            format!("cloned built-in equation `{}` into user equation `{}`", params.builtin_id, entry.id),
+            json!({
+                "saved": true,
+                "equation": entry,
+                "store_path": lib.store_path().to_string_lossy(),
+            }),
+        ))
+    } else {
+        let entry = clone_builtin_equation_template(&params.builtin_id, params.new_id.as_deref(), params.new_name.as_deref())?;
+        Ok(CommandOutcome::read_only(
+            "fit.cloneBuiltinEquation",
+            format!("generated editable DSL template for built-in equation `{}`", params.builtin_id),
+            json!({
+                "saved": false,
+                "equation": entry,
+            }),
+        ))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Command Runners
 // ---------------------------------------------------------------------------
@@ -811,7 +1158,8 @@ fn run_analysis_with_domain(
 
     validate_transform_graph_params(command_id, &parsed)?;
     let combined = params_to_combined_value(&parsed);
-    let spec = build_analysis_spec(doc, &parsed, &combined, domain)?;
+    let path_policy = ctx.session.path_policy.clone();
+    let spec = build_analysis_spec(doc, &path_policy, &parsed, &combined, domain)?;
     let sheet_id = spec.id.clone();
     let overwrite = parsed.overwrite.unwrap_or(false);
     let wants_create_graph = command_id == "transform.run" && parsed.create_graph.unwrap_or(false);
@@ -950,6 +1298,9 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
 
     let cleaned_patch_map = extract_clean_patch_map(&mut updated, parsed.params.as_ref())?;
     let cleaned_patch_val = cleaned_patch_map.as_ref().map(|m| Value::Object(m.clone()));
+    let explicit_eq_id_patch = parsed.extra.contains_key("equation_id") || cleaned_patch_map.as_ref().is_some_and(|m| m.contains_key("equation_id"));
+    let explicit_custom_dsl_patch =
+        parsed.extra.contains_key("custom_dsl") || cleaned_patch_map.as_ref().is_some_and(|m| m.contains_key("custom_dsl"));
 
     let kind_replaced = parsed.kind.is_some();
     if let Some(ref kind_val) = parsed.kind {
@@ -961,12 +1312,13 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`kind` must be string or object"))?
                 .trim()
                 .to_ascii_lowercase();
-            resolve_kind_shorthand(&name, &combined, Some(source_ds_initial))?
+            resolve_kind_shorthand(&name, &combined, Some(source_ds_initial), &ctx.session.path_policy)?
         };
         apply_kind_patch_and_overrides(&mut new_kind, &combined)?;
         if let Some(ref patch_val) = cleaned_patch_val {
             apply_kind_patch_and_overrides(&mut new_kind, patch_val)?;
         }
+        reconcile_updated_nonlinear_equation_id(&mut new_kind, explicit_eq_id_patch, explicit_custom_dsl_patch, &ctx.session.path_policy);
         updated.update_kind(new_kind);
     } else {
         let mut kind_copy = updated.kind.clone();
@@ -974,6 +1326,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         if let Some(ref patch_val) = cleaned_patch_val {
             apply_kind_patch_and_overrides(&mut kind_copy, patch_val)?;
         }
+        reconcile_updated_nonlinear_equation_id(&mut kind_copy, explicit_eq_id_patch, explicit_custom_dsl_patch, &ctx.session.path_policy);
         updated.update_kind(kind_copy);
     }
 
@@ -1219,6 +1572,28 @@ fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     )
 }
 
+fn reconcile_updated_nonlinear_equation_id(
+    kind: &mut AnalysisKind,
+    explicit_eq_id_patch: bool,
+    explicit_custom_dsl_patch: bool,
+    path_policy: &ExternalPathPolicy,
+) {
+    if !explicit_eq_id_patch || explicit_custom_dsl_patch {
+        return;
+    }
+    let AnalysisKind::NonlinearRegression(nl) = kind else {
+        return;
+    };
+    if get_builtin_model(&nl.equation_id).is_some() {
+        nl.custom_dsl = None;
+    } else if let Some(user_eq) = resolve_user_equation_library(path_policy, None).ok().and_then(|lib| lib.get(&nl.equation_id).ok()).flatten() {
+        nl.equation_id = user_eq.id;
+        nl.custom_dsl = Some(user_eq.dsl_source);
+    } else {
+        nl.custom_dsl = None;
+    }
+}
+
 fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
     match &res.status {
         ResultStatus::Failed { code, message } => {
@@ -1362,6 +1737,22 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
             obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
         }
     }
+    if let AnalysisKind::MonteCarloSimulation(_) = &res.analysis.kind
+        && let Some(obj) = payload.as_object_mut()
+    {
+        for (field, key) in [
+            ("iterations", "Iterations"),
+            ("retained_iterations", "RetainedIterations"),
+            ("excluded_iterations", "ExcludedIterations"),
+            ("hits", "Hits"),
+            ("not_hits", "NotHits"),
+            ("hit_rate", "HitRate"),
+        ] {
+            if let Some(val) = res.lookup_scalar(key, None) {
+                obj.insert(String::from(field), json!(val));
+            }
+        }
+    }
     payload
 }
 
@@ -1453,6 +1844,7 @@ fn try_raw_analysis_spec(
 
 fn build_analysis_spec(
     doc: &ProjectDocument,
+    path_policy: &ExternalPathPolicy,
     parsed: &RunAnalysisParams,
     combined: &Value,
     domain: AnalysisDomain,
@@ -1473,7 +1865,7 @@ fn build_analysis_spec(
             None => next_unique_sheet_id(doc, domain_prefix(domain))?,
         };
 
-        let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, &parsed.extra, domain, source_ds)?;
+        let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, &parsed.extra, domain, source_ds, path_policy)?;
         validate_domain_and_compat(&kind, domain, table_kind)?;
 
         let mut spec = AnalysisSpec::new(id, source_sheet_id, kind)?;
@@ -1881,7 +2273,7 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
                 return Err(EngineError::with_code(ErrorCode::BadInput, format!("multiple imputation `max_iters` ({max_iters}) must be in 1..=100")));
             }
         }
-        AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, k_sweep_max, .. }) => {
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, k_sweep_max, cut_height, .. }) => {
             if let Some(k) = k_means_k
                 && *k < 2
             {
@@ -1891,6 +2283,78 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
                 && *k_max < 2
             {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`k_sweep_max` must be >= 2"));
+            }
+            if let Some(h) = cut_height
+                && (!h.is_finite() || *h < 0.0)
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`cut_height` must be finite and >= 0"));
+            }
+        }
+        AnalysisKind::GeneralizedLinearModel(glm) => {
+            if let Some(c) = glm.classification_cutoff
+                && (!c.is_finite() || c <= 0.0 || c >= 1.0)
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("GLM `classification_cutoff` ({c}) must lie strictly in (0, 1)")));
+            }
+        }
+        AnalysisKind::RowStatistics(rs) => {
+            if let Some(p) = rs.upper_percentile
+                && (!p.is_finite() || p <= 50.0 || p >= 100.0)
+            {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("RowStatistics `upper_percentile` ({p}) must lie strictly in (50, 100)"),
+                ));
+            }
+        }
+        AnalysisKind::CurveCalculus(cc) => match cc.operation {
+            CurveCalculusOp::FirstDerivative | CurveCalculusOp::SecondDerivative => {}
+            CurveCalculusOp::CumulativeIntegral { baseline } => {
+                if !baseline.is_finite() {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "CurveCalculus `baseline` must be finite"));
+                }
+            }
+            CurveCalculusOp::SmoothSavitzkyGolay { window, order } => {
+                if window < 3 || window.is_multiple_of(2) || order >= window {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("Savitzky-Golay requires odd `window` >= 3 and `order` < `window` (got window={window}, order={order})"),
+                    ));
+                }
+            }
+            CurveCalculusOp::SmoothMovingAverage { window } => {
+                if window < 2 {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "Moving-average smoothing requires `window` >= 2"));
+                }
+            }
+            CurveCalculusOp::SmoothLowess { span, .. } => {
+                if !span.is_finite() || span <= 0.0 || span > 1.0 {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, format!("LOWESS `span` ({span}) must lie in (0, 1]")));
+                }
+            }
+        },
+        AnalysisKind::MonteCarloSimulation(mc) => {
+            if mc.iterations == 0 || mc.iterations > MonteCarloSpec::MAX_ITERATIONS {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("Monte Carlo `iterations` ({}) must lie in 1..={}", mc.iterations, MonteCarloSpec::MAX_ITERATIONS),
+                ));
+            }
+            for (idx, rule) in mc.hit_rules.iter().enumerate() {
+                if !rule.threshold.is_finite() {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, format!("`hit_rules[{idx}].threshold` must be finite")));
+                }
+                if rule.op == MonteCarloHitOp::Between {
+                    match rule.upper_threshold {
+                        Some(hi) if hi.is_finite() && hi >= rule.threshold => {}
+                        _ => {
+                            return Err(EngineError::with_code(
+                                ErrorCode::BadInput,
+                                format!("`hit_rules[{idx}]` with `Between` requires finite `upper_threshold` >= `threshold`"),
+                            ));
+                        }
+                    }
+                }
             }
         }
         AnalysisKind::NonlinearRegression(nl) => validate_nonlinear_spec_semantics(nl)?,
@@ -2016,7 +2480,10 @@ fn validate_nonlinear_spec_semantics(nl: &NonlinearFitSpec) -> Result<(), Engine
             return Err(EngineError::with_code(ErrorCode::BadInput, "`fit_flag_rules.min_runs_or_lof_p` must lie strictly in (0, 1)"));
         }
     }
-    if nl.parameter_rules.is_empty() {
+    if nl.parameter_rules.is_empty() && nl.relational_constraints.is_empty() {
+        return Ok(());
+    }
+    if nl.plot_distribution.is_some() && nl.parameter_rules.is_empty() && nl.relational_constraints.is_empty() {
         return Ok(());
     }
     let model = resolve_model_from_spec(nl)
@@ -2034,6 +2501,32 @@ fn validate_nonlinear_spec_semantics(nl: &NonlinearFitSpec) -> Result<(), Engine
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("duplicate `parameter_rules` entry for `{}`", rule.name)));
         }
         seen.push(&rule.name);
+    }
+    for (idx, rel) in nl.relational_constraints.iter().enumerate() {
+        if !rel.margin.is_finite() || rel.margin < 0.0 {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("`relational_constraints[{idx}].margin` ({}) must be finite and >= 0", rel.margin),
+            ));
+        }
+        if rel.lhs_param.eq_ignore_ascii_case(&rel.rhs_param) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("`relational_constraints[{idx}]` cannot compare `{}` against itself", rel.lhs_param),
+            ));
+        }
+        for pname in [&rel.lhs_param, &rel.rhs_param] {
+            if !param_names.iter().any(|p| p.eq_ignore_ascii_case(pname)) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!(
+                        "unknown parameter `{pname}` in `relational_constraints[{idx}]` for `{}` (expected one of: {})",
+                        nl.equation_id,
+                        param_names.join(", ")
+                    ),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -2107,7 +2600,7 @@ fn select_default_mv_response_col(mv: &MultipleVariablesTable, candidates: &[usi
 fn persist_mv_two_group_defaults(mv: &MultipleVariablesTable, selected: &mut Vec<usize>, tg: &mut TwoGroupSpec) {
     let n_vars = mv.variables.len();
     let pool: Vec<usize> = if selected.is_empty() { (0..n_vars).collect() } else { selected.iter().copied().filter(|&i| i < n_vars).collect() };
-    if matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. }) {
+    if matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. }) {
         if tg.mv_response_column.is_none() && selected.is_empty() {
             let num_cols: Vec<usize> = pool.into_iter().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_var)).collect();
             if !num_cols.is_empty() {
@@ -2425,6 +2918,12 @@ fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMo
         AnalysisKind::AreaUnderCurve(_) => {
             matches!(key, "baseline" | "x_min" | "x_max" | "independent_time_points" | "min_peak_height" | "min_area_fraction")
         }
+        AnalysisKind::RowStatistics(_) => matches!(key, "summary" | "upper_percentile"),
+        AnalysisKind::FractionOfTotal(_) => matches!(key, "denominator" | "output_percent" | "ci_method"),
+        AnalysisKind::CurveCalculus(_) => key == "operation",
+        AnalysisKind::MonteCarloSimulation(_) => {
+            matches!(key, "seed" | "iterations" | "downstream_result_sheet_id" | "tracked_scalars" | "hit_rules" | "exclude_flagged_fits")
+        }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key, mode.allow_ui_update_compat()),
         _ => is_key_allowed_for_stats(kind, key, mode.allow_ui_update_compat()),
     }
@@ -2432,16 +2931,37 @@ fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMo
 
 fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str) -> bool {
     match tr {
-        TransformAnalysisSpec::Math { .. } => matches!(key, "x_transform" | "y_transform" | "error_propagation"),
+        TransformAnalysisSpec::Math { .. } => matches!(
+            key,
+            "x_transform"
+                | "y_transform"
+                | "error_propagation"
+                | "pharmacology_preset"
+                | "interchange_xy"
+                | "zero_x_substitute"
+                | "asymmetric_ci_policy"
+        ),
         TransformAnalysisSpec::Normalize { .. } => {
             matches!(key, "zero_anchor" | "hundred_anchor" | "output_percent" | "as_fraction" | "per_data_set")
         }
-        TransformAnalysisSpec::RemoveBaseline { .. } => matches!(key, "baseline_columns" | "operation"),
+        TransformAnalysisSpec::RemoveBaseline { .. } => {
+            matches!(key, "baseline_columns" | "operation" | "baseline_kind" | "retain_unselected_columns")
+        }
         TransformAnalysisSpec::Transpose { .. } => key == "swap_row_and_column_titles",
         TransformAnalysisSpec::PruneRows { .. } => matches!(key, "every_k_rows" | "average_window"),
-        TransformAnalysisSpec::SelectAndTransform { .. } => matches!(key, "filter_formula" | "target_archetype" | "derived_columns"),
+        TransformAnalysisSpec::SelectAndTransform { .. } => matches!(
+            key,
+            "filter_formula"
+                | "target_archetype"
+                | "derived_columns"
+                | "complete_rows_only"
+                | "subject_column"
+                | "row_title_column"
+                | "contingency_count_column"
+                | "include_variable_name_prefixes"
+        ),
         TransformAnalysisSpec::Simulate { .. } => {
-            matches!(key, "seed" | "row_count" | "replicates" | "x_min" | "x_max" | "equation_id" | "parameters" | "noise")
+            matches!(key, "seed" | "row_count" | "replicates" | "x_min" | "x_max" | "equation_id" | "parameters" | "noise" | "simulation_mode")
         }
         TransformAnalysisSpec::RandomSample { .. } => {
             matches!(key, "seed" | "sample_size" | "stratify_column" | "proportional_allocation")
@@ -2521,6 +3041,9 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat
                     | "create_summary_graph"
                     | "output_significant_digits"
                     | "fit_flag_rules"
+                    | "relational_constraints"
+                    | "plot_distribution"
+                    | "emit_extra_gof"
             ) || (matches!(nl.method, FitMethod::RoutOutlierElimination { .. }) && matches!(key, "q_percent" | "fdr_q_percent"))
                 || (nl.comparison.is_some() && key == "alternative_equation_id")
         }
@@ -2531,22 +3054,29 @@ fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_ui_update_compat
 fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_compat: bool) -> bool {
     match kind {
         AnalysisKind::DescriptiveStats(_) => {
-            matches!(key, "aggregation" | "custom_upper_percentile" | "run_normality_battery" | "hypothetical_value")
+            matches!(
+                key,
+                "aggregation" | "custom_upper_percentile" | "run_normality_battery" | "hypothetical_value" | "normality_only" | "emit_qq_tabs"
+            )
         }
         AnalysisKind::OutlierDetection(OutlierSpec::Rout { .. }) => matches!(key, "q_percent" | "fdr_q_percent"),
         AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { .. }) => matches!(key, "alpha" | "iterative"),
         AnalysisKind::TwoGroupComparison(tg) => {
             matches!(key, "two_tailed" | "one_tailed" | "compute_effect_sizes" | "mv_group_column" | "mv_response_column")
-                || (matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. }) && key == "hypothetical")
+                || (matches!(
+                    tg.method,
+                    TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. }
+                ) && key == "hypothetical")
         }
         AnalysisKind::BlandAltman(_) => matches!(key, "column_a" | "column_b" | "percent_difference" | "xy_compare_x_vs_y"),
         AnalysisKind::PassingBablok(_) => matches!(key, "x_column" | "y_column"),
         AnalysisKind::MultipleRowTTests(mr) => {
-            matches!(key, "paired" | "nonparametric" | "assume_equal_sd") || is_key_allowed_for_multiplicity(&mr.multiplicity, key)
+            matches!(key, "paired" | "nonparametric" | "assume_equal_sd" | "lognormal_mode") || is_key_allowed_for_multiplicity(&mr.multiplicity, key)
         }
         AnalysisKind::OneWayAnova(spec) => {
             matches!(key, "mixed_effects_reml" | "df_method" | "residual_covariance" | "compute_effect_sizes")
-                || (matches!(spec.method, OneWayMethod::RepeatedMeasures { .. }) && key == "geisser_greenhouse")
+                || (matches!(spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. })
+                    && key == "geisser_greenhouse")
                 || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
         }
         AnalysisKind::FactorialAnova(spec) => {
@@ -2563,6 +3093,15 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     | "residual_covariance"
                     | "fit_reml_on_missing"
                     | "compute_effect_sizes"
+                    | "sphericity_correction"
+                    | "reml_zero_variance_policy"
+                    | "comparison_family_mode"
+                    | "preselected_pairs"
+                    | "swap_direction"
+                    | "heteroscedasticity_test"
+                    | "formula"
+                    | "three_way_rm_factors"
+                    | "emit_consolidated_data_tab"
             ) || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
         }
         AnalysisKind::NestedComparison(spec) => {
@@ -2590,14 +3129,49 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     | "mv_time_column"
                     | "mv_status_column"
                     | "mv_group_column"
+                    | "event_code"
+                    | "censored_code"
+                    | "treat_other_as"
+                    | "ratio_median_ci"
+                    | "mv_status_columns"
+                    | "mv_group_columns"
             ) || is_key_allowed_for_multiplicity(multiplicity, key)
         }
         AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => {
-            matches!(key, "time_column" | "status_column" | "predictor_columns" | "reference_levels" | "tie_method")
+            matches!(
+                key,
+                "time_column"
+                    | "status_column"
+                    | "predictor_columns"
+                    | "reference_levels"
+                    | "tie_method"
+                    | "formula"
+                    | "covariate_profiles"
+                    | "nested_comparison"
+                    | "emit_cox_snell_residuals"
+                    | "ci_method"
+                    | "event_code"
+                    | "censored_code"
+                    | "treat_other_as"
+            )
         }
         AnalysisKind::RocCurve(_) => key == "ci_method",
         AnalysisKind::GeneralizedLinearModel(_) => {
-            matches!(key, "family" | "response_column" | "predictor_columns" | "reference_levels" | "compute_vif")
+            matches!(
+                key,
+                "family"
+                    | "response_column"
+                    | "predictor_columns"
+                    | "reference_levels"
+                    | "compute_vif"
+                    | "formula"
+                    | "nested_comparison"
+                    | "weights"
+                    | "dispersion_mode"
+                    | "classification_cutoff"
+                    | "ci_method"
+                    | "emit_influence_diagnostics"
+            )
         }
         AnalysisKind::Multivariate(mv) => is_key_allowed_for_multivariate(mv, key, allow_ui_update_compat),
         AnalysisKind::PValueStack(_) => matches!(key, "method" | "threshold" | "column"),
@@ -2620,6 +3194,10 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                 | "correlation_method"
                 | "info_sheet_id"
                 | "num_groups"
+                | "survival_method"
+                | "target_events"
+                | "event_prob_group1"
+                | "event_prob_group2"
         ),
         AnalysisKind::SimpleLogisticRegression(_) => {
             matches!(key, "emit_row_classification" | "confidence_bands" | "classification_cutoff" | "plot_x_min" | "plot_x_max" | "plot_segments")
@@ -2628,6 +3206,10 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
         AnalysisKind::Transform(_)
         | AnalysisKind::FitSplineLowess(_)
         | AnalysisKind::AreaUnderCurve(_)
+        | AnalysisKind::RowStatistics(_)
+        | AnalysisKind::FractionOfTotal(_)
+        | AnalysisKind::CurveCalculus(_)
+        | AnalysisKind::MonteCarloSimulation(_)
         | AnalysisKind::LinearRegression(_)
         | AnalysisKind::NonlinearRegression(_)
         | AnalysisKind::ImportedSnapshot(_) => false,
@@ -2636,11 +3218,25 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
 
 fn is_key_allowed_for_multivariate(mv: &MultivariateSpec, key: &str, allow_ui_update_compat: bool) -> bool {
     match mv {
-        MultivariateSpec::Pca { .. } => matches!(key, "standardize" | "parallel_analysis_seed" | "pcr_outcome_column"),
+        MultivariateSpec::Pca { .. } => {
+            matches!(key, "standardize" | "parallel_analysis_seed" | "pcr_outcome_column" | "retention_rule" | "emit_extra_matrices")
+        }
         MultivariateSpec::CorrelationMatrix { .. } => {
             matches!(key, "spearman" | "spearman_rank") || (allow_ui_update_compat && matches!(key, "correlation_all_pairs" | "correlation_heatmap"))
         }
-        MultivariateSpec::Clustering { .. } => matches!(key, "k_means_k" | "k_clusters" | "distance" | "linkage" | "k_sweep_max"),
+        MultivariateSpec::Clustering { .. } => matches!(
+            key,
+            "k_means_k"
+                | "k_clusters"
+                | "distance"
+                | "linkage"
+                | "k_sweep_max"
+                | "consensus_optimal_k"
+                | "kmeans_algorithm"
+                | "cluster_direction"
+                | "cut_height"
+                | "emit_anova_tab"
+        ),
         MultivariateSpec::MultipleImputation { .. } => {
             matches!(key, "imputations_m" | "max_iters" | "seed" | "response_column" | "predictor_columns")
         }
@@ -2754,6 +3350,7 @@ fn parse_analysis_kind(
     extra: &Map<String, Value>,
     domain: AnalysisDomain,
     source_ds: &DataSheet,
+    path_policy: &ExternalPathPolicy,
 ) -> Result<AnalysisKind, EngineError> {
     let mut kind = if let Some(kv) = kind_val
         && kv.is_object()
@@ -2762,8 +3359,8 @@ fn parse_analysis_kind(
     } else {
         let raw_kind = kind_val.and_then(Value::as_str).map(|s| s.trim().to_ascii_lowercase());
         match raw_kind.as_deref() {
-            None => infer_default_kind(params, domain, source_ds)?,
-            Some(name) => resolve_kind_shorthand(name, params, Some(source_ds))?,
+            None => infer_default_kind(params, domain, source_ds, path_policy)?,
+            Some(name) => resolve_kind_shorthand(name, params, Some(source_ds), path_policy)?,
         }
     };
     apply_kind_patch_and_overrides(&mut kind, params)?;
@@ -2771,15 +3368,20 @@ fn parse_analysis_kind(
     Ok(kind)
 }
 
-fn infer_default_kind(params: &Value, domain: AnalysisDomain, source_ds: &DataSheet) -> Result<AnalysisKind, EngineError> {
+fn infer_default_kind(
+    params: &Value,
+    domain: AnalysisDomain,
+    source_ds: &DataSheet,
+    path_policy: &ExternalPathPolicy,
+) -> Result<AnalysisKind, EngineError> {
     if params.get("equation_id").is_some() || params.get("custom_dsl").is_some() {
-        return resolve_fit_shorthand("nonlinear", params, Some(source_ds));
+        return resolve_fit_shorthand("nonlinear", params, Some(source_ds), path_policy);
     }
     match domain {
         AnalysisDomain::TransformOnly => Ok(default_transform_math()),
-        AnalysisDomain::FitOnly => resolve_fit_shorthand("nonlinear", params, Some(source_ds)),
+        AnalysisDomain::FitOnly => resolve_fit_shorthand("nonlinear", params, Some(source_ds), path_policy),
         AnalysisDomain::StatsOnly | AnalysisDomain::Any => match source_ds.kind() {
-            TableKind::Xy => resolve_fit_shorthand("nonlinear", params, Some(source_ds)),
+            TableKind::Xy => resolve_fit_shorthand("nonlinear", params, Some(source_ds), path_policy),
             TableKind::Column => Ok(AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::OrdinaryAnova))),
             TableKind::Grouped => Ok(AnalysisKind::FactorialAnova(default_factorial_anova(false))),
             TableKind::Contingency => Ok(AnalysisKind::Contingency(ContingencySpec::default())),
@@ -2791,7 +3393,12 @@ fn infer_default_kind(params: &Value, domain: AnalysisDomain, source_ds: &DataSh
     }
 }
 
-fn resolve_kind_shorthand(name: &str, params: &Value, source_ds: Option<&DataSheet>) -> Result<AnalysisKind, EngineError> {
+fn resolve_kind_shorthand(
+    name: &str,
+    params: &Value,
+    source_ds: Option<&DataSheet>,
+    path_policy: &ExternalPathPolicy,
+) -> Result<AnalysisKind, EngineError> {
     if let Some(kind) = resolve_transform_shorthand(name) {
         return Ok(kind);
     }
@@ -2801,7 +3408,7 @@ fn resolve_kind_shorthand(name: &str, params: &Value, source_ds: Option<&DataShe
     if let Some(kind) = resolve_other_stats_shorthand(name) {
         return Ok(kind);
     }
-    resolve_fit_shorthand(name, params, source_ds)
+    resolve_fit_shorthand(name, params, source_ds, path_policy)
 }
 
 fn default_transform_math() -> AnalysisKind {
@@ -2809,6 +3416,10 @@ fn default_transform_math() -> AnalysisKind {
         x_transform: None,
         y_transform: Some(MathTransformPreset::Log10),
         error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: AsymmetricCiTransformPolicy::default(),
     })
 }
 
@@ -2821,14 +3432,24 @@ fn resolve_transform_shorthand(name: &str) -> Option<AnalysisKind> {
             output_percent: true,
             per_data_set: true,
         },
-        "remove_baseline" | "baseline" | "transform.remove_baseline" => {
-            TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Difference }
-        }
+        "remove_baseline" | "baseline" | "transform.remove_baseline" => TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: BaselineOperation::Difference,
+            baseline_kind: None,
+            retain_unselected_columns: false,
+        },
         "transpose" | "transform.transpose" => TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true },
         "prune_rows" | "prune" | "transform.prune_rows" => TransformAnalysisSpec::PruneRows { every_k_rows: 2, average_window: false },
-        "select_and_transform" | "select" | "transform.select_and_transform" => {
-            TransformAnalysisSpec::SelectAndTransform { filter_formula: None, target_archetype: TableKind::Xy, derived_columns: Vec::new() }
-        }
+        "select_and_transform" | "select" | "transform.select_and_transform" => TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: None,
+            target_archetype: TableKind::Xy,
+            derived_columns: Vec::new(),
+            complete_rows_only: false,
+            subject_column: None,
+            row_title_column: None,
+            contingency_count_column: None,
+            include_variable_name_prefixes: false,
+        },
         "simulate" | "simulate_xy" | "transform.simulate" => TransformAnalysisSpec::Simulate {
             seed: 42,
             row_count: 13,
@@ -2838,6 +3459,7 @@ fn resolve_transform_shorthand(name: &str) -> Option<AnalysisKind> {
             equation_id: String::from("log_agonist_vs_response_4pl"),
             parameters: Vec::new(),
             noise: SimulationNoise::None,
+            simulation_mode: None,
         },
         "random_sample" | "sample" | "transform.random_sample" => {
             TransformAnalysisSpec::RandomSample { seed: 42, sample_size: 10, stratify_column: None, proportional_allocation: true }
@@ -2869,25 +3491,37 @@ fn resolve_transform_shorthand(name: &str) -> Option<AnalysisKind> {
         "auc" | "area_under_curve" | "transform.auc" => {
             return Some(AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default()));
         }
+        "row_statistics" | "row_stats" | "transform.row_statistics" => {
+            return Some(AnalysisKind::RowStatistics(RowStatisticsSpec::default()));
+        }
+        "fraction_of_total" | "transform.fraction_of_total" => {
+            return Some(AnalysisKind::FractionOfTotal(FractionOfTotalSpec::default()));
+        }
+        "curve_calculus" | "smooth_differentiate_integrate" | "differentiate" | "smooth" | "transform.curve_calculus" => {
+            return Some(AnalysisKind::CurveCalculus(CurveCalculusSpec::default()));
+        }
         _ => return None,
     };
     Some(AnalysisKind::Transform(tr))
 }
 
 fn resolve_two_group_or_anova_shorthand(name: &str, params: &Value) -> Result<Option<AnalysisKind>, EngineError> {
-    let hyp = opt_f64_checked(params, "hypothetical")?.unwrap_or(0.0);
+    let hyp_opt = opt_f64_checked(params, "hypothetical")?;
+    let hyp = hyp_opt.unwrap_or(0.0);
     let kind = match name {
         "unpaired_t" | "t_test" | "unpaired_t_test" => two_group_kind(TwoGroupMethod::UnpairedT),
         "welch_t" | "welch_t_test" => two_group_kind(TwoGroupMethod::WelchT),
         "paired_t" | "paired_t_test" => two_group_kind(TwoGroupMethod::PairedT),
         "ratio_paired_t" => two_group_kind(TwoGroupMethod::RatioPairedT),
         "lognormal_t" | "lognormal_unpaired_t" => two_group_kind(TwoGroupMethod::LognormalUnpairedT),
+        "lognormal_welch_t" => two_group_kind(TwoGroupMethod::LognormalWelchT),
         "mann_whitney" | "mann_whitney_u" => two_group_kind(TwoGroupMethod::MannWhitneyU),
         "wilcoxon" | "wilcoxon_matched_pairs" | "wilcoxon_signed_rank" => two_group_kind(TwoGroupMethod::WilcoxonSignedRank),
         "paired_sign_test" | "paired_sign" | "sign_test" => two_group_kind(TwoGroupMethod::PairedSignTest),
         "kolmogorov_smirnov" | "ks" | "ks_two_sample" => two_group_kind(TwoGroupMethod::KolmogorovSmirnov),
         "one_sample_t" => two_group_kind(TwoGroupMethod::OneSampleT { hypothetical: hyp }),
         "one_sample_wilcoxon" => two_group_kind(TwoGroupMethod::OneSampleWilcoxon { hypothetical: hyp }),
+        "one_sample_ratio_t" => two_group_kind(TwoGroupMethod::OneSampleRatioT { hypothetical: hyp_opt.unwrap_or(1.0) }),
         "one_way_anova" | "anova" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::OrdinaryAnova)),
         "welch_anova" | "brown_forsythe" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::BrownForsytheAndWelch)),
         "rm_one_way_anova" | "repeated_measures_anova" => {
@@ -2896,6 +3530,12 @@ fn resolve_two_group_or_anova_shorthand(name: &str, params: &Value) -> Result<Op
         }
         "kruskal_wallis" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::KruskalWallis)),
         "friedman" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::Friedman)),
+        "lognormal_one_way_anova" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::LognormalOrdinary)),
+        "lognormal_welch_anova" => AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::LognormalWelchBf)),
+        "lognormal_rm_anova" => {
+            let gg = opt_bool_checked(params, "geisser_greenhouse")?.unwrap_or(true);
+            AnalysisKind::OneWayAnova(default_one_way_anova(OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: gg }))
+        }
         "two_way_anova" | "factorial_anova" => AnalysisKind::FactorialAnova(default_factorial_anova(false)),
         "three_way_anova" => AnalysisKind::FactorialAnova(default_factorial_anova(true)),
         _ => return Ok(None),
@@ -2906,6 +3546,9 @@ fn resolve_two_group_or_anova_shorthand(name: &str, params: &Value) -> Result<Op
 fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
     let kind = match name {
         "descriptive" | "descriptive_stats" | "column_stats" => AnalysisKind::DescriptiveStats(DescriptiveSpec::default()),
+        "normality" | "normality_lognormality" | "lognormality" => {
+            AnalysisKind::DescriptiveStats(DescriptiveSpec { normality_only: true, ..DescriptiveSpec::default() })
+        }
         "outliers" | "outlier" | "rout" => AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 }),
         "grubbs" => AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: false }),
         "nested_t" | "nested_anova" | "nested" => {
@@ -2920,6 +3563,7 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
             AnalysisKind::PValueStack(PValueStackSpec::default())
         }
         "power" | "power_analysis" | "stats.power" | "power_sample_size" => AnalysisKind::PowerAnalysis(PowerAnalysisSpec::default()),
+        "monte_carlo" | "monte_carlo_simulation" | "stats.monte_carlo" => AnalysisKind::MonteCarloSimulation(MonteCarloSpec::default()),
         "contingency"
         | "chi_square"
         | "fisher_exact"
@@ -2947,6 +3591,14 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
             predictor_columns: vec![2],
             reference_levels: Vec::new(),
             tie_method: CoxTieMethod::Efron,
+            formula: None,
+            covariate_profiles: Vec::new(),
+            nested_comparison: None,
+            emit_cox_snell_residuals: false,
+            ci_method: RegressionCiMethod::default(),
+            event_code: None,
+            censored_code: None,
+            treat_other_as: SurvivalOtherValuePolicy::default(),
         }),
         "roc" => AnalysisKind::RocCurve(RocSpec { ci_method: RocCiMethod::DeLong }),
         "glm" | "linear_glm" | "multiple_linear" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Linear)),
@@ -2973,6 +3625,11 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
             distance: ClusterDistance::default(),
             linkage: ClusterLinkage::default(),
             k_sweep_max: None,
+            consensus_optimal_k: false,
+            kmeans_algorithm: KMeansAlgorithm::default(),
+            cluster_direction: ClusterDirection::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
         "multiple_imputation" | "stats.multiple_imputation" | "mice" => AnalysisKind::Multivariate(default_multiple_imputation(42)),
         _ => return None,
@@ -2980,7 +3637,12 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
     Some(kind)
 }
 
-fn resolve_fit_shorthand(name: &str, params: &Value, source_ds: Option<&DataSheet>) -> Result<AnalysisKind, EngineError> {
+fn resolve_fit_shorthand(
+    name: &str,
+    params: &Value,
+    source_ds: Option<&DataSheet>,
+    path_policy: &ExternalPathPolicy,
+) -> Result<AnalysisKind, EngineError> {
     if matches!(name, "linear" | "simple_linear" | "linear_regression" | "deming" | "deming_regression") {
         let deming_model_ii = matches!(name, "deming" | "deming_regression") || opt_bool_checked(params, "deming")?.unwrap_or(false);
         return Ok(AnalysisKind::LinearRegression(LinearRegressionSpec { deming_model_ii, ..LinearRegressionSpec::default() }));
@@ -2988,6 +3650,9 @@ fn resolve_fit_shorthand(name: &str, params: &Value, source_ds: Option<&DataShee
 
     let explicit_eq = opt_str_checked(params, "equation_id")?;
     let explicit_dsl = opt_str_checked(params, "custom_dsl")?;
+    let lookup_user_eq = |eq_id: &str| -> Option<crate::services::UserEquationEntry> {
+        resolve_user_equation_library(path_policy, None).ok().and_then(|lib| lib.get(eq_id).ok()).flatten()
+    };
     let eq_id = match name {
         "four_parameter_logistic" | "4pl" | "4pl_agonist" => "log_agonist_vs_response_4pl",
         "4pl_inhibitor" | "four_parameter_logistic_inhibitor" | "ic50" => "log_inhibitor_vs_response_4pl",
@@ -3004,6 +3669,10 @@ fn resolve_fit_shorthand(name: &str, params: &Value, source_ds: Option<&DataShee
                 other
             } else if explicit_dsl.is_some() {
                 "custom_dsl"
+            } else if let Some(user_eq) = lookup_user_eq(other) {
+                let mut fit = NonlinearFitSpec::new(user_eq.id);
+                fit.custom_dsl = Some(user_eq.dsl_source);
+                return Ok(AnalysisKind::NonlinearRegression(fit));
             } else {
                 let suggestions = suggest_analysis_kinds(other);
                 let mut remediation = String::from(
@@ -3022,6 +3691,11 @@ fn resolve_fit_shorthand(name: &str, params: &Value, source_ds: Option<&DataShee
     let mut fit = NonlinearFitSpec::new(chosen_eq);
     if let Some(dsl) = explicit_dsl {
         fit.custom_dsl = Some(dsl.to_owned());
+    } else if get_builtin_model(chosen_eq).is_none()
+        && let Some(user_eq) = lookup_user_eq(chosen_eq)
+    {
+        fit.equation_id = user_eq.id;
+        fit.custom_dsl = Some(user_eq.dsl_source);
     }
     Ok(AnalysisKind::NonlinearRegression(fit))
 }
@@ -3032,7 +3706,9 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "welch_t",
         "paired_t",
         "ratio_paired_t",
+        "one_sample_ratio_t",
         "lognormal_t",
+        "lognormal_welch_t",
         "mann_whitney",
         "wilcoxon",
         "paired_sign_test",
@@ -3042,11 +3718,15 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "one_way_anova",
         "welch_anova",
         "rm_one_way_anova",
+        "lognormal_one_way_anova",
+        "lognormal_welch_anova",
+        "lognormal_rm_anova",
         "kruskal_wallis",
         "friedman",
         "two_way_anova",
         "three_way_anova",
         "descriptive",
+        "normality",
         "rout",
         "grubbs",
         "nested_t",
@@ -3056,11 +3736,13 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "passing_bablok",
         "pvalue_stack",
         "power",
+        "monte_carlo",
         "levene",
         "levene_mean",
         "contingency",
         "chi_square",
         "fisher_exact",
+        "barnard_exact",
         "cohen_kappa",
         "fleiss_kappa",
         "kaplan_meier",
@@ -3097,6 +3779,9 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "auc",
         "area_under_curve",
         "transform.auc",
+        "row_statistics",
+        "fraction_of_total",
+        "curve_calculus",
     ];
     let eqs = list_builtin_equations();
     let all_candidates = KNOWN_SHORTHANDS.iter().copied().chain(eqs.iter().map(|eq| eq.id.as_str()));
@@ -3128,16 +3813,72 @@ fn map_canonical_kind_fields(params: &Value, kind: &AnalysisKind) -> Value {
 
 fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
     match kind {
+        AnalysisKind::Transform(TransformAnalysisSpec::Math { .. }) => {
+            matches!(key, "pharmacology_preset" | "interchange_xy" | "zero_x_substitute" | "asymmetric_ci_policy")
+        }
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { .. }) => {
+            matches!(key, "baseline_kind" | "retain_unselected_columns")
+        }
+        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { .. }) => matches!(
+            key,
+            "derived_columns"
+                | "complete_rows_only"
+                | "subject_column"
+                | "row_title_column"
+                | "contingency_count_column"
+                | "include_variable_name_prefixes"
+        ),
+        AnalysisKind::Transform(TransformAnalysisSpec::Simulate { .. }) => key == "simulation_mode",
+        AnalysisKind::DescriptiveStats(_) => matches!(key, "normality_only" | "emit_qq_tabs"),
+        AnalysisKind::MultipleRowTTests(_) => key == "lognormal_mode",
+        AnalysisKind::FactorialAnova(_) => matches!(
+            key,
+            "sphericity_correction"
+                | "reml_zero_variance_policy"
+                | "comparison_family_mode"
+                | "preselected_pairs"
+                | "swap_direction"
+                | "heteroscedasticity_test"
+                | "formula"
+                | "three_way_rm_factors"
+                | "emit_consolidated_data_tab"
+        ),
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }) => {
+            matches!(key, "event_code" | "censored_code" | "treat_other_as" | "ratio_median_ci" | "mv_status_columns" | "mv_group_columns")
+        }
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => matches!(
+            key,
+            "formula"
+                | "covariate_profiles"
+                | "nested_comparison"
+                | "emit_cox_snell_residuals"
+                | "ci_method"
+                | "event_code"
+                | "censored_code"
+                | "treat_other_as"
+        ),
+        AnalysisKind::GeneralizedLinearModel(_) => matches!(
+            key,
+            "formula" | "nested_comparison" | "weights" | "dispersion_mode" | "classification_cutoff" | "ci_method" | "emit_influence_diagnostics"
+        ),
         AnalysisKind::BlandAltman(_) => key == "xy_compare_x_vs_y",
         AnalysisKind::Contingency(_) => matches!(key, "expected_proportions" | "null_proportion"),
-        AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => key == "pcr_outcome_column",
-        AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => key == "k_sweep_max",
+        AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => {
+            matches!(key, "pcr_outcome_column" | "retention_rule" | "emit_extra_matrices")
+        }
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => {
+            matches!(key, "k_sweep_max" | "consensus_optimal_k" | "kmeans_algorithm" | "cluster_direction" | "cut_height" | "emit_anova_tab")
+        }
         AnalysisKind::LinearRegression(_) => matches!(
             key,
             "fixed_point" | "plot_x_min" | "plot_x_max" | "plot_segments" | "standard_addition" | "extend_line_to_x_intercept" | "deming_error"
         ),
         AnalysisKind::FitSplineLowess(_) => matches!(key, "smoothing_knots" | "smoothing_df" | "lowess_fraction" | "plot_x_min" | "plot_x_max"),
         AnalysisKind::AreaUnderCurve(_) => matches!(key, "x_min" | "x_max"),
+        AnalysisKind::RowStatistics(_) => key == "upper_percentile",
+        AnalysisKind::MonteCarloSimulation(_) => {
+            matches!(key, "downstream_result_sheet_id" | "tracked_scalars" | "hit_rules" | "exclude_flagged_fits")
+        }
         AnalysisKind::NonlinearRegression(_) => matches!(
             key,
             "flag_r_squared_below"
@@ -3148,8 +3889,13 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
                 | "summary_parameter"
                 | "output_significant_digits"
                 | "fit_flag_rules"
+                | "relational_constraints"
+                | "plot_distribution"
+                | "emit_extra_gof"
         ),
-        AnalysisKind::PowerAnalysis(_) => key == "info_sheet_id",
+        AnalysisKind::PowerAnalysis(_) => {
+            matches!(key, "info_sheet_id" | "survival_method" | "target_events" | "event_prob_group1" | "event_prob_group2")
+        }
         AnalysisKind::SimpleLogisticRegression(_) => matches!(key, "plot_x_min" | "plot_x_max" | "plot_segments"),
         _ => false,
     }
@@ -3196,6 +3942,26 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "lowess_fraction",
     "x_min",
     "x_max",
+    "pharmacology_preset",
+    "zero_x_substitute",
+    "baseline_kind",
+    "subject_column",
+    "row_title_column",
+    "contingency_count_column",
+    "simulation_mode",
+    "upper_percentile",
+    "downstream_result_sheet_id",
+    "formula",
+    "nested_comparison",
+    "event_code",
+    "censored_code",
+    "classification_cutoff",
+    "cut_height",
+    "target_events",
+    "event_prob_group1",
+    "event_prob_group2",
+    "plot_distribution",
+    "three_way_rm_factors",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -3215,6 +3981,7 @@ const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
     "max_iters",
     "segment_count",
     "lowess_robustness_iters",
+    "iterations",
 ];
 
 const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
@@ -3226,6 +3993,7 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "mv_response_column",
     "mv_time_column",
     "mv_status_column",
+    "mv_status_columns",
     "column_a",
     "column_b",
     "x_column",
@@ -3237,6 +4005,7 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "sample_size",
     "stratify_column",
     "seed",
+    "iterations",
     "row_count",
     "replicates",
     "time_column",
@@ -3255,6 +4024,9 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "mv_x_columns",
     "mv_y_columns",
     "output_significant_digits",
+    "subject_column",
+    "row_title_column",
+    "contingency_count_column",
 ];
 
 fn coerce_whole_int_value(val: &Value, key: &str) -> Result<Value, EngineError> {
@@ -3328,16 +4100,23 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             }
             if let Some(h) = opt_f64_checked(norm, "hypothetical")? {
                 match &mut spec.method {
-                    TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                    TwoGroupMethod::OneSampleT { hypothetical }
+                    | TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                    | TwoGroupMethod::OneSampleRatioT { hypothetical } => {
                         *hypothetical = h;
                     }
                     _ => {}
                 }
             }
         }
-        AnalysisKind::MultipleRowTTests(spec) => apply_multiplicity_override(&mut spec.multiplicity, norm)?,
+        AnalysisKind::MultipleRowTTests(spec) => {
+            apply_enum_field(norm, "lognormal_mode", &mut spec.lognormal_mode, "`lognormal_mode`")?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm)?;
+        }
         AnalysisKind::OneWayAnova(spec) => {
-            if let OneWayMethod::RepeatedMeasures { ref mut geisser_greenhouse } = spec.method {
+            if let OneWayMethod::RepeatedMeasures { ref mut geisser_greenhouse }
+            | OneWayMethod::LognormalRepeatedMeasures { ref mut geisser_greenhouse } = spec.method
+            {
                 apply_bool_opt_checked(norm, "geisser_greenhouse", geisser_greenhouse)?;
             }
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
@@ -3352,6 +4131,9 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             apply_enum_field(norm, "repeated_measures", &mut spec.repeated_measures, "`repeated_measures`")?;
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
             apply_enum_field(norm, "residual_covariance", &mut spec.residual_covariance, "`residual_covariance`")?;
+            apply_enum_field(norm, "sphericity_correction", &mut spec.sphericity_correction, "`sphericity_correction`")?;
+            apply_enum_field(norm, "reml_zero_variance_policy", &mut spec.reml_zero_variance_policy, "`reml_zero_variance_policy`")?;
+            apply_enum_field(norm, "comparison_family_mode", &mut spec.comparison_family_mode, "`comparison_family_mode`")?;
             apply_multiplicity_override(&mut spec.multiplicity, norm)?;
         }
         AnalysisKind::PValueStack(spec) => {
@@ -3371,9 +4153,24 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
                 spec.baseline = parse_auc_baseline_value(b_val)?;
             }
         }
+        AnalysisKind::RowStatistics(spec) => {
+            apply_enum_field(norm, "summary", &mut spec.summary, "RowStatistics `summary`")?;
+        }
+        AnalysisKind::FractionOfTotal(spec) => {
+            apply_enum_field(norm, "denominator", &mut spec.denominator, "FractionOfTotal `denominator`")?;
+            apply_enum_field(norm, "ci_method", &mut spec.ci_method, "FractionOfTotal `ci_method`")?;
+        }
+        AnalysisKind::CurveCalculus(spec) => {
+            if let Some(op_val) = norm.get("operation")
+                && !op_val.is_null()
+            {
+                spec.operation = parse_curve_calculus_op(op_val)?;
+            }
+        }
         AnalysisKind::PowerAnalysis(spec) => {
             apply_enum_field(norm, "family", &mut spec.family, "power test `family`")?;
             apply_enum_field(norm, "solve_target", &mut spec.solve_target, "power `solve_target`")?;
+            apply_enum_field(norm, "survival_method", &mut spec.survival_method, "power `survival_method`")?;
             if let Some(two_tailed) = opt_bool_checked(norm, "two_tailed")? {
                 spec.tail_mode = if two_tailed { PowerTailMode::TwoSided } else { PowerTailMode::OneSided(PowerOneSidedDirection::Greater) };
             }
@@ -3387,16 +4184,26 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         AnalysisKind::Transform(spec) => apply_transform_custom_overrides(spec, norm)?,
         AnalysisKind::Contingency(spec) => apply_contingency_custom_overrides(spec, norm)?,
         AnalysisKind::Survival(spec) => match spec {
-            SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => apply_multiplicity_override(multiplicity, norm)?,
-            SurvivalAnalysisSpec::CoxProportionalHazards { reference_levels, tie_method, .. } => {
+            SurvivalAnalysisSpec::KaplanMeier { multiplicity, treat_other_as, .. } => {
+                apply_enum_field(norm, "treat_other_as", treat_other_as, "`treat_other_as`")?;
+                apply_multiplicity_override(multiplicity, norm)?;
+            }
+            SurvivalAnalysisSpec::CoxProportionalHazards { reference_levels, tie_method, ci_method, treat_other_as, .. } => {
                 if let Some(rl) = norm.get("reference_levels") {
                     *reference_levels = if rl.is_null() { Vec::new() } else { parse_reference_levels(rl)? };
                 }
                 apply_enum_field(norm, "tie_method", tie_method, "Cox `tie_method`")?;
+                apply_enum_field(norm, "ci_method", ci_method, "Cox `ci_method`")?;
+                apply_enum_field(norm, "treat_other_as", treat_other_as, "Cox `treat_other_as`")?;
             }
         },
+        AnalysisKind::RocCurve(spec) => {
+            apply_enum_field(norm, "ci_method", &mut spec.ci_method, "ROC `ci_method`")?;
+        }
         AnalysisKind::GeneralizedLinearModel(spec) => {
             apply_enum_field(norm, "family", &mut spec.family, "GLM `family`")?;
+            apply_enum_field(norm, "dispersion_mode", &mut spec.dispersion_mode, "GLM `dispersion_mode`")?;
+            apply_enum_field(norm, "ci_method", &mut spec.ci_method, "GLM `ci_method`")?;
             if let Some(rl) = norm.get("reference_levels") {
                 spec.reference_levels = if rl.is_null() { Vec::new() } else { parse_reference_levels(rl)? };
             }
@@ -3408,12 +4215,30 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
     Ok(())
 }
 
+fn parse_curve_calculus_op(val: &Value) -> Result<CurveCalculusOp, EngineError> {
+    if val.is_object() {
+        return deserialize_strict(val, "/operation");
+    }
+    if let Some(raw) = val.as_str() {
+        let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        match norm.as_str() {
+            "firstderivative" | "derivative" | "first" | "dydx" => return Ok(CurveCalculusOp::FirstDerivative),
+            "secondderivative" | "second" | "d2ydx2" => return Ok(CurveCalculusOp::SecondDerivative),
+            "cumulativeintegral" | "integral" => return Ok(CurveCalculusOp::CumulativeIntegral { baseline: 0.0 }),
+            _ => {}
+        }
+    }
+    parse_serde_enum(val, "CurveCalculus `operation`")
+}
+
 fn apply_transform_custom_overrides(spec: &mut TransformAnalysisSpec, norm: &Value) -> Result<(), EngineError> {
     match spec {
-        TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation } => {
+        TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, pharmacology_preset, asymmetric_ci_policy, .. } => {
             apply_opt_enum_field(norm, "x_transform", x_transform, "`x_transform`")?;
             apply_opt_enum_field(norm, "y_transform", y_transform, "`y_transform`")?;
             apply_enum_field(norm, "error_propagation", error_propagation, "`error_propagation`")?;
+            apply_opt_enum_field(norm, "pharmacology_preset", pharmacology_preset, "`pharmacology_preset`")?;
+            apply_enum_field(norm, "asymmetric_ci_policy", asymmetric_ci_policy, "`asymmetric_ci_policy`")?;
         }
         TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, .. } => {
             apply_enum_field(norm, "zero_anchor", zero_anchor, "`zero_anchor`")?;
@@ -3422,8 +4247,17 @@ fn apply_transform_custom_overrides(spec: &mut TransformAnalysisSpec, norm: &Val
                 *output_percent = !as_frac;
             }
         }
-        TransformAnalysisSpec::RemoveBaseline { operation, .. } => {
+        TransformAnalysisSpec::RemoveBaseline { operation, baseline_kind, .. } => {
             apply_enum_field(norm, "operation", operation, "`operation`")?;
+            if let Some(bk) = norm.get("baseline_kind") {
+                *baseline_kind = if bk.is_null() {
+                    None
+                } else if bk.is_object() {
+                    Some(deserialize_strict(bk, "/baseline_kind")?)
+                } else {
+                    Some(parse_serde_enum(bk, "`baseline_kind`")?)
+                };
+            }
         }
         TransformAnalysisSpec::PruneRows { every_k_rows, .. } => {
             if *every_k_rows == 0 {
@@ -3514,7 +4348,7 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> R
 
 fn apply_multivariate_custom_overrides(spec: &mut MultivariateSpec, norm: &Value) -> Result<(), EngineError> {
     match spec {
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max, kmeans_algorithm, cluster_direction, .. } => {
             if let Some(k) = *k_means_k
                 && k < 2
             {
@@ -3522,6 +4356,8 @@ fn apply_multivariate_custom_overrides(spec: &mut MultivariateSpec, norm: &Value
             }
             apply_enum_field(norm, "distance", distance, "cluster `distance`")?;
             apply_enum_field(norm, "linkage", linkage, "cluster `linkage`")?;
+            apply_enum_field(norm, "kmeans_algorithm", kmeans_algorithm, "`kmeans_algorithm`")?;
+            apply_enum_field(norm, "cluster_direction", cluster_direction, "`cluster_direction`")?;
             if let Some(k_max) = *k_sweep_max
                 && k_max < 2
             {
@@ -3536,7 +4372,10 @@ fn apply_multivariate_custom_overrides(spec: &mut MultivariateSpec, norm: &Value
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`max_iters` must be in 1..=100"));
             }
         }
-        MultivariateSpec::Pca { .. } | MultivariateSpec::CorrelationMatrix { .. } => {}
+        MultivariateSpec::Pca { retention_rule, .. } => {
+            apply_enum_field(norm, "retention_rule", retention_rule, "PCA `retention_rule`")?;
+        }
+        MultivariateSpec::CorrelationMatrix { .. } => {}
     }
     Ok(())
 }
@@ -3627,6 +4466,22 @@ const CUSTOM_HANDLED_PATCH_KEYS: &[&str] = &[
     "target_archetype",
     "derived_columns",
     "baseline",
+    "summary",
+    "denominator",
+    "ci_method",
+    "lognormal_mode",
+    "sphericity_correction",
+    "reml_zero_variance_policy",
+    "comparison_family_mode",
+    "treat_other_as",
+    "dispersion_mode",
+    "retention_rule",
+    "kmeans_algorithm",
+    "cluster_direction",
+    "survival_method",
+    "pharmacology_preset",
+    "asymmetric_ci_policy",
+    "baseline_kind",
 ];
 
 fn parse_auc_baseline_value(val: &Value) -> Result<AucBaseline, EngineError> {
@@ -3848,6 +4703,12 @@ fn default_km_survival() -> SurvivalAnalysisSpec {
         mv_time_column: None,
         mv_status_column: None,
         mv_group_column: None,
+        event_code: None,
+        censored_code: None,
+        treat_other_as: SurvivalOtherValuePolicy::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     }
 }
 
@@ -3913,11 +4774,17 @@ fn parse_reference_levels(val: &Value) -> Result<Vec<(usize, String)>, EngineErr
 }
 
 fn default_glm(family: GlmFamily) -> GlmSpec {
-    GlmSpec { family, response_column: 0, predictor_columns: vec![1], reference_levels: Vec::new(), compute_vif: true }
+    GlmSpec { family, response_column: 0, predictor_columns: vec![1], ..GlmSpec::default() }
 }
 
 fn default_pca() -> MultivariateSpec {
-    MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(42), pcr_outcome_column: None }
+    MultivariateSpec::Pca {
+        standardize: true,
+        parallel_analysis_seed: Some(42),
+        pcr_outcome_column: None,
+        retention_rule: PcaRetentionRule::default(),
+        emit_extra_matrices: false,
+    }
 }
 
 fn parse_contingency_method_value(val: &Value) -> Result<ContingencyMethod, EngineError> {
@@ -4305,9 +5172,11 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_twelve_analysis_commands() {
-        assert_eq!(specs().len(), 12);
+    fn registry_contains_all_analysis_commands() {
+        assert_eq!(specs().len(), 17);
         assert!(specs().iter().any(|s| s.id == "stats.pvalueStack"));
+        assert!(specs().iter().any(|s| s.id == "fit.saveUserEquation"));
+        assert!(specs().iter().any(|s| s.id == "fit.cloneBuiltinEquation"));
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Analysis);
             assert!(!spec.summary.is_empty());
@@ -4514,8 +5383,8 @@ mod tests {
 
             for &shorthand in desc.shorthands {
                 assert_eq!(descriptor_by_shorthand(shorthand).map(|d| d.id), Some(desc.id), "descriptor lookup mismatch for `{shorthand}`");
-                let resolved =
-                    resolve_kind_shorthand(shorthand, &empty, None).unwrap_or_else(|err| panic!("shorthand `{shorthand}` failed to resolve: {err}"));
+                let resolved = resolve_kind_shorthand(shorthand, &empty, None, &ExternalPathPolicy::RejectExternal)
+                    .unwrap_or_else(|err| panic!("shorthand `{shorthand}` failed to resolve: {err}"));
                 assert_eq!(resolved.id(), desc.id, "AnalysisKindId mismatch for `{shorthand}`");
                 assert_eq!(resolved.descriptor().domain, desc.domain, "domain mismatch for `{shorthand}`");
 
@@ -4537,7 +5406,8 @@ mod tests {
             }
         }
 
-        let eq_kind = resolve_kind_shorthand("one_phase_decay", &empty, None).expect("built-in equation ID must resolve");
+        let eq_kind =
+            resolve_kind_shorthand("one_phase_decay", &empty, None, &ExternalPathPolicy::RejectExternal).expect("built-in equation ID must resolve");
         assert_eq!(eq_kind.id(), AnalysisKindId::NonlinearRegression);
         assert!(eq_kind.descriptor().accepts_equation_id_shorthand);
     }

@@ -304,6 +304,7 @@ impl PowerWizardState {
                 PowerTestFamily::TwoProportions => 0.4115,
                 PowerTestFamily::Correlation | PowerTestFamily::ChiSquare => 0.30,
                 PowerTestFamily::SimpleLinearRegression => 0.15,
+                PowerTestFamily::LogRankSurvival => 0.50,
             };
         }
         if family == PowerTestFamily::Correlation && self.standardized_effect.abs() >= 1.0 {
@@ -405,6 +406,7 @@ impl PowerWizardState {
             PowerTestFamily::Correlation => curvebook_doc::PowerTestFamily::Correlation,
             PowerTestFamily::ChiSquare => curvebook_doc::PowerTestFamily::ChiSquare,
             PowerTestFamily::SimpleLinearRegression => curvebook_doc::PowerTestFamily::SimpleLinearRegression,
+            PowerTestFamily::LogRankSurvival => curvebook_doc::PowerTestFamily::LogRankSurvival,
         };
         let solve_target = match req.solve_target {
             PowerSolveTarget::SampleSize => curvebook_doc::PowerSolveTarget::SampleSize,
@@ -441,6 +443,9 @@ impl PowerWizardState {
             PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
                 curvebook_doc::PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps }
             }
+            PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 } => {
+                curvebook_doc::PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, event_prob_group2 }
+            }
         };
         curvebook_doc::PowerAnalysisSpec {
             family,
@@ -458,6 +463,7 @@ impl PowerWizardState {
             continuity_correction: req.continuity_correction,
             correlation_method,
             info_sheet_id,
+            ..curvebook_doc::PowerAnalysisSpec::default()
         }
     }
 
@@ -473,6 +479,7 @@ impl PowerWizardState {
             curvebook_doc::PowerTestFamily::Correlation => PowerTestFamily::Correlation,
             curvebook_doc::PowerTestFamily::ChiSquare => PowerTestFamily::ChiSquare,
             curvebook_doc::PowerTestFamily::SimpleLinearRegression => PowerTestFamily::SimpleLinearRegression,
+            curvebook_doc::PowerTestFamily::LogRankSurvival => PowerTestFamily::LogRankSurvival,
         };
         self.solve_target = match spec.solve_target {
             curvebook_doc::PowerSolveTarget::SampleSize => PowerSolveTarget::SampleSize,
@@ -561,6 +568,12 @@ impl PowerWizardState {
                 self.beta1 = *beta1;
                 self.sigma_x = *sigma_x;
                 self.sigma_eps = *sigma_eps;
+            }
+            curvebook_doc::PowerEffectSpec::HazardRatio { hazard_ratio, event_prob_group1, .. } => {
+                self.survival_hazard_ratio = *hazard_ratio;
+                if let Some(p1) = event_prob_group1 {
+                    self.survival_event_prob = *p1;
+                }
             }
         }
         self.created_sheets = None;
@@ -977,6 +990,7 @@ mod tests {
                     wizard.effect_mode = PowerEffectInputMode::Standardized;
                     wizard.standardized_effect = 0.15;
                 }
+                PowerTestFamily::LogRankSurvival => continue,
             }
             let res = wizard.recalculate().unwrap_or_else(|e| panic!("{family:?} failed: {e}"));
             assert!(res.total_n >= res.n_per_group);

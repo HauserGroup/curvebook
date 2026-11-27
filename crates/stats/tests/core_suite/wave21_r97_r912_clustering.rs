@@ -361,6 +361,11 @@ fn pillar3_clustering_all_distances_linkages_cophenetic_silhouettes_and_sweep() 
             distance: ClusterDistance::Cosine,
             linkage: ClusterLinkage::Upgma,
             k_sweep_max: Some(5),
+            consensus_optimal_k: false,
+            kmeans_algorithm: Default::default(),
+            cluster_direction: Default::default(),
+            cut_height: None,
+            emit_anova_tab: false,
         }),
     )
     .unwrap();

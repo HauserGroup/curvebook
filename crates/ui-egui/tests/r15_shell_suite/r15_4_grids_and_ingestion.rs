@@ -824,6 +824,10 @@ fn aud_10_import_wizard_policy_atomicity_unstack_and_transform_modals() -> TestR
         x_transform: None,
         y_transform: Some(MathTransformPreset::LinearScale { slope: 2.5, intercept: 10.0 }),
         error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+        pharmacology_preset: None,
+        interchange_xy: false,
+        zero_x_substitute: None,
+        asymmetric_ci_policy: Default::default(),
     });
     let rsid = SheetId::new(
         app_lin
@@ -851,6 +855,7 @@ fn aud_10_import_wizard_policy_atomicity_unstack_and_transform_modals() -> TestR
         equation_id: "log_agonist_vs_response_4pl".into(),
         parameters: vec![("Top".into(), 100.5), ("HillSlope".into(), 1.5)],
         noise: SimulationNoise::None,
+        simulation_mode: None,
     });
     let sim_id = SheetId::new(
         app_de

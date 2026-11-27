@@ -24,7 +24,7 @@ const MAX_HEATMAP_RENDER_COLS: usize = 250;
 /// Maximum cells for which per-cell text value annotations are rendered.
 const MAX_HEATMAP_ANNOTATED_CELLS: usize = 2_500;
 
-fn cap_heatmap_dimensions(orig_rows: usize, orig_cols: usize, warnings: &mut Vec<ChartWarning>) -> (usize, usize, bool) {
+pub(super) fn cap_heatmap_dimensions(orig_rows: usize, orig_cols: usize, warnings: &mut Vec<ChartWarning>) -> (usize, usize, bool) {
     if orig_rows == 0 || orig_cols == 0 {
         return (orig_rows, orig_cols, false);
     }
@@ -344,7 +344,7 @@ pub(in crate::multivariate_layout) fn compile_heatmap(graph: &GraphSheet, doc: &
     Ok(())
 }
 
-fn spreadsheet_column_letters(mut index: usize) -> String {
+pub(super) fn spreadsheet_column_letters(mut index: usize) -> String {
     let mut chars = Vec::new();
     loop {
         chars.push((b'A' + (index % 26) as u8) as char);

@@ -171,7 +171,7 @@ fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: 
         .collect()
 }
 
-fn ols_residuals(pairs: &[(f64, f64)]) -> Vec<(f64, f64)> {
+pub(super) fn ols_residuals(pairs: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let n = pairs.len();
     if n < 2 {
         return pairs.to_vec();
@@ -373,10 +373,15 @@ fn values_to_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>) -> Vec<D
 fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
     let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
 
-    // 1. Prefer explicit ResultTabKind::NormalQq (excluding BlandAltman).
+    // 1. Prefer explicit ResultTabKind::NormalQq (excluding BlandAltman), prioritizing `normal-qq` over `lognormal-qq`.
     if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::NormalQq)
-    }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq)
+    }) && let Some(tab) = res
+        .tabs
+        .iter()
+        .find(|t| t.id == "normal-qq")
+        .or_else(|| res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq && t.id != "lognormal-qq"))
+        .or_else(|| res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq))
     {
         let ds_col = find_header_col(&tab.column_headers, |h| h == "data set" || h == "dataset" || h == "group");
         let target_label = selected_dataset_label_in_tab(res, tab, ds_col, graph, doc);
@@ -533,6 +538,275 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
     let series_label = if label.is_empty() { graph.spec.title.clone() } else { label };
     let tagged = val_sources.into_iter().map(|(v, src)| (v, src, series_label.clone())).collect();
     values_to_qq_diag_points(tagged)
+}
+
+// 2h. Lognormal Q-Q Plot (Blom 1958 Lognormal Expected Quantiles vs Observed ln(Y))
+
+/// Compile [`curvebook_doc::DiagnosticPlotKind::LognormalQqPlot`] using the `lognormal-qq`
+/// (or lognormal columns of `normal-qq`) coordinate tab from `curvebook-stats`, falling back to
+/// Blom (1958) quantiles on strictly positive observations (`ln(Y)`).
+///
+/// Reference: Blom, G. (1958). *Statistical Estimates and Transformed Beta-Variables*. Wiley.
+pub(in crate::multivariate_layout) fn compile_lognormal_qq_plot(
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    scene: &mut ChartScene,
+) -> Result<(), ChartError> {
+    let mut pts = extract_lognormal_qq_points(graph, doc, &mut scene.warnings);
+    pts.retain(|pt| pt.x.is_finite() && pt.y.is_finite());
+    if pts.len() < 3 {
+        scene.warnings.push(ChartWarning::new(
+            "insufficient_lognormal_qq_sample",
+            "at least 3 finite strictly positive observations required for Lognormal Q-Q plot",
+        ));
+        draw_empty_open_frame(scene);
+        return Ok(());
+    }
+
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
+    let x_pad = (x_max - x_min).max(1.0) * 0.1;
+    let y_pad = (y_max - y_min).max(1.0) * 0.1;
+
+    let mut frame_graph = graph.clone();
+    if frame_graph.spec.x_axis.title.trim().is_empty() || frame_graph.spec.x_axis.title == "X" {
+        frame_graph.spec.x_axis.title = String::from("Theoretical Lognormal Quantiles (ln)");
+    }
+    if frame_graph.spec.y_axis.title.trim().is_empty() || frame_graph.spec.y_axis.title == "Y" {
+        frame_graph.spec.y_axis.title = String::from("Sample Quantiles ln(Y)");
+    }
+
+    let (x_axis, y_axis, _) = layout_and_render_segmented_chrome(
+        scene,
+        &frame_graph,
+        doc,
+        &SegmentedFrameSpec {
+            x_bounds: (x_min - x_pad, x_max + x_pad),
+            y_bounds: (y_min - y_pad, y_max + y_pad),
+            y2_bounds: None,
+            cat_x: None,
+            cat_y: None,
+            margins: PlotMarginConfig::default(),
+        },
+    );
+    let r = scene.plot_rect_pt;
+
+    let mut xs: Vec<f64> = pts.iter().map(|p| p.x).collect();
+    let mut ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
+    xs.sort_by(f64::total_cmp);
+    ys.sort_by(f64::total_cmp);
+    let ref_line = match (quartiles_hinge(&xs), quartiles_hinge(&ys)) {
+        (Some((qx1, _, qx3)), Some((qy1, _, qy3))) if (qx3 - qx1).abs() > 1e-12 => {
+            let slope = (qy3 - qy1) / (qx3 - qx1);
+            Some((slope, qy1 - slope * qx1))
+        }
+        _ => Some((1.0, 0.0)),
+    };
+    if let Some((slope, intercept)) = ref_line {
+        for seg_x in &x_axis.segments {
+            for seg_y in &y_axis.segments {
+                let sx0 = seg_x.domain_min.min(seg_x.domain_max);
+                let sx1 = seg_x.domain_min.max(seg_x.domain_max);
+                let sy0 = intercept + slope * sx0;
+                let sy1 = intercept + slope * sx1;
+                if let (Some(px0), Some(px1), Some(py0), Some(py1)) = (
+                    seg_x.mapping().map_value(sx0, seg_x.span_start_pt, seg_x.span_end_pt),
+                    seg_x.mapping().map_value(sx1, seg_x.span_start_pt, seg_x.span_end_pt),
+                    seg_y.mapping().map_value(sy0, seg_y.span_start_pt, seg_y.span_end_pt),
+                    seg_y.mapping().map_value(sy1, seg_y.span_start_pt, seg_y.span_end_pt),
+                ) {
+                    let cell_clip = RectPt::new(
+                        seg_x.span_start_pt.min(seg_x.span_end_pt),
+                        seg_y.span_start_pt.min(seg_y.span_end_pt),
+                        (seg_x.span_end_pt - seg_x.span_start_pt).abs(),
+                        (seg_y.span_end_pt - seg_y.span_start_pt).abs(),
+                    );
+                    scene.primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(px0, py0), PointPt::new(px1, py1)),
+                        fill: None,
+                        stroke: Some(solid_stroke(Rgba8::rgb(120, 128, 138), 1.1, LineDashStyle::Dashed)),
+                        clip: Some(cell_clip),
+                    });
+                }
+            }
+        }
+    }
+
+    let color = graph.spec.palette.color_at(0);
+    for pt in &pts {
+        let (exp_ln, obs_ln) = (pt.x, pt.y);
+        if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(exp_ln), y_axis.map_value(obs_ln)) {
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.8,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.5,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker_for_col(
+                &graph.spec,
+                &pt.source.sheet_id,
+                pt.source.col,
+                pt.source.row,
+                Some(pt.source.subcol),
+                base_marker,
+            ) {
+                let center_pt = PointPt::new(px, py);
+                emit_marker(&mut scene.primitives, center_pt, &marker, Some(r));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt,
+                    radius_pt: (marker.size_pt * 0.5).max(3.0),
+                    source_cell: pt.source.clone(),
+                    series_label: pt.series_label.clone(),
+                    value_summary: format!("Expected ln={}, Observed ln={}", format_point_value(exp_ln), format_point_value(obs_ln)),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn find_lognormal_qq_tab(res: &ResultSheet) -> Option<&ResultTab> {
+    if matches!(res.analysis.kind, AnalysisKind::BlandAltman(_)) {
+        return None;
+    }
+    res.tabs.iter().find(|t| t.id == "lognormal-qq").or_else(|| {
+        res.tabs.iter().find(|t| {
+            t.kind == ResultTabKind::NormalQq
+                && t.column_headers.iter().any(|h| {
+                    let lo = h.to_ascii_lowercase();
+                    lo.contains("lognormal") || lo.contains("ln(")
+                })
+        })
+    })
+}
+
+fn values_to_lognormal_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
+    vals.retain(|(v, _, _)| v.is_finite());
+    if vals.iter().any(|(v, _, _)| *v <= 0.0) {
+        warnings.push(ChartWarning::new(
+            "non_positive_lognormal_qq",
+            "lognormal Q-Q coordinates require strictly positive observations (values <= 0 found)",
+        ));
+        return Vec::new();
+    }
+    vals.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.row.cmp(&b.1.row)).then_with(|| a.1.subcol.cmp(&b.1.subcol)));
+    if vals.len() < 3 {
+        return Vec::new();
+    }
+    let raw: Vec<f64> = vals.iter().map(|(v, _, _)| *v).collect();
+    let Ok(pairs) = curvebook_stats::column::qq_expected_quantiles(&raw, true) else {
+        return Vec::new();
+    };
+    pairs
+        .into_iter()
+        .zip(vals)
+        .map(|((exp_ln, obs_ln), (_, source, series_label))| DiagPoint { x: exp_ln, y: obs_ln, label: None, source, series_label })
+        .collect()
+}
+
+fn extract_lognormal_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Vec<DiagPoint> {
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+    let has_ln_qq_tab = |r: &ResultSheet| find_lognormal_qq_tab(r).is_some();
+
+    if let Some(res) = find_matching_result_where_checked(graph, doc, warnings, has_ln_qq_tab)
+        && let Some(tab) = find_lognormal_qq_tab(res)
+    {
+        let ds_col = find_header_col(&tab.column_headers, |h| h == "data set" || h == "dataset" || h == "group");
+        let target_label = selected_dataset_label_in_tab(res, tab, ds_col, graph, doc);
+
+        let is_explicit_lognormal_tab = tab.id == "lognormal-qq";
+        let exp_col = find_header_col(&tab.column_headers, |h| {
+            h.contains("lognormal") && (h.contains("expected") || h.contains("theoretical")) && !h.contains("original")
+        })
+        .or_else(|| find_header_col(&tab.column_headers, |h| h.contains("lognormal") && (h.contains("expected") || h.contains("theoretical"))))
+        .or_else(|| find_header_col(&tab.column_headers, |h| h.contains("ln(") && (h.contains("expected") || h.contains("theoretical"))))
+        .or_else(|| {
+            is_explicit_lognormal_tab.then(|| find_header_col(&tab.column_headers, |h| h.contains("expected") || h.contains("theoretical"))).flatten()
+        });
+
+        let obs_col = find_header_col(&tab.column_headers, |h| {
+            h.contains("lognormal") && (h.contains("observed") || h.contains("sample") || h.contains("ln("))
+        })
+        .or_else(|| find_header_col(&tab.column_headers, |h| h.contains("ln(") && !h.contains("expected") && !h.contains("theoretical")))
+        .or_else(|| {
+            is_explicit_lognormal_tab.then(|| find_header_col(&tab.column_headers, |h| h.contains("observed") || h.contains("sample"))).flatten()
+        });
+
+        let fallback_sheet_id = res.analysis.source_sheet_id.clone().unwrap_or_else(|| res.id.clone());
+        let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
+        let ds_col_idx = match ds_opt.map(|d| &d.archetype) {
+            Some(TableArchetype::MultipleVariables(_)) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
+            _ => ds_idx,
+        };
+        let mut sorted_ds_vals = ds_opt.map_or_else(|| (Vec::new(), String::new()), |ds| collect_ds_active_values_with_sources(ds, ds_col_idx));
+        sorted_ds_vals.0.retain(|(v, _)| v.is_finite() && *v > 0.0);
+        sorted_ds_vals.0.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.row.cmp(&b.1.row)).then_with(|| a.1.subcol.cmp(&b.1.subcol)));
+        let series_label =
+            if sorted_ds_vals.1.is_empty() { target_label.clone().unwrap_or_else(|| graph.spec.title.clone()) } else { sorted_ds_vals.1.clone() };
+
+        if let (Some(ec), Some(oc)) = (exp_col, obs_col) {
+            let pairs: Vec<(usize, f64, f64)> = tab
+                .rows
+                .iter()
+                .enumerate()
+                .filter_map(|(i, row)| {
+                    if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
+                        && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
+                    {
+                        return None;
+                    }
+                    Some((i, result_cell_num(row.get(ec)?)?, result_cell_num(row.get(oc)?)?))
+                })
+                .collect();
+            if pairs.len() >= 3 {
+                let can_zip = sorted_ds_vals.0.len() == pairs.len()
+                    && sorted_ds_vals
+                        .0
+                        .iter()
+                        .zip(pairs.iter())
+                        .all(|((dv, _), (_, _, obs_ln))| (dv.ln() - obs_ln).abs() <= 1e-6 * dv.ln().abs().max(1.0));
+                return pairs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, (tab_i, exp_ln, obs_ln))| {
+                        let source = if can_zip {
+                            sorted_ds_vals.0[k].1.clone()
+                        } else {
+                            SourceCellId { sheet_id: fallback_sheet_id.clone(), row: tab_i, col: ds_col_idx, subcol: 0 }
+                        };
+                        DiagPoint { x: exp_ln, y: obs_ln, label: None, source, series_label: series_label.clone() }
+                    })
+                    .collect();
+            }
+            // If an explicit lognormal-qq/normal-qq tab existed for this dataset but had no valid
+            // lognormal pairs (e.g. non-positive values), do not silently bypass the result sheet.
+            return Vec::new();
+        }
+    }
+
+    if has_blocked_matching_result(graph, doc, has_ln_qq_tab) {
+        return Vec::new();
+    }
+
+    // Fallback to raw DataSheet observations.
+    let Some(ds) = resolve_source_data_sheet_checked(graph, doc, warnings) else { return Vec::new() };
+    let target_col = match &ds.archetype {
+        TableArchetype::MultipleVariables(_) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
+        _ => ds_idx,
+    };
+    let (val_sources, label) = collect_ds_active_values_with_sources(ds, target_col);
+    if !val_sources.is_empty() && is_ds_pre_summarized(ds) {
+        warnings.push(ChartWarning::new(
+            "pre_summarized_summary_only",
+            "pre-summarized table uses only the primary summary value (subcolumn 0) without replicate dispersion",
+        ));
+    }
+    let series_label = if label.is_empty() { graph.spec.title.clone() } else { label };
+    let tagged = val_sources.into_iter().map(|(v, src)| (v, src, series_label.clone())).collect();
+    values_to_lognormal_qq_diag_points(tagged, warnings)
 }
 
 #[cfg(test)]

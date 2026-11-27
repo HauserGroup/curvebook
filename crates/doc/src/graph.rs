@@ -36,6 +36,24 @@ pub enum DiagnosticPlotKind {
     /// Theoretical normal quantiles vs observed/residual quantiles Q–Q plot with reference line.
     #[serde(alias = "qq", alias = "normal_qq")]
     NormalQqPlot,
+    /// Absolute residuals `|r_i|` versus predicted values `Y_hat_i` homoscedasticity diagnostic plot.
+    #[serde(alias = "homoscedasticity", alias = "homoscedasticity_plot")]
+    HomoscedasticityPlot,
+    /// Observed response `Y_i` versus model-predicted `Y_hat_i` calibration scatter plot with identity line.
+    #[serde(alias = "actual_vs_predicted", alias = "actual_vs_predicted_plot")]
+    ActualVsPredictedPlot,
+    /// Regression residuals plotted sequentially against observation row order.
+    #[serde(alias = "residual_vs_row", alias = "residual_vs_row_plot")]
+    ResidualVsRowPlot,
+    /// Tibshirani et al. (2001) Gap statistic `Gap(k) ± s_k` versus cluster count `k`.
+    #[serde(alias = "gap_statistic", alias = "gap_statistic_plot")]
+    GapStatisticPlot,
+    /// Color-mapped symmetric parameter correlation matrix heatmap from GLM, Cox PH, or nonlinear regression.
+    #[serde(alias = "parameter_correlation_heatmap", alias = "param_corr_heatmap")]
+    ParameterCorrelationHeatmap,
+    /// Theoretical lognormal quantiles vs observed positive-data quantiles Q–Q plot with reference line.
+    #[serde(alias = "lognormal_qq", alias = "lognormal_qq_plot")]
+    LognormalQqPlot,
 }
 
 /// Primary visual family of a [`GraphSpec`].

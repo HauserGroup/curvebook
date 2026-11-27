@@ -1,25 +1,34 @@
 //! Execution engine for all eight [`TransformAnalysisSpec`] operations (`docs/implementation/data-tables-and-transforms.md` §5, `docs/planning/calculators-and-quick-stats.md` §4).
 
+pub mod fraction_of_total;
 pub mod math;
 pub mod normalize_baseline;
 pub mod reshape_select;
+pub mod row_stats;
 
-pub use math::{MathTransformOp, execute_math_op, execute_math_transform};
-pub use normalize_baseline::{BaselineKind, execute_normalize, execute_remove_baseline, execute_remove_baseline_kind};
-pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_select_with_derived, execute_transpose};
+pub use fraction_of_total::{clopper_pearson_ci, execute_fraction_of_total, wilson_score_ci};
+pub use math::{MathTransformOp, MathTransformOptions, execute_math_op, execute_math_transform, execute_math_transform_with_options};
+pub use normalize_baseline::{
+    BaselineKind, execute_normalize, execute_remove_baseline, execute_remove_baseline_kind, execute_remove_baseline_with_options,
+};
+pub use reshape_select::{
+    PruneMethod, SelectRearrangeOptions, SelectRule, execute_prune, execute_select, execute_select_and_rearrange, execute_select_with_derived,
+    execute_transpose,
+};
+pub use row_stats::{execute_row_statistics, quantile_type6_sorted};
 
 use std::collections::HashSet;
 
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, DocError, HookSource, InfoSheet, MAX_TITLE_BYTES, PartsOfWholeTable, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SummaryModeSupport, TableArchetype, TableKind, TransformAnalysisSpec,
-    VariableRole, VariableSource, parse_column_title_numeric_hook, summary_mode_row_for_spec,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SimulationMode, SummaryModeSupport, TableArchetype, TableKind,
+    TransformAnalysisSpec, VariableRole, VariableSource, parse_column_title_numeric_hook, summary_mode_row_for_spec,
 };
 
 use crate::error::TransformError;
 use crate::randomize::{RowSampleConfig, random_sample_rows};
-use crate::simulate::simulate_xy_sheet;
+use crate::simulate::{simulate_column_sheet, simulate_contingency_2x2, simulate_xy_sheet};
 
 /// External context (linked `InfoSheet`, upstream `ResultSheet`s, `DataSheet`s, and column slice)
 /// supplied when executing a derived data transformation.
@@ -220,43 +229,123 @@ pub fn enforce_summary_mode_matrix(sheet: &DataSheet, kind: &AnalysisKind) -> Re
 pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
     enforce_summary_mode_matrix(source, &AnalysisKind::Transform(spec.clone()))?;
     match spec {
-        TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation } => {
+        TransformAnalysisSpec::Math {
+            x_transform,
+            y_transform,
+            error_propagation,
+            pharmacology_preset,
+            interchange_xy,
+            zero_x_substitute,
+            asymmetric_ci_policy,
+        } => {
             let x_op = x_transform.map(MathTransformOp::Preset);
             let y_op = y_transform.map(MathTransformOp::Preset);
-            execute_math_transform(source, x_op.as_ref(), y_op.as_ref(), *error_propagation, ctx)
+            let opts = MathTransformOptions {
+                pharmacology_preset: *pharmacology_preset,
+                interchange_xy: *interchange_xy,
+                zero_x_substitute: *zero_x_substitute,
+                asymmetric_ci_policy: *asymmetric_ci_policy,
+            };
+            execute_math_transform_with_options(source, x_op.as_ref(), y_op.as_ref(), *error_propagation, &opts, ctx)
         }
         TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set } => {
             execute_normalize(source, zero_anchor, hundred_anchor, *output_percent, *per_data_set, ctx)
         }
-        TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation } => execute_remove_baseline(source, baseline_columns, *operation, ctx),
+        TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation, baseline_kind, retain_unselected_columns } => {
+            if let Some(kind) = baseline_kind {
+                execute_remove_baseline_with_options(source, kind, *operation, *retain_unselected_columns, ctx)
+            } else {
+                if baseline_columns.is_empty() {
+                    return Err(TransformError::InvalidSpec { message: String::from("baseline_columns must not be empty") });
+                }
+                let kind = BaselineKind::ColumnsRowWise(baseline_columns.clone());
+                execute_remove_baseline_with_options(source, &kind, *operation, *retain_unselected_columns, ctx)
+            }
+        }
         TransformAnalysisSpec::Transpose { swap_row_and_column_titles } => execute_transpose(source, *swap_row_and_column_titles, ctx),
         TransformAnalysisSpec::PruneRows { every_k_rows, average_window } => {
             let method = if *average_window { PruneMethod::AverageBins(*every_k_rows) } else { PruneMethod::EveryNth(*every_k_rows) };
             execute_prune(source, method, ctx)
         }
-        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns } => {
+        TransformAnalysisSpec::SelectAndTransform {
+            filter_formula,
+            target_archetype,
+            derived_columns,
+            complete_rows_only,
+            subject_column,
+            row_title_column,
+            contingency_count_column,
+            include_variable_name_prefixes,
+        } => {
             let mut rules = Vec::new();
             if let Some(formula) = filter_formula
                 && !formula.trim().is_empty()
             {
                 rules.push(SelectRule::Predicate(formula.clone()));
             }
-            execute_select_with_derived(source, &rules, derived_columns, *target_archetype, ctx)
+            let opts = SelectRearrangeOptions {
+                complete_rows_only: *complete_rows_only,
+                subject_column: *subject_column,
+                row_title_column: *row_title_column,
+                contingency_count_column: *contingency_count_column,
+                include_variable_name_prefixes: *include_variable_name_prefixes,
+            };
+            execute_select_and_rearrange(source, &rules, derived_columns, *target_archetype, &opts, ctx)
         }
-        TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, parameters, noise } => {
+        TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, parameters, noise, simulation_mode } => {
             let (id, title) = ctx.derived_ids(source, "simulate", "Simulated");
-            let data_sheet = simulate_xy_sheet(&id, &title, *seed, *row_count, *replicates, *x_min, *x_max, equation_id, parameters, *noise)?;
-            let summary_tab = build_summary_tab(
-                "Simulation summary",
-                vec![
-                    ("Equation", ResultCell::Text(equation_id.clone())),
-                    ("Rows", ResultCell::Number { value: *row_count as f64, prefix: None, units: None }),
-                    ("Replicates", ResultCell::Number { value: *replicates as f64, prefix: None, units: None }),
-                    ("Seed", ResultCell::Text(seed.to_string())),
-                ],
-                Vec::new(),
-            );
-            Ok(TransformOutput { data_sheet, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+            match simulation_mode.as_ref().unwrap_or(&SimulationMode::XyCurve) {
+                SimulationMode::XyCurve => {
+                    let data_sheet = simulate_xy_sheet(&id, &title, *seed, *row_count, *replicates, *x_min, *x_max, equation_id, parameters, *noise)?;
+                    let summary_tab = build_summary_tab(
+                        "Simulation summary",
+                        vec![
+                            ("Equation", ResultCell::Text(equation_id.clone())),
+                            ("Rows", ResultCell::Number { value: *row_count as f64, prefix: None, units: None }),
+                            ("Replicates", ResultCell::Number { value: *replicates as f64, prefix: None, units: None }),
+                            ("Seed", ResultCell::Text(seed.to_string())),
+                        ],
+                        Vec::new(),
+                    );
+                    Ok(TransformOutput { data_sheet, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+                }
+                SimulationMode::Contingency2x2(cspec) => {
+                    let data_sheet = simulate_contingency_2x2(&id, &title, *seed, cspec)?;
+                    let summary_tab = build_summary_tab(
+                        "Contingency simulation summary",
+                        vec![("Design", ResultCell::Text(format!("{:?}", cspec.design))), ("Seed", ResultCell::Text(seed.to_string()))],
+                        Vec::new(),
+                    );
+                    Ok(TransformOutput { data_sheet, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+                }
+                SimulationMode::Column(col_spec) => {
+                    let n_cols = col_spec.column_means.len().max(col_spec.hooked_means.len());
+                    let mut resolved = Vec::with_capacity(n_cols);
+                    for i in 0..n_cols {
+                        if let Some(Some(hook)) = col_spec.hooked_means.get(i) {
+                            resolved.push(ctx.resolve_hook(hook, source)?);
+                        } else if let Some(&m) = col_spec.column_means.get(i) {
+                            resolved.push(m);
+                        } else {
+                            return Err(TransformError::InvalidSpec {
+                                message: format!("column mean[{i}] missing and no hooked_means entry provided"),
+                            });
+                        }
+                    }
+                    let data_sheet = simulate_column_sheet(&id, &title, *seed, *row_count, col_spec, Some(&resolved))?;
+                    let summary_tab = build_summary_tab(
+                        "Column simulation summary",
+                        vec![
+                            ("Columns", ResultCell::Number { value: resolved.len() as f64, prefix: None, units: None }),
+                            ("Rows", ResultCell::Number { value: *row_count as f64, prefix: None, units: None }),
+                            ("Within SD", ResultCell::Number { value: col_spec.within_sd, prefix: None, units: None }),
+                            ("Seed", ResultCell::Text(seed.to_string())),
+                        ],
+                        Vec::new(),
+                    );
+                    Ok(TransformOutput { data_sheet, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+                }
+            }
         }
         TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } => {
             let (id, title) = ctx.derived_ids(source, "sample", "Random sample");
@@ -313,8 +402,11 @@ pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, c
         }
         AnalysisKind::FitSplineLowess(spec) => crate::spline::execute_spline_lowess(source, analysis, spec),
         AnalysisKind::AreaUnderCurve(spec) => crate::curve::execute_area_under_curve(source, analysis, spec),
+        AnalysisKind::RowStatistics(spec) => execute_row_statistics(source, analysis, spec, ctx),
+        AnalysisKind::FractionOfTotal(spec) => execute_fraction_of_total(source, analysis, spec, ctx),
+        AnalysisKind::CurveCalculus(spec) => crate::curve::execute_curve_calculus(source, analysis, spec, ctx),
         _ => Err(TransformError::InvalidSpec {
-            message: format!("analysis `{}` is not a Transform, FitSplineLowess, or AreaUnderCurve specification", analysis.effective_title()),
+            message: format!("analysis `{}` is not a supported transform analysis specification", analysis.effective_title()),
         }),
     }
 }

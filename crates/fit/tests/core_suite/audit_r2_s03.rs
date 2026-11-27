@@ -194,17 +194,17 @@ fn r2_s03_04_multi_predictor_fits_omit_1d_auc_while_1d_mv_keeps_it() {
 fn r2_s03_05_builtin_curve_tex_matches_evaluator_formulas() {
     let lor = get_builtin_model("lorentzian").unwrap();
     assert_eq!(lor.param_names(), &["Amplitude", "Center", "Width"]);
-    assert!((lor.eval(&[7.0], &[10.0, 5.0, 4.0], 0).unwrap() - 5.0).abs() < 1e-12);
+    assert!((lor.eval(&[7.0], &[10.0, 5.0, 2.0], 0).unwrap() - 5.0).abs() < 1e-12);
     let lor_sym = format_model_equation_tex("lorentzian", None, &[], false, 4);
-    assert!(lor_sym.contains("0.5 \\cdot \\text{Width}") || lor_sym.contains("0.5 \\cdot Width"), "{lor_sym}");
+    assert!(lor_sym.contains("\\frac{X - \\text{Center}}{\\text{Width}}"), "{lor_sym}");
     let lor_sub = format_model_equation_tex(
         "lorentzian",
         None,
-        &[("Amplitude".to_owned(), 10.0), ("Center".to_owned(), 5.0), ("Width".to_owned(), 4.0)],
+        &[("Amplitude".to_owned(), 10.0), ("Center".to_owned(), 5.0), ("Width".to_owned(), 2.0)],
         true,
         4,
     );
-    assert!(lor_sub.contains("0.5 \\cdot 4"), "{lor_sub}");
+    assert!(lor_sub.contains("\\frac{X - 5}{2}"), "{lor_sub}");
 
     let log_m = get_builtin_model("logarithmic_curve").unwrap();
     assert_eq!(log_m.param_names(), &["a", "b"]);
@@ -237,8 +237,8 @@ fn r2_s03_05_builtin_curve_tex_matches_evaluator_formulas() {
 fn r2_s03_06_substituted_precedence_parenthesizes_sci_divisors_powers_and_negated_products() {
     let owned = |pairs: &[(&str, f64)]| -> Vec<(String, f64)> { pairs.iter().map(|&(k, v)| (k.to_owned(), v)).collect() };
     for &(eq, dsl, params, expected, exact) in &[
-        ("sinc_wave", None, &[("Amplitude", 2.0), ("Center", 1.0), ("Width", -2.0)][..], "/ (-2)", false),
-        ("sinc_wave", None, &[("Amplitude", 2.0), ("Center", 1.0), ("Width", 1e-5)][..], "(1 \\times 10^{-5})", false),
+        ("sinc_wave", None, &[("Amplitude", 2.0), ("Wavelength", -2.0)][..], "/ (-2)", false),
+        ("sinc_wave", None, &[("Amplitude", 2.0), ("Wavelength", 1e-5)][..], "(1 \\times 10^{-5})", false),
         ("custom_dsl", Some("Y = 10^(X / Kd)"), &[("Kd", 1e-5)][..], "Y = 10^{\\frac{X}{1 \\times 10^{-5}}}", true),
         ("custom_dsl", Some("Y = pow(A, 2)"), &[("A", 1e-5)][..], "Y = (1 \\times 10^{-5})^{2}", true),
         ("custom_dsl", Some("Y = A^2"), &[("A", 1e-5)][..], "(1 \\times 10^{-5})^{2}", false),

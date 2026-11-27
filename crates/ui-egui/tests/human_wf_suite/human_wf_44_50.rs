@@ -214,6 +214,11 @@ fn wf44_human_confidence_ellipses_and_convex_hulls() -> TestRes {
         linkage: ClusterLinkage::Ward,
         k_means_k: Some(3),
         k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     });
     run.verify_reference(
         ReferenceSpec::for_graph(gs_id.clone(), |sess| {
@@ -496,6 +501,11 @@ fn wf46_human_interactive_mv_inspector_variable_swapping() -> TestRes {
         linkage: ClusterLinkage::Ward,
         k_means_k: Some(3),
         k_sweep_max: None,
+        consensus_optimal_k: false,
+        kmeans_algorithm: Default::default(),
+        cluster_direction: Default::default(),
+        cut_height: None,
+        emit_anova_tab: false,
     });
     run.verify_reference(
         ReferenceSpec::for_graph(gs_id.clone(), |sess| {
@@ -589,6 +599,12 @@ fn wf47_human_kaplan_meier_number_at_risk_and_pairwise() -> TestRes {
         mv_time_column: None,
         mv_status_column: None,
         mv_group_column: None,
+        event_code: None,
+        censored_code: None,
+        treat_other_as: Default::default(),
+        ratio_median_ci: false,
+        mv_status_columns: Vec::new(),
+        mv_group_columns: Vec::new(),
     });
     run.verify_reference(
         ReferenceSpec::for_result(rs_id.clone(), |sess| {

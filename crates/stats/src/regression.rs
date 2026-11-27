@@ -17,8 +17,9 @@
 //!   `doi:10.1080/03610928008827941`.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PValueFormat,
-    PassingBablokSpec, ResultCell, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, XColumnMode,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, FormulaTerm, GlmDispersionMode, GlmFamily,
+    GlmSpec, GlmWeightSpec, ModelFormulaSpec, PValueFormat, PassingBablokSpec, RegressionCiMethod, ResultCell, ResultSheet, ResultTabKind, SheetId,
+    SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WeightingScheme, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
@@ -32,6 +33,14 @@ use crate::common::{
     push_scalar, sanitize_result_sheet_floats, text_cell, validate_finite_slice,
 };
 use crate::error::StatsError;
+use crate::formula_design::{
+    CategoricalCoding, FormulaPredictorColumn, collect_formula_columns, compile_formula_design, encode_binary_outcome_column, remap_formula_columns,
+};
+use crate::glm_ext::{
+    GlmRowDiagnostics, compute_glm_sandwich_cov, compute_hosmer_lemeshow_bins, compute_logistic_diagnostics, compute_poisson_diagnostics,
+    dense_cov_to_correlation_rows, multiple_linear_regression_weighted, predict_linear_oos, predict_logistic_oos, predict_poisson_oos,
+    profile_ci_logistic, profile_ci_poisson, resolve_glm_weights,
+};
 use crate::roc::{RocCiMethod, roc_curve_analysis};
 
 // ============================================================================
@@ -873,6 +882,39 @@ pub fn multiple_logistic_regression(
     compute_vif: bool,
     confidence: ConfidenceLevel,
 ) -> Result<MultipleLogisticResult, StatsError> {
+    let bundle = multiple_logistic_regression_with_options(
+        x,
+        y_binary,
+        term_names,
+        compute_vif,
+        GlmDispersionMode::Canonical,
+        RegressionCiMethod::Wald,
+        confidence,
+    )?;
+    Ok(bundle.result)
+}
+
+struct LogisticFitBundle {
+    result: MultipleLogisticResult,
+    cov_canonical: DenseMatrix,
+    cov_effective: DenseMatrix,
+    beta_cis: Vec<(f64, f64)>,
+    used_profile_ci: bool,
+    cox_snell_r2: f64,
+}
+
+fn multiple_logistic_regression_with_options(
+    x: &DenseMatrix,
+    y_binary: &[f64],
+    term_names: &[String],
+    compute_vif: bool,
+    dispersion_mode: GlmDispersionMode,
+    ci_method: RegressionCiMethod,
+    confidence: ConfidenceLevel,
+) -> Result<LogisticFitBundle, StatsError> {
+    if dispersion_mode == GlmDispersionMode::QuasiPoisson {
+        return Err(StatsError::IncompatibleAnalysisSpec { expected: "Poisson GLM family for QuasiPoisson dispersion mode" });
+    }
     let n = x.nrows();
     let p = x.ncols();
     if y_binary.len() != n || term_names.len() != p {
@@ -901,9 +943,13 @@ pub fn multiple_logistic_regression(
 
     let nf = n as f64;
     let p_bar = (n_events as f64) / nf;
-    let ll_null = (n_events as f64) * p_bar.ln() + ((n - n_events) as f64) * (1.0 - p_bar).ln();
-    let dev_null = -2.0 * ll_null;
-    let w_null = p_bar * (1.0 - p_bar);
+    let (ll_null, dev_null, w_null) = if has_const_intercept {
+        let ll0 = (n_events as f64) * p_bar.ln() + ((n - n_events) as f64) * (1.0 - p_bar).ln();
+        (ll0, -2.0 * ll0, p_bar * (1.0 - p_bar))
+    } else {
+        let ll0 = -nf * std::f64::consts::LN_2;
+        (ll0, -2.0 * ll0, 0.25)
+    };
     let diag_null_z = fisher_null_diagonal(&z_mat, w_null);
 
     let mut beta_z = vec![0.0_f64; p];
@@ -933,17 +979,36 @@ pub fn multiple_logistic_regression(
     }
     let info_z_mat = DenseMatrix::from_row_major(p, p, info_z_final)?;
     let cov_z = invert_glm_fisher_information(&info_z_mat, &diag_null_z, 1e-8)?;
-    let cov_beta = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
+    let cov_canonical = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
+    let cov_effective = if dispersion_mode == GlmDispersionMode::RobustSandwich {
+        let score_res: Vec<f64> = y_binary.iter().zip(probs_final.iter()).map(|(&y, &pr)| y - pr).collect();
+        let hc1 = nf / ((n - p).max(1) as f64);
+        compute_glm_sandwich_cov(x, &score_res, &cov_canonical, hc1)?
+    } else {
+        cov_canonical.clone()
+    };
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
+    let vifs = if compute_vif { compute_vifs_from_matrix(x, has_const_intercept, &vec![false; p]) } else { vec![None; p] };
+    let se_effective: Vec<f64> = (0..p).map(|j| cov_effective.get(j, j).unwrap_or(0.0).max(0.0).sqrt()).collect();
+    let se_canonical: Vec<f64> = (0..p).map(|j| cov_canonical.get(j, j).unwrap_or(0.0).max(0.0).sqrt()).collect();
+
+    let (beta_cis, used_profile_ci) =
+        if ci_method == RegressionCiMethod::ProfileLikelihood && dispersion_mode == GlmDispersionMode::Canonical && converged && !separation_detected
+        {
+            (profile_ci_logistic(x, y_binary, &beta, &se_canonical, ll_unpen, confidence)?, true)
+        } else {
+            let wald: Vec<(f64, f64)> = (0..p).map(|j| (beta[j] - z_crit * se_effective[j], beta[j] + z_crit * se_effective[j])).collect();
+            (wald, false)
+        };
+
     let mut terms = Vec::with_capacity(p);
     for j in 0..p {
-        let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
+        let se = se_effective[j];
         let z_stat = if se > 0.0 { beta[j] / se } else { 0.0 };
         let p_val = norm_two_sided_p(z_stat);
         let or = beta[j].exp();
-        let or_ci = ((beta[j] - z_crit * se).exp(), (beta[j] + z_crit * se).exp());
+        let or_ci = (beta_cis[j].0.exp(), beta_cis[j].1.exp());
         terms.push(GlmTermEstimate {
             name: term_names[j].clone(),
             beta: beta[j],
@@ -958,7 +1023,7 @@ pub fn multiple_logistic_regression(
 
     let dev_resid = (-2.0 * ll_unpen).max(0.0);
     let lr_chi2 = (dev_null - dev_resid).max(0.0);
-    let lr_df = (p - 1).max(1) as f64;
+    let lr_df = if has_const_intercept { (p - 1).max(1) as f64 } else { p as f64 };
     let lr_p = chi2_sf(lr_chi2, lr_df)?;
 
     let pf = p as f64;
@@ -967,7 +1032,7 @@ pub fn multiple_logistic_regression(
     let bic = dev_resid + pf * nf.ln();
 
     let mcfadden_r2 = if dev_null > 0.0 { (1.0 - dev_resid / dev_null).clamp(0.0, 1.0) } else { 0.0 };
-    let cox_snell = 1.0 - (2.0 * (ll_null - ll_unpen) / nf).exp();
+    let cox_snell = (1.0 - (2.0 * (ll_null - ll_unpen) / nf).exp()).clamp(0.0, 1.0);
     let max_r2 = 1.0 - (2.0 * ll_null / nf).exp();
     let nagelkerke_r2 = if max_r2 > 0.0 { (cox_snell / max_r2).clamp(0.0, 1.0) } else { 0.0 };
 
@@ -981,7 +1046,7 @@ pub fn multiple_logistic_regression(
     let cases: Vec<f64> = probs_final.iter().zip(y_binary.iter()).filter(|(_, y)| **y == 1.0).map(|(p, _)| *p).collect();
     let roc_auc = roc_curve_analysis(&ctrls, &cases, RocCiMethod::DeLong, confidence).ok().map(|r| r.auc);
 
-    Ok(MultipleLogisticResult {
+    let result = MultipleLogisticResult {
         n,
         n_events,
         converged,
@@ -1005,7 +1070,8 @@ pub fn multiple_logistic_regression(
         hosmer_lemeshow_p: hl_p,
         roc_auc,
         predicted_probs: probs_final,
-    })
+    };
+    Ok(LogisticFitBundle { result, cov_canonical, cov_effective, beta_cis, used_profile_ci, cox_snell_r2: cox_snell })
 }
 
 fn hosmer_lemeshow_test(y: &[f64], probs: &[f64], g_groups: usize) -> Result<(f64, f64, f64), StatsError> {
@@ -1142,41 +1208,38 @@ pub fn multiple_poisson_regression(
     compute_vif: bool,
     confidence: ConfidenceLevel,
 ) -> Result<MultiplePoissonResult, StatsError> {
-    let n = x.nrows();
-    let p = x.ncols();
-    if y_counts.len() != n || term_names.len() != p {
-        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y_counts.len() }));
-    }
-    if n <= p || p == 0 {
-        return Err(StatsError::InsufficientSampleSize { context: "GLM regression", required: p + 1, actual: n });
-    }
-    for &yc in y_counts {
-        if !yc.is_finite() || yc < 0.0 || yc.fract() != 0.0 {
-            return Err(StatsError::InvalidParameter { name: "poisson_y", value: yc });
-        }
-    }
-    let (z_mat, means, scales, has_const_intercept) = standardize_glm_design(x)?;
-    let z_rank = svd(&z_mat)?.rank();
-    if z_rank < p {
-        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: z_rank, expected_rank: p }));
-    }
+    let bundle = multiple_poisson_regression_with_options(
+        x,
+        y_counts,
+        term_names,
+        compute_vif,
+        GlmDispersionMode::Canonical,
+        RegressionCiMethod::Wald,
+        confidence,
+    )?;
+    Ok(bundle.result)
+}
 
-    let nf = n as f64;
-    let mut y_sum = NeumaierSum::new();
-    for &yc in y_counts {
-        y_sum.add(yc);
-    }
-    let y_mean_raw = y_sum.total() / nf;
-    if y_mean_raw <= 0.0 {
-        return Err(StatsError::InvalidParameter { name: "poisson_events", value: 0.0 });
-    }
-    let y_mean = y_mean_raw.max(1e-6);
-    let diag_null_z = fisher_null_diagonal(&z_mat, y_mean);
-    let mut beta_z = vec![0.0_f64; p];
-    if has_const_intercept {
-        beta_z[0] = y_mean.ln();
-    }
+struct PoissonFitBundle {
+    result: MultiplePoissonResult,
+    cov_canonical: DenseMatrix,
+    cov_effective: DenseMatrix,
+    beta_cis: Vec<(f64, f64)>,
+    used_profile_ci: bool,
+    crit_val: f64,
+}
 
+struct PoissonIrlsSolution {
+    beta_z: Vec<f64>,
+    hd_curr: f64,
+    mus: Vec<f64>,
+    etas: Vec<f64>,
+    converged: bool,
+}
+
+fn run_poisson_irls_loop(z_mat: &DenseMatrix, y_counts: &[f64], mut beta_z: Vec<f64>) -> Result<PoissonIrlsSolution, StatsError> {
+    let n = y_counts.len();
+    let p = beta_z.len();
     let eval_poisson_half_dev = |b: &[f64]| -> Option<(f64, Vec<f64>, Vec<f64>)> {
         let mut half_dev = NeumaierSum::new();
         let mut mu_vec = Vec::with_capacity(n);
@@ -1261,6 +1324,53 @@ pub fn multiple_poisson_regression(
             break;
         }
     }
+    Ok(PoissonIrlsSolution { beta_z, hd_curr, mus, etas, converged })
+}
+
+fn multiple_poisson_regression_with_options(
+    x: &DenseMatrix,
+    y_counts: &[f64],
+    term_names: &[String],
+    compute_vif: bool,
+    dispersion_mode: GlmDispersionMode,
+    ci_method: RegressionCiMethod,
+    confidence: ConfidenceLevel,
+) -> Result<PoissonFitBundle, StatsError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    if y_counts.len() != n || term_names.len() != p {
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y_counts.len() }));
+    }
+    if n <= p || p == 0 {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM regression", required: p + 1, actual: n });
+    }
+    for &yc in y_counts {
+        if !yc.is_finite() || yc < 0.0 || yc.fract() != 0.0 {
+            return Err(StatsError::InvalidParameter { name: "poisson_y", value: yc });
+        }
+    }
+    let (z_mat, means, scales, has_const_intercept) = standardize_glm_design(x)?;
+    let z_rank = svd(&z_mat)?.rank();
+    if z_rank < p {
+        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: z_rank, expected_rank: p }));
+    }
+
+    let nf = n as f64;
+    let mut y_sum = NeumaierSum::new();
+    for &yc in y_counts {
+        y_sum.add(yc);
+    }
+    let y_mean_raw = y_sum.total() / nf;
+    if y_mean_raw <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "poisson_events", value: 0.0 });
+    }
+    let y_mean = y_mean_raw.max(1e-6);
+    let diag_null_z = fisher_null_diagonal(&z_mat, y_mean);
+    let mut beta_init = vec![0.0_f64; p];
+    if has_const_intercept {
+        beta_init[0] = y_mean.ln();
+    }
+    let PoissonIrlsSolution { beta_z, hd_curr, mus, etas, converged } = run_poisson_irls_loop(&z_mat, y_counts, beta_init)?;
 
     let beta = uncenter_beta(&beta_z, &means, &scales, has_const_intercept);
 
@@ -1268,15 +1378,16 @@ pub fn multiple_poisson_regression(
     let mut ll_null_acc = NeumaierSum::new();
     let mut ll_model_acc = NeumaierSum::new();
     let mut half_dev_null_acc = NeumaierSum::new();
-    let ln_y_mean = y_mean.ln();
+    let mu_null = if has_const_intercept { y_mean } else { 1.0 };
+    let ln_mu_null = mu_null.ln();
     for (r, &yr) in y_counts.iter().enumerate() {
         let lnf = ln_fact(yr);
-        ll_null_acc.add(yr * ln_y_mean - y_mean - lnf);
+        ll_null_acc.add(yr * ln_mu_null - mu_null - lnf);
         ll_model_acc.add(yr * etas[r] - mus[r] - lnf);
         if yr > 0.0 {
-            half_dev_null_acc.add(yr * (yr.ln() - ln_y_mean) - (yr - y_mean));
+            half_dev_null_acc.add(yr * (yr.ln() - ln_mu_null) - (yr - mu_null));
         } else {
-            half_dev_null_acc.add(y_mean);
+            half_dev_null_acc.add(mu_null);
         }
     }
     let ll_null = ll_null_acc.total();
@@ -1305,22 +1416,55 @@ pub fn multiple_poisson_regression(
     }
     let info_z_mat = DenseMatrix::from_row_major(p, p, info_z_final)?;
     let cov_z = invert_glm_fisher_information(&info_z_mat, &diag_null_z, 1e-8)?;
-    let cov_beta = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
+    let cov_canonical = transform_cov_from_standardized(&cov_z, &means, &scales, has_const_intercept)?;
 
+    let df_resid = (n - p) as f64;
+    let dispersion = pearson_chi2 / df_resid.max(1.0);
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
+    let (cov_effective, crit_val, use_student_t) = match dispersion_mode {
+        GlmDispersionMode::Canonical => (cov_canonical.clone(), z_crit, false),
+        GlmDispersionMode::QuasiPoisson => {
+            let phi = dispersion.max(0.0);
+            let mut scaled = vec![0.0_f64; p * p];
+            for j in 0..p {
+                for k in 0..p {
+                    scaled[j * p + k] = phi * cov_canonical.get(j, k).unwrap_or(0.0);
+                }
+            }
+            let t_crit = student_t_two_sided_isf(confidence.alpha(), df_resid.max(1.0))?;
+            (DenseMatrix::from_row_major(p, p, scaled)?, t_crit, true)
+        }
+        GlmDispersionMode::RobustSandwich => {
+            let score_res: Vec<f64> = y_counts.iter().zip(mus.iter()).map(|(&y, &m)| y - m).collect();
+            let hc1 = nf / df_resid.max(1.0);
+            (compute_glm_sandwich_cov(x, &score_res, &cov_canonical, hc1)?, z_crit, false)
+        }
+    };
+
+    let vifs = if compute_vif { compute_vifs_from_matrix(x, has_const_intercept, &vec![false; p]) } else { vec![None; p] };
+    let se_effective: Vec<f64> = (0..p).map(|j| cov_effective.get(j, j).unwrap_or(0.0).max(0.0).sqrt()).collect();
+
+    let (beta_cis, used_profile_ci) =
+        if ci_method == RegressionCiMethod::ProfileLikelihood && dispersion_mode != GlmDispersionMode::RobustSandwich && converged {
+            let quasi_disp = (dispersion_mode == GlmDispersionMode::QuasiPoisson).then_some((dispersion, df_resid));
+            (profile_ci_poisson(x, y_counts, &beta, &se_effective, ll_curr, quasi_disp, confidence)?, true)
+        } else {
+            let wald: Vec<(f64, f64)> = (0..p).map(|j| (beta[j] - crit_val * se_effective[j], beta[j] + crit_val * se_effective[j])).collect();
+            (wald, false)
+        };
+
     let mut terms = Vec::with_capacity(p);
     for j in 0..p {
-        let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
-        let z_stat = if se > 0.0 { beta[j] / se } else { 0.0 };
-        let p_val = norm_two_sided_p(z_stat);
+        let se = se_effective[j];
+        let stat = if se > 0.0 { beta[j] / se } else { 0.0 };
+        let p_val = if use_student_t { student_t_two_sided_p(stat, df_resid.max(1.0))? } else { norm_two_sided_p(stat) };
         let rr = beta[j].exp();
-        let rr_ci = ((beta[j] - z_crit * se).exp(), (beta[j] + z_crit * se).exp());
+        let rr_ci = (beta_cis[j].0.exp(), beta_cis[j].1.exp());
         terms.push(GlmTermEstimate {
             name: term_names[j].clone(),
             beta: beta[j],
             se,
-            z_statistic: z_stat,
+            z_statistic: stat,
             p_value: p_val,
             exp_beta: rr,
             exp_beta_ci: rr_ci,
@@ -1328,10 +1472,8 @@ pub fn multiple_poisson_regression(
         });
     }
 
-    let df_resid = (n - p) as f64;
-    let dispersion = pearson_chi2 / df_resid.max(1.0);
     let lr_chi2 = (dev_null - dev_resid).max(0.0);
-    let lr_df = (p - 1).max(1) as f64;
+    let lr_df = if has_const_intercept { (p - 1).max(1) as f64 } else { p as f64 };
     let lr_p = chi2_sf(lr_chi2, lr_df)?;
 
     let pf = p as f64;
@@ -1339,7 +1481,7 @@ pub fn multiple_poisson_regression(
     let aicc = if nf - pf - 1.0 > 0.0 { aic + (2.0 * pf * (pf + 1.0)) / (nf - pf - 1.0) } else { f64::INFINITY };
     let bic = -2.0 * ll_curr + pf * nf.ln();
 
-    Ok(MultiplePoissonResult {
+    let result = MultiplePoissonResult {
         n,
         converged,
         terms,
@@ -1357,7 +1499,8 @@ pub fn multiple_poisson_regression(
         aicc,
         bic,
         predicted_means: mus,
-    })
+    };
+    Ok(PoissonFitBundle { result, cov_canonical, cov_effective, beta_cis, used_profile_ci, crit_val })
 }
 
 // ============================================================================
@@ -1389,12 +1532,24 @@ enum RetainedGlmPred {
     Numeric(f64),
 }
 
+struct NestedReducedDesign {
+    x_mat: DenseMatrix,
+    term_names: Vec<String>,
+    has_intercept: bool,
+}
+
 struct GlmDesignMatrix {
     x_mat: DenseMatrix,
     y_vec: Vec<f64>,
     row_labels: Vec<String>,
     term_names: Vec<String>,
     factor_spans: Vec<GlmFactorSpan>,
+    has_intercept: bool,
+    weights: Option<Vec<f64>>,
+    nested_reduced: Option<NestedReducedDesign>,
+    oos_x_mat: Option<DenseMatrix>,
+    oos_row_labels: Vec<String>,
+    binary_outcome_labels: Option<(String, String)>,
     skipped_rows: usize,
     ignored_non_numeric: Vec<(String, usize)>,
 }
@@ -1403,8 +1558,15 @@ fn cell_has_entry(cell: Option<&Cell>) -> bool {
     cell.is_some_and(|c| !c.is_empty() || c.excluded)
 }
 
+fn cell_is_blank_unexcluded(cell: Option<&Cell>) -> bool {
+    cell.is_none_or(|c| c.is_empty() && !c.excluded)
+}
+
 struct MvGlmRows {
-    retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)>,
+    retained_rows: Vec<(usize, f64, Vec<Option<RetainedGlmPred>>)>,
+    explicit_weights: Option<Vec<f64>>,
+    oos_rows: Vec<(usize, Vec<Option<RetainedGlmPred>>)>,
+    binary_outcome_labels: Option<(String, String)>,
     skipped_rows: usize,
     ignored_non_numeric: Vec<(String, usize)>,
 }
@@ -1431,49 +1593,100 @@ fn extract_mv_glm_pred(var: &VariableColumn, row: usize, n_rows: usize, is_cat: 
     Ok(Some(RetainedGlmPred::Categorical(tok)))
 }
 
-fn collect_mv_glm_rows(mv: &curvebook_doc::MultipleVariablesTable, glm_spec: &GlmSpec, is_cat: &[bool]) -> Result<MvGlmRows, StatsError> {
+#[allow(clippy::too_many_arguments)]
+fn collect_mv_glm_rows(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    glm_spec: &GlmSpec,
+    pred_cols: &[usize],
+    required_mask: &[bool],
+    is_cat: &[bool],
+    explicit_weight_col: Option<usize>,
+) -> Result<MvGlmRows, StatsError> {
     let resp_var = &mv.variables[glm_spec.response_column];
-    let Some(end_row) = (0..mv.row_count()).rfind(|&r| {
-        cell_has_entry(resp_var.cells.get(r)) || glm_spec.predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
+    let n_rows = mv.row_count();
+    let binary_enc = if glm_spec.family == GlmFamily::Logistic { Some(encode_binary_outcome_column(resp_var, n_rows)?) } else { None };
+    let binary_outcome_labels = binary_enc.as_ref().filter(|e| e.from_text).map(|e| (e.negative_label.clone(), e.positive_label.clone()));
+
+    let Some(end_row) = (0..n_rows).rfind(|&r| {
+        cell_has_entry(resp_var.cells.get(r))
+            || pred_cols.iter().enumerate().any(|(pos, &pc)| required_mask[pos] && cell_has_entry(mv.variables[pc].cells.get(r)))
+            || explicit_weight_col.is_some_and(|wc| cell_has_entry(mv.variables[wc].cells.get(r)))
     }) else {
-        return Ok(MvGlmRows { retained_rows: Vec::new(), skipped_rows: 0, ignored_non_numeric: Vec::new() });
+        return Ok(MvGlmRows {
+            retained_rows: Vec::new(),
+            explicit_weights: explicit_weight_col.map(|_| Vec::new()),
+            oos_rows: Vec::new(),
+            binary_outcome_labels,
+            skipped_rows: 0,
+            ignored_non_numeric: Vec::new(),
+        });
     };
 
     let mut retained_rows = Vec::new();
+    let mut explicit_weights = explicit_weight_col.map(|_| Vec::new());
+    let mut oos_rows = Vec::new();
     let mut skipped_rows = 0_usize;
     let mut resp_non_num = 0_usize;
-    let mut pred_non_num = vec![0_usize; glm_spec.predictor_columns.len()];
+    let mut weight_non_num = 0_usize;
+    let mut pred_non_num = vec![0_usize; pred_cols.len()];
+    let resp_is_text_binary = binary_enc.as_ref().is_some_and(|e| e.from_text);
 
     for r in 0..=end_row {
         let rc = resp_var.cells.get(r);
-        let has_entry = cell_has_entry(rc) || glm_spec.predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
+        let has_entry = cell_has_entry(rc)
+            || pred_cols.iter().enumerate().any(|(pos, &pc)| required_mask[pos] && cell_has_entry(mv.variables[pc].cells.get(r)))
+            || explicit_weight_col.is_some_and(|wc| cell_has_entry(mv.variables[wc].cells.get(r)));
         if !has_entry {
             continue;
         }
-        if rc.is_some_and(is_ignored_non_numeric_cell) {
+        if !resp_is_text_binary && rc.is_some_and(is_ignored_non_numeric_cell) {
             resp_non_num += 1;
         }
-        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-            if !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+        if let Some(wc) = explicit_weight_col
+            && mv.variables[wc].cells.get(r).is_some_and(is_ignored_non_numeric_cell)
+        {
+            weight_non_num += 1;
+        }
+        for (pos, &pc) in pred_cols.iter().enumerate() {
+            if required_mask[pos] && !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
                 pred_non_num[pos] += 1;
             }
         }
-        let Some(yv) = rc.and_then(|c| c.active_number()) else {
-            skipped_rows += 1;
-            continue;
-        };
-        let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
-        let mut ok = true;
-        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+
+        let mut row_preds: Vec<Option<RetainedGlmPred>> = Vec::with_capacity(pred_cols.len());
+        let mut preds_ok = true;
+        for (pos, &pc) in pred_cols.iter().enumerate() {
+            if !required_mask[pos] {
+                row_preds.push(None);
+                continue;
+            }
             let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-            let Some(pred) = extract_mv_glm_pred(pred_var, r, mv.row_count(), is_cat[pos])? else {
-                ok = false;
+            let Some(pred) = extract_mv_glm_pred(pred_var, r, n_rows, is_cat[pos])? else {
+                preds_ok = false;
                 break;
             };
-            row_preds.push(pred);
+            row_preds.push(Some(pred));
         }
-        if ok {
+
+        let yv_opt = match &binary_enc {
+            Some(enc) => enc.values.get(r).copied().flatten(),
+            None => rc.and_then(Cell::active_number),
+        };
+        if let Some(yv) = yv_opt {
+            if !preds_ok {
+                skipped_rows += 1;
+                continue;
+            }
+            if let (Some(wc), Some(w_buf)) = (explicit_weight_col, explicit_weights.as_mut()) {
+                let Some(wv) = mv.variables[wc].cells.get(r).and_then(Cell::active_number) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                w_buf.push(wv);
+            }
             retained_rows.push((r + 1, yv, row_preds));
+        } else if cell_is_blank_unexcluded(rc) && preds_ok {
+            oos_rows.push((r + 1, row_preds));
         } else {
             skipped_rows += 1;
         }
@@ -1483,34 +1696,41 @@ fn collect_mv_glm_rows(mv: &curvebook_doc::MultipleVariablesTable, glm_spec: &Gl
     if resp_non_num > 0 {
         ignored_non_numeric.push((resp_var.title.clone(), resp_non_num));
     }
-    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+    if let Some(wc) = explicit_weight_col
+        && weight_non_num > 0
+    {
+        ignored_non_numeric.push((mv.variables[wc].title.clone(), weight_non_num));
+    }
+    for (pos, &pc) in pred_cols.iter().enumerate() {
         if pred_non_num[pos] > 0 {
             ignored_non_numeric.push((mv.variables[pc].title.clone(), pred_non_num[pos]));
         }
     }
-    Ok(MvGlmRows { retained_rows, skipped_rows, ignored_non_numeric })
+    Ok(MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric })
 }
 
-type GlmCatLevel = Option<(String, Vec<String>)>;
+type GlmCatLevel = Option<Vec<String>>;
 
 fn resolve_glm_categorical_levels(
     mv: &curvebook_doc::MultipleVariablesTable,
     glm_spec: &GlmSpec,
+    pred_cols: &[usize],
+    required_mask: &[bool],
     is_cat: &[bool],
-    retained_rows: &[(usize, f64, Vec<RetainedGlmPred>)],
+    retained_rows: &[(usize, f64, Vec<Option<RetainedGlmPred>>)],
 ) -> Result<Vec<GlmCatLevel>, StatsError> {
-    let mut cat_levels = Vec::with_capacity(glm_spec.predictor_columns.len());
-    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-        if !is_cat[pos] {
+    let mut cat_levels = Vec::with_capacity(pred_cols.len());
+    for (pos, &pc) in pred_cols.iter().enumerate() {
+        if !is_cat[pos] || !required_mask[pos] {
             cat_levels.push(None);
             continue;
         }
         let var = &mv.variables[pc];
         let cells: Vec<Cell> = retained_rows
             .iter()
-            .filter_map(|(_, _, preds)| match &preds[pos] {
-                RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
-                RetainedGlmPred::Numeric(_) => None,
+            .filter_map(|(_, _, preds)| match preds.get(pos).and_then(Option::as_ref) {
+                Some(RetainedGlmPred::Categorical(tok)) => Some(Cell::text(tok.as_str())),
+                _ => None,
             })
             .collect();
         let retained_col = VariableColumn {
@@ -1535,7 +1755,10 @@ fn resolve_glm_categorical_levels(
         };
         if let Some(rl) = ref_lvl {
             lvls.retain(|l| l != &rl);
-            cat_levels.push(Some((rl, lvls)));
+            let mut ordered = Vec::with_capacity(lvls.len() + 1);
+            ordered.push(rl);
+            ordered.extend(lvls);
+            cat_levels.push(Some(ordered));
         } else {
             cat_levels.push(None);
         }
@@ -1543,12 +1766,192 @@ fn resolve_glm_categorical_levels(
     Ok(cat_levels)
 }
 
+enum OwnedFormulaPred {
+    Continuous { name: String, values: Vec<f64> },
+    Categorical { name: String, levels: Vec<String>, level_indices: Vec<usize> },
+}
+
+impl OwnedFormulaPred {
+    fn as_col(&self) -> FormulaPredictorColumn<'_> {
+        match self {
+            Self::Continuous { name, values } => FormulaPredictorColumn::Continuous { name: name.as_str(), values: values.as_slice() },
+            Self::Categorical { name, levels, level_indices } => {
+                FormulaPredictorColumn::Categorical { name: name.as_str(), levels: levels.as_slice(), level_indices: level_indices.as_slice() }
+            }
+        }
+    }
+}
+
+fn compile_mv_oos_matrix(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    pred_cols: &[usize],
+    required_mask: &[bool],
+    cat_levels: &[GlmCatLevel],
+    primary_local: &ModelFormulaSpec,
+    oos_rows: &[(usize, Vec<Option<RetainedGlmPred>>)],
+) -> (Option<DenseMatrix>, Vec<String>) {
+    if oos_rows.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut valid_indices = Vec::new();
+    for (row_i, (_, preds)) in oos_rows.iter().enumerate() {
+        let mut ok = true;
+        for pos in 0..pred_cols.len() {
+            if !required_mask[pos] {
+                continue;
+            }
+            if let Some(levels) = &cat_levels[pos] {
+                let found =
+                    matches!(preds.get(pos).and_then(Option::as_ref), Some(RetainedGlmPred::Categorical(tok)) if levels.iter().any(|l| l == tok));
+                if !found {
+                    ok = false;
+                    break;
+                }
+            } else if !matches!(preds.get(pos).and_then(Option::as_ref), Some(RetainedGlmPred::Numeric(v)) if v.is_finite()) {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            valid_indices.push(row_i);
+        }
+    }
+    if valid_indices.is_empty() {
+        return (None, Vec::new());
+    }
+    let mut kept_labels = Vec::new();
+    let mut flat_rows = Vec::new();
+    let mut expected_cols: Option<usize> = None;
+    for &ri in &valid_indices {
+        let mut owned = Vec::with_capacity(pred_cols.len());
+        for (pos, &pc) in pred_cols.iter().enumerate() {
+            let title = mv.variables[pc].title.clone();
+            if !required_mask[pos] {
+                owned.push(OwnedFormulaPred::Continuous { name: title, values: vec![0.0] });
+            } else if let Some(levels) = &cat_levels[pos] {
+                let tok = match oos_rows[ri].1[pos].as_ref() {
+                    Some(RetainedGlmPred::Categorical(s)) => s.as_str(),
+                    _ => "",
+                };
+                let idx = levels.iter().position(|l| l == tok).unwrap_or(0);
+                owned.push(OwnedFormulaPred::Categorical { name: title, levels: levels.clone(), level_indices: vec![idx] });
+            } else {
+                let v = match oos_rows[ri].1[pos].as_ref() {
+                    Some(RetainedGlmPred::Numeric(x)) => *x,
+                    _ => 0.0,
+                };
+                owned.push(OwnedFormulaPred::Continuous { name: title, values: vec![v] });
+            }
+        }
+        let refs: Vec<FormulaPredictorColumn<'_>> = owned.iter().map(OwnedFormulaPred::as_col).collect();
+        let Ok(compiled) = compile_formula_design(&refs, primary_local, CategoricalCoding::ReferenceFirstNoInterceptFull) else {
+            continue;
+        };
+        let p = compiled.matrix.ncols();
+        if expected_cols.is_some_and(|exp| exp != p) {
+            continue;
+        }
+        let mut row_vals = Vec::with_capacity(p);
+        let mut all_finite = true;
+        for j in 0..p {
+            let v = compiled.matrix.get(0, j).unwrap_or(f64::NAN);
+            if !v.is_finite() {
+                all_finite = false;
+                break;
+            }
+            row_vals.push(v);
+        }
+        if !all_finite {
+            continue;
+        }
+        expected_cols = Some(p);
+        flat_rows.extend_from_slice(&row_vals);
+        kept_labels.push(format!("Row {}", oos_rows[ri].0));
+    }
+    let Some(ncols) = expected_cols else {
+        return (None, Vec::new());
+    };
+    match DenseMatrix::from_row_major(kept_labels.len(), ncols, flat_rows) {
+        Ok(mat) => (Some(mat), kept_labels),
+        Err(_) => (None, Vec::new()),
+    }
+}
+
+fn assemble_mv_owned_predictors(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    pred_cols: &[usize],
+    required_mask: &[bool],
+    cat_levels: &[GlmCatLevel],
+    retained_rows: &[(usize, f64, Vec<Option<RetainedGlmPred>>)],
+) -> (Vec<OwnedFormulaPred>, Option<usize>) {
+    let n_obs = retained_rows.len();
+    let mut owned_preds = Vec::with_capacity(pred_cols.len());
+    let mut first_cont_idx: Option<usize> = None;
+    for (pos, &pc) in pred_cols.iter().enumerate() {
+        let title = mv.variables[pc].title.clone();
+        if !required_mask[pos] {
+            owned_preds.push(OwnedFormulaPred::Continuous { name: title, values: vec![0.0; n_obs] });
+            continue;
+        }
+        if let Some(levels) = &cat_levels[pos] {
+            let mut lidx = Vec::with_capacity(n_obs);
+            for (_, _, preds) in retained_rows {
+                let tok = match preds[pos].as_ref() {
+                    Some(RetainedGlmPred::Categorical(s)) => s.as_str(),
+                    _ => "",
+                };
+                let idx = levels.iter().position(|l| l == tok).unwrap_or(0);
+                lidx.push(idx);
+            }
+            owned_preds.push(OwnedFormulaPred::Categorical { name: title, levels: levels.clone(), level_indices: lidx });
+        } else {
+            let mut vals = Vec::with_capacity(n_obs);
+            for (_, _, preds) in retained_rows {
+                let v = match preds[pos].as_ref() {
+                    Some(RetainedGlmPred::Numeric(x)) => *x,
+                    _ => 0.0,
+                };
+                vals.push(v);
+            }
+            if first_cont_idx.is_none() {
+                first_cont_idx = Some(pos);
+            }
+            owned_preds.push(OwnedFormulaPred::Continuous { name: title, values: vals });
+        }
+    }
+    (owned_preds, first_cont_idx)
+}
+
 fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
     validate_selected_data_sets(selected, mv.variables.len())?;
     if glm_spec.response_column >= mv.variables.len() {
         return Err(StatsError::MissingColumn { index: glm_spec.response_column });
     }
-    if glm_spec.predictor_columns.is_empty() {
+    let has_weights = !matches!(glm_spec.weights, GlmWeightSpec::None | GlmWeightSpec::Scheme(WeightingScheme::None));
+    if has_weights && glm_spec.family != GlmFamily::Linear {
+        return Err(StatsError::IncompatibleAnalysisSpec { expected: "Linear GLM family for observation weights" });
+    }
+    let explicit_weight_col = match glm_spec.weights {
+        GlmWeightSpec::Column(wc) => {
+            if wc >= mv.variables.len() {
+                return Err(StatsError::MissingColumn { index: wc });
+            }
+            Some(wc)
+        }
+        _ => None,
+    };
+
+    let mut pred_cols = glm_spec.predictor_columns.clone();
+    if pred_cols.is_empty()
+        && let Some(formula) = &glm_spec.formula
+    {
+        for c in collect_formula_columns(formula).into_iter().chain(glm_spec.nested_comparison.iter().flat_map(collect_formula_columns)) {
+            if !pred_cols.contains(&c) {
+                pred_cols.push(c);
+            }
+        }
+    }
+    if pred_cols.is_empty() {
         return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
     }
     for &(ref_col, _) in &glm_spec.reference_levels {
@@ -1556,65 +1959,132 @@ fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[u
             return Err(StatsError::MissingColumn { index: ref_col });
         }
     }
-    let mut is_cat = Vec::with_capacity(glm_spec.predictor_columns.len());
-    for &pc in &glm_spec.predictor_columns {
+    let mut is_cat = Vec::with_capacity(pred_cols.len());
+    for &pc in &pred_cols {
         let var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
         is_cat.push(var.role == VariableRole::Categorical);
     }
 
-    let MvGlmRows { retained_rows, skipped_rows, ignored_non_numeric } = collect_mv_glm_rows(mv, glm_spec, &is_cat)?;
-    let cat_levels = resolve_glm_categorical_levels(mv, glm_spec, &is_cat, &retained_rows)?;
+    let primary_local = match &glm_spec.formula {
+        Some(f) => remap_formula_columns(f, &pred_cols)?,
+        None => ModelFormulaSpec { include_intercept: true, terms: (0..pred_cols.len()).map(FormulaTerm::Main).collect() },
+    };
+    let nested_local = glm_spec.nested_comparison.as_ref().map(|nf| remap_formula_columns(nf, &pred_cols)).transpose()?;
 
-    let mut term_names = vec![String::from("Intercept")];
-    let mut factor_spans = Vec::with_capacity(glm_spec.predictor_columns.len());
-    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-        let title = &mv.variables[pc].title;
-        let col_start = term_names.len();
-        if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-            for lv in non_refs {
-                term_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
-            }
-        } else {
-            term_names.push(title.clone());
-        }
-        let col_end = term_names.len();
-        let col_count = col_end - col_start;
-        if col_count == 1 {
-            factor_spans.push(GlmFactorSpan { label: term_names[col_start].clone(), col_start, col_end });
-        } else if col_count >= 2 {
-            factor_spans.push(GlmFactorSpan { label: title.clone(), col_start, col_end });
+    let mut required_mask = vec![false; pred_cols.len()];
+    for c in collect_formula_columns(&primary_local).into_iter().chain(nested_local.iter().flat_map(collect_formula_columns)) {
+        if let Some(slot) = required_mask.get_mut(c) {
+            *slot = true;
         }
     }
 
-    let n_cols = term_names.len();
-    if !retained_rows.is_empty() && n_cols <= 1 {
+    let MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric } =
+        collect_mv_glm_rows(mv, glm_spec, &pred_cols, &required_mask, &is_cat, explicit_weight_col)?;
+    let cat_levels = resolve_glm_categorical_levels(mv, glm_spec, &pred_cols, &required_mask, &is_cat, &retained_rows)?;
+
+    let n_obs = retained_rows.len();
+    if n_obs == 0 {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM observations", required: 2, actual: 0 });
+    }
+    let y_vec: Vec<f64> = retained_rows.iter().map(|(_, yv, _)| *yv).collect();
+    let row_labels: Vec<String> = retained_rows.iter().map(|(rn, _, _)| format!("Row {rn}")).collect();
+    let (owned_preds, first_cont_idx) = assemble_mv_owned_predictors(mv, &pred_cols, &required_mask, &cat_levels, &retained_rows);
+
+    let pred_refs: Vec<FormulaPredictorColumn<'_>> = owned_preds.iter().map(OwnedFormulaPred::as_col).collect();
+    let compiled = compile_formula_design(&pred_refs, &primary_local, CategoricalCoding::ReferenceFirstNoInterceptFull)?;
+    let n_cols = compiled.matrix.ncols();
+    if compiled.has_intercept && n_cols <= 1 {
         return Err(StatsError::ZeroVariance { context: "GLM categorical predictor has fewer than 2 levels after complete-case filtering" });
     }
-    let n_obs = retained_rows.len();
     if n_obs <= n_cols {
         return Err(StatsError::InsufficientSampleSize { context: "GLM observations", required: n_cols + 1, actual: n_obs });
     }
-    let mut x_rows = Vec::with_capacity(n_obs * n_cols);
-    let mut y_vec = Vec::with_capacity(n_obs);
-    let mut row_labels = Vec::with_capacity(n_obs);
-    for (row_num, yv, preds) in retained_rows {
-        row_labels.push(format!("Row {row_num}"));
-        y_vec.push(yv);
-        x_rows.push(1.0);
-        for (pos, pred) in preds.into_iter().enumerate() {
-            match (pred, &cat_levels[pos]) {
-                (RetainedGlmPred::Categorical(tok), Some((_, non_refs))) => {
-                    for lv in non_refs {
-                        x_rows.push(if &tok == lv { 1.0 } else { 0.0 });
-                    }
-                }
-                (RetainedGlmPred::Numeric(xv), None) => x_rows.push(xv),
-                _ => {}
-            }
-        }
+
+    let factor_spans: Vec<GlmFactorSpan> = compiled
+        .term_spans
+        .iter()
+        .filter(|s| s.col_count > 0)
+        .map(|s| GlmFactorSpan {
+            label: if s.col_count == 1 { compiled.column_names[s.col_start].clone() } else { s.name.clone() },
+            col_start: s.col_start,
+            col_end: s.col_start + s.col_count,
+        })
+        .collect();
+
+    let nested_reduced = if let Some(nf) = &nested_local {
+        let red_c = compile_formula_design(&pred_refs, nf, CategoricalCoding::ReferenceFirstNoInterceptFull)?;
+        Some(NestedReducedDesign { x_mat: red_c.matrix, term_names: red_c.column_names, has_intercept: red_c.has_intercept })
+    } else {
+        None
+    };
+
+    let first_cont_slice = first_cont_idx.and_then(|pos| match &owned_preds[pos] {
+        OwnedFormulaPred::Continuous { values, .. } => Some(values.as_slice()),
+        OwnedFormulaPred::Categorical { .. } => None,
+    });
+    let weights = resolve_glm_weights(glm_spec.weights, &y_vec, first_cont_slice, explicit_weights.as_deref())?;
+    let (oos_x_mat, oos_row_labels) = compile_mv_oos_matrix(mv, &pred_cols, &required_mask, &cat_levels, &primary_local, &oos_rows);
+
+    Ok(GlmDesignMatrix {
+        x_mat: compiled.matrix,
+        y_vec,
+        row_labels,
+        term_names: compiled.column_names,
+        factor_spans,
+        has_intercept: compiled.has_intercept,
+        weights,
+        nested_reduced,
+        oos_x_mat,
+        oos_row_labels,
+        binary_outcome_labels,
+        skipped_rows,
+        ignored_non_numeric,
+    })
+}
+
+fn build_xy_oos_design(
+    x_title: &str,
+    oos_xs: &[f64],
+    oos_labels: Vec<String>,
+    primary_local: &ModelFormulaSpec,
+) -> (Option<DenseMatrix>, Vec<String>) {
+    if oos_xs.is_empty() {
+        return (None, Vec::new());
     }
-    let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
-    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans, skipped_rows, ignored_non_numeric })
+    let mut kept_labels = Vec::new();
+    let mut flat_rows = Vec::new();
+    let mut expected_cols: Option<usize> = None;
+    for (&x_val, lbl) in oos_xs.iter().zip(oos_labels) {
+        let single = [x_val];
+        let oos_pred = [FormulaPredictorColumn::Continuous { name: x_title, values: &single }];
+        let Ok(c) = compile_formula_design(&oos_pred, primary_local, CategoricalCoding::ReferenceFirstNoInterceptFull) else {
+            continue;
+        };
+        let p = c.matrix.ncols();
+        if expected_cols.is_some_and(|exp| exp != p) {
+            continue;
+        }
+        let mut row_vals = Vec::with_capacity(p);
+        let mut all_finite = true;
+        for j in 0..p {
+            let v = c.matrix.get(0, j).unwrap_or(f64::NAN);
+            if !v.is_finite() {
+                all_finite = false;
+                break;
+            }
+            row_vals.push(v);
+        }
+        if !all_finite {
+            continue;
+        }
+        expected_cols = Some(p);
+        flat_rows.extend_from_slice(&row_vals);
+        kept_labels.push(lbl);
+    }
+    match expected_cols.and_then(|ncols| DenseMatrix::from_row_major(kept_labels.len(), ncols, flat_rows).ok()) {
+        Some(mat) => (Some(mat), kept_labels),
+        None => (None, Vec::new()),
+    }
 }
 
 fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
@@ -1624,6 +2094,13 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
     }
     if xy.data_sets.is_empty() {
         return Err(StatsError::EmptyInput);
+    }
+    let has_weights = !matches!(glm_spec.weights, GlmWeightSpec::None | GlmWeightSpec::Scheme(WeightingScheme::None));
+    if has_weights && glm_spec.family != GlmFamily::Linear {
+        return Err(StatsError::IncompatibleAnalysisSpec { expected: "Linear GLM family for observation weights" });
+    }
+    if matches!(glm_spec.weights, GlmWeightSpec::Column(_)) {
+        return Err(StatsError::IncompatibleAnalysisSpec { expected: "MultipleVariables table for explicit GLM weight column" });
     }
     validate_selected_data_sets(selected, xy.data_sets.len())?;
     if glm_spec.response_column >= xy.data_sets.len() {
@@ -1667,9 +2144,11 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
         (!is_gen_seq && xy.x_cells.get(r).is_some_and(|s| s.iter().any(|c| cell_has_entry(Some(c)))))
             || ds.cells.get(r).is_some_and(|subs| subs.iter().any(|c| !c.is_empty() || c.excluded))
     });
-    let mut x_rows = Vec::new();
+    let mut x_vals = Vec::new();
     let mut y_vec = Vec::new();
     let mut row_labels = Vec::new();
+    let mut oos_xs = Vec::new();
+    let mut oos_labels = Vec::new();
     let mut skipped_rows = 0_usize;
     let mut x_non_num = 0_usize;
     let mut y_non_num = 0_usize;
@@ -1685,6 +2164,15 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
             let x_explicit = !is_gen_seq && x_subs.iter().any(|c| cell_has_entry(Some(c)));
             let xv_opt = xy.x_summary_at(r)?;
             let row_len = ds.cells.get(r).map_or(0, Vec::len);
+            let all_y_blank = (0..row_len).all(|sub| cell_is_blank_unexcluded(ds.cell(r, sub)));
+            if let Some(xv) = xv_opt
+                && x_explicit
+                && all_y_blank
+            {
+                oos_xs.push(xv);
+                oos_labels.push(format!("Row {}", r + 1));
+                continue;
+            }
             for sub in 0..row_len {
                 let yc = ds.cell(r, sub);
                 if yc.is_some_and(is_ignored_non_numeric_cell) {
@@ -1694,8 +2182,7 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
                 if let (Some(xv), Some(yv)) = (xv_opt, yc.and_then(Cell::active_number)) {
                     let lbl = if n_subcols > 1 { format!("Row {} (rep {})", r + 1, sub + 1) } else { format!("Row {}", r + 1) };
                     row_labels.push(lbl);
-                    x_rows.push(1.0);
-                    x_rows.push(xv);
+                    x_vals.push(xv);
                     y_vec.push(yv);
                 } else if y_explicit || (sub == 0 && x_explicit) {
                     skipped_rows += 1;
@@ -1714,10 +2201,53 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
     if y_non_num > 0 {
         ignored_non_numeric.push((ds.title.clone(), y_non_num));
     }
-    let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
-    let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
-    let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
-    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans, skipped_rows, ignored_non_numeric })
+
+    let xy_pred_source = [pred_col];
+    let primary_local = match &glm_spec.formula {
+        Some(f) => remap_formula_columns(f, &xy_pred_source)?,
+        None => ModelFormulaSpec { include_intercept: true, terms: vec![FormulaTerm::Main(0)] },
+    };
+    let pred_cols = [FormulaPredictorColumn::Continuous { name: xy.x_title.as_str(), values: x_vals.as_slice() }];
+    let compiled = compile_formula_design(&pred_cols, &primary_local, CategoricalCoding::ReferenceFirstNoInterceptFull)?;
+    let n_cols = compiled.matrix.ncols();
+    if n_obs <= n_cols {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: n_cols + 1, actual: n_obs });
+    }
+    let factor_spans: Vec<GlmFactorSpan> = compiled
+        .term_spans
+        .iter()
+        .filter(|s| s.col_count > 0)
+        .map(|s| GlmFactorSpan {
+            label: if s.col_count == 1 { compiled.column_names[s.col_start].clone() } else { s.name.clone() },
+            col_start: s.col_start,
+            col_end: s.col_start + s.col_count,
+        })
+        .collect();
+    let nested_reduced = if let Some(nf) = &glm_spec.nested_comparison {
+        let nf_local = remap_formula_columns(nf, &xy_pred_source)?;
+        let red_c = compile_formula_design(&pred_cols, &nf_local, CategoricalCoding::ReferenceFirstNoInterceptFull)?;
+        Some(NestedReducedDesign { x_mat: red_c.matrix, term_names: red_c.column_names, has_intercept: red_c.has_intercept })
+    } else {
+        None
+    };
+    let weights = resolve_glm_weights(glm_spec.weights, &y_vec, Some(x_vals.as_slice()), None)?;
+    let (oos_x_mat, oos_row_labels) = build_xy_oos_design(xy.x_title.as_str(), &oos_xs, oos_labels, &primary_local);
+
+    Ok(GlmDesignMatrix {
+        x_mat: compiled.matrix,
+        y_vec,
+        row_labels,
+        term_names: compiled.column_names,
+        factor_spans,
+        has_intercept: compiled.has_intercept,
+        weights,
+        nested_reduced,
+        oos_x_mat,
+        oos_row_labels,
+        binary_outcome_labels: None,
+        skipped_rows,
+        ignored_non_numeric,
+    })
 }
 
 /// Assemble `(X, y, row_labels, term_names, factor_spans)` from a `MultipleVariablesTable`
@@ -2279,11 +2809,13 @@ pub fn execute_passing_bablok(sheet: &DataSheet, spec: &PassingBablokSpec, conf:
     run_passing_bablok_analysis(sheet, &analysis, spec)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_linear_type_iii_tab(
     out: &mut ResultSheet,
     res: &MultipleLinearResult,
     x_mat: &DenseMatrix,
     y_vec: &[f64],
+    weights: Option<&[f64]>,
     factor_spans: &[GlmFactorSpan],
     p_fmt: PValueFormat,
     alpha: f64,
@@ -2292,6 +2824,25 @@ fn append_linear_type_iii_tab(
         .headers(["SS", "df", "MS", "F", "P value"]);
     let mut row_count = 0_usize;
     let mse = res.residual_sd * res.residual_sd;
+    let (xw_opt, yw_opt) = if let Some(w) = weights {
+        let nr = x_mat.nrows();
+        let nc = x_mat.ncols();
+        let mut xw_data = Vec::with_capacity(nr * nc);
+        let mut yw = Vec::with_capacity(nr);
+        for (r, (&yr, &wr)) in y_vec.iter().zip(w.iter()).enumerate() {
+            let sw = wr.sqrt();
+            yw.push(sw * yr);
+            for c in 0..nc {
+                xw_data.push(sw * x_mat.get(r, c).unwrap_or(0.0));
+            }
+        }
+        (Some(DenseMatrix::from_row_major(nr, nc, xw_data)?), Some(yw))
+    } else {
+        (None, None)
+    };
+    let x_solve = xw_opt.as_ref().unwrap_or(x_mat);
+    let y_solve = yw_opt.as_deref().unwrap_or(y_vec);
+
     for span in factor_spans {
         let col_count = span.col_end.saturating_sub(span.col_start);
         if col_count == 0 {
@@ -2307,8 +2858,8 @@ fn append_linear_type_iii_tab(
             }
             continue;
         }
-        let x_red = drop_matrix_columns(x_mat, span.col_start, span.col_end)?;
-        if let Ok((red_sol, _)) = solve_linear_least_squares(&x_red, y_vec) {
+        let x_red = drop_matrix_columns(x_solve, span.col_start, span.col_end)?;
+        if let Ok((red_sol, _)) = solve_linear_least_squares(&x_red, y_solve) {
             let df_factor = res.rank.saturating_sub(red_sol.rank) as f64;
             if df_factor <= 0.0 {
                 continue;
@@ -2336,6 +2887,193 @@ fn append_linear_type_iii_tab(
     Ok(())
 }
 
+fn append_correlation_matrix_tab(out: &mut ResultSheet, id: &str, title: &str, labels: &[String], corr_rows: &[Vec<f64>]) {
+    let mut tab = TabBuilder::new(id, title, ResultTabKind::CovarianceMatrix).headers(labels.to_vec());
+    for (lbl, row) in labels.iter().zip(corr_rows.iter()) {
+        tab.push_row(lbl.clone(), row.iter().map(|&v| num_cell(v)));
+    }
+    out.tabs.push(tab.build());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_glm_ratios_tab(
+    out: &mut ResultSheet,
+    id: &str,
+    title: &str,
+    ratio_col: &str,
+    ratio_abbr: &str,
+    terms: &[GlmTermEstimate],
+    beta_cis: &[(f64, f64)],
+    ci_method_label: &str,
+    confidence: ConfidenceLevel,
+) {
+    let pct = confidence.percent();
+    let mut tab = TabBuilder::new(id, title, ResultTabKind::ParametersAndConfidenceIntervals).headers([
+        String::from("beta"),
+        String::from("SE (beta)"),
+        format!("{pct}% CI (beta)"),
+        String::from(ratio_col),
+        format!("SE ({ratio_abbr})"),
+        format!("{pct}% CI ({ratio_abbr})"),
+        String::from("CI method"),
+    ]);
+    for (t, &(b_lo, b_hi)) in terms.iter().zip(beta_cis.iter()) {
+        let se_ratio = if t.exp_beta.is_finite() && t.se.is_finite() { t.exp_beta * t.se } else { f64::NAN };
+        tab.push_row(
+            t.name.clone(),
+            [
+                num_cell(t.beta),
+                num_cell(t.se),
+                finite_ci_cell(b_lo, b_hi),
+                num_cell(t.exp_beta),
+                num_cell(se_ratio),
+                finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
+                text_cell(ci_method_label),
+            ],
+        );
+    }
+    out.tabs.push(tab.build());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_glm_influence_diagnostics_tab(
+    out: &mut ResultSheet,
+    id: &str,
+    title: &str,
+    pred_col_label: &str,
+    row_labels: &[String],
+    y_vec: &[f64],
+    fitted: &[f64],
+    term_names: &[String],
+    diag: &GlmRowDiagnostics,
+) {
+    let mut headers = vec![
+        String::from("Observed Y"),
+        String::from(pred_col_label),
+        String::from("Pearson residual"),
+        String::from("Deviance residual"),
+        String::from("Standardized Pearson"),
+        String::from("Standardized Deviance"),
+        String::from("Leverage"),
+        String::from("Cook's D"),
+    ];
+    for name in term_names {
+        headers.push(format!("DFBETA ({name})"));
+    }
+    let mut tab = TabBuilder::new(id, title, ResultTabKind::Diagnostics).headers(headers);
+    for i in 0..y_vec.len() {
+        let mut row = vec![
+            num_cell(y_vec[i]),
+            num_cell(fitted[i]),
+            num_cell(diag.pearson_residuals[i]),
+            num_cell(diag.deviance_residuals[i]),
+            num_cell(diag.standardized_pearson[i]),
+            num_cell(diag.standardized_deviance[i]),
+            num_cell(diag.leverage[i]),
+            num_cell(diag.cooks_distance[i]),
+        ];
+        for &dfb in &diag.dfbetas[i] {
+            row.push(num_cell(dfb));
+        }
+        tab.push_row(row_labels[i].clone(), row);
+    }
+    out.tabs.push(tab.build());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_deviance_nested_comparison(
+    out: &mut ResultSheet,
+    full_dev: f64,
+    red_dev: f64,
+    full_df: f64,
+    red_df: f64,
+    full_aicc: f64,
+    red_aicc: f64,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(), StatsError> {
+    let (dev_big, dev_small, df_big, df_small, aicc_big, aicc_small) = if red_df >= full_df {
+        (full_dev, red_dev, full_df, red_df, full_aicc, red_aicc)
+    } else {
+        (red_dev, full_dev, red_df, full_df, red_aicc, full_aicc)
+    };
+    let df_diff = df_small - df_big;
+    let delta_aicc = aicc_big - aicc_small;
+    let (chi2, p_val) = if df_diff > 0.0 {
+        let c = (dev_small - dev_big).max(0.0);
+        (c, chi2_sf(c, df_diff)?)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+    push_scalar(out, "Nested LRT chi2", None, chi2);
+    push_scalar(out, "Nested LRT df", None, df_diff);
+    push_scalar(out, "Nested LRT P", None, p_val);
+    push_scalar(out, "Delta AICc (full - reduced)", None, delta_aicc);
+
+    let mut kv =
+        KvTabBuilder::new("glm-nested-comparison", "Nested GLM deviance likelihood-ratio comparison", ResultTabKind::ModelComparison, "Value")
+            .num("Full model deviance", dev_big)
+            .num("Reduced model deviance", dev_small)
+            .num("Full model residual df", df_big)
+            .num("Reduced model residual df", df_small)
+            .num("LRT chi-square", chi2)
+            .num("LRT df", df_diff)
+            .p("LRT P value", p_val, p_fmt, alpha)
+            .num("Full model AICc", aicc_big)
+            .num("Reduced model AICc", aicc_small)
+            .num("Delta AICc (full - reduced)", delta_aicc);
+    if df_diff <= 0.0 {
+        kv = kv.footnote("Nested deviance LRT requires strictly different residual degrees of freedom between the two models.");
+    }
+    out.tabs.push(kv.build());
+    Ok(())
+}
+
+fn append_linear_nested_comparison(
+    out: &mut ResultSheet,
+    res_primary: &MultipleLinearResult,
+    res_nested: &MultipleLinearResult,
+    p_fmt: PValueFormat,
+    alpha: f64,
+) -> Result<(), StatsError> {
+    let (full, red) = if res_nested.df_residual >= res_primary.df_residual { (res_primary, res_nested) } else { (res_nested, res_primary) };
+    let df1 = red.df_residual - full.df_residual;
+    let df2 = full.df_residual;
+    let delta_aicc = full.aicc - red.aicc;
+    let (f_val, p_val) = if df1 > 0.0 && df2 > 0.0 && full.rss > 0.0 {
+        let num = ((red.rss - full.rss).max(0.0)) / df1;
+        let den = full.rss / df2;
+        let f = num / den;
+        (f, f_sf(f, df1, df2)?)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
+    push_scalar(out, "Nested F", None, f_val);
+    push_scalar(out, "Nested df1", None, df1);
+    push_scalar(out, "Nested df2", None, df2);
+    push_scalar(out, "Nested P value", None, p_val);
+    push_scalar(out, "Delta AICc (full - reduced)", None, delta_aicc);
+
+    let mut kv =
+        KvTabBuilder::new("glm-nested-comparison", "Nested linear GLM comparison (Extra-SS F & AICc)", ResultTabKind::ModelComparison, "Value")
+            .num("Full model RSS", full.rss)
+            .num("Reduced model RSS", red.rss)
+            .num("Full model residual df", full.df_residual)
+            .num("Reduced model residual df", red.df_residual)
+            .num("Extra-SS F", f_val)
+            .num("df1", df1)
+            .num("df2", df2)
+            .p("P value", p_val, p_fmt, alpha)
+            .num("Full model AICc", full.aicc)
+            .num("Reduced model AICc", red.aicc)
+            .num("Delta AICc (full - reduced)", delta_aicc);
+    if df1 <= 0.0 {
+        kv = kv.footnote("Nested Extra-SS F-test requires strictly different residual degrees of freedom between the two models.");
+    }
+    out.tabs.push(kv.build());
+    Ok(())
+}
+
 fn populate_linear_glm_sheet(
     out: &mut ResultSheet,
     design: GlmDesignMatrix,
@@ -2343,14 +3081,29 @@ fn populate_linear_glm_sheet(
     confidence: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
-    let res = multiple_linear_regression(&design.x_mat, &design.y_vec, &design.term_names, true, glm_spec.compute_vif, confidence)?;
+    if glm_spec.dispersion_mode == GlmDispersionMode::QuasiPoisson {
+        return Err(StatsError::IncompatibleAnalysisSpec { expected: "Poisson GLM family for QuasiPoisson dispersion mode" });
+    }
+    let ext = multiple_linear_regression_weighted(
+        &design.x_mat,
+        &design.y_vec,
+        design.weights.as_deref(),
+        &design.term_names,
+        design.has_intercept,
+        glm_spec.compute_vif,
+        glm_spec.dispersion_mode,
+        confidence,
+    )?;
+    let res = &ext.core;
     push_scalar(out, "R squared", None, res.r_squared);
     push_scalar(out, "Adjusted R squared", None, res.adjusted_r_squared);
     push_scalar(out, "Residual SD (Sy.x)", None, res.residual_sd);
+    push_scalar(out, "df residual", None, res.df_residual);
     push_scalar(out, "F statistic", None, res.f_statistic);
     push_scalar(out, "P value", None, res.f_p_value);
     push_scalar(out, "AIC", None, res.aic);
     push_scalar(out, "AICc", None, res.aicc);
+    push_scalar(out, "BIC", None, res.bic);
     push_scalar(out, "Durbin-Watson", None, res.durbin_watson);
 
     let mut headers =
@@ -2395,8 +3148,15 @@ fn populate_linear_glm_sheet(
             "Exact linear fit (zero residual sum of squares): coefficient t statistics, P values, and confidence intervals are unavailable.",
         );
     }
+    if design.weights.is_some() {
+        params_tab.push_footnote("Weighted least squares (WLS) applied; RSS, Sy.x, and Gaussian AIC/AICc incorporate observation weights.");
+    }
+    if glm_spec.dispersion_mode == GlmDispersionMode::RobustSandwich {
+        params_tab.push_footnote("Standard errors, t statistics, P values, and CIs use Huber-White HC1 robust sandwich covariance.");
+    }
     out.tabs.push(params_tab.build());
 
+    let total_df = if res.has_intercept { (res.n - 1) as f64 } else { res.n as f64 };
     out.tabs.push(
         TabBuilder::new("glm-linear-anova", "ANOVA of regression", ResultTabKind::AnovaTable)
             .headers(["SS", "df", "MS", "F", "P value"])
@@ -2414,18 +3174,19 @@ fn populate_linear_glm_sheet(
                 "Residual",
                 [num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
             )
-            .row("Total", [num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty])
+            .row("Total", [num_cell(res.ss_total), num_cell(total_df), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty])
             .build(),
     );
 
-    append_linear_type_iii_tab(out, &res, &design.x_mat, &design.y_vec, &design.factor_spans, p_fmt, confidence.alpha())?;
+    append_linear_type_iii_tab(out, res, &design.x_mat, &design.y_vec, design.weights.as_deref(), &design.factor_spans, p_fmt, confidence.alpha())?;
 
     let mut cov_tab =
         TabBuilder::new("glm-linear-covariance", "Parameter covariance matrix", ResultTabKind::CovarianceMatrix).headers(labels.clone());
-    for (lbl, row) in labels.into_iter().zip(res.cov_beta.iter()) {
-        cov_tab.push_row(lbl, row.iter().map(|&v| num_cell(v)));
+    for (lbl, row) in labels.iter().zip(res.cov_beta.iter()) {
+        cov_tab.push_row(lbl.clone(), row.iter().map(|&v| num_cell(v)));
     }
     out.tabs.push(cov_tab.build());
+    append_correlation_matrix_tab(out, "glm-linear-correlation", "Parameter correlation matrix", &labels, &ext.correlation_matrix);
 
     let mut resid_tab = TabBuilder::new("glm-linear-residuals", "Linear regression residuals and influence", ResultTabKind::Residuals).headers([
         "Observed Y",
@@ -2434,13 +3195,73 @@ fn populate_linear_glm_sheet(
         "Leverage",
         "Cook's D",
     ]);
-    for (i, (lbl, &yi)) in design.row_labels.into_iter().zip(design.y_vec.iter()).take(res.n).enumerate() {
+    for (i, (lbl, &yi)) in design.row_labels.iter().zip(design.y_vec.iter()).take(res.n).enumerate() {
         resid_tab.push_row(
-            lbl,
+            lbl.clone(),
             [num_cell(yi), num_cell(res.fitted[i]), num_cell(res.residuals[i]), num_cell(res.leverage[i]), num_cell(res.cooks_distance[i])],
         );
     }
     out.tabs.push(resid_tab.build());
+
+    if glm_spec.emit_influence_diagnostics {
+        let mut diag_headers = vec![
+            String::from("Observed Y"),
+            String::from("Predicted Y"),
+            String::from("Raw residual"),
+            String::from("Standardized residual"),
+            String::from("Studentized residual"),
+            String::from("Leverage"),
+            String::from("Cook's D"),
+        ];
+        for name in &labels {
+            diag_headers.push(format!("DFBETA ({name})"));
+        }
+        let mut diag_tab =
+            TabBuilder::new("glm-linear-diagnostics", "Linear GLM row-level influence diagnostics", ResultTabKind::Diagnostics).headers(diag_headers);
+        for i in 0..res.n {
+            let mut row = vec![
+                num_cell(design.y_vec[i]),
+                num_cell(res.fitted[i]),
+                num_cell(ext.diagnostics.raw_residuals[i]),
+                num_cell(ext.diagnostics.standardized_residuals[i]),
+                num_cell(ext.diagnostics.studentized_residuals[i]),
+                num_cell(ext.diagnostics.leverage[i]),
+                num_cell(ext.diagnostics.cooks_distance[i]),
+            ];
+            for &dfb in &ext.diagnostics.dfbetas[i] {
+                row.push(num_cell(dfb));
+            }
+            diag_tab.push_row(design.row_labels[i].clone(), row);
+        }
+        out.tabs.push(diag_tab.build());
+    }
+
+    if let Some(nested) = &design.nested_reduced {
+        let red_ext = multiple_linear_regression_weighted(
+            &nested.x_mat,
+            &design.y_vec,
+            design.weights.as_deref(),
+            &nested.term_names,
+            nested.has_intercept,
+            false,
+            glm_spec.dispersion_mode,
+            confidence,
+        )?;
+        append_linear_nested_comparison(out, res, &red_ext.core, p_fmt, confidence.alpha())?;
+    }
+
+    if let Some(oos_x) = &design.oos_x_mat {
+        let beta_vec: Vec<f64> = res.terms.iter().map(|t| t.estimate).collect();
+        let preds = predict_linear_oos(oos_x, &beta_vec, &res.cov_beta, res.residual_sd * res.residual_sd, res.df_residual, confidence)?;
+        let pct = confidence.percent();
+        let mut oos_tab = TabBuilder::new("glm-oos-predictions", "Out-of-sample linear GLM predictions", ResultTabKind::InterpolatedUnknowns)
+            .headers([String::from("Predicted Y"), String::from("SE (fit)"), format!("{pct}% CI"), format!("{pct}% PI")]);
+        for (lbl, pr) in design.oos_row_labels.iter().zip(preds.iter()) {
+            oos_tab
+                .push_row(lbl.clone(), [num_cell(pr.fit), num_cell(pr.se_fit), finite_ci_cell(pr.ci.0, pr.ci.1), finite_ci_cell(pr.pi.0, pr.pi.1)]);
+        }
+        out.tabs.push(oos_tab.build());
+    }
 
     if !aliased_names.is_empty() {
         out.checklist.push(checklist_item(
@@ -2494,36 +3315,60 @@ fn populate_logistic_glm_sheet(
     confidence: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
-    let res = multiple_logistic_regression(&design.x_mat, &design.y_vec, &design.term_names, glm_spec.compute_vif, confidence)?;
+    let cutoff = glm_spec.classification_cutoff.unwrap_or(0.5);
+    if !cutoff.is_finite() || cutoff <= 0.0 || cutoff >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "classification_cutoff", value: cutoff });
+    }
+    let bundle = multiple_logistic_regression_with_options(
+        &design.x_mat,
+        &design.y_vec,
+        &design.term_names,
+        glm_spec.compute_vif,
+        glm_spec.dispersion_mode,
+        glm_spec.ci_method,
+        confidence,
+    )?;
+    let res = &bundle.result;
     push_scalar(out, "Converged", None, if res.converged { 1.0 } else { 0.0 });
     push_scalar(out, "Log-likelihood (model)", None, res.log_lik_model);
+    push_scalar(out, "Null deviance", None, res.deviance_null);
+    push_scalar(out, "Residual deviance", None, res.deviance_residual);
+    push_scalar(out, "df residual", None, (res.n.saturating_sub(res.terms.len())) as f64);
     push_scalar(out, "LR chi-square", None, res.lr_chi2);
     push_scalar(out, "LR P value", None, res.lr_p);
     push_scalar(out, "McFadden R squared", None, res.mcfadden_r2);
+    push_scalar(out, "Cox-Snell R squared", None, bundle.cox_snell_r2);
     push_scalar(out, "Nagelkerke R squared", None, res.nagelkerke_r2);
     push_scalar(out, "Tjur R squared", None, res.tjur_r2);
     push_scalar(out, "AIC", None, res.aic);
     push_scalar(out, "AICc", None, res.aicc);
     push_scalar(out, "Hosmer-Lemeshow chi2", None, res.hosmer_lemeshow_chi2);
     push_scalar(out, "Hosmer-Lemeshow P", None, res.hosmer_lemeshow_p);
+    push_scalar(out, "Classification cutoff", None, cutoff);
     if let Some(auc) = res.roc_auc {
         push_scalar(out, "ROC AUC", None, auc);
     }
+
     let roc_ctrls: Vec<f64> = res.predicted_probs.iter().zip(design.y_vec.iter()).filter(|(_, y)| **y == 0.0).map(|(p, _)| *p).collect();
     let roc_cases: Vec<f64> = res.predicted_probs.iter().zip(design.y_vec.iter()).filter(|(_, y)| **y == 1.0).map(|(p, _)| *p).collect();
+    let mut roc_tab = TabBuilder::new("glm-logistic-roc", "Logistic ROC curve coordinates", ResultTabKind::CurveCoordinates).headers([
+        "1 - Specificity",
+        "Sensitivity",
+        "Cutoff",
+    ]);
     if let Ok(roc) = roc_curve_analysis(&roc_ctrls, &roc_cases, RocCiMethod::DeLong, confidence) {
-        let curve_pts: Vec<CurveSamplePoint> = roc
-            .points
-            .iter()
-            .map(|pt| CurveSamplePoint {
+        let mut curve_pts = Vec::with_capacity(roc.points.len());
+        for (idx, pt) in roc.points.iter().enumerate() {
+            curve_pts.push(CurveSamplePoint {
                 x: pt.one_minus_specificity,
                 y: pt.sensitivity,
                 ci_lower: None,
                 ci_upper: None,
                 pred_lower: None,
                 pred_upper: None,
-            })
-            .collect();
+            });
+            roc_tab.push_row(format!("Point {}", idx + 1), [num_cell(pt.one_minus_specificity), num_cell(pt.sensitivity), num_cell(pt.cutoff)]);
+        }
         out.fitted_curves.push(FittedCurveOverlay {
             data_set_index: 0,
             equation_id: String::from("ROC"),
@@ -2536,6 +3381,7 @@ fn populate_logistic_glm_sheet(
     let mut params_tab = build_glm_ratio_params_tab(
         "glm-logistic-params",
         "Logistic regression odds ratios",
+        "Wald z",
         "Odds Ratio",
         "OR",
         &res.terms,
@@ -2543,10 +3389,20 @@ fn populate_logistic_glm_sheet(
         confidence,
         p_fmt,
     );
+    if let Some((neg_lbl, pos_lbl)) = &design.binary_outcome_labels {
+        params_tab.push_footnote(format!("Binary text outcome coded as '{pos_lbl}' = 1 (event) vs '{neg_lbl}' = 0 (reference)."));
+    }
     if res.separation_detected {
         params_tab.push_footnote("Complete or quasi-complete separation detected: unpenalized MLE did not converge; ridge safeguard applied.");
     } else if !res.converged {
         params_tab.push_footnote("IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.");
+    }
+    if glm_spec.ci_method == RegressionCiMethod::ProfileLikelihood && !bundle.used_profile_ci {
+        params_tab
+            .push_footnote("Profile-likelihood CIs require a converged canonical MLE without separation; asymptotic Wald CIs reported instead.");
+    }
+    if glm_spec.dispersion_mode == GlmDispersionMode::RobustSandwich {
+        params_tab.push_footnote("Standard errors, Wald z, P values, and CIs use Huber-White HC1 robust sandwich covariance.");
     }
     if !res.hosmer_lemeshow_p.is_finite() {
         params_tab
@@ -2554,14 +3410,119 @@ fn populate_logistic_glm_sheet(
     }
     out.tabs.push(params_tab.build());
 
-    out.tabs.push(build_logistic_classification_tab(&design.y_vec, &res.predicted_probs));
+    let ci_lbl = if bundle.used_profile_ci { "Profile likelihood" } else { "Wald" };
+    append_glm_ratios_tab(
+        out,
+        "glm-logistic-ratios",
+        "Logistic regression odds ratios, delta-method SEs, and beta CIs",
+        "Odds Ratio",
+        "OR",
+        &res.terms,
+        &bundle.beta_cis,
+        ci_lbl,
+        confidence,
+    );
+    let corr_rows = dense_cov_to_correlation_rows(&bundle.cov_effective);
+    append_correlation_matrix_tab(out, "glm-logistic-correlation", "Logistic parameter correlation matrix", &design.term_names, &corr_rows);
+
+    out.tabs.push(build_logistic_classification_tab(&design.y_vec, &res.predicted_probs, cutoff));
 
     let mut pred_tab = TabBuilder::new("glm-logistic-predictions", "Logistic regression predicted probabilities", ResultTabKind::Residuals)
         .headers(["Observed Y", "Predicted probability", "Predicted class"]);
-    for (lbl, (&yi, &pi)) in design.row_labels.into_iter().zip(design.y_vec.iter().zip(res.predicted_probs.iter())) {
-        pred_tab.push_row(lbl, [num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })]);
+    for (lbl, (&yi, &pi)) in design.row_labels.iter().zip(design.y_vec.iter().zip(res.predicted_probs.iter())) {
+        pred_tab.push_row(lbl.clone(), [num_cell(yi), num_cell(pi), num_cell(if pi >= cutoff { 1.0 } else { 0.0 })]);
     }
     out.tabs.push(pred_tab.build());
+    out.tabs.push(roc_tab.build());
+
+    let cal_bins = compute_hosmer_lemeshow_bins(&design.y_vec, &res.predicted_probs, 10);
+    let mut cal_tab = TabBuilder::new("glm-logistic-calibration", "Hosmer-Lemeshow calibration bins", ResultTabKind::Diagnostics).headers([
+        "N",
+        "Observed events",
+        "Expected events",
+        "Observed rate",
+        "Expected rate",
+    ]);
+    for bin in &cal_bins {
+        cal_tab.push_row(
+            bin.label.clone(),
+            [
+                num_cell(bin.count as f64),
+                num_cell(bin.observed_events),
+                num_cell(bin.expected_events),
+                num_cell(bin.observed_rate),
+                num_cell(bin.expected_rate),
+            ],
+        );
+    }
+    out.tabs.push(cal_tab.build());
+
+    if glm_spec.emit_influence_diagnostics {
+        let diag = compute_logistic_diagnostics(&design.x_mat, &design.y_vec, &res.predicted_probs, &bundle.cov_canonical)?;
+        append_glm_influence_diagnostics_tab(
+            out,
+            "glm-logistic-diagnostics",
+            "Logistic GLM row-level influence diagnostics",
+            "Predicted probability",
+            &design.row_labels,
+            &design.y_vec,
+            &res.predicted_probs,
+            &design.term_names,
+            &diag,
+        );
+    }
+
+    if let Some(nested) = &design.nested_reduced {
+        let red_b = multiple_logistic_regression_with_options(
+            &nested.x_mat,
+            &design.y_vec,
+            &nested.term_names,
+            false,
+            glm_spec.dispersion_mode,
+            RegressionCiMethod::Wald,
+            confidence,
+        )?;
+        let full_df = res.n.saturating_sub(res.terms.len()) as f64;
+        let red_df = red_b.result.n.saturating_sub(red_b.result.terms.len()) as f64;
+        append_deviance_nested_comparison(
+            out,
+            res.deviance_residual,
+            red_b.result.deviance_residual,
+            full_df,
+            red_df,
+            res.aicc,
+            red_b.result.aicc,
+            p_fmt,
+            confidence.alpha(),
+        )?;
+    }
+
+    if let Some(oos_x) = &design.oos_x_mat {
+        let beta_vec: Vec<f64> = res.terms.iter().map(|t| t.beta).collect();
+        let preds = predict_logistic_oos(oos_x, &beta_vec, &bundle.cov_effective, cutoff, confidence)?;
+        let pct = confidence.percent();
+        let mut oos_tab = TabBuilder::new("glm-oos-predictions", "Out-of-sample logistic GLM predictions", ResultTabKind::InterpolatedUnknowns)
+            .headers([
+                String::from("Linear predictor"),
+                String::from("SE (eta)"),
+                String::from("Predicted probability"),
+                format!("{pct}% CI (prob)"),
+                String::from("Predicted class"),
+            ]);
+        for (lbl, pr) in design.oos_row_labels.iter().zip(preds.iter()) {
+            oos_tab.push_row(
+                lbl.clone(),
+                [
+                    num_cell(pr.eta),
+                    num_cell(pr.se_eta),
+                    num_cell(pr.probability),
+                    finite_ci_cell(pr.prob_ci.0, pr.prob_ci.1),
+                    num_cell(pr.predicted_class),
+                ],
+            );
+        }
+        out.tabs.push(oos_tab.build());
+    }
 
     let hl_str = if res.hosmer_lemeshow_p.is_finite() { format!("{:.4}", res.hosmer_lemeshow_p) } else { String::from("unavailable") };
     let status = if res.separation_detected || !res.converged { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
@@ -2587,14 +3548,26 @@ fn populate_poisson_glm_sheet(
     confidence: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
-    let res = multiple_poisson_regression(&design.x_mat, &design.y_vec, &design.term_names, glm_spec.compute_vif, confidence)?;
+    let bundle = multiple_poisson_regression_with_options(
+        &design.x_mat,
+        &design.y_vec,
+        &design.term_names,
+        glm_spec.compute_vif,
+        glm_spec.dispersion_mode,
+        glm_spec.ci_method,
+        confidence,
+    )?;
+    let res = &bundle.result;
     let mcfadden_r2 = if res.log_lik_null.abs() > 1e-12 && res.log_lik_null.is_finite() && res.log_lik_model.is_finite() {
         (1.0 - res.log_lik_model / res.log_lik_null).clamp(0.0, 1.0)
     } else {
         0.0
     };
     push_scalar(out, "Converged", None, if res.converged { 1.0 } else { 0.0 });
+    push_scalar(out, "Null deviance", None, res.deviance_null);
     push_scalar(out, "Residual deviance", None, res.deviance_residual);
+    push_scalar(out, "Pearson chi-square", None, res.pearson_chi2);
+    push_scalar(out, "df residual", None, res.df_residual);
     push_scalar(out, "Pearson dispersion", None, res.dispersion_pearson);
     push_scalar(out, "LR chi-square", None, res.lr_chi2);
     push_scalar(out, "LR P value", None, res.lr_p);
@@ -2602,9 +3575,11 @@ fn populate_poisson_glm_sheet(
     push_scalar(out, "AICc", None, res.aicc);
     push_scalar(out, "McFadden R squared", None, mcfadden_r2);
 
+    let stat_col = if glm_spec.dispersion_mode == GlmDispersionMode::QuasiPoisson { "t" } else { "Wald z" };
     let mut params_tab = build_glm_ratio_params_tab(
         "glm-poisson-params",
         "Poisson regression rate ratios",
+        stat_col,
         "Rate Ratio",
         "RR",
         &res.terms,
@@ -2616,18 +3591,95 @@ fn populate_poisson_glm_sheet(
         params_tab
             .push_footnote("Poisson IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.");
     }
+    if glm_spec.ci_method == RegressionCiMethod::ProfileLikelihood && !bundle.used_profile_ci {
+        params_tab.push_footnote("Profile-likelihood CIs require a converged canonical or quasi-Poisson fit; asymptotic Wald CIs reported instead.");
+    }
+    if glm_spec.dispersion_mode == GlmDispersionMode::QuasiPoisson {
+        params_tab.push_footnote(format!(
+            "Quasi-Poisson dispersion scaling applied (phi = {:.4}, Student-t on df = {:.0}).",
+            res.dispersion_pearson, res.df_residual
+        ));
+    } else if glm_spec.dispersion_mode == GlmDispersionMode::RobustSandwich {
+        params_tab.push_footnote("Standard errors, Wald z, P values, and CIs use Huber-White HC1 robust sandwich covariance.");
+    }
     out.tabs.push(params_tab.build());
+
+    let ci_lbl = if bundle.used_profile_ci { "Profile likelihood" } else { "Wald" };
+    append_glm_ratios_tab(
+        out,
+        "glm-poisson-ratios",
+        "Poisson regression rate ratios, delta-method SEs, and beta CIs",
+        "Rate Ratio",
+        "IRR",
+        &res.terms,
+        &bundle.beta_cis,
+        ci_lbl,
+        confidence,
+    );
+    let corr_rows = dense_cov_to_correlation_rows(&bundle.cov_effective);
+    append_correlation_matrix_tab(out, "glm-poisson-correlation", "Poisson parameter correlation matrix", &design.term_names, &corr_rows);
 
     let mut resid_tab = TabBuilder::new("glm-poisson-residuals", "Poisson regression Pearson and deviance residuals", ResultTabKind::Residuals)
         .headers(["Observed Y", "Predicted count", "Pearson residual", "Deviance residual"]);
-    for (lbl, (&yi, &mui)) in design.row_labels.into_iter().zip(design.y_vec.iter().zip(res.predicted_means.iter())) {
+    for (lbl, (&yi, &mui)) in design.row_labels.iter().zip(design.y_vec.iter().zip(res.predicted_means.iter())) {
         let mu = mui.max(1e-12);
         let pearson = (yi - mui) / mu.sqrt();
         let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
         let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
-        resid_tab.push_row(lbl, [num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]);
+        resid_tab.push_row(lbl.clone(), [num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]);
     }
     out.tabs.push(resid_tab.build());
+
+    if glm_spec.emit_influence_diagnostics {
+        let phi_diag = if glm_spec.dispersion_mode == GlmDispersionMode::QuasiPoisson { res.dispersion_pearson } else { 1.0 };
+        let diag = compute_poisson_diagnostics(&design.x_mat, &design.y_vec, &res.predicted_means, &bundle.cov_canonical, phi_diag)?;
+        append_glm_influence_diagnostics_tab(
+            out,
+            "glm-poisson-diagnostics",
+            "Poisson GLM row-level influence diagnostics",
+            "Predicted count",
+            &design.row_labels,
+            &design.y_vec,
+            &res.predicted_means,
+            &design.term_names,
+            &diag,
+        );
+    }
+
+    if let Some(nested) = &design.nested_reduced {
+        let red_b = multiple_poisson_regression_with_options(
+            &nested.x_mat,
+            &design.y_vec,
+            &nested.term_names,
+            false,
+            glm_spec.dispersion_mode,
+            RegressionCiMethod::Wald,
+            confidence,
+        )?;
+        append_deviance_nested_comparison(
+            out,
+            res.deviance_residual,
+            red_b.result.deviance_residual,
+            res.df_residual,
+            red_b.result.df_residual,
+            res.aicc,
+            red_b.result.aicc,
+            p_fmt,
+            confidence.alpha(),
+        )?;
+    }
+
+    if let Some(oos_x) = &design.oos_x_mat {
+        let beta_vec: Vec<f64> = res.terms.iter().map(|t| t.beta).collect();
+        let preds = predict_poisson_oos(oos_x, &beta_vec, &bundle.cov_effective, bundle.crit_val)?;
+        let pct = confidence.percent();
+        let mut oos_tab = TabBuilder::new("glm-oos-predictions", "Out-of-sample Poisson GLM predictions", ResultTabKind::InterpolatedUnknowns)
+            .headers([String::from("Linear predictor"), String::from("SE (eta)"), String::from("Predicted count"), format!("{pct}% CI (count)")]);
+        for (lbl, pr) in design.oos_row_labels.iter().zip(preds.iter()) {
+            oos_tab.push_row(lbl.clone(), [num_cell(pr.eta), num_cell(pr.se_eta), num_cell(pr.rate), finite_ci_cell(pr.rate_ci.0, pr.rate_ci.1)]);
+        }
+        out.tabs.push(oos_tab.build());
+    }
 
     out.checklist.push(checklist_item(
         "Poisson IRLS convergence",
@@ -2716,6 +3768,7 @@ fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> curvebook
 fn build_glm_ratio_params_tab(
     id: &str,
     title: &str,
+    stat_col: &str,
     ratio_col: &str,
     ratio_abbr: &str,
     terms: &[GlmTermEstimate],
@@ -2726,7 +3779,7 @@ fn build_glm_ratio_params_tab(
     let mut headers = vec![
         String::from("beta"),
         String::from("SE"),
-        String::from("Wald z"),
+        String::from(stat_col),
         String::from("P value"),
         String::from(ratio_col),
         format!("{}% CI ({ratio_abbr})", confidence.percent()),
@@ -2752,8 +3805,8 @@ fn build_glm_ratio_params_tab(
     tab
 }
 
-/// Build logistic classification summary (cutoff 0.50) and cutoff-accuracy sweep (`0.1..=0.9`).
-fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc::ResultTab {
+/// Build logistic classification summary at configured `primary_cutoff` and cutoff-accuracy sweep (`0.1..=0.9`).
+fn build_logistic_classification_tab(y: &[f64], probs: &[f64], primary_cutoff: f64) -> curvebook_doc::ResultTab {
     fn metrics_row(y: &[f64], probs: &[f64], cutoff: f64) -> [ResultCell; 10] {
         let mut tp = 0_usize;
         let mut fp = 0_usize;
@@ -2790,7 +3843,7 @@ fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc:
 
     let mut tab = TabBuilder::new("glm-logistic-classification", "Logistic classification table & cutoff sweep", ResultTabKind::Diagnostics)
         .headers(["Cutoff", "TP", "FP", "FN", "TN", "Sensitivity", "Specificity", "PPV", "NPV", "Accuracy"])
-        .row("Cutoff 0.50 (2x2)", metrics_row(y, probs, 0.5));
+        .row(format!("Cutoff {primary_cutoff:.2} (2x2)"), metrics_row(y, probs, primary_cutoff));
     for k in 1..=9 {
         let cutoff = (k as f64) * 0.1;
         tab.push_row(format!("Sweep cutoff {cutoff:.1}"), metrics_row(y, probs, cutoff));

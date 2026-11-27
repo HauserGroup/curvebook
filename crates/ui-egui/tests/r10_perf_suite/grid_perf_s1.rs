@@ -421,7 +421,15 @@ fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
     let src_res = AnalysisSpec::new(
         "src-res",
         "src-xy",
-        AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: None, y_transform: None, error_propagation: Default::default() }),
+        AnalysisKind::Transform(TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: None,
+            error_propagation: Default::default(),
+            pharmacology_preset: None,
+            interchange_xy: false,
+            zero_x_substitute: None,
+            asymmetric_ci_policy: Default::default(),
+        }),
     )
     .expect("src-res");
     doc.add_result_sheet(ResultSheet::new(src_res).expect("result")).expect("add src-res");

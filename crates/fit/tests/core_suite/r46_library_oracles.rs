@@ -282,26 +282,28 @@ fn r46_8_logistic_growth_and_operational_model_oracles() {
     assert_params_approx(&res_log, 0, &[("YM", ym, 1e-5, 1e-6), ("Y0", y0, 1e-5, 1e-6), ("k", k, 1e-5, 1e-6)], "logistic");
 
     let op = get_builtin_model("operational_model_agonist").unwrap();
-    let (basal, emax, log_ka, log_tau, n) = (5.0_f64, 95.0, -6.0, 0.8, 1.3);
+    let (basal, emax, log_ec50, log_ka, log_tau, n) = (5.0_f64, 95.0, -7.2, -6.0, 0.8, 1.3);
     let (ka, tau) = (10.0_f64.powf(log_ka), 10.0_f64.powf(log_tau));
     let log_xs: Vec<f64> = (-10..=-3).map(|i| i as f64).collect();
+    let ys_full: Vec<f64> = log_xs.iter().map(|&lx| basal + (emax - basal) / (1.0 + 10.0_f64.powf((log_ec50 - lx) * n))).collect();
     let ys_op: Vec<f64> = log_xs
         .iter()
         .map(|&lx| {
             let a = 10.0_f64.powf(lx);
             let num = (tau * a).powf(n);
             let exp = basal + (emax - basal) * num / (num + (a + ka).powf(n));
-            assert_approx_eq(op.eval(&[lx], &[basal, emax, log_ka, log_tau, n], 0).unwrap(), exp, 1e-12, 1e-12, &format!("op logA={lx}"));
+            assert_approx_eq(op.eval(&[lx], &[basal, emax, log_ec50, log_ka, log_tau, n], 1).unwrap(), exp, 1e-12, 1e-12, &format!("op logA={lx}"));
             exp
         })
         .collect();
     let res_op = fit_with(
         op.as_ref(),
-        &[series_xy(0, "Operational", &log_xs, &ys_op)],
-        &cfg_rules(vec![rule_const("Basal", basal), rule_const("Emax", emax)]),
+        &[series_xy(0, "FullAgonist", &log_xs, &ys_full), series_xy(1, "PartialAgonist", &log_xs, &ys_op)],
+        &cfg_rules(vec![rule_const("Basal", basal), rule_const("EffectMax", emax)]),
     );
     assert_eq!(res_op.status, FitStatus::Converged);
-    assert_params_approx(&res_op, 0, &[("LogKA", log_ka, 1e-5, 1e-5), ("LogTau", log_tau, 1e-5, 1e-5), ("n", n, 1e-5, 1e-5)], "op");
+    assert_params_approx(&res_op, 0, &[("LogEC50", log_ec50, 1e-5, 1e-5), ("n", n, 1e-5, 1e-5)], "op full");
+    assert_params_approx(&res_op, 1, &[("LogKA", log_ka, 1e-5, 1e-5), ("LogTau", log_tau, 1e-5, 1e-5), ("n", n, 1e-5, 1e-5)], "op partial");
 }
 
 #[test]
@@ -468,14 +470,15 @@ fn aud_03_42_derived_scalars_operational_agonism_and_builtin_nan_sweep() {
 
     // 2. OperationalAgonism guards, saturation, FD grad, bounds, and derived KA/Tau.
     let op = get_builtin_model("operational_model_agonist").unwrap();
-    let mut g_op = [0.0; 5];
-    assert!(op.eval(&[-6.0], &[5.0, 95.0, -6.0, 0.8, 0.0], 0).is_none());
-    assert!(op.eval(&[-6.0], &[5.0, 95.0, -6.0, 0.8, -1.5], 0).is_none());
-    assert!(!op.grad(&[-6.0], &[5.0, 95.0, -6.0, 0.8, -1.5], 0, &mut g_op));
-    assert_eq!(op.eval(&[0.0], &[5.0, 95.0, -6.0, 10.0, 100.0], 0), Some(95.0));
-    assert_grad_matches_fd(op.as_ref(), &[-5.5], &[5.0, 95.0, -6.0, 0.8, 1.3], 0, 1e-6);
-    assert_eq!(op.default_bounds()[4].0, Some(1e-4));
-    let op_d = op.derived_transforms(&[5.0, 95.0, -6.0, 0.5, 1.3]);
+    let mut g_op = [0.0; 6];
+    assert!(op.eval(&[-6.0], &[5.0, 95.0, -7.2, -6.0, 0.8, 0.0], 1).is_none());
+    assert!(op.eval(&[-6.0], &[5.0, 95.0, -7.2, -6.0, 0.8, -1.5], 1).is_none());
+    assert!(!op.grad(&[-6.0], &[5.0, 95.0, -7.2, -6.0, 0.8, -1.5], 1, &mut g_op));
+    assert_eq!(op.eval(&[0.0], &[5.0, 95.0, -7.2, -6.0, 10.0, 100.0], 1), Some(95.0));
+    assert_grad_matches_fd(op.as_ref(), &[-5.5], &[5.0, 95.0, -7.2, -6.0, 0.8, 1.3], 0, 1e-6);
+    assert_grad_matches_fd(op.as_ref(), &[-5.5], &[5.0, 95.0, -7.2, -6.0, 0.8, 1.3], 1, 1e-6);
+    assert_eq!(op.default_bounds()[5].0, Some(1e-4));
+    let op_d = op.derived_transforms_for_dataset(&[5.0, 95.0, -7.2, -6.0, 0.5, 1.3], 1);
     assert_approx_eq(op_d.iter().find(|d| d.name == "KA").unwrap().value, 1e-6, 1e-18, 1e-12, "op KA");
     assert_approx_eq(op_d.iter().find(|d| d.name == "Tau").unwrap().value, 10.0_f64.powf(0.5), 1e-12, 1e-12, "op Tau");
 

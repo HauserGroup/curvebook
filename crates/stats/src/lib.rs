@@ -35,7 +35,11 @@ pub mod categorical;
 pub mod cld;
 pub mod column;
 pub mod common;
+pub mod cox_ext;
 pub mod error;
+pub mod formula_design;
+pub mod glm_ext;
+pub mod lognormal;
 pub mod multiplicity;
 pub mod multivariate;
 pub mod power;
@@ -52,7 +56,8 @@ use curvebook_doc::{AnalysisKind, AnalysisSpec, DataSheet, ResultSheet};
 pub use error::StatsError;
 pub use power::{
     CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerAnalysisResult, PowerCurvePoint, PowerEffectSpec, PowerSolveTarget,
-    PowerTestFamily, SensitivityCell, TailMode, TwoProportionsMethod, compute_power_curve, compute_sensitivity_table, solve_power,
+    PowerTestFamily, SensitivityCell, SurvivalPowerMethod, TailMode, TwoProportionsMethod, compute_power_curve, compute_sensitivity_table,
+    solve_power,
 };
 
 /// High-level families of statistical analyses.
@@ -91,6 +96,10 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::Transform(_)
             | AnalysisKind::FitSplineLowess(_)
             | AnalysisKind::AreaUnderCurve(_)
+            | AnalysisKind::RowStatistics(_)
+            | AnalysisKind::FractionOfTotal(_)
+            | AnalysisKind::CurveCalculus(_)
+            | AnalysisKind::MonteCarloSimulation(_)
             | AnalysisKind::LinearRegression(_)
             | AnalysisKind::NonlinearRegression(_)
             | AnalysisKind::ImportedSnapshot(_)
@@ -112,8 +121,16 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::RocCurve(r) => roc::run_roc_analysis(sheet, spec, r),
         AnalysisKind::GeneralizedLinearModel(g) => regression::run_glm_analysis(sheet, spec, g),
         AnalysisKind::Multivariate(m) => multivariate::run_multivariate_analysis(sheet, spec, m),
-        AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::AreaUnderCurve(_) => {
+        AnalysisKind::Transform(_)
+        | AnalysisKind::FitSplineLowess(_)
+        | AnalysisKind::AreaUnderCurve(_)
+        | AnalysisKind::RowStatistics(_)
+        | AnalysisKind::FractionOfTotal(_)
+        | AnalysisKind::CurveCalculus(_) => {
             Err(StatsError::IncompatibleTable { analysis: "transform (handled by curvebook-transform)", actual: sheet.archetype.kind() })
+        }
+        AnalysisKind::MonteCarloSimulation(_) => {
+            Err(StatsError::IncompatibleTable { analysis: "monte carlo (handled by curvebook-engine)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
             Err(StatsError::IncompatibleTable { analysis: "curve fitting (handled by curvebook-fit)", actual: sheet.archetype.kind() })

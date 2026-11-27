@@ -305,7 +305,13 @@ fn qol3_exclude_cells_with_reason_recalculates_and_audit_report() {
     for (id, kind) in [
         (
             "res-pca",
-            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: None, pcr_outcome_column: Some(0) }),
+            AnalysisKind::Multivariate(MultivariateSpec::Pca {
+                standardize: true,
+                parallel_analysis_seed: None,
+                pcr_outcome_column: Some(0),
+                retention_rule: Default::default(),
+                emit_extra_matrices: false,
+            }),
         ),
         (
             "res-samp",

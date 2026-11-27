@@ -229,29 +229,31 @@ fn nist_reparam_gaussian_sigmoids_and_three_phase_decay() {
         "Rat42>4pl_inhibitor",
     );
 
-    // 6. Rat43 -> log_agonist_vs_response_5pl (Bottom = 0)
+    // 6. Rat43 -> log_agonist_vs_response_5pl (Bottom = 0, LogEC50 parameterization)
     let rat43 = load_corpus_nonlinear(&dir, "Rat43").unwrap();
     let (b, s) = (&rat43.certified_betas, &rat43.certified_se_betas);
     let (log_xb, hill5, s_asym) = (b[1] / b[2], b[2] / std::f64::consts::LN_10, 1.0 / b[3]);
-    verify_fit(
+    let log_ec50_5pl = log_xb - (2.0_f64.powf(1.0 / s_asym) - 1.0).log10() / hill5;
+    let res_5pl = verify_fit(
         "log_agonist_vs_response_5pl",
         &series_from_nls(&rat43, false),
         vec![
             rule_const("Bottom", 0.0),
             rule_local_init("Top", b[0] * 1.05),
-            rule_local_init("LogXb", log_xb * 1.05),
+            rule_local_init("LogEC50", log_ec50_5pl * 1.05),
             rule_local_init("HillSlope", hill5 * 1.05),
             rule_local_init("S", s_asym * 1.05),
         ],
         (rat43.certified_rss, 1e-12, 1e-9),
         &[
             ("Top", b[0], s[0], 1e-6, 1e-5),
-            ("LogXb", log_xb, 1.013_920_603_500_262, 1e-6, 1e-5),
             ("HillSlope", hill5, s[2] / std::f64::consts::LN_10, 1e-6, 1e-5),
             ("S", s_asym, s[3] / (b[3] * b[3]), 1e-6, 1e-5),
         ],
         "Rat43>5pl",
     );
+    assert_approx_eq(find_param(&res_5pl, "LogEC50").estimate, log_ec50_5pl, 1e-6, 1e-5, "Rat43>5pl LogEC50");
+    assert_approx_eq(find_derived(&res_5pl, 0, "LogXb"), log_xb, 1e-6, 1e-5, "Rat43>5pl LogXb");
 
     // 7. Lanczos3 -> three_phase_decay (Plateau = 0)
     let lanczos3 = load_corpus_nonlinear(&dir, "Lanczos3").unwrap();
