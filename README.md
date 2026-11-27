@@ -76,6 +76,33 @@ Want to drive CurveBook with a local AI assistant? Read the **[Beginner's MCP Gu
 
 ---
 
+## Citing CurveBook
+
+If you use CurveBook in published research, include the exact version you ran (from **Help › Cite CurveBook**, **About CurveBook**, or `curvebook-cli --version`):
+
+```text
+CurveBook Contributors (2026). CurveBook [Computer software]. https://github.com/HauserGroup/curvebook
+```
+
+<details>
+<summary>BibTeX</summary>
+
+```bibtex
+@software{curvebook,
+  author  = {{CurveBook Contributors}},
+  title   = {{CurveBook}},
+  year    = {2026},
+  license = {MIT OR Apache-2.0},
+  url     = {https://github.com/HauserGroup/curvebook}
+}
+```
+
+</details>
+
+See [`CITATION.cff`](CITATION.cff) and **[How to cite CurveBook](https://curvebook.org/manual/latest/get-started.html#how-to-cite)** for citation metadata and generated methods-paragraph details.
+
+---
+
 ## Privacy, Docs & Contributing
 
 - **Private & offline** — Zero telemetry, zero crash reporting, and zero network calls ([Privacy Policy](https://curvebook.org/privacy.html)). Built from scratch in safe Rust.

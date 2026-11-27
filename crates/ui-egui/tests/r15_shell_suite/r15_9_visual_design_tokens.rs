@@ -170,9 +170,13 @@ fn modal_footers_follow_cancel_secondary_primary_order_and_render_cleanly() {
     app_mv.grid.variables_dialog.open_for_column(&mv_ds, 0);
     app_mv.sync_views();
 
-    let cases: [(&str, UiApp, &[&str]); 4] = [
+    let mut app_cite = seed_xy_app();
+    app_cite.canvas_dialogs.active_dialog = ActiveDialog::Cite;
+
+    let cases: [(&str, UiApp, &[&str]); 5] = [
         ("UnsavedChanges", app_unsaved, &["dialog.button.dont_save", "dialog.button.cancel", "dialog.button.save"]),
-        ("About", app_about, &["dialog.about.copy_version", "dialog.about.send_feedback", "dialog.about.close"]),
+        ("About", app_about, &["dialog.about.copy_version", "dialog.about.cite", "dialog.about.send_feedback", "dialog.about.close"]),
+        ("Cite", app_cite, &["dialog.cite.copy_reference", "dialog.cite.close"]),
         ("CloneOptions", app_clone, &["welcome.clone_modal.close", "welcome.clone_modal.apply"]),
         ("ManageVariables", app_mv, &["dialog.manage_variables"]),
     ];

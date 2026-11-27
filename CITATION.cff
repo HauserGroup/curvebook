@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+title: CurveBook
+message: "If you use CurveBook in your research, please cite it using the metadata from this file."
+type: software
+authors:
+  - name: CurveBook Contributors
+    website: https://hausergroup.org
+repository-code: https://github.com/HauserGroup/curvebook
+url: https://curvebook.org/
+license:
+  - MIT
+  - Apache-2.0
+version: 0.1.0-alpha.3
+date-released: 2026-11-27

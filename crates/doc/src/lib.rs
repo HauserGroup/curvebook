@@ -23,6 +23,7 @@
 pub mod analysis;
 pub mod archetypes;
 pub mod cell;
+pub mod citation;
 pub mod delimited;
 pub mod error;
 pub mod graph;
@@ -72,6 +73,7 @@ pub use cell::{
     Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint, infer_number_separators, parse_import_number,
     strip_thousands_grouping,
 };
+pub use citation::{CURVEBOOK_CITATION, SoftwareAuthor, SoftwareCitation};
 pub use delimited::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 pub use error::{
     CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_DISPLAY_DECIMALS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS,

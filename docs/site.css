@@ -32,6 +32,7 @@ body { margin: 0; padding: 0 0 2.5rem; }
 a { color: var(--link); text-underline-offset: .2em; }
 a:hover { color: var(--link-hover); text-decoration-thickness: 2px; }
 a:focus-visible,
+button:focus-visible,
 summary:focus-visible { outline: 2px solid var(--title); outline-offset: 3px; border-radius: 2px; }
 [tabindex="-1"]:focus { outline: 2px solid var(--title); outline-offset: 3px; }
 
@@ -399,6 +400,170 @@ main {
   border-color: var(--title);
   color: var(--title);
   text-decoration: none;
+}
+
+.cite-trigger-row {
+  margin: .6rem 0 0;
+}
+.cite-trigger {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: .25rem .65rem;
+  font: inherit;
+  font-size: .875rem;
+  font-weight: 600;
+  color: var(--link);
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cite-trigger:hover {
+  color: var(--link-hover);
+  background: var(--surface-subtle);
+  border-color: var(--title);
+}
+.cite-popover {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: min(31rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  padding: 1rem 1.15rem;
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 18px 44px -18px rgba(30, 38, 48, .42);
+}
+.cite-popover::backdrop {
+  background: rgba(30, 38, 48, .28);
+}
+.cite-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem;
+  margin: 0 0 .65rem;
+}
+.cite-popover-header h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+.cite-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  font: inherit;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.cite-close:hover {
+  color: var(--ink);
+  background: var(--surface-subtle);
+  border-color: var(--border);
+}
+.cite-copy {
+  user-select: all;
+  -webkit-user-select: all;
+  cursor: text;
+}
+.overview section .cite-copy-plain,
+.cite-copy-plain {
+  margin: 0;
+  max-width: none;
+  padding: .7rem .85rem;
+  font-size: .92rem;
+  line-height: 1.5;
+  color: var(--ink);
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.cite-copy-plain:hover,
+.cite-copy-plain:focus-visible {
+  border-color: var(--border-strong);
+}
+.overview section .cite-hint,
+.cite-hint {
+  margin: .4rem 0 0;
+  max-width: none;
+  font-size: .78rem;
+  color: var(--muted);
+}
+.cite-popover-footer {
+  margin-top: .75rem;
+  padding-top: .65rem;
+  border-top: 1px solid var(--border);
+}
+.cite-bibtex {
+  margin: 0 0 .45rem;
+}
+.cite-bibtex summary {
+  cursor: pointer;
+  font-size: .84rem;
+  font-weight: 600;
+  color: var(--title);
+  padding: .15rem 0;
+  display: list-item;
+  list-style-position: inside;
+}
+.cite-bibtex summary:hover {
+  color: var(--link);
+}
+.cite-bibtex[open] summary {
+  margin-bottom: .45rem;
+}
+.overview .cite-bibtex .cite-copy {
+  margin: 0;
+  padding: .6rem .75rem;
+  font-size: .8rem;
+  line-height: 1.45;
+  background: var(--surface-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.overview section .cite-links,
+.cite-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .35rem 1rem;
+  margin: 0;
+  max-width: none;
+  font-size: .82rem;
+}
+.cite-links a {
+  text-decoration: none;
+}
+.cite-links a:hover {
+  text-decoration: underline;
+}
+@media (min-width: 701px) {
+  @supports (anchor-name: --cite-trigger) and (position-area: block-end span-inline-end) {
+    .cite-trigger {
+      anchor-name: --cite-trigger;
+    }
+    .cite-popover {
+      inset: auto;
+      margin: .45rem 0 0;
+      position-anchor: --cite-trigger;
+      position-area: block-end span-inline-end;
+      position-try-fallbacks: flip-block, flip-inline;
+      max-height: min(calc(100dvh - 2rem), calc(100% - .75rem));
+    }
+  }
 }
 
 .hero {
@@ -1129,6 +1294,9 @@ details.toc[open] summary.toc-title { margin-bottom: .5rem; }
   .overview { padding: 1.25rem 1rem; }
   .lead { font-size: .95rem; }
   .action-row { gap: .65rem; }
+  .cite-trigger,
+  .cite-close,
+  .cite-bibtex summary { min-height: 44px; }
   .primary-action { margin: 1.25rem 0; }
   .overview .feature-grid,
   .platform-grid,
@@ -1154,6 +1322,9 @@ details.toc[open] summary.toc-title { margin-bottom: .5rem; }
   .overview,
   .downloads,
   .button,
+  .cite-trigger,
+  .cite-popover,
+  .cite-copy-plain,
   .feature-card,
   .badge-beta,
   .platform-card,
@@ -1199,6 +1370,8 @@ details.toc[open] summary.toc-title { margin-bottom: .5rem; }
   .header-utility,
   .manual-sidebar,
   .action-row,
+  .cite-trigger-row,
+  .cite-popover,
   .primary-action,
   .pager { display: none; }
   .manual-layout { display: block; padding: 0; }

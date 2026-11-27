@@ -85,9 +85,85 @@ fn verify_workspace_and_manual(root: &Path, manual_dir: &Path) -> Result<(), Str
     check_no_committed_generated_site_files(root)?;
     check_manual_snapshots(root, manual_dir)?;
     check_root_pages(root, manual_dir)?;
+    check_software_citation_sync(root)?;
     super::seo::check_search_metadata_with_manual(root, Some(manual_dir))?;
     crate::pages_site::check_publish_set_with_manual(root, Some(manual_dir))?;
     run_hygiene_scanners(root, manual_dir, true)
+}
+
+fn check_software_citation_sync(root: &Path) -> Result<(), String> {
+    use crate::scan_util::normalize_newlines;
+    use curvebook_doc::CURVEBOOK_CITATION;
+
+    let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
+    let ws_ver = crate::version::read_workspace_version(&cargo_toml)?;
+    let expected_cff = CURVEBOOK_CITATION.render_citation_cff(&ws_ver);
+    let actual_cff = std::fs::read_to_string(root.join("CITATION.cff")).map_err(|e| format!("CITATION.cff: {e}"))?;
+    if normalize_newlines(&actual_cff) != normalize_newlines(&expected_cff) {
+        return Err(String::from("CITATION.cff drifted from curvebook_doc::CURVEBOOK_CITATION (or Cargo.toml version)"));
+    }
+
+    let plain_ref = CURVEBOOK_CITATION.plain_text_reference(None);
+    let bibtex = CURVEBOOK_CITATION.bibtex(None);
+    let index_html = normalize_newlines(&std::fs::read_to_string(root.join("docs/index.html")).map_err(|e| format!("docs/index.html: {e}"))?);
+    for needle in [
+        "popovertarget=\"cite-popover\"",
+        "id=\"cite-popover\"",
+        " popover ",
+        "CITATION.cff",
+        "manual/latest/get-started.html#how-to-cite",
+        plain_ref.as_str(),
+        bibtex.as_str(),
+    ] {
+        if !index_html.contains(needle) {
+            return Err(format!("docs/index.html: citation popover missing synced token `{needle}`"));
+        }
+    }
+
+    let get_started = normalize_newlines(
+        &std::fs::read_to_string(root.join("docs/reference/get-started.md")).map_err(|e| format!("docs/reference/get-started.md: {e}"))?,
+    );
+    for needle in ["{#how-to-cite}", "CITATION.cff", plain_ref.as_str(), bibtex.as_str()] {
+        if !get_started.contains(needle) {
+            return Err(format!("docs/reference/get-started.md: How to cite section missing synced token `{needle}`"));
+        }
+    }
+
+    let readme = normalize_newlines(&std::fs::read_to_string(root.join("README.md")).map_err(|e| format!("README.md: {e}"))?);
+    for needle in ["CITATION.cff", plain_ref.as_str(), bibtex.as_str()] {
+        if !readme.contains(needle) {
+            return Err(format!("README.md: Citing CurveBook section missing synced token `{needle}`"));
+        }
+    }
+
+    let faq_html = normalize_newlines(&std::fs::read_to_string(root.join("docs/faq.html")).map_err(|e| format!("docs/faq.html: {e}"))?);
+    match CURVEBOOK_CITATION.concept_doi {
+        None => {
+            for (rel, body) in [
+                ("docs/index.html", index_html.as_str()),
+                ("docs/faq.html", faq_html.as_str()),
+                ("docs/reference/get-started.md", get_started.as_str()),
+                ("README.md", readme.as_str()),
+            ] {
+                let lower = body.to_ascii_lowercase();
+                for forbidden in ["10.5281/zenodo.", "easy to cite"] {
+                    if lower.contains(forbidden) {
+                        return Err(format!("{rel}: `{forbidden}` is forbidden before CURVEBOOK_CITATION.concept_doi is minted and resolving"));
+                    }
+                }
+            }
+        }
+        Some(doi) => {
+            for (rel, body) in
+                [("docs/index.html", index_html.as_str()), ("docs/reference/get-started.md", get_started.as_str()), ("README.md", readme.as_str())]
+            {
+                if !body.contains(doi) {
+                    return Err(format!("{rel}: missing minted concept DOI `{doi}`"));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn check_unique_titles_and_descriptions(facts: &BTreeMap<String, PageFacts>) -> Result<(), String> {

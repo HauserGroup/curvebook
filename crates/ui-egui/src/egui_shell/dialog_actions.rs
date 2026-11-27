@@ -502,6 +502,7 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 }
                 ActiveDialog::ResultViewer { .. }
                 | ActiveDialog::About
+                | ActiveDialog::Cite
                 | ActiveDialog::ImportWarnings
                 | ActiveDialog::ImportProjectMode { .. }
                 | ActiveDialog::CsvExportOptions(_)

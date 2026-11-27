@@ -3,7 +3,7 @@
 //! `Find & Replace`, and 4-category `Preferences` (with pure-Rust conflict-checked
 //! staged `Keyboard Shortcuts` editor and strict 14-locale Beta language selector).
 
-use curvebook_doc::SheetId;
+use curvebook_doc::{CURVEBOOK_CITATION, SheetId};
 use curvebook_palette::CanvasPreviewFilter;
 use curvebook_pdf::PdfColorSpace;
 use curvebook_render::TiffCompression;
@@ -319,6 +319,7 @@ pub fn render_app_modal(
         ActiveDialog::Print { .. } => render_print_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::Checkpoints => render_checkpoints_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
+        ActiveDialog::Cite => render_cite_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::ImportWarnings => render_import_warnings_modal(ctx, app, tokens, meta, intents),
         ActiveDialog::ImportProjectMode { command_id, path, has_unsaved_changes } => {
             render_import_project_mode_modal(ctx, app, command_id, path, *has_unsaved_changes, tokens, meta, intents)
@@ -2047,6 +2048,39 @@ fn format_about_diagnostic_summary(app: &UiApp, build_sha: Option<&str>) -> Stri
     )
 }
 
+fn render_modal_close_x_button(ui: &mut Ui, widget_id: &str, close_lbl: &str, tokens: &Tokens, meta: &mut FrameInspectMeta) -> bool {
+    let close_dim = tokens.metrics.min_hit_target_pt;
+    let spacer = (ui.available_width() - close_dim).max(tokens.metrics.space_sm);
+    ui.add_space(spacer);
+    let (close_rect, close_resp) = ui.allocate_exact_size(egui::Vec2::splat(close_dim), egui::Sense::click());
+    if close_resp.hovered() || close_resp.has_focus() {
+        let border = if close_resp.has_focus() { Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring) } else { Stroke::NONE };
+        ui.painter().rect(close_rect, egui::CornerRadius::same(tokens.metrics.radius_md), tokens.hover_bg, border, egui::StrokeKind::Inside);
+    }
+    let fg = if close_resp.hovered() { tokens.text_primary } else { tokens.text_muted };
+    ui.painter().text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(tokens.metrics.font_ui_title_pt), fg);
+    let close_a11y = close_lbl.to_owned();
+    close_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, true, close_a11y.clone()));
+    app_record_visible(
+        ui,
+        &close_resp,
+        meta,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "button",
+            label: close_lbl,
+            command_id: None,
+            value: None,
+            enabled: true,
+            disabled_reason: None,
+            z_layer: ZLayer::ModalDialog,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    close_resp.clicked()
+}
+
 pub(crate) fn render_about_modal(
     ctx: &Context,
     app: &UiApp,
@@ -2058,7 +2092,7 @@ pub(crate) fn render_about_modal(
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "menu.help.about");
     let close_lbl = tr(locale, "btn.close");
-    let (inner_w, max_h, body_w) = modal_bounds(ctx, 400.0);
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 460.0);
     let build_sha = option_env!("CURVEBOOK_BUILD_SHA");
     let version_line = format_about_version_line(env!("CARGO_PKG_VERSION"), build_sha);
     let copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.about.copied"));
@@ -2077,36 +2111,7 @@ pub(crate) fn render_about_modal(
         ui.horizontal(|ui| {
             ui.set_width(inner_w);
             ui.heading(title);
-            let close_dim = tokens.metrics.min_hit_target_pt;
-            let spacer = (ui.available_width() - close_dim).max(tokens.metrics.space_sm);
-            ui.add_space(spacer);
-            let (close_rect, close_resp) = ui.allocate_exact_size(egui::Vec2::splat(close_dim), egui::Sense::click());
-            if close_resp.hovered() || close_resp.has_focus() {
-                let border = if close_resp.has_focus() { Stroke::new(tokens.metrics.stroke_focus_pt, tokens.focus_ring) } else { Stroke::NONE };
-                ui.painter().rect(close_rect, egui::CornerRadius::same(tokens.metrics.radius_md), tokens.hover_bg, border, egui::StrokeKind::Inside);
-            }
-            let fg = if close_resp.hovered() { tokens.text_primary } else { tokens.text_muted };
-            ui.painter().text(close_rect.center(), egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(tokens.metrics.font_ui_title_pt), fg);
-            let close_a11y = close_lbl.to_owned();
-            close_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, true, close_a11y.clone()));
-            app_record_visible(
-                ui,
-                &close_resp,
-                meta,
-                FrameInspectEntryInput {
-                    widget_id: "dialog.about.close",
-                    role: "button",
-                    label: close_lbl,
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer: ZLayer::ModalDialog,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-            if close_resp.clicked() {
+            if render_modal_close_x_button(ui, "dialog.about.close", close_lbl, tokens, meta) {
                 ctx.data_mut(|d| d.insert_temp(copied_id, false));
                 intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
             }
@@ -2151,13 +2156,14 @@ pub(crate) fn render_about_modal(
 
         let copied = ctx.data(|d| d.get_temp::<bool>(copied_id).unwrap_or(false));
         let copy_lbl = if copied { "Copied" } else { "Copy version info" };
+        let cite_lbl = tr(locale, "menu.help.cite");
         let feedback_lbl = tr(locale, "menu.help.feedback");
         render_trailing_modal_footer(
             ui,
             meta,
             body_w,
             &[copy_lbl],
-            &[feedback_lbl],
+            &[cite_lbl, feedback_lbl],
             tokens,
             intents,
             |ui, meta, _intents| {
@@ -2186,6 +2192,23 @@ pub(crate) fn render_about_modal(
                 }
             },
             |ui, meta, intents| {
+                let cite_resp = app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "dialog.about.cite",
+                        label: cite_lbl,
+                        command_id: Some("app.cite"),
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                );
+                if cite_resp.clicked() {
+                    ctx.data_mut(|d| d.insert_temp(copied_id, false));
+                    intents.push_ui("app.cite", json!({}));
+                }
                 let feedback_resp = app_button(
                     ui,
                     meta,
@@ -2218,6 +2241,217 @@ pub(crate) fn render_about_modal(
     modal_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Dialog, true, title));
     let capture =
         finalize_egui_modal_response(ctx, &modal_resp, ModalCaptureSpec { widget_id: "dialog.about", title, z_dialog: ZLayer::ModalDialog }, meta);
+    report_from_capture(capture)
+}
+
+struct CiteCopyBlock<'a> {
+    heading: &'a str,
+    text_widget_id: &'a str,
+    btn_widget_id: &'a str,
+    copy_label: &'a str,
+    copied_label: &'a str,
+    content: &'a str,
+    desired_rows: usize,
+    monospace: bool,
+    copied_id: egui::Id,
+    unavail_id: egui::Id,
+    body_w: f32,
+}
+
+fn render_cite_copy_block(ui: &mut Ui, app: &UiApp, spec: CiteCopyBlock<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(spec.heading).strong());
+        let copied = ui.ctx().data(|d| d.get_temp::<bool>(spec.copied_id).unwrap_or(false));
+        let lbl = if copied { spec.copied_label } else { spec.copy_label };
+        let resp = app_button(
+            ui,
+            meta,
+            AppBtn { widget_id: spec.btn_widget_id, label: lbl, command_id: None, selected: false, enabled: true, disabled_reason: None },
+            tokens,
+        );
+        if resp.clicked() {
+            let status = app
+                .write_clipboard_text(spec.content)
+                .unwrap_or_else(|err| crate::os_integration::OsAdapterStatus::unavailable("os-pasteboard", err));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(spec.copied_id, true);
+                d.insert_temp(spec.unavail_id, !status.available);
+            });
+        }
+    });
+    ui.add_space(4.0);
+    egui::Frame::NONE
+        .fill(tokens.surface_bg)
+        .stroke(Stroke::new(tokens.metrics.stroke_thin_pt, tokens.divider))
+        .corner_radius(egui::CornerRadius::same(tokens.metrics.radius_md))
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            let edit_w = (spec.body_w - 16.0).max(80.0);
+            let mut readonly_text = spec.content;
+            let font = if spec.monospace {
+                egui::FontId::monospace(tokens.metrics.font_ui_small_pt)
+            } else {
+                egui::FontId::proportional(tokens.metrics.font_ui_small_pt)
+            };
+            let edit_resp = ui.add(
+                egui::TextEdit::multiline(&mut readonly_text)
+                    .id_salt(spec.text_widget_id)
+                    .font(font)
+                    .text_color(tokens.text_primary)
+                    .background_color(tokens.surface_bg)
+                    .frame(egui::Frame::NONE)
+                    .desired_width(edit_w)
+                    .desired_rows(spec.desired_rows),
+            );
+            app_record_visible(
+                ui,
+                &edit_resp,
+                meta,
+                FrameInspectEntryInput {
+                    widget_id: spec.text_widget_id,
+                    role: "textbox",
+                    label: spec.heading,
+                    command_id: None,
+                    value: Some(json!(spec.content)),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::ModalDialog,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        });
+}
+
+fn render_cite_modal(
+    ctx: &Context,
+    app: &UiApp,
+    _state: &AppModalsEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "dialog.cite.title");
+    let close_lbl = tr(locale, "btn.close");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 480.0);
+    let version = env!("CARGO_PKG_VERSION");
+    let reference = CURVEBOOK_CITATION.plain_text_reference(Some(version));
+    let bibtex = CURVEBOOK_CITATION.bibtex(Some(version));
+    let citation_url = CURVEBOOK_CITATION.primary_citation_url();
+    let ref_copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.cite.ref_copied"));
+    let bib_copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.cite.bib_copied"));
+    let unavail_id = egui::Id::unique(("egui_shell_app_modal", "dialog.cite.clipboard_unavailable"));
+
+    let clear_copy_flags = |ctx: &Context| {
+        ctx.data_mut(|d| {
+            d.insert_temp(ref_copied_id, false);
+            d.insert_temp(bib_copied_id, false);
+            d.insert_temp(unavail_id, false);
+        });
+    };
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        clear_copy_flags(ctx);
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    }
+
+    let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.cite"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
+        ui.set_min_width(inner_w);
+        ui.set_max_width(inner_w);
+        ui.set_max_height(max_h);
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+
+        ui.horizontal(|ui| {
+            ui.set_width(inner_w);
+            ui.heading(title);
+            if render_modal_close_x_button(ui, "dialog.cite.close", close_lbl, tokens, meta) {
+                clear_copy_flags(ctx);
+                intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+            }
+        });
+        ui.add_space(4.0);
+
+        egui::ScrollArea::vertical()
+            .id_salt("app_modal.cite.scroll")
+            .max_height((max_h - 84.0).max(120.0))
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+            .show(ui, |ui| {
+                ui.set_width(body_w);
+                ui.set_max_width(body_w);
+                ui.label(egui::RichText::new(format!("{} {version}", CURVEBOOK_CITATION.title)).strong());
+                ui.add_space(8.0);
+
+                render_cite_copy_block(
+                    ui,
+                    app,
+                    CiteCopyBlock {
+                        heading: tr(locale, "dialog.cite.reference_heading"),
+                        text_widget_id: "dialog.cite.reference_text",
+                        btn_widget_id: "dialog.cite.copy_reference",
+                        copy_label: tr(locale, "dialog.cite.copy_reference"),
+                        copied_label: tr(locale, "dialog.cite.copied"),
+                        content: &reference,
+                        desired_rows: 3,
+                        monospace: false,
+                        copied_id: ref_copied_id,
+                        unavail_id,
+                        body_w,
+                    },
+                    tokens,
+                    meta,
+                );
+                ui.add_space(10.0);
+
+                render_cite_copy_block(
+                    ui,
+                    app,
+                    CiteCopyBlock {
+                        heading: tr(locale, "dialog.cite.bibtex_heading"),
+                        text_widget_id: "dialog.cite.bibtex_text",
+                        btn_widget_id: "dialog.cite.copy_bibtex",
+                        copy_label: tr(locale, "dialog.cite.copy_bibtex"),
+                        copied_label: tr(locale, "dialog.cite.copied"),
+                        content: &bibtex,
+                        desired_rows: 8,
+                        monospace: true,
+                        copied_id: bib_copied_id,
+                        unavail_id,
+                        body_w,
+                    },
+                    tokens,
+                    meta,
+                );
+                ui.add_space(8.0);
+
+                if CURVEBOOK_CITATION.concept_doi.is_none() {
+                    ui.add(egui::Label::new(egui::RichText::new(tr(locale, "dialog.cite.doi_pending")).small().color(tokens.text_muted)).wrap());
+                }
+                let mut link_spec = ui_kit::LinkButtonSpec::new("dialog.cite.external_link", &citation_url, ZLayer::ModalDialog);
+                link_spec.font_size = tokens.metrics.font_ui_small_pt;
+                link_spec.max_width = Some(body_w);
+                link_spec.tooltip = Some(ui_kit::TooltipSpec::new(tr(locale, "dialog.cite.open_link")));
+                link_spec.tooltip_mode = ui_kit::TooltipMode::ModalAlwaysOpen;
+                if ui_kit::link_button(ui, tokens, meta, link_spec).clicked() {
+                    intents.push(UiIntent::OpenCitationUrl);
+                }
+
+                if ctx.data(|d| d.get_temp::<bool>(unavail_id).unwrap_or(false)) {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(tr(locale, "dialog.cite.clipboard_unavailable")).small().color(tokens.text_muted));
+                }
+            });
+    });
+
+    if modal_resp.backdrop_response.clicked() {
+        clear_copy_flags(ctx);
+        intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+    }
+
+    modal_resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Dialog, true, title));
+    let capture =
+        finalize_egui_modal_response(ctx, &modal_resp, ModalCaptureSpec { widget_id: "dialog.cite", title, z_dialog: ZLayer::ModalDialog }, meta);
     report_from_capture(capture)
 }
 

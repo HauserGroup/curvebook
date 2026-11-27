@@ -33,7 +33,8 @@ Rerunning a version updates its existing draft and replaces matching assets. The
 Before tagging or publishing a release, verify both source invariants and packaging outputs across target platforms:
 
 1. **Workspace gates & licences:**
-   - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (check synced outputs with `git diff`).
+   - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (updates `[workspace.package] version` in `Cargo.toml`, refreshes `Cargo.lock`, and synchronizes `version:` in root `CITATION.cff`; update `date-released` in `crates/doc/src/citation.rs` and `CITATION.cff` when cutting a release, then check synced outputs with `git diff`).
+   - **Zenodo concept DOI activation (one-time post-Beta maintainer step, `R14.7`):** enable the Zenodo↔GitHub repository integration for `HauserGroup/curvebook` on Zenodo/GitHub (never adding outbound token egress or wider permissions to `.github/workflows/*`), publish one release so Zenodo archives it and mints a concept DOI, and record that concept DOI in `CURVEBOOK_CITATION.concept_doi` (`crates/doc/src/citation.rs`), `CITATION.cff`, `docs/index.html`, `docs/reference/get-started.md`, and `README.md`.
    - Run the Zero-Telemetry & static security hygiene gate:
      ```sh
      cargo xtask telemetry

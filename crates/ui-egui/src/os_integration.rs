@@ -7,7 +7,7 @@ use std::time::Duration;
 use curvebook_chart::ChartScene;
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_doc::MAX_IMAGE_ASSET_BYTES;
-use curvebook_doc::{DataSheet, SheetCellRange, SheetId};
+use curvebook_doc::{CURVEBOOK_CITATION, DataSheet, SheetCellRange, SheetId, SoftwareCitation};
 use curvebook_engine::Session;
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
@@ -500,17 +500,38 @@ pub fn validate_github_issue_url(url: &str) -> Result<(), String> {
     if url == GITHUB_FEEDBACK_URL { Ok(()) } else { Err(format!("external URL must match `{GITHUB_FEEDBACK_URL}` exactly")) }
 }
 
-/// Injectable platform URL opener used by [`crate::UiApp`] for allowlisted GitHub issue links.
+/// Validate that `url` exactly matches an allowlisted CurveBook external URL (`GITHUB_FEEDBACK_URL`,
+/// [`CURVEBOOK_CITATION`]'s repository URL, or its minted concept DOI URL when configured).
+///
+/// # Errors
+/// Returns a descriptive error string when `url` is not in the compile-time exact-match allowlist.
+pub fn validate_external_url(url: &str) -> Result<(), String> {
+    validate_external_url_with_doi(url, CURVEBOOK_CITATION.concept_doi)
+}
+
+pub(crate) fn validate_external_url_with_doi(url: &str, concept_doi: Option<&str>) -> Result<(), String> {
+    if url == GITHUB_FEEDBACK_URL || url == CURVEBOOK_CITATION.repository_url {
+        return Ok(());
+    }
+    if let Some(doi) = concept_doi.map(str::trim).filter(|d| !d.is_empty())
+        && url == SoftwareCitation::doi_url_for(doi)
+    {
+        return Ok(());
+    }
+    Err(format!("external URL `{url}` is not on CurveBook's exact-match allowlist"))
+}
+
+/// Injectable platform URL opener used by [`crate::UiApp`] for allowlisted external links.
 ///
 /// Interactive desktop sessions install [`SystemPlatformUrlOpener::live`], interactive browser
 /// sessions install `WebPlatformUrlOpener`, and headless / test sessions keep the default
 /// [`SystemPlatformUrlOpener::guarded`] or install `StubPlatformUrlOpener`.
 pub trait PlatformUrlOpener: std::fmt::Debug + Send + Sync {
-    /// Open an allowlisted CurveBook GitHub issue chooser URL in the user's browser.
+    /// Open an allowlisted CurveBook external URL (feedback chooser, citation DOI, or repository)
+    /// in the user's browser.
     ///
     /// # Errors
-    /// Returns an error if `url` fails [`validate_github_issue_url`] or if an
-    /// active OS launcher fails.
+    /// Returns an error if `url` fails [`validate_external_url`] or if an active OS launcher fails.
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String>;
 }
 
@@ -538,7 +559,7 @@ impl SystemPlatformUrlOpener {
 
 impl PlatformUrlOpener for SystemPlatformUrlOpener {
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
-        open_github_issue_url(url, self.allow_live_launch)
+        open_allowlisted_external_url(url, self.allow_live_launch)
     }
 }
 
@@ -610,7 +631,7 @@ impl StubPlatformUrlOpener {
 #[cfg(any(test, feature = "test-support"))]
 impl PlatformUrlOpener for StubPlatformUrlOpener {
     fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
-        validate_github_issue_url(url)?;
+        validate_external_url(url)?;
         let mut guard = self.inner.write_or_recover().map_err(|err| err.to_string())?;
         guard.urls.push(url.to_owned());
         if guard.available {
@@ -769,11 +790,19 @@ fn build_windows_url_opener_candidate(stage_dir: &std::path::Path) -> Result<OsC
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
     validate_github_issue_url(url)?;
+    open_allowlisted_external_url(url, allow_live_launch)
+}
+
+/// Validate `url` against [`validate_external_url`] and open it in the host OS browser when
+/// `allow_live_launch` is `true` or `CURVEBOOK_ALLOW_OS_GUI_DIALOG` is set.
+///
+/// # Errors
+/// Returns an error if `url` fails allowlist validation or if spawning the host launcher fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_allowlisted_external_url(url: &str, allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
+    validate_external_url(url)?;
     if !allow_live_launch && std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
-        return Ok(OsAdapterStatus::unavailable(
-            "os-browser",
-            "browser launch disabled in headless/test mode; open the GitHub feedback URL manually",
-        ));
+        return Ok(OsAdapterStatus::unavailable("os-browser", "browser launch disabled in headless/test mode; open the URL manually"));
     }
 
     #[cfg(target_os = "macos")]
@@ -794,13 +823,11 @@ pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAda
             available: true,
             availability: OsAdapterAvailability::Submitted,
             backend: candidate.program,
-            detail: String::from("opened GitHub issue chooser in default browser"),
+            detail: String::from("opened allowlisted CurveBook URL in default browser"),
             text: Some(url.to_owned()),
             job_id: None,
         }),
-        CandidateOutcome::NotFound => {
-            Ok(OsAdapterStatus::unavailable(candidate.program, "OS browser launcher not found; open the GitHub feedback URL manually"))
-        }
+        CandidateOutcome::NotFound => Ok(OsAdapterStatus::unavailable(candidate.program, "OS browser launcher not found; open the URL manually")),
     }
 }
 
@@ -813,6 +840,16 @@ pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAda
 pub fn open_github_issue_url(url: &str, _allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
     validate_github_issue_url(url)?;
     Ok(OsAdapterStatus::unavailable("wasm-browser", "no browser window opener installed; open the GitHub feedback URL manually"))
+}
+
+/// Validate `url` against [`validate_external_url`] on `wasm32` targets.
+///
+/// # Errors
+/// Returns an error if `url` fails allowlist validation.
+#[cfg(target_arch = "wasm32")]
+pub fn open_allowlisted_external_url(url: &str, _allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
+    validate_external_url(url)?;
+    Ok(OsAdapterStatus::unavailable("wasm-browser", "no browser window opener installed; open the URL manually"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2474,6 +2511,14 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
         assert!(status.available);
         assert_eq!(status.availability, OsAdapterAvailability::Submitted);
         assert_eq!(stub.last_url().as_deref(), Some(GITHUB_FEEDBACK_URL));
+
+        let repo_status = stub.open_external_url(curvebook_doc::CURVEBOOK_CITATION.repository_url)?;
+        assert!(repo_status.available);
+        assert_eq!(stub.last_url().as_deref(), Some(curvebook_doc::CURVEBOOK_CITATION.repository_url));
+        assert!(stub.open_external_url("https://doi.org/10.5281/zenodo.9999999").is_err());
+        assert!(super::validate_external_url_with_doi("https://doi.org/10.5281/zenodo.1234567", Some("10.5281/zenodo.1234567")).is_ok());
+        assert!(super::validate_external_url_with_doi("https://doi.org/10.5281/zenodo.9999999", Some("10.5281/zenodo.1234567")).is_err());
+        assert!(super::validate_external_url_with_doi("https://doi.org/10.5281/zenodo.1234567?x=1", Some("10.5281/zenodo.1234567")).is_err());
 
         let guarded = SystemPlatformUrlOpener::guarded();
         assert!(guarded.open_external_url("javascript:alert(1)").is_err());

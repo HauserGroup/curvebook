@@ -394,17 +394,52 @@ fn render_methods_tab(
         state.last_copied_methods = false;
     }
 
-    // Side-by-side dot-free `Copy` (primary) and `Save` (secondary) actions (`R20.7`, `R20.15`).
+    // Side-by-side dot-free `Copy` (primary), `Save`, and `Cite` actions (`R20.7`, `R20.15`, `R14.7`).
+    // Fits all three on one row when natural widths fit; wraps `Cite` onto a second row for longer
+    // translations (e.g., German/Russian) so none of the labels ellipsize in the 280 pt studio.
+    let copy_lbl = tr(locale, "results.methods_copy");
+    let save_lbl = tr(locale, "results.methods_save");
+    let cite_lbl = tr(locale, "results.methods_cite");
+    let font = egui::FontId::proportional(11.5);
+    let measure = |text: &str| (ui.painter().layout_no_wrap(text.to_owned(), font.clone(), tokens.text_primary).size().x + 18.0).max(48.0);
+    let (nat_copy, nat_save, nat_cite) = (measure(copy_lbl), measure(save_lbl), measure(cite_lbl));
+    let avail_w = ui.available_width().max(152.0);
+    let single_row = nat_copy + nat_save + nat_cite + 8.0 <= avail_w;
+    let (copy_w, save_w, cite_w) = if single_row {
+        let extra = ((avail_w - 8.0) - (nat_copy + nat_save + nat_cite)) / 3.0;
+        (nat_copy + extra, nat_save + extra, nat_cite + extra)
+    } else {
+        let pair_w = (avail_w - 4.0).max(112.0);
+        let pair_sum = (nat_copy + nat_save).max(1.0);
+        let (cw, sw) = if pair_sum <= pair_w {
+            let extra = (pair_w - pair_sum) / 2.0;
+            (nat_copy + extra, nat_save + extra)
+        } else {
+            let scale = pair_w / pair_sum;
+            ((nat_copy * scale).max(48.0), (nat_save * scale).max(48.0))
+        };
+        (cw, sw, avail_w)
+    };
+    let cite_spec = StudioButtonSpec {
+        label: cite_lbl,
+        tooltip: tr(locale, "menu.help.cite"),
+        selected: false,
+        enabled: ctx_in.enabled,
+        primary: false,
+        widget_id: "inspector.cite_curvebook",
+        command_id: Some("app.cite"),
+        disabled_reason: None,
+    };
+    let mut cite_clicked = false;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let btn_w = ((ui.available_width() - 4.0) / 2.0).max(52.0);
         if studio_sized_button(
             ui,
             tokens,
             meta,
-            btn_w,
+            copy_w,
             &StudioButtonSpec {
-                label: tr(locale, "results.methods_copy"),
+                label: copy_lbl,
                 tooltip: "Copy report text to clipboard",
                 selected: false,
                 enabled: ctx_in.enabled,
@@ -432,9 +467,9 @@ fn render_methods_tab(
             ui,
             tokens,
             meta,
-            btn_w,
+            save_w,
             &StudioButtonSpec {
-                label: tr(locale, "results.methods_save"),
+                label: save_lbl,
                 tooltip: "Save report to file",
                 selected: false,
                 enabled: ctx_in.enabled,
@@ -453,7 +488,19 @@ fn render_methods_tab(
                 }),
             );
         }
+        if single_row && studio_sized_button(ui, tokens, meta, cite_w, &cite_spec) {
+            cite_clicked = true;
+        }
     });
+    if !single_row {
+        ui.add_space(4.0);
+        if studio_sized_button(ui, tokens, meta, cite_w, &cite_spec) {
+            cite_clicked = true;
+        }
+    }
+    if cite_clicked {
+        intents.push_ui("app.cite", json!({}));
+    }
 
     if state.last_copied_methods {
         ui.label(egui::RichText::new(tr(locale, "results.methods_copied")).size(small).color(tokens.link_green));

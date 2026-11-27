@@ -4382,7 +4382,7 @@ fn resolve_host_or_ui_route(
         "app.preferences" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Preferences, target_sheet_id: None, query: None }))
         }
-        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.feedback" => {
+        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.cite" || cmd == "app.feedback" => {
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
         }
         _ => Ok(None),

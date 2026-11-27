@@ -200,4 +200,30 @@ CurveBook makes no background network connections ([Privacy & Security](privacy-
 - **Windows:** Open **Settings › Apps › Installed apps** and uninstall **CurveBook** (or run `msiexec /x`). Optionally delete `%APPDATA%\CurveBook` and `%LOCALAPPDATA%\CurveBook`.
 - **Linux / FreeBSD:** Delete the `.AppImage` (and any extracted `squashfs-root/` folder) or the extracted FreeBSD folder. Optionally remove `~/.config/curvebook` and `~/.local/share/curvebook`.
 
+---
+
+## How to cite CurveBook {#how-to-cite}
+
+When reporting analyses or figures produced with CurveBook, include the exact software version you ran. You can copy a ready-to-paste reference and BibTeX entry for your running version from **Help › Cite CurveBook**, from **About CurveBook**, or by clicking **Cite** in the result **Methods** panel. You can also check the CLI version with `curvebook-cli --version`.
+
+Plain-text reference (insert your running version number):
+
+```text
+CurveBook Contributors (2026). CurveBook [Computer software]. https://github.com/HauserGroup/curvebook
+```
+
+BibTeX:
+
+```bibtex
+@software{curvebook,
+  author  = {{CurveBook Contributors}},
+  title   = {{CurveBook}},
+  year    = {2026},
+  license = {MIT OR Apache-2.0},
+  url     = {https://github.com/HauserGroup/curvebook}
+}
+```
+
+Machine-readable citation metadata is maintained in [`CITATION.cff`](https://github.com/HauserGroup/curvebook/blob/main/CITATION.cff). A permanent Zenodo concept DOI will be added to `CITATION.cff`, generated methods paragraphs, and this section after the first archived release is minted on Zenodo.
+
 Next steps: open your first workspace in the [Desktop GUI overview](desktop-gui.md), connect an AI assistant with [MCP setup for beginners](../mcp-for-beginners.md), or read the [MCP automation reference](automation/mcp.md).
