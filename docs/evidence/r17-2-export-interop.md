@@ -8,24 +8,24 @@
 1. **SVG 1.1 + SVG 2 Compatibility & Degenerate Paint Hygiene (`crates/svg/src/writer.rs`):**
    - Added `has_images` tracking on `SvgRenderCtx`: root `<svg>` now declares `xmlns:xlink="http://www.w3.org/1999/xlink"` whenever embedded raster images are emitted, and `<image>` elements emit both `xlink:href="data:..."` (for Illustrator / Office / SVG 1.1 consumers) and `href="data:..."` (for SVG 2 viewers). Vector-only scenes omit `xmlns:xlink`.
    - Filtered zero-alpha fills (`alpha > 0`), zero-alpha strokes (`alpha > 0 && width_pt > 0.0`), and zero-alpha text in `write_path_element` and `write_text_element`, plus guarded all-zero `stroke-dasharray` in `write_stroke_attrs` after finiteness validation. Eliminates `stroke-width="0.000"`, `stroke-dasharray="0.000,..."`, and invisible ghost primitives in downstream vector editors.
-   - Regression coverage: `crates/svg/tests/svg_export.rs` (`svg_interop_emits_xlink_and_suppresses_degenerate_strokes_and_alpha`).
+   - Regression coverage: `crates/svg/tests/svg_suite/svg_export.rs` (`svg_interop_emits_xlink_and_suppresses_degenerate_strokes_and_alpha`).
 
 2. **PDF Page `/Resources` `/Font` Dictionary Pruning (`crates/pdf/src/writer.rs`):**
    - Derived `PartialOrd, Ord` on `PdfFontId`, added `fonts: BTreeSet<PdfFontId>` to `PageResourcesUsed`, recorded referenced fonts in `emit_pdf_text_segment`, and updated `build_page_dict` to emit `/Font << ... >>` strictly for fonts referenced on that page (omitting `/Font` completely when `outline_text: true` or on textless pages, while keeping PDF object IDs `3..7` intact for Core-14 structure parity).
    - Verified with `pdffonts` (`26.11.0`): all `.pdf17_outlined.pdf` exports now report `0` referenced fonts (`fonts=0`) and `.pdf17_ttf.pdf` exports no longer leak unreferenced Core-14 Type 1 font references (`/F1`–`/F3`, `/F5`).
-   - Regression coverage: `crates/pdf/tests/pdf17_truetype_embed.rs` (`pdf17_prunes_unreferenced_fonts_and_omits_font_dict_when_outlined`).
+   - Regression coverage: `crates/pdf/tests/pdf_suite/pdf17_truetype_embed.rs` (`pdf17_prunes_unreferenced_fonts_and_omits_font_dict_when_outlined`).
 
 3. **ECMA-234 `.emf` Pen Geometry & GDI Font Family Normalization (`crates/render/src/emf.rs`):**
    - Updated `create_pen` so thick solid strokes (`width_pt > 1.0`) with `LineCap::Butt` or `LineJoin::Miter` emit geometric `EMR_EXTCREATEPEN` (`PS_GEOMETRIC | PS_SOLID | cap | join`) instead of `EMR_CREATEPEN` (which Windows GDI renders with round caps/joins above 1 px), while keeping narrow `<= 1.0 pt` solid or round/round pens on `EMR_CREATEPEN`.
    - Added `normalize_emf_font_family` in `emit_text_span` so CSS comma-separated/quoted font stacks (e.g. `"Helvetica Neue", Helvetica, sans-serif`) normalize to a single unquoted primary GDI `lfFaceName` (`Helvetica Neue`).
-   - Regression coverage: `crates/render/tests/emf_and_budget.rs` (`emf_thick_non_round_solid_uses_extcreatepen_and_normalizes_css_font_stack`).
+   - Regression coverage: `crates/render/tests/render_suite/emf_and_budget.rs` (`emf_thick_non_round_solid_uses_extcreatepen_and_normalizes_css_font_stack`).
 
 4. **Multi-Flavor Clipboard Bundle & One-Click `ui.clipboard.copyForSlides` (`crates/ui-egui`, `apps/curvebook`, `crates/mcp`):**
    - Added Deflate-compressed TIFF (`tiff_bytes: Option<Vec<u8>>`, macOS UTType `public.tiff`) to `ClipboardBundle` and `available_flavors()`.
    - Updated `build_html_clipboard_wrapper` to embed `<img src="data:image/png;base64,..."/>` inside `<div class="curvebook-figure">` whenever `png_bytes` is non-empty (falling back to inline SVG only when PNG bytes are absent), preventing rich-text targets from stripping inline `<svg>` tags or pasting raw text.
    - Added typed UI command `ui.clipboard.copyForSlides` (`Copy for Slides & Documents`, default shortcut `Cmd+Shift+C`, `Rank::Secondary`; `UI_COMMANDS` `53 -> 54`, 16-locale `catalog.tsv` `708 -> 709` keys, regenerated `crates/mcp/src/ui_catalog.rs`). Exposed via Edit menu, Graph/Layout canvas right-click context menus (`canvas.graph_ctx.copy_for_slides`, `canvas.layout_ctx.copy_for_slides`), Command Palette, `--control` JSONL dispatcher, and `DesktopHostRuntime::handle_clipboard_copy_for_slides`.
    - Writes `300 DPI` PDF + TIFF + PNG + EMF + SVG + `<img>` HTML via `write_os_clipboard_bundle_for_slides` while omitting raw `<svg>` XML from plain-text pasteboard flavor so Office/Keynote/Docs paste rendered figures instead of XML text. Existing `edit.copy` (`Cmd+C`) continues writing `bundle.svg` to `public.utf8-plain-text` to preserve `macos_clipboard_live.rs` roundtrip expectations.
-   - Regression coverage: `crates/ui-egui/src/os_integration.rs` (`os_integration::tests::clipboard_bundle_populates_valid_emf_and_writes_bundle_status`), `crates/ui-egui/tests/r10_23_shortcuts_and_copy.rs` (`r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command`), and `apps/curvebook/tests/audit_r2_desktop_host.rs` (`r17_2_desktop_host_copy_for_slides_routes_at_300_dpi_without_plain_text_svg`).
+   - Regression coverage: `crates/ui-egui/src/os_integration.rs` (`os_integration::tests::clipboard_bundle_populates_valid_emf_and_writes_bundle_status`), `crates/ui-egui/tests/r10_perf_suite/r10_23_shortcuts_and_copy.rs` (`r17_2_copy_for_slides_shortcut_context_menu_and_dispatch_ui_command`), and `apps/curvebook/tests/desktop_suite/audit_r2_desktop_host.rs` (`r17_2_desktop_host_copy_for_slides_routes_at_300_dpi_without_plain_text_svg`).
 
 ## 2. Export Interop Suite (`crates/engine/tests/core_suite/r17_2_export_interop.rs`)
 

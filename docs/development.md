@@ -60,7 +60,7 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 | Print per-crate LOC and test statistics | `cargo xtask stats` |
 | Write a local source-coverage report (lcov + HTML) | `cargo xtask coverage [-p <crate>]` |
 | Build macOS `dist/CurveBook.app` bundle | `cargo xtask bundle` |
-| List every `xtask` subcommand (secrets, licences, telemetry, generated docs, …) | `cargo xtask --help` (see also [AGENTS.md](../AGENTS.md) §4) |
+| List every `xtask` subcommand (secrets, licences, telemetry, generated docs, …) | `cargo xtask --help` (see also [AGENTS.md](../AGENTS.md) §3) |
 
 ## Subsystem implementation guides
 
@@ -179,10 +179,10 @@ A crash destroys a researcher's unsaved experimental data tables, exclusions, an
 ### Fuzzing
 
 Untrusted boundaries carry `proptest` / fuzz suites that must never panic:
-- `crates/format/tests/prop_format.rs` — lossless `.curvebook` round-trips plus truncated/mutated ZIP, CSV, XML, and JSON inputs.
-- `crates/fit/tests/dsl_fuzz_props.rs` — arbitrary/hostile user equation and formula strings.
-- `crates/engine/tests/command_sweep_props.rs` — every registered command invoked with arbitrary JSON payloads.
-- `crates/mcp/tests/protocol_props.rs` — malformed JSON-RPC frames.
+- `crates/format/tests/format_suite/prop_format.rs` — lossless `.curvebook` round-trips plus truncated/mutated ZIP, CSV, XML, and JSON inputs.
+- `crates/fit/tests/core_suite/dsl_fuzz_props.rs` — arbitrary/hostile user equation and formula strings.
+- `crates/engine/tests/core_suite/command_sweep_props.rs` — every registered command invoked with arbitrary JSON payloads.
+- `crates/mcp/tests/mcp_suite/protocol_props.rs` — malformed JSON-RPC frames.
 
 ## Verified NIST StRD corpus
 

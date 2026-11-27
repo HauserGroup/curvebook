@@ -10,7 +10,7 @@ These pages are published on the documentation site by `cargo xtask docs-site`. 
 |---|---|
 | [Get started](reference/get-started.md) | Which file to download, installing on each platform, verifying downloads, fonts, updating, and uninstalling |
 | [Beginner's guide (MCP)](mcp-for-beginners.md) | Connecting an AI assistant, a first analysis, and saving work |
-| [Concepts](reference/concepts.md), [tables](reference/tables.md), [graphs](reference/graphs.md), [files](reference/files.md), [settings](reference/settings.md), [quality-of-life tools](reference/qol.md) | What CurveBook does and how its parts fit together |
+| [Concepts](reference/concepts.md), [tables](reference/tables.md), [analyses](reference/analyses.md), [curve fitting](reference/fitting.md), [graphs](reference/graphs.md), [files](reference/files.md), [settings](reference/settings.md), [quality-of-life tools](reference/qol.md) | What CurveBook does and how its parts fit together |
 | [Desktop app](reference/desktop-gui.md) | Getting started in the desktop GUI |
 | [Automation: MCP](reference/automation/mcp.md), [CLI](reference/automation/cli.md), [control protocol and batch](reference/automation/control-and-batch.md) | Reference for driving CurveBook from scripts and AI assistants |
 | [Troubleshooting & known issues](reference/troubleshooting.md) | Install problems, fonts, MCP connections, error codes, and the current release's known issues |
@@ -45,8 +45,8 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Statistics | [Statistics evidence](evidence/statistics.md) |
 | Curve fitting | [Curve-fitting evidence](evidence/curve-fitting.md) |
 | Graphing | [Graphing evidence](evidence/graphing.md) |
-| Interchange | [File-format evidence](evidence/file-formats.md) |
-| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), [GUI layout specification](planning/gui-layout-spec.md), and [post-Beta GUI improvements](planning/gui-improvements.md) |
+| Interchange | [File-format evidence](evidence/file-formats.md) and [interop format notes](evidence/interop-format-notes.md) |
+| User interface | [User-interface evidence](evidence/user-interface.md), [GUI workflows](gui-workflows.md), and [GUI layout specification](planning/gui-layout-spec.md) |
 | Platforms | [Platform evidence](evidence/platforms.md) |
 | Localization | [Localization evidence](evidence/localization.md) |
 | Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |

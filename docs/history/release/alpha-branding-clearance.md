@@ -33,7 +33,7 @@ The release gates in [`xtask/src/brands.rs`](../../../xtask/src/brands.rs), [`xt
 
 ## 2. Narrow Format-Compatibility Boundaries & Provenance Exceptions
 
-Every exception permitted by the gate is structural, verified by both positive and negative regression cases in [`xtask/tests/r021_strict_alpha_branding.rs`](../../../xtask/tests/r021_strict_alpha_branding.rs) and `xtask/src/brands.rs`:
+Every exception permitted by the gate is structural, verified by both positive and negative regression cases in `xtask/tests/r021_strict_alpha_branding.rs` (since consolidated into `xtask/src/brands.rs` and `xtask/tests/xtask_suite/`) and `xtask/src/brands.rs`:
 
 - **`.pzfx` / `.prism` file interchange boundary:**
   - *Allowed:* File extensions and filter lists (`.prism`, `*.prism`, `.pzfx`), MIME type identifiers in `.mime.xml`/`.desktop` `MimeType=`, macOS `CFBundleTypeExtensions` array extension entry in `Info.plist.in`, canonical format module/registry/command identifiers (`crates/format/src/pzfx.rs`, `crates/format/src/registry.rs`, `table.importPrism`), XML root tag/attribute boundaries in `.pzfx` parsers and parser tests, and `.prism` archive diagnostics referencing container chunks.

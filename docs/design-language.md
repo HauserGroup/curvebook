@@ -4,7 +4,7 @@ CurveBook is a scientific data, statistics, and graphing workstation whose inter
 
 Every visual token and standard control primitive lives in one canonical theme and widget boundary—[`crates/ui-egui/src/theme.rs`](../crates/ui-egui/src/theme.rs) (`ThemeSeeds`, `UiThemeSpec`) and [`crates/ui-egui/src/egui_shell/`](../crates/ui-egui/src/egui_shell/mod.rs) (`mod.rs`, `ui_kit.rs`, `widgets.rs`)—applied uniformly across every pane, inspector, and dialog and policed by `cargo xtask design-tokens`.
 
-Rules below distinguish **`[Implemented]`** behaviour already verified in `crates/ui-egui` from **`[Target]`** refinements scheduled in [`R20.2`–`R20.4`](ROADMAP.md#r20-desktop-gui-visual-system--layout-overhaul). For shell regions, responsive breakpoints, and split-view interaction contracts, see the [GUI layout specification](planning/gui-layout-spec.md).
+This specification documents the implemented desktop design system landed across [`R15.10`](history/roadmap/r15.md#r1510-scientific-visual-design-language-derived-oklaboklch-tokens--structural-hierarchy-gates) and [`R20`](history/roadmap/r20.md#r20-desktop-gui-visual-system--layout-overhaul). For shell regions, responsive breakpoints, and split-view interaction contracts, see the [GUI layout specification](planning/gui-layout-spec.md).
 
 ---
 
@@ -12,20 +12,20 @@ Rules below distinguish **`[Implemented]`** behaviour already verified in `crate
 
 Interface colours are derived deterministically from perceptual seeds in `ThemeSeeds` (`crates/ui-egui/src/theme.rs`) rather than hand-tuned RGB triples:
 
-- **`[Implemented]` Neutral slate ramp:** stepped evenly in OKLab lightness (`curvebook_palette::oklab_even_steps`) with near-zero chroma so chrome, panels, recessed tracks, content planes, dividers, and text share a single neutral axis across `Light`, `Dark`, and `HighContrast`.
-- **`[Implemented]` Single restrained accent:** one moderate-chroma slate-indigo seed stepped in cylindrical OKLCH with chroma-reduction gamut mapping (`Oklch::to_rgba8_gamut_mapped`) so hover, active, focus, and primary-button states keep consistent hue without sRGB clipping.
-- **`[Implemented]` Semantic status & provenance seeds:** dedicated lightness-calibrated seeds for `error`, `warning`, `stale`, live-link provenance, and variable-role badges (`NUM`, `CAT`, `LBL`, `FX=`).
-- **`[Target]` Three opaque neutral surface tiers (surfaces replace borders):** instead of outlining every button, chip, and group in `1 pt` grey boxes, hierarchy comes from three opaque neutral background levels:
+- **Neutral slate ramp:** stepped evenly in OKLab lightness (`curvebook_palette::oklab_even_steps`) with near-zero chroma so chrome, panels, recessed tracks, content planes, dividers, and text share a single neutral axis across `Light`, `Dark`, and `HighContrast`.
+- **Single restrained accent:** one moderate-chroma slate-indigo seed stepped in cylindrical OKLCH with chroma-reduction gamut mapping (`Oklch::to_rgba8_gamut_mapped`) so hover, active, focus, and primary-button states keep consistent hue without sRGB clipping.
+- **Semantic status & provenance seeds:** dedicated lightness-calibrated seeds for `error`, `warning`, `stale`, live-link provenance, and variable-role badges (`NUM`, `CAT`, `LBL`, `FX=`).
+- **Three opaque neutral surface tiers (surfaces replace borders):** instead of outlining every button, chip, and group in `1 pt` grey boxes, hierarchy comes from three opaque neutral background levels:
   1. **`surface_chrome` (`app_bar` / `panel_bg`):** top bars, leading and trailing docks, and the bottom status footer.
   2. **`surface_recessed`:** shared tracks behind segmented controls, inline filter/search wells, inset section wells, and the figure `canvas_mat`.
   3. **`surface_content` (`surface_bg`):** primary workspace sheets—the contiguous data grid, result tables, notes, and figure paper (`paper_white`).
   - *Dark Mode elevation:* higher surface tiers step **lighter** in OKLab lightness (never darker) so elevated controls, sheets, and popovers stay legible without heavy borders.
   - *HighContrast mode:* preserves explicit structural borders alongside surface steps so every interactive boundary remains unmistakably delineated.
-- **`[Target]` Quiet `divider` vs. `input_border`:** split subtle structural hairlines (`divider`—pane seams, header baselines, contiguous grid lines) from higher-contrast `input_border` strokes reserved strictly for editable text fields, numeric inputs, and dropdown controls.
-- **`[Target]` Emphasized vs. unemphasized selection:** active selection inside the focused pane uses the emphasized accent tint (`active_bg`); selection retained in an unfocused pane steps down to a neutral cool-grey fill (`selection_unemphasized_bg`) so only one region visually claims focus at a time.
-- **`[Implemented]` / `[Target]` Contrast verification (WCAG 2.2 by WCAG2ICT analogy):** CurveBook applies WCAG 2.2 criteria to its desktop GUI by analogy following W3C WCAG2ICT guidance:
+- **Quiet `divider` vs. `input_border`:** subtle structural hairlines (`divider`—pane seams, header baselines, contiguous grid lines) are separated from higher-contrast `input_border` strokes reserved strictly for editable text fields, numeric inputs, and dropdown controls.
+- **Emphasized vs. unemphasized selection:** active selection inside the focused pane uses the emphasized accent tint (`active_bg`); selection retained in an unfocused pane steps down to a neutral cool-grey fill (`selection_unemphasized_bg`) so only one region visually claims focus at a time.
+- **Contrast verification (WCAG 2.2 by WCAG2ICT analogy):** CurveBook applies WCAG 2.2 criteria to its desktop GUI by analogy following W3C WCAG2ICT guidance:
   - *Text contrast (SC 1.4.3 Level AA / SC 1.4.6 Level AAA):* unit tests verify `>= 4.5:1` for foreground-on-surface text in `Light` and `Dark`, and `>= 7.0:1` (`>= 18:1` primary text) in `HighContrast` (`text_disabled` is exempt per SC 1.4.3).
-  - *Non-text contrast (SC 1.4.11 Level AA):* every visual cue needed to identify an interactive UI component and its states (rest, hover, pressed, selected, checked, focused, error) must achieve `>= 3.0:1` contrast against adjacent colours in `Light`, `Dark`, and `HighContrast`. A `1 pt` border alone does **not** establish conformance; `[Target]` `R20.2` verifies borderless state cues—segmented tracks, active tab underlines, checkbox ticks, switch thumbs, hover fills, and focus rings—explicitly per theme.
+  - *Non-text contrast (SC 1.4.11 Level AA):* every visual cue needed to identify an interactive UI component and its states (rest, hover, pressed, selected, checked, focused, error) achieves `>= 3.0:1` contrast against adjacent colours in `Light`, `Dark`, and `HighContrast`. A `1 pt` border alone does **not** establish conformance; borderless state cues—segmented tracks, active tab underlines, checkbox ticks, switch thumbs, hover fills, and focus rings—are verified explicitly per theme.
 
 ---
 
@@ -33,16 +33,16 @@ Interface colours are derived deterministically from perceptual seeds in `ThemeS
 
 In a scientific workstation, chromatic saturation belongs to experimental curves, data groups, and statistical diagnostics—not to surrounding chrome:
 
-1. **`[Implemented]` Neutral chrome:** toolbars, docks, inspectors, and dialogs remain predominantly neutral grey, keeping UI chrome visually separate from default **Okabe–Ito** categorical series and **Viridis** / **Cividis** / **Plasma** continuous colormaps in `crates/palette`.
-2. **`[Implemented]` Strict single-accent budget & zero-exception blue-means-link rule:** the interface accent colour is limited exclusively to:
+1. **Neutral chrome:** toolbars, docks, inspectors, and dialogs remain predominantly neutral grey, keeping UI chrome visually separate from default **Okabe–Ito** categorical series and **Viridis** / **Cividis** / **Plasma** continuous colormaps in `crates/palette`.
+2. **Strict single-accent budget & zero-exception blue-means-link rule:** the interface accent colour is limited exclusively to:
    - the single `Primary` action button fill on a surface (`on_accent` over `accent_strong`),
    - active selection cues (the active row in the focused pane, active underline-tab rule, active checkbox/segment indicator, and the `2 pt` top accent bar on the focused split-pane header),
    - the transient `2 pt` keyboard focus ring (`focus_ring`),
    - non-text `LinkedDataRegion` borders and status dots (`link_blue`, never rendered as foreground text), and
    - **clickable links exclusively** via `ui_kit::link_button` (`text_link` foreground, `CursorIcon::PointingHand`, hover underline, `>= 24 pt` target height).
    - Blue foreground text is **never** used for non-link labels (zero exceptions): static spreadsheet column headers (`X`, `Y1`) and corner archetype buttons (`XY`), `NUM` role badges (neutral `text_strong` on `surface_recessed`), section headings (`type.section`, bold `text_strong`), formula prefixes (`fx (…) =`), status/warning readouts, frozen/provenance badges (`Frozen`, `3 sources`), inline `+ New` rows, or permanent full-pane border cages around blank canvas or table space.
-3. **`[Implemented]` Never colour alone:** error, warning, stale, excluded-cell, and broken-link states always combine colour with a distinct icon, stroke pattern, typography style, or text label.
-4. **Decoupled figure styling:** exported chart palettes (`crates/palette`) and publication figure typography, inset placement, and axis autoranging (`crates/chart`, tracked independently in [`R20.5`](history/roadmap/r20.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging)) remain decoupled from UI chrome tokens.
+3. **Never colour alone:** error, warning, stale, excluded-cell, and broken-link states always combine colour with a distinct icon, stroke pattern, typography style, or text label.
+4. **Decoupled figure styling:** exported chart palettes (`crates/palette`) and publication figure typography, inset placement, and axis autoranging (`crates/chart`, [`R20.5`](history/roadmap/r20.md#r205-chart-fit-summary-readability-inset-layout--axis-autoranging)) remain decoupled from UI chrome tokens.
 
 ---
 
@@ -50,21 +50,21 @@ In a scientific workstation, chromatic saturation belongs to experimental curves
 
 All widget dimensions read from [`LayoutMetrics`](../crates/ui-egui/src/egui_shell/layout.rs) and [`Tokens`](../crates/ui-egui/src/egui_shell/tokens.rs) at `1.0x` logical points:
 
-- **`[Target]` `4`-point spacing rhythm (gradual migration):** `4, 8, 12, 16, 24 pt` (`space.xs`, `space.md`, `space.lg`, `space.xl`, `space.xxl`), plus a `2 pt` (`space.xxs`) micro-inset inside tight badges or icon-label pairs. Inter-group spacing is always at least twice intra-group spacing so spatial grouping replaces nested boxes. Retiring the legacy `6 pt` (`space.sm`) dock/form step onto `4 pt` or `8 pt` is a **provisional target** to validate empirically across narrow docks, inspector forms, and dialogs at default and increased text scales (`ui_scale > 1.0`).
-- **`[Target]` Four UI type sizes:** strictly four logical sizes across all interface chrome (retiring the legacy `12.5 pt` near-duplicate):
-  - `11.5 pt` regular (`type.small`): secondary captions, status readouts, badges, hints.
-  - `13 pt` regular (`type.body`) / `13 pt` bold (`type.section`): default control labels, menus, and bold section headings (`[Implemented]` bold system UI face with `14 pt` regular fallback when no bold face exists).
+- **`4`-point spacing rhythm:** `4, 8, 12, 16, 24 pt` (`space.xs`, `space.md`, `space.lg`, `space.xl`, `space.xxl`), plus a `2 pt` (`space.xxs`) micro-inset inside tight badges or icon-label pairs. Inter-group spacing is always at least twice intra-group spacing so spatial grouping replaces nested boxes.
+- **Four UI type sizes:** strictly four logical sizes across all interface chrome:
+  - `11.5 pt` regular (`type.small`): secondary captions, status readouts, badges, hints, and shortcut pills.
+  - `13 pt` regular (`type.body`) / `13 pt` bold (`type.section`): default control labels, menus, and bold section headings (bold system UI face with `14 pt` regular fallback when no bold face exists).
   - `13 pt` aligned numerals (`type.numeral`): right-aligned data-grid and result-table numbers.
   - `15 pt` regular (`type.title`): panel and dialog titles.
   - `18 pt` regular (`type.display`): welcome and empty-state headlines only.
-- **`[Target]` Runtime digit-width alignment check (`R20.2`):** because `egui 0.37` does not enable OpenType `tnum` features, `R20.2` measures the advance widths of ASCII `'0'..='9'` on the resolved primary proportional system sans face at runtime (module location chosen in `R20.2`). When digits share uniform advance width, grid and result numerals render in the `13 pt` primary sans face; otherwise, aligned numeric columns select a uniform-digit system sans or cap-height-matched system monospace fallback without bundling font binaries.
-- **`[Target]` Shared panel-header datum (`32 pt` provisional):** `Project Navigator`, Center Split pane headers, and `Trailing Studio` share one aligned top header height (**`32 pt` provisional target**, validated at default and increased `ui_scale`), uniform horizontal padding, and a single `1 pt` bottom `divider` rule across the full window body. Pane splitters paint as `1 pt` `divider` lines inside an `8 pt` pointer hit zone.
-- **`[Implemented]` Corner radii:** `2 pt` (`radius_sm`: badges, cell highlights), `4 pt` (`radius_md`: buttons, inputs, rows, segments), and `6 pt` (`radius_lg`: menus, popovers, dialogs).
-- **`[Implemented]` Stroke widths:** `1 pt` (`stroke_thin_pt`: structural dividers and input borders) and `2 pt` (`stroke_focus_pt`: keyboard focus ring and active tab/header indicator).
+- **Runtime digit-width alignment check:** because `egui 0.37` does not enable OpenType `tnum` features, CurveBook measures the advance widths of ASCII `'0'..='9'` on the resolved primary proportional system sans face at runtime. When digits share uniform advance width, grid and result numerals render in the `13 pt` primary sans face; otherwise, aligned numeric columns select a uniform-digit system sans or cap-height-matched system monospace fallback without bundling font binaries.
+- **Shared panel-header datum (`32 pt`):** `Project Navigator`, Center Split pane headers, and `Trailing Studio` share one aligned top header height, uniform horizontal padding, and a single `1 pt` bottom `divider` rule across the full window body. Pane splitters paint as `1 pt` `divider` lines inside an `8 pt` pointer hit zone.
+- **Corner radii:** `2 pt` (`radius_sm`: badges, cell highlights), `4 pt` (`radius_md`: buttons, inputs, rows, segments), and `6 pt` (`radius_lg`: menus, popovers, dialogs).
+- **Stroke widths:** `1 pt` (`stroke_thin_pt`: structural dividers and input borders) and `2 pt` (`stroke_focus_pt`: keyboard focus ring and active tab/header indicator).
 
 ---
 
-## 4. Standard Control Kit, Vector Iconography & Writing Rules (`[Target]`)
+## 4. Standard Control Kit, Vector Iconography & Writing Rules
 
 Every interactive role maps to one recognizable visual control type instead of sharing identical outlined rectangles:
 
@@ -83,48 +83,36 @@ Every interactive role maps to one recognizable visual control type instead of s
 
 - **Crisp vector disclosures & sheet icons:** paint disclosure triangles (`1.5 pt` stroke, pointing inward when collapsed and downward when expanded), sidebar collapse/expand glyphs, and frameless semantic sheet-kind icons directly from CurveBook's vector icon set ([`ASSETS.md`](../ASSETS.md)). Never use dot-like Unicode bullets for expand/collapse controls or checkbox-like framed checkmarks/slashes for sheet categories.
 - **Unambiguous state markers:** reserve the bullet glyph (`•`) exclusively for unsaved document dirty state (never for active toolbar toggles such as `Split`).
-- **Clear micro-copy & stable IDs:** write boolean checkboxes as affirmative noun phrases (`Data points`, `Fitted curve overlay`), never put `…` or `...` on buttons, menus, or text-input placeholders (reserve `…` strictly for runtime text truncation and active progress copy such as `"Listening…"` / `"Solving…"`, and `⋯` for overflow triggers per `R20.15`), prefer `".pzfx files"` and `".prism files"` naming where appropriate for imported project files (specifically allowed over clean-room and branding principles by `AGENTS.md` §1 and `cargo xtask brands`, replacing opaque labels such as `"External Archive"` or `"XML Project"`), and decouple concise visible labels (`Gallery`, `Annotations`) from longer Command Palette descriptions (`Toggle Portfolio Gallery`) without renaming stable `UI_COMMANDS` or `FrameInspectMeta` IDs.
+- **Clear micro-copy & stable IDs:** write boolean checkboxes as affirmative noun phrases (`Data points`, `Fitted curve overlay`), never put `…` or `...` on buttons, menus, or text-input placeholders (reserve `…` strictly for runtime text truncation and active progress copy such as `"Listening…"` / `"Solving…"`, and `⋯` for overflow triggers per `R20.15`), prefer `".pzfx files"` and `".prism files"` naming where appropriate for imported project files (specifically allowed over clean-room and branding principles by `AGENTS.md` §1 and `cargo xtask brands`), and decouple concise visible labels (`Gallery`, `Annotations`) from longer Command Palette descriptions (`Toggle Portfolio Gallery`) without renaming stable `UI_COMMANDS` or `FrameInspectMeta` IDs.
 
 ---
 
 ## 5. Action Hierarchy, Single-Owner Navigation & Three-Way Split Targeting
 
-Visual consistency must pair with clear structural ownership so the same sheets and controls do not compete for attention:
+Visual consistency pairs with clear structural ownership so sheets and controls do not compete for attention:
 
-1. **`[Implemented]` Data-driven action rank (`ActionRank`):** every UI command and toolbar/dialog slot carries an explicit rank—`Primary`, `Secondary`, or `Overflow`—with **at most one `Primary` action** per surface.
-2. **`[Implemented]` Priority-ordered toolbar overflow (`fit_ranked_toolbar`):** horizontal toolbars shed `Overflow` items into `"⋯"` first, then `Secondary` items, preserving left-to-right order and minimum hit dimensions (`min_toolbar_target_pt = 28 pt`, `min_hit_target_pt = 24 pt`) without arbitrarily clipping trailing buttons.
-3. **`[Implemented]` Contextual visibility & control budgets (`RegionBudgets`):** toolbars and inspector panels show only actions valid for the active sheet archetype within explicit visible-control budgets.
-4. **`[Target]` Single-owner sheet browsing:** `Project Navigator` is the sole primary sheet browser. Duplicate Tier 2 sheet tabs (`sheet.tab.*`) and Bottom Footer category jump pills are retired; `Family` remains dedicated to DAG lineage, split-pane headers control pane assignment, and the Footer provides a compact active-sheet switcher only when the Navigator is collapsed.
-5. **`[Target]` Three-way split-view targeting:** Split Comparison separates persisted contextual command targeting (`doc.active_sheet_id`, updated via non-mutating `sheet.select` while preserving the Family anchor), materialized ephemeral pane assignment (`primary_sheet_id`, `secondary_sheet_id`), and ephemeral keyboard focus plus Inspector targeting (`inspector_target_sheet_id`, `inspector_pinned`, auto-pinned to the graph on the `Data + Graph` preset). Every Inspector and split-grid UI call site passes its explicit `sheet_id` in engine command parameters, while project-wide `Undo` / `Redo` remain document-scoped. See [`gui-layout-spec.md` §2.4](planning/gui-layout-spec.md#24-keyboard-focus-cycling--rtl-mirroring) for the full state-transition contract.
+1. **Data-driven action rank (`ActionRank`):** every UI command and toolbar/dialog slot carries an explicit rank—`Primary`, `Secondary`, or `Overflow`—with **at most one `Primary` action** per surface.
+2. **Priority-ordered toolbar overflow (`fit_unified_toolbar` / `fit_ranked_toolbar`):** horizontal toolbars shed `Overflow` items into `"⋯"` first, then `Secondary` items, preserving left-to-right order and minimum hit dimensions (`min_toolbar_target_pt = 28 pt`, `min_hit_target_pt = 24 pt`) without arbitrarily clipping trailing buttons.
+3. **Contextual visibility & control budgets (`RegionBudgets`):** toolbars and inspector panels show only actions valid for the active sheet archetype within explicit visible-control budgets.
+4. **Single-owner sheet browsing:** `Project Navigator` is the sole primary sheet browser (`sheet.tab.*` tabs and Bottom Footer category jump pills are retired); `Family` remains dedicated to DAG lineage, split-pane headers control pane assignment, and the Footer provides a compact active-sheet switcher only when the Navigator is collapsed.
+5. **Three-way split-view targeting:** Split Comparison separates persisted contextual command targeting (`doc.active_sheet_id`, updated via non-mutating `sheet.select` while preserving the Family anchor), materialized ephemeral pane assignment (`primary_sheet_id`, `secondary_sheet_id`), and ephemeral keyboard focus plus Inspector targeting (`inspector_target_sheet_id`, `inspector_pinned`, auto-pinned to the graph on the `Data + Graph` preset). Every Inspector and split-grid UI call site passes its explicit `sheet_id` in engine command parameters, while project-wide `Undo` / `Redo` remain document-scoped. See [`gui-layout-spec.md` §2.4](planning/gui-layout-spec.md#24-keyboard-focus-cycling--rtl-mirroring) for the full state-transition contract.
 
 ---
 
 ## 6. Repository Enforcement Gates
 
-### Implemented Gates (`[Implemented]`)
-
-- **Raw-value & blue-link ratchet (`cargo xtask design-tokens`):** scans `crates/ui-egui/src` outside the canonical token definitions, icon/brand vectors, and tests (honouring explicit `// design-token-exempt: <reason>` annotations for scene/canvas geometry) and fails CI if raw colour or size literals exceed the tracked ceiling, unconstrained `Area` popups appear (`R20.16`), or blue foreground text (`.accent` / `.link_blue` / `.text_link`) appears outside `ui_kit::link_button` (`R20.14`, strict zero-exception blue-means-link policy).
-- **Specimen screenshots (`cargo xtask screenshots --check`):** renders the dev-only widget specimen view across `Light`, `Dark`, and `HighContrast` (`docs/images/specimen-{light,dark,high-contrast}.png`).
-- **Frame geometry, non-overlap & target-size gates (`verify_egui_frame_parity` in [`driver.rs`](../crates/ui-egui/src/egui_shell/driver.rs) and the integration suite [`zz_overlap_probe.rs`](../crates/ui-egui/tests/r15_shell_suite/zz_overlap_probe.rs)):** verifies on settled AccessKit + `FrameInspectMeta` trees across narrow (`640 × 420 pt`), standard (`1280 × 800 pt`), and wide (`1440 × 600 pt`) windows, `200%` scale, and long-word locales that:
+- **Raw-value, popup & blue-link ratchet (`cargo xtask design-tokens`):** scans `crates/ui-egui/src` outside the canonical token definitions, icon/brand vectors, and tests (honouring explicit `// design-token-exempt: <reason>` annotations for scene/canvas geometry) and fails CI if raw colour or size literals exceed the tracked ceiling, unconstrained `Area` popups appear (`R20.16`), or blue foreground text (`.accent` / `.link_blue` / `.text_link`) appears outside `ui_kit::link_button` (`R20.14`, strict zero-exception blue-means-link policy).
+- **Theme non-text contrast & specimen screenshots (`cargo xtask screenshots --check`):** verifies WCAG 2.2 SC 1.4.11 (Level AA, `>= 3:1`) borderless state cues across `Light`, `Dark`, and `HighContrast` and renders the dev-only widget specimen view (`docs/images/specimen-{light,dark,high-contrast}.png`).
+- **Frame geometry, non-overlap, targeting & target-size gates (`verify_egui_frame_parity` in [`driver.rs`](../crates/ui-egui/src/egui_shell/driver.rs) and [`zz_overlap_probe.rs`](../crates/ui-egui/tests/r15_shell_suite/zz_overlap_probe.rs)):** verifies on settled AccessKit + `FrameInspectMeta` trees across narrow (`640 × 420 pt`), standard (`1280 × 800 pt`), and wide (`1440 × 600 pt`) windows, `200%` scale, and long-word locales that:
   - no two enabled clickable leaf controls overlap on the same `ZLayer`,
   - neighbouring standalone controls keep `>= 2 pt` separation and scrollbars never intersect clickable children,
-  - every surface honours the single-primary-action rule and `RegionBudgets`, and
-  - standalone interactive controls satisfy CurveBook's `wcag_258_target_size` gate (`24 × 24 pt` at `1.0x` `ui_scale`, mapping `1.0 pt` to `1 CSS px` by WCAG2ICT analogy).
-- **WCAG 2.2 SC 2.5.8 (Level AA) conformance vs. test-gate exclusions:** CurveBook's automated `wcag_258_target_size` check excludes spreadsheet `gridcell`s, `Role::Splitter` sashes, and canvas corner/rotation grips from the standalone-button bounding-box assertion. Separately, WCAG 2.2 SC 2.5.8 defines five exact exceptions (**Spacing**, **Equivalent**, **Inline**, **User agent control**, **Essential**), where **Equivalent** requires another qualifying **pointer** target (`>= 24 × 24 CSS px`) on the same screen (keyboard alternatives alone do not qualify):
-  - *Standalone controls:* directly meet `>= 24 × 24 pt` or satisfy **Spacing** via an unobstructed `24 pt`-diameter offset circle.
-  - *`Role::Splitter` sashes (**pending verification**):* the intended basis is **Spacing**, which still has to be checked against the adjacent controls (grid cells, pane headers, canvas) on both sides of the `8 pt` hit zone. **Equivalent** applies only where a visible `>= 24 × 24 pt` pointer control sets the split ratio.
-  - *Canvas corner and rotation grips (**pending verification**):* the intended basis is **Equivalent**, via the numeric bounds and rotation inputs in the Inspector and Format dialogs. It remains to verify that those inputs are `>= 24 × 24 pt` and produce the same resize and rotation results.
-  - *Spreadsheet `gridcell`s:* default row height (`24 pt`) and column widths (`>= 48 pt`) directly meet `24 × 24 pt`; columns manually narrowed below `24 pt` by the user are documented as a known limitation rather than claiming **Essential**.
-
-### Planned Gates (`[Target]`, `R20.2`–`R20.4`)
-
-- **Theme non-text contrast suite (`R20.2`):** automated WCAG 2.2 SC 1.4.11 (Level AA, `>= 3:1`) assertions covering borderless state cues across `Light`, `Dark`, and `HighContrast`.
-- **Shared header, targeting & unified split-grid parity (`R20.3`):** automated `panel_header_baseline_parity`, `split_targeting_parity`, and `split_unified_datagrid_parity` assertions across default, narrow (`640 × 420 pt`), and increased-`ui_scale` frames.
-- **Five-stage `WorkflowRun` split-view acceptance proof (`R20.4`):** end-to-end human-path dose-response test from an empty `UiApp` through default `Data + Graph` auto-pinned split editing, live curve refit (`D1` oracle parity), and Inspector adjustment, followed by refreshed `cargo xtask screenshots`.
+  - every surface honours the single-primary-action rule, `RegionBudgets`, dot-free button copy (`R20.15`), popup geometry invariants (`R20.16`), and shared header / split-targeting / unified split-grid parity (`panel_header_baseline_parity`, `split_targeting_parity`, `split_unified_datagrid_parity`), and
+  - standalone interactive controls satisfy CurveBook's `wcag_258_target_size` gate (`24 × 24 pt` at `1.0x` `ui_scale`, mapping `1.0 pt` to `1 CSS px` by WCAG2ICT analogy), with **Spacing** verified for `Role::Splitter` sashes, **Equivalent** (`>= 24 × 24 pt` Inspector/Format numeric inputs) verified for canvas corner/rotation grips (`R20.4`), and default `24 pt × >= 48 pt` spreadsheet `gridcell`s meeting `24 × 24 pt` (user-narrowed `< 24 pt` columns documented as a known limitation).
+- **Five-stage `WorkflowRun` split-view acceptance proof (`R20.4`):** end-to-end human-path dose-response test from an empty `UiApp` through default `Data + Graph` auto-pinned split editing, live curve refit (`D1` oracle parity), and Inspector adjustment.
 
 ---
 
-## 7. Cross-Platform Conventions & 4-Layer Keyboard Shortcut Stack (`[Implemented]`)
+## 7. Cross-Platform Conventions & 4-Layer Keyboard Shortcut Stack
 
 Everything in `ui_kit` stays shared across macOS, Windows, and Linux; **only three muscle-memory boundaries adapt by target OS**:
 
