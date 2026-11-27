@@ -960,6 +960,7 @@ pub(in crate::anova) fn compare_independent_contrast_family(
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::Dunnett { .. } => {
             let mut out = Vec::with_capacity(m);
+            let mut crit_memo = CriticalValueMemo::new();
             for (idx, e) in entries.iter().enumerate() {
                 let adj_p = if e.se > 0.0 {
                     let t_abs = (e.diff / e.se).abs();
@@ -968,7 +969,7 @@ pub(in crate::anova) fn compare_independent_contrast_family(
                     raw_p[idx]
                 };
                 let ci = if report_ci {
-                    let crit = max_studentized_range_isf(ci_alpha, m, 2, e.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                    let crit = crit_memo.get(m, 2, e.df, |df| Ok(max_studentized_range_isf(ci_alpha, m, 2, df)?))? * std::f64::consts::FRAC_1_SQRT_2;
                     Some((e.diff - crit * e.se, e.diff + crit * e.se))
                 } else {
                     None
@@ -1035,6 +1036,33 @@ pub(in crate::anova) fn compare_independent_contrast_family(
     }
 }
 
+/// Memo for simultaneous Studentized-range critical values at one confidence level.
+///
+/// Inverting the Studentized-range family takes a root search over nested quadrature (hundreds of
+/// milliseconds per call), yet every pair of a family under a pooled error term, and every slice of
+/// a simple-effects family, asks for the same `(r, c, df)`. Keying on the family sizes and the exact
+/// bit pattern of `df` keeps every interval bit-identical to an uncached call. One memo must only
+/// serve a single confidence level.
+pub(in crate::anova) struct CriticalValueMemo {
+    cached: Vec<((usize, usize, u64), f64)>,
+}
+
+impl CriticalValueMemo {
+    pub(in crate::anova) const fn new() -> Self {
+        Self { cached: Vec::new() }
+    }
+
+    fn get(&mut self, r: usize, c: usize, df: f64, compute: impl FnOnce(f64) -> Result<f64, StatsError>) -> Result<f64, StatsError> {
+        let key = (r, c, df.to_bits());
+        if let Some(&(_, value)) = self.cached.iter().find(|(k, _)| *k == key) {
+            return Ok(value);
+        }
+        let value = compute(df)?;
+        self.cached.push((key, value));
+        Ok(value)
+    }
+}
+
 pub(in crate::anova) struct ContrastFamilyEval<'a> {
     pub(in crate::anova) levels: &'a [(usize, String)],
     pub(in crate::anova) level_means: &'a [Option<f64>],
@@ -1047,6 +1075,15 @@ pub(in crate::anova) struct ContrastFamilyEval<'a> {
 pub(in crate::anova) type ContrastFamilyOutcome = (Vec<PairwiseComparisonDetail>, Option<String>);
 
 pub(in crate::anova) fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<ContrastFamilyOutcome, StatsError> {
+    compare_contrast_family_with_memo(eval, &mut CriticalValueMemo::new())
+}
+
+/// [`compare_contrast_family`] sharing critical values with other families at the same confidence
+/// level (the slices of one simple-effects family).
+pub(in crate::anova) fn compare_contrast_family_with_memo(
+    eval: ContrastFamilyEval<'_>,
+    crit_memo: &mut CriticalValueMemo,
+) -> Result<ContrastFamilyOutcome, StatsError> {
     let k = eval.levels.len();
     let proc_req = MultiplicityProcedure::from(eval.mult_spec.method);
     let threshold = eval.mult_spec.threshold;
@@ -1068,7 +1105,7 @@ pub(in crate::anova) fn compare_contrast_family(eval: ContrastFamilyEval<'_>) ->
     let k_eff = used.iter().filter(|&&u| u).count().max(2);
 
     match proc_req {
-        MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, ci_alpha, report_ci, crit_memo),
         MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::GamesHowell => {
             let mut out = Vec::with_capacity(eval.pairs.len());
             for &(i, j, ref est) in &eval.pairs {
@@ -1082,7 +1119,7 @@ pub(in crate::anova) fn compare_contrast_family(eval: ContrastFamilyEval<'_>) ->
                     (st, rp, rp)
                 };
                 let ci = if report_ci {
-                    let qc = max_studentized_range_isf(ci_alpha, n_slices, k_eff, est.df)?;
+                    let qc = crit_memo.get(n_slices, k_eff, est.df, |df| Ok(max_studentized_range_isf(ci_alpha, n_slices, k_eff, df)?))?;
                     Some((est.diff - qc * se_q, est.diff + qc * se_q))
                 } else {
                     None
@@ -1223,6 +1260,7 @@ pub(in crate::anova) fn compare_contrast_dunnett(
     threshold: f64,
     ci_alpha: f64,
     report_ci: bool,
+    crit_memo: &mut CriticalValueMemo,
 ) -> Result<ContrastFamilyOutcome, StatsError> {
     let m = eval.pairs.len();
     let n_slices = eval.n_slices.max(1);
@@ -1240,7 +1278,8 @@ pub(in crate::anova) fn compare_contrast_dunnett(
                 (st, rp, rp)
             };
             let ci = if report_ci {
-                let crit = max_studentized_range_isf(ci_alpha, m_tot, 2, est.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                let crit =
+                    crit_memo.get(m_tot, 2, est.df, |df| Ok(max_studentized_range_isf(ci_alpha, m_tot, 2, df)?))? * std::f64::consts::FRAC_1_SQRT_2;
                 Some((est.diff - crit * est.se, est.diff + crit * est.se))
             } else {
                 None
@@ -1631,15 +1670,19 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
     } else {
         let level_means: Vec<Option<f64>> = vec![None; k_t];
         let mut all_details = Vec::new();
+        let mut crit_memo = CriticalValueMemo::new();
         for (slice_levels, pairs) in slice_groups {
-            let (details, note_opt) = compare_contrast_family(ContrastFamilyEval {
-                levels: &slice_levels,
-                level_means: &level_means,
-                mult_spec: cfg.mult_spec,
-                confidence: cfg.confidence,
-                n_slices,
-                pairs,
-            })?;
+            let (details, note_opt) = compare_contrast_family_with_memo(
+                ContrastFamilyEval {
+                    levels: &slice_levels,
+                    level_means: &level_means,
+                    mult_spec: cfg.mult_spec,
+                    confidence: cfg.confidence,
+                    n_slices,
+                    pairs,
+                },
+                &mut crit_memo,
+            )?;
             if dunnett_fallback_note.is_none() {
                 dunnett_fallback_note = note_opt;
             }
@@ -1748,6 +1791,7 @@ fn evaluate_cell_pair_family(
             (1, uniq.len().max(2))
         });
         let mut out_det = Vec::with_capacity(labels_owned.len());
+        let mut crit_memo = CriticalValueMemo::new();
         for (id_a, id_b, label_a, label_b, est) in labels_owned {
             let (q_stat, raw_p, adj_p) = if est.se > 0.0 {
                 let t_abs = (est.diff / est.se).abs();
@@ -1761,11 +1805,13 @@ fn evaluate_cell_pair_family(
                 (st, p, p)
             };
             let ci = if mult_spec.report_confidence_intervals {
-                let q_crit = if n_slices > 1 {
-                    max_studentized_range_isf(ci_alpha, n_slices, k_means, est.df)?
-                } else {
-                    studentized_range_isf(ci_alpha, k_means, est.df)?
-                };
+                let q_crit = crit_memo.get(n_slices, k_means, est.df, |df| {
+                    Ok(if n_slices > 1 {
+                        max_studentized_range_isf(ci_alpha, n_slices, k_means, df)?
+                    } else {
+                        studentized_range_isf(ci_alpha, k_means, df)?
+                    })
+                })?;
                 let half = (q_crit / std::f64::consts::SQRT_2) * est.se;
                 Some((est.diff - half, est.diff + half))
             } else {
@@ -2165,4 +2211,42 @@ fn run_factorial_multiplicity_standard(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::CriticalValueMemo;
+    use crate::StatsError;
+
+    #[test]
+    fn critical_value_is_computed_once_per_distinct_df_and_errors_are_not_cached() {
+        let mut memo = CriticalValueMemo::new();
+        let mut calls = 0usize;
+        let mut eval = |memo: &mut CriticalValueMemo, df: f64| {
+            memo.get(6, 3, df, |d| {
+                calls += 1;
+                Ok(d.sqrt())
+            })
+            .unwrap()
+        };
+        // A pooled-df family of many pairs evaluates the inverse once; values stay bit-identical.
+        let first = eval(&mut memo, 37.0);
+        for _ in 0..500 {
+            assert_eq!(eval(&mut memo, 37.0).to_bits(), first.to_bits());
+        }
+        // Welch-style families with distinct df evaluate each df once.
+        for df in [12.5, 19.25, 12.5, 19.25] {
+            assert_eq!(eval(&mut memo, df).to_bits(), df.sqrt().to_bits());
+        }
+        assert_eq!(calls, 3);
+
+        // A failed inversion propagates and is retried rather than cached.
+        let err = memo.get(6, 3, 4.0, |_| Err(StatsError::InvalidParameter { name: "df", value: 4.0 }));
+        assert!(err.is_err());
+        assert_eq!(memo.get(6, 3, 4.0, |d| Ok(d * 2.0)).unwrap(), 8.0);
+        // Different family sizes at the same df are separate entries.
+        assert_eq!(memo.get(7, 3, 37.0, |d| Ok(d + 1.0)).unwrap(), 38.0);
+    }
 }
