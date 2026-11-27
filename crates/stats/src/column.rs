@@ -1908,17 +1908,7 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
             batteries.push(normality_battery(&series.values, conf.alpha())?);
         }
         for (series, bat) in raw_series.iter().zip(&batteries) {
-            let ds_idx = Some(series.data_set_index);
-            push_scalar(&mut res, "ImpossibleNonPositiveCount", ds_idx, bat.n_impossible_nonpositive as f64);
-            if let Some(log_lr) = bat.normal_vs_lognormal_log_lr {
-                push_scalar(&mut res, "NormalVsLognormalLogLR", ds_idx, log_lr);
-            }
-            if let Some(p_n) = bat.prob_normal {
-                push_scalar(&mut res, "PNormal", ds_idx, p_n);
-            }
-            if let Some(p_l) = bat.prob_lognormal {
-                push_scalar(&mut res, "PLognormal", ds_idx, p_l);
-            }
+            push_normality_battery_scalars(&mut res, Some(series.data_set_index), bat);
         }
         res.tabs.push(build_normality_tab(&summaries, &batteries, p_fmt, conf.alpha()));
         append_normality_checklist(&mut res.checklist, &summaries, &batteries, conf.alpha());
@@ -2568,6 +2558,94 @@ fn finite_ratio_cell(val: Option<f64>) -> ResultCell {
         Some(v) if v.is_finite() => num_cell(v),
         Some(v) if v.is_infinite() && v.is_sign_positive() => text_cell("> 1e308"),
         _ => ResultCell::Empty,
+    }
+}
+
+/// Stephens (1974) / D'Agostino & Stephens (1986) Case 3 finite-sample factor
+/// `1 + 0.75/n + 2.25/n^2` relating unadjusted Anderson–Darling `A^2` (Anderson & Darling 1954)
+/// to small-sample-modified `A^{2*} = A^2 * (1 + 0.75/n + 2.25/n^2)`.
+fn stephens_ad_case3_factor(n: usize) -> f64 {
+    let nf = n as f64;
+    1.0 + 0.75 / nf + 2.25 / (nf * nf)
+}
+
+fn push_normality_outcome_scalars(res: &mut ResultSheet, ds_idx: Option<usize>, keys: (&str, &str), outcome: Option<&NormalityTestOutcome>) {
+    if let Some(o) = outcome {
+        push_scalar(res, keys.0, ds_idx, o.statistic);
+        push_scalar(res, keys.1, ds_idx, o.p_value);
+    }
+}
+
+fn push_anderson_darling_scalars(
+    res: &mut ResultSheet,
+    ds_idx: Option<usize>,
+    keys: (&str, &str, &str),
+    n: usize,
+    outcome: Option<&NormalityTestOutcome>,
+) {
+    if let Some(o) = outcome {
+        if n > 0 {
+            push_scalar(res, keys.0, ds_idx, o.statistic / stephens_ad_case3_factor(n));
+        }
+        push_scalar(res, keys.1, ds_idx, o.statistic);
+        push_scalar(res, keys.2, ds_idx, o.p_value);
+    }
+}
+
+/// Publish per-data-set normality and lognormality test statistics and *p*-values as
+/// [`ResultScalarEntry`](curvebook_doc::ResultScalarEntry) values.
+///
+/// Emits:
+/// - Gaussian normality tests: `DAgostinoPearsonK2`, `DAgostinoPearsonP`, `ShapiroWilkW`,
+///   `ShapiroWilkP`, `AndersonDarlingA2` (Anderson & Darling 1954 unadjusted $A^2$),
+///   `AndersonDarlingA2Star` (Stephens 1974 / D'Agostino & Stephens 1986 modified $A^{2*}$),
+///   `AndersonDarlingP`, `KolmogorovSmirnovD`, `KolmogorovSmirnovP`.
+/// - Lognormal tests (strictly positive data): `LognormalDAgostinoPearsonK2`,
+///   `LognormalDAgostinoPearsonP`, `LognormalShapiroWilkW`, `LognormalShapiroWilkP`,
+///   `LognormalAndersonDarlingA2`, `LognormalAndersonDarlingA2Star`, `LognormalAndersonDarlingP`,
+///   `LognormalKolmogorovSmirnovD`, `LognormalKolmogorovSmirnovP`.
+/// - Relative likelihood comparison: `ImpossibleNonPositiveCount`, `NormalVsLognormalLogLR`,
+///   `PNormal`, `PLognormal`.
+fn push_normality_battery_scalars(res: &mut ResultSheet, ds_idx: Option<usize>, bat: &NormalityBatteryResult) {
+    push_scalar(res, "ImpossibleNonPositiveCount", ds_idx, bat.n_impossible_nonpositive as f64);
+    push_normality_outcome_scalars(res, ds_idx, ("DAgostinoPearsonK2", "DAgostinoPearsonP"), bat.dagostino_pearson.as_ref());
+    push_normality_outcome_scalars(res, ds_idx, ("ShapiroWilkW", "ShapiroWilkP"), bat.shapiro_wilk.as_ref());
+    push_anderson_darling_scalars(
+        res,
+        ds_idx,
+        ("AndersonDarlingA2", "AndersonDarlingA2Star", "AndersonDarlingP"),
+        bat.n,
+        bat.anderson_darling.as_ref(),
+    );
+    push_normality_outcome_scalars(res, ds_idx, ("KolmogorovSmirnovD", "KolmogorovSmirnovP"), bat.kolmogorov_smirnov.as_ref());
+    push_normality_outcome_scalars(
+        res,
+        ds_idx,
+        ("LognormalDAgostinoPearsonK2", "LognormalDAgostinoPearsonP"),
+        bat.lognormal_dagostino_pearson.as_ref(),
+    );
+    push_normality_outcome_scalars(res, ds_idx, ("LognormalShapiroWilkW", "LognormalShapiroWilkP"), bat.lognormal_shapiro_wilk.as_ref());
+    push_anderson_darling_scalars(
+        res,
+        ds_idx,
+        ("LognormalAndersonDarlingA2", "LognormalAndersonDarlingA2Star", "LognormalAndersonDarlingP"),
+        bat.n,
+        bat.lognormal_anderson_darling.as_ref(),
+    );
+    push_normality_outcome_scalars(
+        res,
+        ds_idx,
+        ("LognormalKolmogorovSmirnovD", "LognormalKolmogorovSmirnovP"),
+        bat.lognormal_kolmogorov_smirnov.as_ref(),
+    );
+    if let Some(log_lr) = bat.normal_vs_lognormal_log_lr {
+        push_scalar(res, "NormalVsLognormalLogLR", ds_idx, log_lr);
+    }
+    if let Some(p_n) = bat.prob_normal {
+        push_scalar(res, "PNormal", ds_idx, p_n);
+    }
+    if let Some(p_l) = bat.prob_lognormal {
+        push_scalar(res, "PLognormal", ds_idx, p_l);
     }
 }
 

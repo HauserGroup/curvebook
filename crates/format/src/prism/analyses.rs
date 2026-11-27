@@ -681,6 +681,7 @@ const TT: &str = "T_TESTS_AND_NONPARAMETRIC";
 const OW: &str = "ONE_WAY_ANOVA";
 const TW: &str = "TWO_WAY_ANOVA";
 const DS: &str = "DESCRIPTIVE_STATISTICS";
+const NT: &str = "NORMALITY_TESTS";
 const SV: &str = "SURVIVAL";
 const NL: &str = "NONLINEAR_REGRESSION";
 
@@ -730,6 +731,30 @@ pub const CACHED_SCALAR_LINKS: &[CachedScalarLink] = &[
     link(DS, "samples.*.value.sd", "SD"),
     link(DS, "samples.*.value.meanSE", "SEM"),
     link(DS, "samples.*.value.median", "Median"),
+    // Per-data-set normality and lognormality battery (Royston 1995; D'Agostino & Pearson 1973;
+    // Anderson & Darling 1954 / Stephens 1986; Lilliefors 1967). Cached `.prism` files store
+    // unadjusted Anderson-Darling A^2 (`andersonDarlingTest.A2`) alongside the Stephens Case 3
+    // p-value; CurveBook publishes both `AndersonDarlingA2` (unadjusted) and `AndersonDarlingA2Star`
+    // (Stephens-modified). Lilliefors KS p-values (`kolmogorovSmirnovTest.pValue.value`) are left
+    // out because cached files use the Dallal & Wilkinson (1986) analytic approximation and censor
+    // every p > 0.10 to `0.1` (`state: "P_VALUE_GREATER"`), whereas CurveBook computes continuous
+    // Lilliefors upper-tail probabilities in `[0, 1]` via deterministic Monte Carlo PCHIP tables.
+    link(NT, "samples.*.value.normalityModel.shapiroWilkTest.W", "ShapiroWilkW"),
+    link(NT, "samples.*.value.normalityModel.shapiroWilkTest.pValue.value", "ShapiroWilkP"),
+    link(NT, "samples.*.value.normalityModel.dAgostinoPearsonTest.K2", "DAgostinoPearsonK2"),
+    link(NT, "samples.*.value.normalityModel.dAgostinoPearsonTest.pValue.value", "DAgostinoPearsonP"),
+    link(NT, "samples.*.value.normalityModel.andersonDarlingTest.A2", "AndersonDarlingA2"),
+    link(NT, "samples.*.value.normalityModel.andersonDarlingTest.pValue.value", "AndersonDarlingP"),
+    link(NT, "samples.*.value.normalityModel.kolmogorovSmirnovTest.distance", "KolmogorovSmirnovD"),
+    link(NT, "samples.*.value.lognormalityModel.shapiroWilkTest.W", "LognormalShapiroWilkW"),
+    link(NT, "samples.*.value.lognormalityModel.shapiroWilkTest.pValue.value", "LognormalShapiroWilkP"),
+    link(NT, "samples.*.value.lognormalityModel.dAgostinoPearsonTest.K2", "LognormalDAgostinoPearsonK2"),
+    link(NT, "samples.*.value.lognormalityModel.dAgostinoPearsonTest.pValue.value", "LognormalDAgostinoPearsonP"),
+    link(NT, "samples.*.value.lognormalityModel.andersonDarlingTest.A2", "LognormalAndersonDarlingA2"),
+    link(NT, "samples.*.value.lognormalityModel.andersonDarlingTest.pValue.value", "LognormalAndersonDarlingP"),
+    link(NT, "samples.*.value.lognormalityModel.kolmogorovSmirnovTest.distance", "LognormalKolmogorovSmirnovD"),
+    link(NT, "samples.*.value.relativeLikelihoodTest.probabilityNormal", "PNormal"),
+    link(NT, "samples.*.value.relativeLikelihoodTest.probabilityLognormal", "PLognormal"),
     // Survival curve comparison (Mantel 1966 log-rank; Gehan 1965 / Breslow 1970).
     link(SV, "curveComparison.logrankMantelCoxTest.chiSquared", "Log-rank chi-square"),
     link(SV, "curveComparison.logrankMantelCoxTest.pValue.value", "Log-rank P value"),

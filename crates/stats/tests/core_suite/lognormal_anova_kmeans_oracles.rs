@@ -61,7 +61,7 @@ use curvebook_testkit::assert_approx_eq;
 
 use crate::common::{
     assert_all_sheet_numbers_finite, assert_diagnostics_only, cell_ci_finite, cell_num, cell_p, cell_text, col_sheet, col_sheet_opts, grouped_sheet,
-    grouped_sheet_entries, mv_cells_sheet, mv_num_sheet, row_cell, run_kind, run_kind_sel, scalar, spec_for, tab_by_id,
+    grouped_sheet_entries, mv_cells_sheet, mv_num_sheet, row_cell, run_kind, run_kind_sel, scalar, scalar_ds, scalar_opt, spec_for, tab_by_id,
 };
 
 // ============================================================================
@@ -361,6 +361,152 @@ fn oracle_normality_lognormal_battery_relative_likelihood_and_dual_qq() {
     for (r, &expected_q) in exp_ln.iter().enumerate() {
         assert_approx_eq(cell_num(&qq_ln.rows[r][2]), expected_q, 1e-9, 1e-9, "Lognormal Q-Q expected");
     }
+}
+
+#[test]
+fn issue_75_normality_battery_emits_per_dataset_result_scalars() {
+    // D1 Provenance: Royston (1995 AS R94), D'Agostino & Pearson (1973) / D'Agostino, Belanger &
+    // D'Agostino (1990), Anderson & Darling (1954) / Stephens (1986), Lilliefors (1967).
+    let pos_12 = [1.1, 1.3, 1.5, 1.7, 2.0, 2.4, 2.9, 3.6, 4.5, 5.8, 8.2, 14.5];
+    let mixed_10 = [-2.1, -0.8, 0.0, 0.4, 1.1, 1.7, 2.2, 3.0, 3.5, 4.2];
+    let small_4 = [1.0, 2.0, 3.0, 10.0];
+    let mid_6 = [1.0, 2.0, 3.0, 4.0, 5.0, 15.0];
+    let constant_8 = [5.0; 8];
+
+    let sheet =
+        col_sheet("issue-75-norm", &[("Pos12", &pos_12), ("Mixed10", &mixed_10), ("Small4", &small_4), ("Mid6", &mid_6), ("Const8", &constant_8)]);
+    let desc = DescriptiveSpec { run_normality_battery: true, ..DescriptiveSpec::default() };
+    let res = run_kind(&sheet, AnalysisKind::DescriptiveStats(desc)).unwrap();
+    assert_all_sheet_numbers_finite(&res, "issue_75 full battery");
+
+    let norm_tab = tab_by_id(&res, "normality");
+    let bat0 = normality_battery(&pos_12, 0.05).unwrap();
+    let ad_factor_12 = 1.0 + 0.75 / 12.0 + 2.25 / 144.0;
+
+    // Col 0 (n = 12, strictly positive): all normal, lognormal, and relative-likelihood scalars match
+    // `normality_battery` and the Diagnostics tab cells.
+    let expected_col0 = [
+        ("DAgostinoPearsonK2", bat0.dagostino_pearson.as_ref().unwrap().statistic),
+        ("DAgostinoPearsonP", bat0.dagostino_pearson.as_ref().unwrap().p_value),
+        ("ShapiroWilkW", bat0.shapiro_wilk.as_ref().unwrap().statistic),
+        ("ShapiroWilkP", bat0.shapiro_wilk.as_ref().unwrap().p_value),
+        ("AndersonDarlingA2", bat0.anderson_darling.as_ref().unwrap().statistic / ad_factor_12),
+        ("AndersonDarlingA2Star", bat0.anderson_darling.as_ref().unwrap().statistic),
+        ("AndersonDarlingP", bat0.anderson_darling.as_ref().unwrap().p_value),
+        ("KolmogorovSmirnovD", bat0.kolmogorov_smirnov.as_ref().unwrap().statistic),
+        ("KolmogorovSmirnovP", bat0.kolmogorov_smirnov.as_ref().unwrap().p_value),
+        ("LognormalDAgostinoPearsonK2", bat0.lognormal_dagostino_pearson.as_ref().unwrap().statistic),
+        ("LognormalDAgostinoPearsonP", bat0.lognormal_dagostino_pearson.as_ref().unwrap().p_value),
+        ("LognormalShapiroWilkW", bat0.lognormal_shapiro_wilk.as_ref().unwrap().statistic),
+        ("LognormalShapiroWilkP", bat0.lognormal_shapiro_wilk.as_ref().unwrap().p_value),
+        ("LognormalAndersonDarlingA2", bat0.lognormal_anderson_darling.as_ref().unwrap().statistic / ad_factor_12),
+        ("LognormalAndersonDarlingA2Star", bat0.lognormal_anderson_darling.as_ref().unwrap().statistic),
+        ("LognormalAndersonDarlingP", bat0.lognormal_anderson_darling.as_ref().unwrap().p_value),
+        ("LognormalKolmogorovSmirnovD", bat0.lognormal_kolmogorov_smirnov.as_ref().unwrap().statistic),
+        ("LognormalKolmogorovSmirnovP", bat0.lognormal_kolmogorov_smirnov.as_ref().unwrap().p_value),
+        ("ImpossibleNonPositiveCount", 0.0),
+        ("NormalVsLognormalLogLR", bat0.normal_vs_lognormal_log_lr.unwrap()),
+        ("PNormal", bat0.prob_normal.unwrap()),
+        ("PLognormal", bat0.prob_lognormal.unwrap()),
+    ];
+    for (key, expected) in expected_col0 {
+        let got = scalar_ds(&res, key, Some(0));
+        assert_approx_eq(got, expected, 1e-12, 1e-12, &format!("col0 {key}"));
+    }
+    assert_approx_eq(scalar_ds(&res, "ShapiroWilkW", Some(0)), cell_num(row_cell(norm_tab, "Shapiro-Wilk W", 0)), 1e-12, 1e-12, "SW tab parity");
+    assert_approx_eq(scalar_ds(&res, "ShapiroWilkP", Some(0)), cell_p(row_cell(norm_tab, "Shapiro-Wilk P", 0)), 1e-12, 1e-12, "SW P tab parity");
+    assert_approx_eq(
+        scalar_ds(&res, "AndersonDarlingA2Star", Some(0)),
+        cell_num(row_cell(norm_tab, "Anderson-Darling A2*", 0)),
+        1e-12,
+        1e-12,
+        "AD A2* tab parity",
+    );
+    assert_approx_eq(
+        scalar_ds(&res, "AndersonDarlingA2", Some(0)) * ad_factor_12,
+        scalar_ds(&res, "AndersonDarlingA2Star", Some(0)),
+        1e-12,
+        1e-12,
+        "Stephens A2* = A2 * (1 + 0.75/n + 2.25/n^2)",
+    );
+
+    // Col 1 (n = 10, contains non-positive values): normal scalars emitted, lognormal & RL omitted.
+    assert_approx_eq(scalar_ds(&res, "ImpossibleNonPositiveCount", Some(1)), 3.0, 1e-12, 0.0, "col1 nonpositive");
+    for key in [
+        "DAgostinoPearsonK2",
+        "DAgostinoPearsonP",
+        "ShapiroWilkW",
+        "ShapiroWilkP",
+        "AndersonDarlingA2",
+        "AndersonDarlingA2Star",
+        "AndersonDarlingP",
+        "KolmogorovSmirnovD",
+        "KolmogorovSmirnovP",
+    ] {
+        assert!(scalar_opt(&res, key, Some(1)).is_some(), "col1 missing `{key}`");
+    }
+    for key in [
+        "LognormalShapiroWilkW",
+        "LognormalDAgostinoPearsonK2",
+        "LognormalAndersonDarlingA2",
+        "LognormalAndersonDarlingA2Star",
+        "LognormalKolmogorovSmirnovD",
+        "PNormal",
+        "PLognormal",
+    ] {
+        assert!(scalar_opt(&res, key, Some(1)).is_none(), "col1 unexpectedly emitted `{key}`");
+    }
+
+    // Col 2 (n = 4, positive): only Shapiro-Wilk meets its minimum sample size (n >= 3).
+    assert!(scalar_opt(&res, "ShapiroWilkW", Some(2)).is_some());
+    assert!(scalar_opt(&res, "ShapiroWilkP", Some(2)).is_some());
+    assert!(scalar_opt(&res, "LognormalShapiroWilkW", Some(2)).is_some());
+    for key in ["DAgostinoPearsonK2", "AndersonDarlingA2", "AndersonDarlingA2Star", "KolmogorovSmirnovD"] {
+        assert!(scalar_opt(&res, key, Some(2)).is_none(), "col2 (n=4) unexpectedly emitted `{key}`");
+    }
+
+    // Col 3 (n = 6, positive): Shapiro-Wilk (n >= 3) and KS/Lilliefors (n >= 5) emitted; DP & AD (n >= 8) omitted.
+    assert!(scalar_opt(&res, "ShapiroWilkW", Some(3)).is_some());
+    assert!(scalar_opt(&res, "KolmogorovSmirnovD", Some(3)).is_some());
+    assert!(scalar_opt(&res, "KolmogorovSmirnovP", Some(3)).is_some());
+    assert!(scalar_opt(&res, "DAgostinoPearsonK2", Some(3)).is_none());
+    assert!(scalar_opt(&res, "AndersonDarlingA2", Some(3)).is_none());
+
+    // Col 4 (n = 8, zero variance): all four normality tests omitted cleanly.
+    for key in ["ShapiroWilkW", "DAgostinoPearsonK2", "AndersonDarlingA2", "KolmogorovSmirnovD", "PNormal"] {
+        assert!(scalar_opt(&res, key, Some(4)).is_none(), "zero-variance col4 unexpectedly emitted `{key}`");
+    }
+
+    // `normality_only` emits `N` and normality scalars without descriptive moments.
+    let res_norm_only = run_kind(
+        &sheet,
+        AnalysisKind::DescriptiveStats(DescriptiveSpec { run_normality_battery: true, normality_only: true, ..DescriptiveSpec::default() }),
+    )
+    .unwrap();
+    assert!(scalar_opt(&res_norm_only, "Mean", Some(0)).is_none());
+    assert_approx_eq(
+        scalar_ds(&res_norm_only, "ShapiroWilkW", Some(0)),
+        bat0.shapiro_wilk.as_ref().unwrap().statistic,
+        1e-12,
+        1e-12,
+        "normality_only SW W",
+    );
+
+    // Disabling the normality battery emits no normality scalars.
+    let res_no_norm = run_kind(
+        &sheet,
+        AnalysisKind::DescriptiveStats(DescriptiveSpec { run_normality_battery: false, normality_only: false, ..DescriptiveSpec::default() }),
+    )
+    .unwrap();
+    assert!(scalar_opt(&res_no_norm, "ShapiroWilkW", Some(0)).is_none());
+    assert!(scalar_opt(&res_no_norm, "AndersonDarlingA2", Some(0)).is_none());
+
+    // Selected data-set subset preserves original sheet `data_set_index` values.
+    let res_sel = run_kind_sel(&sheet, AnalysisKind::DescriptiveStats(DescriptiveSpec::default()), vec![1, 3]).unwrap();
+    assert!(scalar_opt(&res_sel, "ShapiroWilkW", Some(0)).is_none());
+    assert!(scalar_opt(&res_sel, "ShapiroWilkW", Some(1)).is_some());
+    assert!(scalar_opt(&res_sel, "ShapiroWilkW", Some(3)).is_some());
+    assert!(scalar_opt(&res_sel, "KolmogorovSmirnovD", Some(3)).is_some());
 }
 
 // ============================================================================

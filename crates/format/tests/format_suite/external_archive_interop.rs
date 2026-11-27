@@ -1323,6 +1323,108 @@ fn external_archive_pairwise_crosswalk_fdr_q_and_individual_p() {
 }
 
 #[test]
+fn issue_75_normality_tests_crosswalk_links_and_comparison() {
+    let nt_links: Vec<_> = CACHED_SCALAR_LINKS.iter().filter(|l| l.foreign_class == "NORMALITY_TESTS").collect();
+    assert_eq!(nt_links.len(), 16, "expected 16 NORMALITY_TESTS crosswalk links");
+    // Lilliefors KS p-values are deliberately omitted from the crosswalk because cached `.prism`
+    // files use Dallal & Wilkinson (1986) censoring (`> 0.10` stored as `0.1`).
+    assert!(nt_links.iter().all(|l| !l.cached_path.ends_with("kolmogorovSmirnovTest.pValue.value")));
+
+    let results = json!({"content": {
+        "samples": {
+            "sample-a": {
+                "id": {"col": {"idx": 0}},
+                "value": {
+                    "normalityModel": {
+                        "shapiroWilkTest": {"W": 0.9123, "pValue": {"value": 0.2284, "state": "P_VALUE_EQUAL"}},
+                        "dAgostinoPearsonTest": {"K2": 2.451, "pValue": {"value": 0.2936, "state": "P_VALUE_EQUAL"}},
+                        "andersonDarlingTest": {"A2": 0.412, "pValue": {"value": 0.2781, "state": "P_VALUE_EQUAL"}},
+                        "kolmogorovSmirnovTest": {"distance": 0.175, "pValue": {"value": 0.1, "state": "P_VALUE_GREATER"}}
+                    },
+                    "lognormalityModel": {
+                        "shapiroWilkTest": {"W": 0.9742, "pValue": {"value": 0.9481, "state": "P_VALUE_EQUAL"}},
+                        "dAgostinoPearsonTest": {"K2": 0.312, "pValue": {"value": 0.8556, "state": "P_VALUE_EQUAL"}},
+                        "andersonDarlingTest": {"A2": 0.181, "pValue": {"value": 0.8924, "state": "P_VALUE_EQUAL"}},
+                        "kolmogorovSmirnovTest": {"distance": 0.098, "pValue": {"value": 0.1, "state": "P_VALUE_GREATER"}}
+                    },
+                    "relativeLikelihoodTest": {
+                        "probabilityNormal": 0.12,
+                        "probabilityLognormal": 0.88
+                    }
+                }
+            },
+            "sample-b": {
+                "id": {"col": {"idx": 2}},
+                "value": {
+                    "normalityModel": {
+                        "shapiroWilkTest": {"W": 0.8069, "pValue": {"value": 0.1152, "state": "P_VALUE_EQUAL"}}
+                    }
+                }
+            }
+        }
+    }});
+
+    let sw_link = CACHED_SCALAR_LINKS.iter().find(|l| l.foreign_class == "NORMALITY_TESTS" && l.curvebook_key == "ShapiroWilkW").unwrap();
+    let mut cached_w = cached_values_for_link(sw_link, &results);
+    cached_w.sort_by_key(|v| v.0);
+    assert_eq!(cached_w, vec![(Some(0), 0.9123), (Some(2), 0.8069)]);
+
+    let scalar = |key: &str, ds: usize, value: f64| ResultScalarEntry { key: key.to_owned(), data_set_index: Some(ds), value, units: None };
+    let build_sheet = |scalars: Vec<ResultScalarEntry>| {
+        let spec = AnalysisSpec::new("res-nt", "src", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+        let mut rs = ResultSheet::new(spec).unwrap();
+        rs.scalars = scalars;
+        rs
+    };
+
+    // Matching all 16 linked keys on col 0 plus Shapiro-Wilk on col 2 agrees cleanly, even while
+    // `KolmogorovSmirnovP` reports CurveBook's continuous Lilliefors probability (0.58 vs cached bound 0.1).
+    let agreeing = build_sheet(vec![
+        scalar("ShapiroWilkW", 0, 0.9123),
+        scalar("ShapiroWilkP", 0, 0.2284),
+        scalar("DAgostinoPearsonK2", 0, 2.451),
+        scalar("DAgostinoPearsonP", 0, 0.2936),
+        scalar("AndersonDarlingA2", 0, 0.412),
+        scalar("AndersonDarlingA2Star", 0, 0.449),
+        scalar("AndersonDarlingP", 0, 0.2781),
+        scalar("KolmogorovSmirnovD", 0, 0.175),
+        scalar("KolmogorovSmirnovP", 0, 0.58),
+        scalar("LognormalShapiroWilkW", 0, 0.9742),
+        scalar("LognormalShapiroWilkP", 0, 0.9481),
+        scalar("LognormalDAgostinoPearsonK2", 0, 0.312),
+        scalar("LognormalDAgostinoPearsonP", 0, 0.8556),
+        scalar("LognormalAndersonDarlingA2", 0, 0.181),
+        scalar("LognormalAndersonDarlingA2Star", 0, 0.197),
+        scalar("LognormalAndersonDarlingP", 0, 0.8924),
+        scalar("LognormalKolmogorovSmirnovD", 0, 0.098),
+        scalar("LognormalKolmogorovSmirnovP", 0, 0.91),
+        scalar("PNormal", 0, 0.12),
+        scalar("PLognormal", 0, 0.88),
+        scalar("ShapiroWilkW", 2, 0.8069),
+        scalar("ShapiroWilkP", 2, 0.1152),
+    ]);
+    let row = find_analysis_mapping("NORMALITY_TESTS").unwrap();
+    let diag = compare_recomputed_against_cached_results(&agreeing, "NORMALITY_TESTS", &results, row.absolute_tolerance, row.relative_tolerance);
+    assert_eq!(diag.compared_count, 18);
+    assert!(diag.disagreements.is_empty(), "{:?}", diag.disagreements);
+    assert_eq!(diag.compared_by_key.len(), 16);
+    assert!(!diag.compared_by_key.contains_key("KolmogorovSmirnovP"));
+    assert!(!diag.compared_by_key.contains_key("LognormalKolmogorovSmirnovP"));
+
+    // A stale cached Shapiro-Wilk W on col 2 surfaces as a typed disagreement with checklist warning.
+    let stale = build_sheet(vec![scalar("ShapiroWilkW", 2, 0.8500), scalar("ShapiroWilkP", 2, 0.2200)]);
+    let diag_stale = compare_recomputed_against_cached_results(&stale, "NORMALITY_TESTS", &results, row.absolute_tolerance, row.relative_tolerance);
+    assert_eq!((diag_stale.compared_count, diag_stale.disagreements.len()), (2, 2));
+    assert!(build_disagreement_checklist_item("NORMALITY_TESTS", &diag_stale).is_some());
+
+    // A scalar on an uncached data-set index is skipped rather than borrowing col 0 or col 2.
+    let uncached_col = build_sheet(vec![scalar("ShapiroWilkW", 1, 0.5000)]);
+    let diag_skip =
+        compare_recomputed_against_cached_results(&uncached_col, "NORMALITY_TESTS", &results, row.absolute_tolerance, row.relative_tolerance);
+    assert_eq!((diag_skip.compared_count, diag_skip.disagreements.len()), (0, 0));
+}
+
+#[test]
 fn external_archive_analyses_3hop_preferred_result_snapshot() {
     // Unpromoted design (`MANN_WHITNEY`) stays an imported read-only 3-hop snapshot.
     let zip = build_zip_owned(vec![
