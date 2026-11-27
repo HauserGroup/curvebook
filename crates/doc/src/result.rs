@@ -7,9 +7,9 @@ use std::fmt;
 
 use curvebook_palette::Rgba8;
 
-use crate::analysis::AnalysisSpec;
-use crate::error::DocError;
-use crate::ids::{FloatingNote, SheetId};
+use crate::analysis::{AnalysisKind, AnalysisSpec};
+use crate::error::{DocError, validate_title};
+use crate::ids::{FloatingNote, SheetId, SheetOrigin};
 use crate::links::DataSheet;
 
 /// High-level grouping for structured [`ErrorCode`] diagnostics across L1/L2 crates.
@@ -212,6 +212,45 @@ impl<'de> serde::Deserialize<'de> for ErrorCode {
     }
 }
 
+/// Provenance distinguishing natively computed results from read-only snapshots imported from
+/// external file formats.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum ResultProvenance {
+    /// Result is computed (or pending computation) by CurveBook's own analysis engines.
+    #[default]
+    Computed,
+    /// Result is a preserved read-only snapshot imported from an external file and not computed by CurveBook.
+    Imported {
+        /// Lowercase source format identifier (for example `"pzfx"` or `"external_archive"`).
+        source_format: String,
+        /// Human-readable original analysis kind label from the source file.
+        original_kind_label: String,
+        /// Plain-language explanation of why this result was imported as a snapshot rather than natively recomputed.
+        reason: String,
+    },
+}
+
+impl ResultProvenance {
+    /// Return `true` when this result originated as an external imported snapshot rather than a CurveBook computation.
+    #[must_use]
+    pub const fn is_imported(&self) -> bool {
+        matches!(self, Self::Imported { .. })
+    }
+
+    /// Validate string bounds and non-empty format tag on imported provenance metadata.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if let Self::Imported { source_format, original_kind_label, reason } = self {
+            if source_format.trim().is_empty() {
+                return Err(DocError::EmptyIdentifier);
+            }
+            validate_title(source_format)?;
+            validate_title(original_kind_label)?;
+            validate_title(reason)?;
+        }
+        Ok(())
+    }
+}
+
 /// Recalculation status of a [`ResultSheet`] inside `curvebook-engine`'s reactive DAG.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResultStatus {
@@ -220,6 +259,10 @@ pub enum ResultStatus {
     Dirty,
     /// `tabs`, `scalars`, `pairwise_comparisons`, `fitted_curves`, and `checklist` reflect the latest upstream state.
     UpToDate,
+    /// Preserved read-only snapshot imported from an external format whose upstream source (if linked) has not been edited since import.
+    Imported,
+    /// Preserved read-only imported snapshot whose upstream source table was edited or removed after import; cached tabs remain inspectable as a stale snapshot.
+    ImportedStale,
     /// Most recent recalculation failed; [`ResultSheet::lookup_scalar`] returns `None` while failed so stale values never propagate through hooks.
     Failed {
         /// Machine-readable failure classification.
@@ -508,8 +551,11 @@ pub struct ResultSheet {
     pub id: SheetId,
     /// Persisted [`AnalysisSpec`] configuration that produced (or will produce) this result sheet.
     pub analysis: AnalysisSpec,
-    /// Current reactive recalculation state (`Dirty`, `UpToDate`, or `Failed`).
+    /// Current reactive recalculation state (`Dirty`, `UpToDate`, `Imported`, `ImportedStale`, or `Failed`).
     pub status: ResultStatus,
+    /// Whether this result was computed natively by CurveBook or preserved as an imported read-only snapshot.
+    #[serde(default)]
+    pub provenance: ResultProvenance,
     /// Present when this result is a derived data transform (`Transform`, `Normalize`, `Transpose`,
     /// `Simulate`) that can feed downstream statistical analyses, curve fits, and graphs; `None` for terminal statistical/regression result sheets.
     pub analyzable_data: Option<DataSheet>,
@@ -533,6 +579,9 @@ pub struct ResultSheet {
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
+    /// Optional external import/merge origin metadata; `None` for natively authored sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SheetOrigin>,
 }
 
 impl ResultSheet {
@@ -540,10 +589,14 @@ impl ResultSheet {
     pub fn new(analysis: AnalysisSpec) -> Result<Self, DocError> {
         analysis.id.validate_non_empty_bounded()?;
         analysis.validate_structural()?;
+        if matches!(analysis.kind, AnalysisKind::ImportedSnapshot(_)) {
+            return Err(DocError::InvalidIdentifier { reason: "ImportedSnapshot analysis requires ResultSheet::new_imported" });
+        }
         Ok(Self {
             id: analysis.id.clone(),
             analysis,
             status: ResultStatus::Dirty,
+            provenance: ResultProvenance::Computed,
             analyzable_data: None,
             tabs: Vec::new(),
             scalars: Vec::new(),
@@ -554,6 +607,7 @@ impl ResultSheet {
             cell_details: Vec::new(),
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         })
     }
 
@@ -563,10 +617,83 @@ impl ResultSheet {
         self.cell_details.iter().find(|d| d.tab_id == tab_id && d.row == row && d.col == col)
     }
 
-    /// Validate result sheet identifier bounds, analysis spec, finite numeric outputs, and floating notes.
+    /// Construct an imported read-only [`ResultSheet`] with [`ResultStatus::Imported`] and [`ResultProvenance::Imported`].
+    pub fn new_imported(
+        analysis: AnalysisSpec,
+        source_format: impl Into<String>,
+        original_kind_label: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Result<Self, DocError> {
+        let sheet = Self {
+            id: analysis.id.clone(),
+            analysis,
+            status: ResultStatus::Imported,
+            provenance: ResultProvenance::Imported {
+                source_format: source_format.into(),
+                original_kind_label: original_kind_label.into(),
+                reason: reason.into(),
+            },
+            analyzable_data: None,
+            tabs: Vec::new(),
+            scalars: Vec::new(),
+            pairwise_comparisons: Vec::new(),
+            fitted_curves: Vec::new(),
+            eliminated_outliers: Vec::new(),
+            checklist: Vec::new(),
+            cell_details: Vec::new(),
+            floating_notes: Vec::new(),
+            color_tag: None,
+            origin: None,
+        };
+        sheet.validate()?;
+        Ok(sheet)
+    }
+
+    /// Return `true` when this result sheet is an imported read-only snapshot (whether fresh or stale).
+    #[must_use]
+    pub const fn is_imported(&self) -> bool {
+        self.provenance.is_imported() || matches!(self.status, ResultStatus::Imported | ResultStatus::ImportedStale)
+    }
+
+    /// Return `true` strictly when this result sheet was computed natively by CurveBook and is [`ResultStatus::UpToDate`].
+    ///
+    /// Use this gate for downstream computation inputs (`analyzable_data`, scalar constant hooks, and DAG chaining)
+    /// so imported snapshots never masquerade as CurveBook-computed inputs.
+    #[must_use]
+    pub const fn is_computed_up_to_date(&self) -> bool {
+        !self.provenance.is_imported() && matches!(self.status, ResultStatus::UpToDate)
+    }
+
+    /// Return `true` when this result sheet carries displayable output tables, overlays, or comparisons
+    /// (`UpToDate`, `Imported`, or `ImportedStale`).
+    #[must_use]
+    pub const fn has_displayable_output(&self) -> bool {
+        matches!(self.status, ResultStatus::UpToDate | ResultStatus::Imported | ResultStatus::ImportedStale)
+    }
+
+    /// Validate result sheet identifier bounds, analysis spec, provenance invariants, finite numeric outputs, origin metadata, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         self.analysis.validate_structural()?;
+        self.provenance.validate()?;
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
+        }
+        if self.provenance.is_imported() {
+            if self.analyzable_data.is_some() {
+                return Err(DocError::InvalidIdentifier { reason: "imported result sheet cannot populate analyzable_data" });
+            }
+            if !matches!(self.status, ResultStatus::Imported | ResultStatus::ImportedStale) {
+                return Err(DocError::InvalidIdentifier { reason: "imported result sheet must have Imported or ImportedStale status" });
+            }
+        } else {
+            if matches!(self.status, ResultStatus::Imported | ResultStatus::ImportedStale) {
+                return Err(DocError::InvalidIdentifier { reason: "computed result sheet cannot have Imported or ImportedStale status" });
+            }
+            if matches!(self.analysis.kind, AnalysisKind::ImportedSnapshot(_)) {
+                return Err(DocError::InvalidIdentifier { reason: "ImportedSnapshot analysis requires Imported result provenance" });
+            }
+        }
         if let Some(ds) = &self.analyzable_data {
             ds.validate()?;
             ds.validate_finite_metadata()?;
@@ -674,9 +801,12 @@ impl ResultSheet {
     }
 
     /// Resolve a hooked scalar by case-insensitive parameter key and optional dataset index.
+    ///
+    /// Returns `None` for non-[`ResultStatus::UpToDate`] or imported result sheets so imported
+    /// snapshots never leak into live constant hooks or downstream computations.
     #[must_use]
     pub fn lookup_scalar(&self, key: &str, data_set_index: Option<usize>) -> Option<f64> {
-        if !matches!(self.status, ResultStatus::UpToDate) {
+        if !self.is_computed_up_to_date() {
             return None;
         }
         let needle = key.trim();
@@ -766,6 +896,8 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             id: SheetId,
             analysis: AnalysisSpec,
             status: ResultStatus,
+            #[serde(default)]
+            provenance: ResultProvenance,
             analyzable_data: Option<DataSheet>,
             tabs: Vec<ResultTab>,
             scalars: Vec<ResultScalarEntry>,
@@ -778,6 +910,8 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             cell_details: Vec<ResultCellDetail>,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
+            #[serde(default)]
+            origin: Option<SheetOrigin>,
         }
 
         let raw = RawResultSheet::deserialize(deserializer)?;
@@ -785,6 +919,7 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             id: raw.id,
             analysis: raw.analysis,
             status: raw.status,
+            provenance: raw.provenance,
             analyzable_data: raw.analyzable_data,
             tabs: raw.tabs,
             scalars: raw.scalars,
@@ -795,6 +930,7 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             cell_details: raw.cell_details,
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
+            origin: raw.origin,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
         Ok(sheet)

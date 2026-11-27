@@ -11,8 +11,10 @@ use crate::ids::{HookSource, SheetId};
 
 pub mod descriptor;
 mod finite;
+pub mod summary_matrix;
 
 pub use descriptor::*;
+pub use summary_matrix::*;
 
 const fn default_col_b() -> usize {
     1
@@ -2708,6 +2710,14 @@ impl crate::schema::JsonSchema for PowerAnalysisSpec {
     }
 }
 
+/// Specification payload for an imported read-only result snapshot that CurveBook preserves
+/// without natively recomputing.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportedSnapshotSpec {
+    /// Original analysis kind label reported by the source file (for example `"Nested t test"`).
+    pub original_kind_label: String,
+}
+
 // ============================================================================
 // Unified AnalysisKind & AnalysisSpec
 // ============================================================================
@@ -2762,6 +2772,8 @@ pub enum AnalysisKind {
     LeveneTest(LeveneTestSpec),
     /// Standalone trapezoidal Area Under the Curve (AUC) and peak detection on `XY` tables ([`AreaUnderCurveSpec`]).
     AreaUnderCurve(AreaUnderCurveSpec),
+    /// Preserved read-only result snapshot imported from an external file format ([`ImportedSnapshotSpec`]).
+    ImportedSnapshot(ImportedSnapshotSpec),
 }
 
 impl AnalysisKind {
@@ -2865,6 +2877,10 @@ impl AnalysisKind {
                 LeveneCenter::Median => String::from("Brown-Forsythe test (median)"),
             },
             Self::AreaUnderCurve(_) => String::from("Area under the curve"),
+            Self::ImportedSnapshot(s) => {
+                let trimmed = s.original_kind_label.trim();
+                if trimmed.is_empty() { String::from("Imported result") } else { trimmed.to_owned() }
+            }
         }
     }
 
@@ -2932,7 +2948,10 @@ pub struct AnalysisSpec {
     /// Project-unique identifier shared with the owning [`crate::ResultSheet`].
     pub id: SheetId,
     /// Upstream [`crate::DataSheet`] (or analyzable transform [`crate::ResultSheet`]) supplying input data.
-    pub source_sheet_id: SheetId,
+    ///
+    /// Required (`Some(..)`) for all natively computed analysis kinds; may be `None` strictly for
+    /// unlinked [`AnalysisKind::ImportedSnapshot`] result sheets.
+    pub source_sheet_id: Option<SheetId>,
     /// Selected zero-based dataset/column indices (`empty` means analyze all columns on `source_sheet_id`).
     pub selected_data_sets: Vec<usize>,
     /// Dynamically derived default navigator title (`kind.derive_auto_title()`), updated whenever parameters change via [`Self::update_kind`].
@@ -2951,10 +2970,32 @@ impl AnalysisSpec {
     /// Construct a validated `AnalysisSpec` at 95% confidence and `FourDecimal` *p*-value formatting, rejecting empty/oversized sheet IDs or invalid analysis specs.
     pub fn new(id: impl Into<SheetId>, source_sheet_id: impl Into<SheetId>, kind: AnalysisKind) -> Result<Self, DocError> {
         let id = id.into();
-        let source_sheet_id = source_sheet_id.into();
+        let source_sheet_id = Some(source_sheet_id.into());
         let auto_title = kind.derive_auto_title();
         let spec = Self {
             id,
+            source_sheet_id,
+            selected_data_sets: Vec::new(),
+            auto_title,
+            custom_title: None,
+            confidence_level: ConfidenceLevel::DEFAULT_95,
+            p_value_format: PValueFormat::FourDecimal,
+            kind,
+        };
+        spec.validate_structural()?;
+        Ok(spec)
+    }
+
+    /// Construct a validated [`AnalysisSpec`] for an imported read-only snapshot, optionally linked to an upstream `source_sheet_id`.
+    pub fn new_imported_snapshot(
+        id: impl Into<SheetId>,
+        source_sheet_id: Option<SheetId>,
+        original_kind_label: impl Into<String>,
+    ) -> Result<Self, DocError> {
+        let kind = AnalysisKind::ImportedSnapshot(ImportedSnapshotSpec { original_kind_label: original_kind_label.into() });
+        let auto_title = kind.derive_auto_title();
+        let spec = Self {
+            id: id.into(),
             source_sheet_id,
             selected_data_sets: Vec::new(),
             auto_title,
@@ -2971,7 +3012,20 @@ impl AnalysisSpec {
     /// and [`PowerAnalysisSpec::validate_domain`] when configured for power analysis).
     pub fn validate_structural(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
-        self.source_sheet_id.validate_non_empty_bounded()?;
+        match (&self.kind, &self.source_sheet_id) {
+            (AnalysisKind::ImportedSnapshot(snapshot), maybe_src) => {
+                validate_title(&snapshot.original_kind_label)?;
+                if let Some(src) = maybe_src {
+                    src.validate_non_empty_bounded()?;
+                }
+            }
+            (_, Some(src)) => {
+                src.validate_non_empty_bounded()?;
+            }
+            (_, None) => {
+                return Err(DocError::InvalidIdentifier { reason: "source_sheet_id is required for non-imported analyses" });
+            }
+        }
         if let Some(custom) = &self.custom_title {
             validate_title(custom)?;
         }
@@ -3051,7 +3105,7 @@ impl AnalysisSpec {
         }
         let new_id = new_source_sheet_id.into();
         new_id.validate_non_empty_bounded()?;
-        self.source_sheet_id = new_id;
+        self.source_sheet_id = Some(new_id);
         self.selected_data_sets = selected_data_sets;
         Ok(())
     }
@@ -3065,7 +3119,8 @@ impl<'de> serde::Deserialize<'de> for AnalysisSpec {
         #[derive(serde::Deserialize)]
         struct RawAnalysisSpec {
             id: SheetId,
-            source_sheet_id: SheetId,
+            #[serde(default)]
+            source_sheet_id: Option<SheetId>,
             selected_data_sets: Vec<usize>,
             auto_title: String,
             custom_title: Option<String>,
@@ -3239,7 +3294,7 @@ mod r18_5_linear_spec_tests {
 
     #[test]
     fn linear_regression_spec_backward_compat_and_deming_error_spec() {
-        assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 9);
 
         let levene_default: LeveneTestSpec = serde_json::from_str("{}").unwrap();
         assert_eq!(levene_default.center, LeveneCenter::Median);

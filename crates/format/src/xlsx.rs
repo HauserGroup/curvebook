@@ -1799,6 +1799,8 @@ fn assemble_datasheet(
             let subs = match subcolumn_mode {
                 SubcolumnMode::RawReplicates(n) => n.max(1),
                 SubcolumnMode::Single
+                | SubcolumnMode::MeanSd
+                | SubcolumnMode::MeanSem
                 | SubcolumnMode::MeanSdN
                 | SubcolumnMode::MeanSemN
                 | SubcolumnMode::MeanCvN

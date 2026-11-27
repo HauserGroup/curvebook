@@ -793,11 +793,11 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
                     "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "xlsx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
-                    "subcolumn_mode": { "type": "string", "description": "Optional subcolumn layout: 'single' (or 'none'), 'replicates:<1..=256>', 'mean_sd_n', 'mean_sem_n', 'mean_cv_n', 'mean_low_high', 'upper_lower_limits', or 'median_iqr'." },
+                    "subcolumn_mode": { "type": "string", "description": "Optional subcolumn layout: 'single' (or 'none'), 'replicates:<1..=256>', 'mean_sd', 'mean_sem', 'mean_sd_n', 'mean_sem_n', 'mean_cv_n', 'mean_low_high', 'upper_lower_limits', or 'median_iqr'." },
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text (omit to auto-detect comma, tab, semicolon, and European decimal comma)." },
                     "sheet_id": { "type": "string", "description": "Sheet ID used when importing delimited data." },
                     "title": { "type": "string", "description": "Optional title override for imported sheet or instantiated template." },
-                    "append": { "type": "boolean", "description": "When importing CSV, TSV, XLSX, .pzfx files, or .prism files, append/merge sheets into the active project instead of replacing it." },
+                    "append": { "type": "boolean", "description": "When importing CSV, TSV, XLSX, CurveBook project/template (.curvebook, .curvebook.d, .cbtemplate), .pzfx files, or .prism files, append/merge sheets into the active project instead of replacing it." },
                     "sheets": { "type": "array", "items": { "type": "string" }, "description": "Optional `.xlsx` worksheet names to import." },
                     "sheet_indices": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "Optional zero-based `.xlsx` worksheet indices to import." },
                     "list_sheets": { "type": "boolean", "description": "When true for `.xlsx`, list workbook sheets without mutating the session." },
@@ -811,8 +811,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("save_file"),
+            // Keep relative manual URL here because `xtask brands` rejects `.prism` + `https://` in one string.
             description: String::from(concat!(
-                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template (atomically overwrites any existing destination target). Docs: https://curvebook.org/manual/v",
+                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, .cbtemplate template, data-only .pzfx XML file (written to match the .pzfx structure of real files; not tested in other applications), or experimental .prism archive (requires experimental: true). Exporting .pzfx or .prism never mutates session file_path or dirty state. Docs: manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -821,8 +822,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Destination file path (atomically overwrites any existing target; defaults to current project path when available)." },
-                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate"] }
+                    "path": { "type": "string", "description": "Destination file path (atomically overwrites any existing target; defaults to current project path for native formats, required for .pzfx and .prism)." },
+                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "pzfx", "prism"] },
+                    "experimental": { "type": "boolean", "description": "Required (must be true) when exporting experimental .prism archives (defaults to false; .prism is import-only at Beta)." }
                 },
                 "additionalProperties": false
             }),
@@ -939,8 +941,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("export"),
+            // Keep relative manual URL here because `xtask brands` rejects `.prism` + `https://` in one string.
             description: String::from(concat!(
-                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://curvebook.org/manual/v",
+                "Export a sheet or project to svg, pdf, emf, png, tiff, csv, tsv, json, data-only pzfx (written to match the .pzfx structure of real files; not tested in other applications), or experimental .prism (requires experimental: true) to disk or inline. Docs: manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -950,10 +953,11 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "type": "object",
                 "required": ["format"],
                 "properties": {
-                    "format": { "type": "string", "enum": ["svg", "pdf", "emf", "png", "tiff", "csv", "tsv", "json"] },
+                    "format": { "type": "string", "enum": ["svg", "pdf", "emf", "png", "tiff", "csv", "tsv", "json", "pzfx", "prism"] },
                     "sheet_id": { "type": "string" },
                     "output_path": { "type": "string", "description": "Optional destination path (atomically overwrites any existing file)." },
                     "path": { "type": "string", "description": "Alias for output_path (atomically overwrites any existing file)." },
+                    "experimental": { "type": "boolean", "description": "Required (must be true) when exporting experimental .prism archives (defaults to false; .prism is import-only at Beta)." },
                     "width_px": { "type": "integer", "minimum": 1, "maximum": 8192 },
                     "height_px": { "type": "integer", "minimum": 1, "maximum": 8192 },
                     "dpi": { "type": "integer", "minimum": 18, "maximum": 2400 },
@@ -2710,7 +2714,10 @@ mod live_control {
                 | "command.batch"
                 | "engine.execute"
                 | "project.open"
+                | "project.merge"
                 | "project.save"
+                | "project.exportPzfx"
+                | "project.exportPrism"
                 | "project.instantiateTemplate"
                 | "table.importPrism"
                 | "table.importPzfx"
@@ -3701,6 +3708,10 @@ mod tests {
         );
         assert_eq!(
             super::live_control::io_timeout_for_method_with_env("project.open", &|_| None).expect("project.open timeout"),
+            std::time::Duration::from_secs(120)
+        );
+        assert_eq!(
+            super::live_control::io_timeout_for_method_with_env("project.merge", &|_| None).expect("project.merge timeout"),
             std::time::Duration::from_secs(120)
         );
         assert_eq!(

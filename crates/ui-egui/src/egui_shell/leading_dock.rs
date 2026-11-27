@@ -87,6 +87,7 @@ pub struct NavigatorContextMenuState {
     pub selected_ids: Vec<SheetId>,
     pub section: SheetSection,
     pub is_frozen: bool,
+    pub origin_source_label: Option<String>,
     pub anchor: Pos2,
 }
 
@@ -1159,7 +1160,9 @@ fn collect_data_sheet_children<'a>(
         }
     }
     for res in &doc.result_sheets {
-        if &res.analysis.source_sheet_id == data_id || owned_results.contains(&res.analysis.source_sheet_id) {
+        if let Some(src) = res.analysis.source_sheet_id.as_ref()
+            && (src == data_id || owned_results.contains(src))
+        {
             owned_results.insert(res.id.clone());
             if let Some((_, e)) = entry_map.get(&res.id) {
                 out.push((*e, 1));
@@ -1468,6 +1471,7 @@ fn handle_navigator_row_interaction(
             selected_ids,
             section: entry.section,
             is_frozen: entry.is_frozen,
+            origin_source_label: entry.origin.as_ref().map(|o| o.source_label.clone()),
             anchor,
         });
     }
@@ -1645,7 +1649,16 @@ fn render_navigator_row(
             Rect::from_min_max(Pos2::new(x_cur, rect.top() + 20.0), Pos2::new(rect.right() - tokens.metrics.space_sm, rect.bottom() - 2.0));
         ui.painter().with_clip_rect(sub_clip).galley(Pos2::new(x_cur, rect.top() + 21.0), sub_galley, sub_fg);
     }
-    let sheet_summary = build_sheet_hover_summary(doc, &entry.sheet_id, entry.subtitle.as_deref());
+    let mut sheet_summary = build_sheet_hover_summary(doc, &entry.sheet_id, entry.subtitle.as_deref());
+    if let Some(orig) = entry.origin.as_ref() {
+        let origin_tip = format!("{} {} ({})", tr(&app.locale, "nav.origin_badge_prefix"), orig.source_label, orig.source_format);
+        if sheet_summary.is_empty() {
+            sheet_summary = origin_tip;
+        } else {
+            sheet_summary.push('\n');
+            sheet_summary.push_str(&origin_tip);
+        }
+    }
     let row_disabled_reason = (!enabled).then(|| tr(&app.locale, "tooltip.disabled.close_dialog"));
     resp = show_tooltip_for_control(
         &resp,
@@ -1666,6 +1679,21 @@ fn render_navigator_row(
     let a11y_lbl = title.to_owned();
     let is_selected = entry.is_active || state.selected_sheet_ids.contains(&entry.sheet_id);
     resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::TreeItem, enabled, is_selected, a11y_lbl.clone()));
+    let mut row_value = json!({
+        "sheet_id": entry.sheet_id.as_str(),
+        "selected": is_selected,
+        "active": entry.is_active,
+        "multi_selected": state.selected_sheet_ids.contains(&entry.sheet_id),
+        "selected_count": state.selected_sheet_ids.len(),
+        "bold": entry.is_bold,
+        "row_h": row_h,
+    });
+    if let Some(ref orig) = entry.origin
+        && let Some(obj) = row_value.as_object_mut()
+    {
+        obj.insert(String::from("origin_source"), json!(orig.source_label));
+        obj.insert(String::from("origin_format"), json!(orig.source_format));
+    }
     meta.record_response(
         ui,
         &resp,
@@ -1674,15 +1702,7 @@ fn render_navigator_row(
             role: "treeitem",
             label: title,
             command_id: Some("sheet.select"),
-            value: Some(json!({
-                "sheet_id": entry.sheet_id.as_str(),
-                "selected": is_selected,
-                "active": entry.is_active,
-                "multi_selected": state.selected_sheet_ids.contains(&entry.sheet_id),
-                "selected_count": state.selected_sheet_ids.len(),
-                "bold": entry.is_bold,
-                "row_h": row_h,
-            })),
+            value: Some(row_value),
             enabled,
             disabled_reason: None,
             z_layer: ZLayer::Workspace,
@@ -2130,8 +2150,10 @@ fn compute_active_chain(doc: &ProjectDocument) -> BTreeSet<SheetId> {
         return chain;
     };
     chain.insert(active.clone());
-    if let Some(res) = doc.result_sheet(&active) {
-        chain.insert(res.analysis.source_sheet_id.clone());
+    if let Some(res) = doc.result_sheet(&active)
+        && let Some(src) = &res.analysis.source_sheet_id
+    {
+        chain.insert(src.clone());
     }
     if let Some(graph) = doc.graph_sheet(&active) {
         for s in &graph.spec.series {
@@ -2181,8 +2203,11 @@ fn build_sheet_hover_summary(doc: &ProjectDocument, sheet_id: &SheetId, fallback
         return format!("Info • {} constants", info.constants.len());
     }
     if let Some(rs) = doc.result_sheet(sheet_id) {
-        let src_title = doc_sheet_title(doc, &rs.analysis.source_sheet_id).unwrap_or(rs.analysis.source_sheet_id.as_str());
-        return format!("Result • Source: {src_title}");
+        if let Some(src_id) = rs.analysis.source_sheet_id.as_ref() {
+            let src_title = doc_sheet_title(doc, src_id).unwrap_or(src_id.as_str());
+            return format!("Result • Source: {src_title}");
+        }
+        return String::from("Result • Imported");
     }
     if let Some(gs) = doc.graph_sheet(sheet_id) {
         let kind_lbl = format!("{:?}", gs.spec.kind);
@@ -2332,16 +2357,37 @@ fn render_hover_preview_contents(ui: &mut egui::Ui, doc: &ProjectDocument, sheet
             ui.label(egui::RichText::new("Frozen").size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
         }
     } else if let Some(res) = doc.result_sheet(sheet_id) {
-        let status = match &res.status {
-            ResultStatus::UpToDate => "Up-to-date",
-            ResultStatus::Dirty => "Dirty (recalc pending)",
-            ResultStatus::Failed { .. } => "Failed",
+        let (status, status_color) = match &res.status {
+            ResultStatus::UpToDate => ("Up-to-date", tokens.text_muted),
+            ResultStatus::Dirty => ("Dirty (recalc pending)", tokens.warning),
+            ResultStatus::Imported => ("Imported snapshot", tokens.link_blue),
+            ResultStatus::ImportedStale => ("Imported (stale)", tokens.stale),
+            ResultStatus::Failed { .. } => ("Failed", tokens.error),
         };
-        ui.label(egui::RichText::new(format!("Result • {status}")).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
-        for scalar in res.scalars.iter().take(2) {
+        ui.label(egui::RichText::new(format!("Result • {status}")).size(tokens.metrics.font_ui_small_pt).color(status_color));
+        if let curvebook_doc::ResultProvenance::Imported { source_format, original_kind_label, .. } = &res.provenance {
             ui.label(
-                egui::RichText::new(format!("{}: {:.4}", scalar.key, scalar.value)).size(tokens.metrics.font_ui_small_pt).color(tokens.text_primary),
+                egui::RichText::new(format!("{source_format} • {original_kind_label}"))
+                    .size(tokens.metrics.font_ui_small_pt)
+                    .color(tokens.text_muted),
             );
+            let note = if matches!(res.status, ResultStatus::ImportedStale) {
+                crate::i18n::tr_or_fallback(tokens.locale, "results.imported.stale_suffix", "stale: upstream data changed")
+            } else {
+                crate::i18n::tr_or_fallback(tokens.locale, "results.imported.not_computed", "not computed by CurveBook")
+            };
+            ui.label(egui::RichText::new(note).size(tokens.metrics.font_ui_small_pt).color(status_color));
+        }
+        if res.scalars.is_empty() && !res.tabs.is_empty() {
+            ui.label(egui::RichText::new(format!("{} tab(s)", res.tabs.len())).size(tokens.metrics.font_ui_small_pt).color(tokens.text_primary));
+        } else {
+            for scalar in res.scalars.iter().take(2) {
+                ui.label(
+                    egui::RichText::new(format!("{}: {:.4}", scalar.key, scalar.value))
+                        .size(tokens.metrics.font_ui_small_pt)
+                        .color(tokens.text_primary),
+                );
+            }
         }
     } else if let Some(graph) = doc.graph_sheet(sheet_id) {
         ui.label(
@@ -2503,6 +2549,9 @@ fn compute_badge_strip_width(entry: &NavigatorEntry) -> f32 {
     if entry.color_tag.is_some() {
         w += 8.0;
     }
+    if entry.origin.is_some() {
+        w += 18.0;
+    }
     if entry.is_frozen {
         w += 14.0;
     }
@@ -2522,6 +2571,20 @@ fn paint_row_badges(painter: &egui::Painter, rect: Rect, center_y: f32, entry: &
         let r = Rect::from_min_size(Pos2::new(x_right - 4.0, center_y - tag_h * 0.5), Vec2::new(tokens.metrics.space_xs, tag_h));
         painter.rect_filled(r, CornerRadius::same(1), crate::egui_shell::rgba8_to_color32(tag));
         x_right -= 7.0;
+    }
+    if entry.origin.is_some() {
+        let pill = Rect::from_min_size(Pos2::new(x_right - 14.0, rect.center().y - 6.0), Vec2::new(14.0, 12.0)); // design-token-exempt: compact navigator origin badge
+        painter.rect_filled(pill, CornerRadius::same(3), tokens.surface_bg);
+        painter.rect_stroke(pill, CornerRadius::same(3), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+        let arrow = Stroke::new(1.25, tokens.link_blue);
+        let cy = pill.center().y;
+        let x0 = pill.left() + 3.0;
+        let x1 = pill.right() - 4.5;
+        painter.line_segment([Pos2::new(x0, cy), Pos2::new(x1, cy)], arrow);
+        painter.line_segment([Pos2::new(x1 - 2.5, cy - 2.5), Pos2::new(x1, cy)], arrow);
+        painter.line_segment([Pos2::new(x1 - 2.5, cy + 2.5), Pos2::new(x1, cy)], arrow);
+        painter.vline(pill.right() - 2.5, (cy - 3.0)..=(cy + 3.0), Stroke::new(1.1, tokens.link_blue));
+        x_right -= 17.0;
     }
     if entry.is_dirty {
         painter.circle_filled(Pos2::new(x_right - 4.0, center_y), 3.0, tokens.link_red);
@@ -2852,6 +2915,8 @@ enum NavCtxAction {
     Duplicate,
     DuplicateFamily,
     ToggleFreeze,
+    ClearOrigin,
+    ClearOriginSource,
     Analyze,
     NewGraph,
     ConvertArchetype,
@@ -3116,6 +3181,19 @@ fn render_navigator_context_menu(
     let mut actions =
         vec![Some(NavCtxAction::Rename), Some(NavCtxAction::Duplicate), Some(NavCtxAction::DuplicateFamily), Some(NavCtxAction::ToggleFreeze)];
 
+    if menu.origin_source_label.is_some() {
+        entries.push(ActionMenuEntry::Separator);
+        actions.push(None);
+        entries.push(ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.clear_origin", tr(locale, "cmd.sheet.clearOrigin")).command_id(Some("sheet.clearOrigin")),
+        ));
+        actions.push(Some(NavCtxAction::ClearOrigin));
+        entries.push(ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("nav.ctx.clear_origin_source", tr(locale, "nav.clear_origin_source")).command_id(Some("sheet.clearOrigin")),
+        ));
+        actions.push(Some(NavCtxAction::ClearOriginSource));
+    }
+
     if !matches!(menu.section, SheetSection::Info) {
         entries.push(ActionMenuEntry::Separator);
         actions.push(None);
@@ -3148,6 +3226,10 @@ fn render_navigator_context_menu(
             NavCtxAction::Duplicate => intents.push_engine("sheet.duplicate", json!({ "sheet_id": sid })),
             NavCtxAction::DuplicateFamily => intents.push_engine("sheet.duplicateFamily", json!({ "sheet_id": sid })),
             NavCtxAction::ToggleFreeze => intents.push_engine(freeze_cmd, json!({ "sheet_id": sid })),
+            NavCtxAction::ClearOrigin => intents.push_engine("sheet.clearOrigin", json!({ "sheet_id": sid })),
+            NavCtxAction::ClearOriginSource => {
+                intents.push_engine("sheet.clearOrigin", json!({ "sheet_id": sid, "all_from_same_source": true }));
+            }
             NavCtxAction::Analyze => intents.push_ui("ui.analyze.open", json!({ "sheet_id": sid })),
             NavCtxAction::NewGraph => intents.push_engine("graph.create", json!({ "data_sheet_id": sid })),
             NavCtxAction::ConvertArchetype => intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": sid })),

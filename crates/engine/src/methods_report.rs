@@ -117,7 +117,7 @@ pub fn generate_methods_report_with_scope(
     let res = doc
         .result_sheet(result_sheet_id)
         .ok_or_else(|| EngineError::with_code(curvebook_doc::ErrorCode::NotFound, format!("result sheet `{result_sheet_id}` not found")))?;
-    let source_ds = resolve_source_data_sheet(doc, &res.analysis.source_sheet_id);
+    let source_ds = res.analysis.source_sheet_id.as_ref().and_then(|sid| resolve_source_data_sheet(doc, sid));
     let blocks = match scope {
         ReportScope::Methods => build_manuscript_methods_blocks(doc, res, source_ds),
         ReportScope::FullReport => build_report_blocks(doc, res, source_ds),
@@ -310,10 +310,19 @@ fn count_column_observations(col: &DataSetColumn, mode: SubcolumnMode) -> usize 
         }
         SubcolumnMode::Single
         | SubcolumnMode::RawReplicates(_)
+        | SubcolumnMode::MeanSd
+        | SubcolumnMode::MeanSem
         | SubcolumnMode::MeanLowHigh
         | SubcolumnMode::UpperLowerLimits
         | SubcolumnMode::MedianIqr => {
-            let count_sub0_only = matches!(mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr);
+            let count_sub0_only = matches!(
+                mode,
+                SubcolumnMode::MeanSd
+                    | SubcolumnMode::MeanSem
+                    | SubcolumnMode::MeanLowHigh
+                    | SubcolumnMode::UpperLowerLimits
+                    | SubcolumnMode::MedianIqr
+            );
             if count_sub0_only {
                 col.cells.iter().filter(|row| row.first().and_then(Cell::active_number).is_some()).count()
             } else {
@@ -371,7 +380,11 @@ fn describe_xy_sample_sizes(ds: &DataSheet, t: &curvebook_doc::XyTable, selected
                             n = n.saturating_add(row_n);
                         }
                     }
-                    SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+                    SubcolumnMode::MeanSd
+                    | SubcolumnMode::MeanSem
+                    | SubcolumnMode::MeanLowHigh
+                    | SubcolumnMode::UpperLowerLimits
+                    | SubcolumnMode::MedianIqr => {
                         if row.first().and_then(Cell::active_number).is_some() {
                             n = n.saturating_add(1);
                         }
@@ -539,8 +552,10 @@ fn append_study_context_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocu
         let excluded_count = count_excluded_cells(ds);
         let documented_count = count_active_exclusion_notes(ds);
         bullets.push(exclusion_audit_bullet(excluded_count, documented_count));
+    } else if let Some(src_id) = &res.analysis.source_sheet_id {
+        bullets.push(bullet_kv("Source table ID", [code(src_id.as_str())]));
     } else {
-        bullets.push(bullet_kv("Source table ID", [code(res.analysis.source_sheet_id.as_str())]));
+        bullets.push(bullet_kv("Source table", [plain("None (unlinked imported snapshot)")]));
     }
     if let Some(accounting) = res.paired_observation_accounting() {
         bullets.push(paired_observations_bullet(&accounting));
@@ -575,6 +590,8 @@ fn status_run(status: &ResultStatus) -> TextRun {
     match status {
         ResultStatus::UpToDate => plain("Up to date"),
         ResultStatus::Dirty => plain("Pending recalculation (Dirty)"),
+        ResultStatus::Imported => plain("Imported snapshot (not computed by CurveBook)"),
+        ResultStatus::ImportedStale => plain("Imported snapshot — stale (upstream data changed after import; not computed by CurveBook)"),
         ResultStatus::Failed { code: err_code, message } => plain(format!("Failed ({err_code}): {message}")),
     }
 }
@@ -613,6 +630,37 @@ fn effective_report_alpha(doc: &ProjectDocument, res: &ResultSheet) -> (f64, f64
 }
 
 fn append_methods_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocument, res: &ResultSheet, source_ds: Option<&DataSheet>) {
+    if res.is_imported() || matches!(res.analysis.kind, AnalysisKind::ImportedSnapshot(_)) {
+        blocks.push(ReportBlock::Section(vec![plain("Imported results (not computed by CurveBook)")]));
+        let (source_format, original_kind, reason) = match &res.provenance {
+            curvebook_doc::ResultProvenance::Imported { source_format, original_kind_label, reason } => {
+                (source_format.as_str(), original_kind_label.as_str(), reason.as_str())
+            }
+            curvebook_doc::ResultProvenance::Computed => match &res.analysis.kind {
+                AnalysisKind::ImportedSnapshot(s) => ("external", s.original_kind_label.as_str(), "Imported read-only snapshot"),
+                _ => ("external", res.title(), "Imported read-only snapshot"),
+            },
+        };
+        let staleness = if matches!(res.status, ResultStatus::ImportedStale) {
+            "Stale — upstream source data was edited or removed after import"
+        } else {
+            "Fresh snapshot (upstream data untouched since import)"
+        };
+        blocks.push(ReportBlock::Paragraph(vec![plain(
+            "This result sheet contains preserved output values imported from an external file and was not computed or verified by CurveBook's statistical or regression engines.",
+        )]));
+        let mut bullets = vec![
+            bullet_kv("Source format", [code(source_format)]),
+            bullet_kv("Original analysis kind", [plain(if original_kind.trim().is_empty() { res.title() } else { original_kind })]),
+            bullet_kv("Snapshot status", [plain(staleness)]),
+        ];
+        if !reason.trim().is_empty() {
+            bullets.push(bullet_kv("Import note", [plain(reason)]));
+        }
+        blocks.push(ReportBlock::Bullets(bullets));
+        return;
+    }
+
     blocks.push(ReportBlock::Section(vec![plain("Statistical and Mathematical Methods")]));
 
     let spec = &res.analysis;
@@ -676,6 +724,10 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::Transform(s) => describe_transform(s),
         AnalysisKind::SimpleLogisticRegression(s) => describe_simple_logistic(s),
         AnalysisKind::LeveneTest(s) => describe_levene_test(s),
+        AnalysisKind::ImportedSnapshot(s) => {
+            let label = if s.original_kind_label.trim().is_empty() { "Imported analysis" } else { s.original_kind_label.as_str() };
+            vec![ReportBlock::Paragraph(vec![plain(format!("Preserved external result snapshot ({label}); not computed by CurveBook."))])]
+        }
     }
 }
 
@@ -1150,7 +1202,7 @@ fn describe_nested(s: &NestedAnalysisSpec, res: &ResultSheet, source_ds: Option<
         return vec![ReportBlock::Paragraph(runs)];
     }
     let has_posthoc_tab = res.tabs.iter().any(|t| t.id == "multiple-comparisons" || t.id == "linear-trend");
-    let fewer_than_three = if matches!(res.status, ResultStatus::UpToDate) {
+    let fewer_than_three = if res.is_computed_up_to_date() {
         !has_posthoc_tab
     } else if let Some(ds) = source_ds {
         let count = if res.analysis.selected_data_sets.is_empty() { ds.archetype.column_count() } else { res.analysis.selected_data_sets.len() };
@@ -1397,7 +1449,7 @@ fn describe_survival(s: &SurvivalAnalysisSpec, res: &ResultSheet, source_ds: Opt
                 ]);
             }
             let has_pairwise = res.tabs.iter().any(|t| t.id == "survival-pairwise");
-            if matches!(res.status, ResultStatus::UpToDate) && !has_pairwise {
+            if res.is_computed_up_to_date() && !has_pairwise {
                 runs.push(plain(" Fewer than three active cohorts were analyzed, so pairwise log-rank post-hoc comparisons were not computed."));
             } else {
                 runs.extend(describe_survival_pairwise_runs(multiplicity, source_ds));
@@ -2535,7 +2587,7 @@ fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
 }
 
 fn result_has_posthoc_ci(res: &ResultSheet) -> bool {
-    if !matches!(res.status, ResultStatus::UpToDate) {
+    if !res.is_computed_up_to_date() {
         return true;
     }
     let mc_tabs: Vec<&ResultTab> = res.tabs.iter().filter(|t| t.kind == ResultTabKind::MultipleComparisons).collect();

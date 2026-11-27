@@ -149,7 +149,7 @@ fn r1_s07_10_duplicate_family_terminates_on_layout_and_mixed_cycles_while_allowi
 
         let mut r1 = ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::DescriptiveStats(Default::default())).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-        r1.analysis.source_sheet_id = SheetId::new("g_res");
+        r1.analysis.source_sheet_id = Some(SheetId::new("g_res"));
         let mut g_res = GraphSheet::new_uninitialized_for_data("g_res", &ds).map_err(|e| e.to_string())?;
         g_res.spec.primary_source_sheet_id = SheetId::new("r1");
 

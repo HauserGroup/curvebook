@@ -315,7 +315,7 @@ fn engine_command_round_trips_for_analysis_and_constant_hook_dialogs() {
     let ret = app.canvas_dialogs.change_data.commit_intent().unwrap();
     assert_eq!(ret.command_id, "analysis.retargetData");
     app.execute_command(&ret.command_id, ret.params).unwrap();
-    assert_eq!(app.document().result_sheet(&"res-anova".into()).unwrap().analysis.source_sheet_id, "data-col2".into());
+    assert_eq!(app.document().result_sheet(&"res-anova".into()).unwrap().analysis.source_sheet_id, Some("data-col2".into()));
 
     // 5. ConstantHookPicker -> HookedConstant, graph.addAnnotation, layout.addPanel
     let snap = app.document().clone();

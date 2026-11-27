@@ -37,3 +37,4 @@ mod r46_shapiro_rk45_oracles;
 mod r46_solver_oracles;
 mod rv_ledger_fit;
 mod s3a_fit_x2_regressions;
+mod summary_mode_matrix_oracles;

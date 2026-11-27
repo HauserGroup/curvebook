@@ -1,7 +1,7 @@
 //! Nested, Multiple Row t-Tests, Contingency, Descriptive, Outlier, and Linear Regression design controls.
 
 use curvebook_doc::{
-    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument,
+    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument, SheetId,
     SubcolumnAggregation,
 };
 use egui::{Id, TextEdit, Ui, Vec2};
@@ -40,7 +40,7 @@ pub(super) fn render_contingency_design(
     intents: &mut PendingUiIntents,
 ) {
     let ContingencyDesignCtx { doc, ep, spec, c } = cx;
-    let (rows, cols, _) = source_table_shape(doc, Some(&spec.source_sheet_id));
+    let (rows, cols, _) = source_table_shape(doc, spec.source_sheet_id.as_ref());
     let two_by_two_en = r5_contingency_2x2_effect_sizes(rows, cols);
     let trend_en = r5_contingency_cochran_armitage_trend(rows, cols);
     render_section_title(ui, tokens, "Categorical Test & Effect Sizes");
@@ -253,7 +253,7 @@ pub(super) fn render_misc_stats_design(
             }
         }
         AnalysisKind::DescriptiveStats(d) => {
-            let (_, _, max_sub) = source_table_shape(doc, Some(&spec.source_sheet_id));
+            let (_, _, max_sub) = source_table_shape(doc, spec.source_sheet_id.as_ref());
             let sub_en = r8_subcolumn_aggregation(max_sub);
             render_section_title(ui, tokens, "Replicate Aggregation & Distribution Tests");
             for (wid, lbl, agg) in [
@@ -301,7 +301,7 @@ pub(super) fn render_misc_stats_design(
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
             if let Some(p_hi) = d.custom_upper_percentile {
-                let sid = spec.source_sheet_id.as_str();
+                let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
                 ui.horizontal_wrapped(|ui| {
                     if let Some(new_p) = render_linear_numeric_input(
                         ui,
@@ -381,7 +381,7 @@ pub(super) fn render_misc_stats_design(
         }
         AnalysisKind::PassingBablok(pb) => {
             render_section_title(ui, tokens, "Method Comparison Columns (X Reference vs Y Candidate)");
-            let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
+            let titles = column_titles_for_draft(doc, spec.source_sheet_id.as_ref());
             for (idx, t) in titles.iter().enumerate() {
                 ui.horizontal(|ui| {
                     if render_modal_seg_btn(
@@ -494,7 +494,7 @@ fn render_pvalue_stack_design(
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
-    let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
+    let titles = column_titles_for_draft(doc, spec.source_sheet_id.as_ref());
     let col_lbl = ps
         .column
         .and_then(|c| titles.get(c))
@@ -751,7 +751,7 @@ fn render_linear_regression_design(
 ) {
     let doc = app.document();
     let locale = tokens.locale;
-    let sid = spec.source_sheet_id.as_str();
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
     render_section_title(ui, tokens, "Regression Model");
     for (wid, lbl, deming) in
         [("edit.lin.ols", "Ordinary Least Squares (Model I)", false), ("edit.lin.deming", "Deming Model II (Error in both X and Y)", true)]
@@ -916,7 +916,7 @@ fn render_deming_error_controls(
     intents: &mut PendingUiIntents,
 ) {
     let locale = tokens.locale;
-    let sid = spec.source_sheet_id.as_str();
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
     render_section_title(ui, tokens, tr(locale, "linear.deming_error_section"));
     let is_equal = matches!(lin.deming_error, DemingErrorSpec::EqualError);
     let is_sds = matches!(lin.deming_error, DemingErrorSpec::StandardDeviations { .. });
@@ -1043,7 +1043,7 @@ fn render_simple_logistic_design(
 ) {
     let doc = app.document();
     let locale = tokens.locale;
-    let sid = spec.source_sheet_id.as_str();
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
     render_section_title(ui, tokens, "Simple Logistic Regression (Binary Y in {0, 1})");
     if render_modal_checkbox(
         ui,
@@ -1392,7 +1392,7 @@ fn render_area_under_curve_design(
 
     let doc = app.document();
     let locale = tokens.locale;
-    let sid = spec.source_sheet_id.as_str();
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
 
     render_section_title(ui, tokens, tr(locale, "auc.section.baseline"));
     let is_fixed = matches!(auc.baseline, AucBaseline::Fixed { .. });

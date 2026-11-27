@@ -142,6 +142,7 @@ fn sweep_valid_sheet_and_table_commands(s: &mut Session, covered: &mut BTreeSet<
             ("sheet.unfreeze", json!({ "sheet_id": "xy-dup" })),
             ("sheet.reorder", json!({ "sheet_id": "xy-extra", "index": 0 })),
             ("sheet.select", json!({ "sheet_id": "xy-1" })),
+            ("sheet.clearOrigin", json!({ "sheet_id": "xy-1" })),
             ("sheet.delete", json!({ "sheet_id": "xy-dup", "cascade": false })),
             ("sheet.extractResultTab", json!({ "result_sheet_id": "res-fit-seed", "sheet_id": "res-tab-sweep", "archetype": "column" })),
             ("table.setCell", json!({ "sheet_id": "xy-extra", "row": 0, "col": 0, "value": 42.0 })),
@@ -334,6 +335,9 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
     let saved_b64 = saved.payload["bytes_base64"].as_str().ok_or_else(|| String::from("missing project bytes_base64"))?.to_owned();
     let tpl_saved = run_valid(s, covered, "project.saveTemplate", json!({ "return_bytes": true }))?;
     let tpl_b64 = tpl_saved.payload["bytes_base64"].as_str().ok_or_else(|| String::from("missing template bytes_base64"))?.to_owned();
+    let _ = run_valid(s, covered, "project.exportPzfx", json!({ "path": dir.child("exported.pzfx"), "return_bytes": true }))?;
+    let _ =
+        run_valid(s, covered, "project.exportPrism", json!({ "path": dir.child("exported.prism"), "experimental": true, "return_bytes": false }))?;
 
     let mut xlsx_zip = curvebook_format::ZipWriter::new();
     for (name, bytes) in [
@@ -357,6 +361,7 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
             ("table.importXlsx", json!({ "bytes_base64": xlsx_b64 })),
             ("file.new", json!({ "title": "Reset File" })),
             ("project.open", json!({ "bytes_base64": saved_b64 })),
+            ("project.merge", json!({ "bytes_base64": saved_b64, "merged_at": "unix:1700000000" })),
             ("project.new", json!({ "title": "Reset Project" })),
             ("project.instantiateTemplate", json!({ "bytes_base64": tpl_b64, "title": "Template Instance" })),
         ],

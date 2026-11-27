@@ -114,7 +114,14 @@ const EXPORT_CONVERT_FLAGS: &[CliFlagSpec] = &[
         short: None,
         value_placeholder: Some("<fmt>"),
         default_value: "inferred from `<out>` extension",
-        description: "Explicit target format (`curvebook`, `curvebook.d`, `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, `json`).",
+        description: "Explicit target format (`curvebook`, `curvebook.d`, `pzfx`, `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, `json`; `.pzfx` exports data tables and info sheets only, written to match the `.pzfx` structure of real files and not tested in other applications).",
+    },
+    CliFlagSpec {
+        long: "--experimental",
+        short: None,
+        value_placeholder: None,
+        default_value: "false",
+        description: "Explicit opt-in required for experimental `.prism` archive export (`.prism` is import-only at Beta; use `.pzfx` for standard data interchange).",
     },
     CliFlagSpec {
         long: "--sheet",

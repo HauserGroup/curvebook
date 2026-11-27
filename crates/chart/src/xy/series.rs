@@ -79,7 +79,7 @@ fn push_unresolved_source_warning(doc: &ProjectDocument, sheet_id: &SheetId, is_
                 ));
                 return;
             }
-            curvebook_doc::ResultStatus::UpToDate => {}
+            curvebook_doc::ResultStatus::UpToDate | curvebook_doc::ResultStatus::Imported | curvebook_doc::ResultStatus::ImportedStale => {}
         }
     }
     let prefix = if is_primary { "primary data sheet" } else { "series source sheet" };
@@ -244,6 +244,11 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             }
             None => (None, Vec::new()),
         };
+        let base_label = series_spec.legend_label.clone().unwrap_or(fallback_label);
+        let label = match fitted_overlay.as_ref().and_then(|ov| ov.imported_label.as_deref()) {
+            Some(tag) => format!("{base_label} [{tag}]"),
+            None => base_label,
+        };
         out.push(ExtractedXySeries {
             series_index: idx,
             sheet_id,
@@ -253,7 +258,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             replicates,
             has_x_err,
             has_y_err,
-            label: series_spec.legend_label.clone().unwrap_or(fallback_label),
+            label,
             default_color: color,
             fitted_overlay,
             rout_outliers,

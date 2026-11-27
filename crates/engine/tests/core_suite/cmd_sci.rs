@@ -247,9 +247,9 @@ fn test_stats_anova_auto_brackets_update_params_and_retarget() {
     assert!(matches!(rs(&session, "stat-anova").analysis.kind, AnalysisKind::OneWayAnova(_)));
 
     ok_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet_id": "col-2" }));
-    assert_eq!(rs(&session, "stat-anova").analysis.source_sheet_id.as_str(), "col-2");
+    assert_eq!(rs(&session, "stat-anova").analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("col-2"));
     let _ = err_cmd(&mut session, "analysis.retargetData", json!({ "sheet_id": "stat-anova", "source_sheet_id": "surv-incompatible" }));
-    assert_eq!(rs(&session, "stat-anova").analysis.source_sheet_id.as_str(), "col-2");
+    assert_eq!(rs(&session, "stat-anova").analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("col-2"));
 }
 
 #[test]

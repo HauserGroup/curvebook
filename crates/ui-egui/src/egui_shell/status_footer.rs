@@ -604,18 +604,27 @@ fn summarize_sheet_links(app: &UiApp, tokens: &Tokens) -> Option<LinkHealthSumma
         return Some(build_data_links_summary(doc, ds, tokens));
     }
     if let Some(rs) = doc.result_sheet(active_id) {
-        let src_id = &rs.analysis.source_sheet_id;
-        let src_title = doc_sheet_title(doc, src_id).unwrap_or_else(|| src_id.as_str()).to_owned();
         let (accent, status_tag) = match rs.status {
             ResultStatus::UpToDate => (tokens.link_green, "Synced"),
             ResultStatus::Dirty => (tokens.stale, "Dirty"),
+            ResultStatus::Imported => (tokens.link_blue, "Imported"),
+            ResultStatus::ImportedStale => (tokens.stale, "Imported (stale)"),
             ResultStatus::Failed { .. } => (tokens.link_red, "Error"),
         };
+        if let Some(src_id) = rs.analysis.source_sheet_id.as_ref() {
+            let src_title = doc_sheet_title(doc, src_id).unwrap_or_else(|| src_id.as_str()).to_owned();
+            return Some(LinkHealthSummary {
+                badge_text: format!("↗ {src_title}"),
+                tooltip: format!("Upstream source: {src_title} ({status_tag})"),
+                accent,
+                upstream_links: vec![(src_title, String::from(status_tag), Some(src_id.clone()), accent)],
+            });
+        }
         return Some(LinkHealthSummary {
-            badge_text: format!("↗ {src_title}"),
-            tooltip: format!("Upstream source: {src_title} ({status_tag})"),
+            badge_text: String::from(status_tag),
+            tooltip: format!("Result sheet ({status_tag}; unlinked)"),
             accent,
-            upstream_links: vec![(src_title, String::from(status_tag), Some(src_id.clone()), accent)],
+            upstream_links: Vec::new(),
         });
     }
     if let Some(gs) = doc.graph_sheet(active_id) {

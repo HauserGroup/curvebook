@@ -186,16 +186,48 @@ impl ProjectDocument {
         Ok(())
     }
 
-    /// Perform full strict validation across sheet IDs, folder limits, project cell budget, image assets,
-    /// and every child sheet specification.
-    pub fn validate(&self) -> Result<(), DocError> {
-        self.validate_structural_limits()?;
+    /// Validate that `active_sheet_id` and `family_anchor_sheet_id`, when present, are well-formed
+    /// and reference sheets that exist in this project.
+    pub fn validate_selection_ids(&self) -> Result<(), DocError> {
         if let Some(active) = &self.active_sheet_id {
             active.validate()?;
+            if self.sheet_section(active).is_none() {
+                return Err(DocError::SheetNotFound { sheet_id: active.clone() });
+            }
         }
         if let Some(anchor) = &self.family_anchor_sheet_id {
             anchor.validate()?;
+            if self.sheet_section(anchor).is_none() {
+                return Err(DocError::SheetNotFound { sheet_id: anchor.clone() });
+            }
         }
+        Ok(())
+    }
+
+    /// Clear any dangling `active_sheet_id` or `family_anchor_sheet_id` referencing a missing sheet,
+    /// returning human-readable warning strings describing each cleared field.
+    pub fn clear_dangling_selection_ids(&mut self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if let Some(active) = &self.active_sheet_id
+            && self.sheet_section(active).is_none()
+        {
+            warnings.push(format!("cleared dangling active_sheet_id `{}` referencing missing sheet", active.as_str()));
+            self.active_sheet_id = None;
+        }
+        if let Some(anchor) = &self.family_anchor_sheet_id
+            && self.sheet_section(anchor).is_none()
+        {
+            warnings.push(format!("cleared dangling family_anchor_sheet_id `{}` referencing missing sheet", anchor.as_str()));
+            self.family_anchor_sheet_id = None;
+        }
+        warnings
+    }
+
+    /// Perform full strict validation across sheet IDs, folder limits, project cell budget, image assets,
+    /// selection pointers, and every child sheet specification.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_structural_limits()?;
+        self.validate_selection_ids()?;
         for ds in &self.data_sheets {
             ds.id.validate()?;
             ds.validate_strict()?;
@@ -214,7 +246,9 @@ impl ProjectDocument {
         }
         for rs in &self.result_sheets {
             rs.id.validate()?;
-            rs.analysis.source_sheet_id.validate()?;
+            if let Some(src) = &rs.analysis.source_sheet_id {
+                src.validate()?;
+            }
             for up in rs.analysis.kind.upstream_sheet_ids() {
                 up.validate()?;
             }
@@ -430,7 +464,10 @@ impl ProjectDocument {
                 if let Some(info_id) = res.analyzable_data.as_ref().and_then(|d| d.info_sheet_id.as_ref()) {
                     return Some(info_id);
                 }
-                cursor = &res.analysis.source_sheet_id;
+                let Some(next_src) = res.analysis.source_sheet_id.as_ref() else {
+                    break;
+                };
+                cursor = next_src;
             } else {
                 break;
             }
@@ -455,8 +492,11 @@ impl ProjectDocument {
                 }
             }
         } else if let Some(rs) = self.result_sheet(id) {
-            deps.push(rs.analysis.source_sheet_id.clone());
-            let paired_info = self.paired_info_sheet_id(&rs.analysis.source_sheet_id).cloned().or_else(|| default_info.clone());
+            if let Some(src) = &rs.analysis.source_sheet_id {
+                deps.push(src.clone());
+            }
+            let paired_info =
+                rs.analysis.source_sheet_id.as_ref().and_then(|src| self.paired_info_sheet_id(src)).cloned().or_else(|| default_info.clone());
             for hook in rs.analysis.kind.hooked_sources() {
                 push_hook_dep(&mut deps, &hook, paired_info.as_ref());
             }

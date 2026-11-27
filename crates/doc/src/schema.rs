@@ -10,11 +10,11 @@ use std::collections::BTreeMap;
 use crate::TableKind;
 use crate::analysis::PowerAnalysisSpec;
 use crate::error::{CURRENT_SCHEMA_VERSION, MAX_SHEET_ID_BYTES, MAX_SHEETS_PER_PROJECT, MAX_TITLE_BYTES};
-use crate::ids::SheetId;
+use crate::ids::{SheetId, SheetOrigin};
 use crate::image::MAX_PROJECT_IMAGE_ASSETS;
 use crate::layout::MAX_LAYOUT_ITEMS;
 use crate::project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
-use crate::result::{ChecklistItem, ChecklistStatus, ErrorCategory, ErrorCode, RemediationKind, ResultStatus};
+use crate::result::{ChecklistItem, ChecklistStatus, ErrorCategory, ErrorCode, RemediationKind, ResultProvenance, ResultStatus};
 
 /// Canonical JSON Schema Draft 2020-12 dialect URI.
 pub const DRAFT_2020_12_SCHEMA_URI: &str = "https://json-schema.org/draft/2020-12/schema";
@@ -600,7 +600,53 @@ impl JsonSchema for ResultStatus {
         ]);
         let failed_payload = object_schema(vec![("code", code_schema), ("message", string_schema())], &["code", "message"], false);
         let failed_variant = object_schema(vec![("Failed", failed_payload)], &["Failed"], false);
-        one_of_schema(vec![const_string_schema("Dirty"), const_string_schema("UpToDate"), failed_variant]).with_title("ResultStatus")
+        one_of_schema(vec![
+            const_string_schema("Dirty"),
+            const_string_schema("UpToDate"),
+            const_string_schema("Imported"),
+            const_string_schema("ImportedStale"),
+            failed_variant,
+        ])
+        .with_title("ResultStatus")
+    }
+}
+
+impl JsonSchema for ResultProvenance {
+    fn schema_name() -> &'static str {
+        "ResultProvenance"
+    }
+
+    fn json_schema() -> SchemaNode {
+        let imported_payload = object_schema(
+            vec![
+                ("source_format", title_string_schema().with_min_length(1)),
+                ("original_kind_label", title_string_schema()),
+                ("reason", title_string_schema()),
+            ],
+            &["source_format", "original_kind_label", "reason"],
+            false,
+        );
+        let imported_variant = object_schema(vec![("Imported", imported_payload)], &["Imported"], false);
+        one_of_schema(vec![const_string_schema("Computed"), imported_variant]).with_title("ResultProvenance")
+    }
+}
+
+impl JsonSchema for SheetOrigin {
+    fn schema_name() -> &'static str {
+        "SheetOrigin"
+    }
+
+    fn json_schema() -> SchemaNode {
+        object_schema(
+            vec![
+                ("source_label", title_string_schema().with_min_length(1).with_pattern(r"^[^/\\\x00]+$")),
+                ("source_format", title_string_schema().with_min_length(1)),
+                ("merged_at", title_string_schema()),
+            ],
+            &["source_label", "source_format"],
+            false,
+        )
+        .with_title("SheetOrigin")
     }
 }
 
@@ -794,7 +840,7 @@ fn analysis_spec_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("source_sheet_id", ref_schema(SheetId::schema_name())),
+            ("source_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
             ("selected_data_sets", array_schema(integer_schema().with_minimum_i64(0))),
             ("auto_title", string_schema()),
             ("custom_title", nullable_schema(title_string_schema())),
@@ -981,6 +1027,7 @@ fn data_sheet_schema() -> SchemaNode {
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
             ("exclusion_notes", array_schema(ref_schema("CellExclusionNote"))),
             ("plate_well_origins", array_schema(ref_schema("PlateCellOrigin"))),
+            ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
         ],
         &["id", "title", "archetype", "frozen", "info_sheet_id", "linked_regions", "floating_notes", "color_tag"],
         false,
@@ -998,6 +1045,7 @@ fn info_sheet_schema() -> SchemaNode {
             ("notes_markdown", string_schema()),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
+            ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
         ],
         &["id", "title", "linked_data_sheets", "constants", "notes_markdown", "floating_notes", "color_tag"],
         false,
@@ -1040,6 +1088,7 @@ fn result_sheet_schema() -> SchemaNode {
             ("id", ref_schema(SheetId::schema_name())),
             ("analysis", ref_schema("AnalysisSpec")),
             ("status", ref_schema(ResultStatus::schema_name())),
+            ("provenance", ref_schema(ResultProvenance::schema_name())),
             ("analyzable_data", nullable_schema(ref_schema("DataSheet"))),
             ("tabs", array_schema(ref_schema("ResultTab"))),
             ("scalars", array_schema(ref_schema("ResultScalarEntry"))),
@@ -1050,6 +1099,7 @@ fn result_sheet_schema() -> SchemaNode {
             ("cell_details", array_schema(ref_schema("ResultCellDetail"))),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
+            ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
         ],
         &[
             "id",
@@ -1078,6 +1128,7 @@ fn graph_sheet_schema() -> SchemaNode {
             ("spec", ref_schema("GraphSpec")),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
+            ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
         ],
         &["id", "title", "initialized", "spec", "floating_notes", "color_tag"],
         false,
@@ -1093,6 +1144,7 @@ fn layout_sheet_schema() -> SchemaNode {
             ("spec", ref_schema("LayoutSpec")),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
+            ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
         ],
         &["id", "title", "spec", "floating_notes", "color_tag"],
         false,
@@ -1167,6 +1219,8 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def(ChecklistStatus::schema_name(), ChecklistStatus::json_schema())
     .with_def(ChecklistItem::schema_name(), ChecklistItem::json_schema())
     .with_def(ResultStatus::schema_name(), ResultStatus::json_schema())
+    .with_def(ResultProvenance::schema_name(), ResultProvenance::json_schema())
+    .with_def(SheetOrigin::schema_name(), SheetOrigin::json_schema())
     .with_def(TableKind::schema_name(), TableKind::json_schema())
     .with_def(SheetFolderKind::schema_name(), SheetFolderKind::json_schema())
     .with_def(NamedCheckpoint::schema_name(), NamedCheckpoint::json_schema())

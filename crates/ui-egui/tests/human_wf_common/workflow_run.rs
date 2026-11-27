@@ -1090,7 +1090,10 @@ impl WorkflowRun {
 fn assert_all_results_up_to_date(doc: &ProjectDocument, wf_id: &str, phase: &str) -> TestRes {
     for rs in &doc.result_sheets {
         match &rs.status {
-            ResultStatus::UpToDate => {}
+            ResultStatus::UpToDate | ResultStatus::Imported => {}
+            ResultStatus::ImportedStale => {
+                return Err(format!("{wf_id}: `{phase}` found ImportedStale ResultSheet `{}`", rs.id.as_str()));
+            }
             ResultStatus::Dirty => {
                 return Err(format!("{wf_id}: `{phase}` found Dirty ResultSheet `{}`", rs.id.as_str()));
             }

@@ -946,7 +946,8 @@ pub(crate) fn resolve_source_data_sheet_slices<'a>(
         if let Some(ref analyzable) = res.analyzable_data {
             return Some(analyzable);
         }
-        cursor = &res.analysis.source_sheet_id;
+        let next_src = res.analysis.source_sheet_id.as_ref()?;
+        cursor = next_src;
     }
     None
 }
@@ -979,7 +980,9 @@ pub(super) fn resolve_graph_create_source_sheet(
         return Ok((analyzable.clone(), None));
     }
     let res_title = initial_res.title().to_owned();
-    let mut cursor = initial_res.analysis.source_sheet_id.clone();
+    let Some(mut cursor) = initial_res.analysis.source_sheet_id.clone() else {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("result sheet `{source_id}` is unlinked and has no upstream data sheet")));
+    };
     let mut visited = std::collections::HashSet::new();
     visited.insert(source_id.clone());
     while visited.insert(cursor.clone()) {
@@ -997,7 +1000,13 @@ pub(super) fn resolve_graph_create_source_sheet(
             if let Some(ref analyzable) = res.analyzable_data {
                 return Ok((analyzable.clone(), Some(res_title)));
             }
-            cursor = res.analysis.source_sheet_id.clone();
+            let Some(next_src) = res.analysis.source_sheet_id.clone() else {
+                return Err(EngineError::with_code(
+                    ErrorCode::Conflict,
+                    format!("result sheet `{source_id}` has no upstream data sheet (upstream result `{cursor}` is unlinked)"),
+                ));
+            };
+            cursor = next_src;
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::Conflict,

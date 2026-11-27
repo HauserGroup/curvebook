@@ -614,9 +614,10 @@ fn resolve_active_or_first_data_sheet_id(doc: &curvebook_doc::ProjectDocument) -
             return Some(graph.spec.primary_source_sheet_id.clone());
         }
         if let Some(res) = doc.result_sheet(active)
-            && doc.data_sheet(&res.analysis.source_sheet_id).is_some()
+            && let Some(src) = res.analysis.source_sheet_id.as_ref()
+            && doc.data_sheet(src).is_some()
         {
-            return Some(res.analysis.source_sheet_id.clone());
+            return Some(src.clone());
         }
     }
     doc.data_sheets.first().map(|s| s.id.clone())

@@ -595,7 +595,8 @@ fn wf17_human_dose_response_4pl_5pl_interp_and_heatmap_r7() -> TestRes {
         .iter()
         .rev()
         .find(|r| {
-            r.analysis.source_sheet_id == mv_id && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
+            r.analysis.source_sheet_id.as_ref() == Some(&mv_id)
+                && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
         })
         .map(|r| r.id.clone())
         .ok_or("WF-17 missing Correlation Matrix ResultSheet")?;

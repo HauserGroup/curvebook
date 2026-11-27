@@ -104,6 +104,7 @@ fn r1_s11_12_category_slots_resolve_real_coordinates_and_reject_misses() -> Test
         spec,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     };
 
     let mut doc = ProjectDocument::new("Bracket Slots").map_err(|e| format!("{e}"))?;
@@ -185,6 +186,7 @@ fn r1_s11_12_category_slots_resolve_real_coordinates_and_reject_misses() -> Test
             spec: gspec,
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         };
         grp_doc.add_graph_sheet(gsheet.clone()).map_err(|e| format!("{e}"))?;
         let gscene = compile_graph(&gsheet, &grp_doc).map_err(|e| format!("compile grouped: {e}"))?;
@@ -213,6 +215,7 @@ fn r1_s11_12_category_slots_resolve_real_coordinates_and_reject_misses() -> Test
         spec: xy_spec,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     };
     let mut xy_doc = ProjectDocument::new("XY").map_err(|e| format!("{e}"))?;
     xy_doc.add_data_sheet(xy_ds).map_err(|e| format!("{e}"))?;

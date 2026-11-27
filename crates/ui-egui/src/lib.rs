@@ -119,6 +119,22 @@ pub fn format_figure_export_warnings_banner(warnings: &[String]) -> Option<Strin
     Some(format!("{FIGURE_EXPORT_WARNING_PREFIX}{} warning(s): {}", cleaned.len(), cleaned.join("; ")))
 }
 
+/// Format a concise post-export status summary for `project.exportPzfx` repeating exported sheet,
+/// dropped item, and warning counts (§4.2).
+#[must_use]
+pub fn format_pzfx_export_status_summary(path: Option<&std::path::Path>, payload: &serde_json::Value, warnings: &[String]) -> String {
+    let data_count = payload.get("data_sheet_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let info_count = payload.get("info_sheet_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let dropped_count = payload.get("total_dropped_count").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let warning_count = warnings.len();
+    let target = path
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .map_or_else(|| String::from(".pzfx file"), |name| format!("'{name}'"));
+    format!("Exported {target} ({data_count} data table(s), {info_count} info sheet(s); {dropped_count} dropped, {warning_count} warning(s)).")
+}
+
 /// Whether the UI crate was compiled with bundled interface/document fonts enabled.
 #[must_use]
 pub const fn bundled_fonts_enabled() -> bool {
@@ -662,9 +678,11 @@ impl UiApp {
     }
 
     pub(crate) fn execute_session_ui_cmd(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
-        Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
+        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_as_ui(command_id, params)
-        })
+        })?;
+        self.surface_pzfx_export_status(command_id, &outcome);
+        Ok(outcome)
     }
 
     pub(crate) fn execute_power_wizard_create(&mut self) -> Result<power_wizard::PowerWizardCreatedSheets, EngineError> {
@@ -904,6 +922,12 @@ impl UiApp {
         self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
     }
 
+    /// Open the `.pzfx` pre-export confirmation modal summarizing non-tabular dropped items (§4.2).
+    pub fn open_pzfx_export_confirm_dialog(&mut self, preflight: curvebook_format::PzfxExportPreflight) {
+        self.canvas_dialogs.active_dialog = ActiveDialog::PzfxExportConfirm { preflight };
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
+    }
+
     /// Copy all recorded import warnings to the configured [`PlatformClipboardAdapter`].
     ///
     /// # Errors
@@ -1047,6 +1071,7 @@ impl UiApp {
             session.execute_as_ui(command_id, params)
         })?;
         self.surface_figure_export_warnings(command_id, &outcome.warnings);
+        self.surface_pzfx_export_status(command_id, &outcome);
         self.sync_views();
         Ok(outcome)
     }
@@ -1061,6 +1086,15 @@ impl UiApp {
             return;
         }
         self.canvas_dialogs.figure_export_warning = format_figure_export_warnings_banner(warnings);
+    }
+
+    /// Record post-export `.pzfx` counts and warnings in `status_banner` (§4.2).
+    pub fn surface_pzfx_export_status(&mut self, command_id: &str, outcome: &CommandOutcome) {
+        if command_id != "project.exportPzfx" {
+            return;
+        }
+        let path_opt = outcome.payload.get("path").and_then(serde_json::Value::as_str).map(std::path::Path::new);
+        self.canvas_dialogs.status_banner = Some(format_pzfx_export_status_summary(path_opt, &outcome.payload, &outcome.warnings));
     }
 
     /// Execute an external control-protocol command (`Caller::Control`).
@@ -1707,8 +1741,9 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 63);
+        assert_eq!(UI_COMMANDS.len(), 64);
         for required in [
+            "ui.export.pzfx.open",
             "ui.navigator.toggle",
             "ui.inspector.toggle",
             "ui.family.toggle",

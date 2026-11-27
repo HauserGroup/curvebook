@@ -203,6 +203,7 @@ pub const BATCH_MANIFEST_EXPORT_KEYS: &[&str] = &[
     "sheetId",
     "dpi",
     "pretty",
+    "experimental",
     "tab_index",
     "tabIndex",
     "pdf_version",
@@ -212,7 +213,7 @@ pub const BATCH_MANIFEST_EXPORT_KEYS: &[&str] = &[
 ];
 
 const BATCH_EXPORT_FORMATS: &[&str] =
-    &["curvebook", "curvebook.d", "curvebook-dir", "unpacked", "dir", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "tif", "emf"];
+    &["curvebook", "curvebook.d", "curvebook-dir", "unpacked", "dir", "pzfx", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "tif", "emf"];
 
 fn batch_command_property_schema(key: &str) -> Option<SchemaNode> {
     match key {
@@ -228,7 +229,7 @@ fn batch_export_property_schema(key: &str) -> Option<SchemaNode> {
         "out" | "path" | "sheet" | "sheet_id" | "sheetId" | "ttf_font" | "ttfFont" => Some(nullable_schema(string_schema().with_min_length(1))),
         "format" => Some(enum_schema(BATCH_EXPORT_FORMATS)),
         "dpi" => Some(nullable_schema(integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(u16::MAX)))),
-        "pretty" => Some(nullable_schema(bool_schema())),
+        "pretty" | "experimental" => Some(nullable_schema(bool_schema())),
         "tab_index" | "tabIndex" => Some(nullable_schema(integer_schema().with_minimum_i64(0))),
         "pdf_version" | "pdfVersion" => Some(string_schema()),
         _ => None,

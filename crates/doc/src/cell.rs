@@ -443,6 +443,10 @@ pub enum SubcolumnMode {
     Single,
     /// `n` raw replicate subcolumns (`Y1 .. Yn`, `1 <= n <= MAX_SUBCOLUMNS`).
     RawReplicates(usize),
+    /// Pre-summarized `[Mean, SD]` (`2` subcolumns, no sample size `N`).
+    MeanSd,
+    /// Pre-summarized `[Mean, SEM]` (`2` subcolumns, no sample size `N`).
+    MeanSem,
     /// Pre-summarized `[Mean, SD, N]` (`3` subcolumns).
     MeanSdN,
     /// Pre-summarized `[Mean, SEM, N]` (`3` subcolumns).
@@ -464,6 +468,7 @@ impl SubcolumnMode {
         match self {
             Self::Single => 1,
             Self::RawReplicates(n) => n,
+            Self::MeanSd | Self::MeanSem => 2,
             Self::MeanSdN | Self::MeanSemN | Self::MeanCvN | Self::MeanLowHigh | Self::UpperLowerLimits | Self::MedianIqr => 3,
         }
     }
@@ -482,7 +487,17 @@ impl SubcolumnMode {
     /// pre-summarized tables with `RequiresRawReplicates` (`docs/implementation/data-tables-and-transforms.md` §2.1).
     #[must_use]
     pub const fn is_pre_summarized(self) -> bool {
-        matches!(self, Self::MeanSdN | Self::MeanSemN | Self::MeanCvN | Self::MeanLowHigh | Self::UpperLowerLimits | Self::MedianIqr)
+        matches!(
+            self,
+            Self::MeanSd
+                | Self::MeanSem
+                | Self::MeanSdN
+                | Self::MeanSemN
+                | Self::MeanCvN
+                | Self::MeanLowHigh
+                | Self::UpperLowerLimits
+                | Self::MedianIqr
+        )
     }
 
     /// True if parametric `(Mean, SD, N)` within-point sum of squares can be reconstructed rigorously.
@@ -497,6 +512,8 @@ impl SubcolumnMode {
         match self {
             Self::Single => vec![String::from("Y")],
             Self::RawReplicates(n) => (1..=n).map(|i| format!("Y{i}")).collect(),
+            Self::MeanSd => vec![String::from("Mean"), String::from("SD")],
+            Self::MeanSem => vec![String::from("Mean"), String::from("SEM")],
             Self::MeanSdN => vec![String::from("Mean"), String::from("SD"), String::from("N")],
             Self::MeanSemN => vec![String::from("Mean"), String::from("SEM"), String::from("N")],
             Self::MeanCvN => vec![String::from("Mean"), String::from("%CV"), String::from("N")],
@@ -507,8 +524,8 @@ impl SubcolumnMode {
     }
 
     /// Resolve `(center, lower_endpoint, upper_endpoint)` in data-axis coordinates from a
-    /// pre-summarized 3-cell subcolumn slice (`MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`,
-    /// `UpperLowerLimits`, or `MedianIqr`).
+    /// pre-summarized subcolumn slice (`MeanSd`, `MeanSem`, `MeanSdN`, `MeanSemN`, `MeanCvN`,
+    /// `MeanLowHigh`, `UpperLowerLimits`, or `MedianIqr`).
     #[must_use]
     pub fn explicit_bounds(self, subcells: &[Cell]) -> Option<ExplicitErrorBounds> {
         let center = subcells.first()?.active_number()?;
@@ -517,7 +534,7 @@ impl SubcolumnMode {
         }
         match self {
             Self::Single | Self::RawReplicates(_) => None,
-            Self::MeanSdN | Self::MeanSemN => {
+            Self::MeanSd | Self::MeanSem | Self::MeanSdN | Self::MeanSemN => {
                 let d = subcells.get(1)?.active_number()?;
                 if !d.is_finite() || d < 0.0 {
                     return None;

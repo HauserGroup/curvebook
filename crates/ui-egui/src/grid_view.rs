@@ -2971,6 +2971,8 @@ fn replicate_mode_badge(mode: SubcolumnMode) -> Option<String> {
     match mode {
         SubcolumnMode::Single => None,
         SubcolumnMode::RawReplicates(n) => Some(format!("{n} replicate{}", if n == 1 { "" } else { "s" })),
+        SubcolumnMode::MeanSd => Some(String::from("Mean / SD")),
+        SubcolumnMode::MeanSem => Some(String::from("Mean / SEM")),
         SubcolumnMode::MeanSdN => Some(String::from("Mean / SD / N")),
         SubcolumnMode::MeanSemN => Some(String::from("Mean / SEM / N")),
         SubcolumnMode::MeanCvN => Some(String::from("Mean / %CV / N")),
@@ -4331,6 +4333,7 @@ mod tests {
             source: VariableSource::Entered,
             level_order: Default::default(),
             cells: vec![Cell::number(1.0), Cell::number(10.0)],
+            display_decimals: None,
         };
         mv.variables[1] = VariableColumn {
             title: String::from("Flag"),
@@ -4339,6 +4342,7 @@ mod tests {
             source: VariableSource::Entered,
             level_order: Default::default(),
             cells: vec![Cell::number(1.0), Cell::number(0.0)],
+            display_decimals: None,
         };
         let sheet = DataSheet::new("mv-14", "Conditional", TableArchetype::MultipleVariables(mv)).unwrap();
         let mut doc = ProjectDocument::default();

@@ -413,7 +413,7 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mu
             warnings.push(ChartWarning::new("failed_result_sheet", format!("result sheet '{}' failed; omitted stale heatmap matrix", res.id)));
             return None;
         }
-        if !matches!(res.status, ResultStatus::UpToDate) {
+        if !res.has_displayable_output() {
             warnings.push(ChartWarning::new(
                 "pending_analysis_result",
                 format!("result sheet '{}' is pending recalculation; omitted stale heatmap matrix", res.id),

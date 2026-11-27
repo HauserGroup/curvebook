@@ -9,8 +9,9 @@
 use std::collections::BTreeSet;
 
 use curvebook_doc::{
-    AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, DataSheet, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec,
-    OneWayMethod, PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SummaryPointError, TableArchetype,
+    AnalysisKind, AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, DataSheet, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec,
+    OneWayAnovaSpec, OneWayMethod, PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SummaryPointError,
+    TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
@@ -36,9 +37,9 @@ use crate::anova::results::{FactorialAnovaTerm, OneWayAnovaResult, UnstructuredF
 use crate::anova::sheet::factorial::push_reml_df_scalars;
 use crate::column::shapiro_wilk;
 use crate::common::{
-    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, extract_numeric_columns,
-    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, rank_with_ties, sanitize_result_sheet_floats, text_cell,
-    try_resolve_selected_indices, validate_finite_slice,
+    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
+    enforce_summary_mode_matrix, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    rank_with_ties, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
@@ -48,6 +49,7 @@ use crate::multiplicity::{
 
 /// Execute a [`OneWayAnovaSpec`] against a `Column` or `MultipleVariables` [`DataSheet`].
 pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &OneWayAnovaSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::OneWayAnova(anova_spec.clone()))?;
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;

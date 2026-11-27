@@ -929,7 +929,7 @@ impl AnalyzeDialogState {
         };
         doc.result_sheets
             .iter()
-            .filter(|rs| &rs.analysis.source_sheet_id == src && same_analysis_family(&rs.analysis.kind, &pending))
+            .filter(|rs| rs.analysis.source_sheet_id.as_ref() == Some(src) && same_analysis_family(&rs.analysis.kind, &pending))
             .map(|rs| rs.id.clone())
             .collect()
     }

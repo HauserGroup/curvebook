@@ -1089,12 +1089,14 @@ fn find_linked_graph_for_data_sheet<'a>(app: &'a UiApp, ds_id: &curvebook_doc::S
     let doc = app.document();
     if let Some(active) = doc.active_sheet_id.as_ref().and_then(|id| doc.graph_sheet(id))
         && (active.spec.primary_source_sheet_id == *ds_id
-            || doc.result_sheet(&active.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id == *ds_id))
+            || doc.result_sheet(&active.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id.as_ref() == Some(ds_id)))
     {
         return Some(active);
     }
     doc.graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == *ds_id).or_else(|| {
-        doc.graph_sheets.iter().find(|g| doc.result_sheet(&g.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id == *ds_id))
+        doc.graph_sheets
+            .iter()
+            .find(|g| doc.result_sheet(&g.spec.primary_source_sheet_id).is_some_and(|r| r.analysis.source_sheet_id.as_ref() == Some(ds_id)))
     })
 }
 

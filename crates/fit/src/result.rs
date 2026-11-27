@@ -37,8 +37,8 @@ use crate::solver::{
     SolverConfig, compare_models_question, compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, ordered_nested_roles,
 };
 use crate::types::{
-    DataPoint, DatasetSeries, HookContext, extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_from_multivar_multi_with_y_map,
-    filter_datasets_by_range, per_dataset_parameter_key,
+    DataPoint, DatasetSeries, HookContext, enforce_summary_mode_matrix, extract_datasets_from_sheet, extract_datasets_from_sheet_multi,
+    extract_from_multivar_multi_with_y_map, filter_datasets_by_range, per_dataset_parameter_key,
 };
 
 fn ci_bounds_cell(lower: CiBound, upper: CiBound) -> ResultCell {
@@ -78,6 +78,7 @@ pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookCont
 /// Execute linear regression (OLS, origin-forced, ANCOVA line comparison, or Model II Deming)
 /// and populate a [`ResultSheet`].
 pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionSpec, sheet: &DataSheet) -> Result<ResultSheet, FitError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::LinearRegression(*lin_spec))?;
     let mut result = ResultSheet::new(spec.clone())?;
     let mut datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
     let p_fmt = spec.p_value_format;
@@ -422,6 +423,9 @@ struct PreparedNonlinearFit {
 }
 
 fn prepare_nonlinear_fit(spec: &AnalysisSpec, nl_spec: &NonlinearFitSpec, sheet: &DataSheet) -> Result<PreparedNonlinearFit, FitError> {
+    if !nl_spec.plot_function_only {
+        enforce_summary_mode_matrix(sheet, &AnalysisKind::NonlinearRegression(nl_spec.clone()))?;
+    }
     if nl_spec.flag_r_squared_below.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
         return Err(FitError::InvalidParameter { name: "flag_r_squared_below", reason: "threshold must be a finite number from 0 to 1".to_owned() });
     }

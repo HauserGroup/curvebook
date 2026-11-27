@@ -184,6 +184,16 @@ pub fn column_design_hint_tag(col_t: &curvebook_doc::ColumnTable) -> &'static st
 pub(super) fn column_subcolumn_role_label(mode: SubcolumnMode, subcol: usize, locale: &str) -> String {
     match mode {
         SubcolumnMode::Single => String::from("Y"),
+        SubcolumnMode::MeanSd => match subcol {
+            0 => grid_tr(locale, "w5.grid_core.mean_col", "Mean").to_owned(),
+            1 => grid_tr(locale, "w5.grid_core.sd_col", "SD").to_owned(),
+            _ => format!("Y{}", subcol + 1),
+        },
+        SubcolumnMode::MeanSem => match subcol {
+            0 => grid_tr(locale, "w5.grid_core.mean_col", "Mean").to_owned(),
+            1 => grid_tr(locale, "w5.grid_core.sem_col", "SEM").to_owned(),
+            _ => format!("Y{}", subcol + 1),
+        },
         SubcolumnMode::MeanSdN => match subcol {
             0 => grid_tr(locale, "w5.grid_core.mean_col", "Mean").to_owned(),
             1 => grid_tr(locale, "w5.grid_core.sd_col", "SD").to_owned(),

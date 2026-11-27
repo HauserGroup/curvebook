@@ -588,7 +588,7 @@ fn wf43_human_xy_serial_dilution_constrained_4pl_and_auc() -> TestRes {
 
     {
         let rs = result_sheet(run.document(), &fit_id)?;
-        ensure(rs.analysis.source_sheet_id == xform_id, "WF-43 expected 4PL source chained to log10(X) ResultSheet")?;
+        ensure(rs.analysis.source_sheet_id.as_ref() == Some(&xform_id), "WF-43 expected 4PL source chained to log10(X) ResultSheet")?;
         ensure(
             matches!(
                 &rs.analysis.kind,

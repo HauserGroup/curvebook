@@ -419,6 +419,64 @@ fn headless_open_file_append_prism_and_pzfx_preserves_sheets_file_path_and_undo(
 }
 
 #[test]
+fn headless_open_file_append_curvebook_unpacked_and_template_routes_to_project_merge() -> TestResult {
+    let dir = TempDir::new_canonical("cb_s10_append_curvebook")?;
+    let seed_csv = dir.child("base.csv");
+    let base_proj = dir.child("base_study.curvebook");
+    let extra_proj = dir.child("cohort_b.curvebook");
+    let unpacked_dir = dir.child("cohort_c.curvebook.d");
+    let tpl_path = dir.child("cohort_tpl.cbtemplate");
+
+    fs::write(&seed_csv, "X,Y\n1,10\n2,20\n").map_err(|e| format!("write base csv: {e}"))?;
+    let mut seed = McpServerState::new();
+    call_ok_json(&mut seed, "open_file", json!({ "path": seed_csv.display().to_string() }))?;
+    save_project_file(&base_proj, seed.session().document()).map_err(|e| format!("save base: {e}"))?;
+
+    let mut extra = McpServerState::new();
+    call_ok_json(&mut extra, "open_file", json!({ "path": seed_csv.display().to_string(), "title": "Cohort B" }))?;
+    save_project_file(&extra_proj, extra.session().document()).map_err(|e| format!("save extra: {e}"))?;
+    curvebook_format::save_project_unpacked_dir(extra.session().document(), &unpacked_dir).map_err(|e| format!("save unpacked: {e}"))?;
+    curvebook_format::save_template_file(&tpl_path, extra.session().document()).map_err(|e| format!("save template: {e}"))?;
+
+    let mut state = McpServerState::new();
+    call_ok_json(&mut state, "enable_toolset", json!({ "groups": ["edit"] }))?;
+    call_ok_json(&mut state, "open_file", json!({ "path": base_proj.display().to_string() }))?;
+    assert_eq!(state.session().file_path(), Some(base_proj.as_path()));
+
+    // 1. Append .curvebook
+    let res_cb = call_ok_json(&mut state, "open_file", json!({ "path": extra_proj.display().to_string(), "append": true }))?;
+    assert_eq!(res_cb["opened"], json!(true));
+    assert_eq!(res_cb["merged"], json!(true));
+    assert_eq!(res_cb["format"], json!("curvebook"));
+    assert_eq!(res_cb["total_sheet_count"], json!(2));
+    assert_eq!(res_cb["source_label"], json!("cohort_b.curvebook"));
+    assert_eq!(state.session().file_path(), Some(base_proj.as_path()));
+    assert_eq!(state.session().document().data_sheets[0].origin, None);
+    assert_eq!(state.session().document().data_sheets[1].origin.as_ref().map(|o| o.source_label.as_str()), Some("cohort_b.curvebook"));
+
+    // 2. Append .curvebook.d
+    let res_dir = call_ok_json(&mut state, "open_file", json!({ "path": unpacked_dir.display().to_string(), "append": true }))?;
+    assert_eq!(res_dir["merged"], json!(true));
+    assert_eq!(res_dir["format"], json!("curvebook.d"));
+    assert_eq!(res_dir["total_sheet_count"], json!(3));
+    assert_eq!(state.session().document().data_sheets[2].origin.as_ref().map(|o| o.source_format.as_str()), Some("curvebook.d"));
+
+    // 3. Append .cbtemplate
+    let res_tpl = call_ok_json(&mut state, "open_file", json!({ "path": tpl_path.display().to_string(), "append": true }))?;
+    assert_eq!(res_tpl["merged"], json!(true));
+    assert_eq!(res_tpl["format"], json!("cbtemplate"));
+    assert_eq!(res_tpl["total_sheet_count"], json!(4));
+    assert_eq!(state.session().document().data_sheets[3].origin.as_ref().map(|o| o.source_format.as_str()), Some("cbtemplate"));
+    assert_eq!(state.session().file_path(), Some(base_proj.as_path()));
+
+    // Undo removes template merge cleanly in one step.
+    call_ok_json(&mut state, "edit_undo", json!({}))?;
+    assert_eq!(state.session().document().total_sheet_count(), 3);
+    assert_eq!(state.session().file_path(), Some(base_proj.as_path()));
+    Ok(())
+}
+
+#[test]
 fn export_emf_tsv_pdf_version_and_ttf_font_with_workdir_guard() -> TestResult {
     let dir = TempDir::new_canonical("cb_audit_export_parity")?;
     let outside = TempDir::new_canonical("cb_audit_export_outside")?;

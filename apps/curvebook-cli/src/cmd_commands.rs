@@ -735,6 +735,7 @@ fn persist_session_output(session: &Session, out_path: &Path, format: Option<Exp
         tab_index: None,
         pdf_version: curvebook_pdf::PdfVersion::default(),
         embedded_truetype_font: None,
+        experimental: false,
     })?;
     Ok(())
 }

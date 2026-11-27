@@ -7,12 +7,13 @@ use curvebook_doc::{ColumnEqualsFilter, ErrorCode, ProjectDocument, ResultStatus
 use curvebook_engine::EngineError;
 use curvebook_engine::services::{
     self, DEFAULT_EXPORT_DPI, DocumentExportFormat, ExportArtifactRequest, ExportOptionsSpec, ExportTarget, RasterSizingPolicy,
-    export_document_artifact, resolve_json_target_by_name_or_id, resolve_tabular_sheet_by_name_or_id, resolve_visual_sheet_by_name_or_id,
+    export_document_artifact, format_import_or_archive_warning, format_pzfx_export_warning, resolve_json_target_by_name_or_id,
+    resolve_tabular_sheet_by_name_or_id, resolve_visual_sheet_by_name_or_id,
 };
 pub use curvebook_engine::services::{LoadedProject, is_unpacked_project_path, pdf_version_str};
 pub(crate) use curvebook_engine::services::{MAX_RASTER_DPI, MIN_RASTER_DPI};
-use curvebook_format::XlsxImportOptions;
-use curvebook_format::registry::{ExportOptions, ExportSource, FormatRegistry};
+use curvebook_format::registry::{DESC_PRISM, ExportOptions, ExportSource, FormatRegistry};
+use curvebook_format::{ArchiveExportOptions, XlsxImportOptions, export_prism_bytes_with_options, export_pzfx_bytes};
 use curvebook_pdf::PdfVersion;
 use curvebook_platform::fs::write_atomic;
 use curvebook_render::TiffCompression;
@@ -25,6 +26,8 @@ use crate::error::CliError;
 pub enum ExportFormat {
     CurveBook,
     CurveBookDir,
+    Pzfx,
+    ExternalArchive,
     Svg,
     Pdf,
     Emf,
@@ -42,6 +45,8 @@ impl ExportFormat {
         match self {
             Self::CurveBook => "curvebook",
             Self::CurveBookDir => "curvebook.d",
+            Self::Pzfx => "pzfx",
+            Self::ExternalArchive => DESC_PRISM.id,
             Self::Svg => "svg",
             Self::Pdf => "pdf",
             Self::Emf => "emf",
@@ -65,6 +70,7 @@ pub struct ExportRequest<'a> {
     pub tab_index: Option<usize>,
     pub pdf_version: PdfVersion,
     pub embedded_truetype_font: Option<&'a [u8]>,
+    pub experimental: bool,
 }
 
 /// Summary metadata produced after writing an export artifact.
@@ -77,6 +83,9 @@ pub struct ExportOutcomeSummary {
     /// Figure warnings as `code: message` lines (for example a fitted curve omitted because its fit
     /// failed or is pending recalculation). Callers are responsible for printing them.
     pub warnings: Vec<String>,
+    /// Format export report warnings (such as dropped non-tabular items or corpus-coverage notices
+    /// for `.pzfx` and experimental `.prism` exports); each is printed to stderr and surfaced in JSON `warnings`.
+    pub export_warnings: Vec<String>,
 }
 
 struct ConvertArgs {
@@ -95,6 +104,7 @@ struct ConvertArgs {
     dpi: Option<u16>,
     pdf_version: PdfVersion,
     ttf_font: Option<String>,
+    experimental: bool,
     json: bool,
 }
 
@@ -168,6 +178,8 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
             if matches!(format, ExportFormat::CurveBook | ExportFormat::CurveBookDir) {
                 let ids = dirty_ids.iter().map(SheetId::as_str).collect::<Vec<_>>().join(", ");
                 loaded.warnings.push(format!("pending_result_sheet: {} analysis sheet(s) pending recalculation ({ids})", dirty_ids.len()));
+            } else if matches!(format, ExportFormat::Pzfx | ExportFormat::ExternalArchive) {
+                // Data-only interchange exports drop analysis sheets and report them via ExportReport warnings.
             } else {
                 match curvebook_engine::dag::recalculate_dirty_with_report(&mut loaded.doc, &dirty_ids) {
                     Ok(report) => {
@@ -196,9 +208,12 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
             tab_index: None,
             pdf_version: parsed.pdf_version,
             embedded_truetype_font: font_bytes.as_deref(),
+            experimental: parsed.experimental,
         })?;
 
         if parsed.json {
+            let mut combined_warnings = loaded.warnings;
+            combined_warnings.extend(summary.export_warnings);
             let payload = if format == ExportFormat::Pdf {
                 json!({
                     "ok": true,
@@ -210,7 +225,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
                     "bytes_written": summary.bytes_written,
                     "pdf_version": pdf_version_str(parsed.pdf_version),
                     "ttf_font_embedded": font_bytes.is_some(),
-                    "warnings": loaded.warnings,
+                    "warnings": combined_warnings,
                     "figure_warnings": summary.warnings,
                 })
             } else {
@@ -222,7 +237,7 @@ fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Res
                     "format": summary.format,
                     "sheet_id": summary.sheet_id,
                     "bytes_written": summary.bytes_written,
-                    "warnings": loaded.warnings,
+                    "warnings": combined_warnings,
                     "figure_warnings": summary.warnings,
                 })
             };
@@ -278,6 +293,7 @@ fn export_format_from_descriptor_id(id: &str) -> Option<ExportFormat> {
     match id {
         "curvebook" => Some(ExportFormat::CurveBook),
         "curvebook.d" => Some(ExportFormat::CurveBookDir),
+        "pzfx" => Some(ExportFormat::Pzfx),
         "svg" => Some(ExportFormat::Svg),
         "pdf" => Some(ExportFormat::Pdf),
         "emf" => Some(ExportFormat::Emf),
@@ -297,13 +313,18 @@ pub fn parse_export_format(raw: &str) -> Result<ExportFormat, CliError> {
         "curvebook-dir" | "unpacked" | "dir" => "curvebook.d",
         other => other,
     };
+    if canonical == DESC_PRISM.id {
+        return Ok(ExportFormat::ExternalArchive);
+    }
     let registry = FormatRegistry::default_registry();
     if let Some(exporter) = registry.exporter_by_format(canonical)
         && let Some(fmt) = export_format_from_descriptor_id(exporter.descriptor().id)
     {
         return Ok(fmt);
     }
-    Err(CliError::Usage(format!("unsupported export format `{raw}` (expected curvebook, curvebook.d, svg, pdf, emf, png, tiff, csv, tsv, json)")))
+    Err(CliError::Usage(format!(
+        "unsupported export format `{raw}` (expected curvebook, curvebook.d, pzfx, svg, pdf, emf, png, tiff, csv, tsv, json)"
+    )))
 }
 
 /// Infer [`ExportFormat`] from an output path via [`FormatRegistry`] (including `.curvebook.d` directories).
@@ -390,6 +411,38 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
                 sheet_id: None,
                 bytes_written,
                 warnings: Vec::new(),
+                export_warnings: Vec::new(),
+            });
+        }
+
+        if matches!(req.format, ExportFormat::Pzfx | ExportFormat::ExternalArchive) {
+            let (bytes, export_warnings) = if req.format == ExportFormat::Pzfx {
+                let report = export_pzfx_bytes(req.doc)?;
+                let warns: Vec<String> = report.warnings.iter().map(format_pzfx_export_warning).collect();
+                (report.bytes, warns)
+            } else {
+                let report = export_prism_bytes_with_options(req.doc, ArchiveExportOptions { experimental: req.experimental })?;
+                let warns: Vec<String> = report.warnings.iter().map(format_import_or_archive_warning).collect();
+                (report.bytes, warns)
+            };
+            if let Some(parent) = req.out_path.parent()
+                && !parent.as_os_str().is_empty()
+                && !parent.exists()
+            {
+                fs::create_dir_all(parent)
+                    .map_err(|err| CliError::Runtime(format!("failed to create output directory `{}`: {err}", parent.display())))?;
+            }
+            write_atomic(req.out_path, &bytes)?;
+            for w in &export_warnings {
+                eprintln!("warning: {w}");
+            }
+            return Ok(ExportOutcomeSummary {
+                out_path: req.out_path.to_string_lossy().into_owned(),
+                format: req.format.as_str(),
+                sheet_id: None,
+                bytes_written: bytes.len(),
+                warnings: Vec::new(),
+                export_warnings,
             });
         }
 
@@ -433,6 +486,7 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             sheet_id,
             bytes_written: artifact.bytes.len(),
             warnings,
+            export_warnings: Vec::new(),
         })
     })
 }
@@ -447,8 +501,8 @@ fn build_cli_export_request(req: &ExportRequest<'_>) -> Result<(ExportArtifactRe
         ExportFormat::Csv => DocumentExportFormat::Csv,
         ExportFormat::Tsv => DocumentExportFormat::Tsv,
         ExportFormat::Json => DocumentExportFormat::Json,
-        ExportFormat::CurveBook | ExportFormat::CurveBookDir => {
-            return Err(CliError::Runtime(format!("format `{}` is exported via FormatRegistry", req.format.as_str())));
+        ExportFormat::CurveBook | ExportFormat::CurveBookDir | ExportFormat::Pzfx | ExportFormat::ExternalArchive => {
+            return Err(CliError::Runtime(format!("format `{}` is exported directly", req.format.as_str())));
         }
     };
     let mut spec = ExportOptionsSpec::new(doc_format);
@@ -481,7 +535,7 @@ fn build_cli_export_request(req: &ExportRequest<'_>) -> Result<(ExportArtifactRe
             }
             label
         }
-        ExportFormat::CurveBook | ExportFormat::CurveBookDir => None,
+        ExportFormat::CurveBook | ExportFormat::CurveBookDir | ExportFormat::Pzfx | ExportFormat::ExternalArchive => None,
     };
     let artifact_req = spec.into_artifact_request(req.doc, false)?;
     Ok((artifact_req, sheet_label))
@@ -508,6 +562,7 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
     let mut dpi = None;
     let mut pdf_version = PdfVersion::Pdf17;
     let mut ttf_font = None;
+    let mut experimental = false;
     let mut json = false;
     let mut idx = 0;
 
@@ -517,6 +572,9 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
         };
         if arg == "--json" {
             json = true;
+            idx += 1;
+        } else if arg == "--experimental" {
+            experimental = true;
             idx += 1;
         } else if arg == "--xlsx-fill-merged" {
             xlsx_fill_merged = true;
@@ -604,6 +662,7 @@ fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<Conve
         dpi,
         pdf_version,
         ttf_font,
+        experimental,
         json,
     })
 }
@@ -753,6 +812,7 @@ mod tests {
             tab_index: None,
             pdf_version: PdfVersion::default(),
             embedded_truetype_font: None,
+            experimental: false,
         })
         .unwrap();
         let _ = std::fs::remove_dir_all(&dir);
@@ -948,6 +1008,7 @@ mod tests {
             tab_index: None,
             pdf_version: PdfVersion::default(),
             embedded_truetype_font: None,
+            experimental: false,
         })
         .unwrap();
         assert!(svg_summary.warnings.iter().any(|w| w.starts_with("pending_embedded_result_table: ")), "warnings: {:?}", svg_summary.warnings);
@@ -965,6 +1026,7 @@ mod tests {
             tab_index: None,
             pdf_version: PdfVersion::default(),
             embedded_truetype_font: None,
+            experimental: false,
         })
         .unwrap();
         assert!(csv_summary.warnings.iter().any(|w| w.starts_with("pending_result_sheet: ")), "csv warnings: {:?}", csv_summary.warnings);

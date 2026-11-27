@@ -317,7 +317,12 @@ fn file_hover_and_file_dropped_routing_csv_and_curvebook() -> Result<(), Box<dyn
     assert!(rt.window_count() == 1 && rt.window(w1)?.app().document().data_sheets.len() == 2 && rt.window(w1)?.has_unsaved_changes());
 
     let dirty_drop = rt.dispatch(DesktopHostEvent::FileDropped { window_id: w1, path: archive_path.clone() })?;
-    assert!(dirty_drop.opened_window_id.is_some_and(|w2| w2 != w1) && rt.window_count() == 2);
+    assert_eq!(dirty_drop.action, "file.dropped_confirm_import_mode:project.open");
+    assert!(rt.window_count() == 1);
+    let new_win_drop = rt
+        .dispatch_native_file_command_with_params(w1, "project.open", &json!({ "path": archive_path.to_string_lossy(), "new_window": true }))?
+        .ok_or("expected new window outcome")?;
+    assert!(new_win_drop.opened_window_id.is_some_and(|w2| w2 != w1) && rt.window_count() == 2);
 
     let (mut multi_rt, mw1) = open_host_window(false, true, None, 1024.0, 640.0)?;
     assert!(
@@ -394,5 +399,72 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
         rt.window(zip_win)?.app().document().data_sheets.iter().find(|d| d.title == "Dropped Archive Trace").ok_or("missing .prism sheet")?;
     assert!(matches!(zip_ds.archetype, TableArchetype::Xy(_)));
     assert_eq!(zip_ds.cell(CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(9.75));
+    Ok(())
+}
+
+#[test]
+fn desktop_host_pzfx_export_preflight_prompt_skip_and_session_invariance() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::Arc;
+
+    use curvebook::desktop_host::StubNativeFileDialogAdapter;
+    use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+
+    let dir = TempDirGuard::new("curvebook-pzfx-export-host")?;
+    let proj_path = dir.child("study.curvebook");
+    let export_drops_path = dir.child("with_drops.pzfx");
+    let export_clean_path = dir.child("data_only.pzfx");
+
+    let mut doc = ProjectDocument::new("PZFX Export Study")?;
+    let mut col = curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+    for (r, (a, b)) in [(10.0, 20.0), (11.0, 21.0), (12.0, 22.0)].into_iter().enumerate() {
+        col.data_sets[0].cells[r][0] = curvebook_doc::Cell::number(a);
+        col.data_sets[1].cells[r][0] = curvebook_doc::Cell::number(b);
+    }
+    let ds = curvebook_doc::DataSheet::new("d1", "Assay Data", TableArchetype::Column(col))?;
+    let graph = curvebook_doc::GraphSheet::new_uninitialized_for_data(curvebook_doc::SheetId::new("g1"), &ds)?;
+    doc.add_data_sheet(ds)?;
+    doc.add_graph_sheet(graph)?;
+    save_project_file(&proj_path, &doc)?;
+
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: true, ..DesktopHostConfig::default() });
+    rt.set_file_dialog_adapter(adapter.clone());
+    let wid = rt.open_window(Some(proj_path.clone()), ViewportMetrics::new(1100.0, 720.0, 1.0))?;
+    rt.window_mut(wid)?.execute_and_journal("table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "value": 15.5 }))?;
+    assert!(rt.window(wid)?.has_unsaved_changes());
+    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(proj_path.as_path()));
+
+    // 1. Project with dropped graph -> ui.export.pzfx.open opens PzfxExportConfirm modal without invoking SaveFile picker.
+    let prompt_out = rt.dispatch_native_file_command(wid, "ui.export.pzfx.open")?.ok_or("expected prompt outcome")?;
+    assert_eq!(prompt_out.action, "native_file_dialog.confirm_pzfx_export:ui.export.pzfx.open");
+    assert!(
+        matches!(rt.window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::PzfxExportConfirm { ref preflight } if preflight.total_dropped_count() == 1)
+    );
+    assert!(adapter.requests().is_empty(), "confirmation prompt must open before file picker");
+
+    // 2. Confirming via project.exportPzfx opens SaveFile (.pzfx), writes file, preserves file_path & dirty, and sets status summary.
+    adapter.push_response("project.exportPzfx", Some(export_drops_path.clone()));
+    let exp_out = rt.dispatch_native_file_command(wid, "project.exportPzfx")?.ok_or("expected export outcome")?;
+    assert_eq!(exp_out.action, "native_file_dialog.completed:project.exportPzfx");
+    let res = exp_out.command_result.as_ref().ok_or("missing export result payload")?;
+    assert_eq!(res["total_dropped_count"], json!(1));
+    let summary = res["status_summary"].as_str().ok_or("missing status_summary")?;
+    assert!(summary.contains("with_drops.pzfx") && summary.contains("1 dropped"), "unexpected status_summary: {summary}");
+    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(proj_path.as_path()));
+    assert!(rt.window(wid)?.has_unsaved_changes(), "project.exportPzfx must never clear dirty state");
+    let reimported = curvebook_format::import_pzfx_bytes(&fs::read(&export_drops_path)?)?;
+    assert_eq!(reimported.document.data_sheets.len(), 1);
+    assert_eq!(reimported.document.data_sheets[0].cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(15.5));
+
+    // 3. Delete graph so project is data-only -> ui.export.pzfx.open skips prompt and exports directly.
+    rt.window_mut(wid)?.app_mut().canvas_dialogs.close_dialog();
+    rt.window_mut(wid)?.execute_and_journal("sheet.delete", json!({ "sheet_id": "g1" }))?;
+    adapter.push_response("project.exportPzfx", Some(export_clean_path.clone()));
+    let direct_out = rt.dispatch_native_file_command(wid, "ui.export.pzfx.open")?.ok_or("expected direct export outcome")?;
+    assert_eq!(direct_out.action, "native_file_dialog.completed:project.exportPzfx");
+    assert_eq!(rt.window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+    assert!(export_clean_path.is_file());
+    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(proj_path.as_path()));
+    assert!(rt.window(wid)?.has_unsaved_changes());
     Ok(())
 }

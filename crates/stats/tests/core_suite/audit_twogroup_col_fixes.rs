@@ -11,7 +11,7 @@ use curvebook_math::dist::norm_sf;
 use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::column::{
     anderson_darling, one_sample_ks_normal, one_sample_ks_normal_at_alpha, one_sample_t_test, one_sample_wilcoxon, rout_outliers,
-    run_descriptive_analysis, shapiro_wilk, summarize_column, summarize_pre_summarized_points,
+    run_descriptive_analysis, run_outlier_analysis, shapiro_wilk, summarize_column, summarize_pre_summarized_points,
 };
 use curvebook_stats::common::{select_kth_pairwise_sum, select_kth_upper_triangle_half_sum};
 use curvebook_stats::error::StatsError;
@@ -796,7 +796,8 @@ fn audit_aud05_descriptive_checklist_kth_selection_welch_scale_and_zero_cis() {
     let p_sum =
         summarize_pre_summarized_points("P", &[SummarizedPoint { mean: 10.0, sd: 0.0, n: 5.0, ss_within: 0.0, df_within: 4.0 }], conf).unwrap();
     assert_eq!((p_sum.sd, p_sum.sd_ci), (Some(0.0), None));
-    let out_k = AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: 0.05, iterative: false });
+    let outlier = OutlierSpec::Grubbs { alpha: 0.05, iterative: false };
+    let out_k = AnalysisKind::OutlierDetection(outlier);
     let pop_pre = presum_col_sheet("po", SubcolumnMode::MeanSdN, &[("G", &[&[10.0, 1.5, 6.0], &[12.0, 2.0, 6.0]])]);
     assert!(matches!(run_kind(&pop_pre, out_k.clone()), Err(StatsError::RequiresRawReplicates)));
     let emp_pre = DataSheet::new(
@@ -805,5 +806,6 @@ fn audit_aud05_descriptive_checklist_kth_selection_welch_scale_and_zero_cis() {
         TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 1, 2).unwrap()),
     )
     .unwrap();
-    assert!(matches!(run_kind(&emp_pre, out_k), Err(StatsError::EmptyInput)));
+    assert!(matches!(run_kind(&emp_pre, out_k.clone()), Err(StatsError::RequiresRawReplicates)));
+    assert!(matches!(run_outlier_analysis(&emp_pre, &spec_for("res-eo", emp_pre.id.as_str(), out_k), outlier), Err(StatsError::EmptyInput)));
 }

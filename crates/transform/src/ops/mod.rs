@@ -13,8 +13,8 @@ use std::collections::HashSet;
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, DocError, HookSource, InfoSheet, MAX_TITLE_BYTES, PartsOfWholeTable, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
-    VariableSource, parse_column_title_numeric_hook,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SummaryModeSupport, TableArchetype, TableKind, TransformAnalysisSpec,
+    VariableRole, VariableSource, parse_column_title_numeric_hook, summary_mode_row_for_spec,
 };
 
 use crate::error::TransformError;
@@ -108,6 +108,13 @@ impl<'a> TransformContext<'a> {
                             description: format!("upstream ResultSheet `{result_sheet_id}` failed: {message}"),
                         });
                     }
+                    ResultStatus::Imported | ResultStatus::ImportedStale => {
+                        return Err(TransformError::MissingHook {
+                            description: format!(
+                                "upstream ResultSheet `{result_sheet_id}` is an imported snapshot and cannot supply computed hook scalars"
+                            ),
+                        });
+                    }
                 }
                 res.lookup_scalar(parameter_key, *data_set_index).ok_or_else(|| TransformError::MissingHook {
                     description: format!("scalar `{parameter_key}` not found on ResultSheet `{result_sheet_id}`"),
@@ -178,8 +185,40 @@ impl TransformOutput {
     }
 }
 
+/// Enforce the canonical `curvebook-doc` summary-mode support matrix ([`curvebook_doc::SUMMARY_MODE_MATRIX`])
+/// for transform, spline/LOWESS, and AUC operations invoked against `Column`, `Xy`, or `Grouped` tables.
+///
+/// Leaves incompatible table archetypes (`!kind.is_compatible_with(table_kind)`) to return
+/// [`TransformError::IncompatibleTable`] downstream, and returns [`TransformError::UnsupportedSubcolumnMode`]
+/// for every refused pre-summarized cell.
+pub fn enforce_summary_mode_matrix(sheet: &DataSheet, kind: &AnalysisKind) -> Result<(), TransformError> {
+    let table_kind = sheet.archetype.kind();
+    if !kind.is_compatible_with(table_kind) {
+        return Ok(());
+    }
+    let Some(mode) = sheet.archetype.primary_subcolumn_mode() else {
+        return Ok(());
+    };
+    if !mode.is_pre_summarized() {
+        return Ok(());
+    }
+    let Some(row) = summary_mode_row_for_spec(kind, table_kind) else {
+        return Ok(());
+    };
+    let Some(verdict) = row.support_for(mode) else {
+        return Ok(());
+    };
+    match verdict {
+        SummaryModeSupport::Supported(_) => Ok(()),
+        SummaryModeSupport::Refused(reason) => {
+            Err(TransformError::UnsupportedSubcolumnMode { operation: row.label, table_kind, mode, reason: reason.message() })
+        }
+    }
+}
+
 /// Execute any [`TransformAnalysisSpec`] against `source` without mutating `source`.
 pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
+    enforce_summary_mode_matrix(source, &AnalysisKind::Transform(spec.clone()))?;
     match spec {
         TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation } => {
             let x_op = x_transform.map(MathTransformOp::Preset);
@@ -260,6 +299,9 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
 /// Execute an [`AnalysisSpec`] whose kind is [`AnalysisKind::Transform`],
 /// [`AnalysisKind::FitSplineLowess`], or [`AnalysisKind::AreaUnderCurve`] and populate a [`ResultSheet`].
 pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, ctx: &TransformContext<'_>) -> Result<ResultSheet, TransformError> {
+    if matches!(analysis.kind, AnalysisKind::Transform(_) | AnalysisKind::FitSplineLowess(_) | AnalysisKind::AreaUnderCurve(_)) {
+        enforce_summary_mode_matrix(source, &analysis.kind)?;
+    }
     match &analysis.kind {
         AnalysisKind::Transform(spec) => {
             let mut local_ctx = ctx.clone();

@@ -53,6 +53,7 @@ struct BatchExportSpec {
     sheet: Option<String>,
     dpi: Option<u16>,
     pretty: bool,
+    experimental: bool,
     tab_index: Option<usize>,
     pdf_version: PdfVersion,
     ttf_font_path: Option<PathBuf>,
@@ -165,19 +166,29 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
                 tab_index: exp.tab_index,
                 pdf_version: exp.pdf_version,
                 embedded_truetype_font: ttf_font_bytes.as_deref(),
+                experimental: exp.experimental,
             })?;
             if !parsed.json {
                 for w in &summary.warnings {
                     eprintln!("warning: {w}");
                 }
             }
-            export_summaries.push(json!({
+            for w in &summary.export_warnings {
+                push_unique_warning(&mut all_warnings, w.clone());
+            }
+            let mut export_json = json!({
                 "out": summary.out_path,
                 "format": summary.format,
                 "sheet_id": summary.sheet_id,
                 "bytes_written": summary.bytes_written,
                 "figure_warnings": summary.warnings,
-            }));
+            });
+            if !summary.export_warnings.is_empty()
+                && let Some(obj) = export_json.as_object_mut()
+            {
+                obj.insert(String::from("warnings"), json!(summary.export_warnings));
+            }
+            export_summaries.push(export_json);
         }
 
         if parsed.json {
@@ -463,6 +474,7 @@ fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) 
     };
     let dpi = parse_export_dpi(idx, obj.get("dpi"))?;
     let pretty = parse_export_pretty(idx, obj.get("pretty"))?;
+    let experimental = parse_export_experimental(idx, obj.get("experimental"))?;
     let tab_index = parse_export_tab_index(idx, obj.get("tab_index").or_else(|| obj.get("tabIndex")))?;
     let pdf_version = parse_export_pdf_version(idx, obj.get("pdf_version").or_else(|| obj.get("pdfVersion")))?;
     let ttf_font_path = parse_export_ttf_font(idx, obj.get("ttf_font").or_else(|| obj.get("ttfFont")), resolver)?;
@@ -473,10 +485,19 @@ fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) 
         sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"], &context)?.map(str::to_owned),
         dpi,
         pretty,
+        experimental,
         tab_index,
         pdf_version,
         ttf_font_path,
     })
+}
+
+fn parse_export_experimental(idx: usize, val: Option<&Value>) -> Result<bool, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].experimental` must be a boolean"))),
+    }
 }
 
 fn parse_export_pretty(idx: usize, val: Option<&Value>) -> Result<bool, CliError> {
@@ -645,7 +666,7 @@ fn reject_unknown_keys(obj: &Map<String, Value>, allowed: &[&str], context: &str
                     " (sheet replacement is automatic when `sheet` matches an existing sheet by ID or title)"
                 }
                 (ctx, "kind") if ctx.starts_with("manifest `exports[") => {
-                    " (use `format` with `curvebook`, `curvebook.d`, `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, or `json`)"
+                    " (use `format` with `curvebook`, `curvebook.d`, `pzfx`, `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, or `json`)"
                 }
                 _ => "",
             };
@@ -798,6 +819,53 @@ mod tests {
             let err = parse_batch_manifest(&manifest.to_string(), &resolver).err().unwrap();
             assert!(matches!(err, CliError::Schema(ref msg) if msg.contains("curvebook.batch.v1")), "unexpected error for `{bad_schema}`: {err:?}");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_manifest_executes_project_merge_and_clear_origin_under_workdir() {
+        let dir = std::env::temp_dir().join(format!("cb_batch_merge_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let make_proj = |title: &str, val: f64| {
+            let mut doc = curvebook_doc::ProjectDocument::new(title).unwrap();
+            let mut col = curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
+            col.data_sets[0].cells = vec![vec![curvebook_doc::Cell::number(val)], vec![curvebook_doc::Cell::number(val + 1.0)]];
+            doc.add_data_sheet(curvebook_doc::DataSheet::new("d1", title, curvebook_doc::TableArchetype::Column(col)).unwrap()).unwrap();
+            doc
+        };
+        let base_path = dir.join("base.curvebook");
+        let extra_path = dir.join("extra.curvebook");
+        curvebook_format::save_project_file(&base_path, &make_proj("Base", 10.0)).unwrap();
+        curvebook_format::save_project_file(&extra_path, &make_proj("Extra", 40.0)).unwrap();
+
+        let resolver = PathResolver::Sandboxed(WorkdirGuard::new(&dir).unwrap());
+        let manifest_json = json!({
+            "schema": "curvebook.batch.v1",
+            "project": "base.curvebook",
+            "commands": [
+                { "cmd": "project.merge", "params": { "path": "extra.curvebook", "merged_at": "unix:1700005000" } },
+                { "cmd": "sheet.clearOrigin", "params": { "source_label": "extra.curvebook" } }
+            ],
+            "exports": []
+        });
+        let manifest = parse_batch_manifest(&manifest_json.to_string(), &resolver).unwrap();
+        let (mut session, _) = super::open_manifest_base_session(&manifest).unwrap();
+        session.set_path_policy(curvebook_engine::ExternalPathPolicy::workdir(&dir).unwrap());
+        let executed = super::execute_commands(&mut session, &manifest.commands).unwrap();
+        assert_eq!(executed.results.len(), 2);
+        assert_eq!(session.document().data_sheets.len(), 2);
+        assert_eq!(session.document().data_sheets[1].title, "Extra");
+        assert!(session.document().data_sheets.iter().all(|s| s.origin.is_none()));
+
+        let escape_manifest = json!({
+            "schema": "curvebook.batch.v1",
+            "commands": [{ "cmd": "project.merge", "params": { "path": "../outside.curvebook" } }],
+            "exports": []
+        });
+        assert!(matches!(parse_batch_manifest(&escape_manifest.to_string(), &resolver), Err(CliError::PathEscape(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -17,6 +17,7 @@ mod issue_59_pzfx_decimal_comma;
 mod mcp_e2e;
 mod mcp_surface;
 mod protocol_props;
+mod pzfx_and_archive_export;
 mod r17_1_mcp_xlsx;
 mod r17_4_mcp_usability;
 mod r19_5_mcp_export_warnings;

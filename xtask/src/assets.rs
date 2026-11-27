@@ -7,7 +7,7 @@ use std::path::{Component, Path};
 
 use crate::brands::{
     ADAPTED_UPSTREAM_BRAND, BRANDS, PRE_RENAME_ASSET_BRANDS, check_pdf_metadata_checked, check_svg_metadata, inflate_gzip_bounded,
-    is_attribution_or_notice_path, is_forbidden_bundled_dir, is_plan_prism_path, mask_attributed_upstream_url,
+    is_attribution_or_notice_path, is_corpus_path, is_forbidden_bundled_dir, is_plan_prism_path, mask_attributed_upstream_url,
 };
 use crate::scan_util::{ZIP_CONTAINER_EXTS, collect_dist_files, format_error_list, is_regular_file, looks_like_zip, lower_ext};
 use crate::zip_read::{ZipArchive, ZipLimits};
@@ -402,8 +402,15 @@ fn read_provenance_docs(root: &Path) -> Result<(String, String, String), String>
 
 pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, attribution_md: &str, notice: &str) -> Result<usize, String> {
     let count = verify_assets(files, assets_md, attribution_md)?;
-    let mut errors: Vec<String> =
-        files.iter().filter(|p| is_plan_prism_path(p)).map(|p| format!("{p}: committed `plan/prism` reference directory is forbidden")).collect();
+    let mut errors = Vec::new();
+    for path in files {
+        if is_plan_prism_path(path) {
+            errors.push(format!("{path}: committed `plan/prism` reference directory is forbidden"));
+        }
+        if is_corpus_path(path) {
+            errors.push(format!("{path}: committed `corpus/` directory is forbidden"));
+        }
+    }
     let tracked: BTreeSet<&str> = files.iter().map(String::as_str).collect();
     let (asset_rows, attr_rows) = (parse_attribution_table(assets_md, "ASSETS.md")?, parse_attribution_table(attribution_md, "ATTRIBUTION.md")?);
     asset_rows
@@ -515,6 +522,10 @@ pub(crate) fn scan_dist_artefacts(catalog: &RepoAssetCatalog, dist_dir: &Path) -
     rel_files.sort();
     let (mut checked, mut violations) = (0usize, Vec::new());
     for rel in rel_files {
+        if is_corpus_path(&rel) {
+            violations.push(format!("{rel}: bundled `corpus/` directory is forbidden"));
+            continue;
+        }
         if is_forbidden_bundled_dir(&rel) {
             violations.push(format!("{rel}: bundled reference or historical audit directory is forbidden"));
             continue;
@@ -557,6 +568,10 @@ fn scan_dist_asset_bytes(
             Ok(zip) => {
                 for (name, entry_bytes) in zip.iter() {
                     let nested = format!("{display_path}!{name}");
+                    if is_corpus_path(name) {
+                        violations.push(format!("{nested}: bundled `corpus/` directory is forbidden"));
+                        continue;
+                    }
                     if is_forbidden_bundled_dir(name) {
                         violations.push(format!("{nested}: bundled reference or historical audit directory is forbidden"));
                     } else {
@@ -680,5 +695,33 @@ mod tests {
         dist.write_bytes("corrupt.zip", b"NOT_A_ZIP");
         let (_, errs) = scan_dist_artefacts(&RepoAssetCatalog { allowed_sha256: Default::default() }, dist.path()).unwrap();
         assert!(errs.iter().any(|e| e.contains("corrupt.zip")), "{errs:?}");
+    }
+
+    #[test]
+    fn corpus_gate_rejects_tracked_and_packaged_corpus_while_allowing_untracked_local_files() {
+        // 1. Tracked corpus/ file fails verify_repo_provenance.
+        let tracked_root = TestDir::new("assets-corpus-tracked");
+        tracked_root.write("corpus/sample.txt", "clean");
+        let tracked_err = super::verify_repo_provenance(tracked_root.path(), &[String::from("corpus/sample.txt")], "", "", "CurveBook").unwrap_err();
+        assert!(tracked_err.contains("corpus/"), "tracked corpus file must fail assets gate: {tracked_err}");
+
+        // 2. Bundled corpus/ file and archived corpus/ entry fail scan_dist_artefacts.
+        let dist_root = TestDir::new("assets-corpus-dist");
+        dist_root.write("app/corpus/sample.txt", "clean");
+        dist_root.write_bytes("pkg.zip", &zip_single("corpus/nested.txt", b"clean"));
+        let cat = super::RepoAssetCatalog { allowed_sha256: std::collections::BTreeSet::new() };
+        let (_, dist_errs) = super::scan_dist_artefacts(&cat, dist_root.path()).unwrap();
+        assert!(dist_errs.iter().any(|e| e.contains("app/corpus/sample.txt") && e.contains("corpus/")), "{dist_errs:?}");
+        assert!(dist_errs.iter().any(|e| e.contains("pkg.zip!corpus/nested.txt") && e.contains("corpus/")), "{dist_errs:?}");
+
+        // 3. Untracked gitignored local corpus/ files must NOT fail assets::run.
+        let git_root = TestDir::git_repo("assets-corpus-untracked");
+        git_root.write(".gitignore", "/corpus\n");
+        git_root.write("ASSETS.md", "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
+        git_root.write("ATTRIBUTION.md", "| Asset | Author | Source | Licence | Notes |\n|---|---|---|---|---|\n");
+        git_root.write("NOTICE", "CurveBook\n");
+        git_root.git_add_all();
+        git_root.write("corpus/third-party-prism/local.pzfx", "<PrismFile/>");
+        assert!(super::run(git_root.path()).is_ok(), "untracked local corpus/ files must not fail assets gate");
     }
 }

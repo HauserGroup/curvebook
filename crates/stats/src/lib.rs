@@ -86,6 +86,17 @@ pub enum AnalysisFamily {
 /// and produce a complete [`ResultSheet`] (scalars, tabs, pairwise comparison records, curves, and
 /// plain-language `ChecklistItem` diagnostics).
 pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultSheet, StatsError> {
+    if !matches!(
+        spec.kind,
+        AnalysisKind::Transform(_)
+            | AnalysisKind::FitSplineLowess(_)
+            | AnalysisKind::AreaUnderCurve(_)
+            | AnalysisKind::LinearRegression(_)
+            | AnalysisKind::NonlinearRegression(_)
+            | AnalysisKind::ImportedSnapshot(_)
+    ) {
+        common::enforce_summary_mode_matrix(sheet, &spec.kind)?;
+    }
     match &spec.kind {
         AnalysisKind::DescriptiveStats(d) => column::run_descriptive_analysis(sheet, spec, d),
         AnalysisKind::OutlierDetection(o) => column::run_outlier_analysis(sheet, spec, *o),
@@ -111,5 +122,8 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::PowerAnalysis(p) => power::run_power_analysis(sheet, spec, p),
         AnalysisKind::SimpleLogisticRegression(sl) => simple_logistic::run_simple_logistic_analysis(sheet, spec, sl),
         AnalysisKind::LeveneTest(lt) => variance_homogeneity::run_levene_analysis(sheet, spec, lt),
+        AnalysisKind::ImportedSnapshot(_) => {
+            Err(StatsError::IncompatibleAnalysisSpec { expected: "computed statistical analysis (imported snapshot)" })
+        }
     }
 }

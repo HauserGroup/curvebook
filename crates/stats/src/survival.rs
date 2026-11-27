@@ -2363,6 +2363,7 @@ fn resolve_cox_cat_levels(
             source: pv.source.clone(),
             level_order: pv.level_order.clone(),
             cells,
+            display_decimals: pv.display_decimals,
         };
         let mut lvls: Vec<String> =
             retained_col.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();

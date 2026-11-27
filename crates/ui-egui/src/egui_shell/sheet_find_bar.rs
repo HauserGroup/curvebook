@@ -842,10 +842,14 @@ mod tests {
         table.data_sets[0] = DataSetColumn {
             title: String::from("Control"),
             cells: vec![vec![Cell::number(12.5)], vec![Cell::text("Alpha")], vec![Cell::text("alpha")]],
+            subcolumn_titles: Vec::new(),
+            display_decimals: None,
         };
         table.data_sets[1] = DataSetColumn {
             title: String::from("Treated"),
             cells: vec![vec![Cell::number(125.0)], vec![Cell::text("Beta")], vec![Cell::text("AlphaBeta")]],
+            subcolumn_titles: Vec::new(),
+            display_decimals: None,
         };
         table.row_titles = vec![String::from("Baseline"), String::from("Peak"), String::from("Recovery")];
         DataSheet::new("ds_find", "Dose Table", TableArchetype::Column(table)).expect("data sheet")

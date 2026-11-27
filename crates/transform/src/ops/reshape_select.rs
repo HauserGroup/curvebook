@@ -7,9 +7,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DerivedColumnFormula,
     DocError, GroupedTable, InfoSheet, MAX_SHEET_CELLS, MultipleVariablesTable, NestedTable, PartsOfWholeTable, PlateCellOrigin, ReplicateStacking,
-    ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource,
-    XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
-    validate_title,
+    ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SummaryModeRefusalReason, SurvivalTable, TableArchetype, TableKind, VariableColumn,
+    VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_cell_grid, validate_data_sets,
+    validate_rows, validate_sheet_cells, validate_title,
 };
 use curvebook_math::sum;
 
@@ -95,12 +95,6 @@ fn remap_transposed_exclusion_notes(source: &DataSheet) -> Vec<CellExclusionNote
         },
         _ => None,
     };
-    let primary_only = matches!(
-        &source.archetype,
-        TableArchetype::Xy(t)
-            if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr)
-    );
-
     let mut out: Vec<CellExclusionNote> = source
         .exclusion_notes
         .iter()
@@ -114,11 +108,6 @@ fn remap_transposed_exclusion_notes(source: &DataSheet) -> Vec<CellExclusionNote
                 }
                 let new_row = note.coord.col.checked_mul(stride)?.checked_add(note.coord.subcol)?;
                 CellCoord::new(new_row, note.coord.row, 0)
-            } else if primary_only {
-                if note.coord.subcol != 0 {
-                    return None;
-                }
-                CellCoord::new(note.coord.col, note.coord.row, 0)
             } else {
                 CellCoord::new(note.coord.col, note.coord.row, note.coord.subcol)
             };
@@ -145,11 +134,6 @@ fn remap_transposed_plate_well_origins(source: &DataSheet) -> Vec<PlateCellOrigi
         },
         _ => None,
     };
-    let primary_only = matches!(
-        &source.archetype,
-        TableArchetype::Xy(t)
-            if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr)
-    );
 
     let mut out: Vec<PlateCellOrigin> = source
         .plate_well_origins
@@ -160,11 +144,6 @@ fn remap_transposed_plate_well_origins(source: &DataSheet) -> Vec<PlateCellOrigi
                     return None;
                 }
                 CellCoord::new(origin.coord.col * stride + origin.coord.subcol, origin.coord.row, 0)
-            } else if primary_only {
-                if origin.coord.subcol != 0 {
-                    return None;
-                }
-                CellCoord::new(origin.coord.col, origin.coord.row, 0)
             } else {
                 CellCoord::new(origin.coord.col, origin.coord.row, origin.coord.subcol)
             };
@@ -184,7 +163,12 @@ fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<(Tabl
     match arch {
         TableArchetype::Column(t) => {
             if t.subcolumn_mode != SubcolumnMode::Single {
-                return Err(TransformError::IncompatibleTable { operation: "Transpose on multi-subcolumn Column table", kind: TableKind::Column });
+                return Err(TransformError::UnsupportedSubcolumnMode {
+                    operation: "Transform: Transpose (Column)",
+                    table_kind: TableKind::Column,
+                    mode: t.subcolumn_mode,
+                    reason: SummaryModeRefusalReason::UnsupportedSummaryMode.message(),
+                });
             }
             let tc = transpose_single_columns(&t.data_sets, &t.row_titles, swap_titles)?;
             let row_titles_expanded = !tc.row_titles.iter().all(String::is_empty);
@@ -397,8 +381,15 @@ fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<(TableArchetype, Vec<S
             out.validate()?;
             Ok((TableArchetype::Column(out), warnings))
         }
-        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
-            let tc = transpose_subcolumn_datasets(&t.data_sets, &row_labels, 3, swap_titles)?;
+        SubcolumnMode::MeanSdN
+        | SubcolumnMode::MeanSemN
+        | SubcolumnMode::MeanCvN
+        | SubcolumnMode::MeanSd
+        | SubcolumnMode::MeanSem
+        | SubcolumnMode::MeanLowHigh
+        | SubcolumnMode::UpperLowerLimits
+        | SubcolumnMode::MedianIqr => {
+            let tc = transpose_subcolumn_datasets(&t.data_sets, &row_labels, t.y_subcolumn_mode.subcolumn_count(), swap_titles)?;
             let row_titles_expanded = !tc.row_titles.iter().all(String::is_empty);
             let out = ColumnTable {
                 design_hint: ColumnDesignHint::PrecomputedError,
@@ -450,20 +441,6 @@ fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<(TableArchetype, Vec<S
             };
             out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
             warnings.push(format!("transposed XY RawReplicates({n}) into {new_rows} stacked Column rows to preserve all replicate observations"));
-            Ok((TableArchetype::Column(out), warnings))
-        }
-        SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
-            let tc = transpose_single_columns(&t.data_sets, &row_labels, swap_titles)?;
-            let row_titles_expanded = !tc.row_titles.iter().all(String::is_empty);
-            let out = ColumnTable {
-                design_hint: ColumnDesignHint::UnpairedReplicates,
-                subcolumn_mode: SubcolumnMode::Single,
-                row_titles: tc.row_titles,
-                row_titles_expanded,
-                data_sets: tc.data_sets,
-            };
-            out.validate()?;
-            warnings.push(format!("Column tables do not support {:?} error subcolumns; transpose retained primary values only", t.y_subcolumn_mode));
             Ok((TableArchetype::Column(out), warnings))
         }
     }

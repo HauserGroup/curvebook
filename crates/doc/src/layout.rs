@@ -588,6 +588,9 @@ pub struct LayoutSheet {
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
+    /// Optional external import/merge origin metadata; `None` for natively authored sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::ids::SheetOrigin>,
 }
 
 fn rect_is_finite(rect: RectPt) -> bool {
@@ -602,7 +605,7 @@ impl LayoutSheet {
         let title = title.into();
         validate_title(&title)?;
         spec.validate()?;
-        Ok(Self { id, title, spec, floating_notes: Vec::new(), color_tag: None })
+        Ok(Self { id, title, spec, floating_notes: Vec::new(), color_tag: None, origin: None })
     }
 
     /// Return the first non-finite float field path in this layout sheet, if any.
@@ -617,13 +620,16 @@ impl LayoutSheet {
         None
     }
 
-    /// Validate sheet identity, title, layout specification, and floating-note geometry.
+    /// Validate sheet identity, title, layout specification, origin metadata, and floating-note geometry.
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
         self.spec.validate()?;
         for note in &self.floating_notes {
             note.validate()?;
+        }
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
         }
         Ok(())
     }
@@ -641,10 +647,13 @@ impl<'de> serde::Deserialize<'de> for LayoutSheet {
             spec: LayoutSpec,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
+            #[serde(default)]
+            origin: Option<crate::ids::SheetOrigin>,
         }
 
         let raw = RawLayoutSheet::deserialize(deserializer)?;
-        let sheet = Self { id: raw.id, title: raw.title, spec: raw.spec, floating_notes: raw.floating_notes, color_tag: raw.color_tag };
+        let sheet =
+            Self { id: raw.id, title: raw.title, spec: raw.spec, floating_notes: raw.floating_notes, color_tag: raw.color_tag, origin: raw.origin };
         sheet.validate().map_err(serde::de::Error::custom)?;
         Ok(sheet)
     }

@@ -28,6 +28,10 @@ const ALLOW_MARKER: &str = "brand-ok";
 const SELF_SCANNER_PATHS: &str = "xtask/src/brands.rs xtask/src/cleanroom.rs xtask/src/assets.rs xtask/src/bundle.rs xtask/src/layers.rs";
 const ROADMAP_R24_ANCHOR: &str = "r24-clean-room-prism--pzfx-project-import-with-authoritative-cell-budget";
 const PLAN_PRISM_SCOPE: &str = "plan/prism";
+const INTEROP_CORPUS_ALLOWLIST_FILE: &str = "xtask/src/interop_corpus.rs";
+const INTEROP_CORPUS_DEFAULT_DIR: &str = "corpus/third-party-prism";
+const PZFX_EXPORT_ALLOWLIST_FILE: &str = "crates/format/src/pzfx/export.rs";
+const PZFX_VENDOR_ROOT_ELEMENT: &str = "GraphPadPrismFile";
 const BINARY_ASSET_EXT: &str =
     "png jpg jpeg gif webp bmp tif tiff ico icns avif svgz pdf eps icc icm cur ani ase aco ttf otf ttc woff woff2 eot pfb mp4 wav mp3";
 const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
@@ -116,9 +120,20 @@ fn path_contains_dir(t: &str, dir: &str) -> bool {
 pub(crate) fn is_plan_prism_path(path: &str) -> bool {
     path_contains_dir(&norm_rel(path), PLAN_PRISM_SCOPE)
 }
+pub(crate) fn is_corpus_path(path: &str) -> bool {
+    path_contains_dir(&norm_rel(path), "corpus")
+}
+pub(crate) fn contains_vendor_brand_word(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    BRANDS.split_ascii_whitespace().any(|brand| {
+        let mut found = false;
+        collect_word_matches(text, &lower, brand, PrismPolicy::Strict, |_| found = true);
+        found
+    })
+}
 pub(crate) fn is_forbidden_bundled_dir(rel: &str) -> bool {
     let t = norm_rel(rel);
-    ["docs/audit", "docs/history/audit", PLAN_PRISM_SCOPE].iter().any(|d| path_contains_dir(&t, d))
+    ["docs/audit", "docs/history/audit", PLAN_PRISM_SCOPE, "corpus"].iter().any(|d| path_contains_dir(&t, d))
 }
 pub(crate) fn is_crates_or_apps_path(path: &str) -> bool {
     let t = norm_rel(path);
@@ -208,6 +223,13 @@ fn try_scan_doc_binary_metadata(path: &str, ext: &str, bytes: &[u8], allow_packa
     Ok(false)
 }
 
+fn is_prism_format_module_path(path: &str) -> bool {
+    let t = norm_rel(path);
+    t == "crates/format/src/prism.rs"
+        || t.strip_prefix("crates/format/src/prism/")
+            .is_some_and(|leaf| !leaf.is_empty() && !leaf.contains('/') && leaf.ends_with(".rs") && leaf != ".rs")
+}
+
 fn scan_tracked_path_name(path: &str, out: &mut Vec<BrandHit>) {
     let norm = path.replace('\\', "/");
     if norm == PLAN_PRISM_SCOPE || norm.starts_with("plan/prism/") {
@@ -218,8 +240,17 @@ fn scan_tracked_path_name(path: &str, out: &mut Vec<BrandHit>) {
     if is_crates_or_apps_path(&norm) {
         collect_line_words(path, 1, &norm, ADAPTED_UPSTREAM_BRAND, PrismPolicy::Strict, out);
     }
-    let pol = if norm == "crates/format/src/prism.rs" { PrismPolicy::AllowExactBarePrism } else { PrismPolicy::Strict };
-    collect_line_words(path, 1, &norm, BRANDS, pol, out);
+    if let Some(leaf) = norm.strip_prefix("crates/format/src/prism/")
+        && !leaf.is_empty()
+        && !leaf.contains('/')
+        && leaf.ends_with(".rs")
+        && leaf != ".rs"
+    {
+        collect_line_words(path, 1, leaf, BRANDS, PrismPolicy::Strict, out);
+    } else {
+        let pol = if norm == "crates/format/src/prism.rs" { PrismPolicy::AllowExactBarePrism } else { PrismPolicy::Strict };
+        collect_line_words(path, 1, &norm, BRANDS, pol, out);
+    }
     dedup_tail_hits(out, from);
 }
 
@@ -244,6 +275,8 @@ fn scan_common_surface_text(path: &str, ext: &str, text: &str, allow_packaged: b
         out.extend(check_svg_metadata(path, text));
     } else if matches!(ext, "html" | "htm") {
         out.extend(check_html_metadata(path, text));
+    } else if ext == "wxs" {
+        scan_wxs(path, text, out);
     } else if lp.ends_with(".plist")
         || lp.ends_with(".plist.in")
         || lp.ends_with(".mime.xml")
@@ -257,6 +290,24 @@ fn scan_common_surface_text(path: &str, ext: &str, text: &str, allow_packaged: b
         return false;
     }
     true
+}
+
+fn scan_wxs(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    for (idx, line) in text.lines().enumerate() {
+        let (t, ln) = (line.trim(), idx + 1);
+        collect_line_words(path, ln, line, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, out);
+        if t.starts_with("<Extension ") && t.ends_with('>') {
+            let mut work = t.to_owned();
+            for exact_attr in [r#"Id="prism""#, r#"ContentType="application/x-prism-project""#, r#"ContentType="application/x-prism-xml""#] {
+                if work.contains(exact_attr) {
+                    work = work.replace(exact_attr, r#"Attr="format_ext""#);
+                }
+            }
+            collect_line_words(path, ln, &work, BRANDS, PrismPolicy::Strict, out);
+        } else {
+            collect_line_words(path, ln, line, BRANDS, PrismPolicy::Strict, out);
+        }
+    }
 }
 
 fn scan_packaging_descriptor(path: &str, lp: &str, text: &str, out: &mut Vec<BrandHit>) {
@@ -386,7 +437,7 @@ fn is_generated_docs_html_path(path: &str) -> bool {
 }
 
 fn mask_generated_docs_html_tokens(path: &str, line: &str) -> Option<String> {
-    const TOKENS: &str = "table.importPrism table_import_prism #cmd-table-importprism #mcp-tool-table_import_prism #format-prism id=\"format-prism\" import_prism_bytes prism.rs {pzfx,prism, &quot;prism&quot; \"prism\" <code>prism</code> `prism` https://github.com/HauserGroup/curvebook/ http://github.com/HauserGroup/curvebook/";
+    const TOKENS: &str = "table.importPrism table_import_prism #cmd-table-importprism #mcp-tool-table_import_prism project.exportPrism project_export_prism #cmd-project-exportprism #mcp-tool-project_export_prism #format-prism id=\"format-prism\" import_prism_bytes export_prism_bytes prism.rs {pzfx,prism, {pzfx,prism} &quot;prism&quot; \"prism\" <code>prism</code> `prism` https://github.com/HauserGroup/curvebook/ http://github.com/HauserGroup/curvebook/";
     let norm = path.replace('\\', "/");
     if norm.ends_with("/registry/formats.html") && line.trim() == "prism" {
         return Some(String::from("format_token"));
@@ -401,6 +452,7 @@ fn mask_generated_docs_html_tokens(path: &str, line: &str) -> Option<String> {
     if norm.ends_with("/contribute/agents.html") && ((line.contains("Scope:") && line.contains(PLAN_PRISM_SCOPE)) || line.trim() == "plan/prism/") {
         rep(PLAN_PRISM_SCOPE, "plan/ref_frames");
     }
+    rep("crates/format/src/prism/", "crates/format/src/format_mod/");
     TOKENS.split_ascii_whitespace().for_each(|tok| rep(tok, "format_token"));
     changed.then_some(work)
 }
@@ -421,8 +473,13 @@ fn scan_text_lines(path: &str, text: &str, allow_packaged: bool, is_md: bool, ou
             if path == "AGENTS.md" && line.contains("Scope:") && line.contains(PLAN_PRISM_SCOPE) {
                 work = Cow::Owned(work.replace(PLAN_PRISM_SCOPE, "plan/ref_frames"));
             }
-            for tok in ["table.importPrism", "import_prism_bytes", "prism.rs", "{pzfx,prism,"] {
-                if work.contains(tok) && (is_dev || tok == "table.importPrism") {
+            if is_dev && work.contains("crates/format/src/prism/") {
+                work = Cow::Owned(work.replace("crates/format/src/prism/", "crates/format/src/format_mod/"));
+            }
+            for tok in
+                ["table.importPrism", "project.exportPrism", "import_prism_bytes", "export_prism_bytes", "prism.rs", "{pzfx,prism,", "{pzfx,prism}"]
+            {
+                if work.contains(tok) && (is_dev || matches!(tok, "table.importPrism" | "project.exportPrism")) {
                     work = Cow::Owned(work.replace(tok, "format_importer"));
                 }
             }
@@ -446,7 +503,7 @@ fn is_negative_brand_guard_literal(path: &str, src: &str, lit: &ExtractedLiteral
 }
 
 fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
-    const FMT_TOKS: &str = "table.importPrism importPrism import_prism_bytes <PrismFile </PrismFile> PrismXMLVersion PrismTableMeta";
+    const FMT_TOKS: &str = "table.importPrism importPrism import_prism_bytes project.exportPrism exportPrism export_prism_bytes project_export_prism ExportPrismParams run_project_export_prism <PrismFile </PrismFile> PrismXMLVersion PrismTableMeta";
     let (lines, mut lexer, mut seen) = (text.lines().collect::<Vec<_>>(), RustLexer::new(text), BTreeSet::new());
     let (strict_ui, is_fmt) = (
         path.starts_with("crates/ui-egui/src/") || path.starts_with("apps/"),
@@ -471,12 +528,21 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             }
         } else if lexer.try_skip_char_literal() {
         } else if let Some(lit) = lexer.try_read_raw_string().or_else(|| lexer.try_read_quoted_string()) {
-            if is_negative_brand_guard_literal(path, text, &lit) {
+            let rel_path = norm_rel(path);
+            if is_negative_brand_guard_literal(path, text, &lit)
+                || (rel_path == INTEROP_CORPUS_ALLOWLIST_FILE && lit.text == INTEROP_CORPUS_DEFAULT_DIR)
+                || (rel_path == PZFX_EXPORT_ALLOWLIST_FILE && lit.text == PZFX_VENDOR_ROOT_ELEMENT)
+            {
                 continue;
             }
             let pol = PrismPolicy::RustLiteral {
                 bare: is_import_export_prism_literal(path, text, &lit),
-                cmd: lit.text.contains("table.importPrism") || lit.text == "cmd.table.importPrism" || lit.text == "importPrism",
+                cmd: lit.text.contains("table.importPrism")
+                    || lit.text == "cmd.table.importPrism"
+                    || lit.text == "importPrism"
+                    || lit.text.contains("project.exportPrism")
+                    || lit.text == "cmd.project.exportPrism"
+                    || lit.text == "exportPrism",
                 xml: ["<PrismFile", "</PrismFile>", "PrismXMLVersion"].iter().any(|t| lit.text.contains(t)) || lit.text.trim() == "PrismFile",
                 it_stat: strict_ui
                     && path == "crates/ui-egui/src/i18n.rs"
@@ -502,10 +568,10 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 }
 
 fn is_format_test_container_literal(path: &str, text: &str) -> bool {
-    const WORDS: &str = "zip|pzfx|bytes|open |open:|write |save |to prism|finish |import |expected |prism json|prism:";
+    const WORDS: &str = "zip|pzfx|bytes|open |open:|write |save |to prism|finish |import |export |expected |prism json|prism:";
     let is_test = path.starts_with("tests/") || path.contains("/tests/");
-    (text.contains("import_prism_bytes") && (path.starts_with("crates/format/") || is_test))
-        || ((is_test || matches!(path, "apps/curvebook-web/src/lib.rs" | "crates/format/src/prism.rs"))
+    ((text.contains("import_prism_bytes") || text.contains("export_prism_bytes")) && (path.starts_with("crates/format/") || is_test))
+        || ((is_test || path == "apps/curvebook-web/src/lib.rs" || is_prism_format_module_path(path))
             && !text.contains("Prism")
             && text.contains("prism")
             && text.chars().all(|b| b.is_ascii_alphanumeric() || matches!(b, '_' | '-' | '.' | '/' | ' ' | ':' | '{' | '}'))
@@ -513,10 +579,11 @@ fn is_format_test_container_literal(path: &str, text: &str) -> bool {
 }
 
 fn is_canonical_format_rust_ident(path: &str, ident: &str) -> bool {
-    const EXACT: &str = "prism DESC_PRISM PrismAdapter PrismManifest PrismTableMeta PrismInfoMeta ImportPrismParams PrismFile PrismXMLVersion";
-    const PFX: &str = "import_prism open_prism run_import_prism schema_import_prism parse_prism_constant";
+    const EXACT: &str =
+        "prism DESC_PRISM PrismAdapter PrismManifest PrismTableMeta PrismInfoMeta ImportPrismParams ExportPrismParams PrismFile PrismXMLVersion";
+    const PFX: &str = "import_prism export_prism project_export_prism open_prism run_import_prism run_project_export_prism schema_import_prism schema_export_prism schema_project_export_prism parse_prism_constant";
     const FORBIDDEN: &str = "style theme palette logo icon ui widget dialog like clone copy competitor vendor brand title_bar";
-    const REQUIRED: &str = "zip pzfx bytes import open report manifest file path sess host res sum opened inspect container archive cleanroom synthetic merge budget json csv bad nan legacy renamed tpl batch huge test c_prism";
+    const REQUIRED: &str = "zip pzfx bytes import export open report manifest file path sess host res sum opened inspect container archive cleanroom synthetic merge budget json csv bad nan legacy renamed tpl batch huge test c_prism";
     if path.starts_with("crates/ui-egui/src/") {
         return false;
     }
@@ -642,8 +709,10 @@ fn is_token_match_exempt(raw: &str, lower: &str, word: &'static str, pos: usize,
             if raw.as_bytes().get(pos..end) == Some(b"prism") && is_prism_extension_token(lower.as_bytes(), pos, end) {
                 return true;
             }
-            let is_cmd =
-                raw.get(pos.saturating_sub(12)..end) == Some("table.importPrism") || raw.get(pos.saturating_sub(6)..end) == Some("importPrism");
+            let is_cmd = raw.get(pos.saturating_sub(12)..end) == Some("table.importPrism")
+                || raw.get(pos.saturating_sub(6)..end) == Some("importPrism")
+                || raw.get(pos.saturating_sub(14)..end) == Some("project.exportPrism")
+                || raw.get(pos.saturating_sub(6)..end) == Some("exportPrism");
             let is_xml = raw.get(pos..pos + 9) == Some("PrismFile") || raw.get(pos..pos + 15) == Some("PrismXMLVersion");
             match policy {
                 PrismPolicy::Strict | PrismPolicy::RustComment(_) => false,
@@ -672,7 +741,7 @@ fn is_token_match_exempt(raw: &str, lower: &str, word: &'static str, pos: usize,
 }
 
 fn is_import_export_prism_literal(path: &str, src: &str, lit: &ExtractedLiteral) -> bool {
-    const CALLS: &str = "apply_import_report load_import_report importer_by_format exporter_by_format add_filter open_prism import_prism handle_native_import_file formatdescriptor file_extensions import_extensions export_extensions format_tag format_id format_opt detect_ext";
+    const CALLS: &str = "apply_import_report load_import_report importer_by_format exporter_by_format add_filter open_prism import_prism export_prism project_export_prism handle_native_import_file formatdescriptor file_extensions import_extensions export_extensions format_tag format_id format_opt detect_ext";
     const UI_FNS: &str = "label title text button tooltip heading window_title set_title";
     const UI_FLDS: &str = "label title text tooltip summary beginner message placeholder";
     if lit.text != "prism" {
@@ -1094,8 +1163,8 @@ fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Ve
             .and_then(|r| r.split_once('/'))
             .is_some_and(|(i, t)| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()) && t == f)
     };
-    if text == "table_import_prism"
-        && ((ctx.method == "tools/list" && ctx.entry_tool == Some("table_import_prism") && top_field("name"))
+    if matches!(text, "table_import_prism" | "project_export_prism")
+        && ((ctx.method == "tools/list" && ctx.entry_tool == Some(text) && top_field("name"))
             || (ctx.method == "tools/call"
                 && matches!(ctx.called_tool, Some("list_toolsets" | "command_list"))
                 && (ptr.ends_with("/name") || ptr.ends_with("/mcp_tool"))))
@@ -1103,16 +1172,20 @@ fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Ve
         return;
     }
     let pol = if ctx.method == "tools/list"
-        && ctx.entry_tool == Some("open_file")
+        && matches!(ctx.entry_tool, Some("open_file" | "save_file" | "export"))
         && ptr.contains("/inputSchema/properties/format/enum/")
         && text == "prism"
     {
         PrismPolicy::AllowExactBarePrism
-    } else if (ctx.method == "tools/list" && ctx.entry_tool == Some("table_import_prism") && top_field("description"))
+    } else if (ctx.method == "tools/list"
+        && matches!(ctx.entry_tool, Some("table_import_prism" | "project_export_prism"))
+        && top_field("description"))
         || (ctx.method == "tools/call"
             && matches!(ctx.called_tool, Some("list_toolsets" | "command_list" | "ui_inspect"))
             && (ptr.ends_with("/command_id") || ptr.ends_with("/id") || ptr.ends_with("/widget_id"))
-            && (text == "table.importPrism" || text.ends_with(".table.importPrism")))
+            && (matches!(text, "table.importPrism" | "project.exportPrism")
+                || text.ends_with(".table.importPrism")
+                || text.ends_with(".project.exportPrism")))
     {
         PrismPolicy::UiTextRun { it_stat: false, cmd_id: true }
     } else {
@@ -1159,7 +1232,8 @@ fn scan_dir_files(
     for rel in files {
         let display = display_prefix.map_or_else(|| rel.clone(), |p| format!("{p}/{rel}"));
         if check_forbidden && is_forbidden_bundled_dir(&rel) {
-            hits.push(BrandHit { path: display, line: 1, brand: "prism" });
+            let brand = if is_corpus_path(&rel) { "corpus" } else { "prism" };
+            hits.push(BrandHit { path: display, line: 1, brand });
             continue;
         }
         scan_strict_label_words(&display, &rel, include_adapted, &mut hits);
@@ -1221,7 +1295,8 @@ fn scan_zip_container_bytes(
         stats.archive_entries += 1;
         let entry_path = format!("{display_path}!{name}");
         if is_forbidden_bundled_dir(name) {
-            hits.push(BrandHit { path: entry_path, line: 1, brand: "prism" });
+            let brand = if is_corpus_path(name) { "corpus" } else { "prism" };
+            hits.push(BrandHit { path: entry_path, line: 1, brand });
             continue;
         }
         scan_strict_label_words(&entry_path, name, true, hits);
@@ -1389,5 +1464,255 @@ mod tests {
         let dh = scan_dist_artefacts(&dir.join("dist")).unwrap();
         assert!(dh.iter().any(|h| h.brand == "originpro") && dh.iter().any(|h| h.path == "docs/audit/leak.md"));
         assert!(skip_path("xtask/src/brands.rs") && !skip_path("docs/audit/README.md"));
+    }
+
+    #[test]
+    fn interop_corpus_allowlist_and_corpus_bundle_gate() {
+        let mut ok_hits = Vec::new();
+        super::scan_file("xtask/src/interop_corpus.rs", "pub(crate) const DEFAULT_CORPUS_DIR: &str = \"corpus/third-party-prism\";\n", &mut ok_hits);
+        assert!(ok_hits.is_empty(), "exact default corpus dir constant must be allowed in interop_corpus.rs: {ok_hits:?}");
+
+        let mut other_file_hits = Vec::new();
+        super::scan_file("xtask/src/other.rs", "const DIR: &str = \"corpus/third-party-prism\";\n", &mut other_file_hits);
+        assert!(other_file_hits.iter().any(|h| h.brand == "prism"), "other file must reject third-party-prism: {other_file_hits:?}");
+
+        let mut extra_hits = Vec::new();
+        super::scan_file(
+            "xtask/src/interop_corpus.rs",
+            "const BAD1: &str = \"corpus/third-party-prism/sub\";\nconst BAD2: &str = \"Prism\";\n",
+            &mut extra_hits,
+        );
+        assert_eq!(extra_hits.len(), 2, "non-exact tokens in interop_corpus.rs must still fail: {extra_hits:?}");
+
+        assert!(super::is_corpus_path("corpus"));
+        assert!(super::is_corpus_path("corpus/sample.pzfx"));
+        assert!(super::is_corpus_path("bundle/corpus/sample.pzfx"));
+        assert!(!super::is_corpus_path("xtask/src/corpus.rs"));
+        assert!(!super::is_corpus_path("crates/testkit/src/nist_strd/corpus.rs"));
+        assert!(super::is_forbidden_bundled_dir("dist/app/corpus/sample.pzfx"));
+
+        let dist_dir = TestDir::new("brands-corpus-dist");
+        dist_dir.write("app/corpus/data.txt", "clean");
+        let mut zw = crate::zip_read::TestZipWriter::new();
+        zw.add_file("corpus/data.txt", b"clean".to_vec()).unwrap();
+        dist_dir.write_bytes("pkg.zip", &zw.finish().unwrap());
+        let dist_hits = super::scan_dist_artefacts(dist_dir.path()).unwrap();
+        assert!(dist_hits.iter().any(|h| h.path == "app/corpus/data.txt" && h.brand == "corpus"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "pkg.zip!corpus/data.txt" && h.brand == "corpus"), "{dist_hits:?}");
+
+        let repo = TestDir::git_repo("brands-corpus-untracked");
+        repo.write(".gitignore", "/corpus\n");
+        repo.write("docs/clean.md", "# Clean CurveBook note\n");
+        repo.git_add_all();
+        repo.write("corpus/third-party-prism/vendor.pzfx", "GraphPad Prism");
+        assert!(super::run(repo.path()).is_ok(), "untracked local corpus/ files must not fail brands gate");
+    }
+
+    #[test]
+    fn pzfx_export_bare_root_element_allowlist_stays_strict_everywhere_else() {
+        let root = super::PZFX_VENDOR_ROOT_ELEMENT;
+        let gp = ["Graph", "Pad"].concat();
+        let copy = ["Copy", "right (", "c)"].concat();
+
+        let ok_src = format!("pub(crate) const PZFX_ROOT_ELEMENT: &str = \"{root}\";\n");
+        assert!(scan("crates/format/src/pzfx/export.rs", &ok_src).is_empty());
+
+        let doc_md = format!("Root element: `{root}`\n");
+        let fixture_xml = format!("<{root} PrismXMLVersion=\"5.00\"/>\n");
+        for (other_path, body) in [
+            ("crates/format/src/pzfx/import.rs", ok_src.as_str()),
+            ("crates/format/src/pzfx/mod.rs", ok_src.as_str()),
+            ("crates/format/tests/format_suite/pzfx.rs", ok_src.as_str()),
+            ("docs/file-formats.md", doc_md.as_str()),
+            ("fixtures/sample.pzfx", fixture_xml.as_str()),
+        ] {
+            let hits = scan(other_path, body);
+            assert!(hits.iter().any(|h| h.brand == "graphpad"), "expected vendor root-element rejection in {other_path}, got {hits:?}");
+        }
+
+        let bad_export_src = format!(
+            "const OPEN_TAG: &str = \"<{root}>\";\n\
+             const NON_EXACT: &str = \"{root}Extra\";\n\
+             const OTHER_VENDOR: &str = \"Dotmatics\";\n\
+             const NOTICE_LINE: &str = \"{copy} 2026 {gp} Software\";\n\
+             const GRAPHPAD_ROOT: &str = \"ok\";\n\
+             // {root} comment\n"
+        );
+        let export_hits = scan("crates/format/src/pzfx/export.rs", &bad_export_src);
+        for line in 1..=6 {
+            assert!(export_hits.iter().any(|h| h.line == line), "expected rejection on line {line} in pzfx/export.rs, got {export_hits:?}");
+        }
+
+        let dist = TestDir::new("brands-pzfx-root-dist");
+        dist.write("docs/readme.txt", &format!("{root}\n"));
+        dist.write("docs-site/guide.html", &format!("<p>{root}</p>\n"));
+        let mut zw = crate::zip_read::TestZipWriter::new();
+        zw.add_file("meta.txt", root.as_bytes().to_vec()).unwrap();
+        dist.write_bytes("bundle.zip", &zw.finish().unwrap());
+        let mut elf = b"\x7FELF\x00\x00".to_vec();
+        elf.extend_from_slice(root.as_bytes());
+        elf.push(0);
+        dist.write_bytes("bin/curvebook", &elf);
+        let dist_hits = super::scan_dist_artefacts(dist.path()).unwrap();
+        assert!(dist_hits.iter().any(|h| h.path == "docs/readme.txt" && h.brand == "graphpad"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "docs-site/guide.html" && h.brand == "graphpad"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "bundle.zip!meta.txt" && h.brand == "graphpad"), "{dist_hits:?}");
+        assert!(!dist_hits.iter().any(|h| h.path == "bin/curvebook"), "native binary should not fail brands: {dist_hits:?}");
+    }
+
+    #[test]
+    fn prism_module_split_export_prism_allowlists_and_wxs_scanner() {
+        for ok_path in [
+            "crates/format/src/prism.rs",
+            "crates/format/src/prism/mod.rs",
+            "crates/format/src/prism/import.rs",
+            "crates/format/src/prism/export.rs",
+            "crates/format/src/prism/schema.rs",
+        ] {
+            let mut hits = Vec::new();
+            super::scan_tracked_path_name(ok_path, &mut hits);
+            assert!(hits.is_empty(), "expected clean module path {ok_path}, got {hits:?}");
+        }
+        for bad_path in [
+            "crates/format/src/prism/prism_style.rs",
+            "crates/format/src/prism/graphpad.rs",
+            "crates/format/src/prism/sub/mod.rs",
+            "crates/ui-egui/src/prism/mod.rs",
+        ] {
+            let mut hits = Vec::new();
+            super::scan_tracked_path_name(bad_path, &mut hits);
+            assert!(!hits.is_empty(), "expected rejection for {bad_path}");
+        }
+
+        let export_rust = "\
+            // Routes project.exportPrism through export_prism_bytes and ExportPrismParams via run_project_export_prism.\n\
+            pub struct ExportPrismParams;\n\
+            pub fn run_project_export_prism() -> &'static str { \"project.exportPrism\" }\n\
+            pub fn export_prism_bytes() -> &'static str { exporter_by_format(\"prism\") }\n\
+            pub const CMD_KEY: &str = \"cmd.project.exportPrism\";\n\
+            pub const TEST_OP: &str = \"export_prism_bytes failed\";\n";
+        assert!(scan("crates/format/src/prism/export.rs", export_rust).is_empty(), "canonical exportPrism Rust code must pass");
+
+        let bad_export_rust = "\
+            pub struct PrismStyle;\n\
+            pub const BAD_CMD: &str = \"bad.exportPrism\";\n\
+            pub const BAD_PROSE: &str = \"Export to Prism format\";\n";
+        let bad_rust_hits = scan("crates/format/src/prism/export.rs", bad_export_rust);
+        assert_eq!(bad_rust_hits.len(), 3, "non-canonical prism tokens in prism/export.rs must fail: {bad_rust_hits:?}");
+
+        let tsv = "key\ten\tde\ncmd.project.exportPrism\tExport .prism file\t.prism-Datei exportieren\ncmd.bad\tExport Prism file\tPrism Datei\n";
+        let tsv_hits = scan("crates/ui-egui/locales/catalog.tsv", tsv);
+        assert_eq!(tsv_hits, vec![hit("crates/ui-egui/locales/catalog.tsv", 3, "prism")]);
+
+        assert!(
+            scan("docs/commands.md", "### `project.exportPrism`\nImplemented in `crates/format/src/prism/export.rs` via `export_prism_bytes`.\n")
+                .is_empty()
+        );
+        assert!(
+            !scan("docs/commands.md", "Implemented in `crates/format/src/prism/prism_style.rs`.\n").is_empty(),
+            "markdown must still reject contaminated leaf inside crates/format/src/prism/"
+        );
+        let ok_html = "<!doctype html><html><body><p><a href=\"#cmd-project-exportprism\">project.exportPrism</a> <a href=\"#mcp-tool-project_export_prism\">project_export_prism</a> in <a href=\"https://github.com/HauserGroup/curvebook/blob/main/crates/format/src/prism/export.rs\">export</a> via <code>export_prism_bytes</code>.</p></body></html>\n";
+        assert!(scan("docs-site/commands.html", ok_html).is_empty());
+        assert!(!scan("docs-site/commands.html", "<p>Export Prism file from crates/format/src/prism/prism_style.rs</p>\n").is_empty());
+
+        let mcp_ok_list: serde_json::Value = serde_json::json!({
+            "result": {
+                "tools": [
+                    {
+                        "name": "save_file",
+                        "description": "Save or export a .curvebook, .pzfx, or .prism file.",
+                        "inputSchema": {"type": "object", "properties": {"format": {"type": "string", "enum": ["curvebook", "pzfx", "prism"]}}}
+                    },
+                    {
+                        "name": "export",
+                        "description": "Export data as .pzfx or .prism.",
+                        "inputSchema": {"type": "object", "properties": {"format": {"type": "string", "enum": ["pzfx", "prism"]}}}
+                    },
+                    {
+                        "name": "project_export_prism",
+                        "description": "[project.exportPrism] Export .prism file.",
+                        "inputSchema": {"type": "object"}
+                    }
+                ]
+            }
+        });
+        let mut mcp_ok_hits = Vec::new();
+        super::scan_mcp_json_value(
+            super::McpScanCtx { source: "mcp:tools/list", method: "tools/list", called_tool: None, entry_tool: None },
+            "",
+            &mcp_ok_list,
+            &mut mcp_ok_hits,
+        );
+        assert!(mcp_ok_hits.is_empty(), "expected clean MCP export surfaces, got {mcp_ok_hits:?}");
+
+        let mcp_ok_call: serde_json::Value = serde_json::json!({
+            "result": {
+                "commands": [
+                    {"command_id": "project.exportPrism", "mcp_tool": "project_export_prism", "widget_id": "cmd.project.exportPrism"}
+                ]
+            }
+        });
+        let mut mcp_call_hits = Vec::new();
+        super::scan_mcp_json_value(
+            super::McpScanCtx { source: "mcp:command_list", method: "tools/call", called_tool: Some("command_list"), entry_tool: None },
+            "",
+            &mcp_ok_call,
+            &mut mcp_call_hits,
+        );
+        assert!(mcp_call_hits.is_empty(), "expected clean MCP command_list exportPrism entry, got {mcp_call_hits:?}");
+
+        let mcp_bad_list: serde_json::Value = serde_json::json!({
+            "result": {
+                "tools": [
+                    {
+                        "name": "export",
+                        "description": "Export a Prism project file.",
+                        "inputSchema": {"type": "object", "properties": {"format": {"type": "string", "enum": ["prism"]}}}
+                    }
+                ]
+            }
+        });
+        let mut mcp_bad_hits = Vec::new();
+        super::scan_mcp_json_value(
+            super::McpScanCtx { source: "mcp:tools/list", method: "tools/list", called_tool: None, entry_tool: None },
+            "",
+            &mcp_bad_list,
+            &mut mcp_bad_hits,
+        );
+        assert!(mcp_bad_hits.iter().any(|h| h.brand == "prism"), "MCP export description prose must stay strict: {mcp_bad_hits:?}");
+
+        let ok_wxs = "\
+            <Wix>\n\
+              <ProgId Id=\"CurveBook.Pzfx\" Description=\"CurveBook .pzfx file\">\n\
+                <Extension Id=\"pzfx\" ContentType=\"application/x-prism-xml\">\n\
+                  <Verb Id=\"open\" Command=\"Open\" TargetFile=\"CurveBookExe\" Argument=\"&quot;%1&quot;\" />\n\
+                </Extension>\n\
+              </ProgId>\n\
+              <ProgId Id=\"CurveBook.Archive\" Description=\"CurveBook .prism file\">\n\
+                <Extension Id=\"prism\" ContentType=\"application/x-prism-project\">\n\
+                  <Verb Id=\"open\" Command=\"Open\" TargetFile=\"CurveBookExe\" Argument=\"&quot;%1&quot;\" />\n\
+                </Extension>\n\
+              </ProgId>\n\
+            </Wix>\n";
+        assert!(scan("packaging/windows/curvebook.wxs", ok_wxs).is_empty(), "valid .wxs extension registration must pass");
+
+        let mut wxs_dist_hits = Vec::new();
+        super::scan_dist_bytes("installer/curvebook.wxs", ok_wxs.as_bytes(), 0, &mut super::DistScanStats::default(), &mut wxs_dist_hits).unwrap();
+        assert!(wxs_dist_hits.is_empty(), "valid dist .wxs must pass: {wxs_dist_hits:?}");
+
+        let bad_wxs = "\
+            <Wix>\n\
+              <ProgId Id=\"CurveBook.Prism\" Description=\"Prism Project\">\n\
+                <Extension Id=\"Prism\">\n\
+                <Extension Id=\"prism\" Description=\"GraphPad Prism\">\n\
+                <!-- <Extension Id=\"prism\"> -->\n\
+                <SummaryInformation Description=\"LumenCraft\" />\n\
+              </ProgId>\n\
+            </Wix>\n";
+        let bad_wxs_hits = scan("packaging/windows/curvebook.wxs", bad_wxs);
+        for line in 2..=6 {
+            assert!(bad_wxs_hits.iter().any(|h| h.line == line), "expected .wxs rejection on line {line}, got {bad_wxs_hits:?}");
+        }
     }
 }

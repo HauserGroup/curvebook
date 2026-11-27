@@ -1,7 +1,7 @@
 //! Interactive color-coded `8×12` / `16×24` microplate editor, sheet/AUC value-source picker,
 //! dilution-series filler, pasted/sheet grid loader, and `.cbplate` persistence controls (`R17.7`).
 
-use curvebook_doc::{PlateGeometry, PlateWellRole, ResultStatus, TableArchetype, TableKind};
+use curvebook_doc::{PlateGeometry, PlateWellRole, TableArchetype, TableKind};
 use egui::{Color32, CornerRadius, FontId, Id, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use serde_json::{Value, json};
 
@@ -313,7 +313,7 @@ fn render_plate_values_subtab(
 
     if let Some(sid) = ir.plate_source_sheet_id.as_deref()
         && let Some(rs) = doc.result_sheet(&curvebook_doc::SheetId::new(sid))
-        && rs.status != ResultStatus::UpToDate
+        && !rs.is_computed_up_to_date()
     {
         ui.label(RichText::new(tr(locale, "plate.source_sheet.stale_warn")).small().color(tokens.error));
     }
@@ -1092,7 +1092,7 @@ fn collect_plate_source_candidates(app: &UiApp) -> Vec<PlateSourceCandidate> {
     for rs in &doc.result_sheets {
         if let Some(ds) = rs.analyzable_data.as_ref() {
             let (is_mv, mv_cols) = mv_numeric_column_titles(ds);
-            let tag = if rs.status == ResultStatus::UpToDate { "Result" } else { "Stale Result" };
+            let tag = if rs.is_computed_up_to_date() { "Result" } else { "Stale Result" };
             out.push(PlateSourceCandidate {
                 id: rs.id.as_str().to_owned(),
                 display: format!("[{tag}] {}", rs.title()),

@@ -2326,6 +2326,9 @@ pub struct GraphSheet {
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
+    /// Optional external import/merge origin metadata; `None` for natively authored sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::ids::SheetOrigin>,
 }
 
 impl GraphSheet {
@@ -2341,13 +2344,16 @@ impl GraphSheet {
         None
     }
 
-    /// Validate sheet identity, title, graph specification, and floating notes.
+    /// Validate sheet identity, title, graph specification, origin metadata, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
         self.spec.validate()?;
         for note in &self.floating_notes {
             note.validate()?;
+        }
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
         }
         Ok(())
     }
@@ -2366,6 +2372,8 @@ impl<'de> serde::Deserialize<'de> for GraphSheet {
             spec: GraphSpec,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
+            #[serde(default)]
+            origin: Option<crate::ids::SheetOrigin>,
         }
 
         let raw = RawGraphSheet::deserialize(deserializer)?;
@@ -2376,6 +2384,7 @@ impl<'de> serde::Deserialize<'de> for GraphSheet {
             spec: raw.spec,
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
+            origin: raw.origin,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
         Ok(sheet)
@@ -2394,6 +2403,7 @@ impl GraphSheet {
             spec: GraphSpec::default_for_data_sheet(data_sheet),
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         })
     }
 }

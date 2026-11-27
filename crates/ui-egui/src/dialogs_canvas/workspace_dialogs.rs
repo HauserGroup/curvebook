@@ -286,7 +286,8 @@ impl SplitWorkspaceState {
                     return Some(gs.id.clone());
                 }
                 if let Some(rs) = doc.result_sheet(prim)
-                    && let Some(gs) = doc.graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == rs.analysis.source_sheet_id)
+                    && let Some(src_id) = rs.analysis.source_sheet_id.as_ref()
+                    && let Some(gs) = doc.graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == *src_id)
                 {
                     return Some(gs.id.clone());
                 }

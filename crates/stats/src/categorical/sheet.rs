@@ -22,8 +22,8 @@
 //!   Bulletin*, 76(5), 378-382. `doi:10.1037/h0031619`.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, ContingencyMethod, ContingencySpec, DataSheet, KappaWeighting, PValueFormat, ResultCell, ResultSheet,
-    ResultTabKind, SubcolumnMode, TableArchetype,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, ContingencyMethod, ContingencySpec, DataSheet, KappaWeighting, PValueFormat, ResultCell,
+    ResultSheet, ResultTabKind, SubcolumnMode, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::chi2_sf;
@@ -37,8 +37,8 @@ use super::kappa::{cohens_kappa, fleiss_kappa};
 use super::ratios_nnt::analyze_2x2_ratios;
 use super::types::{BarnardExactResult, ContingencyResult, KappaResult};
 use crate::common::{
-    KvTabBuilder, TabBuilder, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    KvTabBuilder, TabBuilder, checklist_item, ci_cell, enforce_summary_mode_matrix, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
+    p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
@@ -161,6 +161,7 @@ fn resolve_contingency_primary(
 
 /// Execute a [`ContingencySpec`] against a `Contingency`, `PartsOfWhole`, or binary `Column` [`DataSheet`].
 pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spec: &ContingencySpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::Contingency(cont_spec.clone()))?;
     let mut result = run_contingency_analysis_inner(sheet, spec, cont_spec)?;
     sanitize_result_sheet_floats(&mut result)?;
     Ok(result)

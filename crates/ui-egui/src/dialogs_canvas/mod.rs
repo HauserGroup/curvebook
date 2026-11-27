@@ -163,6 +163,10 @@ pub enum ActiveDialog {
         /// File names in `dir` that the export would replace.
         existing_files: Vec<String>,
     },
+    /// Pre-export confirmation modal listing non-tabular items dropped by `.pzfx` export (§4.2).
+    PzfxExportConfirm {
+        preflight: curvebook_format::PzfxExportPreflight,
+    },
 }
 
 /// Editable draft state for the `Checkpoints` modal (`R15-GUI-31`).
@@ -584,6 +588,9 @@ impl CanvasDialogState {
         let Some(rs) = doc.result_sheet(result_sheet_id) else {
             return false;
         };
+        if rs.is_imported() {
+            return false;
+        }
         self.edit_params.open_for_result(rs);
         if let curvebook_doc::AnalysisKind::PowerAnalysis(ref pa) = rs.analysis.kind {
             self.power_wizard.sync_from_doc_spec(pa);
@@ -629,6 +636,9 @@ impl CanvasDialogState {
         let Some(rs) = doc.result_sheet(result_sheet_id) else {
             return false;
         };
+        if rs.is_imported() {
+            return false;
+        }
         self.change_data.open_for_result(rs, doc);
         self.active_dialog = ActiveDialog::ChangeDataAnalyzed { result_sheet_id: rs.id.clone() };
         true

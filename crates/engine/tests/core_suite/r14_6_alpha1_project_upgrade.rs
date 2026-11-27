@@ -105,10 +105,10 @@ fn alpha1_project_opens_edits_recomputes_and_round_trips() {
     assert_eq!(doc.data_sheet(&SheetId::new("xy1")).expect("xy1").title, "Dose response");
     let anova = doc.result_sheet(&SheetId::new("res-anova")).expect("res-anova");
     assert!(matches!(anova.analysis.kind, AnalysisKind::OneWayAnova(_)), "res-anova kind: {:?}", anova.analysis.kind);
-    assert_eq!(anova.analysis.source_sheet_id.as_str(), "col1");
+    assert_eq!(anova.analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("col1"));
     let fit = doc.result_sheet(&SheetId::new("res-fit")).expect("res-fit");
     assert!(matches!(fit.analysis.kind, AnalysisKind::NonlinearRegression(_)), "res-fit kind: {:?}", fit.analysis.kind);
-    assert_eq!(fit.analysis.source_sheet_id.as_str(), "xy1");
+    assert_eq!(fit.analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("xy1"));
     for (graph, source) in [("g-col", "col1"), ("g-xy", "xy1")] {
         let g = doc.graph_sheet(&SheetId::new(graph)).unwrap_or_else(|| panic!("graph `{graph}`"));
         assert_eq!(g.spec.primary_source_sheet_id.as_str(), source, "`{graph}` source");

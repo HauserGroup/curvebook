@@ -1292,6 +1292,14 @@ fn label_for_subcolumn_mode(mode: SubcolumnMode, subcol: usize) -> String {
     match mode {
         SubcolumnMode::Single => String::from("Y"),
         SubcolumnMode::RawReplicates(_) => format!("Y{}", subcol + 1),
+        SubcolumnMode::MeanSd => match subcol {
+            0 => String::from("Mean"),
+            _ => String::from("SD"),
+        },
+        SubcolumnMode::MeanSem => match subcol {
+            0 => String::from("Mean"),
+            _ => String::from("SEM"),
+        },
         SubcolumnMode::MeanSdN => match subcol {
             0 => String::from("Mean"),
             1 => String::from("SD"),

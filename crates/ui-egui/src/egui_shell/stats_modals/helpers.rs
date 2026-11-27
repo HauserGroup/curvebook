@@ -457,7 +457,7 @@ pub(super) fn render_dataset_checklist(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
+    let titles = column_titles_for_draft(doc, spec.source_sheet_id.as_ref());
     if titles.is_empty() {
         return;
     }

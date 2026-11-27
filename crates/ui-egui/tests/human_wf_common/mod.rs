@@ -526,10 +526,14 @@ fn has_non_empty_path(params: &Value) -> bool {
 
 fn is_intercepted_host_file_command(command_id: &str, params: &Value) -> bool {
     match command_id {
-        "table.importPrism" | "table.importPzfx" | "table.importXlsx" | "ui.export.allTablesCsv" => true,
-        "project.open" | "file.open" | "table.exportCsv" | "analysis.exportCsv" | "analysis.exportJson" | "result.generateReport" => {
-            !has_non_empty_path(params)
-        }
+        "project.merge" | "table.importPrism" | "table.importPzfx" | "table.importXlsx" | "ui.export.allTablesCsv" | "ui.export.pzfx.open" => true,
+        "project.open"
+        | "file.open"
+        | "project.exportPzfx"
+        | "table.exportCsv"
+        | "analysis.exportCsv"
+        | "analysis.exportJson"
+        | "result.generateReport" => !has_non_empty_path(params),
         _ => false,
     }
 }
@@ -754,6 +758,25 @@ fn execute_intercepted_host_file_command(
             let out = commit_single_engine_command(app, "project.open", json!({ "path": path.to_string_lossy() }))?;
             Ok(vec![out])
         }
+        "project.merge" => {
+            let path = if let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+                PathBuf::from(explicit_path)
+            } else {
+                let req = NativeFileDialogRequest {
+                    command_id: String::from("project.merge"),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label: tr(&app.locale, "w6.view.shell.filter_project").to_owned(),
+                    extensions: vec![String::from("curvebook"), String::from("cbtemplate")],
+                    default_file_name: None,
+                };
+                let Some(picked) = adapter.pick(&req)? else {
+                    return Ok(Vec::new());
+                };
+                picked
+            };
+            let out = commit_single_engine_command(app, "project.merge", json!({ "path": path.to_string_lossy() }))?;
+            Ok(vec![out])
+        }
         "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
             if let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
                 let merge = params.get("merge").and_then(Value::as_bool).unwrap_or(false);
@@ -818,6 +841,29 @@ fn execute_intercepted_host_file_command(
             let default_decimal = app.locale_preset.decimal_separator.to_string();
             let decimal_separator = params.get("decimal_separator").and_then(Value::as_str).map_or(default_decimal, ToOwned::to_owned);
             export_all_tables_to_dir(app, pending_all_tables_export, PendingAllTablesExport { dir, delimiter, decimal_separator }, None)
+        }
+        "ui.export.pzfx.open" => {
+            let preflight = curvebook_format::preflight_pzfx_export(app.document());
+            if preflight.total_dropped_count() > 0 {
+                app.open_pzfx_export_confirm_dialog(preflight);
+                Ok(Vec::new())
+            } else {
+                execute_intercepted_host_file_command(app, adapter, pending_all_tables_export, "project.exportPzfx", &json!({}))
+            }
+        }
+        "project.exportPzfx" => {
+            let req = NativeFileDialogRequest {
+                command_id: String::from("project.exportPzfx"),
+                kind: NativeFileDialogKind::SaveFile,
+                filter_label: tr(&app.locale, "w6.view.shell.filter_xml_project").to_owned(),
+                extensions: vec![String::from("pzfx")],
+                default_file_name: Some(String::from("export.pzfx")),
+            };
+            let Some(path) = adapter.pick(&req)? else {
+                return Ok(Vec::new());
+            };
+            let out = commit_single_engine_command(app, "project.exportPzfx", json!({ "path": path.to_string_lossy(), "return_bytes": false }))?;
+            Ok(vec![out])
         }
         "table.exportCsv" | "analysis.exportCsv" | "analysis.exportJson" | "result.generateReport" => {
             let (filter_label, extensions, default_name, target_kind): (&str, &[&str], &str, HostExportTargetKind) = match command_id {

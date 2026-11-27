@@ -84,7 +84,8 @@ pub use tex_format::{
 };
 pub use types::{
     DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, UnknownResponse, collapse_datasets_to_row_means,
-    extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_datasets_from_sheet_with_options, filter_datasets_by_range,
+    enforce_summary_mode_matrix, extract_datasets_from_sheet, extract_datasets_from_sheet_multi, extract_datasets_from_sheet_with_options,
+    filter_datasets_by_range,
 };
 
 #[cfg(test)]
@@ -280,5 +281,39 @@ mod tests {
         let lin_spec = AnalysisSpec::new("lin-1", "sheet-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).unwrap();
         let lin_out = execute_analysis(&lin_spec, &sheet, &HookContext::default()).unwrap();
         assert!(lin_out.lookup_scalar("Slope", Some(0)).is_some());
+    }
+
+    #[test]
+    fn v9_mean_sd_sem_and_imported_result_hooks_are_refused() {
+        use curvebook_doc::{GroupedTable, HookSource, ResultScalarEntry, ResultSheet, SheetId};
+
+        for mode in [SubcolumnMode::MeanSd, SubcolumnMode::MeanSem] {
+            let mut xy = XyTable::new(mode, 1, 3).unwrap();
+            xy.x_cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+            xy.data_sets[0].cells = vec![
+                vec![Cell::number(10.0), Cell::number(1.0)],
+                vec![Cell::number(20.0), Cell::number(2.0)],
+                vec![Cell::number(30.0), Cell::number(3.0)],
+            ];
+            let xy_sheet = DataSheet::new("xy-no-n", "XY", TableArchetype::Xy(xy)).unwrap();
+            assert!(matches!(extract_datasets_from_sheet(&xy_sheet, &[0]), Err(FitError::UnsupportedSubcolumnMode { .. })));
+
+            let mut grp = GroupedTable::new(mode, 1, 2).unwrap();
+            grp.data_sets[0].cells = vec![vec![Cell::number(5.0), Cell::number(0.5)], vec![Cell::number(8.0), Cell::number(0.8)]];
+            let grp_sheet = DataSheet::new("grp-no-n", "Grouped", TableArchetype::Grouped(grp)).unwrap();
+            assert!(matches!(extract_datasets_from_sheet(&grp_sheet, &[0]), Err(FitError::UnsupportedSubcolumnMode { .. })));
+        }
+
+        let mut imp = ResultSheet::new_imported(
+            AnalysisSpec::new_imported_snapshot("imp-1", None, "Imported Fit").unwrap(),
+            "external_archive",
+            "Fit",
+            "Cached",
+        )
+        .unwrap();
+        imp.scalars.push(ResultScalarEntry { key: String::from("Top"), data_set_index: Some(0), value: 100.0, units: None });
+        let ctx = HookContext { result_sheets: &[imp], ..HookContext::default() };
+        let hook = HookSource::ResultScalar { result_sheet_id: SheetId::new("imp-1"), parameter_key: String::from("Top"), data_set_index: Some(0) };
+        assert!(matches!(ctx.resolve(&hook), Err(FitError::HookResolutionError { .. })));
     }
 }

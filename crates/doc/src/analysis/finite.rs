@@ -97,7 +97,8 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
         | AnalysisKind::RocCurve(_)
         | AnalysisKind::GeneralizedLinearModel(_)
         | AnalysisKind::Multivariate(_)
-        | AnalysisKind::LeveneTest(_) => None,
+        | AnalysisKind::LeveneTest(_)
+        | AnalysisKind::ImportedSnapshot(_) => None,
         AnalysisKind::PValueStack(ps) => non_finite(ps.threshold, at("pvalue_stack.threshold")),
         AnalysisKind::PowerAnalysis(p) => p.first_non_finite_float().map(|field| format!("analysis.{field}")),
         AnalysisKind::SimpleLogisticRegression(sl) => non_finite(sl.classification_cutoff, at("classification_cutoff"))

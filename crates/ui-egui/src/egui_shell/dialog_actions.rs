@@ -114,14 +114,20 @@ fn commit_import_project_mode_action(app: &mut UiApp, merge: bool) -> Result<Val
     let ActiveDialog::ImportProjectMode { command_id, path, .. } = app.canvas_dialogs.active_dialog.clone() else {
         return Err(EngineError::with_code(ErrorCode::Conflict, "import project mode dialog is not open"));
     };
-    let out = app.execute_command(&command_id, json!({ "path": path, "merge": merge }))?;
-    if !merge {
+    let (exec_cmd, exec_params, clear_file_path) = match (command_id.as_str(), merge) {
+        ("project.open" | "project.instantiateTemplate" | "project.merge", true) => ("project.merge", json!({ "path": path }), false),
+        ("project.open", false) => ("project.open", json!({ "path": path }), false),
+        ("project.instantiateTemplate", false) => ("project.instantiateTemplate", json!({ "path": path }), true),
+        _ => (command_id.as_str(), json!({ "path": path, "merge": merge }), !merge),
+    };
+    let out = app.execute_command(exec_cmd, exec_params)?;
+    if clear_file_path {
         app.session_mut().set_file_path(None, false);
     }
     app.canvas_dialogs.close_dialog();
     let source_label = std::path::Path::new(&path).file_name().and_then(|n| n.to_str()).unwrap_or(&path);
-    app.record_import_warnings(&command_id, source_label, &out);
-    Ok(json!({ "action": "ok", "command_id": command_id, "merge": merge, "closed": true, "mutated": out.mutated, "payload": out.payload }))
+    app.record_import_warnings(exec_cmd, source_label, &out);
+    Ok(json!({ "action": "ok", "command_id": exec_cmd, "merge": merge, "closed": true, "mutated": out.mutated, "payload": out.payload }))
 }
 
 fn commit_save_edit_params_default_action(app: &mut UiApp) -> Value {
@@ -500,6 +506,7 @@ pub(crate) fn commit_active_dialog_action(app: &mut UiApp, action: &str, params:
                 | ActiveDialog::ImportProjectMode { .. }
                 | ActiveDialog::CsvExportOptions(_)
                 | ActiveDialog::ExportAllTablesExistingFiles { .. }
+                | ActiveDialog::PzfxExportConfirm { .. }
                 | ActiveDialog::None => {
                     if app.canvas_dialogs.active_dialog == ActiveDialog::ImportWarnings {
                         app.import_warnings.panel_open = false;
@@ -1079,7 +1086,7 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
         }
         "edit.assume_gaussian" => {
             if ep.assume_gaussian {
-                let gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                let gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
                 if !gate.enabled {
                     return Err(disabled_err(
                         gate.disabled_reason
@@ -1092,7 +1099,7 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
         }
         "edit.paired_or_matched" => {
             if !ep.paired_or_matched {
-                let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
                 if !gate.enabled {
                     return Err(disabled_err(
                         gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),

@@ -491,9 +491,9 @@ fn rout_outlier_cells_migrate_v5_and_round_trip() {
 
 #[test]
 fn gap_06_05_levene_test_schema_v8_upgrades_v7_and_rejects_future_before_serde() {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 9);
 
-    // 1. Persisting `AnalysisKind::LeveneTest` stamps both manifest and document with schema v8 and round-trips cleanly.
+    // 1. Persisting `AnalysisKind::LeveneTest` stamps both manifest and document with CURRENT_SCHEMA_VERSION and round-trips cleanly.
     let mut doc = ProjectDocument::new("Levene Schema V8").unwrap();
     doc.add_data_sheet(col_sheet("data-col", 3, 4)).unwrap();
     doc.add_result_sheet(result_sheet_with_kind(
@@ -513,8 +513,8 @@ fn gap_06_05_levene_test_schema_v8_upgrades_v7_and_rejects_future_before_serde()
     let zip = curvebook_format::zip::ZipArchive::from_bytes(&saved).unwrap();
     let manifest_val: Value = serde_json::from_str(zip.get_utf8("manifest.json").unwrap().unwrap()).unwrap();
     let doc_val: Value = serde_json::from_str(zip.get_utf8("document.json").unwrap().unwrap()).unwrap();
-    assert_eq!(manifest_val["schema_version"], json!(8));
-    assert_eq!(doc_val["schema_version"], json!(8));
+    assert_eq!(manifest_val["schema_version"], json!(CURRENT_SCHEMA_VERSION));
+    assert_eq!(doc_val["schema_version"], json!(CURRENT_SCHEMA_VERSION));
 
     let reopened = open_project_bytes(&saved).unwrap();
     assert_eq!(reopened.schema_version, CURRENT_SCHEMA_VERSION);

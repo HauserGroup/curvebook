@@ -170,9 +170,7 @@ pub(crate) fn clamp_f64_safe(value: f64, min: f64, max: f64) -> f64 {
 /// silently rendered (`GAP-01-03` / `R19.5`).
 #[must_use]
 pub fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::DataSheet> {
-    doc.data_sheet(id).or_else(|| {
-        doc.result_sheet(id).filter(|res| matches!(res.status, curvebook_doc::ResultStatus::UpToDate)).and_then(|res| res.analyzable_data.as_ref())
-    })
+    doc.data_sheet(id).or_else(|| doc.result_sheet(id).filter(|res| res.is_computed_up_to_date()).and_then(|res| res.analyzable_data.as_ref()))
 }
 
 /// Resolve a [`curvebook_doc::DataSheet`] for `id`, checking top-level `data_sheets` first, then
@@ -181,8 +179,8 @@ pub fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: &curvebook_doc::Shee
 /// when `analyzable_data` is `None`.
 ///
 /// Returns `None` if `id` (or any intermediate result sheet along the chain) is
-/// [`curvebook_doc::ResultStatus::Dirty`] or [`curvebook_doc::ResultStatus::Failed`], or if a
-/// dependency cycle is encountered (`GAP-01-03` / `R19.5`).
+/// [`curvebook_doc::ResultStatus::Dirty`], [`curvebook_doc::ResultStatus::Failed`],
+/// or an imported snapshot, or if a dependency cycle is encountered (`GAP-01-03` / `R19.5`).
 #[must_use]
 pub fn resolve_data_sheet_or_upstream<'a>(doc: &'a ProjectDocument, id: &curvebook_doc::SheetId) -> Option<&'a curvebook_doc::DataSheet> {
     let mut visited = std::collections::HashSet::new();
@@ -192,13 +190,14 @@ pub fn resolve_data_sheet_or_upstream<'a>(doc: &'a ProjectDocument, id: &curvebo
             return Some(ds);
         }
         let res = doc.result_sheet(cursor)?;
-        if !matches!(res.status, curvebook_doc::ResultStatus::UpToDate) {
+        if !res.is_computed_up_to_date() {
             return None;
         }
         if let Some(analyzable) = res.analyzable_data.as_ref() {
             return Some(analyzable);
         }
-        cursor = &res.analysis.source_sheet_id;
+        let next = res.analysis.source_sheet_id.as_ref()?;
+        cursor = next;
     }
     None
 }

@@ -303,16 +303,23 @@ impl ConversionColPlan {
         let old_cols = grp.data_sets.len();
         let rows = grp.data_sets.iter().map(DataSetColumn::row_count).max().unwrap_or(grp.row_titles.len()).max(grp.row_titles.len());
         match grp.subcolumn_mode {
-            SubcolumnMode::Single | SubcolumnMode::RawReplicates(1) | SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
-                Self {
-                    cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
-                    x_injected_at_col0: false,
-                    preserves_cell_shape: true,
-                    transposes_row_subcol: false,
-                    target_table_kind,
-                    converted_col_count: old_cols,
-                }
-            }
+            SubcolumnMode::Single
+            | SubcolumnMode::RawReplicates(1)
+            | SubcolumnMode::MeanSd
+            | SubcolumnMode::MeanSem
+            | SubcolumnMode::MeanSdN
+            | SubcolumnMode::MeanSemN
+            | SubcolumnMode::MeanCvN
+            | SubcolumnMode::MeanLowHigh
+            | SubcolumnMode::UpperLowerLimits
+            | SubcolumnMode::MedianIqr => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
             SubcolumnMode::RawReplicates(n) if n >= 2 && rows <= 1 => Self {
                 cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
                 x_injected_at_col0: false,
@@ -357,16 +364,6 @@ impl ConversionColPlan {
 
     fn from_xy_to_column(xy: &curvebook_doc::XyTable, target_table_kind: TableKind) -> Self {
         let old_cols = xy.data_sets.len();
-        if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
-            return Self {
-                cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
-                x_injected_at_col0: true,
-                preserves_cell_shape: false,
-                transposes_row_subcol: false,
-                target_table_kind,
-                converted_col_count: 1 + old_cols,
-            };
-        }
         if let SubcolumnMode::RawReplicates(n) = xy.y_subcolumn_mode
             && n >= 2
         {
@@ -390,7 +387,7 @@ impl ConversionColPlan {
                 converted_col_count: 1 + old_cols,
             };
         }
-        if xy.y_subcolumn_mode.supports_parametric_moments() {
+        if xy.y_subcolumn_mode.is_pre_summarized() {
             let matching_parametric = matches!(&xy.x_mode, XColumnMode::Numbers { subcolumn_mode } if *subcolumn_mode == xy.y_subcolumn_mode);
             if matching_parametric {
                 return Self {
@@ -805,7 +802,7 @@ fn remap_analysis_spec_for_conversion(
 ) -> Result<(), String> {
     let mut err: Option<String> = None;
     remap_analysis_kind_column_hooks(&mut spec.kind, target_sheet_id, plan, warnings, &mut err);
-    if spec.source_sheet_id != *target_sheet_id {
+    if spec.source_sheet_id.as_ref() != Some(target_sheet_id) {
         return match err {
             Some(reason) => Err(reason),
             None => Ok(()),
@@ -1031,7 +1028,8 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         | AnalysisKind::PowerAnalysis(_)
         | AnalysisKind::SimpleLogisticRegression(_)
         | AnalysisKind::LeveneTest(_)
-        | AnalysisKind::AreaUnderCurve(_) => {}
+        | AnalysisKind::AreaUnderCurve(_)
+        | AnalysisKind::ImportedSnapshot(_) => {}
     }
 }
 

@@ -453,7 +453,7 @@ fn normalize_dataset_col(
                     }
                 }
             }
-            SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {
+            SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanSd | SubcolumnMode::MeanSem => {
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
                     assign_norm_cell(&mut row_cells[0], map_val(m), r, col, "mean", warnings);
                 }
@@ -701,7 +701,7 @@ fn apply_baseline_datasets(
                     swapped_rows.push(r);
                 }
             }
-            SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {
+            SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanSd | SubcolumnMode::MeanSem => {
                 if let Some(mean_cell) = row_cells.first_mut() {
                     apply_baseline_cell(mean_cell, b_opt, operation, r, col, warnings);
                 }

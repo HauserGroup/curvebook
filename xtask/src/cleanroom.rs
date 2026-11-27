@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::brands::is_plan_prism_path;
+use crate::brands::{is_corpus_path, is_plan_prism_path};
 use crate::scan_util::{ZIP_CONTAINER_EXTS, collect_dist_files, format_error_list, has_ext_ci, looks_like_zip};
 use crate::text_decode::{decode_utf8_or_utf16, decode_xml_html_entities};
 use crate::zip_read::{ZipArchive, ZipLimits};
@@ -72,6 +72,8 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
     for path in files.iter().filter(|p| !should_skip(p)) {
         if is_plan_prism_path(path) {
             push_hit(&mut hits, path, 1, "committed plan/prism reference directory");
+        } else if is_corpus_path(path) {
+            push_hit(&mut hits, path, 1, "committed corpus/ directory");
         } else if let Ok(bytes) = std::fs::read(root.join(path)) {
             scan_bytes_recursive(path, &bytes, 0, false, &mut entries, &mut hits);
         } else {
@@ -103,6 +105,8 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
     for rel in rel_files {
         if is_plan_prism_path(&rel) {
             push_hit(&mut hits, rel, 1, "bundled plan/prism reference directory");
+        } else if is_corpus_path(&rel) {
+            push_hit(&mut hits, rel, 1, "bundled corpus/ directory");
         } else if let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(&dist_dir.join(&rel), MAX_DIST_SCAN_BYTES) {
             scan_bytes_recursive(&rel, &bytes, 0, true, &mut entries, &mut hits);
         } else {
@@ -141,6 +145,10 @@ fn scan_bytes_recursive(
                 let entry_path = format!("{display_path}!{entry_name}");
                 if is_plan_prism_path(entry_name) {
                     push_hit(hits, entry_path, 1, "archived plan/prism reference directory");
+                    continue;
+                }
+                if is_corpus_path(entry_name) {
+                    push_hit(hits, entry_path, 1, "archived corpus/ directory");
                     continue;
                 }
                 scan_text(&entry_path, entry_name, allow_packaged, hits, &mut HashSet::new());
@@ -382,5 +390,81 @@ mod tests {
         repo.write("docs/clean.md", "# CurveBook\n");
         repo.git_add_all();
         assert!(run(repo.path()).is_ok());
+    }
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn corpus_gate_rejects_tracked_and_packaged_corpus_while_allowing_untracked_local_files() {
+        // 1. Tracked corpus/ file fails cleanroom::scan even if its content is clean.
+        let dir = TestDir::new("cleanroom-corpus-tracked");
+        dir.write("corpus/sample.txt", "clean");
+        let hits = scan(dir.path(), &paths(&["corpus/sample.txt"]));
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].signature.contains("corpus/"), "{hits:?}");
+
+        // 2. Bundled dist/corpus/ file and archived ZIP corpus/ entry fail cleanroom::scan_dist_artefacts.
+        let dist = TestDir::new("cleanroom-corpus-dist");
+        dist.write("app/corpus/sample.txt", "clean");
+        dist.write_bytes("pkg.zip", &zip_bytes(&[("corpus/nested.txt", b"clean")]));
+        let dist_hits = super::scan_dist_artefacts(dist.path()).unwrap();
+        assert!(dist_hits.iter().any(|h| h.path == "app/corpus/sample.txt" && h.signature.contains("corpus/")), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "pkg.zip!corpus/nested.txt" && h.signature.contains("corpus/")), "{dist_hits:?}");
+
+        // 3. Untracked gitignored local corpus/ files must NOT fail cleanroom::run.
+        let repo = TestDir::git_repo("cleanroom-corpus-untracked");
+        repo.write(".gitignore", "/corpus\n");
+        repo.write("docs/clean.md", "# Clean CurveBook note\n");
+        repo.git_add_all();
+        repo.write("corpus/third-party-prism/vendor.pzfx", "<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>");
+        assert!(run(repo.path()).is_ok(), "untracked local corpus/ files must not fail cleanroom gate");
+
+        // 4. Force-tracked corpus/ file MUST fail cleanroom::run.
+        repo.run_git(&["add", "-f", "--", "corpus/third-party-prism/vendor.pzfx"]);
+        let err = run(repo.path()).unwrap_err();
+        assert!(err.contains("corpus/third-party-prism/vendor.pzfx"), "{err}");
+    }
+
+    #[test]
+    fn pzfx_export_bare_root_constant_allowed_while_open_tag_and_vendor_notices_stay_banned() {
+        let dir = TestDir::new("cleanroom-pzfx-export-boundary");
+        // 1. Bare root-element constant (never `<`-prefixed) in crates/format/src/pzfx/export.rs is clean
+        //    under cleanroom::scan and cleanroom::scan_dist_artefacts (including compiled binary .rodata).
+        dir.write("crates/format/src/pzfx/export.rs", "pub(crate) const PZFX_ROOT_ELEMENT: &str = \"GraphPadPrismFile\";\n");
+        let ok_hits = scan(dir.path(), &paths(&["crates/format/src/pzfx/export.rs"]));
+        assert!(ok_hits.is_empty(), "bare root constant must not trip cleanroom: {ok_hits:?}");
+
+        let dist_ok = TestDir::new("cleanroom-pzfx-export-dist-ok");
+        dist_ok.write_bytes("bin/curvebook", b"\x7FELF\x00\x00GraphPadPrismFile\x00");
+        assert!(super::scan_dist_artefacts(dist_ok.path()).unwrap().is_empty(), "compiled binary embedding bare root constant must pass cleanroom");
+
+        // 2. `<`-prefixed vendor root tag, vendor copyright, and vendor creator notices MUST still be caught
+        //    even inside crates/format/src/pzfx/export.rs, as well as in fixtures, docs, and dist/ text & archives.
+        dir.write(
+            "crates/format/src/pzfx/export.rs",
+            "const BAD_TAG: &str = \"<GraphPadPrismFile PrismXMLVersion=\\\"5.00\\\">\";\n\
+             // Copyright (c) 2026 GraphPad Software, LLC. All rights reserved.\n\
+             // Created by GraphPad\n\
+             // Exported from Prism\n",
+        );
+        dir.write("fixtures/sample.pzfx", "<?xml version=\"1.0\"?><GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n");
+        dir.write("docs/guide.md", "Example root: `<GraphPadPrismFile>`\n");
+        let bad_hits = scan(dir.path(), &paths(&["crates/format/src/pzfx/export.rs", "fixtures/sample.pzfx", "docs/guide.md"]));
+        let export_lines: Vec<usize> = bad_hits.iter().filter(|h| h.path == "crates/format/src/pzfx/export.rs").map(|h| h.line).collect();
+        assert_eq!(export_lines, vec![1, 2, 3, 4], "every violation in pzfx/export.rs must be caught: {bad_hits:?}");
+        assert!(bad_hits.iter().any(|h| h.path == "fixtures/sample.pzfx" && h.signature == "<GraphPadPrismFile"), "{bad_hits:?}");
+        assert!(bad_hits.iter().any(|h| h.path == "docs/guide.md" && h.signature == "<GraphPadPrismFile"), "{bad_hits:?}");
+
+        // 3. `<`-prefixed root tag in dist/ text, archives, and binary blobs stays banned.
+        let dist_bad = TestDir::new("cleanroom-pzfx-export-dist-bad");
+        dist_bad.write("docs/sample.html", "<pre>&lt;GraphPadPrismFile&gt;</pre>\n");
+        dist_bad.write_bytes("pkg.zip", &zip_bytes(&[("nested.xml", b"<GraphPadPrismFile/>")]));
+        dist_bad.write_bytes("bin/bad_rodata", b"\x7FELF\x00<GraphPadPrismFile\x00");
+        let dist_hits = super::scan_dist_artefacts(dist_bad.path()).unwrap();
+        assert!(dist_hits.iter().any(|h| h.path == "docs/sample.html" && h.signature == "<GraphPadPrismFile"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "pkg.zip!nested.xml" && h.signature == "<GraphPadPrismFile"), "{dist_hits:?}");
+        assert!(dist_hits.iter().any(|h| h.path == "bin/bad_rodata" && h.signature == "<GraphPadPrismFile"), "{dist_hits:?}");
     }
 }

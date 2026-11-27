@@ -200,6 +200,8 @@ pub struct FitSummaryEntry {
     pub color: Rgba8,
     pub converged: bool,
     pub ambiguous: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_label: Option<String>,
     pub metrics: Vec<FitSummaryMetric>,
 }
 
@@ -395,7 +397,7 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
         let Some(res) = doc.result_sheet(&ov_spec.result_sheet_id) else {
             continue;
         };
-        if !matches!(res.status, ResultStatus::UpToDate) {
+        if !res.has_displayable_output() {
             continue;
         }
         let Some(curve) =
@@ -413,12 +415,22 @@ pub fn extract_fit_summary_entries(graph: &GraphSheet, doc: &ProjectDocument, ma
         let series_label = series.legend_label.clone().unwrap_or(fallback_label);
         let equation_label = humanize_equation_id(&curve.equation_id);
         let metrics = collect_ranked_metrics(doc, res, series.data_set_index, max_metrics_per_series);
+        let imported_label = if res.is_imported() {
+            Some(if matches!(res.status, ResultStatus::ImportedStale) {
+                String::from("Imported (stale)")
+            } else {
+                String::from("Imported (not computed by CurveBook)")
+            })
+        } else {
+            None
+        };
         out.push(FitSummaryEntry {
             series_label,
             equation_label,
             color: resolved_series_curve_color(series, palette.color_at(idx)),
             converged: curve.converged,
             ambiguous: curve.ambiguous,
+            imported_label,
             metrics,
         });
     }
@@ -431,8 +443,10 @@ fn entry_header_rich(entry: &FitSummaryEntry) -> RichText {
     RichText { spans: vec![RichSpan { text, weight: SpanWeight::Bold, ..RichSpan::default() }] }
 }
 
-fn entry_status_text(entry: &FitSummaryEntry) -> Option<&'static str> {
-    if !entry.converged {
+fn entry_status_text(entry: &FitSummaryEntry) -> Option<&str> {
+    if let Some(label) = entry.imported_label.as_deref() {
+        Some(label)
+    } else if !entry.converged {
         Some("Did not converge")
     } else if entry.ambiguous {
         Some("Ambiguous fit")

@@ -167,6 +167,7 @@ fn audit_93_mv_explicit_bindings_resist_added_calculated_variable() {
         source: VariableSource::Calculated { formula: "[Dose]*[Dose]".to_owned() },
         level_order: LevelOrderSpec::default(),
         cells: [1.0, 4.0, 9.0, 16.0].into_iter().map(Cell::number).collect(),
+        display_decimals: None,
     });
     let sheet_after = DataSheet::new(SheetId::new("mv-93"), "MV", TableArchetype::MultipleVariables(mv)).unwrap();
 

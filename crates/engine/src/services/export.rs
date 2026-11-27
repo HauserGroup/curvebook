@@ -6,7 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use curvebook_chart::{ChartScene, ChartWarning, compile_graph, compile_layout};
 use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId};
-use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
+use curvebook_format::{
+    CsvOptions, ImportWarning, PzfxExportWarning, export_datasheet_to_csv, export_result_sheet_json, try_export_result_sheet_tidy_csv_with_warnings,
+    try_export_result_tab_csv_with_warnings,
+};
 use curvebook_pdf::{
     MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf, render_pdf_page_refs, render_pdf_pages,
 };
@@ -35,6 +38,33 @@ pub const DEFAULT_EXPORT_DPI: u16 = 300;
 
 /// Maximum TrueType SFNT font file read size (`64 MiB`).
 pub const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Honest data-only scope copy for `.pzfx` export dialogs, CLI, MCP, and docs (§4.2).
+pub const PZFX_EXPORT_DATA_ONLY_NOTICE: &str =
+    "`.pzfx` export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your `.curvebook` project.";
+
+/// Honest structural-conformance copy for `.pzfx` export dialogs, CLI, MCP, and docs (§6.3).
+pub const PZFX_EXPORT_STRUCTURE_NOTICE: &str = "Written to match the `.pzfx` structure of real files; not tested in other applications.";
+
+/// Format one [`PzfxExportWarning`] into a concise single-line diagnostic string shared by engine, CLI, and MCP.
+#[must_use]
+pub fn format_pzfx_export_warning(warning: &PzfxExportWarning) -> String {
+    if warning.source.trim().is_empty() {
+        format!("[{:?}] {}", warning.kind, warning.message)
+    } else {
+        format!("[{:?}] {}: {}", warning.kind, warning.source, warning.message)
+    }
+}
+
+/// Format one [`ImportWarning`] (including archive export warnings) into a concise single-line diagnostic string.
+#[must_use]
+pub fn format_import_or_archive_warning(warning: &ImportWarning) -> String {
+    if warning.source.trim().is_empty() {
+        format!("[{:?}] {}", warning.kind, warning.message)
+    } else {
+        format!("[{:?}] {}: {}", warning.kind, warning.source, warning.message)
+    }
+}
 
 /// Target sheet selection strategy for [`export_document_artifact`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1209,38 +1239,31 @@ fn export_csv_artifact(
         ));
     }
     let tab_desc = tab_id.map(|id| format!("tab `{id}`")).or_else(|| tab_index.map(|idx| format!("tab index {idx}")));
-    let (target_id, csv_text) = match resolve_tabular_target(doc, target, tab_desc.is_some(), tab_desc.as_deref())? {
-        TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, options)?),
+    let (target_id, csv_text, warnings) = match resolve_tabular_target(doc, target, tab_desc.is_some(), tab_desc.as_deref())? {
+        TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, options)?, Vec::new()),
         TabularTarget::Result(rs) => {
-            let text = if tidy {
-                try_export_result_sheet_tidy_csv(rs, options)?
+            let (text, raw_warnings) = if tidy {
+                try_export_result_sheet_tidy_csv_with_warnings(rs, options)?
             } else if let Some(tid) = tab_id {
                 let tab = rs.tabs.iter().find(|t| t.id == tid).ok_or_else(|| {
                     EngineError::with_code(ErrorCode::NotFound, format!("tab `{tid}` not found on result sheet `{}`", rs.id.as_str()))
                 })?;
-                try_export_result_tab_csv(rs, tab, options)?
+                try_export_result_tab_csv_with_warnings(rs, tab, options)?
             } else if let Some(idx) = tab_index {
                 let tab = rs.tabs.get(idx).ok_or_else(|| {
                     EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` has no tab at index {idx}", rs.id.as_str()))
                 })?;
-                try_export_result_tab_csv(rs, tab, options)?
+                try_export_result_tab_csv_with_warnings(rs, tab, options)?
             } else if let Some(first_tab) = rs.tabs.first() {
-                try_export_result_tab_csv(rs, first_tab, options)?
+                try_export_result_tab_csv_with_warnings(rs, first_tab, options)?
             } else {
-                try_export_result_sheet_tidy_csv(rs, options)?
+                try_export_result_sheet_tidy_csv_with_warnings(rs, options)?
             };
-            (rs.id.as_str().to_owned(), text)
+            let warnings = raw_warnings.into_iter().map(|msg| ChartWarning::new("imported_result_provenance", msg)).collect();
+            (rs.id.as_str().to_owned(), text, warnings)
         }
     };
-    Ok(ExportedArtifact {
-        target_id,
-        bytes: csv_text.into_bytes(),
-        page_count: 1,
-        width_pt: None,
-        height_pt: None,
-        warnings: Vec::new(),
-        raster: None,
-    })
+    Ok(ExportedArtifact { target_id, bytes: csv_text.into_bytes(), page_count: 1, width_pt: None, height_pt: None, warnings, raster: None })
 }
 
 fn serialize_json_bytes(value: &impl Serialize, pretty: bool) -> Result<Vec<u8>, EngineError> {

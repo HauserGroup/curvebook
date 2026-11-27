@@ -335,8 +335,8 @@ fn wf02_human_normalize_to_result_sheet_chaining_and_log_x() -> TestRes {
     run.commit_modal_ok()?;
 
     let tx_rs = run.document().result_sheet(&tx_id).ok_or_else(|| String::from("missing chained Transform ResultSheet"))?;
-    if tx_rs.analysis.source_sheet_id != norm_id {
-        return Err(format!("expected Transform parent `{}`, got `{}`", norm_id.as_str(), tx_rs.analysis.source_sheet_id.as_str()));
+    if tx_rs.analysis.source_sheet_id.as_ref() != Some(&norm_id) {
+        return Err(format!("expected Transform parent `{}`, got `{:?}`", norm_id.as_str(), tx_rs.analysis.source_sheet_id));
     }
     if !matches!(
         tx_rs.analysis.kind,

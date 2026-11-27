@@ -109,6 +109,8 @@ pub(super) fn render_results_interpret_studio(
     let (status_lbl, status_clr) = match &rs.status {
         ResultStatus::UpToDate => ("Up to date", tokens.link_green),
         ResultStatus::Dirty => ("Recalculating", tokens.stale),
+        ResultStatus::Imported => ("Imported (not computed by CurveBook)", tokens.link_blue),
+        ResultStatus::ImportedStale => ("Imported (stale — upstream data changed)", tokens.stale),
         ResultStatus::Failed { message, .. } => {
             ui.add(egui::Label::new(egui::RichText::new(format!("Failed: {message}")).size(small).color(tokens.link_red)).wrap());
             ("Failed", tokens.link_red)
@@ -245,7 +247,7 @@ pub(super) fn render_results_interpret_studio(
         ResultsStudioTab::Guidance => {
             ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(small).color(tokens.text_muted)).wrap());
             ui.add_space(4.0);
-            let src_title = doc_sheet_title(doc, &rs.analysis.source_sheet_id).unwrap_or(rs.analysis.source_sheet_id.as_str());
+            let src_title = rs.analysis.source_sheet_id.as_ref().map_or("None (unlinked)", |sid| doc_sheet_title(doc, sid).unwrap_or(sid.as_str()));
             ui.add(egui::Label::new(egui::RichText::new(format!("Analysis: {}", rs.title())).size(small).strong().color(tokens.text_strong)).wrap());
             widgets::dim_label(ui, &format!("Source table: {src_title} • Pairwise comparisons: {}", rs.pairwise_comparisons.len()));
             if !rs.scalars.is_empty() {

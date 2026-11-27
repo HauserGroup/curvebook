@@ -14,6 +14,7 @@ mod brand_surface_sweep;
 mod cli_v2_and_mcp_smoke;
 mod mcp_live_attach_parity;
 mod path_policy_and_mcp_workdir;
+mod pzfx_and_archive_export;
 mod r12_8_pzfx_landing_page;
 mod r16_5_cli_and_callers;
 mod r17_1_cli_xlsx;

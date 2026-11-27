@@ -926,6 +926,25 @@ pub(crate) fn detect_xy_x_subcolumn_header(headers: &[&str], col_offset: usize) 
         }
     }
 
+    // 1b. Check 2-column pre-summarized X header pairs (`{base}:Mean`, `{base}:SD` or `{base}:SEM`).
+    if let (Some(h0), Some(h1)) = (headers.get(col_offset), headers.get(col_offset + 1))
+        && let (Some((p0, s0)), Some((p1, s1))) = (h0.trim().rsplit_once(':'), h1.trim().rsplit_once(':'))
+    {
+        let base = p0.trim();
+        if !base.is_empty() && p1.trim() == base {
+            let t0 = s0.trim().to_ascii_lowercase();
+            let t1 = s1.trim().to_ascii_lowercase();
+            let mode = match (t0.as_str(), t1.as_str()) {
+                ("mean", "sd") => Some(SubcolumnMode::MeanSd),
+                ("mean", "sem") => Some(SubcolumnMode::MeanSem),
+                _ => None,
+            };
+            if let Some(m) = mode {
+                return Some((base.to_owned(), m));
+            }
+        }
+    }
+
     // 2. Check `{base}`, `{base}:2`, `{base}:3`, ... contiguous sequence.
     let mut numbered_count = 1_usize;
     while numbered_count < MAX_SUBCOLUMNS

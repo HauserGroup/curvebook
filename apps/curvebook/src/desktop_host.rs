@@ -390,6 +390,19 @@ enum ImportModePrompt {
 /// dialog is already open (`R0.36`).
 const IMPORT_BLOCKED_BY_DIALOG_MESSAGE: &str = "cannot import while a dialog is open; close or finish the current dialog first";
 
+/// Map any dropped project, template, or interchange path to its replace-or-merge prompt command
+/// (`project.open` for `.curvebook` / `.curvebook.d`, `project.instantiateTemplate` for `.cbtemplate`,
+/// or `table.importPrism` / `table.importPzfx` / `table.importXlsx`).
+fn drop_import_mode_command_for_path(path: &Path) -> Option<&'static str> {
+    if is_unpacked_project_target(path) {
+        return Some("project.open");
+    }
+    match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("curvebook") => Some("project.open"),
+        Some("cbtemplate") => Some("project.instantiateTemplate"),
+        _ => interchange_import_command_for_extension(path),
+    }
+}
 /// Open the replace-or-merge import prompt (`ActiveDialog::ImportProjectMode`) when importing
 /// `path` with `command_id` would otherwise replace a window whose document has sheets or unsaved
 /// changes. On [`ImportModePrompt::Opened`] the caller waits for the user's answer, which re-enters
@@ -1612,6 +1625,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
     matches!(
         command_id,
         "project.open"
+            | "project.merge"
             | "file.open"
             | "file.open_unpacked_dir"
             | "project.save"
@@ -1620,6 +1634,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "file.save_as"
             | "project.saveTemplate"
             | "project.instantiateTemplate"
+            | "project.exportPzfx"
             | "table.importCsv"
             | "table.importPrism"
             | "table.importPzfx"
@@ -1627,6 +1642,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "graph.insertImage"
             | "layout.insertImage"
             | "ui.export.allTablesCsv"
+            | "ui.export.pzfx.open"
     ) || native_export_spec_for_command(command_id).is_some()
 }
 
@@ -1664,6 +1680,7 @@ pub fn execute_native_import_at_path_with_params(
 ) -> Result<(), String> {
     let path_str = path.to_string_lossy().into_owned();
     let mut map = extra_params.as_object().cloned().unwrap_or_default();
+    map.remove("new_window");
     map.insert(String::from("path"), json!(path_str));
     if matches!(command, "table.importPrism" | "table.importPzfx" | "table.importXlsx") {
         map.insert(String::from("merge"), json!(merge));
@@ -2336,10 +2353,24 @@ impl DesktopHostRuntime {
         command_id: &str,
         params: &Value,
     ) -> Result<Option<DesktopEventOutcome>, String> {
-        if matches!(command_id, "project.open" | "file.open")
+        if matches!(command_id, "project.open" | "file.open" | "project.instantiateTemplate" | "project.merge")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
         {
-            return self.open_or_prompt_interchange_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
+            if params.get("new_window").and_then(Value::as_bool) == Some(true) {
+                return self.open_interchange_in_new_window(window_id, command_id, PathBuf::from(explicit_path)).map(Some);
+            }
+            if command_id == "project.merge" {
+                let path = PathBuf::from(explicit_path);
+                let win = self.window_mut(window_id)?;
+                execute_native_import_at_path_with_params(win, "project.merge", &path, true, params)?;
+                if matches!(win.app().canvas_dialogs.active_dialog, curvebook_ui_egui::dialogs_canvas::ActiveDialog::ImportProjectMode { .. }) {
+                    win.app_mut().canvas_dialogs.close_dialog();
+                }
+                return Ok(Some(Self::completed_file_dialog_outcome(window_id, command_id, &path)));
+            }
+            if matches!(command_id, "project.open" | "file.open") {
+                return self.open_or_prompt_interchange_in_window(window_id, PathBuf::from(explicit_path)).map(Some);
+            }
         }
         if matches!(command_id, "table.importPrism" | "table.importPzfx" | "table.importXlsx")
             && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
@@ -2393,6 +2424,23 @@ impl DesktopHostRuntime {
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
                 }
             }
+            "project.merge" => {
+                let req = NativeFileDialogRequest {
+                    command_id: String::from("project.merge"),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label: tr(&win_locale, "w6.view.shell.filter_project").to_owned(),
+                    extensions: vec![String::from("curvebook"), String::from("cbtemplate")],
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let win = self.window_mut(window_id)?;
+                        execute_native_import_at_path_with_params(win, "project.merge", &path, true, params)?;
+                        Self::completed_file_dialog_outcome(window_id, "project.merge", &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, "project.merge"),
+                }
+            }
             "file.open_unpacked_dir" => {
                 let req = NativeFileDialogRequest {
                     command_id: command_id.to_owned(),
@@ -2426,6 +2474,32 @@ impl DesktopHostRuntime {
                     None => Self::cancelled_file_dialog_outcome(window_id, "project.saveTemplate"),
                 }
             }
+            "ui.export.pzfx.open" => {
+                let preflight = {
+                    let win = self.window(window_id)?;
+                    curvebook_format::preflight_pzfx_export(win.app().document())
+                };
+                if preflight.total_dropped_count() > 0 {
+                    let total_dropped = preflight.total_dropped_count();
+                    let win = self.window_mut(window_id)?;
+                    win.app_mut().open_pzfx_export_confirm_dialog(preflight.clone());
+                    DesktopEventOutcome {
+                        handled: true,
+                        action: String::from("native_file_dialog.confirm_pzfx_export:ui.export.pzfx.open"),
+                        window_id: Some(window_id),
+                        command_id: Some(String::from("ui.export.pzfx.open")),
+                        command_result: Some(json!({
+                            "prompted": true,
+                            "total_dropped_count": total_dropped,
+                            "preflight": preflight,
+                        })),
+                        ..Default::default()
+                    }
+                } else {
+                    self.execute_native_pzfx_export_with_adapter(window_id, &win_locale, adapter.as_ref())?
+                }
+            }
+            "project.exportPzfx" => self.execute_native_pzfx_export_with_adapter(window_id, &win_locale, adapter.as_ref())?,
             "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" | "table.importXlsx" => {
                 // Refuse before showing the picker: the replace-or-merge prompt cannot open while
                 // another dialog is open, and the import must never run without it (`R0.36`).
@@ -2684,6 +2758,48 @@ impl DesktopHostRuntime {
 
     fn completed_file_dialog_outcome(window_id: DesktopWindowId, command_id: &str, path: &Path) -> DesktopEventOutcome {
         Self::completed_file_dialog_outcome_with_warnings(window_id, command_id, path, &[])
+    }
+
+    fn execute_native_pzfx_export_with_adapter(
+        &mut self,
+        window_id: DesktopWindowId,
+        win_locale: &str,
+        adapter: &dyn NativeFileDialogAdapter,
+    ) -> Result<DesktopEventOutcome, String> {
+        let req = NativeFileDialogRequest {
+            command_id: String::from("project.exportPzfx"),
+            kind: NativeFileDialogKind::SaveFile,
+            filter_label: tr(win_locale, "w6.view.shell.filter_xml_project").to_owned(),
+            extensions: vec![String::from("pzfx")],
+            default_file_name: Some(String::from("export.pzfx")),
+        };
+        let Some(path) = adapter.pick(&req)? else {
+            return Ok(Self::cancelled_file_dialog_outcome(window_id, "project.exportPzfx"));
+        };
+        let path_str = path.to_string_lossy().into_owned();
+        let win = self.window_mut(window_id)?;
+        let export_outcome = win.execute_and_journal("project.exportPzfx", json!({ "path": path_str, "return_bytes": false }))?;
+        let status_summary = curvebook_ui_egui::format_pzfx_export_status_summary(Some(&path), &export_outcome.payload, &export_outcome.warnings);
+        let mut payload = serde_json::Map::new();
+        payload.insert(String::from("path"), json!(path.to_string_lossy()));
+        for key in ["data_sheet_count", "info_sheet_count", "total_dropped_count"] {
+            if let Some(val) = export_outcome.payload.get(key) {
+                payload.insert(key.to_owned(), val.clone());
+            }
+        }
+        payload.insert(String::from("warnings_count"), json!(export_outcome.warnings.len()));
+        if !export_outcome.warnings.is_empty() {
+            payload.insert(String::from("warnings"), json!(export_outcome.warnings));
+        }
+        payload.insert(String::from("status_summary"), Value::String(status_summary));
+        Ok(DesktopEventOutcome {
+            handled: true,
+            action: String::from("native_file_dialog.completed:project.exportPzfx"),
+            window_id: Some(window_id),
+            command_id: Some(String::from("project.exportPzfx")),
+            command_result: Some(Value::Object(payload)),
+            ..Default::default()
+        })
     }
 
     fn completed_file_dialog_outcome_with_warnings(
@@ -3405,8 +3521,7 @@ impl DesktopHostRuntime {
         }
         let resolved_path = self.validate_host_path_for_window(Some(window_id), &path)?;
         if !self.config.new_instance
-            && let Some(command_id) = interchange_import_command_for_extension(&resolved_path)
-            && !is_unpacked_project_target(&resolved_path)
+            && let Some(command_id) = drop_import_mode_command_for_path(&resolved_path)
         {
             let win = self.window_mut(window_id)?;
             match open_import_mode_prompt_if_needed(win, command_id, &resolved_path) {
@@ -4247,7 +4362,7 @@ fn resolve_project_or_sheet_route(
         "edit.undo" | "edit.redo" | "file.new" | "project.new" | "project.inspect" | "project.recalculate" | "layout.create" => {
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) }))
         }
-        "project.open" | "file.open" | "file.open_unpacked_dir" => {
+        "project.open" | "project.merge" | "file.open" | "file.open_unpacked_dir" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeOpenProject, target_sheet_id: None, query: None }))
         }
         "project.instantiateTemplate" => {
@@ -4263,6 +4378,15 @@ fn resolve_project_or_sheet_route(
         "project.saveTemplate" => Ok(Some(DesktopCommandRoute::EngineCommand {
             engine_command_id: String::from("project.saveTemplate"),
             params: json!({ "return_bytes": true }),
+        })),
+        "project.exportPzfx" => Ok(Some(DesktopCommandRoute::EngineCommand {
+            engine_command_id: String::from("project.exportPzfx"),
+            params: json!({ "return_bytes": true }),
+        })),
+        "project.exportPrism" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: None,
+            query: Some(String::from("project.exportPrism")),
         })),
         "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Checkpoints, target_sheet_id: None, query: None }))
@@ -4287,7 +4411,7 @@ fn resolve_project_or_sheet_route(
             let params = build_sheet_reorder_params(doc)?;
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: String::from("sheet.reorder"), params }))
         }
-        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
+        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" | "sheet.clearOrigin" => {
             let id = resolve_any_sheet_id(doc).ok_or_else(|| format!("no active sheet available for `{base_cmd}`"))?;
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
         }

@@ -200,3 +200,53 @@ fn aud_02_19_and_13_01_wal_checkpoint_and_replay_filesystem_policy() -> Result<(
     assert!(rep_lease.recovered_commands.is_empty());
     Ok(())
 }
+
+#[test]
+fn s10_4_project_merge_and_merge_imports_wal_checkpoint_survive_mutated_or_deleted_sources() -> Result<(), Box<dyn std::error::Error>> {
+    // Verify WAL checkpoint policy marks project.merge and path-based imports as requiring a snapshot checkpoint.
+    for cmd_id in ["project.merge", "table.importPzfx", "table.importPrism", "table.importXlsx"] {
+        assert!(Session::command_requires_wal_checkpoint(cmd_id), "{cmd_id} must force a WAL snapshot checkpoint");
+    }
+
+    let dir = TempDir::try_new("s10-4-merge-wal")?;
+    let mut source_doc = curvebook_doc::ProjectDocument::new("Merge Source").unwrap();
+    let mut col = curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
+    col.data_sets[0].cells = vec![vec![curvebook_doc::Cell::number(11.0)], vec![curvebook_doc::Cell::number(22.0)]];
+    source_doc.add_data_sheet(curvebook_doc::DataSheet::new("d1", "Merged Study", TableArchetype::Column(col)).unwrap()).unwrap();
+    let merge_proj_path = dir.path.join("incoming.curvebook");
+    curvebook_format::save_project_file(&merge_proj_path, &source_doc)?;
+
+    let pzfx_path = dir.path.join("incoming.pzfx");
+    fs::write(
+        &pzfx_path,
+        r#"<?xml version="1.0" encoding="UTF-8"?><PrismFile><Table ID="T1" TableType="OneWay"><Title>Merged XML</Title><YColumn><Title>Y</Title><Subcolumn><d>33</d><d>44</d></Subcolumn></YColumn></Table></PrismFile>"#,
+    )?;
+
+    let (mut live, mut journal, _) = Session::open_with_recovery(MemoryJournalBackend::new(), "merge-wal-1", 5_000, 1_000)?;
+    live.execute_and_record(
+        &mut journal,
+        "sheet.createData",
+        json!({ "sheet_id": "d1", "title": "Base", "archetype": "column", "cols": 1, "rows": 2 }),
+    )?;
+    live.execute_and_record(&mut journal, "table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "value": 5.0 }))?;
+    live.execute_and_record(&mut journal, "project.merge", json!({ "path": merge_proj_path.to_string_lossy(), "merged_at": "unix:1700001000" }))?;
+    live.execute_and_record(
+        &mut journal,
+        "table.importPzfx",
+        json!({ "path": pzfx_path.to_string_lossy(), "merge": true, "merged_at": "unix:1700001001" }),
+    )?;
+    live.execute_and_record(&mut journal, "table.setCell", json!({ "sheet_id": "d1", "row": 1, "col": 0, "value": 9.5 }))?;
+
+    let expected_doc = live.document().clone();
+    assert_eq!(expected_doc.data_sheets.len(), 3);
+    assert_eq!(expected_doc.data_sheets[1].origin.as_ref().map(|o| o.source_label.as_str()), Some("incoming.curvebook"));
+    assert_eq!(expected_doc.data_sheets[2].origin.as_ref().map(|o| o.source_label.as_str()), Some("incoming.pzfx"));
+
+    // Mutate the `.curvebook` source file with corrupt bytes and delete the `.pzfx` file before crash recovery.
+    fs::write(&merge_proj_path, b"corrupted-after-merge")?;
+    fs::remove_file(&pzfx_path)?;
+
+    let (recovered, _, _) = Session::open_with_recovery(journal.abandon(), "merge-wal-2", 5_000, 7_000)?;
+    assert_eq!(recovered.document(), &expected_doc);
+    Ok(())
+}

@@ -29,7 +29,13 @@ pub fn compare_result_vs_horizontal_line(doc: &ProjectDocument, result_sheet_id:
             format!("horizontal-line comparison requires a NonlinearRegression result sheet, got `{}`", res.title()),
         ));
     }
-    let source_ds = resolve_source_table(doc, &res.analysis.source_sheet_id).map_err(|(code, msg)| EngineError::with_code(code, msg))?;
+    let Some(source_id) = res.analysis.source_sheet_id.as_ref() else {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("horizontal-line comparison requires a linked source data sheet for `{}`", res.title()),
+        ));
+    };
+    let source_ds = resolve_source_table(doc, source_id).map_err(|(code, msg)| EngineError::with_code(code, msg))?;
     let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &res.analysis);
     validate_info_constant_hooks(doc, &res.analysis, primary_info_id).map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
 

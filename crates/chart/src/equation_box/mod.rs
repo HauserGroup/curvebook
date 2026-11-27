@@ -153,7 +153,8 @@ pub const fn is_parametric_equation_analysis(kind: &AnalysisKind) -> bool {
 
 /// Resolve the display title for `data_set_index` in the upstream data table referenced by `res`.
 pub(crate) fn dataset_title_for_result<'a>(doc: &'a ProjectDocument, res: &ResultSheet, data_set_index: usize) -> Option<&'a str> {
-    let ds = crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id)?;
+    let src = res.analysis.source_sheet_id.as_ref()?;
+    let ds = crate::resolve_data_sheet_or_upstream(doc, src)?;
     let raw = match &ds.archetype {
         TableArchetype::Xy(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
         TableArchetype::Column(t) => t.data_sets.get(data_set_index).map(|c| c.title.as_str()),
@@ -399,6 +400,15 @@ pub(super) fn resolve_model_equation(
         // Model-free / non-parametric curve analyses never emit bogus diagnostic scalar dumps (`AUD-13-18`).
         AnalysisKind::FitSplineLowess(_) | AnalysisKind::Survival(_) | AnalysisKind::RocCurve(_) | AnalysisKind::GeneralizedLinearModel(_) => {
             ResolvedEquation::Empty
+        }
+        AnalysisKind::ImportedSnapshot(snap) => {
+            let suffix = if matches!(res.status, ResultStatus::ImportedStale) { " — stale" } else { "" };
+            let label = if snap.original_kind_label.trim().is_empty() {
+                format!("(Imported result{suffix})")
+            } else {
+                format!("(Imported: {}{suffix})", snap.original_kind_label.trim())
+            };
+            ResolvedEquation::Placeholder(label)
         }
         _ => {
             if let Some(curve) = overlay_for_dataset.filter(|c| !c.equation_id.trim().is_empty()) {

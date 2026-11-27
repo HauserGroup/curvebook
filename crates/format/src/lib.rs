@@ -27,7 +27,8 @@ pub mod zip;
 pub use archive::{
     ArchiveKind, ArchiveManifest, AssetManifestEntry, MAX_ARCHIVE_FILE_BYTES, SheetManifestEntry, detect_dependency_cycles,
     ensure_existing_archive_not_newer, ensure_existing_unpacked_dir_not_newer, instantiate_template_bytes, is_unpacked_project_dir,
-    migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_project_bytes, open_project_file, open_project_unpacked_dir,
+    migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_archive_bytes_with_limits_and_warnings,
+    open_archive_bytes_with_warnings, open_project_bytes, open_project_file, open_project_unpacked_dir, open_project_unpacked_dir_with_warnings,
     open_template_bytes, open_template_file, sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir,
     save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document, validate_project_document_skip_checkpoints,
 };
@@ -40,7 +41,8 @@ pub use csv::{
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 pub use export::{
     ResultSheetExportJson, ensure_result_sheet_csv_exportable, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
-    try_export_result_sheet_tidy_csv, try_export_result_tab_csv,
+    result_sheet_export_warning, try_export_result_sheet_tidy_csv, try_export_result_sheet_tidy_csv_with_warnings, try_export_result_tab_csv,
+    try_export_result_tab_csv_with_warnings,
 };
 pub use image_asset::{ingest_image_asset, validate_image_asset};
 pub use plate::{
@@ -48,8 +50,20 @@ pub use plate::{
     serialize_cbplate_json,
 };
 pub use preamble::{PreambleInfo, build_preamble_info_sheet, extract_preamble_info, parse_preamble_constant_value, try_parse_preamble_kv};
-pub use prism::{import_prism_bytes, import_prism_bytes_with_limits};
-pub use pzfx::{import_pzfx_bytes, import_pzfx_str};
+pub use prism::{
+    ANALYSIS_MAPPINGS, AnalysisMappingRow, AnalysisVerificationStatus, ArchiveExportOptions, ArchiveExportReport, CachedResultDiagnostic,
+    CachedScalarDiff, TranslatedAnalysis, build_disagreement_checklist_item, compare_recomputed_against_cached_result,
+    export_prism_bytes_experimental, export_prism_bytes_with_options, find_analysis_mapping, import_prism_bytes, import_prism_bytes_with_limits,
+    translate_analysis_parameters,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use pzfx::export_pzfx_file;
+pub use pzfx::{
+    BINARY_PZF_MAGIC, BINARY_PZF_UNSUPPORTED_MESSAGE, PZFX_FEATURE_CORPUS_COVERAGE, PZFX_ROOT_ELEMENT, PzfxDataLayerDiff, PzfxDataLayerDifference,
+    PzfxDroppedGroup, PzfxDroppedKind, PzfxExportPreflight, PzfxExportReport, PzfxExportWarning, PzfxExportWarningKind, PzfxFeatureCoverageRow,
+    PzfxFeatureCoverageStatus, binary_pzf_unsupported_error, compare_pzfx_data_layer, export_pzfx_bytes, import_pzfx_bytes, import_pzfx_str,
+    is_binary_pzf_bytes, lookup_pzfx_feature_coverage, preflight_pzfx_export,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use recovery::DirectoryJournalBackend;
 pub use recovery::{
@@ -68,8 +82,15 @@ pub use versioned::{
     save_preferences_file, upgrade, validate_batch_manifest_version,
 };
 pub use xlsx::{XlsxImportOptions, XlsxSheetInfo, import_xlsx_bytes, import_xlsx_bytes_with_options, list_xlsx_sheets};
-pub use xml::{MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, XmlElement, XmlLimits, XmlNode, parse_xml, parse_xml_with_limits};
-pub use zip::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_UNCOMPRESSED_BYTES, ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
+pub use xml::{
+    MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, MAX_XML_OPAQUE_BYTES, ParsedXml, SkippedOpaqueElement, XmlElement, XmlEncoding, XmlLimits, XmlNode,
+    XmlParseOptions, XmlWriter, decode_xml_entities, detect_xml_encoding, parse_xml, parse_xml_bytes, parse_xml_bytes_with_options,
+    parse_xml_with_limits, parse_xml_with_options,
+};
+pub use zip::{
+    MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_UNCOMPRESSED_BYTES, ZipArchive, ZipEntryClass, ZipEntryInfo, ZipIndex, ZipLimits, ZipReadOptions,
+    ZipWriter, classify_zip_entry_name, decode_cp437, sanitize_zip_path, sanitize_zip_path_with_options,
+};
 
 /// Canonical file extension for native CurveBook project archives.
 pub const EXTENSION: &str = "curvebook";

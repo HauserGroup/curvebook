@@ -31,11 +31,11 @@ fn raw_matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec
     if let Some(direct) = doc.result_sheet(&graph.spec.primary_source_sheet_id) {
         return vec![direct];
     }
-    doc.result_sheets.iter().filter(|r| r.analysis.source_sheet_id == graph.spec.primary_source_sheet_id).collect()
+    doc.result_sheets.iter().filter(|r| r.analysis.source_sheet_id.as_ref() == Some(&graph.spec.primary_source_sheet_id)).collect()
 }
 
 fn matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a ResultSheet> {
-    raw_matching_results(graph, doc).into_iter().filter(|r| matches!(r.status, ResultStatus::UpToDate)).collect()
+    raw_matching_results(graph, doc).into_iter().filter(|r| r.has_displayable_output()).collect()
 }
 
 fn find_matching_result_where<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> Option<&'a ResultSheet> {
@@ -53,7 +53,7 @@ fn find_matching_result_where_checked<'a>(
         let raw = raw_matching_results(graph, doc);
         if let Some(failed) = raw.iter().copied().find(|r| matches!(r.status, ResultStatus::Failed { .. }) && pred(r)) {
             push_unique_warning(warnings, "failed_result_sheet", format!("result sheet '{}' failed; omitted stale analysis results", failed.id));
-        } else if let Some(pending) = raw.iter().copied().find(|r| !matches!(r.status, ResultStatus::UpToDate) && pred(r)) {
+        } else if let Some(pending) = raw.iter().copied().find(|r| !r.has_displayable_output() && pred(r)) {
             push_unique_warning(
                 warnings,
                 "pending_analysis_result",
@@ -65,7 +65,7 @@ fn find_matching_result_where_checked<'a>(
 }
 
 fn has_blocked_matching_result(graph: &GraphSheet, doc: &ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> bool {
-    raw_matching_results(graph, doc).into_iter().any(|r| !matches!(r.status, ResultStatus::UpToDate) && pred(r))
+    raw_matching_results(graph, doc).into_iter().any(|r| !r.has_displayable_output() && pred(r))
 }
 
 fn find_matching_result_checked<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, warnings: &mut Vec<ChartWarning>) -> Option<&'a ResultSheet> {
@@ -291,18 +291,22 @@ fn resolve_fresh_data_sheet_or_upstream<'a>(doc: &'a ProjectDocument, id: &Sheet
                 );
                 return None;
             }
+            ResultStatus::Imported | ResultStatus::ImportedStale => return None,
         }
         if let Some(analyzable) = res.analyzable_data.as_ref() {
             return Some(analyzable);
         }
-        cursor = &res.analysis.source_sheet_id;
+        let next = res.analysis.source_sheet_id.as_ref()?;
+        cursor = next;
     }
     None
 }
 
 fn resolve_analysis_source_data_sheet<'a>(res: &ResultSheet, graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
-    doc.data_sheet(&res.analysis.source_sheet_id)
-        .or_else(|| crate::resolve_data_sheet_or_upstream(doc, &res.analysis.source_sheet_id))
+    res.analysis
+        .source_sheet_id
+        .as_ref()
+        .and_then(|src| doc.data_sheet(src).or_else(|| crate::resolve_data_sheet_or_upstream(doc, src)))
         .or_else(|| crate::resolve_data_sheet_or_upstream(doc, &graph.spec.primary_source_sheet_id))
 }
 

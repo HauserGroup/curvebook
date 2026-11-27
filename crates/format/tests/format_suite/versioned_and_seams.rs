@@ -166,8 +166,9 @@ fn format_registry_lookup_and_roundtrips() {
     );
     assert_eq!(
         reg.supported_export_formats().into_iter().map(|d| d.id).collect::<Vec<_>>(),
-        vec!["curvebook", "curvebook.d", "cbtemplate", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "emf"]
+        vec!["curvebook", "curvebook.d", "cbtemplate", "pzfx", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "emf"]
     );
+    assert!(reg.exporter_by_format("prism").is_none(), ".prism export stays experimental-gated and unregistered in default FormatRegistry");
 
     assert_eq!(
         (
@@ -417,4 +418,329 @@ fn journal_v1_crc_verified_before_v2_upgrade_and_batch_manifest_normalizes() {
         ann["commands"][0]["params"],
         json!({ "sheet_id": "g1", "kind": "shape", "stroke_color": "#ff0000", "bounds_pt": { "x": 10.0, "y": 10.0, "width": 50.0, "height": 20.0 } })
     );
+}
+
+fn build_v9_provenance_fixture() -> ProjectDocument {
+    use curvebook_doc::{
+        AnalysisSpec, BracketLabelMode, BracketStyle, Cell, CellCoord, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, DataSheet,
+        EmbeddedTableStyle, EquationDisplayMode, FittedCurveOverlay, GraphAnnotation, GraphSheet, GraphSpec, ImportFilterSpec, ImportLinkSpec,
+        ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem, LayoutSheet, LayoutSpec, LinkSource, LinkedDataRegion, PairwiseBracketSpec,
+        RectPt, RegressionOverlaySpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetCellRange, SheetId,
+        SheetOrigin, SubcolumnMode, TableArchetype, XColumnMode, XyTable,
+    };
+
+    let mut doc = ProjectDocument::new("V9 Full Provenance Study").unwrap();
+    let origin = SheetOrigin::new("incoming_run.curvebook", "curvebook", "unix:1795700100").unwrap();
+
+    let mut xy = XyTable::new(SubcolumnMode::MeanSd, 1, 2).unwrap();
+    xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSem };
+    xy.x_cells = vec![vec![Cell::number(1.0), Cell::number(0.1)], vec![Cell::number(2.0), Cell::number(0.2)]];
+    xy.x_subcolumn_titles = vec![String::from("X Mean"), String::from("X SEM")];
+    xy.x_display_decimals = Some(2);
+    xy.data_sets[0].title = String::from("Drug A");
+    xy.data_sets[0].subcolumn_titles = vec![String::from("Mean"), String::from("SD")];
+    xy.data_sets[0].display_decimals = Some(3);
+    xy.data_sets[0].cells = vec![vec![Cell::number(10.0), Cell::number(1.2)], vec![Cell::number(20.0), Cell::number(1.8)]];
+    let mut ds = DataSheet::new("xy-1", "Dose Curve", TableArchetype::Xy(xy)).unwrap();
+    ds.origin = Some(origin.clone());
+    doc.add_data_sheet(ds).unwrap();
+
+    let mut info = InfoSheet::new_preseeded("info-1", "Study Info").unwrap();
+    info.origin = Some(origin.clone());
+    doc.add_info_sheet(info).unwrap();
+
+    let mut imp_linked = ResultSheet::new_imported(
+        AnalysisSpec::new_imported_snapshot("imp-fit", Some(SheetId::new("xy-1")), "Imported 4PL").unwrap(),
+        "external_archive",
+        "Dose-response 4PL",
+        "Preserved cached output",
+    )
+    .unwrap();
+    imp_linked.origin = Some(origin.clone());
+    imp_linked.tabs.push(ResultTab {
+        id: String::from("summary"),
+        title: String::from("Summary"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![String::from("Value")],
+        row_labels: vec![String::from("IC50")],
+        rows: vec![vec![ResultCell::Number { value: 12.5, prefix: None, units: None }]],
+        footnotes: Vec::new(),
+    });
+    imp_linked.scalars.push(ResultScalarEntry { key: String::from("IC50"), data_set_index: Some(0), value: 12.5, units: Some(String::from("nM")) });
+    imp_linked.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("imported_curve"),
+        converged: true,
+        ambiguous: false,
+        points: vec![curvebook_doc::CurveSamplePoint { x: 1.0, y: 10.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None }],
+    });
+    doc.add_result_sheet(imp_linked).unwrap();
+
+    let mut imp_unlinked = ResultSheet::new_imported(
+        AnalysisSpec::new_imported_snapshot("imp-orphan", None, "Orphan Summary").unwrap(),
+        "external_archive",
+        "Summary Table",
+        "Source table absent in archive",
+    )
+    .unwrap();
+    imp_unlinked.status = ResultStatus::ImportedStale;
+    imp_unlinked.tabs.push(ResultTab {
+        id: String::from("tab0"),
+        title: String::from("Table"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![String::from("Metric")],
+        row_labels: vec![String::from("Total")],
+        rows: vec![vec![ResultCell::Number { value: 99.0, prefix: None, units: None }]],
+        footnotes: Vec::new(),
+    });
+    doc.add_result_sheet(imp_unlinked).unwrap();
+
+    let mut ds2 =
+        DataSheet::new("col-2", "Linked Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+            .unwrap();
+    ds2.linked_regions.push(LinkedDataRegion {
+        id: String::from("lnk-imp"),
+        spec: ImportLinkSpec {
+            source: LinkSource::InternalSheet {
+                sheet_id: SheetId::new("imp-fit"),
+                kind: InternalLinkKind::TerminalResultSheet,
+                tab_id: Some(String::from("summary")),
+                range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+            },
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec::default(),
+        },
+        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+        provenance_summary: String::from("Imported link"),
+    });
+    doc.add_data_sheet(ds2).unwrap();
+
+    let mut gspec = GraphSpec::default_for_data_sheet(&doc.data_sheets[0]);
+    gspec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+        result_sheet_id: SheetId::new("imp-fit"),
+        sample_segments: 256,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: true,
+    });
+    gspec.comparisons.push(PairwiseBracketSpec {
+        result_sheet_id: SheetId::new("imp-fit"),
+        group_a: 0,
+        group_b: 1,
+        style: BracketStyle::Square,
+        label_mode: BracketLabelMode::SummaryStars,
+        hide_if_non_significant: false,
+        stroke_width_pt: 0.75,
+        font_size_pt: 8.5,
+        bracket_step_pt: 12.0,
+    });
+    gspec.compact_letter_display = Some(CompactLetterDisplaySpec::new("imp-fit"));
+    gspec.annotations.push(GraphAnnotation::EmbeddedResultTable {
+        result_sheet_id: SheetId::new("imp-fit"),
+        tab_id: Some(String::from("summary")),
+        bounds_pt: RectPt::new(10.0, 10.0, 80.0, 40.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: EmbeddedTableStyle::default(),
+    });
+    gspec.annotations.push(GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("imp-fit"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Substituted,
+        bounds_pt: RectPt::new(10.0, 60.0, 80.0, 30.0),
+        font_size_pt: 8.0,
+        bordered: false,
+    });
+    let gs = GraphSheet {
+        id: SheetId::new("g-1"),
+        title: String::from("Dose Plot"),
+        initialized: true,
+        spec: gspec,
+        floating_notes: Vec::new(),
+        color_tag: None,
+        origin: Some(origin.clone()),
+    };
+    doc.add_graph_sheet(gs).unwrap();
+
+    let mut lspec = LayoutSpec::default();
+    lspec.items.push(LayoutItem::LiveTable {
+        id: String::from("lt-imp"),
+        source_sheet_id: SheetId::new("imp-fit"),
+        tab_id: Some(String::from("summary")),
+        bounds_pt: RectPt::new(10.0, 10.0, 100.0, 60.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: EmbeddedTableStyle::default(),
+    });
+    lspec.items.push(LayoutItem::LiveGraph {
+        id: String::from("lg-1"),
+        graph_sheet_id: SheetId::new("g-1"),
+        bounds_pt: RectPt::new(120.0, 10.0, 100.0, 80.0),
+        scale_percent: 100.0,
+        badge_override: None,
+    });
+    let mut ls = LayoutSheet::new("l-1", "Plate Layout", lspec).unwrap();
+    ls.origin = Some(origin);
+    doc.add_layout_sheet(ls).unwrap();
+    doc.active_sheet_id = Some(SheetId::new("imp-fit"));
+    doc.family_anchor_sheet_id = Some(SheetId::new("imp-orphan"));
+    doc
+}
+
+#[test]
+fn v9_archive_migration_selection_clearing_and_template_stripping() {
+    use curvebook_format::{
+        migrate_document_json, open_archive_bytes_with_warnings, open_project_unpacked_dir_with_warnings, save_project_bytes, save_template_bytes,
+        strip_project_data_for_template, validate_project_document,
+    };
+
+    assert_eq!(CURRENT_SCHEMA_VERSION, 9);
+    let doc = build_v9_provenance_fixture();
+
+    // Direct archive round-trip AND streaming visitor path (schema_version omitted in document.json).
+    let archive_bytes = save_project_bytes(&doc).unwrap();
+    assert_eq!(open_project_bytes(&archive_bytes).unwrap(), doc);
+
+    let mut streamed_val = serde_json::to_value(&doc).unwrap();
+    streamed_val.as_object_mut().unwrap().remove("schema_version");
+    let streamed_bytes = serde_json::to_vec(&streamed_val).unwrap();
+    let streamed_manifest = json!({
+        "format": "curvebook-archive",
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "kind": "Project",
+        "title": doc.title,
+        "document_crc32": crc32fast::hash(&streamed_bytes),
+        "sheets": []
+    });
+    let streamed_zip = build_zip_entries(&[("document.json", &streamed_bytes), ("manifest.json", &serde_json::to_vec(&streamed_manifest).unwrap())]);
+    assert_eq!(open_project_bytes(&streamed_zip).unwrap(), doc);
+
+    // v8 -> v9 migration step upgrades schema_version to 9.
+    let base_v8 = sample_column_project("V8 Legacy");
+    let mut v8_val = serde_json::to_value(&base_v8).unwrap();
+    v8_val["schema_version"] = json!(8_u32);
+    assert_eq!(migrate_document_json(v8_val, 8).unwrap()["schema_version"], json!(9_u32));
+
+    // Dangling active_sheet_id & family_anchor_sheet_id cleared on archive AND unpacked-dir load with warnings.
+    let mut dangling_val = serde_json::to_value(&base_v8).unwrap();
+    dangling_val["active_sheet_id"] = json!("missing-active");
+    dangling_val["family_anchor_sheet_id"] = json!("missing-anchor");
+    let dangling_bytes = serde_json::to_vec(&dangling_val).unwrap();
+    let dangling_manifest = json!({
+        "format": "curvebook-archive",
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "kind": "Project",
+        "title": base_v8.title,
+        "document_crc32": crc32fast::hash(&dangling_bytes),
+        "sheets": []
+    });
+    let dangling_zip = build_zip_entries(&[("document.json", &dangling_bytes), ("manifest.json", &serde_json::to_vec(&dangling_manifest).unwrap())]);
+    let (_kind, cleaned_doc, archive_warnings) = open_archive_bytes_with_warnings(&dangling_zip).unwrap();
+    assert_eq!((cleaned_doc.active_sheet_id, cleaned_doc.family_anchor_sheet_id, archive_warnings.len()), (None, None, 2));
+
+    let dir = TempDirGuard::new("v9-dangling").unwrap();
+    let unpacked_dangling = dir.child("dangling.curvebook.d");
+    fs::create_dir_all(&unpacked_dangling).unwrap();
+    fs::write(unpacked_dangling.join("document.json"), &dangling_bytes).unwrap();
+    fs::write(unpacked_dangling.join("manifest.json"), serde_json::to_vec(&dangling_manifest).unwrap()).unwrap();
+    let (unpacked_doc, unpacked_warnings) = open_project_unpacked_dir_with_warnings(&unpacked_dangling).unwrap();
+    assert_eq!((unpacked_doc.active_sheet_id, unpacked_doc.family_anchor_sheet_id, unpacked_warnings.len()), (None, None, 2));
+
+    // Template stripping drops imported results, prunes dangling references, clears origin & selection IDs, and validates.
+    let mut doc_with_imp_graphs = doc.clone();
+    // Graph anchored on a dropped imported result WITH a surviving series from `xy-1` -> primary_source_sheet_id retargeted to `xy-1`.
+    let mut g_retarget_spec = curvebook_doc::GraphSpec::default_for_data_sheet(&doc.data_sheets[0]);
+    g_retarget_spec.primary_source_sheet_id = curvebook_doc::SheetId::new("imp-fit");
+    doc_with_imp_graphs
+        .add_graph_sheet(curvebook_doc::GraphSheet {
+            id: curvebook_doc::SheetId::new("g-retarget"),
+            title: String::from("Retargeted Plot"),
+            initialized: true,
+            spec: g_retarget_spec,
+            floating_notes: Vec::new(),
+            color_tag: None,
+            origin: None,
+        })
+        .unwrap();
+    // Graph anchored ONLY on a dropped imported result (no surviving series) + LiveGraph item -> both dropped cleanly.
+    let mut g_drop_spec = curvebook_doc::GraphSpec::default_for_data_sheet(&doc.data_sheets[0]);
+    g_drop_spec.primary_source_sheet_id = curvebook_doc::SheetId::new("imp-fit");
+    g_drop_spec.series[0].source_sheet_id = curvebook_doc::SheetId::new("imp-fit");
+    doc_with_imp_graphs
+        .add_graph_sheet(curvebook_doc::GraphSheet {
+            id: curvebook_doc::SheetId::new("g-drop"),
+            title: String::from("Orphan Imported Plot"),
+            initialized: true,
+            spec: g_drop_spec,
+            floating_notes: Vec::new(),
+            color_tag: None,
+            origin: None,
+        })
+        .unwrap();
+    doc_with_imp_graphs.layout_sheets[0].spec.items.push(curvebook_doc::LayoutItem::LiveGraph {
+        id: String::from("lg-drop"),
+        graph_sheet_id: curvebook_doc::SheetId::new("g-drop"),
+        bounds_pt: curvebook_doc::RectPt::new(10.0, 100.0, 80.0, 60.0),
+        scale_percent: 100.0,
+        badge_override: None,
+    });
+    doc_with_imp_graphs.active_sheet_id = Some(curvebook_doc::SheetId::new("g-drop"));
+
+    let stripped = strip_project_data_for_template(&doc_with_imp_graphs).unwrap();
+    validate_project_document(&stripped).unwrap();
+    assert!(stripped.result_sheets.is_empty());
+    assert!(stripped.data_sheets.iter().all(|s| s.origin.is_none()) && stripped.info_sheets.iter().all(|s| s.origin.is_none()));
+    assert!(stripped.graph_sheets.iter().all(|s| s.origin.is_none()) && stripped.layout_sheets.iter().all(|s| s.origin.is_none()));
+    assert!(stripped.data_sheets[1].linked_regions.is_empty());
+    assert!(stripped.graph_sheets[0].spec.series[0].regression_overlay.is_none() && stripped.graph_sheets[0].spec.comparisons.is_empty());
+    assert!(stripped.graph_sheets[0].spec.compact_letter_display.is_none() && stripped.graph_sheets[0].spec.annotations.is_empty());
+    assert_eq!(stripped.graph_sheet(&curvebook_doc::SheetId::new("g-retarget")).unwrap().spec.primary_source_sheet_id.as_str(), "xy-1");
+    assert!(stripped.graph_sheet(&curvebook_doc::SheetId::new("g-drop")).is_none(), "graph with only dropped imported source must be removed");
+    assert_eq!((stripped.layout_sheets[0].spec.items.len(), stripped.active_sheet_id, stripped.family_anchor_sheet_id), (1, None, None));
+    assert!(open_template_bytes(&save_template_bytes(&doc_with_imp_graphs).unwrap()).unwrap().result_sheets.is_empty());
+}
+
+#[test]
+fn v9_result_export_provenance_and_csv_two_subcolumn_x() {
+    use curvebook_doc::{ResultProvenance, ResultStatus, SubcolumnMode, TableArchetype, TableKind, XColumnMode};
+    use curvebook_format::{
+        export_result_sheet_json, export_result_sheet_tidy_csv, import_csv_to_datasheet, parse_delimited_records, result_sheet_export_warning,
+        try_export_result_sheet_tidy_csv_with_warnings, try_export_result_tab_csv_with_warnings,
+    };
+
+    let doc = build_v9_provenance_fixture();
+    let opts = CsvOptions::csv();
+    let (imp_rs, stale_rs) = (&doc.result_sheets[0], &doc.result_sheets[1]);
+
+    let imp_json: Value = serde_json::from_str(&export_result_sheet_json(imp_rs, false).unwrap()).unwrap();
+    assert_eq!(imp_json["provenance"]["Imported"]["source_format"], json!("external_archive"));
+    assert_eq!(imp_json["status"], json!("Imported"));
+
+    let (tidy_imp_str, tidy_imp_warn) = try_export_result_sheet_tidy_csv_with_warnings(imp_rs, &opts).unwrap();
+    assert!(!tidy_imp_warn.is_empty());
+    let tidy_imp = parse_delimited_records(&tidy_imp_str, &opts).unwrap();
+    assert_eq!((tidy_imp[0].len(), tidy_imp[0][21].as_str()), (22, "provenance"));
+    assert!(tidy_imp[1..].iter().all(|r| r.len() == 22 && r[21] == "imported:external_archive"));
+
+    let tidy_stale = parse_delimited_records(&export_result_sheet_tidy_csv(stale_rs, &opts), &opts).unwrap();
+    assert!(tidy_stale[1..].iter().all(|r| r.len() == 22 && r[21] == "imported_stale:external_archive"));
+
+    let (_wide_csv, wide_warn) = try_export_result_tab_csv_with_warnings(stale_rs, &stale_rs.tabs[0], &opts).unwrap();
+    assert!(wide_warn.iter().any(|w| w.contains("stale imported snapshot")));
+    assert!(result_sheet_export_warning(imp_rs).is_some());
+
+    let mut failed_rs = imp_rs.clone();
+    failed_rs.provenance = ResultProvenance::Computed;
+    failed_rs.status = ResultStatus::Failed { code: curvebook_doc::ErrorCode::SolverFailed, message: String::from("boom") };
+    assert!(try_export_result_tab_csv_with_warnings(&failed_rs, &failed_rs.tabs[0], &opts).is_err());
+
+    // CSV header detection for 2-subcolumn X MeanSd and MeanSem.
+    for (hdr, expected) in [("X:Mean,X:SD,Y:Mean,Y:SD", SubcolumnMode::MeanSd), ("X:Mean,X:SEM,Y:Mean,Y:SEM", SubcolumnMode::MeanSem)] {
+        let csv_text = format!("{hdr}\n1.0,0.1,10.0,1.0\n2.0,0.2,20.0,2.0\n");
+        let ds = import_csv_to_datasheet("csv-2sub", "CSV 2Sub", &csv_text, TableKind::Xy, expected, &opts).unwrap();
+        let TableArchetype::Xy(t) = &ds.archetype else { panic!("expected XY table") };
+        assert_eq!(t.x_mode, XColumnMode::Numbers { subcolumn_mode: expected });
+        assert_eq!(t.y_subcolumn_mode, expected);
+        assert_eq!(t.x_cells[0][1].active_number(), Some(0.1));
+    }
 }

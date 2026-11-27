@@ -17,6 +17,7 @@ mod design_tokens;
 #[cfg(feature = "docs-site")]
 mod docs_site;
 mod ico;
+pub mod interop_corpus;
 mod layers;
 mod licenses;
 mod msix;
@@ -77,6 +78,8 @@ commands:
   wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
   web-bundle            verify web bundle readiness and R10.22 zip size budget (CURVEBOOK_REQUIRE_WEB_BUNDLE=1 requires zip)
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
+  interop-corpus [--strict] [--observe] [--corpus <dir>] [--ledger-dir <dir>] [--structural-only]
+                        verify & observe external .pzfx/.prism interop corpus (aggregate stats only)
   coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
   bundle                build release binaries and assemble dist/CurveBook.app
   msix --arch <arch> --package-version <A.B.C.0>  package Windows binaries for Microsoft Store
@@ -134,6 +137,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "wasm" => cmd_wasm(&root),
         "web-bundle" => web_fonts::run_bundle_check(&root, rest),
         "corpus" => corpus::run(&root, rest),
+        "interop-corpus" => interop_corpus::run(&root, rest),
         "coverage" => coverage::run(&root, rest),
         "bundle" => bundle::run(&root),
         "msix" => msix::run(&root, rest),

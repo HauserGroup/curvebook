@@ -103,19 +103,35 @@ fn pzfx_hardens_plusminus_asymmetric_limits_and_missing_n_summary_modes() {
     );
 
     let TableArchetype::Column(ref col_ul_c) = sheet(doc, "col-ul-coerce").archetype else { panic!("expected Column") };
-    assert_eq!(col_ul_c.subcolumn_mode, SubcolumnMode::Single);
+    if TableKind::Column.allows_subcolumn_mode(SubcolumnMode::UpperLowerLimits) {
+        assert_eq!(
+            (
+                col_ul_c.subcolumn_mode,
+                col_ul_c.data_sets[0].cell(0, 1).unwrap().active_number(),
+                col_ul_c.data_sets[0].cell(0, 2).unwrap().active_number()
+            ),
+            (SubcolumnMode::UpperLowerLimits, Some(38.0), Some(62.0))
+        );
+    } else {
+        assert_eq!(col_ul_c.subcolumn_mode, SubcolumnMode::Single);
+        assert_warnings_present(&report.warnings, &[(Some(ImportWarningKind::CoercedValue), Some("col-ul-coerce"), None)]);
+    }
 
     let TableArchetype::Column(ref col_sd2) = sheet(doc, "col-sd2").archetype else { panic!("expected Column") };
-    assert_eq!((col_sd2.subcolumn_mode, &col_sd2.data_sets[0].cell(0, 2).unwrap().value), (SubcolumnMode::MeanSemN, &CellValue::Empty));
+    assert_eq!(
+        (
+            col_sd2.subcolumn_mode,
+            col_sd2.data_sets[0].cell(0, 0).unwrap().active_number(),
+            col_sd2.data_sets[0].cell(0, 1).unwrap().active_number(),
+            col_sd2.data_sets[0].cell(0, 2),
+        ),
+        (SubcolumnMode::MeanSem, Some(8.0), Some(0.4), None)
+    );
+    assert!(!report.warnings.iter().any(|w| w.source == "col-sd2"), "unexpected warnings for native MeanSem: {:?}", report.warnings);
 
     assert_warnings_present(
         &report.warnings,
-        &[
-            (Some(ImportWarningKind::CoercedValue), Some("xy-pm"), None),
-            (Some(ImportWarningKind::CoercedValue), Some("grp-ul"), None),
-            (Some(ImportWarningKind::CoercedValue), Some("col-ul-coerce"), None),
-            (Some(ImportWarningKind::MissingMetadata), Some("col-sd2"), None),
-        ],
+        &[(Some(ImportWarningKind::CoercedValue), Some("xy-pm"), None), (Some(ImportWarningKind::CoercedValue), Some("grp-ul"), None)],
     );
 }
 

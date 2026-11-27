@@ -225,7 +225,8 @@ fn host_clipboard_isolation_xlsx_selection_path_policy_and_multi_file_dnd() -> R
     save_project_file(&proj_path, &build_col_doc("orig", "Original", &[("A", &[1.0])])?)?;
     let extra_csv = td.child("extra_table.csv");
     fs::write(&extra_csv, "A,B\n1,2\n3,4\n")?;
-    let mut rt_dnd = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: None, in_window_menus: true, ..DesktopHostConfig::default() });
+    let mut rt_dnd =
+        DesktopHostRuntime::new(DesktopHostConfig { recovery_root: None, in_window_menus: true, new_instance: true, ..DesktopHostConfig::default() });
     let d1 = rt_dnd.open_window(None, ViewportMetrics::default())?;
     rt_dnd.window_mut(d1)?.execute_and_journal("sheet.createData", json!({ "sheet_id": "dirty1", "kind": "Column" }))?;
     assert!(rt_dnd.window(d1)?.has_unsaved_changes());

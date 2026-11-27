@@ -279,6 +279,9 @@ pub struct DataSheet {
     /// Sorted well-origin provenance records mapping cells created by microplate import back to physical well IDs (`R17.7`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plate_well_origins: Vec<PlateCellOrigin>,
+    /// Optional external import/merge origin metadata; `None` for natively authored sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::ids::SheetOrigin>,
 }
 
 #[derive(serde::Deserialize)]
@@ -295,6 +298,8 @@ struct RawDataSheet {
     exclusion_notes: Vec<CellExclusionNote>,
     #[serde(default)]
     plate_well_origins: Vec<PlateCellOrigin>,
+    #[serde(default)]
+    origin: Option<crate::ids::SheetOrigin>,
 }
 
 impl<'de> serde::Deserialize<'de> for DataSheet {
@@ -314,6 +319,7 @@ impl<'de> serde::Deserialize<'de> for DataSheet {
             color_tag: raw.color_tag,
             exclusion_notes: raw.exclusion_notes,
             plate_well_origins: raw.plate_well_origins,
+            origin: raw.origin,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
         sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
@@ -337,12 +343,13 @@ impl DataSheet {
             color_tag: None,
             exclusion_notes: Vec::new(),
             plate_well_origins: Vec::new(),
+            origin: None,
         };
         sheet.validate()?;
         Ok(sheet)
     }
 
-    /// Validate identifier bounds, title bounds, table archetype invariants, plate well origins, and floating notes.
+    /// Validate identifier bounds, title bounds, table archetype invariants, plate well origins, origin metadata, and floating notes.
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
@@ -372,6 +379,9 @@ impl DataSheet {
         }
         for note in &self.floating_notes {
             note.validate_id()?;
+        }
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
         }
         Ok(())
     }
@@ -672,6 +682,7 @@ impl DataSheet {
         cloned.frozen = false;
         cloned.linked_regions.clear();
         cloned.floating_notes.clear();
+        cloned.origin = None;
         apply_clone_options(&mut cloned.archetype, opts)?;
         cloned.prune_stale_exclusion_notes();
         if opts.clear_y_values {
@@ -894,6 +905,9 @@ fn reset_data_sets(
     for (idx, ds) in data_sets.iter_mut().enumerate() {
         if clear_titles {
             ds.title = default_column_label(idx);
+            ds.subcolumn_titles.clear();
+        } else if !ds.subcolumn_titles.is_empty() && ds.subcolumn_titles.len() != subcolumn_count {
+            ds.subcolumn_titles.clear();
         }
         if clear_values {
             ds.cells = vec![vec![Cell::empty(); subcolumn_count]; ds.row_count()];

@@ -192,7 +192,10 @@ fn audit_29_pzfx_and_prism_validate_and_sanitize_invalid_sheet_ids() {
     assert_eq!(clean.info_sheets[0].linked_data_sheets, vec![clean_ds.id.clone()]);
     assert_eq!(clean_ds.info_sheet_id.as_ref(), Some(&clean.info_sheets[0].id));
     assert_eq!(clean_ds.linked_regions[0].spec.source.upstream_sheet_id(), Some(clean_up_id));
-    assert_eq!((&clean.result_sheets[0].analysis.id, &clean.result_sheets[0].analysis.source_sheet_id), (&clean.result_sheets[0].id, &clean_ds.id));
+    assert_eq!(
+        (&clean.result_sheets[0].analysis.id, clean.result_sheets[0].analysis.source_sheet_id.as_ref()),
+        (&clean.result_sheets[0].id, Some(&clean_ds.id))
+    );
     assert_eq!(
         (&clean.graph_sheets[0].spec.primary_source_sheet_id, clean.active_sheet_id.as_ref(), clean.family_anchor_sheet_id.as_ref()),
         (&clean_ds.id, Some(&clean.graph_sheets[0].id), Some(&clean_ds.id))

@@ -90,7 +90,7 @@ fn pzfx_importer_covers_all_eight_table_types_exclusions_and_info_constants() {
     let doc = &report.document;
     assert_eq!((doc.title.as_str(), doc.info_sheets.len(), doc.data_sheets.len()), ("Multi-Table Assay", 1, 9));
     assert_eq!(doc.info_sheets[0].get_constant("HotNM").unwrap().value.as_finite_f64(), Some(2.5));
-    assert_eq!(doc.data_sheets[0].title, "Dose Response (10-6 M)");
+    assert_eq!(doc.data_sheets[0].title, "Dose Response (10<sup>-6</sup> M)");
 
     let TableArchetype::Xy(xy) = &doc.data_sheets[0].archetype else { panic!("expected XY") };
     let excl = xy.data_sets[0].cell(0, 1).unwrap();
@@ -246,9 +246,9 @@ fn result_exports_preserve_outliers_pred_bands_footnotes_and_analyzable_data() {
 
     let opts = CsvOptions::csv();
     let tidy = parse_delimited_records(&export_result_sheet_tidy_csv(&rs, &opts), &opts).unwrap();
-    assert_eq!((tidy[0].len(), tidy[0][19].as_str(), tidy[0][20].as_str()), (21, "pred_lower", "pred_upper"));
-    assert!(tidy.iter().all(|r| r.len() == 21));
-    assert!(tidy.iter().any(|r| r[2] == "curve_point" && r[14] == "45" && r[15] == "55" && r[19] == "35" && r[20] == "65"));
+    assert_eq!((tidy[0].len(), tidy[0][19].as_str(), tidy[0][20].as_str(), tidy[0][21].as_str()), (22, "pred_lower", "pred_upper", "provenance"));
+    assert!(tidy.iter().all(|r| r.len() == 22));
+    assert!(tidy.iter().any(|r| r[2] == "curve_point" && r[14] == "45" && r[15] == "55" && r[19] == "35" && r[20] == "65" && r[21] == "computed"));
     assert!(tidy.iter().any(|r| r[2] == "tab_footnote" && r[3] == "summary" && r[8] == "ROUT Q = 1%"));
     assert!(tidy.iter().any(|r| r[2] == "tab_footnote" && r[8] == "'=formula_note"));
     assert!(tidy.iter().any(|r| r[2] == "eliminated_outlier" && r[3] == "data-1" && r[6] == "row_2" && r[7] == "col_0_sub_1"));

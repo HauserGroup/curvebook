@@ -249,6 +249,8 @@ fn r2_s06_01_unpacked_dir_preserves_untracked_files_and_rejects_untrusted_csv_pa
     doc.result_sheets.clear();
     doc.data_sheets.clear();
     doc.checkpoints.clear();
+    doc.active_sheet_id = None;
+    doc.family_anchor_sheet_id = None;
     save_project_unpacked_dir(&doc, &proj_dir)?;
     assert_eq!(
         (

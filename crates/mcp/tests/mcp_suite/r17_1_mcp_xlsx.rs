@@ -155,7 +155,7 @@ fn open_file_subcolumn_schema_xlsx_title_append_and_live_csv_escape_fallback() -
     let desc = tools.iter().find(|t| t.name == "open_file").ok_or("missing open_file")?.input_schema["properties"]["subcolumn_mode"]["description"]
         .as_str()
         .ok_or("missing desc")?;
-    assert!(desc.contains("single") && desc.contains("upper_lower_limits") && !desc.contains("'mean_sd'") && !desc.contains("'mean_sem'"));
+    assert!(desc.contains("single") && desc.contains("upper_lower_limits") && desc.contains("'mean_sd'") && desc.contains("'mean_sem'"));
 
     let dir = TempDir::new("open_file_rem")?;
     let csv_path = dir.child("data.csv");
@@ -166,8 +166,15 @@ fn open_file_subcolumn_schema_xlsx_title_append_and_live_csv_escape_fallback() -
             .map_err(|e| e.to_string())?
             .is_error
     );
+    let csv_msd = dir.child("data_msd.csv");
+    fs::write(&csv_msd, "X,Y:Mean,Y:SD\n1,10,1.2\n2,20,2.3\n").map_err(|e| e.to_string())?;
+    assert!(
+        !call_tool(&mut state, "open_file", json!({ "path": csv_msd.display().to_string(), "subcolumn_mode": "mean_sd" }))
+            .map_err(|e| e.to_string())?
+            .is_error
+    );
     assert!(matches!(
-        call_tool(&mut state, "open_file", json!({ "path": csv_path.display().to_string(), "subcolumn_mode": "mean_sd" })),
+        call_tool(&mut state, "open_file", json!({ "path": csv_path.display().to_string(), "subcolumn_mode": "mean_invalid" })),
         Err(ToolCallError::InvalidParams(ref m)) if m.contains("mean_sd_n")
     ));
 

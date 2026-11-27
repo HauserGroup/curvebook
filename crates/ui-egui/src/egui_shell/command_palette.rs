@@ -718,9 +718,10 @@ fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
             return Some(graph.spec.primary_source_sheet_id.clone());
         }
         if let Some(res) = doc.result_sheet(active)
-            && doc.data_sheet(&res.analysis.source_sheet_id).is_some()
+            && let Some(src) = res.analysis.source_sheet_id.as_ref()
+            && doc.data_sheet(src).is_some()
         {
-            return Some(res.analysis.source_sheet_id.clone());
+            return Some(src.clone());
         }
     }
     doc.data_sheets.first().map(|s| s.id.clone())
@@ -951,6 +952,7 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
         "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint" => {
             Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenCheckpointsDialog))
         }
+        "project.exportPzfx" => Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.export.pzfx.open"), params: json!({}) }),
         _ => None,
     }
 }
@@ -958,7 +960,7 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
 fn resolve_palette_sheet_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {
     let eng = |params: Value| Some(PaletteCommandRoute::EngineCommand { command_id: command_id.to_owned(), params });
     match command_id {
-        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
+        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" | "sheet.clearOrigin" => {
             eng(sheet_id_param(resolve_any_sheet_id(doc)))
         }
         "graph.create" => {
@@ -1020,6 +1022,7 @@ fn is_palette_hidden_engine_command(command_id: &str) -> bool {
         "sheet.rename"
             | "sheet.reorder"
             | "project.saveTemplate"
+            | "project.exportPrism"
             | "table.setCell"
             | "table.setCells"
             | "table.setXCells"

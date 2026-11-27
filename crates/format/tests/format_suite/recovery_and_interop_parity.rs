@@ -278,13 +278,24 @@ fn cleanroom_pzfx_and_prism_edge_archetypes_entities_info_and_exclusions_roundtr
             info.get_constant("Vehicle").map(|c| &c.value),
             info.notes_markdown.as_str()
         ),
-        (Some("μM"), Some(-14.2), Some(&ConstantValue::Text(String::from("10-6 M α-Toxin"))), "Incubated at 37°C ± 0.5°C in 5% CO2.")
+        (
+            Some("μM"),
+            Some(-14.2),
+            Some(&ConstantValue::Text(String::from("10<sup>-6</sup> M α-Toxin"))),
+            "Incubated at 37°C ± 0.5°C in 5% CO<sub>2</sub>."
+        )
     );
 
     let TableArchetype::Nested(ref n) = doc.data_sheets[0].archetype else { panic!("expected Nested") };
     assert_eq!(
         (doc.data_sheets[0].title.as_str(), &n.row_titles, n.groups.len(), n.groups[0].biological_unit_count(), &n.groups[0].subcolumn_titles),
-        ("Tissue CO2 Nested (μg/mL)", &vec![String::from("Rep α"), String::from("Rep β")], 2, 2, &vec![String::from("WT:1"), String::from("WT:2")])
+        (
+            "Tissue CO<sub>2</sub> Nested (μg/mL)",
+            &vec![String::from("Rep α"), String::from("Rep β")],
+            2,
+            2,
+            &vec![String::from("WT:1"), String::from("WT:2")]
+        )
     );
     assert_eq!(
         (&n.groups[0].cells[0][1], &n.groups[0].cells[1][0], &n.groups[1].cells[0][0], &n.groups[1].cells[1][1]),
@@ -312,7 +323,7 @@ fn cleanroom_pzfx_and_prism_edge_archetypes_entities_info_and_exclusions_roundtr
             mv.variables[1].cells[1].excluded,
             mv.variables[1].cells[2].excluded
         ),
-        (VariableRole::Categorical, VariableRole::Continuous, "IC50", true, true)
+        (VariableRole::Categorical, VariableRole::Continuous, "IC<sub>50</sub>", true, true)
     );
 
     let TableArchetype::Contingency(ref cont) = doc.data_sheets[3].archetype else { panic!("expected Contingency") };

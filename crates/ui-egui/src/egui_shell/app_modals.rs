@@ -327,6 +327,7 @@ pub fn render_app_modal(
         ActiveDialog::ExportAllTablesExistingFiles { dir, existing_files } => {
             render_export_all_tables_existing_files_modal(ctx, app, dir, existing_files, tokens, meta, intents)
         }
+        ActiveDialog::PzfxExportConfirm { preflight } => render_pzfx_export_confirm_modal(ctx, app, preflight, tokens, meta, intents),
         _ => AppModalFrameReport::default(),
     }
 }
@@ -3205,6 +3206,132 @@ fn render_csv_export_options_modal(
     {
         emit_csv_export_intent(target, final_opts, intents);
     }
+
+    report_from_capture(capture)
+}
+
+// ============================================================================
+// 11. `.pzfx` Pre-Export Confirmation Modal (§4.2, §6.1, §6.3)
+// ============================================================================
+
+fn pzfx_dropped_kind_label(locale: &str, kind: curvebook_format::PzfxDroppedKind) -> &'static str {
+    use curvebook_format::PzfxDroppedKind;
+    match kind {
+        PzfxDroppedKind::AnalysesAndResults => tr(locale, "export.pzfx.kind.analyses"),
+        PzfxDroppedKind::Graphs => tr(locale, "export.pzfx.kind.graphs"),
+        PzfxDroppedKind::Layouts => tr(locale, "export.pzfx.kind.layouts"),
+        PzfxDroppedKind::LiveLinks => tr(locale, "export.pzfx.kind.live_links"),
+        PzfxDroppedKind::Images => tr(locale, "export.pzfx.kind.images"),
+        PzfxDroppedKind::Checkpoints => tr(locale, "export.pzfx.kind.checkpoints"),
+        PzfxDroppedKind::FormulasWrittenAsValues => tr(locale, "export.pzfx.kind.formulas"),
+        PzfxDroppedKind::UnrepresentableTableFeatures => tr(locale, "export.pzfx.kind.unrepresentable"),
+    }
+}
+
+fn render_pzfx_export_confirm_modal(
+    ctx: &Context,
+    app: &UiApp,
+    preflight: &curvebook_format::PzfxExportPreflight,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "export.pzfx.confirm_title");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 540.0);
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push(UiIntent::CloseAllModals);
+    }
+
+    let capture = show_scrolled_modal(
+        ctx,
+        meta,
+        ScrolledModalCfg {
+            tokens,
+            modal_id: egui::Id::unique(("egui_shell_app_modal", "dialog.pzfx_export_confirm")),
+            scroll_id: "app_modal.pzfx_export_confirm.scroll",
+            widget_id: "dialog.pzfx_export_confirm",
+            title,
+            inner_w,
+            max_h,
+            body_w,
+            body_max_h: (max_h - 116.0).max(120.0),
+            footer_separator: true,
+        },
+        intents,
+        |_, _, _| {},
+        |ui, meta, _| {
+            let data_only = tr(locale, "export.pzfx.data_only_notice");
+            let data_only_resp = ui.add(egui::Label::new(egui::RichText::new(data_only).color(tokens.text_primary)).wrap());
+            app_text(ui, &data_only_resp, meta, "pzfx_export_confirm.data_only_notice", data_only);
+            ui.add_space(6.0);
+
+            let structure = tr(locale, "export.pzfx.structure_notice");
+            let structure_resp = ui.add(egui::Label::new(egui::RichText::new(structure).color(tokens.text_muted)).wrap());
+            app_text(ui, &structure_resp, meta, "pzfx_export_confirm.structure_notice", structure);
+            ui.add_space(8.0);
+
+            let dropped_heading = tr(locale, "export.pzfx.dropped_heading");
+            let head_text = format!("{dropped_heading} ({})", preflight.total_dropped_count());
+            let head_resp = ui.add(egui::Label::new(egui::RichText::new(&head_text).strong().color(tokens.text_strong)).wrap());
+            app_text(ui, &head_resp, meta, "pzfx_export_confirm.dropped_heading", &head_text);
+            ui.add_space(4.0);
+
+            for (idx, group) in preflight.dropped.iter().enumerate() {
+                let kind_lbl = pzfx_dropped_kind_label(locale, group.kind);
+                let header = format!("{kind_lbl} ({})", group.count);
+                let hdr_resp = ui.add(egui::Label::new(egui::RichText::new(&header).strong().color(tokens.warning)).wrap());
+                app_text(ui, &hdr_resp, meta, &format!("pzfx_export_confirm.group.{idx}"), &header);
+                if !group.items.is_empty() {
+                    let items_text = group.items.join(", ");
+                    let items_resp = ui.add(egui::Label::new(egui::RichText::new(&items_text).color(tokens.text_primary)).wrap());
+                    app_text(ui, &items_resp, meta, &format!("pzfx_export_confirm.group.{idx}.items"), &items_text);
+                }
+                ui.add_space(4.0);
+            }
+        },
+        |ui, meta, intents| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(body_w);
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "modal.cancel",
+                        label: tr(locale, "btn.cancel"),
+                        command_id: None,
+                        selected: false,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::CloseAllModals);
+                }
+                if app_button(
+                    ui,
+                    meta,
+                    AppBtn {
+                        widget_id: "pzfx_export_confirm.export",
+                        label: tr(locale, "export.pzfx.confirm_action"),
+                        command_id: Some("project.exportPzfx"),
+                        selected: true,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    tokens,
+                )
+                .clicked()
+                {
+                    intents.push(UiIntent::EngineCommand { command_id: String::from("project.exportPzfx"), params: json!({}) });
+                    intents.push(UiIntent::CloseAllModals);
+                }
+            });
+        },
+    );
 
     report_from_capture(capture)
 }

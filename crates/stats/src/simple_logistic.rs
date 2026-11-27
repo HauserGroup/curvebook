@@ -31,8 +31,8 @@
 //!   *Biometrics*, 44(3), 837-845. `doi:10.2307/2531595`.
 
 use curvebook_doc::{
-    AnalysisSpec, CellValue, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultCell, ResultSheet, ResultTabKind,
-    SimpleLogisticSpec, TableArchetype,
+    AnalysisKind, AnalysisSpec, CellValue, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultCell, ResultSheet,
+    ResultTabKind, SimpleLogisticSpec, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
@@ -40,8 +40,8 @@ use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, ci_cell, init_result_sheet, num_cell, opt_num_cell,
-    p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, ci_cell, enforce_summary_mode_matrix, init_result_sheet,
+    num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, RocResult, roc_curve_analysis};
@@ -1280,6 +1280,7 @@ fn push_dataset_scalars(out: &mut ResultSheet, data_set_index: usize, res: &Simp
 /// Execute [`curvebook_doc::AnalysisKind::SimpleLogisticRegression`] against an `XY` [`DataSheet`]
 /// and assemble a complete [`ResultSheet`].
 pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_spec: &SimpleLogisticSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::SimpleLogisticRegression(*sl_spec))?;
     let datasets = extract_xy_binary_datasets(sheet, spec)?;
     let mut out = init_result_sheet(spec)?;
     let alpha = spec.confidence_level.alpha();

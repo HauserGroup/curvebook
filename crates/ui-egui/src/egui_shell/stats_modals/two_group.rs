@@ -33,8 +33,8 @@ pub(super) fn render_two_group_design(
         return;
     };
     let doc = app.document();
-    let assume_en = r2_assume_gaussian_allowed(doc, Some(&spec.source_sheet_id));
-    let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
+    let assume_en = r2_assume_gaussian_allowed(doc, spec.source_sheet_id.as_ref());
+    let paired_en = r1_paired_or_matched_allowed(doc, spec.source_sheet_id.as_ref());
     ui.horizontal_wrapped(|ui| {
         if render_modal_checkbox(ui, tokens, meta, "edit.assume_gaussian", "Assume Gaussian distribution", ep.assume_gaussian, &assume_en) {
             intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.assume_gaussian") });
@@ -78,7 +78,7 @@ pub(super) fn render_two_group_design(
     });
     if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = t.method {
         ui.add_space(4.0);
-        let hyp_key = Id::unique(("edit_tg_hyp_draft", spec.source_sheet_id.as_str()));
+        let hyp_key = Id::unique(("edit_tg_hyp_draft", spec.source_sheet_id.as_ref().map_or("", curvebook_doc::SheetId::as_str)));
         let mut hyp_draft: String = ui.ctx().data(|d| d.get_temp(hyp_key)).unwrap_or_else(|| format!("{hypothetical}"));
         let locale = normalize_locale(&app.locale);
         ui.horizontal_wrapped(|ui| {
@@ -181,7 +181,7 @@ pub(super) fn render_two_group_design(
             intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.two_group.hodges_lehmann") });
         }
     });
-    if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
+    if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src))
         && let TableArchetype::MultipleVariables(mv) = &ds.archetype
     {
         ui.add_space(4.0);

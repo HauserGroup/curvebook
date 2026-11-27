@@ -786,7 +786,7 @@ fn wf23_human_stacked_superimposed_pcr_r10_and_chaining() -> TestRes {
     let chained_id = run.run_analyze_entry("Linear", "analyze.entry.fit.linear")?;
     {
         let chained = run.document().result_sheet(&chained_id).ok_or("WF-23 missing chained ResultSheet")?;
-        ensure(chained.analysis.source_sheet_id == norm_id, "WF-23 chained source must point to Normalize ResultSheet")?;
+        ensure(chained.analysis.source_sheet_id.as_ref() == Some(&norm_id), "WF-23 chained source must point to Normalize ResultSheet")?;
         let slope = scalar_val(chained, "Slope")?;
         ensure((slope - 25.0).abs() < 0.05, format!("expected normalized linear slope ~25.0, got {slope}"))?;
     }
@@ -845,8 +845,12 @@ fn wf23_human_stacked_superimposed_pcr_r10_and_chaining() -> TestRes {
     run.click("analyze.pcr.outcome.2")?;
     run.commit_modal_ok()?;
     {
-        let pcr_rs =
-            run.document().result_sheets.iter().rfind(|r| r.analysis.source_sheet_id == pcr_mv_id).ok_or("WF-23 missing created PCR ResultSheet")?;
+        let pcr_rs = run
+            .document()
+            .result_sheets
+            .iter()
+            .rfind(|r| r.analysis.source_sheet_id.as_ref() == Some(&pcr_mv_id))
+            .ok_or("WF-23 missing created PCR ResultSheet")?;
         ensure(matches!(pcr_rs.status, ResultStatus::UpToDate), "WF-23 PCR ResultSheet must be UpToDate")?;
         ensure(
             matches!(pcr_rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: Some(2), .. })),

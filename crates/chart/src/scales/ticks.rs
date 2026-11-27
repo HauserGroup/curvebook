@@ -1,6 +1,6 @@
 //! Auto nice-tick generation, additional ticks, scientific rich-text formatting, and template hooks.
 
-use curvebook_doc::{AdditionalTick, ProjectDocument, ResultStatus, SheetId, TickDirection, TickLabelFormat};
+use curvebook_doc::{AdditionalTick, ProjectDocument, SheetId, TickDirection, TickLabelFormat};
 use curvebook_math::{AxisScale, LogitDomain};
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::{LocaleNumberPolicy, RichText, expand_template_hooks, parse_markup};
@@ -1030,7 +1030,7 @@ fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&
         }
         ["result", sheet, param] if !sheet.is_empty() && !param.is_empty() => {
             let res = doc.result_sheet(&SheetId::new(*sheet))?;
-            if !matches!(res.status, ResultStatus::UpToDate) {
+            if !res.is_computed_up_to_date() {
                 return None;
             }
             let needle = param.trim();
@@ -1056,7 +1056,7 @@ fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&
         ["result", sheet, ds_str, param] if !sheet.is_empty() && !param.is_empty() => {
             let ds = ds_str.parse::<usize>().ok()?;
             let res = doc.result_sheet(&SheetId::new(*sheet))?;
-            if !matches!(res.status, ResultStatus::UpToDate) {
+            if !res.is_computed_up_to_date() {
                 return None;
             }
             let needle = param.trim();

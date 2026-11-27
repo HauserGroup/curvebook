@@ -925,9 +925,17 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let parsed: AnalysisUpdateParams = parse_params(&schema, raw)?;
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
-    let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
+    let existing_rs = require_result_sheet(doc, &id)?;
+    if existing_rs.is_imported() {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("imported result sheet `{id}` is a read-only snapshot and its parameters cannot be modified"),
+        ));
+    }
+    let mut updated = existing_rs.analysis.clone();
     let prev_create_summary_graph = matches!(&updated.kind, AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph);
-    let source_ds_initial = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
+    let source_sheet_id = updated.source_sheet_id.clone().ok_or_else(|| bad_input(format!("result sheet `{id}` has no upstream source_sheet_id")))?;
+    let source_ds_initial = require_analyzable_data_sheet(doc, &source_sheet_id)?;
     let source_kind = source_ds_initial.kind();
 
     let combined = update_params_to_value(&parsed);
@@ -983,6 +991,12 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         let _ = opt_bool_checked(&combined, "correlation_heatmap")?;
     }
 
+    if !updated.kind.descriptor().user_creatable {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("analysis kind `{}` is reserved for imported snapshots and cannot be created or assigned", updated.kind.slug()),
+        ));
+    }
     if !updated.kind.is_compatible_with(source_kind) {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
@@ -990,7 +1004,8 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         )
         .with_remediation("Choose an analysis kind compatible with the source table archetype."));
     }
-    let source_ds = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
+    let source_sheet_id = updated.source_sheet_id.clone().ok_or_else(|| bad_input(format!("result sheet `{id}` has no upstream source_sheet_id")))?;
+    let source_ds = require_analyzable_data_sheet(doc, &source_sheet_id)?;
     validate_selected_data_sets_for_sheet(source_ds, &updated)?;
     if kind_replaced {
         persist_default_mv_columns(source_ds, &mut updated, explicit_empty_selection);
@@ -1044,8 +1059,15 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let new_source = parse_sheet_id(&parsed.source_sheet_id)?;
     let new_table_kind = require_analyzable_data_sheet(doc, &new_source)?.kind();
-    let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
-    let source_changed = updated.source_sheet_id != new_source;
+    let existing_rs = require_result_sheet(doc, &id)?;
+    if existing_rs.is_imported() {
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("imported result sheet `{id}` is a read-only snapshot and cannot be retargeted"),
+        ));
+    }
+    let mut updated = existing_rs.analysis.clone();
+    let source_changed = updated.source_sheet_id.as_ref() != Some(&new_source);
 
     let next_selected = if parsed.clear_selected_data_sets == Some(true) {
         Vec::new()
@@ -1204,7 +1226,7 @@ fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
             Err(EngineError::with_code(mapped, format!("analysis `{}` failed ({mapped}): {message}", res.id))
                 .with_details(json!({ "sheet_id": res.id.as_str(), "error_code": mapped })))
         }
-        ResultStatus::Dirty | ResultStatus::UpToDate => Ok(()),
+        ResultStatus::Dirty | ResultStatus::UpToDate | ResultStatus::Imported | ResultStatus::ImportedStale => Ok(()),
     }
 }
 
@@ -1306,7 +1328,7 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
         res.scalars.iter().map(|s| (s.key.clone(), json!({ "data_set_index": s.data_set_index, "value": s.value, "units": s.units }))).collect();
     let mut payload = json!({
         "sheet_id": res.id.as_str(),
-        "source_sheet_id": res.analysis.source_sheet_id.as_str(),
+        "source_sheet_id": res.analysis.source_sheet_id.as_ref().map(SheetId::as_str),
         "title": res.analysis.effective_title(),
         "status": res.status,
         "recalculated_sheets": recalculated,
@@ -1362,6 +1384,9 @@ fn try_raw_analysis_spec(
             return Err(EngineError::with_code(ErrorCode::BadInput, format!("unrecognized parameter(s) {} alongside `spec`", extra_keys.join(", "))));
         }
         let mut spec: AnalysisSpec = deserialize_strict(spec_val, "/spec")?;
+        if !spec.kind.descriptor().user_creatable {
+            return Err(bad_input(format!("analysis kind `{}` is reserved for imported snapshots and cannot be created directly", spec.kind.slug())));
+        }
         if let Some(raw_id) = parsed.sheet_id.as_deref() {
             let explicit_id = parse_sheet_id(raw_id)?;
             if explicit_id != spec.id {
@@ -1369,12 +1394,13 @@ fn try_raw_analysis_spec(
                     .with_remediation("Omit top-level `sheet_id` when passing `spec`, or ensure it matches `spec.id`."));
             }
         }
+        let spec_src =
+            spec.source_sheet_id.clone().ok_or_else(|| bad_input("`spec.source_sheet_id` is required when creating a computed analysis"))?;
         if let Some(raw_src) = parsed.source_sheet_id.as_deref() {
             let explicit_src = parse_sheet_id(raw_src)?;
-            if explicit_src != spec.source_sheet_id {
+            if explicit_src != spec_src {
                 return Err(bad_input(format!(
-                    "top-level `source_sheet_id` (`{explicit_src}`) conflicts with `spec.source_sheet_id` (`{}`)",
-                    spec.source_sheet_id
+                    "top-level `source_sheet_id` (`{explicit_src}`) conflicts with `spec.source_sheet_id` (`{spec_src}`)"
                 ))
                 .with_remediation("Omit top-level `source_sheet_id` when passing `spec`, or ensure it matches `spec.source_sheet_id`."));
             }
@@ -1387,7 +1413,7 @@ fn try_raw_analysis_spec(
             parsed.selected_data_sets.as_deref(),
             parsed.p_value_format.as_ref(),
         )?;
-        let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
+        let table_kind = require_analyzable_data_sheet(doc, &spec_src)?.kind();
         validate_domain_and_compat(&spec.kind, domain, table_kind)?;
         return Ok(Some(spec));
     }
@@ -1413,8 +1439,12 @@ fn try_raw_analysis_spec(
             obj.insert(String::from("p_value_format"), pv.clone());
         }
         let spec: AnalysisSpec = deserialize_strict(&Value::Object(obj), "")?;
+        if !spec.kind.descriptor().user_creatable {
+            return Err(bad_input(format!("analysis kind `{}` is reserved for imported snapshots and cannot be created directly", spec.kind.slug())));
+        }
         validate_confidence_percent(spec.confidence_level.percent())?;
-        let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
+        let spec_src = spec.source_sheet_id.as_ref().ok_or_else(|| bad_input("`source_sheet_id` is required when creating a computed analysis"))?;
+        let table_kind = require_analyzable_data_sheet(doc, spec_src)?.kind();
         validate_domain_and_compat(&spec.kind, domain, table_kind)?;
         return Ok(Some(spec));
     }
@@ -1464,7 +1494,8 @@ fn build_analysis_spec(
 
 fn finalize_built_analysis_spec(doc: &ProjectDocument, spec: &mut AnalysisSpec, explicit_empty_selection: bool) -> Result<(), EngineError> {
     validate_confidence_percent(spec.confidence_level.percent())?;
-    let source_ds = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?;
+    let spec_src = spec.source_sheet_id.as_ref().ok_or_else(|| bad_input("`source_sheet_id` is required when creating a computed analysis"))?;
+    let source_ds = require_analyzable_data_sheet(doc, spec_src)?;
     validate_selected_data_sets_for_sheet(source_ds, spec)?;
     persist_default_mv_columns(source_ds, spec, explicit_empty_selection);
     resolve_xy_bland_altman_mode(source_ds, spec);
@@ -1511,6 +1542,12 @@ fn domain_prefix(domain: AnalysisDomain) -> &'static str {
 }
 
 fn validate_domain_and_compat(kind: &AnalysisKind, domain: AnalysisDomain, table_kind: TableKind) -> Result<(), EngineError> {
+    if !kind.descriptor().user_creatable {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("analysis kind `{}` is reserved for imported snapshots and cannot be created directly", kind.slug()),
+        ));
+    }
     let actual_domain = kind.descriptor().domain;
     let domain_ok = match domain {
         AnalysisDomain::Any => true,
@@ -2592,7 +2629,8 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
         | AnalysisKind::FitSplineLowess(_)
         | AnalysisKind::AreaUnderCurve(_)
         | AnalysisKind::LinearRegression(_)
-        | AnalysisKind::NonlinearRegression(_) => false,
+        | AnalysisKind::NonlinearRegression(_)
+        | AnalysisKind::ImportedSnapshot(_) => false,
     }
 }
 

@@ -21,7 +21,7 @@ fn conflict(msg: impl Into<String>) -> EngineError {
 
 fn source_sheet_col_count(app: &UiApp) -> usize {
     let doc = app.document();
-    let Some(src_id) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id) else {
+    let Some(src_id) = app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()) else {
         return 0;
     };
     doc.data_sheet(src_id).or_else(|| doc.result_sheet(src_id).and_then(|rs| rs.analyzable_data.as_ref())).map_or(0, |ds| ds.archetype.column_count())
@@ -182,7 +182,7 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
     match kind {
         AnalysisKind::OneWayAnova(_) | AnalysisKind::TwoGroupComparison(_) => {
             let next = !app.canvas_dialogs.edit_params.paired_or_matched;
-            let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
+            let src = app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
             if next && !r1_paired_or_matched_allowed(app.document(), src).enabled {
                 let mode = &mut app.canvas_dialogs.edit_params.schematic_mode;
                 *mode = if mode == "detail" { String::from("auto") } else { String::from("detail") };
@@ -196,7 +196,7 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
                 let next = if f.residual_covariance == ResidualCovariance::CompoundSymmetry { "unstructured" } else { "compound_symmetry" };
                 return set_factorial_residual_cov(app, next);
             }
-            let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
+            let src = app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
             if !r1_paired_or_matched_allowed(app.document(), src).enabled {
                 let mode = &mut app.canvas_dialogs.edit_params.schematic_mode;
                 *mode = if mode == "detail" { String::from("auto") } else { String::from("detail") };
@@ -215,7 +215,7 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
 
 fn set_one_way_method(app: &mut UiApp, method_name: &str) -> Result<(), EngineError> {
     let ep = &app.canvas_dialogs.edit_params;
-    let src = ep.draft.as_ref().map(|d| &d.source_sheet_id);
+    let src = ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
     let wants_nonparam = matches!(method_name, "kruskal" | "friedman");
     let wants_paired = matches!(method_name, "rm" | "friedman");
     if wants_nonparam {
@@ -462,7 +462,7 @@ fn step_hypothetical_value(app: &mut UiApp, delta: f64) {
 fn cycle_contingency_ci(app: &mut UiApp, which: ContingencyCiTarget) -> Result<(), EngineError> {
     let doc = app.document();
     let ep = &app.canvas_dialogs.edit_params;
-    let (rows, cols, _) = source_table_shape(doc, ep.draft.as_ref().map(|d| &d.source_sheet_id));
+    let (rows, cols, _) = source_table_shape(doc, ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
     let cont = match ep.draft.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::Contingency(c)) => c.clone(),
         _ => ContingencySpec::default(),

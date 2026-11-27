@@ -105,11 +105,11 @@
                 </tr>
                 <tr>
                   <th scope="row">Formats read</th>
-                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code>, <code>.prism</code>, <code>.csv</code>/<code>.tsv</code>, <code>.xlsx</code></td>
+                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code> (XML; not legacy binary <code>.pzf</code>/<code>PCFF</code>), <code>.prism</code>, <code>.csv</code>/<code>.tsv</code>, <code>.xlsx</code></td>
                 </tr>
                 <tr>
                   <th scope="row">Formats written</th>
-                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.csv</code>/<code>.tsv</code>, SVG, PDF, PNG, TIFF, EMF</td>
+                  <td><code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code> (data &amp; info only), <code>.csv</code>/<code>.tsv</code>, SVG, PDF, PNG, TIFF, EMF</td>
                 </tr>
                 <tr>
                   <th scope="row">Interfaces</th>
@@ -138,9 +138,9 @@
           </article>
 
           <article id="faq-open-pzfx" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
-            <h3 itemprop="name">Can I open a <code>.pzfx</code> or <code>.prism</code> file on Linux, macOS, or Windows?</h3>
+            <h3 itemprop="name">Can I open or export <code>.pzfx</code> and <code>.prism</code> files on Linux, macOS, or Windows?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Yes, CurveBook reads the data tables inside <code>.pzfx</code> (XML) and <code>.prism</code> (ZIP archive) files offline on Linux, macOS, Windows, and FreeBSD, and exports them to CSV, TSV, or a <code>.curvebook</code> project. CurveBook imports the data tables, replicate and summary subcolumns, titles, excluded-value markers, and info notes; graphs, analysis results, and layouts are not imported and can be rerun in CurveBook. See the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> import guide</a> and the <a href="manual/latest/files.html">files reference</a> for details.</p>
+              <p itemprop="text">Yes. CurveBook reads all eight data-table archetypes (including replicate, mean/SD, mean/SEM, interval, and quartile subcolumns), rich text, Symbol-font characters, subcolumn titles, display decimals, exclusions, and info sheets from XML <code>.pzfx</code> and <code>.prism</code> files offline on Linux, macOS, Windows, and FreeBSD. Legacy binary <code>.pzf</code> files — including <code>PCFF</code>-prefixed files carrying a <code>.pzfx</code> extension (~15–18% of public <code>.pzfx</code>-named files) — are not supported and must be re-saved as XML <code>.pzfx</code> or <code>.prism</code>. From <code>.prism</code> files, CurveBook also imports preferred analysis results as clearly labelled read-only snapshots (which never feed CurveBook calculations) and raster preview PNGs for opaque binary graphs and layouts. For export, <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications (structure-conformant files may still be rejected by other applications for non-structural reasons such as checksums, cross-references, or version gates). <code>.prism</code> export is not shipped as a supported format at Beta because real <code>.prism</code> archives contain undocumented binary and digest entries; use <code>.pzfx</code> export for data interchange. See the <a href="open-pzfx-files.html"><code>.pzfx</code> and <code>.prism</code> guide</a> and the <a href="manual/latest/files.html">files reference</a>.</p>
             </div>
           </article>
 
@@ -166,9 +166,9 @@
           </article>
 
           <article id="faq-share-project" itemscope itemprop="mainEntity" itemtype="https://schema.org/Question">
-            <h3 itemprop="name">How do I share a CurveBook project with a collaborator?</h3>
+            <h3 itemprop="name">How do I share or merge CurveBook projects?</h3>
             <div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">
-              <p itemprop="text">Send a single <code>.curvebook</code> project archive, an unpacked <code>.curvebook.d/</code> directory for Git version control, or a reusable <code>.cbtemplate</code> file so your collaborator can reopen the full workspace in CurveBook. All data tables, formulas, statistical results, graphs, page layouts, and notes travel together in one deterministic project; note that this is manual file sharing rather than hosted live collaboration, and externally linked CSV or TSV paths keep provenance metadata without automatically bundling external files.</p>
+              <p itemprop="text">Send a single <code>.curvebook</code> project archive, an unpacked <code>.curvebook.d/</code> directory for Git version control, or a reusable <code>.cbtemplate</code> file so your collaborator can reopen the full workspace in CurveBook. To combine sheets from another <code>.curvebook</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file into your current workspace, use <strong>File › Merge Project…</strong>: CurveBook performs a one-time copy with automatic sheet ID remapping and removable navigator origin badges (with no live cross-file links). All data tables, formulas, statistical results, graphs, page layouts, and notes travel together in one deterministic project; note that externally linked CSV or TSV paths keep provenance metadata without automatically bundling external files.</p>
             </div>
           </article>
 

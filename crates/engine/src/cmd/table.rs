@@ -665,14 +665,17 @@ fn parse_subcolumn_mode_str(s: &str, replicates: usize) -> Result<SubcolumnMode,
     match norm.as_str() {
         "single" => Ok(SubcolumnMode::Single),
         "replicate" | "replicates" | "rawreplicates" => Ok(SubcolumnMode::RawReplicates(replicates.max(1))),
+        "meansd" => Ok(SubcolumnMode::MeanSd),
+        "meansem" => Ok(SubcolumnMode::MeanSem),
         "meansdn" => Ok(SubcolumnMode::MeanSdN),
         "meansemn" => Ok(SubcolumnMode::MeanSemN),
         "meancvn" => Ok(SubcolumnMode::MeanCvN),
         "meanlowhigh" => Ok(SubcolumnMode::MeanLowHigh),
         "upperlowerlimits" | "meanupperlower" => Ok(SubcolumnMode::UpperLowerLimits),
         "medianiqr" => Ok(SubcolumnMode::MedianIqr),
-        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown subcolumn mode `{s}`"))
-            .with_remediation("Use single, replicates, mean_sd_n, mean_sem_n, mean_cv_n, mean_low_high, upper_lower_limits, or median_iqr.")),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown subcolumn mode `{s}`")).with_remediation(
+            "Use single, replicates, mean_sd, mean_sem, mean_sd_n, mean_sem_n, mean_cv_n, mean_low_high, upper_lower_limits, or median_iqr.",
+        )),
     }
 }
 
@@ -1514,7 +1517,7 @@ fn propagate_mv_variable_renames(doc: &mut ProjectDocument, sheet_id: &SheetId, 
         }
     }
     for rs in &mut doc.result_sheets {
-        if rs.analysis.source_sheet_id == *sheet_id
+        if rs.analysis.source_sheet_id.as_ref() == Some(sheet_id)
             && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, derived_columns, .. }) = &mut rs.analysis.kind
         {
             if let Some(f) = filter_formula.as_mut()
@@ -2798,7 +2801,7 @@ fn recode_analysis_reference_levels(
     }
     let mut updated = 0;
     for rs in result_sheets {
-        if rs.analysis.source_sheet_id != *source_sheet_id {
+        if rs.analysis.source_sheet_id.as_ref() != Some(source_sheet_id) {
             continue;
         }
         match &mut rs.analysis.kind {

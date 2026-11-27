@@ -419,7 +419,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut V
             }
         };
 
-        let fallback_sheet_id = res.analysis.source_sheet_id.clone();
+        let fallback_sheet_id = res.analysis.source_sheet_id.clone().unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
         let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
         let ds_col_idx = match ds_opt.map(|d| &d.archetype) {
             Some(TableArchetype::MultipleVariables(_)) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),

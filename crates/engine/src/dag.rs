@@ -178,7 +178,7 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
     }
 
     for res in &doc.result_sheets {
-        if res.analysis.source_sheet_id == res.id {
+        if res.analysis.source_sheet_id.as_ref() == Some(&res.id) {
             return Err(EngineError::with_code(
                 crate::ErrorCode::CycleDetected,
                 format!("self-referential analysis source detected on result sheet `{}`", res.id),
@@ -569,6 +569,7 @@ fn recalculate_project_scoped(
     check_recalc_cancelled(cancelled)?;
     let order = topological_order(doc)?;
     let dirty_closure = dirty_seeds.map(|seeds| compute_dirty_closure(doc, &order, seeds, external_policy));
+    let upstream_edit_closure = dirty_seeds.map(|seeds| compute_seed_closure(doc, &order, seeds));
     let in_scope = |sheet_id: &SheetId| dirty_closure.as_ref().is_none_or(|dirty| dirty.contains(sheet_id));
 
     // Only dirty unfrozen data sheets with links or calculated variables can mutate data or fail.
@@ -578,8 +579,11 @@ fn recalculate_project_scoped(
         doc.data_sheets.iter().any(|ds| in_scope(&ds.id) && !ds.frozen && (!ds.linked_regions.is_empty() || data_sheet_has_calculated_variables(ds)));
     let multi_result_cancellable = cancelled.is_some() && doc.result_sheets.iter().filter(|rs| in_scope(&rs.id)).take(2).count() > 1;
 
+    let has_imported_results = doc.result_sheets.iter().any(ResultSheet::is_imported);
+
     if !has_fallible_dirty_ds && !multi_result_cancellable {
         let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
+        let mut mutated_upstream: HashSet<SheetId> = HashSet::new();
         for sheet_id in order {
             check_recalc_cancelled(cancelled)?;
             if !in_scope(&sheet_id) {
@@ -590,10 +594,23 @@ fn recalculate_project_scoped(
                     report.skipped_frozen_sheets.push(sheet_id);
                 }
             } else if let Some(res_idx) = doc.result_sheets.iter().position(|s| s.id == sheet_id) {
-                if recompute_result_sheet(doc, res_idx, cancelled)? {
-                    report.updated_result_sheets.push(sheet_id);
-                } else {
-                    report.failed_result_sheets.push(sheet_id);
+                let before_rs = has_imported_results.then(|| doc.result_sheets.get(res_idx).cloned()).flatten();
+                match recompute_result_sheet(doc, res_idx, upstream_edit_closure.as_ref(), &mutated_upstream, cancelled)? {
+                    RecomputeOutcome::Updated => {
+                        let changed = before_rs.as_ref().is_some_and(|prev| doc.result_sheets.get(res_idx) != Some(prev));
+                        if changed {
+                            mutated_upstream.insert(sheet_id.clone());
+                        }
+                        report.updated_result_sheets.push(sheet_id);
+                    }
+                    RecomputeOutcome::Unchanged => {}
+                    RecomputeOutcome::Failed => {
+                        let changed = before_rs.as_ref().is_some_and(|prev| doc.result_sheets.get(res_idx) != Some(prev));
+                        if changed {
+                            mutated_upstream.insert(sheet_id.clone());
+                        }
+                        report.failed_result_sheets.push(sheet_id);
+                    }
                 }
             } else if doc.graph_sheets.iter().any(|g| g.id == sheet_id) {
                 report.preserved_graph_sheets.push(sheet_id);
@@ -608,6 +625,7 @@ fn recalculate_project_scoped(
     let mut working = doc.clone();
     let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
     let mut refreshed_links = 0usize;
+    let mut mutated_upstream: HashSet<SheetId> = HashSet::new();
 
     for sheet_id in order {
         if let Err(err) = check_recalc_cancelled(cancelled) {
@@ -619,9 +637,16 @@ fn recalculate_project_scoped(
             continue;
         }
         if let Some(ds_idx) = working.data_sheets.iter().position(|s| s.id == sheet_id) {
+            let before_archetype = working.data_sheets.get(ds_idx).map(|ds| ds.archetype.clone());
             let evaluated = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy, cancelled);
             match evaluated {
-                Ok(refreshed) => refreshed_links = refreshed_links.saturating_add(refreshed),
+                Ok(refreshed) => {
+                    refreshed_links = refreshed_links.saturating_add(refreshed);
+                    let changed = working.data_sheets.get(ds_idx).zip(before_archetype.as_ref()).is_some_and(|(ds, prev)| ds.archetype != *prev);
+                    if changed {
+                        mutated_upstream.insert(sheet_id);
+                    }
+                }
                 Err(err) => {
                     doc.checkpoints = saved_checkpoints;
                     doc.image_assets = saved_assets;
@@ -629,9 +654,23 @@ fn recalculate_project_scoped(
                 }
             }
         } else if let Some(res_idx) = working.result_sheets.iter().position(|s| s.id == sheet_id) {
-            match recompute_result_sheet(&mut working, res_idx, cancelled) {
-                Ok(true) => report.updated_result_sheets.push(sheet_id),
-                Ok(false) => report.failed_result_sheets.push(sheet_id),
+            let before_rs = has_imported_results.then(|| working.result_sheets.get(res_idx).cloned()).flatten();
+            match recompute_result_sheet(&mut working, res_idx, upstream_edit_closure.as_ref(), &mutated_upstream, cancelled) {
+                Ok(RecomputeOutcome::Updated) => {
+                    let changed = before_rs.as_ref().is_some_and(|prev| working.result_sheets.get(res_idx) != Some(prev));
+                    if changed {
+                        mutated_upstream.insert(sheet_id.clone());
+                    }
+                    report.updated_result_sheets.push(sheet_id);
+                }
+                Ok(RecomputeOutcome::Unchanged) => {}
+                Ok(RecomputeOutcome::Failed) => {
+                    let changed = before_rs.as_ref().is_some_and(|prev| working.result_sheets.get(res_idx) != Some(prev));
+                    if changed {
+                        mutated_upstream.insert(sheet_id.clone());
+                    }
+                    report.failed_result_sheets.push(sheet_id);
+                }
                 Err(err) => {
                     doc.checkpoints = saved_checkpoints;
                     doc.image_assets = saved_assets;
@@ -650,13 +689,14 @@ fn recalculate_project_scoped(
     Ok((report, refreshed_links))
 }
 
-fn compute_dirty_closure(
-    doc: &ProjectDocument,
-    order: &[SheetId],
-    seeds: &[SheetId],
-    external_policy: Option<&ExternalPathPolicy>,
-) -> HashSet<SheetId> {
-    let known: HashSet<&SheetId> = order.iter().collect();
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecomputeOutcome {
+    Updated,
+    Unchanged,
+    Failed,
+}
+
+fn build_dependents_map(doc: &ProjectDocument, order: &[SheetId]) -> BTreeMap<SheetId, Vec<SheetId>> {
     let mut dependents: BTreeMap<SheetId, Vec<SheetId>> = BTreeMap::new();
     for id in order {
         for dep in doc.upstream_dependencies(id) {
@@ -668,11 +708,50 @@ fn compute_dirty_closure(
     // back to the origin DataSheet; keep that edge explicit even if intermediate sheets are frozen.
     for rs in &doc.result_sheets {
         if rs.analysis.kind.hooked_sources().iter().any(|h| matches!(h, HookSource::InfoConstant { info_sheet_id: None, .. }))
-            && let Some(origin_info) = walk_origin_info_sheet_id(doc, &rs.analysis.source_sheet_id)
+            && let Some(src_id) = rs.analysis.source_sheet_id.as_ref()
+            && let Some(origin_info) = walk_origin_info_sheet_id(doc, src_id)
         {
             dependents.entry(origin_info.clone()).or_default().push(rs.id.clone());
         }
     }
+    dependents
+}
+
+/// Transitive closure strictly of explicitly edited/deleted `seeds` (excluding unrelated
+/// `ResultStatus::Dirty` sheets) so imported snapshots only flip to `ImportedStale` when an
+/// upstream dependency was actually edited or removed.
+fn compute_seed_closure(doc: &ProjectDocument, order: &[SheetId], seeds: &[SheetId]) -> HashSet<SheetId> {
+    let dependents = build_dependents_map(doc, order);
+    let mut touched: HashSet<SheetId> = HashSet::new();
+    let mut queue: VecDeque<SheetId> = VecDeque::new();
+    for seed in seeds {
+        if touched.insert(seed.clone()) {
+            queue.push_back(seed.clone());
+        }
+    }
+    while let Some(curr) = queue.pop_front() {
+        if doc.data_sheet(&curr).is_some_and(|ds| ds.frozen) {
+            continue;
+        }
+        if let Some(children) = dependents.get(&curr) {
+            for child in children {
+                if touched.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+    touched
+}
+
+fn compute_dirty_closure(
+    doc: &ProjectDocument,
+    order: &[SheetId],
+    seeds: &[SheetId],
+    external_policy: Option<&ExternalPathPolicy>,
+) -> HashSet<SheetId> {
+    let known: HashSet<&SheetId> = order.iter().collect();
+    let dependents = build_dependents_map(doc, order);
 
     let mut dirty: HashSet<SheetId> = HashSet::new();
     let mut queue: VecDeque<SheetId> = VecDeque::new();
@@ -683,10 +762,18 @@ fn compute_dirty_closure(
     };
 
     for seed in seeds {
-        enqueue(seed);
+        if known.contains(seed) {
+            enqueue(seed);
+        } else if let Some(children) = dependents.get(seed) {
+            for child in children {
+                enqueue(child);
+            }
+        }
     }
     for rs in &doc.result_sheets {
-        if matches!(rs.status, ResultStatus::Dirty) {
+        if matches!(rs.status, ResultStatus::Dirty)
+            || (matches!(rs.status, ResultStatus::Imported) && rs.analysis.source_sheet_id.as_ref().is_some_and(|src| !known.contains(src)))
+        {
             enqueue(&rs.id);
         }
     }
@@ -1076,10 +1163,20 @@ pub(crate) fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCod
 }
 
 fn check_upstream_result_status(res: &ResultSheet, context_id: &SheetId) -> Result<(), (ErrorCode, String)> {
+    if res.is_imported() {
+        return Err((
+            ErrorCode::BadInput,
+            format!("upstream result sheet `{context_id}` is an imported snapshot and cannot supply computed inputs or hooks"),
+        ));
+    }
     match &res.status {
         ResultStatus::UpToDate => Ok(()),
         ResultStatus::Failed { message, .. } => Err((ErrorCode::BadInput, format!("upstream result sheet `{context_id}` failed: {message}"))),
         ResultStatus::Dirty => Err((ErrorCode::BadInput, format!("upstream result sheet `{context_id}` is not up to date"))),
+        ResultStatus::Imported | ResultStatus::ImportedStale => Err((
+            ErrorCode::BadInput,
+            format!("upstream result sheet `{context_id}` is an imported snapshot and cannot supply computed inputs or hooks"),
+        )),
     }
 }
 
@@ -1107,7 +1204,10 @@ fn walk_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, start_id: &SheetId) -
             break;
         }
         if let Some(res) = doc.result_sheet(cursor) {
-            cursor = &res.analysis.source_sheet_id;
+            let Some(next) = res.analysis.source_sheet_id.as_ref() else {
+                break;
+            };
+            cursor = next;
         } else {
             break;
         }
@@ -1123,7 +1223,7 @@ pub(crate) fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_
     }
 
     // Walk back through chained ResultSheets if `source_ds` came from `analyzable_data`.
-    walk_origin_info_sheet_id(doc, &analysis.source_sheet_id)
+    analysis.source_sheet_id.as_ref().and_then(|src| walk_origin_info_sheet_id(doc, src))
 }
 
 pub(crate) fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, primary_info_id: Option<&SheetId>) -> Result<(), String> {
@@ -1134,7 +1234,7 @@ pub(crate) fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &Ana
                 None => {
                     return Err(format!(
                         "info constant hook `{constant_name}` requires a bound Info sheet on source sheet `{}`",
-                        analysis.source_sheet_id
+                        analysis.source_sheet_id.as_ref().map_or("<none>", SheetId::as_str)
                     ));
                 }
                 Some(iid) if doc.info_sheet(iid).is_none() => {
@@ -1147,18 +1247,57 @@ pub(crate) fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &Ana
     Ok(())
 }
 
-fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: Option<&AtomicBool>) -> Result<bool, EngineError> {
+fn recompute_result_sheet(
+    doc: &mut ProjectDocument,
+    res_idx: usize,
+    upstream_edit_closure: Option<&HashSet<SheetId>>,
+    mutated_upstream: &HashSet<SheetId>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<RecomputeOutcome, EngineError> {
     check_recalc_cancelled(cancelled)?;
     let Some(existing) = doc.result_sheets.get(res_idx).cloned() else {
-        return Ok(false);
+        return Ok(RecomputeOutcome::Failed);
     };
-    let source_ds = match resolve_source_table(doc, &existing.analysis.source_sheet_id) {
+
+    // Handle preserved imported snapshots BEFORE resolving any upstream source table so deleted or
+    // edited sources transition cleanly to `ImportedStale` without wiping tabs or becoming `Failed`.
+    let desc = descriptor_for_kind(&existing.analysis.kind);
+    if desc.recompute_strategy == AnalysisRecomputeStrategy::PreserveSnapshot || existing.is_imported() {
+        let should_mark_stale = match existing.analysis.source_sheet_id.as_ref() {
+            None => false,
+            Some(src_id) => {
+                let source_exists = doc.data_sheet(src_id).is_some() || doc.result_sheet(src_id).is_some();
+                if !source_exists {
+                    true
+                } else {
+                    let edited_by_seed = upstream_edit_closure.is_some_and(|closure| closure.contains(src_id));
+                    let mutated_in_pass = mutated_upstream.contains(src_id);
+                    edited_by_seed || mutated_in_pass
+                }
+            }
+        };
+        if should_mark_stale && existing.status != ResultStatus::ImportedStale {
+            if let Some(target) = doc.result_sheets.get_mut(res_idx) {
+                target.status = ResultStatus::ImportedStale;
+            }
+            return Ok(RecomputeOutcome::Updated);
+        }
+        return Ok(RecomputeOutcome::Unchanged);
+    }
+
+    let Some(source_id) = existing.analysis.source_sheet_id.as_ref() else {
+        if let Some(target) = doc.result_sheets.get_mut(res_idx) {
+            clear_failed_result_sheet(target, ErrorCode::BadInput, String::from("analysis is missing required source_sheet_id"));
+        }
+        return Ok(RecomputeOutcome::Failed);
+    };
+    let source_ds = match resolve_source_table(doc, source_id) {
         Ok(ds) => ds,
         Err((code, message)) => {
             if let Some(target) = doc.result_sheets.get_mut(res_idx) {
                 clear_failed_result_sheet(target, code, message);
             }
-            return Ok(false);
+            return Ok(RecomputeOutcome::Failed);
         }
     };
     for hook in existing.analysis.kind.hooked_sources() {
@@ -1169,13 +1308,15 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: 
             if let Some(target) = doc.result_sheets.get_mut(res_idx) {
                 clear_failed_result_sheet(target, code, message);
             }
-            return Ok(false);
+            return Ok(RecomputeOutcome::Failed);
         }
     }
 
     check_recalc_cancelled(cancelled)?;
-    let desc = descriptor_for_kind(&existing.analysis.kind);
     let output: Result<ResultSheet, String> = match desc.recompute_strategy {
+        AnalysisRecomputeStrategy::PreserveSnapshot => {
+            return Ok(RecomputeOutcome::Unchanged);
+        }
         AnalysisRecomputeStrategy::Transform => {
             let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &existing.analysis);
             if let Err(message) = validate_info_constant_hooks(doc, &existing.analysis, primary_info_id) {
@@ -1236,7 +1377,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: 
 
     check_recalc_cancelled(cancelled)?;
     let Some(target) = doc.result_sheets.get_mut(res_idx) else {
-        return Ok(false);
+        return Ok(RecomputeOutcome::Failed);
     };
     match output {
         Ok(mut computed) => {
@@ -1245,6 +1386,8 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: 
             if let ResultStatus::Failed { code, message } = computed.status {
                 computed.id = existing.id.clone();
                 computed.analysis = existing.analysis;
+                computed.provenance = existing.provenance;
+                computed.origin = existing.origin;
                 computed.floating_notes = existing.floating_notes;
                 computed.color_tag = existing.color_tag;
                 computed.scalars.clear();
@@ -1258,14 +1401,16 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: 
                 } else {
                     clear_failed_result_sheet(target, code, message);
                 }
-                return Ok(false);
+                return Ok(RecomputeOutcome::Failed);
             }
             if let Err(reason) = validate_result_sheet_finite(&computed, &existing.id) {
                 clear_failed_result_sheet(target, ErrorCode::SolverFailed, reason);
-                return Ok(false);
+                return Ok(RecomputeOutcome::Failed);
             }
             computed.id = existing.id;
             computed.analysis = existing.analysis;
+            computed.provenance = existing.provenance;
+            computed.origin = existing.origin;
             computed.floating_notes = existing.floating_notes;
             computed.color_tag = existing.color_tag;
             if let AnalysisKind::Survival(curvebook_doc::SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) = &computed.analysis.kind {
@@ -1287,11 +1432,11 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize, cancelled: 
             }
             computed.status = ResultStatus::UpToDate;
             *target = computed;
-            Ok(true)
+            Ok(RecomputeOutcome::Updated)
         }
         Err(message) => {
             clear_failed_result_sheet(target, ErrorCode::SolverFailed, message);
-            Ok(false)
+            Ok(RecomputeOutcome::Failed)
         }
     }
 }

@@ -31,15 +31,15 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisSpec, Cell, CellValue, ChecklistStatus, DataSheet, PValueStackMethod, PValueStackSpec, ResultCell, ResultSheet, ResultTabKind,
-    TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, Cell, CellValue, ChecklistStatus, DataSheet, PValueStackMethod, PValueStackSpec, ResultCell, ResultSheet,
+    ResultTabKind, TableArchetype, VariableRole,
 };
 use curvebook_math::MathError;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, enforce_summary_mode_matrix, init_result_sheet, num_cell, p_cell_at_alpha,
+    push_scalar, sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, try_adjust_p_values};
@@ -468,6 +468,7 @@ fn resolve_target_columns(
 /// summary metrics, input-order adjusted *P* / *q* values, discovery flags, scalars, and
 /// assumption checklist entries.
 pub fn run_pvalue_stack_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ps: &PValueStackSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::PValueStack(*ps))?;
     validate_pvalue_threshold(ps.threshold)?;
     let mut res = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;

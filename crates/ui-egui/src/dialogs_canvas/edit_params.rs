@@ -849,8 +849,9 @@ impl EditAnalysisParametersState {
             _ => {}
         }
         if self.pending_create {
+            let source_sheet_id = spec.source_sheet_id.as_ref()?;
             let mut payload = json!({
-                "source_sheet_id": spec.source_sheet_id.as_str(),
+                "source_sheet_id": source_sheet_id.as_str(),
                 "kind": kind,
                 "confidence_percent": spec.confidence_level.percent(),
                 "selected_data_sets": spec.selected_data_sets,
@@ -919,15 +920,16 @@ impl EditAnalysisParametersState {
             && self.graph_differences
             && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
             && crate::modal_predicates::r4_two_group_graph_differences(two.method).enabled
-            && let Some(source_ds) = d.data_sheet(&spec.source_sheet_id)
+            && let Some(src_id) = spec.source_sheet_id.as_ref()
+            && let Some(source_ds) = d.data_sheet(src_id)
             && matches!(source_ds.archetype, curvebook_doc::TableArchetype::Column(_))
         {
             let already_has_before_after = d.graph_sheets.iter().any(|g| {
-                g.spec.primary_source_sheet_id == spec.source_sheet_id
+                g.spec.primary_source_sheet_id == *src_id
                     && g.spec.series.iter().any(|s| matches!(s.gdo, curvebook_doc::GraphicalDataObject::BeforeAfterLines { .. }))
             });
             if !already_has_before_after {
-                let base_id = format!("{}_diff", spec.source_sheet_id.as_str());
+                let base_id = format!("{}_diff", src_id.as_str());
                 let mut cand = base_id.clone();
                 let mut suffix = 2_usize;
                 while let Ok(sid) = SheetId::try_new(cand.as_str())
@@ -941,7 +943,7 @@ impl EditAnalysisParametersState {
                         "graph.create",
                         json!({
                             "sheet_id": cand,
-                            "data_sheet_id": spec.source_sheet_id.as_str(),
+                            "data_sheet_id": src_id.as_str(),
                             "kind": GraphKind::Column,
                             "title": format!("{} (Before-After)", source_ds.title),
                             "initialized": true,
@@ -963,14 +965,14 @@ impl EditAnalysisParametersState {
             && self.graph_ranks
             && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
             && crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
-            && let Some(source_ds) = d.data_sheet(&spec.source_sheet_id)
+            && let Some(src_id) = spec.source_sheet_id.as_ref()
+            && let Some(source_ds) = d.data_sheet(src_id)
             && matches!(source_ds.archetype, curvebook_doc::TableArchetype::Column(_))
         {
             let rank_title = format!("{} (Ranks)", source_ds.title);
-            let base_id = format!("{}_ranks", spec.source_sheet_id.as_str());
+            let base_id = format!("{}_ranks", src_id.as_str());
             let already_has_rank_graph = d.graph_sheets.iter().any(|g| {
-                g.spec.primary_source_sheet_id == spec.source_sheet_id
-                    && (g.id.as_str() == base_id || g.title == rank_title || g.spec.title == rank_title)
+                g.spec.primary_source_sheet_id == *src_id && (g.id.as_str() == base_id || g.title == rank_title || g.spec.title == rank_title)
             });
             if !already_has_rank_graph {
                 let mut cand = base_id.clone();
@@ -986,7 +988,7 @@ impl EditAnalysisParametersState {
                         "graph.create",
                         json!({
                             "sheet_id": cand,
-                            "data_sheet_id": spec.source_sheet_id.as_str(),
+                            "data_sheet_id": src_id.as_str(),
                             "kind": GraphKind::Column,
                             "title": rank_title,
                             "initialized": true,

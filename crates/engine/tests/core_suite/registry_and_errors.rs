@@ -55,13 +55,13 @@ fn is_valid_command_id_format(id: &str) -> bool {
 fn registry_matches_command_id_category_effect_and_schema_spec() {
     let built = cmd::build_registry().expect("registry build must succeed with zero duplicates");
     let reg = cmd::registry();
-    assert_eq!(built.len(), 106, "expected 106 registered commands");
-    assert_eq!(reg.len(), 106);
+    assert_eq!(built.len(), 110, "expected 110 registered commands");
+    assert_eq!(reg.len(), 110);
 
     let built_ids: BTreeSet<&str> = built.specs().map(|s| s.id).collect();
     let reg_ids: BTreeSet<&str> = reg.specs().map(|s| s.id).collect();
     assert_eq!(built_ids, reg_ids, "cmd::build_registry() IDs must match cmd::registry() 1:1");
-    assert_eq!(reg_ids.len(), 106, "command IDs must be unique across all 106 commands");
+    assert_eq!(reg_ids.len(), 110, "command IDs must be unique across all 110 commands");
 
     let mut group_total = 0usize;
     for &group in CommandGroup::all() {
@@ -70,7 +70,7 @@ fn registry_matches_command_id_category_effect_and_schema_spec() {
         assert!(!group_specs.is_empty(), "group `{}` has zero commands", group.as_str());
         group_total += group_specs.len();
     }
-    assert_eq!(group_total, 106, "CommandGroup::all() partition must sum to 106");
+    assert_eq!(group_total, 110, "CommandGroup::all() partition must sum to 110");
 
     let markdown = cmd::render_commands_markdown();
     assert!(markdown.starts_with("# CurveBook Command Reference\n"));
@@ -263,6 +263,12 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
         TransformError::ArityMismatch { function: String::from("log"), expected: String::from("1"), actual: 2 },
         TransformError::InvalidSpec { message: String::from("bad") },
         TransformError::IncompatibleTable { operation: "row_means", kind: TableKind::Xy },
+        TransformError::UnsupportedSubcolumnMode {
+            operation: "Transpose",
+            table_kind: TableKind::Column,
+            mode: SubcolumnMode::MeanSdN,
+            reason: "pre-summarized column transpose",
+        },
         TransformError::MissingHook { description: String::from("c1") },
         TransformError::UnknownEquation { equation_id: String::from("eq") },
         TransformError::InvalidInput { message: String::from("nan") },
@@ -278,6 +284,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             | TransformError::ArityMismatch { .. }
             | TransformError::InvalidSpec { .. }
             | TransformError::IncompatibleTable { .. }
+            | TransformError::UnsupportedSubcolumnMode { .. }
             | TransformError::InvalidInput { .. } => ErrorCode::BadInput,
             TransformError::EvalError { .. } => ErrorCode::SolverFailed,
             TransformError::MissingHook { .. } | TransformError::UnknownEquation { .. } => ErrorCode::NotFound,
@@ -291,6 +298,12 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
         StatsError::InvalidParameter { name: "alpha", value: 2.0 },
         StatsError::DimensionMismatch { expected: 4, actual: 2 },
         StatsError::RequiresRawReplicates,
+        StatsError::UnsupportedSubcolumnMode {
+            analysis: "Two-group t-test",
+            table_kind: TableKind::Column,
+            mode: SubcolumnMode::MeanSd,
+            reason: "missing N",
+        },
         StatsError::IncompatibleTable { analysis: "one_way_anova", actual: TableKind::Xy },
         StatsError::IncompatibleAnalysisSpec { expected: "t_test" },
         StatsError::ZeroVariance { context: "col" },
@@ -305,6 +318,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             StatsError::InvalidParameter { .. }
             | StatsError::DimensionMismatch { .. }
             | StatsError::RequiresRawReplicates
+            | StatsError::UnsupportedSubcolumnMode { .. }
             | StatsError::IncompatibleTable { .. }
             | StatsError::IncompatibleAnalysisSpec { .. }
             | StatsError::MissingColumn { .. } => ErrorCode::BadInput,
@@ -324,6 +338,12 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
         FitError::IncompatibleTable { kind: TableKind::Column },
         FitError::ImpossibleWeights { reason: String::from("y=0") },
         FitError::RequiresRawReplicates,
+        FitError::UnsupportedSubcolumnMode {
+            analysis: "Nonlinear regression",
+            table_kind: TableKind::Xy,
+            mode: SubcolumnMode::MeanSd,
+            reason: "missing N",
+        },
         FitError::BadInitialValues { reason: String::from("neg") },
         FitError::DslCompileError { message: String::from("tok"), line: 1, column: 3 },
         FitError::DslEvalError { message: String::from("domain") },
@@ -340,6 +360,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             | FitError::IncompatibleTable { .. }
             | FitError::ImpossibleWeights { .. }
             | FitError::RequiresRawReplicates
+            | FitError::UnsupportedSubcolumnMode { .. }
             | FitError::BadInitialValues { .. }
             | FitError::DslCompileError { .. } => ErrorCode::BadInput,
             FitError::DslEvalError { .. } | FitError::OdeIntegrationFailed { .. } | FitError::ImplicitSolveFailed { .. } => ErrorCode::SolverFailed,

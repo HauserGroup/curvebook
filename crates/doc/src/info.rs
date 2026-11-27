@@ -122,6 +122,9 @@ pub struct InfoSheet {
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
+    /// Optional external import/merge origin metadata; `None` for natively authored sheets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<crate::ids::SheetOrigin>,
 }
 
 impl InfoSheet {
@@ -133,10 +136,19 @@ impl InfoSheet {
         validate_title(&title)?;
         let constants =
             STANDARD_INFO_KEYS.iter().map(|&key| InfoConstant { name: key.to_owned(), value: ConstantValue::Empty, units: None }).collect();
-        Ok(Self { id, title, linked_data_sheets: Vec::new(), constants, notes_markdown: String::new(), floating_notes: Vec::new(), color_tag: None })
+        Ok(Self {
+            id,
+            title,
+            linked_data_sheets: Vec::new(),
+            constants,
+            notes_markdown: String::new(),
+            floating_notes: Vec::new(),
+            color_tag: None,
+            origin: None,
+        })
     }
 
-    /// Validate structural invariants (identifier bounds, title bounds, finite constants, and valid floating notes).
+    /// Validate structural invariants (identifier bounds, title bounds, finite constants, origin metadata, and valid floating notes).
     pub fn validate(&self) -> Result<(), DocError> {
         self.id.validate_non_empty_bounded()?;
         validate_title(&self.title)?;
@@ -145,6 +157,9 @@ impl InfoSheet {
         }
         for note in &self.floating_notes {
             note.validate()?;
+        }
+        if let Some(origin) = &self.origin {
+            origin.validate()?;
         }
         Ok(())
     }
@@ -205,6 +220,8 @@ impl<'de> serde::Deserialize<'de> for InfoSheet {
             notes_markdown: String,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
+            #[serde(default)]
+            origin: Option<crate::ids::SheetOrigin>,
         }
 
         let raw = RawInfoSheet::deserialize(deserializer)?;
@@ -216,6 +233,7 @@ impl<'de> serde::Deserialize<'de> for InfoSheet {
             notes_markdown: raw.notes_markdown,
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
+            origin: raw.origin,
         };
         sheet.validate().map_err(serde::de::Error::custom)?;
         Ok(sheet)

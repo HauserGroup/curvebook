@@ -160,14 +160,14 @@ pub fn is_reml_mixed_effects_active(edit: &EditAnalysisParametersState, doc: &Pr
             matches!(a.method, OneWayMethod::RepeatedMeasures { .. })
                 && (a.mixed_effects_reml
                     || a.residual_covariance == ResidualCovariance::Unstructured
-                    || table_has_incomplete_rm_blocks(doc, Some(&spec.source_sheet_id), &spec.selected_data_sets))
+                    || table_has_incomplete_rm_blocks(doc, spec.source_sheet_id.as_ref(), &spec.selected_data_sets))
         }
         AnalysisKind::FactorialAnova(f) => {
             f.repeated_measures != RepeatedMeasuresDesign::None
                 && (f.mixed_effects_reml
                     || f.residual_covariance == ResidualCovariance::Unstructured
                     || f.three_way
-                    || (f.fit_reml_on_missing && table_has_incomplete_rm_blocks(doc, Some(&spec.source_sheet_id), &spec.selected_data_sets)))
+                    || (f.fit_reml_on_missing && table_has_incomplete_rm_blocks(doc, spec.source_sheet_id.as_ref(), &spec.selected_data_sets)))
         }
         _ => false,
     }
@@ -463,7 +463,7 @@ pub fn source_table_shape(doc: &ProjectDocument, source_sheet_id: Option<&SheetI
     let ds = doc
         .data_sheet(id)
         .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analyzable_data.as_ref()))
-        .or_else(|| doc.result_sheet(id).and_then(|rs| doc.data_sheet(&rs.analysis.source_sheet_id)));
+        .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analysis.source_sheet_id.as_ref().and_then(|src| doc.data_sheet(src))));
     let Some(sheet) = ds else {
         return (2, 2, 1);
     };
@@ -488,7 +488,7 @@ fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: Option<&SheetId>) -> Opt
     let id = id?;
     doc.data_sheet(id)
         .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analyzable_data.as_ref()))
-        .or_else(|| doc.result_sheet(id).and_then(|rs| doc.data_sheet(&rs.analysis.source_sheet_id)))
+        .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analysis.source_sheet_id.as_ref().and_then(|src| doc.data_sheet(src))))
 }
 
 /// Whether `source_sheet_id` (data sheet or result sheet source) is a pre-summarized `Column` table (`MeanSdN`, `MeanSemN`, `MeanCvN`).
@@ -767,7 +767,8 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::ImportWarnings
         | ActiveDialog::ImportProjectMode { .. }
         | ActiveDialog::CsvExportOptions(_)
-        | ActiveDialog::ExportAllTablesExistingFiles { .. } => ControlEnablement::enabled(),
+        | ActiveDialog::ExportAllTablesExistingFiles { .. }
+        | ActiveDialog::PzfxExportConfirm { .. } => ControlEnablement::enabled(),
         ActiveDialog::CreateGraph { .. } => {
             if matches!(norm.as_str(), "ok" | "apply") && dialogs.create_graph.commit_intent().is_none() {
                 ControlEnablement::disabled("Select a source data table first.")
@@ -888,8 +889,9 @@ fn evaluate_analyze_button(analyze: &AnalyzeDialogState, button: &str) -> Contro
 }
 
 fn edit_params_shape(dialogs: &CanvasDialogState, doc: &ProjectDocument, result_sheet_id: &SheetId) -> (usize, usize, usize) {
-    let target =
-        doc.result_sheet(result_sheet_id).map_or_else(|| dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id), |_| Some(result_sheet_id));
+    let target = doc
+        .result_sheet(result_sheet_id)
+        .map_or_else(|| dialogs.edit_params.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()), |_| Some(result_sheet_id));
     source_table_shape(doc, target)
 }
 
@@ -908,8 +910,8 @@ fn evaluate_edit_params_button(
     if edit.pending_create && button == "apply" {
         return ControlEnablement::disabled("Apply is only available after the analysis sheet has been created.");
     }
-    let shape_id = doc.result_sheet(result_sheet_id).map_or(&spec.source_sheet_id, |_| result_sheet_id);
-    let (rows, cols, _max_sub) = source_table_shape(doc, Some(shape_id));
+    let shape_id = doc.result_sheet(result_sheet_id).map_or(spec.source_sheet_id.as_ref(), |_| Some(result_sheet_id));
+    let (rows, cols, _max_sub) = source_table_shape(doc, shape_id);
     if let AnalysisKind::Contingency(cont) = &spec.kind {
         if cont.method == curvebook_doc::ContingencyMethod::CochranArmitageTrend {
             let trend = r5_contingency_cochran_armitage_trend(rows, cols);
@@ -937,10 +939,10 @@ fn evaluate_edit_params_widget(
 ) -> ControlEnablement {
     let norm = normalize_key(widget_id);
     if norm == "editpairedormatched" || norm == "pairedormatched" || norm == "matched" {
-        return r1_paired_or_matched_allowed(doc, edit.draft.as_ref().map(|d| &d.source_sheet_id));
+        return r1_paired_or_matched_allowed(doc, edit.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
     }
     if norm == "editassumegaussian" || norm == "assumegaussian" {
-        return r2_assume_gaussian_allowed(doc, edit.draft.as_ref().map(|d| &d.source_sheet_id));
+        return r2_assume_gaussian_allowed(doc, edit.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
     }
     let reml_active = is_reml_mixed_effects_active(edit, doc);
     if norm.contains("repeatedmeasures") && norm.contains("tab") {
@@ -1052,7 +1054,7 @@ fn evaluate_edit_params_widget(
         && let Some(spec) = &edit.draft
         && let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_group_column, .. }) = spec.kind
     {
-        return r_km_trend_test(survival_group_count(doc, Some(&spec.source_sheet_id), mv_group_column));
+        return r_km_trend_test(survival_group_count(doc, spec.source_sheet_id.as_ref(), mv_group_column));
     }
     if (norm.contains("pvaluedigits") || norm.contains("pvaluespinner"))
         && let Some(spec) = &edit.draft

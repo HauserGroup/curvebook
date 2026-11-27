@@ -168,9 +168,9 @@ fn sample_plate_map(geometry: PlateGeometry, name: &str) -> Result<PlateMapFile,
 
 #[test]
 fn v7_to_v8_migration_and_v7_forward_cap_rejection() -> TestResult {
-    assert_eq!(CURRENT_SCHEMA_VERSION, 8);
+    assert_eq!(CURRENT_SCHEMA_VERSION, 9);
 
-    // 1. Golden v7 project document (no `plate_well_origins`, no `row_match`) upgrades cleanly to v8.
+    // 1. Golden v7 project document (no `plate_well_origins`, no `row_match`) upgrades cleanly to current schema.
     let mut baseline_doc = ProjectDocument::new("Legacy v7 Study")?;
     let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2)?;
     if let Some(ds0) = col.data_sets.first_mut() {
@@ -211,7 +211,7 @@ fn v7_to_v8_migration_and_v7_forward_cap_rejection() -> TestResult {
     }
 
     let migrated_val = migrate_document_json(v7_val.clone(), 7)?;
-    assert_eq!(migrated_val.get("schema_version").and_then(serde_json::Value::as_u64), Some(8));
+    assert_eq!(migrated_val.get("schema_version").and_then(serde_json::Value::as_u64), Some(u64::from(CURRENT_SCHEMA_VERSION)));
     let migrated_ds0_origins = migrated_val
         .get("data_sheets")
         .and_then(serde_json::Value::as_array)
@@ -241,7 +241,7 @@ fn v7_to_v8_migration_and_v7_forward_cap_rejection() -> TestResult {
 
     let full_v8 = build_v8_plate_project()?;
     let full_v8_json = serde_json::to_value(&full_v8)?;
-    assert_eq!(full_v8_json.get("schema_version").and_then(serde_json::Value::as_u64), Some(8));
+    assert_eq!(full_v8_json.get("schema_version").and_then(serde_json::Value::as_u64), Some(u64::from(CURRENT_SCHEMA_VERSION)));
 
     // Confirm all three v8 features are serialized in the test payload.
     let serialized_str = serde_json::to_string(&full_v8)?;
@@ -252,13 +252,17 @@ fn v7_to_v8_migration_and_v7_forward_cap_rejection() -> TestResult {
     let v7_cap_err = upgrade(full_v8_json, 8, 0, 7, &v7_steps);
     assert_eq!(v7_cap_err, Err(FormatError::UnsupportedSchemaVersion { version: 8, max_supported: 7 }));
 
-    // 3. Current v8 archive opener rejects future v9 archives cleanly.
-    let mut v9_val = serde_json::to_value(&full_v8)?;
-    if let Some(root) = v9_val.as_object_mut() {
-        root.insert(String::from("schema_version"), serde_json::json!(9_u32));
+    // 3. Current v9 archive opener rejects future v10 archives cleanly.
+    let next_ver = CURRENT_SCHEMA_VERSION + 1;
+    let mut future_val = serde_json::to_value(&full_v8)?;
+    if let Some(root) = future_val.as_object_mut() {
+        root.insert(String::from("schema_version"), serde_json::json!(next_ver));
     }
-    let v9_zip = wrap_zip_archive(&v9_val, 9, "Project")?;
-    assert_eq!(open_project_bytes(&v9_zip), Err(FormatError::UnsupportedSchemaVersion { version: 9, max_supported: 8 }));
+    let future_zip = wrap_zip_archive(&future_val, next_ver, "Project")?;
+    assert_eq!(
+        open_project_bytes(&future_zip),
+        Err(FormatError::UnsupportedSchemaVersion { version: next_ver, max_supported: CURRENT_SCHEMA_VERSION })
+    );
     Ok(())
 }
 

@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use curvebook_doc::{
     Cell, ChecklistStatus, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DiagnosticPlotKind,
     DocError, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedTable, LayoutItem, LinkBorderColor, LinkSource, MultipleVariablesTable,
-    NestedTable, PartsOfWholeTable, ProjectDocument, ResultSheet, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, XColumnMode, XyTable,
+    NestedTable, PartsOfWholeTable, ProjectDocument, ResultSheet, ResultStatus, SheetFolderKind, SheetId, SheetOrigin, SheetSection, SubcolumnMode,
+    SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_palette::Rgba8;
 use curvebook_tools::{NavigatorDragState, ToolCommandIntent};
@@ -111,6 +111,8 @@ pub struct NavigatorEntry {
     pub link_colors: Vec<LinkBorderColor>,
     pub badges: Vec<NavigatorBadge>,
     pub floating_note_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SheetOrigin>,
 }
 
 /// One of the five canonical folders in the Project Navigator (`Data Tables`, `Info`, `Results`,
@@ -1518,8 +1520,11 @@ fn derive_info_subtitle(doc: &ProjectDocument, s: &curvebook_doc::InfoSheet) -> 
 }
 
 fn derive_result_subtitle(doc: &ProjectDocument, s: &ResultSheet) -> Option<String> {
-    let src_title = lookup_doc_sheet_title(doc, &s.analysis.source_sheet_id).unwrap_or(s.analysis.source_sheet_id.as_str());
     let short_kind = s.analysis.kind.descriptor().short_label;
+    let Some(src_id) = s.analysis.source_sheet_id.as_ref() else {
+        return if s.is_imported() { Some(format!("Imported \u{00B7} {short_kind}")) } else { Some(String::from(short_kind)) };
+    };
+    let src_title = lookup_doc_sheet_title(doc, src_id).unwrap_or(src_id.as_str());
     if s.analysis.custom_title.is_some() { Some(format!("From {src_title} \u{00B7} {short_kind}")) } else { Some(format!("From {src_title}")) }
 }
 
@@ -1661,6 +1666,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
+                origin: s.origin.as_ref(),
             },
             &ctx,
         ));
@@ -1677,6 +1683,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
+                origin: s.origin.as_ref(),
             },
             &ctx,
         ));
@@ -1690,6 +1697,7 @@ fn build_raw_entries(doc: &ProjectDocument, up_set: &BTreeSet<SheetId>, down_set
                 disambig: disambig.get(&s.id),
                 color_tag: s.color_tag,
                 floating_note_count: s.floating_notes.len(),
+                origin: s.origin.as_ref(),
             },
             &ctx,
         ));
@@ -1710,6 +1718,7 @@ struct SimpleSheetSummary<'a> {
     disambig: Option<&'a SheetDisambiguation>,
     color_tag: Option<Rgba8>,
     floating_note_count: usize,
+    origin: Option<&'a SheetOrigin>,
 }
 
 fn build_data_entry(
@@ -1766,6 +1775,7 @@ fn build_data_entry(
         link_colors,
         badges,
         floating_note_count: s.floating_notes.len(),
+        origin: s.origin.clone(),
     }
 }
 
@@ -1778,7 +1788,7 @@ fn build_result_entry(
 ) -> NavigatorEntry {
     let is_up = up_set.contains(&s.id);
     let is_down = down_set.contains(&s.id);
-    let is_dirty = matches!(s.status, ResultStatus::Dirty | ResultStatus::Failed { .. });
+    let is_dirty = matches!(s.status, ResultStatus::Dirty | ResultStatus::ImportedStale | ResultStatus::Failed { .. });
     let mut badges = Vec::new();
     match &s.status {
         ResultStatus::Dirty => {
@@ -1786,6 +1796,12 @@ fn build_result_entry(
         }
         ResultStatus::Failed { .. } => {
             badges.push(NavigatorBadge::new(NavigatorBadgeKind::Failed, NavigatorBadgeColor::Red, "Failed"));
+        }
+        ResultStatus::Imported => {
+            badges.push(NavigatorBadge::new(NavigatorBadgeKind::Dirty, NavigatorBadgeColor::Blue, "Imported"));
+        }
+        ResultStatus::ImportedStale => {
+            badges.push(NavigatorBadge::new(NavigatorBadgeKind::Dirty, NavigatorBadgeColor::Red, "Imported (stale)"));
         }
         ResultStatus::UpToDate => {}
     }
@@ -1809,6 +1825,7 @@ fn build_result_entry(
         link_colors: Vec::new(),
         badges,
         floating_note_count: s.floating_notes.len(),
+        origin: s.origin.clone(),
     }
 }
 
@@ -1835,6 +1852,7 @@ fn build_simple_entry(summary: SimpleSheetSummary<'_>, ctx: &FamilyHighlightCtx<
         link_colors: Vec::new(),
         badges: Vec::new(),
         floating_note_count: summary.floating_note_count,
+        origin: summary.origin.cloned(),
     }
 }
 
@@ -1855,7 +1873,9 @@ fn order_entries_by_nesting(doc: &ProjectDocument, raw: Vec<NavigatorEntry>, mod
 
     let mut children_by_parent: BTreeMap<SheetId, Vec<SheetId>> = BTreeMap::new();
     for rs in &doc.result_sheets {
-        children_by_parent.entry(rs.analysis.source_sheet_id.clone()).or_default().push(rs.id.clone());
+        if let Some(src_id) = &rs.analysis.source_sheet_id {
+            children_by_parent.entry(src_id.clone()).or_default().push(rs.id.clone());
+        }
     }
 
     let mut placed = BTreeSet::new();
@@ -2128,6 +2148,7 @@ mod tests {
             spec: g1_spec,
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         };
         let mut g2_spec = GraphSpec::default_for_data_sheet(&ds2);
         g2_spec.series[0].gdo = GraphicalDataObject::Violin {
@@ -2144,6 +2165,7 @@ mod tests {
             spec: g2_spec,
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         };
 
         let mut rs1 = ResultSheet::new(AnalysisSpec::new("r1", "d1", AnalysisKind::OneWayAnova(Default::default())).unwrap()).unwrap();
@@ -2205,6 +2227,7 @@ mod tests {
             spec: GraphSpec::default_for_data_sheet(&ds1),
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         };
         doc.data_sheets.extend([ds1, ds2]);
         doc.graph_sheets.push(gs_same);

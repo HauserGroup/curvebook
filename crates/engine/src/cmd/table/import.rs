@@ -2,13 +2,14 @@
 //! `table.importCsv`, plus `table.importPrism`, `table.importPzfx`, `table.importPlateMap`, and
 //! `table.importTidyLong`. Command specs stay in the parent `table` module.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use curvebook_doc::{
-    CellCoord, DataSheet, DocError, FloatingNote, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_PROJECT_IMAGE_ASSETS,
-    MAX_SHEETS_PER_PROJECT, PlacementMode, ProjectDocument, RectPt, ResultSheet, ResultStatus, SheetCellRange, SheetId, SheetSection, SubcolumnMode,
-    TableArchetype, VariableSource, validate_project_cells, validate_title,
+    AnalysisKind, CellCoord, DataSheet, DocError, FloatingNote, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_SHEETS_PER_PROJECT,
+    PlacementMode, ProjectDocument, RectPt, ResultSheet, SheetCellRange, SheetId, SheetOrigin, SheetSection, SubcolumnMode, TableArchetype,
+    VariableSource, validate_project_cells, validate_title,
 };
+use curvebook_format::registry::FormatRegistry;
 use curvebook_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, XlsxImportOptions, import_csv_sheets_with_filter, import_csv_to_datasheet,
     import_prism_bytes, import_pzfx_bytes, import_pzfx_str, import_xlsx_bytes_with_options, list_xlsx_sheets, parse_cbplate_json,
@@ -34,12 +35,14 @@ use super::{
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, prune_shortened_series_overrides, remap_analysis_hooks, remap_data_sheet_links,
-    remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet, select_result_tab,
-    shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
+    next_unique_sheet_id_excluding, parse_sheet_id, prune_shortened_series_overrides, require_analyzable_data_sheet, require_data_sheet,
+    select_result_tab, shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{command_schema, deserialize_strict, parse_params};
-use crate::cmd::project::recalculate_dirty_with_links;
+use crate::cmd::project::{
+    collect_all_sheet_ids, extract_source_label, merge_imported_document, next_collision_free_sheet_id, recalculate_dirty_with_links,
+    resolve_optional_merged_at, stamp_document_origin,
+};
 
 fn check_inline_payload_len(len: usize, max_bytes: usize, label: &str) -> Result<(), EngineError> {
     if len > max_bytes {
@@ -830,138 +833,8 @@ pub(super) struct ImportPrismParams {
     pub(super) bytes: Option<Vec<u8>>,
     /// Merge imported sheets into existing document instead of replacing (default false).
     pub(super) merge: Option<bool>,
-}
-
-pub(super) fn collect_all_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {
-    let mut ids = HashSet::with_capacity(doc.total_sheet_count());
-    for id in doc
-        .data_sheets
-        .iter()
-        .map(|s| &s.id)
-        .chain(doc.info_sheets.iter().map(|s| &s.id))
-        .chain(doc.result_sheets.iter().map(|s| &s.id))
-        .chain(doc.graph_sheets.iter().map(|s| &s.id))
-        .chain(doc.layout_sheets.iter().map(|s| &s.id))
-    {
-        ids.insert(id.as_str().to_owned());
-    }
-    ids
-}
-
-pub(super) fn next_collision_free_sheet_id(original: &SheetId, reserved: &mut HashSet<String>) -> Result<SheetId, EngineError> {
-    let raw = original.as_str().trim();
-    let base = if raw.is_empty() { "sheet" } else { raw };
-    for suffix in 2..=100_000_usize {
-        let candidate = SheetId::try_new(format!("{base}-{suffix}"))?;
-        if reserved.insert(candidate.as_str().to_owned()) {
-            return Ok(candidate);
-        }
-    }
-    Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("exhausted collision-free sheet IDs for `{raw}`")))
-}
-
-pub(super) fn plan_imported_id_remap(doc: &ProjectDocument, imported: &ProjectDocument) -> Result<HashMap<SheetId, SheetId>, EngineError> {
-    let doc_ids = collect_all_sheet_ids(doc);
-    let mut reserved = doc_ids.clone();
-    reserved.extend(collect_all_sheet_ids(imported));
-
-    let mut seen_imported: HashSet<String> = HashSet::with_capacity(imported.total_sheet_count());
-    let mut id_map: HashMap<SheetId, SheetId> = HashMap::new();
-
-    for orig_id in imported
-        .data_sheets
-        .iter()
-        .map(|s| &s.id)
-        .chain(imported.info_sheets.iter().map(|s| &s.id))
-        .chain(imported.result_sheets.iter().map(|s| &s.id))
-        .chain(imported.graph_sheets.iter().map(|s| &s.id))
-        .chain(imported.layout_sheets.iter().map(|s| &s.id))
-    {
-        let key = orig_id.as_str();
-        let needs_remap = doc_ids.contains(key) || !seen_imported.insert(key.to_owned());
-        if needs_remap {
-            let new_id = next_collision_free_sheet_id(orig_id, &mut reserved)?;
-            id_map.entry(orig_id.clone()).or_insert(new_id);
-        }
-    }
-    Ok(id_map)
-}
-
-pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: ProjectDocument) -> Result<(), EngineError> {
-    let total_sheets = doc.total_sheet_count().saturating_add(imported.total_sheet_count());
-    if total_sheets > MAX_SHEETS_PER_PROJECT {
-        return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
-    }
-    let existing_cells = doc.total_allocated_cells()?;
-    let added_cells = imported.total_allocated_cells()?;
-    validate_project_cells(existing_cells, added_cells)?;
-    let existing_asset_ids: HashSet<&str> = doc.image_assets.iter().map(|a| a.asset_id.as_str()).collect();
-    let mut added_asset_ids: HashSet<&str> = HashSet::new();
-    for asset in &imported.image_assets {
-        if !existing_asset_ids.contains(asset.asset_id.as_str()) {
-            added_asset_ids.insert(asset.asset_id.as_str());
-        }
-    }
-    let total_assets = doc.image_assets.len().saturating_add(added_asset_ids.len());
-    if total_assets > MAX_PROJECT_IMAGE_ASSETS {
-        return Err(EngineError::from(DocError::TooManyImageAssets { count: total_assets, max: MAX_PROJECT_IMAGE_ASSETS }));
-    }
-
-    let id_map = plan_imported_id_remap(doc, &imported)?;
-    if !id_map.is_empty() {
-        for ds in &mut imported.data_sheets {
-            remap_sheet_id(&mut ds.id, &id_map);
-            remap_data_sheet_links(ds, &id_map);
-        }
-        for info in &mut imported.info_sheets {
-            remap_sheet_id(&mut info.id, &id_map);
-            for linked in &mut info.linked_data_sheets {
-                remap_sheet_id(linked, &id_map);
-            }
-        }
-        for res in &mut imported.result_sheets {
-            remap_sheet_id(&mut res.id, &id_map);
-            res.analysis.id = res.id.clone();
-            remap_sheet_id(&mut res.analysis.source_sheet_id, &id_map);
-            remap_analysis_hooks(&mut res.analysis, &id_map);
-            if let Some(ref mut ad) = res.analyzable_data {
-                ad.id = res.id.clone();
-                remap_data_sheet_links(ad, &id_map);
-            }
-            for outlier in &mut res.eliminated_outliers {
-                remap_sheet_id(&mut outlier.sheet_id, &id_map);
-            }
-        }
-        for gs in &mut imported.graph_sheets {
-            remap_sheet_id(&mut gs.id, &id_map);
-            remap_graph_spec_references(&mut gs.spec, &id_map);
-        }
-        for ls in &mut imported.layout_sheets {
-            remap_sheet_id(&mut ls.id, &id_map);
-            remap_layout_spec_references(&mut ls.spec, &id_map);
-        }
-    }
-
-    for asset in imported.image_assets {
-        doc.upsert_image_asset(asset)?;
-    }
-    for ds in imported.data_sheets {
-        doc.add_data_sheet(ds)?;
-    }
-    for info in imported.info_sheets {
-        doc.add_info_sheet(info)?;
-    }
-    for res in imported.result_sheets {
-        doc.add_result_sheet(res)?;
-    }
-    for gs in imported.graph_sheets {
-        doc.add_graph_sheet(gs)?;
-    }
-    for ls in imported.layout_sheets {
-        doc.add_layout_sheet(ls)?;
-    }
-    let _ = dag::topological_order(doc)?;
-    Ok(())
+    /// Optional caller-supplied UTC timestamp (`unix:<seconds>` or ISO-8601 UTC) recorded on merged sheet origins.
+    pub(super) merged_at: Option<String>,
 }
 
 pub(super) fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -981,11 +854,15 @@ fn finish_project_import_report(
     ctx: &mut Ctx<'_>,
     command_id: &str,
     summary: &str,
-    report: curvebook_format::ImportReport,
+    mut report: curvebook_format::ImportReport,
     merge: bool,
+    origin: Option<SheetOrigin>,
 ) -> Result<CommandOutcome, EngineError> {
     let doc = &mut ctx.session.doc;
     if merge {
+        if let Some(ref orig) = origin {
+            stamp_document_origin(&mut report.document, orig);
+        }
         merge_imported_document(doc, report.document)?;
     } else {
         validate_project_cells(0, report.document.total_allocated_cells()?)?;
@@ -1006,6 +883,9 @@ fn finish_project_import_report(
 }
 
 fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<CommandOutcome, EngineError> {
+    let merged_at = resolve_optional_merged_at(p.merged_at.as_deref())?;
+    let merge = p.merge.unwrap_or(false);
+    let source_path = p.path.clone();
     let bytes = if let Some(path) = p.path.as_deref() {
         ctx.session.path_policy.read_binary_file(path, ".prism file", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
@@ -1019,7 +899,40 @@ fn import_prism_with_params(ctx: &mut Ctx<'_>, p: ImportPrismParams) -> Result<C
     };
 
     let report = import_prism_bytes(&bytes)?;
-    finish_project_import_report(ctx, "table.importPrism", "imported .prism file", report, p.merge.unwrap_or(false))
+    let origin = if merge {
+        let format_id = FormatRegistry::default_registry().importer_by_format("prism").map_or(".prism", |imp| imp.descriptor().id);
+        Some(SheetOrigin::new(extract_source_label(source_path.as_deref(), "inline.prism"), format_id, merged_at)?)
+    } else {
+        None
+    };
+    let before_result_len = if merge { ctx.session.doc.result_sheets.len() } else { 0 };
+    let mut outcome = finish_project_import_report(ctx, "table.importPrism", "imported .prism file", report, merge, origin)?;
+
+    // §6.1: If the imported archive produced any live-translated (non-ImportedSnapshot) analyses,
+    // recompute them inside the same single journaled undoable step while preserving untouched
+    // `ResultStatus::Imported` snapshots.
+    let live_result_ids: Vec<SheetId> = ctx
+        .session
+        .doc
+        .result_sheets
+        .iter()
+        .skip(before_result_len)
+        .filter(|rs| !matches!(rs.analysis.kind, AnalysisKind::ImportedSnapshot { .. }) && !rs.is_imported())
+        .map(|rs| rs.id.clone())
+        .collect();
+    if !live_result_ids.is_empty() {
+        let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, &live_result_ids, None, Some(ctx.cancelled))?;
+        if let Some(note) = recalc.failure_note() {
+            outcome.message = format!("{}{note}", outcome.message);
+        }
+        if let Some(obj) = outcome.payload.as_object_mut() {
+            obj.insert(String::from("recalculated_sheets"), json!(recalc.recalculated_sheets));
+            obj.insert(String::from("refreshed_links"), json!(recalc.refreshed_links));
+            obj.insert(String::from("failed_count"), json!(recalc.failed_result_sheets.len()));
+            obj.insert(String::from("failed_result_sheets"), json!(recalc.failed_json()));
+        }
+    }
+    Ok(outcome)
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,10 +952,15 @@ pub(super) struct ImportPzfxParams {
     pub(super) bytes_base64: Option<String>,
     /// Merge imported sheets into existing document instead of replacing (default false).
     pub(super) merge: Option<bool>,
+    /// Optional caller-supplied UTC timestamp (`unix:<seconds>` or ISO-8601 UTC) recorded on merged sheet origins.
+    pub(super) merged_at: Option<String>,
 }
 
 pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPzfxParams = parse_params(&command_schema::<ImportPzfxParams>(), raw)?;
+    let merged_at = resolve_optional_merged_at(p.merged_at.as_deref())?;
+    let merge = p.merge.unwrap_or(false);
+    let source_path = p.path.clone();
     let report = if let Some(xml) = p.xml.as_deref() {
         check_inline_payload_len(xml.len(), MAX_XML_BYTES, ".pzfx XML")?;
         import_pzfx_str(xml)?
@@ -1057,7 +975,8 @@ pub(super) fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
             .with_remediation("Provide a .pzfx `path`, inline `xml` string, or `bytes_base64`."));
     };
 
-    finish_project_import_report(ctx, "table.importPzfx", "imported .pzfx file", report, p.merge.unwrap_or(false))
+    let origin = if merge { Some(SheetOrigin::new(extract_source_label(source_path.as_deref(), "inline.pzfx"), "pzfx", merged_at)?) } else { None };
+    finish_project_import_report(ctx, "table.importPzfx", "imported .pzfx file", report, merge, origin)
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,10 +1030,14 @@ pub(super) struct ImportXlsxParams {
     pub(super) row_match: Option<ColumnEqualsFilterSchema>,
     /// When true and `skip_rows > 0`, store skipped preamble `Key: Value` rows and notes in one shared linked InfoSheet (default false).
     pub(super) extract_preamble_info: Option<bool>,
+    /// Optional caller-supplied UTC timestamp (`unix:<seconds>` or ISO-8601 UTC) recorded on merged sheet origins.
+    pub(super) merged_at: Option<String>,
 }
 
 pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportXlsxParams = parse_params(&command_schema::<ImportXlsxParams>(), raw)?;
+    let merged_at = resolve_optional_merged_at(p.merged_at.as_deref())?;
+    let source_path = p.path.clone();
     if let Some(ref title) = p.title {
         validate_title(title)?;
         if title.trim().is_empty() {
@@ -1176,9 +1099,11 @@ pub(super) fn run_import_xlsx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         extract_preamble_info: p.extract_preamble_info.unwrap_or(false),
     };
 
-    let report = import_xlsx_bytes_with_options(&bytes, &opts)?;
+    let mut report = import_xlsx_bytes_with_options(&bytes, &opts)?;
     let doc = &mut ctx.session.doc;
     let (imported_ids, info_sheet_id): (Vec<String>, Option<String>) = if p.merge.unwrap_or(false) {
+        let origin = SheetOrigin::new(extract_source_label(source_path.as_deref(), "inline.xlsx"), "xlsx", merged_at)?;
+        stamp_document_origin(&mut report.document, &origin);
         let before_count = doc.data_sheets.len();
         let before_info_count = doc.info_sheets.len();
         merge_imported_document(doc, report.document)?;
@@ -1469,7 +1394,7 @@ pub(super) fn parse_plate_template_obj(val: &Value, default_name: &str) -> Resul
 
 fn require_fresh_analyzable_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Result<&'a DataSheet, EngineError> {
     if let Some(res) = doc.result_sheet(id)
-        && res.status != ResultStatus::UpToDate
+        && !res.is_computed_up_to_date()
     {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
@@ -1949,7 +1874,8 @@ mod tests {
         let mut session = Session::new();
         let cancelled = AtomicBool::new(false);
         let mut ctx = Ctx { session: &mut session, caller: Caller::Cli, cancelled: &cancelled };
-        let params = ImportPrismParams { path: None, bytes_base64: None, bytes: Some(vec![0u8; MAX_ARCHIVE_FILE_BYTES + 1]), merge: None };
+        let params =
+            ImportPrismParams { path: None, bytes_base64: None, bytes: Some(vec![0u8; MAX_ARCHIVE_FILE_BYTES + 1]), merge: None, merged_at: None };
         let res = import_prism_with_params(&mut ctx, params);
         assert!(matches!(res, Err(err) if err.code == ErrorCode::ResourceLimit));
     }
@@ -2006,7 +1932,7 @@ mod tests {
 
         assert!(dest.image_asset(&asset.asset_id).is_some(), "merged document must retain imported image assets");
         let merged_res = dest.result_sheet(&SheetId::new("res-1")).expect("merged result sheet");
-        assert_eq!(merged_res.analysis.source_sheet_id.as_str(), "data-1-2");
+        assert_eq!(merged_res.analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("data-1-2"));
         assert_eq!(merged_res.eliminated_outliers.len(), 1);
         assert_eq!(
             merged_res.eliminated_outliers[0].sheet_id.as_str(),

@@ -44,7 +44,7 @@ fn collect_term_combinations(
 }
 
 pub(super) fn build_live_symbolic_formula(spec: &curvebook_doc::AnalysisSpec, doc: &ProjectDocument) -> Option<String> {
-    let titles = column_titles_for_draft(doc, Some(&spec.source_sheet_id));
+    let titles = column_titles_for_draft(doc, spec.source_sheet_id.as_ref());
     let name = |col: usize| titles.get(col).cloned().unwrap_or_else(|| format!("X{}", col + 1));
     match &spec.kind {
         AnalysisKind::FactorialAnova(f) if !f.multifactor_columns.is_empty() => {
@@ -105,7 +105,7 @@ pub(super) fn render_stat_mv_data_tab(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id) else {
+    let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src)) else {
         return;
     };
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
@@ -476,7 +476,7 @@ pub(super) fn render_survival_design(
             ..
         } => {
             render_section_title(ui, tokens, "Survival Curve Comparison Tests");
-            let grp_count = survival_group_count(doc, Some(&spec.source_sheet_id), *mv_group_column);
+            let grp_count = survival_group_count(doc, spec.source_sheet_id.as_ref(), *mv_group_column);
             let trend_en = r_km_trend_test(grp_count);
             for (wid, lbl, checked, en, idx) in [
                 ("edit.km.mantel_cox", "Log-rank (Mantel-Cox) test", *log_rank_mantel_cox, ControlEnablement::enabled(), 0u8),

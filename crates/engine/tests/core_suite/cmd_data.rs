@@ -272,7 +272,7 @@ fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
     assert_eq!(cell_num(&session, "data-run2", 2, 0, 0), None);
     assert_eq!(x_num(&session, "data-run2", 2), Some(-6.0));
     let res_obj = rs(&session, cloned_res);
-    assert_eq!(res_obj.analysis.source_sheet_id.as_str(), "data-run2");
+    assert_eq!(res_obj.analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("data-run2"));
     assert!(res_obj.scalars.is_empty());
     let AnalysisKind::NonlinearRegression(nl_cloned) = &res_obj.analysis.kind else {
         panic!("expected NonlinearRegression");

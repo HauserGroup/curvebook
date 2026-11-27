@@ -146,7 +146,8 @@ fn r10_28_wf15_power_studio_family_aliases_and_cmd_t_reentry() -> TestRes {
         correlation_method: Default::default(),
         info_sheet_id: None,
     };
-    let mut edit_spec = AnalysisSpec::new("Power Plan", power_rs.analysis.source_sheet_id, AnalysisKind::PowerAnalysis(custom_spec)).unwrap();
+    let mut edit_spec =
+        AnalysisSpec::new("Power Plan", power_rs.analysis.source_sheet_id.expect("power source"), AnalysisKind::PowerAnalysis(custom_spec)).unwrap();
     edit_spec.id = power_rs_id.clone();
     *doc2.result_sheet_mut(&power_rs_id).unwrap() = ResultSheet::new(edit_spec).unwrap();
 

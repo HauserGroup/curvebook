@@ -411,7 +411,7 @@ pub(crate) struct SheetGrid {
 
 pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetId, tab_id: Option<&str>) -> Option<SheetGrid> {
     if let Some(res) = doc.result_sheet(source_sheet_id) {
-        if !matches!(res.status, ResultStatus::UpToDate) {
+        if !res.has_displayable_output() {
             return None;
         }
         let tab: Option<&ResultTab> = tab_id.and_then(|tid| res.tabs.iter().find(|t| t.id == tid)).or_else(|| res.tabs.first());
@@ -473,11 +473,13 @@ pub(super) fn resolve_fresh_data_sheet_or_upstream<'a>(
                 }
                 return None;
             }
+            ResultStatus::Imported | ResultStatus::ImportedStale => return None,
         }
         if let Some(analyzable) = res.analyzable_data.as_ref() {
             return Some(analyzable);
         }
-        cursor = &res.analysis.source_sheet_id;
+        let next = res.analysis.source_sheet_id.as_ref()?;
+        cursor = next;
     }
     None
 }

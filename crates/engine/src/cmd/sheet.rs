@@ -144,8 +144,10 @@ fn parse_subcolumn_mode(raw: Option<&Value>, replicates: usize) -> Result<Subcol
             "raw" | "raw_replicates" | "rawreplicates" | "replicate" | "replicates" => {
                 Ok(if replicates <= 1 { SubcolumnMode::Single } else { SubcolumnMode::RawReplicates(replicates) })
             }
-            "mean_sd" | "mean_sd_n" | "meansdn" => Ok(SubcolumnMode::MeanSdN),
-            "mean_sem" | "mean_sem_n" | "meansemn" => Ok(SubcolumnMode::MeanSemN),
+            "mean_sd" | "meansd" => Ok(SubcolumnMode::MeanSd),
+            "mean_sem" | "meansem" => Ok(SubcolumnMode::MeanSem),
+            "mean_sd_n" | "meansdn" => Ok(SubcolumnMode::MeanSdN),
+            "mean_sem_n" | "meansemn" => Ok(SubcolumnMode::MeanSemN),
             "mean_cv" | "mean_cv_n" | "meancvn" => Ok(SubcolumnMode::MeanCvN),
             "mean_low_high" | "meanlowhigh" => Ok(SubcolumnMode::MeanLowHigh),
             "upper_lower" | "upper_lower_limits" | "upperlowerlimits" | "mean_upper_lower" | "meanupperlower" => Ok(SubcolumnMode::UpperLowerLimits),
@@ -607,8 +609,10 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
             .with_remediation("Delete or unlink dependent sheets first, or pass `cascade: true` on unfrozen sheets."));
     }
     if matches!(section, SheetSection::Data | SheetSection::Analyses)
-        && let Some(rs) =
-            doc.result_sheets.iter().find(|r| r.id != *id && (r.analysis.source_sheet_id == *id || result_hooks_data_or_result_sheet(r, id)))
+        && let Some(rs) = doc
+            .result_sheets
+            .iter()
+            .find(|r| r.id != *id && (r.analysis.source_sheet_id.as_ref() == Some(id) || result_hooks_data_or_result_sheet(r, id)))
     {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
@@ -646,14 +650,17 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
 }
 
 fn result_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, rs: &'a ResultSheet) -> Option<&'a SheetId> {
-    let mut cursor = &rs.analysis.source_sheet_id;
+    let mut cursor = rs.analysis.source_sheet_id.as_ref()?;
     let mut seen: HashSet<&SheetId> = HashSet::new();
     while seen.insert(cursor) {
         if let Some(ds) = doc.data_sheet(cursor) {
             return ds.info_sheet_id.as_ref();
         }
         if let Some(upstream) = doc.result_sheet(cursor) {
-            cursor = &upstream.analysis.source_sheet_id;
+            let Some(next) = upstream.analysis.source_sheet_id.as_ref() else {
+                break;
+            };
+            cursor = next;
         } else {
             break;
         }
@@ -695,7 +702,7 @@ fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, inclu
     while changed {
         changed = false;
         for rs in &doc.result_sheets {
-            if !to_delete.contains(&rs.id) && to_delete.contains(&rs.analysis.source_sheet_id) {
+            if !to_delete.contains(&rs.id) && rs.analysis.source_sheet_id.as_ref().is_some_and(|src| to_delete.contains(src)) {
                 to_delete.insert(rs.id.clone());
                 changed = true;
             }
@@ -1119,7 +1126,9 @@ fn resolve_family_root_data_id_inner(
             let Some(rs) = doc.result_sheet(raw_id) else {
                 return Err(EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", raw_id.as_str())));
             };
-            let up = &rs.analysis.source_sheet_id;
+            let Some(up) = rs.analysis.source_sheet_id.as_ref() else {
+                return Err(bad_input(format!("result sheet `{}` is unlinked and cannot trace back to a data sheet", raw_id.as_str())));
+            };
             if doc.data_sheet(up).is_some() {
                 return Ok(up.clone());
             }
@@ -1292,7 +1301,7 @@ fn clone_downstream_results(
     loop {
         let mut progress = false;
         for rs in &original_results {
-            if id_map.contains_key(&rs.id) || !id_map.contains_key(&rs.analysis.source_sheet_id) {
+            if rs.is_imported() || id_map.contains_key(&rs.id) || !rs.analysis.source_sheet_id.as_ref().is_some_and(|src| id_map.contains_key(src)) {
                 continue;
             }
             let new_res_id = next_unique_id_with_reserved(doc, &format!("{id_prefix}-res"), reserved)?;
@@ -1326,8 +1335,11 @@ fn remap_result_sheet(
     let orig_title = res.title().to_owned();
     res.id = new_id.clone();
     res.analysis.id = new_id;
-    if let Some(mapped) = id_map.get(&res.analysis.source_sheet_id) {
-        res.analysis.source_sheet_id = mapped.clone();
+    res.origin = None;
+    if let Some(ref mut src) = res.analysis.source_sheet_id
+        && let Some(mapped) = id_map.get(src)
+    {
+        *src = mapped.clone();
     }
     let next_title = if let Some(custom) = res.analysis.custom_title.take() {
         format!("{custom} ({suffix_label})")
@@ -1887,6 +1899,137 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     ))
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ClearOriginParams {
+    /// Target sheet ID whose origin badge should be cleared (mutually exclusive with `source_label`).
+    #[schemars(length(min = 1))]
+    sheet_id: Option<String>,
+    /// When true alongside `sheet_id`, clear origin badges on every sheet sharing that sheet's `source_label` (default false).
+    all_from_same_source: Option<bool>,
+    /// Clear origin badges on every sheet whose `origin.source_label` equals this filename (mutually exclusive with `sheet_id`).
+    #[schemars(length(min = 1))]
+    source_label: Option<String>,
+}
+
+fn find_sheet_origin_label(doc: &ProjectDocument, id: &SheetId) -> Option<String> {
+    doc.data_sheet(id)
+        .and_then(|s| s.origin.as_ref())
+        .or_else(|| doc.info_sheet(id).and_then(|s| s.origin.as_ref()))
+        .or_else(|| doc.result_sheet(id).and_then(|s| s.origin.as_ref()))
+        .or_else(|| doc.graph_sheet(id).and_then(|s| s.origin.as_ref()))
+        .or_else(|| doc.layout_sheet(id).and_then(|s| s.origin.as_ref()))
+        .map(|o| o.source_label.clone())
+}
+
+fn clear_single_sheet_origin(doc: &mut ProjectDocument, id: &SheetId) -> Option<String> {
+    if let Some(ds) = doc.data_sheet_mut(id) {
+        return ds.origin.take().map(|o| o.source_label);
+    }
+    if let Some(info) = doc.info_sheet_mut(id) {
+        return info.origin.take().map(|o| o.source_label);
+    }
+    if let Some(rs) = doc.result_sheet_mut(id) {
+        return rs.origin.take().map(|o| o.source_label);
+    }
+    if let Some(gs) = doc.graph_sheet_mut(id) {
+        return gs.origin.take().map(|o| o.source_label);
+    }
+    if let Some(ls) = doc.layout_sheet_mut(id) {
+        return ls.origin.take().map(|o| o.source_label);
+    }
+    None
+}
+
+fn clear_all_origins_matching_source(doc: &mut ProjectDocument, label: &str) -> Vec<String> {
+    let mut cleared = Vec::new();
+    for ds in &mut doc.data_sheets {
+        if ds.origin.as_ref().is_some_and(|o| o.source_label == label) {
+            ds.origin = None;
+            cleared.push(ds.id.as_str().to_owned());
+        }
+    }
+    for info in &mut doc.info_sheets {
+        if info.origin.as_ref().is_some_and(|o| o.source_label == label) {
+            info.origin = None;
+            cleared.push(info.id.as_str().to_owned());
+        }
+    }
+    for rs in &mut doc.result_sheets {
+        if rs.origin.as_ref().is_some_and(|o| o.source_label == label) {
+            rs.origin = None;
+            cleared.push(rs.id.as_str().to_owned());
+        }
+    }
+    for gs in &mut doc.graph_sheets {
+        if gs.origin.as_ref().is_some_and(|o| o.source_label == label) {
+            gs.origin = None;
+            cleared.push(gs.id.as_str().to_owned());
+        }
+    }
+    for ls in &mut doc.layout_sheets {
+        if ls.origin.as_ref().is_some_and(|o| o.source_label == label) {
+            ls.origin = None;
+            cleared.push(ls.id.as_str().to_owned());
+        }
+    }
+    cleared
+}
+
+fn run_sheet_clear_origin(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: ClearOriginParams = parse_params(&command_schema::<ClearOriginParams>(), params)?;
+    let all_from_same_source = parsed.all_from_same_source.unwrap_or(false);
+
+    if parsed.sheet_id.is_some() && parsed.source_label.is_some() {
+        return Err(bad_input("sheet.clearOrigin accepts either `sheet_id` or `source_label`, not both")
+            .with_remediation("Provide `sheet_id` (optionally with `all_from_same_source: true`) or `source_label`."));
+    }
+
+    let (cleared_ids, cleared_label): (Vec<String>, Option<String>) = if let Some(ref raw_label) = parsed.source_label {
+        let label = raw_label.trim();
+        if label.is_empty() {
+            return Err(bad_input_ptr("/source_label", "sheet.clearOrigin `source_label` must not be empty"));
+        }
+        validate_title(label)?;
+        let cleared = clear_all_origins_matching_source(&mut ctx.session.doc, label);
+        (cleared, Some(label.to_owned()))
+    } else if let Some(ref raw_id) = parsed.sheet_id {
+        let sid = parse_sheet_id(raw_id)?;
+        if !sheet_id_exists(&ctx.session.doc, &sid) {
+            return Err(EngineError::from(DocError::SheetNotFound { sheet_id: sid }));
+        }
+        if all_from_same_source {
+            match find_sheet_origin_label(&ctx.session.doc, &sid) {
+                Some(label) => {
+                    let cleared = clear_all_origins_matching_source(&mut ctx.session.doc, &label);
+                    (cleared, Some(label))
+                }
+                None => (Vec::new(), None),
+            }
+        } else {
+            match clear_single_sheet_origin(&mut ctx.session.doc, &sid) {
+                Some(label) => (vec![sid.as_str().to_owned()], Some(label)),
+                None => (Vec::new(), None),
+            }
+        }
+    } else {
+        return Err(bad_input("sheet.clearOrigin requires `sheet_id` or `source_label`")
+            .with_remediation("Pass a target `sheet_id` or `source_label` to clear origin badges."));
+    };
+
+    let cleared_count = cleared_ids.len();
+    let payload = json!({
+        "cleared_count": cleared_count,
+        "cleared_sheet_ids": cleared_ids,
+        "source_label": cleared_label,
+    });
+    if cleared_count == 0 {
+        Ok(CommandOutcome::read_only("sheet.clearOrigin", "no origin badges to clear", payload))
+    } else {
+        Ok(CommandOutcome::mutated("sheet.clearOrigin", format!("cleared origin badge on {cleared_count} sheet(s)"), payload))
+    }
+}
+
 static SPECS: &[CommandSpec] = &command_specs!(
     CommandGroup::Sheet;
     {
@@ -2010,6 +2153,17 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: command_schema::<ExtractResultTabParams>,
         enabled: has_result_sheet,
         run: run_sheet_extract_result_tab,
+    },
+    {
+        id: "sheet.clearOrigin",
+        label: "Clear Origin Badge",
+        menu_path: "Change/Clear Origin Badge",
+        summary: "Clear the merge/import origin badge from one sheet or every sheet from the same source file.",
+        beginner: "Removes the navigator provenance badge from a single sheet or from all sheets merged from the same source file without changing titles or data.",
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
+        input_schema: command_schema::<ClearOriginParams>,
+        enabled: always_enabled,
+        run: run_sheet_clear_origin,
     },
 );
 

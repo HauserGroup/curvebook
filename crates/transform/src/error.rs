@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use curvebook_doc::{DocError, SummaryPointError, TableKind};
+use curvebook_doc::{DocError, SubcolumnMode, SummaryPointError, TableKind};
 use curvebook_math::MathError;
 
 /// Error produced by formula parsing/evaluation, table transformations, curve calculus, or imports.
@@ -62,6 +62,17 @@ pub enum TransformError {
         /// Actual [`TableKind`] of the rejected input sheet.
         kind: TableKind,
     },
+    /// Transform or curve operation does not support the input table's pre-summarized [`SubcolumnMode`].
+    UnsupportedSubcolumnMode {
+        /// Static name of the attempted transform operation.
+        operation: &'static str,
+        /// Input table archetype (`Column`, `Xy`, or `Grouped`).
+        table_kind: TableKind,
+        /// Pre-summarized subcolumn layout encountered on the input sheet.
+        mode: SubcolumnMode,
+        /// Neutral explanation of why this mode is refused.
+        reason: &'static str,
+    },
     /// Referenced `HookSource` could not be resolved to a finite numeric constant.
     MissingHook {
         /// Diagnostic describing which upstream sheet, constant, or scalar failed to resolve.
@@ -100,6 +111,9 @@ impl fmt::Display for TransformError {
             Self::InvalidSpec { message } => write!(f, "invalid transform specification: {message}"),
             Self::IncompatibleTable { operation, kind } => {
                 write!(f, "operation `{operation}` is not compatible with {kind:?} tables")
+            }
+            Self::UnsupportedSubcolumnMode { operation, table_kind, mode, reason } => {
+                write!(f, "operation `{operation}` does not support {mode:?} subcolumns on {table_kind:?} tables: {reason}")
             }
             Self::MissingHook { description } => write!(f, "missing hooked constant: {description}"),
             Self::UnknownEquation { equation_id } => write!(f, "unknown simulation equation `{equation_id}`"),

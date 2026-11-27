@@ -504,17 +504,19 @@ fn convert_grouped_to_column(grp: &GroupedTable) -> Result<BuiltArchetype, Trans
             Ok(acc.finish(TableArchetype::Column(out)))
         }
         SubcolumnMode::RawReplicates(n) => convert_grouped_multi_rep_to_column(grp, cols, rows, n),
-        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+        SubcolumnMode::MeanSdN
+        | SubcolumnMode::MeanSemN
+        | SubcolumnMode::MeanCvN
+        | SubcolumnMode::MeanSd
+        | SubcolumnMode::MeanSem
+        | SubcolumnMode::MeanLowHigh
+        | SubcolumnMode::UpperLowerLimits
+        | SubcolumnMode::MedianIqr => {
             let mut acc = ConversionAcc::default();
             let out = copy_grouped_direct_to_column(grp, ColumnDesignHint::PrecomputedError, grp.subcolumn_mode, rows, &mut acc)?;
             warn_grouped_metadata_loss(grp, true, "Column", &mut acc);
             Ok(acc.finish(TableArchetype::Column(out)))
         }
-        SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => build_grouped_truncated_column(
-            grp,
-            rows,
-            format!("Column tables do not support {:?} subcolumns; spread/limit subcolumns 1..3 will be dropped", grp.subcolumn_mode),
-        ),
     }
 }
 
@@ -687,15 +689,12 @@ fn convert_xy_to_column(xy: &XyTable) -> Result<BuiltArchetype, TransformError> 
     let rows = xy_row_count(xy);
     let y_cols = xy.data_sets.len();
 
-    if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
-        return convert_xy_lossy_single_column(xy, rows, y_cols);
-    }
     if let SubcolumnMode::RawReplicates(n) = xy.y_subcolumn_mode
         && n >= 2
     {
         return convert_xy_replicates_to_column(xy, rows, y_cols, n);
     }
-    if xy.y_subcolumn_mode.supports_parametric_moments() {
+    if xy.y_subcolumn_mode.is_pre_summarized() {
         return convert_xy_parametric_to_column(xy, rows, y_cols);
     }
 
@@ -807,7 +806,7 @@ fn convert_xy_parametric_to_column(xy: &XyTable, rows: usize, y_cols: usize) -> 
 fn convert_xy_lossy_single_column(xy: &XyTable, rows: usize, y_cols: usize) -> Result<BuiltArchetype, TransformError> {
     let mut acc = ConversionAcc::default();
     acc.warn_lossy(format!(
-        "Column tables do not support {:?} Y subcolumns; spread/limit subcolumns beyond subcolumn 0 will be dropped",
+        "Expanded column count for {:?} exceeds {MAX_DATA_SETS}; subcolumns beyond subcolumn 0 will be dropped",
         xy.y_subcolumn_mode
     ));
     let mut col = init_xy_to_column_table(xy, 1 + y_cols, rows, &mut acc)?;

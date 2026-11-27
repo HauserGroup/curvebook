@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use curvebook_doc::{DocError, SummaryPointError, TableKind};
+use curvebook_doc::{DocError, SubcolumnMode, SummaryPointError, TableKind};
 use curvebook_math::MathError;
 
 /// Errors returned by statistical computation engines and `ResultSheet` builders.
@@ -35,6 +35,17 @@ pub enum StatsError {
     },
     /// Selected procedure (e.g. rank test, normality battery, ROUT, PCA) requires individual replicate cells rather than pre-summarized moments.
     RequiresRawReplicates,
+    /// Selected procedure does not support the input table's pre-summarized [`SubcolumnMode`] (for example missing `N` or parametric variance).
+    UnsupportedSubcolumnMode {
+        /// Canonical matrix procedure label that refused the summary mode.
+        analysis: &'static str,
+        /// Input table archetype (`Column`, `Xy`, or `Grouped`).
+        table_kind: TableKind,
+        /// Pre-summarized subcolumn layout encountered on the input sheet.
+        mode: SubcolumnMode,
+        /// Neutral explanation of why this mode is refused.
+        reason: &'static str,
+    },
     /// Input `DataSheet` archetype does not support the requested analysis.
     IncompatibleTable {
         /// Name of the requested statistical analysis.
@@ -84,6 +95,9 @@ impl fmt::Display for StatsError {
                 write!(f, "dimension mismatch: expected {expected}, got {actual}")
             }
             Self::RequiresRawReplicates => f.write_str("analysis requires raw replicate observations rather than pre-summarized points"),
+            Self::UnsupportedSubcolumnMode { analysis, table_kind, mode, reason } => {
+                write!(f, "{analysis} does not support {mode:?} subcolumns on {table_kind:?} tables: {reason}")
+            }
             Self::IncompatibleTable { analysis, actual } => {
                 write!(f, "{analysis} is not compatible with {actual:?} tables")
             }

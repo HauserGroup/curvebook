@@ -88,6 +88,18 @@
             <Verb Id="open" Command="Open" TargetFile="CurveBookExe" Argument="&quot;%1&quot;" />
           </Extension>
         </ProgId>
+        <ProgId Id="CurveBook.Pzfx" Description="CurveBook .pzfx file" Icon="CurveBookExe" IconIndex="0">
+          <Extension Id="pzfx" ContentType="application/x-prism-xml">
+            <Verb Id="open" Command="Open" TargetFile="CurveBookExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <ProgId Id="CurveBook.Archive" Description="CurveBook .prism file" Icon="CurveBookExe" IconIndex="0">
+          <Extension Id="prism" ContentType="application/x-prism-project">
+            <Verb Id="open" Command="Open" TargetFile="CurveBookExe" Argument="&quot;%1&quot;" />
+          </Extension>
+        </ProgId>
+        <RegistryValue Root="HKMU" Key="Software\Classes\.pzfx\OpenWithProgids" Name="CurveBook.Pzfx" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.prism\OpenWithProgids" Name="CurveBook.Archive" Value="" Type="string" />
       </Component>
 
       <Component Id="CurveBookCli">

@@ -33,7 +33,7 @@ impl ChangeDataAnalyzedState {
     /// Populate compatible and incompatible `DataSheet` candidates for `result`.
     pub fn open_for_result(&mut self, result: &ResultSheet, doc: &ProjectDocument) {
         self.result_sheet_id = Some(result.id.clone());
-        self.current_source_id = Some(result.analysis.source_sheet_id.clone());
+        self.current_source_id = result.analysis.source_sheet_id.clone();
         self.selected_data_sets = result.analysis.selected_data_sets.clone();
         self.candidates = doc
             .data_sheets

@@ -283,7 +283,7 @@ fn audit_76_duplicate_family_remaps_overlays_cld_hooks_anchors_and_power_info() 
         .document()
         .result_sheets
         .iter()
-        .find(|r| r.analysis.source_sheet_id == SheetId::new("xy-2") && matches!(r.analysis.kind, AnalysisKind::Transform(_)))
+        .find(|r| r.analysis.source_sheet_id.as_ref() == Some(&SheetId::new("xy-2")) && matches!(r.analysis.kind, AnalysisKind::Transform(_)))
         .ok_or("cloned norm")?;
     let last_val = c_norm
         .analyzable_data
@@ -297,7 +297,7 @@ fn audit_76_duplicate_family_remaps_overlays_cld_hooks_anchors_and_power_info() 
         .document()
         .result_sheets
         .iter()
-        .find(|r| r.analysis.source_sheet_id == SheetId::new("xy-2") && matches!(r.analysis.kind, AnalysisKind::PowerAnalysis(_)))
+        .find(|r| r.analysis.source_sheet_id.as_ref() == Some(&SheetId::new("xy-2")) && matches!(r.analysis.kind, AnalysisKind::PowerAnalysis(_)))
         .ok_or("cloned pow")?;
     assert!(matches!(&c_pow.analysis.kind, AnalysisKind::PowerAnalysis(p) if p.info_sheet_id.as_ref().map(SheetId::as_str) == Some(c_info)));
 

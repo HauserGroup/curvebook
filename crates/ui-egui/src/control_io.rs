@@ -1101,6 +1101,7 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.export.resultsCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::ResultSheet))),
         "ui.export.allTablesCsv.open" => Some(|app, p| map_ui_err(dispatch_ui_csv_export_open(app, p, CsvExportOpenMode::AllDataTables))),
         "ui.export.allTablesCsv" => Some(|app, p| map_ui_err(dispatch_ui_export_all_tables_csv_fallback(app, p))),
+        "ui.export.pzfx.open" => Some(|app, p| map_ui_err(dispatch_ui_pzfx_export_open(app, p))),
         "ui.print.open" | "file.print" => Some(|app, p| map_ui_err(dispatch_ui_print_open(app, p))),
         "app.feedback" => Some(dispatch_ui_app_feedback),
         #[cfg(not(target_arch = "wasm32"))]
@@ -2610,6 +2611,12 @@ fn dispatch_ui_edit_params_open(app: &mut UiApp, params: &Value) -> Result<Value
     } else {
         resolve_target_result_sheet_id(&doc, params)?
     };
+    if doc.result_sheet(&rs_id).is_some_and(curvebook_doc::ResultSheet::is_imported) {
+        return Err(format!(
+            "result sheet `{}` is a read-only imported snapshot; re-run it as a CurveBook analysis to edit parameters",
+            rs_id.as_str()
+        ));
+    }
     if !app.canvas_dialogs.open_edit_parameters(&doc, &rs_id) {
         return Err(format!("result sheet `{}` not found", rs_id.as_str()));
     }
@@ -2870,7 +2877,9 @@ fn dispatch_ui_append_cluster_column(app: &mut UiApp, params: &Value) -> Result<
     if !matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })) {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("result sheet `{}` is not a Cluster analysis", rs_id.as_str())).into());
     }
-    let source_id = rs.analysis.source_sheet_id.clone();
+    let Some(source_id) = rs.analysis.source_sheet_id.clone() else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("result sheet `{}` has no source data sheet", rs_id.as_str())).into());
+    };
     let ds = doc.data_sheet(&source_id).ok_or_else(|| format!("source data sheet `{}` not found", source_id.as_str()))?;
     let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
         return Err(EngineError::with_code(
@@ -3121,6 +3130,29 @@ fn dispatch_ui_export_all_tables_csv_fallback(app: &mut UiApp, _params: &Value) 
         return Err(String::from("no data tables available to export"));
     }
     Err(String::from("ui.export.allTablesCsv requires the native desktop host folder picker"))
+}
+
+fn dispatch_ui_pzfx_export_open(app: &mut UiApp, _params: &Value) -> Result<Value, String> {
+    let preflight = curvebook_format::preflight_pzfx_export(app.document());
+    let total_dropped = preflight.total_dropped_count();
+    if total_dropped > 0 {
+        app.canvas_dialogs.active_dialog = ActiveDialog::PzfxExportConfirm { preflight: preflight.clone() };
+        Ok(json!({
+            "dialog": "PzfxExportConfirm",
+            "prompted": true,
+            "total_dropped_count": total_dropped,
+            "preflight": preflight,
+        }))
+    } else {
+        app.canvas_dialogs.active_dialog = ActiveDialog::None;
+        Ok(json!({
+            "dialog": Value::Null,
+            "prompted": false,
+            "ready_to_export": true,
+            "total_dropped_count": 0,
+            "preflight": preflight,
+        }))
+    }
 }
 
 fn dispatch_ui_copy_for_slides(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -3677,6 +3709,7 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ImportProjectMode { .. } => "ImportProjectMode",
         ActiveDialog::CsvExportOptions(_) => "CsvExportOptions",
         ActiveDialog::ExportAllTablesExistingFiles { .. } => "ExportAllTablesExistingFiles",
+        ActiveDialog::PzfxExportConfirm { .. } => "PzfxExportConfirm",
     }
 }
 
@@ -4795,6 +4828,33 @@ mod tests {
         );
         let append2 = dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.appendClusterColumn" }))?;
         assert_eq!(append2.pointer("/result/updated_existing").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn v9_edit_params_and_change_data_refuse_imported_result_sheets() -> Result<(), Box<dyn std::error::Error>> {
+        use curvebook_doc::{AnalysisSpec, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, ResultSheet, SheetId, TableArchetype};
+        use serde_json::json;
+
+        use super::dispatch_ui_edit_params_open;
+        use crate::UiApp;
+
+        let mut doc = ProjectDocument::new("Imported UI Guard")?;
+        doc.add_data_sheet(DataSheet::new("d1", "Data", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2)?))?)?;
+        let imp_spec = AnalysisSpec::new_imported_snapshot("imp-1", Some(SheetId::new("d1")), "Imported ANOVA")?;
+        let imp = ResultSheet::new_imported(imp_spec, "external_archive", "One-way ANOVA", "Snapshot from external archive")?;
+        doc.add_result_sheet(imp)?;
+        doc.active_sheet_id = Some(SheetId::new("imp-1"));
+
+        let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        let snap = app.document().clone();
+        let imp_id = SheetId::new("imp-1");
+        assert!(!app.canvas_dialogs.open_edit_parameters(&snap, &imp_id), "open_edit_parameters must refuse imported sheets");
+        assert!(!app.canvas_dialogs.open_change_data_analyzed(&snap, &imp_id), "open_change_data_analyzed must refuse imported sheets");
+
+        let err = dispatch_ui_edit_params_open(&mut app, &json!({ "result_sheet_id": "imp-1" }))
+            .expect_err("ui.editParams.open must return a read-only error for imported results");
+        assert!(err.contains("read-only imported snapshot"), "unexpected error message: {err}");
         Ok(())
     }
 }

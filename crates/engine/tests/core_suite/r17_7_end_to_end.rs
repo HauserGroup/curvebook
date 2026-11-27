@@ -206,7 +206,7 @@ fn verify_slice1_snapshot_and_v8(session: &mut Session, ch_a_id: &str, a01: Cell
 
     let reopened = open_project_bytes(&save_project_bytes(session.document())?)?;
     validate_project_document(&reopened)?;
-    assert_eq!(reopened.schema_version, 8);
+    assert_eq!(reopened.schema_version, curvebook_doc::CURRENT_SCHEMA_VERSION);
     let r_scr = reopened.data_sheet(&SheetId::new("screen-col")).ok_or("reopened screen-col")?;
     assert_eq!((r_scr.plate_well_origin(g12_s), r_scr.plate_well_origin(a01_s)), (Some("G12"), None));
     assert!(r_scr.cell(g12_s).is_some_and(|c| c.excluded));

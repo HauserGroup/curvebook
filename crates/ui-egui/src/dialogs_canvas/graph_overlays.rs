@@ -359,7 +359,8 @@ fn resolve_primary_source_data_sheet<'a>(doc: &'a ProjectDocument, source_id: &'
         if let Some(analyzable) = rs.analyzable_data.as_ref() {
             return Some(analyzable);
         }
-        cursor = &rs.analysis.source_sheet_id;
+        let next = rs.analysis.source_sheet_id.as_ref()?;
+        cursor = next;
     }
     None
 }

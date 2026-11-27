@@ -391,6 +391,7 @@ pub fn raw_datasheet(id: &str, archetype: TableArchetype) -> DataSheet {
         color_tag: None,
         exclusion_notes: Vec::new(),
         plate_well_origins: Vec::new(),
+        origin: None,
     }
 }
 

@@ -400,16 +400,16 @@ impl CanvasToolState {
                 .result_sheets
                 .iter()
                 .find(|res| {
-                    res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id
+                    res.analysis.source_sheet_id.as_ref() == Some(&graph.spec.primary_source_sheet_id)
                         && res
                             .pairwise_comparisons
                             .iter()
                             .any(|c| (c.group_a == group_a && c.group_b == group_b) || (c.group_a == group_b && c.group_b == group_a))
                 })
                 .or_else(|| {
-                    doc.result_sheets
-                        .iter()
-                        .find(|res| res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id && !res.pairwise_comparisons.is_empty())
+                    doc.result_sheets.iter().find(|res| {
+                        res.analysis.source_sheet_id.as_ref() == Some(&graph.spec.primary_source_sheet_id) && !res.pairwise_comparisons.is_empty()
+                    })
                 })
                 .map(|res| res.id.clone())?;
             let spec = PairwiseBracketSpec {

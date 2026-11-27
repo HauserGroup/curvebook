@@ -57,6 +57,7 @@ fn rv56_recode_levels_updates_variable_explicit_order_and_graph_overrides_with_d
         spec: gspec,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     })
     .unwrap();
 
@@ -78,6 +79,7 @@ fn rv56_recode_levels_updates_variable_explicit_order_and_graph_overrides_with_d
         spec: gspec2,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     })
     .unwrap();
 
@@ -208,6 +210,7 @@ fn rv61_sheet_delete_checks_and_prunes_result_backed_graph_overlays_and_annotati
         spec: gspec,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     })
     .unwrap();
     dag::recalculate_project(&mut doc).unwrap();

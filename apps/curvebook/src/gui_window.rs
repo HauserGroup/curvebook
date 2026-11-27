@@ -155,7 +155,11 @@ fn has_non_null_field(params: &serde_json::Value, key: &str) -> bool {
 
 fn should_bypass_native_file_picker(command_id: &str, params: &serde_json::Value) -> bool {
     match command_id {
-        "project.instantiateTemplate" => has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "path"),
+        "project.merge" => has_non_null_field(params, "bytes_base64"),
+        "project.exportPzfx" => has_non_null_field(params, "path") || has_non_null_field(params, "return_bytes"),
+        "project.instantiateTemplate" => {
+            has_non_null_field(params, "bytes_base64") || (has_non_null_field(params, "path") && !has_non_null_field(params, "new_window"))
+        }
         "graph.insertImage" | "layout.insertImage" => {
             has_non_null_field(params, "path") || has_non_null_field(params, "bytes_base64") || has_non_null_field(params, "asset_id")
         }
@@ -1549,15 +1553,20 @@ impl CurveBookNativeApp {
                 self.status_banner = Some(err);
             } else {
                 let mut export_warnings: Vec<String> = Vec::new();
+                let mut pzfx_summary: Option<String> = None;
                 for out in batch.outcomes() {
-                    if let curvebook_ui_egui::egui_shell::UiIntentOutcome::Engine { command_id, outcome } = out
-                        && curvebook_ui_egui::is_figure_export_command(&command_id)
-                        && !outcome.warnings.is_empty()
-                    {
-                        export_warnings.extend(outcome.warnings);
+                    if let curvebook_ui_egui::egui_shell::UiIntentOutcome::Engine { command_id, outcome } = out {
+                        if command_id == "project.exportPzfx" {
+                            let path_opt = outcome.payload.get("path").and_then(serde_json::Value::as_str).map(std::path::Path::new);
+                            pzfx_summary = Some(curvebook_ui_egui::format_pzfx_export_status_summary(path_opt, &outcome.payload, &outcome.warnings));
+                        } else if curvebook_ui_egui::is_figure_export_command(&command_id) && !outcome.warnings.is_empty() {
+                            export_warnings.extend(outcome.warnings);
+                        }
                     }
                 }
-                if let Some(warn_banner) = curvebook_ui_egui::format_figure_export_warnings_banner(&export_warnings) {
+                if let Some(summary) = pzfx_summary {
+                    self.status_banner = Some(summary);
+                } else if let Some(warn_banner) = curvebook_ui_egui::format_figure_export_warnings_banner(&export_warnings) {
                     self.status_banner = Some(warn_banner);
                 }
             }
@@ -2059,7 +2068,9 @@ impl CurveBookNativeApp {
         if outcome.opened_window_id.is_some() {
             self.on_active_window_switched();
         }
-        if let Some(warnings) = outcome.command_result.as_ref().and_then(|res| res.get("warnings")).and_then(serde_json::Value::as_array) {
+        if let Some(summary) = outcome.command_result.as_ref().and_then(|res| res.get("status_summary")).and_then(serde_json::Value::as_str) {
+            self.status_banner = Some(summary.to_owned());
+        } else if let Some(warnings) = outcome.command_result.as_ref().and_then(|res| res.get("warnings")).and_then(serde_json::Value::as_array) {
             let warning_lines: Vec<String> = warnings.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect();
             if let Some(warn_banner) = curvebook_ui_egui::format_figure_export_warnings_banner(&warning_lines) {
                 self.status_banner = Some(warn_banner);

@@ -396,7 +396,10 @@ fn modal_title_for(kind: TransformModalKind, locale: &str) -> &'static str {
 fn resolve_source_sheet<'a>(app: &'a UiApp, state: &TransformModalsEguiState, from_edit: bool) -> Option<&'a DataSheet> {
     let doc = app.document();
     if from_edit && let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() {
-        return doc.data_sheet(&spec.source_sheet_id).or_else(|| doc.result_sheet(&spec.source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()));
+        return spec
+            .source_sheet_id
+            .as_ref()
+            .and_then(|src| doc.data_sheet(src).or_else(|| doc.result_sheet(src).and_then(|rs| rs.analyzable_data.as_ref())));
     }
     state
         .target_sheet_id

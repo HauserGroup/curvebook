@@ -35,7 +35,7 @@ CurveBook also reads and writes unpacked `.curvebook.d/` directories for clean l
 
 ### `.cbtemplate` reusable templates {#cbtemplate}
 
-Saving a template (`project.saveTemplate`) writes a `.cbtemplate` archive with project-specific raw table observations, exclusion notes, plate well origins, and cached result numbers stripped out. Templates retain:
+Saving a template (`project.saveTemplate`) writes a `.cbtemplate` archive with project-specific raw table observations, exclusion notes, plate well origins, navigator sheet origin badges, cached result numbers, and imported result snapshots stripped out (automatically pruning dangling graph overlays, layout items, and active/anchor selection links that referenced dropped imported results). Templates retain:
 
 - Table archetypes, column headers, subcolumn modes, and `=` Calculated Variable formulas.
 - Info sheet constants used as hook targets.
@@ -59,7 +59,7 @@ A `.curvebook` archive bundles all data tables, exclusion notes, plate well orig
 
 | Format / record | Current version | Migration & compatibility |
 |---|---:|---|
-| Project & template (`document.json`, `manifest.json`) | 8 | Upgrades schemas 0 through 8 automatically; rejects newer versions. |
+| Project & template (`document.json`, `manifest.json`) | 9 | Upgrades schemas 0 through 9 automatically (`v8 -> v9` additive migration for display metadata, result provenance, `MeanSd`/`MeanSem`, Column asymmetric summary modes, and sheet origin badges); clears dangling `active_sheet_id`/`family_anchor_sheet_id` on load with a warning; rejects newer versions (`> 9`). |
 | Plate map layout (`.cbplate`) | 1 | Upgrades legacy `v0` to `v1` in memory; rejects `format_version > 1`. |
 | User preferences (`preferences.json`) | 1 | Preserves unknown extension keys; refuses overwrite if `version > 1`. |
 | Recovery WAL (`ops.journal` / `curvebook.lock`) | 2 / 1 | Validates NDJSON and CRC-32 per line; upgrades `v1` journals to `v2` in memory. |
@@ -91,17 +91,20 @@ Recovery journal details:
 - **Supported imports:**
   - `.curvebook` native project archives, `.curvebook.d/` unpacked directories, and `.cbtemplate` templates.
   - `.csv`, `.tsv`, and delimited text (`table.importCsv`, `table.paste`).
-  - `.pzfx` files (`table.importPzfx`), importing tables, subcolumn modes, row and column titles, `Excluded="1"` masks, and info constants.
-  - `.prism` files (`table.importPrism`), reading tabular CSVs, optional table/info metadata JSON, or embedded XML tables with bounded ZIP validation.
+  - `.pzfx` files (`table.importPzfx`), importing all eight table archetypes (`<Table>`, `<HugeTable>`, `<Table1024>`, and XSLT-wrapped files), replicate, `MeanSd`/`MeanSem`, parametric summary, and Column asymmetric/quartile summary modes, rich text and Symbol-font Unicode mapping, row/column/subcolumn titles, display decimals, `Excluded="1"` masks, floating notes, and top-level or per-table info sheets. Legacy binary `.pzf` files — including `PCFF`-prefixed binary files carrying a `.pzfx` extension (observed in ~15–18% of public `.pzfx`-named files) — are not supported and fail cleanly before XML decoding; re-save them as XML `.pzfx` or `.prism` before opening.
+  - `.prism` files (`table.importPrism`, **import-only at Beta**), reading all eight table archetypes from ID-indexed headerless CSVs (including generated X sequences, replicate/summary/offset modes, subcolumn titles, decimals, exclusions, and rich text), info sheets, preferred analysis results as clearly labelled read-only snapshots (`ResultStatus::Imported` / `ImportedStale` — never `UpToDate`, excluded from scalar hooks and upstream DAG inputs, and listed separately under *"Imported results (not computed by CurveBook)"* in methods reports), and raster preview PNGs for opaque binary graphs/layouts with bounded ZIP/ZIP64 validation.
   - `.xlsx` workbooks (`table.importXlsx`), importing worksheet tables with bounded OOXML parsing.
-- **Import warnings & replace-or-merge behavior:**
-  - Non-fatal warnings from `.pzfx`, `.prism`, and `.xlsx` imports (such as skipped archive parts or unsupported elements) appear in the desktop **Import Warnings** panel. Reopen it from the status bar or **File › Import › Import Warnings…** (also exposed via `ui.inspect`).
+- **Project merging, origin badges & import warnings:**
+  - Non-fatal warnings from `.pzfx`, `.prism`, and `.xlsx` imports (such as skipped archive parts, opaque binary graph/layout entries, or unsupported elements) appear in the desktop **Import Warnings** panel. Reopen it from the status bar or **File › Import › Import Warnings…** (also exposed via `ui.inspect`).
+  - **File › Merge Project…** (`project.merge`), drag-and-drop onto an occupied workspace, CLI batch, and MCP `open_file` append mode copy sheets from another `.curvebook`, `.curvebook.d/`, `.cbtemplate`, `.pzfx`, `.prism`, or `.xlsx` file into the current project as a one-time copy (no live cross-file links). Colliding sheet IDs are automatically remapped across every typed and text-embedded reference, while the open project's file path, active selection, and checkpoints stay untouched. Merged sheets receive a removable navigator origin badge (`sheet.clearOrigin`) storing only the source filename and format (never full directory paths).
   - When opening or importing `.prism`, `.pzfx`, or `.xlsx` files via **File › Open…**, **File › Import**, or drag-and-drop into an occupied or unsaved project, CurveBook prompts before replacing the workspace. Choose **Add to current project** (`merge: true`) or **Open as new project** (`merge: false`).
 - **Supported exports:**
   - `.curvebook`, `.curvebook.d/`, and `.cbtemplate`.
-  - Delimited table export (`table.exportCsv`), **Export All Data Tables…** (`ui.export.allTablesCsv`, writing one file per table named from its sanitized title), single-tab or tidy results CSV (`analysis.exportCsv`), and structured results JSON (`analysis.exportJson`).
+  - **`.pzfx` data-only export:** `.pzfx` export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your `.curvebook` project. Writes are atomic export copies (never replacing the active `.curvebook` path or unsaved-changes state), preceded by a preflight summary in the desktop app and a structured export report listing every dropped item and any feature with insufficient corpus coverage. Written to match the `.pzfx` structure of real files; not tested in other applications — structure-conformant files may still be rejected by other applications for non-structural reasons such as checksums, cross-references, or version gates.
+  - **`.prism` export status:** `.prism` export is not shipped as a supported format at Beta because real `.prism` archives contain undocumented binary and digest entries (`.dt` tokens and `PCFF` binary `.bin` graph/layout/font payloads); use `.pzfx` export for data interchange instead.
+  - Delimited table export (`table.exportCsv`), **Export All Data Tables…** (`ui.export.allTablesCsv`, writing one file per table named from its sanitized title), single-tab or tidy results CSV (`analysis.exportCsv`, appending `provenance` as the final column on tidy exports), and structured results JSON (`analysis.exportJson`, including result `provenance`).
   - Publication figures: **SVG**, **PDF 1.7**, **PNG**, **TIFF**, and ECMA-234 **`.emf`** (see [Graphs & Export Capabilities](graphs.md#export-capabilities)).
-  - **Save Methods Report…** (`result.generateReport`), writing `plain`, `markdown`, or `latex` analytical methods summaries selected by extension (`.txt`, `.md`, `.tex`).
+  - **Save Methods Report…** (`result.generateReport`), writing `plain`, `markdown`, or `latex` analytical methods summaries selected by extension (`.txt`, `.md`, `.tex`), with imported `.prism` snapshots isolated under *"Imported results (not computed by CurveBook)"*.
 
 ### CSV / TSV parsing & formatting rules {#csv-rules}
 

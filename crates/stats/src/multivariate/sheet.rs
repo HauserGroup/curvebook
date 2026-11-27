@@ -20,8 +20,8 @@
 //!   *Biometrika*, 86(4), 948-955.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, ClusterDistance, ClusterLinkage, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind,
-    SubcolumnMode, TableArchetype, VariableRole, XColumnMode,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, ClusterDistance, ClusterLinkage, DataSheet, MultivariateSpec, ResultCell, ResultSheet,
+    ResultTabKind, SubcolumnMode, TableArchetype, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::student_t_two_sided_p;
@@ -38,14 +38,15 @@ use super::mice::mice_predictive_mean_matching;
 use super::pca::pca_analysis;
 use super::types::{KMeansResult, MultipleImputationConfig, MultipleImputationResult, PcaResult};
 use crate::common::{
-    build_tab, checklist_item, ci_cell, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    resolve_selected_indices, sanitize_result_sheet_floats, t_crit_two_sided,
+    build_tab, checklist_item, ci_cell, enforce_summary_mode_matrix, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha,
+    push_scalar, resolve_selected_indices, sanitize_result_sheet_floats, t_crit_two_sided,
 };
 use crate::error::StatsError;
 use crate::regression::multiple_linear_regression;
 
 /// Execute a [`MultivariateSpec`] (`Pca`, `CorrelationMatrix`, or `Clustering`) on a `DataSheet`.
 pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec: &MultivariateSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::Multivariate(mv_spec.clone()))?;
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
 

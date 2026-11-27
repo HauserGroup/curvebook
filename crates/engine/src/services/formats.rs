@@ -10,10 +10,13 @@ use curvebook_doc::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_format::MAX_ARCHIVE_FILE_BYTES;
-#[cfg(not(target_arch = "wasm32"))]
-use curvebook_format::is_unpacked_project_dir;
 use curvebook_format::registry::{Exporter, FormatKind, FormatRegistry, ImportOptions, ImportPayload, Importer};
-use curvebook_format::{ArchiveKind, ImportReport, XlsxImportOptions, import_prism_bytes, import_pzfx_bytes, import_xlsx_bytes, open_archive_bytes};
+use curvebook_format::{
+    ArchiveKind, ImportReport, XlsxImportOptions, binary_pzf_unsupported_error, import_prism_bytes, import_pzfx_bytes, import_xlsx_bytes,
+    is_binary_pzf_bytes, open_archive_bytes_with_warnings,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use curvebook_format::{is_unpacked_project_dir, open_project_unpacked_dir_with_warnings};
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_platform::PlatformError;
 use serde_json::Value;
@@ -103,6 +106,9 @@ pub fn resolve_open_importer<'a>(
     allow_txt_as_csv: bool,
 ) -> Result<&'a dyn Importer, EngineError> {
     if let Some(fmt) = explicit {
+        if fmt.trim().trim_start_matches('.').eq_ignore_ascii_case("pzf") {
+            return Err(EngineError::from(binary_pzf_unsupported_error()));
+        }
         return registry
             .importer_by_format(fmt)
             .ok_or_else(|| EngineError::with_code(ErrorCode::UnsupportedFormat, format!("unsupported open format '{fmt}'")));
@@ -111,6 +117,7 @@ pub fn resolve_open_importer<'a>(
         return Ok(found);
     }
     match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("pzf") => Err(EngineError::from(binary_pzf_unsupported_error())),
         Some("txt") if allow_txt_as_csv => {
             registry.importer_by_format("csv").ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "CSV importer unavailable"))
         }
@@ -228,16 +235,9 @@ pub fn load_project_from_path_with_xlsx_options(
     #[cfg(not(target_arch = "wasm32"))]
     {
         if is_unpacked_project_path(path) {
-            let registry = FormatRegistry::default_registry();
-            let importer = registry
-                .importer_by_format("curvebook.d")
-                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "missing `curvebook.d` importer in FormatRegistry"))?;
-            let payload = importer.import_path(path, &ImportOptions::default())?;
-            let doc = payload
-                .into_document()
-                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "`curvebook.d` importer returned non-document payload"))?;
+            let (doc, warnings) = open_project_unpacked_dir_with_warnings(path)?;
             let total_bytes = dir_size_bytes(path)?;
-            return Ok((LoadedProject { doc, format_tag: "curvebook.d", warnings: Vec::new() }, total_bytes));
+            return Ok((LoadedProject { doc, format_tag: "curvebook.d", warnings }, total_bytes));
         }
         let limit = FormatRegistry::default_registry().importer_for_path(path).map_or(MAX_ARCHIVE_FILE_BYTES, |importer| importer.max_input_bytes());
         let bytes = read_regular_file_for_import(path, limit)?;
@@ -295,6 +295,9 @@ pub fn load_project_from_bytes_with_xlsx_options(
         return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited, xlsx_options);
     }
     let ext = path_hint.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
+    if ext.as_deref() == Some("pzf") {
+        return Err(EngineError::from(binary_pzf_unsupported_error()));
+    }
     if ext.as_deref() == Some("json") {
         return load_project_json(bytes);
     }
@@ -312,26 +315,18 @@ fn import_with_registered_adapter(
 ) -> Result<LoadedProject, EngineError> {
     match kind {
         FormatKind::Template => {
-            let payload = importer.import_bytes(bytes, &ImportOptions::default())?;
-            let doc = payload
-                .into_document()
-                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, format!("importer `{format_tag}` returned non-document payload")))?;
-            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
+            let (kind, doc, warnings) = open_archive_bytes_with_warnings(bytes)?;
+            if kind != ArchiveKind::Template {
+                return Err(EngineError::from(curvebook_format::FormatError::InvalidArchiveKind {
+                    expected: ArchiveKind::Template.as_str(),
+                    found: kind.as_str(),
+                }));
+            }
+            Ok(LoadedProject { doc, format_tag, warnings })
         }
         FormatKind::Archive => {
-            let doc = match importer.import_bytes(bytes, &ImportOptions::default()) {
-                Ok(payload) => payload.into_document().ok_or_else(|| {
-                    EngineError::with_code(ErrorCode::InternalError, format!("importer `{format_tag}` returned non-document payload"))
-                })?,
-                Err(registry_err) => {
-                    if let Ok((_, doc)) = open_archive_bytes(bytes) {
-                        doc
-                    } else {
-                        return Err(EngineError::from(registry_err));
-                    }
-                }
-            };
-            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
+            let (_, doc, warnings) = open_archive_bytes_with_warnings(bytes)?;
+            Ok(LoadedProject { doc, format_tag, warnings })
         }
         FormatKind::ForeignProject => {
             let mut opts = ImportOptions::default();
@@ -363,12 +358,12 @@ fn import_with_registered_adapter(
 }
 
 fn load_native_archive(bytes: &[u8]) -> Result<LoadedProject, EngineError> {
-    let (kind, doc) = open_archive_bytes(bytes)?;
+    let (kind, doc, warnings) = open_archive_bytes_with_warnings(bytes)?;
     let format_tag = match kind {
         ArchiveKind::Project => "curvebook",
         ArchiveKind::Template => "cbtemplate",
     };
-    Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
+    Ok(LoadedProject { doc, format_tag, warnings })
 }
 
 fn load_import_report(report: ImportReport, format_tag: &'static str) -> LoadedProject {
@@ -401,10 +396,11 @@ fn load_project_json(bytes: &[u8]) -> Result<LoadedProject, EngineError> {
             .ok_or_else(|| EngineError::with_code(ErrorCode::CorruptData, format!("invalid project `schema_version`: {v}")))?,
     };
     let migrated_value = curvebook_format::archive::migrate_document_json(raw_value, doc_version)?;
-    let doc: ProjectDocument = serde_json::from_value(migrated_value)
+    let mut doc: ProjectDocument = serde_json::from_value(migrated_value)
         .map_err(|err| EngineError::with_code(ErrorCode::CorruptData, format!("invalid project JSON: {err}")))?;
+    let warnings = doc.clear_dangling_selection_ids();
     validate_loaded_project_document(&doc)?;
-    Ok(LoadedProject { doc, format_tag: "json", warnings: Vec::new() })
+    Ok(LoadedProject { doc, format_tag: "json", warnings })
 }
 
 fn validate_loaded_project_document(doc: &ProjectDocument) -> Result<(), EngineError> {
@@ -451,6 +447,9 @@ fn load_delimited_with_importer(
 }
 
 fn sniff_project_bytes(bytes: &[u8]) -> Result<LoadedProject, EngineError> {
+    if is_binary_pzf_bytes(bytes) {
+        return Err(EngineError::from(binary_pzf_unsupported_error()));
+    }
     if bytes.starts_with(b"PK\x03\x04") {
         if let Ok(loaded) = load_native_archive(bytes) {
             return Ok(loaded);
@@ -460,10 +459,11 @@ fn sniff_project_bytes(bytes: &[u8]) -> Result<LoadedProject, EngineError> {
         }
         return Ok(load_import_report(import_prism_bytes(bytes)?, "prism"));
     }
-    let trimmed = bytes.iter().copied().find(|b| !b.is_ascii_whitespace());
+    let body = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let trimmed = body.iter().copied().find(|b| !b.is_ascii_whitespace());
     match trimmed {
         Some(b'<') => Ok(load_import_report(import_pzfx_bytes(bytes)?, "pzfx")),
-        Some(b'{') => load_project_json(bytes),
+        Some(b'{') => load_project_json(body),
         _ => Err(EngineError::with_code(ErrorCode::UnsupportedFormat, "unrecognized input file format")),
     }
 }
@@ -473,7 +473,7 @@ mod tests {
     use std::path::Path;
 
     use curvebook_doc::ErrorCode;
-    use curvebook_format::FormatRegistry;
+    use curvebook_format::{BINARY_PZF_UNSUPPORTED_MESSAGE, FormatRegistry};
 
     use super::{has_unpacked_dir_suffix, load_project_from_bytes, resolve_open_importer, resolve_project_save_exporter};
 
@@ -497,6 +497,35 @@ mod tests {
 
         assert!(has_unpacked_dir_suffix(Path::new("study.CURVEBOOK.D")));
         assert!(!has_unpacked_dir_suffix(Path::new("study.curvebook")));
+    }
+
+    #[test]
+    fn pzf_extension_and_pcff_bytes_refuse_with_canonical_unsupported_message() {
+        let reg = FormatRegistry::default_registry();
+        assert!(reg.importer_by_format("pzf").is_none());
+        assert!(reg.importer_for_path(Path::new("legacy.pzf")).is_none());
+
+        for (explicit, path) in [
+            (None, Path::new("legacy.pzf")),
+            (None, Path::new("LEGACY.PZF")),
+            (Some("pzf"), Path::new("arbitrary.bin")),
+            (Some(".PZF"), Path::new("arbitrary.bin")),
+        ] {
+            let err = resolve_open_importer(&reg, explicit, path, true).map(|imp| imp.descriptor().id).expect_err("pzf must be refused");
+            assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+            assert!(err.message().contains(BINARY_PZF_UNSUPPORTED_MESSAGE), "unexpected message: {}", err.message());
+        }
+
+        let pcff_non_utf8 = b"PCFF\x00\x01\xFF\xFEbinary-payload";
+        let by_pzfx = load_project_from_bytes(Path::new("misnamed.pzfx"), pcff_non_utf8, false).expect_err("PCFF .pzfx refused");
+        let by_sniff = load_project_from_bytes(Path::new("blob"), pcff_non_utf8, false).expect_err("PCFF sniff refused");
+        let by_pzf_ext = load_project_from_bytes(Path::new("legacy.pzf"), b"\x00\xFFnot-pcff", false).expect_err(".pzf ext refused");
+        for err in [&by_pzfx, &by_sniff, &by_pzf_ext] {
+            assert_eq!(err.code, ErrorCode::UnsupportedFormat);
+            assert!(err.message().contains(BINARY_PZF_UNSUPPORTED_MESSAGE), "unexpected message: {}", err.message());
+        }
+        assert_eq!(by_pzfx.message(), by_sniff.message());
+        assert_eq!(by_pzfx.message(), by_pzf_ext.message());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 106
+Registered commands: 110
 
 ## Project & Files (`project`)
 
@@ -29,6 +29,22 @@ Registered commands: 106
 - **Beginner note:** Deletes a stored checkpoint by ID or name without altering active data sheets.
 - **Parameters:** `id` (string|null), `name` (string|null)
 
+### `project.exportPrism` — Export .prism File (Experimental)
+
+- **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `File/Export/Export .prism File (Experimental)...`
+- **Summary:** Experimental `.prism` archive export (disabled by default; requires `experimental: true`).
+- **Beginner note:** Requires explicit `experimental: true` opt-in because `.prism` is import-only at Beta; use `project.exportPzfx` for standard data interchange. Never changes the active file path or unsaved state.
+- **Parameters:** `experimental` (boolean|null), `path` (string|null), `return_bytes` (boolean|null)
+
+### `project.exportPzfx` — Export .pzfx File
+
+- **Effects:** `WRITES_FILESYSTEM | IDEMPOTENT`
+- **Menu:** `File/Export/Export .pzfx File...`
+- **Summary:** Export data tables and info sheets as a deterministic `.pzfx` XML file.
+- **Beginner note:** Saves data tables and info sheets only (analyses, graphs, and layouts stay in your `.curvebook` project; written to match the `.pzfx` structure of real files and not tested in other applications) without changing the active file path or unsaved state.
+- **Parameters:** `path` (string|null), `return_bytes` (boolean|null)
+
 ### `project.inspect` — Inspect Project
 
 - **Effects:** `IDEMPOTENT`
@@ -52,6 +68,14 @@ Registered commands: 106
 - **Summary:** List named checkpoints stored in the project.
 - **Beginner note:** Lists each checkpoint's ID, name, note, and UTC timestamp without dumping full snapshot payloads.
 - **Parameters:** (none)
+
+### `project.merge` — Merge Project
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `File/Merge Project...`
+- **Summary:** Merge sheets and referenced image assets from another `.curvebook`, `.curvebook.d/`, or `.cbtemplate` project into the active project.
+- **Beginner note:** Brings data tables, info sheets, results, graphs, layouts, and embedded images from another project into this project in one undoable step without changing the open project's file path.
+- **Parameters:** `bytes_base64` (string|null), `merged_at` (string|null), `path` (string|null), `source_label` (string|null), `unpacked` (boolean|null)
 
 ### `project.new` — New Project
 
@@ -140,6 +164,14 @@ Registered commands: 106
 - **Parameters:** (none)
 
 ## Sheets & Pipelines (`sheet`)
+
+### `sheet.clearOrigin` — Clear Origin Badge
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Change/Clear Origin Badge`
+- **Summary:** Clear the merge/import origin badge from one sheet or every sheet from the same source file.
+- **Beginner note:** Removes the navigator provenance badge from a single sheet or from all sheets merged from the same source file without changing titles or data.
+- **Parameters:** `all_from_same_source` (boolean|null), `sheet_id` (string|null), `source_label` (string|null)
 
 ### `sheet.clonePipeline` — Clone Pipeline
 
@@ -303,7 +335,7 @@ Registered commands: 106
 - **Menu:** `File/Import/.prism files`
 - **Summary:** Import .prism files from disk, base64, or raw byte array.
 - **Beginner note:** Open or merge .prism files into the project.
-- **Parameters:** `bytes` (array|null), `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null)
+- **Parameters:** `bytes` (array|null), `bytes_base64` (string|null), `merge` (boolean|null), `merged_at` (string|null), `path` (string|null)
 
 ### `table.importPzfx` — Import .pzfx files
 
@@ -311,7 +343,7 @@ Registered commands: 106
 - **Menu:** `File/Import/.pzfx files`
 - **Summary:** Import .pzfx files from disk, inline XML string, or base64 payload.
 - **Beginner note:** Open or merge .pzfx files into the project.
-- **Parameters:** `bytes_base64` (string|null), `merge` (boolean|null), `path` (string|null), `xml` (string|null)
+- **Parameters:** `bytes_base64` (string|null), `merge` (boolean|null), `merged_at` (string|null), `path` (string|null), `xml` (string|null)
 
 ### `table.importTidyLong` — Import Tidy Long Table
 
@@ -327,7 +359,7 @@ Registered commands: 106
 - **Menu:** `File/Import/XLSX Workbook`
 - **Summary:** Import one or more worksheets (or list available sheets) from an .xlsx workbook file, base64, or byte array.
 - **Beginner note:** Open or merge worksheets from a spreadsheet workbook (.xlsx) into the project.
-- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `cell_range` (string|null), `extract_preamble_info` (boolean|null), `fill_merged_cells` (boolean|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `path` (string|null), `row_match` (any), `sheet_indices` (array|null), `sheets` (array|null), `skip_rows` (integer|null), `split_by_column` (integer|null), `subcolumn_mode` (any), `title` (string|null)
+- **Parameters:** `archetype` (string|null), `bytes` (array|null), `bytes_base64` (string|null), `cell_range` (string|null), `extract_preamble_info` (boolean|null), `fill_merged_cells` (boolean|null), `has_header` (boolean|null), `has_row_titles` (boolean|null), `header_rows` (integer|null), `include_hidden` (boolean|null), `list_sheets` (boolean|null), `merge` (boolean|null), `merged_at` (string|null), `path` (string|null), `row_match` (any), `sheet_indices` (array|null), `sheets` (array|null), `skip_rows` (integer|null), `split_by_column` (integer|null), `subcolumn_mode` (any), `title` (string|null)
 
 ### `table.paste` — Paste Special
 

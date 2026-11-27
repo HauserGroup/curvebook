@@ -1,0 +1,1172 @@
+//! Comprehensive clean-room synthetic tests for full external `.prism` import (§5.1, §5.2, §5.3),
+//! analysis translation & cached-vs-recomputed diagnostics, preview ingestion, and the experimental
+//! `.prism` writer (§6.3).
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
+
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, Cell, CellValue, ChecklistStatus, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet,
+    DescriptiveSpec, GroupedTable, InfoConstant, InfoSheet, LayoutItem, MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument,
+    ResultCell, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetId, SubcolumnMode, SurvivalTable,
+    TableArchetype, TableKind, XColumnMode, XyTable,
+};
+use curvebook_format::{
+    ANALYSIS_MAPPINGS, AnalysisVerificationStatus, ArchiveExportOptions, FormatError, ImportWarningKind, ZipArchive,
+    build_disagreement_checklist_item, compare_recomputed_against_cached_result, export_prism_bytes_experimental, export_prism_bytes_with_options,
+    find_analysis_mapping, import_prism_bytes, translate_analysis_parameters, try_export_result_sheet_tidy_csv,
+};
+use curvebook_palette::Rgba8;
+use serde_json::json;
+
+use super::common::{RawZipEntry, build_raw_zip, build_zip_entries, encode_rgba_png};
+
+fn json_bytes(v: serde_json::Value) -> Vec<u8> {
+    serde_json::to_vec(&v).unwrap()
+}
+
+fn build_zip_owned(entries: Vec<(String, Vec<u8>)>) -> Vec<u8> {
+    let refs: Vec<(&str, &[u8])> = entries.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    build_zip_entries(&refs)
+}
+
+#[test]
+fn external_archive_headerless_csv_row_titles_before_x_series_timespan_xerr_and_trailing_empty() {
+    let doc_json = json_bytes(json!({
+        "$id": "doc-1",
+        "@class": "Document",
+        "formatVersion": "1-6-0",
+        "title": "Empirical Layout Study",
+        "sheets": {
+            "data": ["sh-rt-x", "sh-series", "sh-time", "sh-xerr"],
+            "info": [],
+            "analyses": [],
+            "graphs": [],
+            "layouts": []
+        },
+        "sheetAttributesMap": {
+            "sh-rt-x": { "title": "RowTitles Before X", "highlightColor": "#336699", "isFrozen": true },
+            "sh-series": { "title": "Series X Zero CSV Cols" },
+            "sh-time": { "title": "Elapsed Time XY" },
+            "sh-xerr": { "title": "Horizontal X Error" }
+        },
+        "uiSettings": { "currentSheets": ["sh-series"] }
+    }));
+
+    // 1. Row titles FIRST, then X, then 2 Y columns (with trailing empty Y col omitted on row 1).
+    let sh_rt_x = json_bytes(json!({
+        "uid": "sh-rt-x",
+        "title": "Ignored Fallback",
+        "flags": [],
+        "table": {
+            "uid": "tbl-rt-x",
+            "format": "xy",
+            "dataFormat": "y_single",
+            "rowTitlesDataSet": "ds-rt",
+            "xDataSet": "ds-x1",
+            "xDataSetFormat": "y_single",
+            "dataSets": ["ds-y1", "ds-y2"]
+        }
+    }));
+    // 2. `xDataSetFormat == "series"` occupies 0 columns in `data.csv`!
+    let sh_series = json_bytes(json!({
+        "uid": "sh-series",
+        "title": "Series X Zero CSV Cols",
+        "table": {
+            "uid": "tbl-series",
+            "format": "xy",
+            "dataFormat": "y_single",
+            "xDataSet": "ds-x-series",
+            "xDataSetFormat": "series",
+            "dataSets": ["ds-ys"]
+        }
+    }));
+    // 3. `xDataSetFormat == "timeSpan"` (1 X col + units).
+    let sh_time = json_bytes(json!({
+        "uid": "sh-time",
+        "title": "Elapsed Time XY",
+        "dateTimeConversion": { "units": "Minutes" },
+        "table": {
+            "uid": "tbl-time",
+            "format": "xy",
+            "dataFormat": "y_single",
+            "xDataSet": "ds-x-time",
+            "xDataSetFormat": "timeSpan",
+            "dataSets": ["ds-yt"]
+        }
+    }));
+    // 4. `xDataSetFormat == "y_errorBar"` (2 X cols: [X, X_err]).
+    let sh_xerr = json_bytes(json!({
+        "uid": "sh-xerr",
+        "title": "Horizontal X Error",
+        "table": {
+            "uid": "tbl-xerr",
+            "format": "xy",
+            "dataFormat": "y_single",
+            "xDataSet": "ds-x-err",
+            "xDataSetFormat": "y_errorBar",
+            "dataSets": ["ds-ye"]
+        }
+    }));
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        ("data/sheets/sh-rt-x/sheet.json".into(), sh_rt_x),
+        ("data/sheets/sh-series/sheet.json".into(), sh_series),
+        ("data/sheets/sh-time/sheet.json".into(), sh_time),
+        ("data/sheets/sh-xerr/sheet.json".into(), sh_xerr),
+        ("data/sets/ds-rt.json".into(), json_bytes(json!({"title": "Sample", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/ds-x1.json".into(), json_bytes(json!({"title": "Dose", "replicates": [{"valueType": "real", "decimalsLength": 2}]}))),
+        ("data/sets/ds-y1.json".into(), json_bytes(json!({"title": "Ctrl", "replicates": [{"valueType": "real", "decimalsLength": 3}]}))),
+        ("data/sets/ds-y2.json".into(), json_bytes(json!({"title": "Drug", "replicates": [{"valueType": "real"}]}))),
+        (
+            "data/sets/ds-x-series.json".into(),
+            json_bytes(json!({"title": "Cycle", "format": "series", "replicates": [{"valueType": "real", "startValue": 10.0, "interval": 2.5}]})),
+        ),
+        ("data/sets/ds-ys.json".into(), json_bytes(json!({"title": "Signal", "replicates": [{"valueType": "real"}]}))),
+        (
+            "data/sets/ds-x-time.json".into(),
+            json_bytes(json!({"title": "Time", "dateTimeConversion": {"units": "Hours"}, "replicates": [{"valueType": "timespan"}]})),
+        ),
+        ("data/sets/ds-yt.json".into(), json_bytes(json!({"title": "OD", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-x-err.json".into(), json_bytes(json!({"title": "Conc", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/sets/ds-ye.json".into(), json_bytes(json!({"title": "Resp", "replicates": [{"valueType": "real"}]}))),
+        // Row titles FIRST, then X, then Y1, then Y2 (omitted on row 1 -> padded as Empty).
+        ("data/tables/tbl-rt-x/data.csv".into(), b"Sample A,1.0,10.0,20.0\nSample B,2.0,15.0\n".to_vec()),
+        // Series X has 0 columns in CSV: only the single Y column appears!
+        ("data/tables/tbl-series/data.csv".into(), b"100.0\n150.0\n200.0\n".to_vec()),
+        ("data/tables/tbl-time/data.csv".into(), b"0.5,0.12\n1.5,0.48\n".to_vec()),
+        ("data/tables/tbl-xerr/data.csv".into(), b"5.0,0.2,40.0\n10.0,0.4,80.0\n".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+    assert_eq!(doc.title, "Empirical Layout Study");
+    assert_eq!(doc.data_sheets.len(), 4);
+    assert_eq!(doc.active_sheet_id, Some(SheetId::new("sh-series")));
+
+    // Verify RowTitles-before-X + trailing empty padding + color + frozen + decimals.
+    let s1 = doc.data_sheet(&SheetId::new("sh-rt-x")).unwrap();
+    assert_eq!(s1.title, "RowTitles Before X");
+    assert!(s1.frozen);
+    assert_eq!(s1.color_tag, Some(Rgba8::rgb(0x33, 0x66, 0x99)));
+    let TableArchetype::Xy(xy1) = &s1.archetype else { panic!("expected Xy") };
+    assert_eq!(xy1.row_titles, vec!["Sample A", "Sample B"]);
+    assert!(xy1.row_titles_expanded);
+    assert_eq!(xy1.x_title, "Dose");
+    assert_eq!(xy1.x_display_decimals, Some(2));
+    assert_eq!(xy1.x_value_at(0), Some(1.0));
+    assert_eq!(xy1.x_value_at(1), Some(2.0));
+    assert_eq!(xy1.data_sets[0].display_decimals, Some(3));
+    assert_eq!(xy1.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(10.0));
+    assert_eq!(xy1.data_sets[1].cell(0, 0).unwrap().value, CellValue::Number(20.0));
+    assert_eq!(xy1.data_sets[1].cell(1, 0).unwrap().value, CellValue::Empty);
+
+    // Verify Series X occupies 0 CSV columns and synthesizes GeneratedSequence!
+    let s2 = doc.data_sheet(&SheetId::new("sh-series")).unwrap();
+    let TableArchetype::Xy(xy2) = &s2.archetype else { panic!("expected Xy") };
+    assert_eq!(xy2.x_mode, XColumnMode::GeneratedSequence { start: 10.0, step: 2.5, progression: SequenceProgression::Arithmetic });
+    assert_eq!(xy2.x_value_at(0), Some(10.0));
+    assert_eq!(xy2.x_value_at(1), Some(12.5));
+    assert_eq!(xy2.x_value_at(2), Some(15.0));
+    assert_eq!(xy2.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(100.0));
+    assert_eq!(xy2.data_sets[0].cell(2, 0).unwrap().value, CellValue::Number(200.0));
+
+    // Verify timeSpan X.
+    let s3 = doc.data_sheet(&SheetId::new("sh-time")).unwrap();
+    let TableArchetype::Xy(xy3) = &s3.archetype else { panic!("expected Xy") };
+    assert_eq!(xy3.x_mode, XColumnMode::DateOrElapsedTime { unit_label: String::from("Hours") });
+    assert_eq!(xy3.x_value_at(1), Some(1.5));
+
+    // Verify y_errorBar X.
+    let s4 = doc.data_sheet(&SheetId::new("sh-xerr")).unwrap();
+    let TableArchetype::Xy(xy4) = &s4.archetype else { panic!("expected Xy") };
+    assert_eq!(xy4.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSd });
+    assert_eq!(xy4.x_cells[0][0].value, CellValue::Number(5.0));
+    assert_eq!(xy4.x_cells[0][1].value, CellValue::Number(0.2));
+    assert_eq!(xy4.data_sets[0].cell(1, 0).unwrap().value, CellValue::Number(80.0));
+}
+
+#[test]
+fn external_archive_all_eight_archetypes_view_exclusion_exclusions_rich_text_and_info_links() {
+    let doc_json = json_bytes(json!({
+        "formatVersion": "1-6-1",
+        "title": "Eight Archetypes",
+        "sheets": {
+            "data": ["s-xy", "s-col", "s-grp", "s-surv", "s-cont", "s-mv", "s-nest", "s-pow", "s-view"],
+            "info": ["info-1"],
+            "analyses": [],
+            "graphs": [],
+            "layouts": []
+        },
+        "sheetAttributesMap": {
+            "s-xy": { "title": "XY" },
+            "s-col": { "title": "Column" },
+            "s-grp": { "title": "Grouped" },
+            "s-surv": { "title": "Survival" },
+            "s-cont": { "title": "Contingency" },
+            "s-mv": { "title": "Multivar" },
+            "s-nest": { "title": "Nested" },
+            "s-pow": { "title": "Parts" },
+            "s-view": { "title": "Internal Analysis View" },
+            "info-1": { "title": "Experiment Info", "highlightColor": "#AA5500" }
+        }
+    }));
+
+    let rich_title = json!({
+        "string": "Ca2+ Flux",
+        "version": 1,
+        "formatting": [
+            { "range": "2~3", "attributes": { "baseline": "superscript" } },
+            { "range": "5~8", "attributes": { "fontWeight": "bold" } }
+        ]
+    });
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        // 1. XY
+        (
+            "data/sheets/s-xy/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-xy", "format": "xy", "dataFormat": "y_single", "xDataSet": "dx-xy", "dataSets": ["dy-xy"]}})),
+        ),
+        ("data/sets/dx-xy.json".into(), json_bytes(json!({"title": "X", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/dy-xy.json".into(), json_bytes(json!({"title": rich_title, "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-xy/data.csv".into(), b"1,10\n2,20\n".to_vec()),
+        // 2. Column with EXCLUDED via cellAttributes
+        (
+            "data/sheets/s-col/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-col", "format": "column", "dataFormat": "y_single", "dataSets": ["dy-col"]}})),
+        ),
+        (
+            "data/sets/dy-col.json".into(),
+            json_bytes(json!({
+                "title": "Arm A",
+                "replicates": [{
+                    "valueType": "real",
+                    "cellAttributes": [{ "rows": "1", "attributes": ["EXCLUDED"] }]
+                }]
+            })),
+        ),
+        ("data/tables/t-col/data.csv".into(), b"5.0\n999.0\n6.0\n".to_vec()),
+        // 3. Grouped with `"replicate ranges"` + subcolumn titles
+        (
+            "data/sheets/s-grp/sheet.json".into(),
+            json_bytes(json!({"table": {
+                "uid": "t-grp", "format": "grouped", "dataFormat": "y_replicates", "replicatesCount": 2,
+                "rowTitlesDataSet": "rt-grp", "subcolumnTitlesDataSet": "st-grp", "dataSets": ["dy-grp"]
+            }})),
+        ),
+        ("data/sets/rt-grp.json".into(), json_bytes(json!({"title": "Time", "replicates": [{"valueType": "string"}]}))),
+        (
+            "data/sets/dy-grp.json".into(),
+            json_bytes(json!({
+                "title": "Treated",
+                "replicate ranges": [{
+                    "range": "0~1",
+                    "replicate": { "valueType": "real", "cellAttributes": [{ "rows": "0", "attributes": ["EXCLUDED"] }] }
+                }]
+            })),
+        ),
+        (
+            "data/sets/st-grp.json".into(),
+            json_bytes(
+                json!({"@class": "SubColumnTitlesDataSet", "titles": [{"column": 0, "replicates": [{"replicate": 0, "name": "Rep A"}, {"replicate": 1, "name": "Rep B"}]}]}),
+            ),
+        ),
+        ("data/tables/t-grp/data.csv".into(), b"Day 1,10,12\nDay 2,20,22\n".to_vec()),
+        // 4. Survival with CENSORED cellAttributes
+        (
+            "data/sheets/s-surv/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-surv", "format": "survival", "dataFormat": "y_single", "xDataSet": "dx-surv", "dataSets": ["dy-surv"]}}),
+            ),
+        ),
+        ("data/sets/dx-surv.json".into(), json_bytes(json!({"title": "Days", "replicates": [{"valueType": "real"}]}))),
+        (
+            "data/sets/dy-surv.json".into(),
+            json_bytes(
+                json!({"title": "Cohort A", "replicates": [{"valueType": "int", "cellAttributes": [{"rows": "1", "attributes": ["CENSORED"]}]}]}),
+            ),
+        ),
+        ("data/tables/t-surv/data.csv".into(), b"5,1\n12,\n".to_vec()),
+        // 5. Contingency
+        (
+            "data/sheets/s-cont/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-cont", "format": "contingency", "dataFormat": "y_single", "rowTitlesDataSet": "rt-cont", "dataSets": ["dy-c1", "dy-c2"]}}),
+            ),
+        ),
+        ("data/sets/rt-cont.json".into(), json_bytes(json!({"title": "Outcome", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-c1.json".into(), json_bytes(json!({"title": "Yes", "replicates": [{"valueType": "int"}]}))),
+        ("data/sets/dy-c2.json".into(), json_bytes(json!({"title": "No", "replicates": [{"valueType": "int"}]}))),
+        ("data/tables/t-cont/data.csv".into(), b"Exposed,12,8\nControl,4,16\n".to_vec()),
+        // 6. MultipleVariables
+        (
+            "data/sheets/s-mv/sheet.json".into(),
+            json_bytes(json!({"table": {"uid": "t-mv", "format": "multivariable", "dataFormat": "y_single", "dataSets": ["dy-mv1", "dy-mv2"]}})),
+        ),
+        ("data/sets/dy-mv1.json".into(), json_bytes(json!({"title": "Strain", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-mv2.json".into(), json_bytes(json!({"title": "Mass", "replicates": [{"valueType": "real", "decimalsLength": 1}]}))),
+        ("data/tables/t-mv/data.csv".into(), b"WT,22.4\nKO,19.8\n".to_vec()),
+        // 7. Nested
+        (
+            "data/sheets/s-nest/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-nest", "format": "nested", "dataFormat": "y_replicates", "replicatesCount": 2, "subcolumnTitlesDataSet": "st-nest", "dataSets": ["dy-nest"]}}),
+            ),
+        ),
+        ("data/sets/dy-nest.json".into(), json_bytes(json!({"title": "Group A", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        (
+            "data/sets/st-nest.json".into(),
+            json_bytes(
+                json!({"@class": "SubColumnTitlesDataSet", "titles": [{"column": 0, "replicates": [{"replicate": 0, "name": "Mouse 1"}, {"replicate": 1, "name": "Mouse 2"}]}]}),
+            ),
+        ),
+        ("data/tables/t-nest/data.csv".into(), b"1.1,2.1\n1.3,2.3\n".to_vec()),
+        // 8. PartsOfWhole
+        (
+            "data/sheets/s-pow/sheet.json".into(),
+            json_bytes(
+                json!({"table": {"uid": "t-pow", "format": "parts_of_whole", "dataFormat": "y_single", "rowTitlesDataSet": "rt-pow", "dataSets": ["dy-pow"]}}),
+            ),
+        ),
+        ("data/sets/rt-pow.json".into(), json_bytes(json!({"title": "Slice", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/dy-pow.json".into(), json_bytes(json!({"title": "Share", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-pow/data.csv".into(), b"Alpha,30\nBeta,70\n".to_vec()),
+        // 9. Analysis View — MUST NOT be imported as a DataSheet!
+        (
+            "data/sheets/s-view/sheet.json".into(),
+            json_bytes(
+                json!({"flags": ["ANALYSIS_VIEW"], "table": {"uid": "t-view", "format": "view", "dataFormat": "text", "dataSets": ["dy-view"]}}),
+            ),
+        ),
+        ("data/sets/dy-view.json".into(), json_bytes(json!({"title": "Col", "replicates": [{"valueType": "string"}]}))),
+        ("data/tables/t-view/data.csv".into(), b"P value,0.001\n".to_vec()),
+        // Info sheet with ISO-8601 experimentDate, polymorphic rich-text notes & constants, and linkedDataSheetID
+        (
+            "info/info-1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "info-1",
+                "title": "Experiment Info",
+                "experimentDate": "2026-11-26",
+                "linkedDataSheetID": "s-xy",
+                "notesText": { "string": "Protocol A", "version": 1, "formatting": [{ "range": "0~7", "attributes": { "fontWeight": "bold" } }] },
+                "constants": [
+                    { "name": { "string": "Conc", "version": 1, "formatting": [] }, "value": "25.5" },
+                    { "name": "Reassay Date", "value": "2026-11-27" }
+                ]
+            })),
+        ),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+    // Exactly 8 data sheets: `s-view` was skipped!
+    assert_eq!(doc.data_sheets.len(), 8);
+    assert!(doc.data_sheet(&SheetId::new("s-view")).is_none());
+
+    let kinds: Vec<TableKind> = doc.data_sheets.iter().map(|s| s.archetype.kind()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            TableKind::Xy,
+            TableKind::Column,
+            TableKind::Grouped,
+            TableKind::Survival,
+            TableKind::Contingency,
+            TableKind::MultipleVariables,
+            TableKind::Nested,
+            TableKind::PartsOfWhole,
+        ]
+    );
+
+    // Rich text title on XY dataset
+    let TableArchetype::Xy(xy) = &doc.data_sheet(&SheetId::new("s-xy")).unwrap().archetype else { panic!() };
+    assert_eq!(xy.data_sets[0].title, "Ca<sup>2+</sup> <b>Flux</b>");
+
+    // Excluded mask on Column row 1
+    let TableArchetype::Column(col) = &doc.data_sheet(&SheetId::new("s-col")).unwrap().archetype else { panic!() };
+    assert!(!col.data_sets[0].cell(0, 0).unwrap().excluded);
+    assert!(col.data_sets[0].cell(1, 0).unwrap().excluded);
+    assert_eq!(col.data_sets[0].cell(1, 0).unwrap().value, CellValue::Number(999.0));
+
+    // Grouped replicate ranges + subcolumn titles
+    let TableArchetype::Grouped(grp) = &doc.data_sheet(&SheetId::new("s-grp")).unwrap().archetype else { panic!() };
+    assert_eq!(grp.data_sets[0].subcolumn_titles, vec!["Rep A", "Rep B"]);
+    assert!(grp.data_sets[0].cell(0, 0).unwrap().excluded);
+    assert!(grp.data_sets[0].cell(0, 1).unwrap().excluded);
+    assert!(!grp.data_sets[0].cell(1, 0).unwrap().excluded);
+
+    // Survival censored cell populated with censored_code = 0
+    let TableArchetype::Survival(surv) = &doc.data_sheet(&SheetId::new("s-surv")).unwrap().archetype else { panic!() };
+    assert_eq!(surv.cohorts[0].cell(0, 0).unwrap().value, CellValue::Number(1.0));
+    assert_eq!(surv.cohorts[0].cell(1, 0).unwrap().value, CellValue::Number(0.0));
+
+    // Nested custom subcolumn titles
+    let TableArchetype::Nested(nest) = &doc.data_sheet(&SheetId::new("s-nest")).unwrap().archetype else { panic!() };
+    assert_eq!(nest.groups[0].subcolumn_titles, vec!["Mouse 1", "Mouse 2"]);
+
+    // Info sheet ISO-8601 Date, rich notes, constants, color, and bidirectional link to `s-xy`
+    assert_eq!(doc.info_sheets.len(), 1);
+    let info = &doc.info_sheets[0];
+    assert_eq!(info.color_tag, Some(Rgba8::rgb(0xAA, 0x55, 0x00)));
+    assert_eq!(info.notes_markdown, "<b>Protocol</b> A");
+    assert_eq!(info.linked_data_sheets, vec![SheetId::new("s-xy")]);
+    assert_eq!(doc.data_sheet(&SheetId::new("s-xy")).unwrap().info_sheet_id, Some(info.id.clone()));
+    assert_eq!(info.constants[0].name, "Experiment Date");
+    assert_eq!(info.constants[0].value, ConstantValue::Date(String::from("2026-11-26")));
+    assert_eq!(info.constants[1].value, ConstantValue::Number(25.5));
+    assert_eq!(info.constants[2].value, ConstantValue::Date(String::from("2026-11-27")));
+}
+
+#[test]
+fn external_archive_data_formats_cv_to_sd_high_low_offset_swap_and_unknown_rejection() {
+    let doc_json = json_bytes(json!({
+        "formatVersion": "1-6-0",
+        "sheets": {
+            "data": ["s-hl", "s-pm2", "s-pm3", "s-cvn", "s-sd", "s-se", "s-cv", "s-bad-rep", "s-unknown"]
+        }
+    }));
+
+    let mk_xy_sheet = |uid: &str, t_uid: &str, fmt: &str, ds: &str, reps: Option<usize>| {
+        let mut tbl = json!({
+            "uid": t_uid, "format": "xy", "dataFormat": fmt, "xDataSet": "dx", "dataSets": [ds]
+        });
+        if let Some(r) = reps {
+            tbl["replicatesCount"] = json!(r);
+        }
+        json_bytes(json!({ "uid": uid, "title": uid, "table": tbl }))
+    };
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        ("data/sets/dx.json".into(), json_bytes(json!({"title": "X", "replicates": [{"valueType": "real"}]}))),
+        // y_high_low: `.prism` stores `[Y=10.0, +Err=4.0, -Err=2.0]` -> CurveBook `[Mean=10.0, -Err=2.0, +Err=4.0]`!
+        ("data/sheets/s-hl/sheet.json".into(), mk_xy_sheet("s-hl", "t-hl", "y_high_low", "dy-hl", None)),
+        (
+            "data/sets/dy-hl.json".into(),
+            json_bytes(json!({"title": "Asym", "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "real"}]})),
+        ),
+        ("data/tables/t-hl/data.csv".into(), b"1,10.0,4.0,2.0\n".to_vec()),
+        // y_plus_minus (2 CSV subcols -> duplicate symmetric error)
+        ("data/sheets/s-pm2/sheet.json".into(), mk_xy_sheet("s-pm2", "t-pm2", "y_plus_minus", "dy-pm2", None)),
+        ("data/sets/dy-pm2.json".into(), json_bytes(json!({"title": "Sym", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-pm2/data.csv".into(), b"1,50.0,3.5\n".to_vec()),
+        // y_plus_minus (3 CSV subcols, corpus-observed -> swap `[Y, +Err, -Err]` -> `[Mean, -Err, +Err]`)
+        ("data/sheets/s-pm3/sheet.json".into(), mk_xy_sheet("s-pm3", "t-pm3", "y_plus_minus", "dy-pm3", None)),
+        (
+            "data/sets/dy-pm3.json".into(),
+            json_bytes(json!({"title": "Pm3", "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "real"}]})),
+        ),
+        ("data/tables/t-pm3/data.csv".into(), b"1,20.0,5.0,1.5\n".to_vec()),
+        // y_cv_n -> MeanSdN (lossless SD)
+        ("data/sheets/s-cvn/sheet.json".into(), mk_xy_sheet("s-cvn", "t-cvn", "y_cv_n", "dy-cvn", None)),
+        (
+            "data/sets/dy-cvn.json".into(),
+            json_bytes(json!({"title": "CvN", "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "int"}]})),
+        ),
+        ("data/tables/t-cvn/data.csv".into(), b"1,100.0,8.0,5\n".to_vec()),
+        // y_sd -> MeanSd, y_se -> MeanSem, y_cv -> MeanSd
+        ("data/sheets/s-sd/sheet.json".into(), mk_xy_sheet("s-sd", "t-sd", "y_sd", "dy-sd", None)),
+        ("data/sets/dy-sd.json".into(), json_bytes(json!({"title": "SD", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-sd/data.csv".into(), b"1,12.0,1.1\n".to_vec()),
+        ("data/sheets/s-se/sheet.json".into(), mk_xy_sheet("s-se", "t-se", "y_se", "dy-se", None)),
+        ("data/sets/dy-se.json".into(), json_bytes(json!({"title": "SE", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-se/data.csv".into(), b"1,12.0,0.4\n".to_vec()),
+        ("data/sheets/s-cv/sheet.json".into(), mk_xy_sheet("s-cv", "t-cv", "y_cv", "dy-cv", None)),
+        ("data/sets/dy-cv.json".into(), json_bytes(json!({"title": "CV", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        ("data/tables/t-cv/data.csv".into(), b"1,12.0,0.9\n".to_vec()),
+        // y_replicates with replicatesCount=0 -> skipped with MissingMetadata
+        ("data/sheets/s-bad-rep/sheet.json".into(), mk_xy_sheet("s-bad-rep", "t-bad-rep", "y_replicates", "dy-bad-rep", Some(0))),
+        ("data/sets/dy-bad-rep.json".into(), json_bytes(json!({"title": "BadRep", "replicates": []}))),
+        ("data/tables/t-bad-rep/data.csv".into(), b"1,5.0\n".to_vec()),
+        // Unknown dataFormat -> skipped with UnsupportedTableType (never plain CSV fallback)
+        ("data/sheets/s-unknown/sheet.json".into(), mk_xy_sheet("s-unknown", "t-unknown", "y_exotic_future", "dy-unk", None)),
+        ("data/sets/dy-unk.json".into(), json_bytes(json!({"title": "Unk", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-unknown/data.csv".into(), b"1,99.0\n".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+    assert_eq!(doc.data_sheets.len(), 7);
+    assert!(doc.data_sheet(&SheetId::new("s-bad-rep")).is_none());
+    assert!(doc.data_sheet(&SheetId::new("s-unknown")).is_none());
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::MissingMetadata && w.source == "s-bad-rep"));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedTableType && w.source == "s-unknown"));
+
+    // Verify y_high_low swap: `[10.0, +Err=4.0, -Err=2.0]` -> `[10.0, -Err=2.0, +Err=4.0]`
+    let TableArchetype::Xy(hl) = &doc.data_sheet(&SheetId::new("s-hl")).unwrap().archetype else { panic!() };
+    assert_eq!(hl.y_subcolumn_mode, SubcolumnMode::MeanLowHigh);
+    assert_eq!(hl.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(10.0));
+    assert_eq!(hl.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(2.0));
+    assert_eq!(hl.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(4.0));
+
+    // Verify y_plus_minus 2-col duplication
+    let TableArchetype::Xy(pm2) = &doc.data_sheet(&SheetId::new("s-pm2")).unwrap().archetype else { panic!() };
+    assert_eq!(pm2.y_subcolumn_mode, SubcolumnMode::MeanLowHigh);
+    assert_eq!(pm2.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(3.5));
+    assert_eq!(pm2.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(3.5));
+
+    // Verify y_plus_minus 3-col swap
+    let TableArchetype::Xy(pm3) = &doc.data_sheet(&SheetId::new("s-pm3")).unwrap().archetype else { panic!() };
+    assert_eq!(pm3.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(1.5));
+    assert_eq!(pm3.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(5.0));
+
+    // Verify y_cv_n -> MeanSdN, y_sd -> MeanSd, y_se -> MeanSem, y_cv -> MeanSd
+    let TableArchetype::Xy(cvn) = &doc.data_sheet(&SheetId::new("s-cvn")).unwrap().archetype else { panic!() };
+    assert_eq!(cvn.y_subcolumn_mode, SubcolumnMode::MeanSdN);
+    assert_eq!(cvn.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(8.0));
+
+    let TableArchetype::Xy(sd) = &doc.data_sheet(&SheetId::new("s-sd")).unwrap().archetype else { panic!() };
+    assert_eq!(sd.y_subcolumn_mode, SubcolumnMode::MeanSd);
+    let TableArchetype::Xy(se) = &doc.data_sheet(&SheetId::new("s-se")).unwrap().archetype else { panic!() };
+    assert_eq!(se.y_subcolumn_mode, SubcolumnMode::MeanSem);
+    let TableArchetype::Xy(cv) = &doc.data_sheet(&SheetId::new("s-cv")).unwrap().archetype else { panic!() };
+    assert_eq!(cv.y_subcolumn_mode, SubcolumnMode::MeanSd);
+}
+
+#[test]
+fn external_archive_whole_segment_id_matching_prevents_prefix_collision_and_skips_ambiguous() {
+    let doc_json = json_bytes(json!({
+        "sheets": { "data": ["id1", "id10", "id-ambig", "id-missing-ds"] }
+    }));
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        // Prefix pair: `id1` vs `id10`, `ds1` vs `ds10`
+        (
+            "data/sheets/id1/sheet.json".into(),
+            json_bytes(json!({"title": "One", "table": {"uid": "t1", "format": "column", "dataFormat": "y_single", "dataSets": ["ds1"]}})),
+        ),
+        (
+            "data/sheets/id10/sheet.json".into(),
+            json_bytes(json!({"title": "Ten", "table": {"uid": "t10", "format": "column", "dataFormat": "y_single", "dataSets": ["ds10"]}})),
+        ),
+        ("data/sets/ds1.json".into(), json_bytes(json!({"title": "Col1", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds10.json".into(), json_bytes(json!({"title": "Col10", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t1/data.csv".into(), b"11\n".to_vec()),
+        ("data/tables/t10/data.csv".into(), b"1010\n".to_vec()),
+        // Ambiguous sheet UID: two `sheet.json` files both have segment `id-ambig`
+        (
+            "a/data/sheets/id-ambig/sheet.json".into(),
+            json_bytes(json!({"title": "DupA", "table": {"uid": "ta", "format": "column", "dataFormat": "y_single", "dataSets": ["ds1"]}})),
+        ),
+        (
+            "b/data/sheets/id-ambig/sheet.json".into(),
+            json_bytes(json!({"title": "DupB", "table": {"uid": "tb", "format": "column", "dataFormat": "y_single", "dataSets": ["ds1"]}})),
+        ),
+        // Missing dataset UID
+        (
+            "data/sheets/id-missing-ds/sheet.json".into(),
+            json_bytes(
+                json!({"title": "Broken", "table": {"uid": "t-miss", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-does-not-exist"]}}),
+            ),
+        ),
+        ("data/tables/t-miss/data.csv".into(), b"42\n".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    assert_eq!(report.document.data_sheets.len(), 2);
+    let TableArchetype::Column(c1) = &report.document.data_sheet(&SheetId::new("id1")).unwrap().archetype else { panic!() };
+    let TableArchetype::Column(c10) = &report.document.data_sheet(&SheetId::new("id10")).unwrap().archetype else { panic!() };
+    assert_eq!(c1.data_sets[0].title, "Col1");
+    assert_eq!(c1.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(11.0));
+    assert_eq!(c10.data_sets[0].title, "Col10");
+    assert_eq!(c10.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(1010.0));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::MissingMetadata && w.source == "id-ambig"));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::MissingMetadata && w.source == "ds-does-not-exist"));
+}
+
+#[test]
+fn external_archive_analysis_mappings_translation_and_disagreement_diagnostics() {
+    // 1. Verify all 11 corpus-observed mapping rows exist, have citations, and default to Unverified.
+    assert_eq!(ANALYSIS_MAPPINGS.len(), 11);
+    for row in ANALYSIS_MAPPINGS {
+        assert_eq!(row.verification, AnalysisVerificationStatus::Unverified, "{}", row.foreign_class);
+        assert!(!row.justification.trim().is_empty(), "{}", row.foreign_class);
+        assert!(find_analysis_mapping(row.foreign_class).is_some());
+    }
+
+    // 2. Verify parameter translation across corpus spellings (`TRNSFORM`, `shaproWilks`, nonlinear equations).
+    let tr_xform = translate_analysis_parameters(
+        "TRNSFORM",
+        &json!({"content": {"calc": {"transformType": "STANDARD", "standardFunction": {"xTransform": {"enabled": true, "function": "LOG10"}, "yTransform": {"enabled": false}}}}}),
+    )
+    .unwrap();
+    assert!(tr_xform.blocking_options.is_empty());
+    assert!(matches!(tr_xform.kind, AnalysisKind::Transform(_)));
+
+    let tr_norm =
+        translate_analysis_parameters("NORMALITY_TESTS", &json!({"content": {"calc": {"tests": {"shaproWilks": true, "andersonDarling": false}}}}))
+            .unwrap();
+    assert!(tr_norm.blocking_options.is_empty());
+    assert!(matches!(tr_norm.kind, AnalysisKind::DescriptiveStats(DescriptiveSpec { run_normality_battery: true, .. })));
+
+    let tr_nl_unmapped =
+        translate_analysis_parameters("NONLINEAR_REGRESSION", &json!({"content": {"model": {"equation": {"name": "Custom Proprietary Model"}}}}))
+            .unwrap();
+    assert!(!tr_nl_unmapped.blocking_options.is_empty());
+
+    // 3. Verify cached-vs-recomputed comparison & caution checklist item (never mutates CurveBook result).
+    let spec = AnalysisSpec::new("res-live", "d-src", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).unwrap();
+    let mut live_rs = ResultSheet::new(spec).unwrap();
+    live_rs.scalars.push(ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 12.25, units: None });
+    let diag_ok = compare_recomputed_against_cached_result(
+        &live_rs,
+        &[ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 12.25, units: None }],
+        1e-9,
+        1e-6,
+    );
+    assert_eq!(diag_ok.compared_count, 1);
+    assert!(diag_ok.disagreements.is_empty());
+    assert!(build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag_ok).is_none());
+
+    let diag_bad = compare_recomputed_against_cached_result(
+        &live_rs,
+        &[ResultScalarEntry { key: String::from("tStatistic"), data_set_index: None, value: 10.0, units: None }],
+        1e-9,
+        1e-6,
+    );
+    assert_eq!(diag_bad.disagreements.len(), 1);
+    let item = build_disagreement_checklist_item("T_TESTS_AND_NONPARAMETRIC", &diag_bad).unwrap();
+    assert_eq!(item.status, ChecklistStatus::Warn);
+    assert!(item.diagnostic_metric.as_deref().unwrap().contains("tStatistic"));
+}
+
+#[test]
+fn external_archive_analyses_3hop_preferred_result_snapshot() {
+    let zip = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Analysis Project",
+                "sheets": { "data": ["d-src"], "analyses": ["an-1"] },
+                "sheetAttributesMap": {
+                    "d-src": { "title": "Groups" },
+                    "an-1": { "title": "Unpaired t test of Groups", "highlightColor": "#228844" }
+                }
+            })),
+        ),
+        (
+            "data/sheets/d-src/sheet.json".into(),
+            json_bytes(
+                json!({"title": "Groups", "table": {"uid": "t-src", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-a", "ds-b"]}}),
+            ),
+        ),
+        ("data/sets/ds-a.json".into(), json_bytes(json!({"title": "Ctrl", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-b.json".into(), json_bytes(json!({"title": "Treated", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-src/data.csv".into(), b"10,20\n12,22\n11,21\n".to_vec()),
+        // Hop 1: `analyses/an-1/sheet.json`
+        (
+            "analyses/an-1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-1",
+                "title": "Unpaired t test of Groups",
+                "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+                "preferredResultSheet": "rs-main",
+                "inputSheets": [{ "uid": "d-src", "title": "Groups" }],
+                "resultSheets": [{ "uid": "rs-main", "title": "Tabular results" }]
+            })),
+        ),
+        (
+            "analyses/an-1/parameters.json".into(),
+            json_bytes(json!({"content": {"experimentalDesign": "UNPAIRED_T_TEST", "options": {"pValueTailType": "P_VALUE_TWO_TAILED"}}})),
+        ),
+        (
+            "analyses/an-1/results.json".into(),
+            json_bytes(json!({"content": {"status": {"error": "", "warning": []}, "tStatistic": 12.2474, "pValue": 0.00025}})),
+        ),
+        // Hop 2: `analyses/an-1/result_sheets/rs-main.json` -> `dataSheet: "view-1"`
+        ("analyses/an-1/result_sheets/rs-main.json".into(), json_bytes(json!({"uid": "rs-main", "name": "Tabular results", "dataSheet": "view-1"}))),
+        // Hop 3: `data/sheets/view-1/sheet.json` -> `table.uid: "t-view-1"` -> `data/tables/t-view-1/data.csv`
+        (
+            "data/sheets/view-1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "view-1",
+                "flags": ["ANALYSIS_VIEW"],
+                "table": {"uid": "t-view-1", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-vrt", "dataSets": ["ds-vcol"]}
+            })),
+        ),
+        ("data/sets/ds-vrt.json".into(), json_bytes(json!({"title": "Metric", "replicates": [{"valueType": "string"}]}))),
+        ("data/sets/ds-vcol.json".into(), json_bytes(json!({"title": "Value", "replicates": [{"valueType": "string"}]}))),
+        ("data/tables/t-view-1/data.csv".into(), b"P value,0.00025\nt statistic,12.2474\n".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    assert_eq!(report.document.data_sheets.len(), 1);
+    assert_eq!(report.document.result_sheets.len(), 1);
+    let rs = &report.document.result_sheets[0];
+    assert_eq!(rs.status, ResultStatus::Imported);
+    let expected_fmt = ".prism".trim_start_matches('.');
+    assert!(matches!(rs.provenance, ResultProvenance::Imported { ref source_format, .. } if source_format == expected_fmt));
+    let tidy = try_export_result_sheet_tidy_csv(rs, &curvebook_format::CsvOptions::csv()).unwrap();
+    assert!(tidy.contains(&format!("imported:{expected_fmt}")), "tidy CSV should emit canonical imported:<format> without leading dot");
+    assert!(matches!(rs.analysis.kind, AnalysisKind::ImportedSnapshot(_)));
+    assert!(rs.analyzable_data.is_none());
+    assert_eq!(rs.analysis.source_sheet_id, Some(SheetId::new("d-src")));
+    assert_eq!(rs.color_tag, Some(Rgba8::rgb(0x22, 0x88, 0x44)));
+    assert_eq!(rs.tabs.len(), 1);
+    assert_eq!(rs.tabs[0].title, "Tabular results");
+    assert_eq!(rs.tabs[0].row_labels, vec!["P value", "t statistic"]);
+    assert_eq!(rs.tabs[0].rows[0][0], ResultCell::Number { value: 0.00025, prefix: None, units: None });
+    assert!(rs.scalars.iter().any(|s| s.key == "tStatistic" && (s.value - 12.2474).abs() < 1e-9));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedAnalysis && w.source == "analyses/an-1"));
+}
+
+#[test]
+fn external_archive_graphs_layouts_preview_png_media_and_unread_opaque_chunks() {
+    let png_graph = encode_rgba_png(4, 3);
+    let png_layout = encode_rgba_png(6, 5);
+    let png_media = encode_rgba_png(2, 2);
+
+    let zip = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Visual Previews",
+                "sheets": { "data": [], "graphs": ["g1", "g2"], "layouts": ["l1"] },
+                "sheetAttributesMap": {
+                    "g1": { "title": "Dose Plot" },
+                    "g2": { "title": "Corrupt Preview Plot" },
+                    "l1": { "title": "Figure 1", "highlightColor": "#112233" }
+                }
+            })),
+        ),
+        (
+            "graphs/g1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "g1",
+                "title": "Dose Plot",
+                "mediaCollection": [{ "representations": [{ "type": "bitmap", "format": "png", "uid": "m-extra" }] }]
+            })),
+        ),
+        ("graphs/g1/preview.png".into(), png_graph),
+        ("graphs/g1/data.bin".into(), b"PCFFGRA4opaque".to_vec()),
+        ("graphs/g2/sheet.json".into(), json_bytes(json!({"uid": "g2", "title": "Corrupt Preview Plot"}))),
+        ("graphs/g2/preview.png".into(), b"not-a-valid-png".to_vec()),
+        ("graphs/g2/data.bin".into(), b"PCFFGRA4opaque".to_vec()),
+        ("layouts/l1/sheet.json".into(), json_bytes(json!({"uid": "l1", "title": "Figure 1"}))),
+        ("layouts/l1/preview.png".into(), png_layout),
+        ("layouts/l1/data.bin".into(), b"PCFFGRA4layout".to_vec()),
+        ("media/m-extra.png".into(), png_media),
+        // Unread opaque chunks that must NOT fail import and must be reported via ZipIndex without decompressing
+        ("data/tables/t1/data.dt".into(), b"0123456789abcdef0123456789abcdef".to_vec()),
+        ("misc/used_fonts.bin".into(), b"PCFF \0\0\0fonts".to_vec()),
+        ("cache/data.cache".into(), b"cached-bytes".to_vec()),
+    ]);
+
+    let report = import_prism_bytes(&zip).unwrap();
+    let doc = &report.document;
+    // 3 distinct valid PNGs ingested (graph preview, extra media, layout preview); corrupt g2 skipped non-fatally.
+    assert_eq!(doc.image_assets.len(), 3);
+    assert_eq!(doc.layout_sheets.len(), 1);
+    let ls = &doc.layout_sheets[0];
+    assert_eq!(ls.title, "Figure 1");
+    assert_eq!(ls.color_tag, Some(Rgba8::rgb(0x11, 0x22, 0x33)));
+    assert!(matches!(ls.spec.items.first(), Some(LayoutItem::EmbeddedImage { .. })));
+
+    let graph_layout_warns = report.warnings.iter().filter(|w| w.kind == ImportWarningKind::UnsupportedGraphOrLayout).count();
+    assert_eq!(graph_layout_warns, 3);
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedChunk && w.source == "graphs/g2/preview.png"));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedChunk && w.source == "archive/cache"));
+    assert!(report.warnings.iter().any(|w| w.kind == ImportWarningKind::UnsupportedChunk && w.source == "archive/opaque/auxiliary"));
+}
+
+#[test]
+fn experimental_archive_writer_fail_closed_deterministic_and_round_trips_all_archetypes() {
+    let mut doc = ProjectDocument::new("Experimental Round Trip").unwrap();
+
+    // 1. XY with GeneratedSequence::Arithmetic + MeanLowHigh (asymmetric offsets!) + exclusions + decimals + subcolumn titles
+    let mut xy = XyTable::new_with_x_mode(
+        XColumnMode::GeneratedSequence { start: 0.0, step: 5.0, progression: SequenceProgression::Arithmetic },
+        SubcolumnMode::MeanLowHigh,
+        1,
+        2,
+    )
+    .unwrap();
+    xy.x_title = String::from("Time");
+    xy.row_titles = vec![String::from("R0"), String::from("R1")];
+    xy.data_sets[0].title = String::from("Curve A");
+    xy.data_sets[0].display_decimals = Some(2);
+    xy.data_sets[0].subcolumn_titles = vec![String::from("Mean"), String::from("-Err"), String::from("+Err")];
+    // CurveBook MeanLowHigh order: [0: Mean, 1: -Err, 2: +Err]
+    xy.data_sets[0].cells[0] = vec![Cell::number(10.0), Cell::number(1.5), Cell::number(3.5)];
+    xy.data_sets[0].cells[1] = vec![Cell { value: CellValue::Number(20.0), excluded: true }, Cell::number(2.0), Cell::number(4.0)];
+    let mut xy_sheet = DataSheet::new("xy-1", "Series Asymmetric", TableArchetype::Xy(xy)).unwrap();
+    xy_sheet.frozen = true;
+    xy_sheet.color_tag = Some(Rgba8::rgb(0x12, 0x34, 0x56));
+    doc.add_data_sheet(xy_sheet).unwrap();
+
+    // 2. Column MeanSdN + Grouped + Survival + Contingency + PartsOfWhole + MultipleVariables + Nested
+    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 1, 1).unwrap();
+    col.data_sets[0].cells[0] = vec![Cell::number(12.5), Cell::number(1.2), Cell::number(4.0)];
+    doc.add_data_sheet(DataSheet::new("col-1", "Summary Col", TableArchetype::Column(col)).unwrap()).unwrap();
+
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 1).unwrap();
+    grp.row_titles = vec![String::from("Dose 1")];
+    grp.data_sets[0].cells[0] = vec![Cell::number(5.0), Cell::number(6.0)];
+    doc.add_data_sheet(DataSheet::new("grp-1", "Two-Way", TableArchetype::Grouped(grp)).unwrap()).unwrap();
+
+    let mut surv = SurvivalTable::new(1, 2).unwrap();
+    surv.times = vec![Cell::number(3.0), Cell::number(9.0)];
+    surv.cohorts[0].cells[0] = vec![Cell::number(1.0)];
+    surv.cohorts[0].cells[1] = vec![Cell::number(0.0)];
+    doc.add_data_sheet(DataSheet::new("surv-1", "KM", TableArchetype::Survival(surv)).unwrap()).unwrap();
+
+    let mut cont = ContingencyTable::new(2, 1).unwrap();
+    cont.row_titles = vec![String::from("Row1")];
+    cont.data_sets[0].cells[0] = vec![Cell::number(7.0)];
+    cont.data_sets[1].cells[0] = vec![Cell::number(3.0)];
+    doc.add_data_sheet(DataSheet::new("cont-1", "Counts", TableArchetype::Contingency(cont)).unwrap()).unwrap();
+
+    let mut pow = PartsOfWholeTable::new(1, 2).unwrap();
+    pow.slice_labels = vec![String::from("A"), String::from("B")];
+    pow.data_sets[0].cells[0] = vec![Cell::number(40.0)];
+    pow.data_sets[0].cells[1] = vec![Cell::number(60.0)];
+    doc.add_data_sheet(DataSheet::new("pow-1", "Slices", TableArchetype::PartsOfWhole(pow)).unwrap()).unwrap();
+
+    let mut mv = MultipleVariablesTable::new(2, 1).unwrap();
+    mv.variables[0].title = String::from("Group");
+    mv.variables[0].cells[0] = Cell::text("WT");
+    mv.variables[0].refresh_inferred_role();
+    mv.variables[1].title = String::from("Score");
+    mv.variables[1].cells[0] = Cell::number(88.5);
+    doc.add_data_sheet(DataSheet::new("mv-1", "Tidy", TableArchetype::MultipleVariables(mv)).unwrap()).unwrap();
+
+    let mut nest = NestedTable::new(1, 2, 1).unwrap();
+    nest.groups[0].title = String::from("Arm 1");
+    nest.groups[0].subcolumn_titles = vec![String::from("Bio 1"), String::from("Bio 2")];
+    nest.groups[0].cells[0] = vec![Cell::number(3.1), Cell::number(3.9)];
+    doc.add_data_sheet(DataSheet::new("nest-1", "Hier", TableArchetype::Nested(nest)).unwrap()).unwrap();
+
+    let mut info = InfoSheet::new_preseeded("info-1", "Lab Notes").unwrap();
+    info.constants.clear();
+    info.constants.push(InfoConstant::new("Experiment Date", ConstantValue::Date(String::from("2026-11-26")), None).unwrap());
+    info.constants.push(InfoConstant::new("Batch", ConstantValue::Number(7.0), None).unwrap());
+    info.notes_markdown = String::from("Clean-room experiment");
+    info.linked_data_sheets.push(SheetId::new("xy-1"));
+    doc.add_info_sheet(info).unwrap();
+    doc.select_in_navigator(&SheetId::new("col-1")).unwrap();
+
+    // 1. Fail-closed default!
+    assert!(!ArchiveExportOptions::default().experimental);
+    assert!(matches!(export_prism_bytes_with_options(&doc, ArchiveExportOptions::default()), Err(FormatError::UnsupportedFormat { .. })));
+
+    // 2. Experimental opt-in is deterministic and emits explicit experimental warning.
+    let exp1 = export_prism_bytes_with_options(&doc, ArchiveExportOptions { experimental: true }).unwrap();
+    let exp2 = export_prism_bytes_experimental(&doc).unwrap();
+    assert_eq!(exp1.bytes, exp2.bytes, "experimental `.prism` output must be byte-deterministic");
+    assert!(exp1.warnings.iter().any(|w| w.message.contains("experimental")));
+
+    // Verify wire CSV for `xy-1` has `[rowTitle, Y, +Err, -Err]` (0 X cols for `series` AND swapped offsets!).
+    let archive = ZipArchive::from_bytes(&exp1.bytes).unwrap();
+    let doc_text = archive.get_utf8("document.json").unwrap().unwrap();
+    assert!(!doc_text.contains("createdBy"), "must omit vendor/user/timestamp fields on §6.3 exclusion list");
+    let xy_csv = archive.get_utf8("data/tables/tbl-1/data.csv").unwrap().unwrap();
+    assert_eq!(xy_csv.lines().next().unwrap(), "R0,10,3.5,1.5");
+
+    // 3. Re-import through CurveBook's `.prism` importer and assert exact round-trip fidelity!
+    let re = import_prism_bytes(&exp1.bytes).unwrap();
+    assert_eq!(re.document.title, "Experimental Round Trip");
+    assert_eq!(re.document.data_sheets.len(), 8);
+    assert_eq!(re.document.info_sheets.len(), 1);
+    assert_eq!(re.document.active_sheet_id, Some(SheetId::new("data-2")));
+
+    let re_xy_sheet = &re.document.data_sheets[0];
+    assert!(re_xy_sheet.frozen);
+    assert_eq!(re_xy_sheet.color_tag, Some(Rgba8::rgb(0x12, 0x34, 0x56)));
+    let TableArchetype::Xy(re_xy) = &re_xy_sheet.archetype else { panic!() };
+    assert_eq!(re_xy.x_mode, XColumnMode::GeneratedSequence { start: 0.0, step: 5.0, progression: SequenceProgression::Arithmetic });
+    assert_eq!(re_xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh);
+    assert_eq!(re_xy.data_sets[0].display_decimals, Some(2));
+    assert_eq!(re_xy.data_sets[0].subcolumn_titles, vec!["Mean", "-Err", "+Err"]);
+    assert_eq!(re_xy.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(10.0));
+    assert_eq!(re_xy.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(1.5));
+    assert_eq!(re_xy.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(3.5));
+    assert!(re_xy.data_sets[0].cell(1, 0).unwrap().excluded);
+    assert_eq!(re.document.info_sheets[0].constants[0].value, ConstantValue::Date(String::from("2026-11-26")));
+}
+
+#[test]
+fn external_interop_zip_normalization_and_post_normalization_collision_rejected() {
+    // Benign `./` and `\` paths normalize cleanly in `.prism` import.
+    let norm_zip = build_raw_zip(
+        &[
+            RawZipEntry::stored(b"./document.json", br#"{"title":"Win Paths","sheets":{"data":["s1"]}}"#),
+            RawZipEntry::stored(
+                b"data\\sheets\\s1\\sheet.json",
+                br#"{"title":"T","table":{"uid":"t1","format":"column","dataFormat":"y_single","dataSets":["d1"]}}"#,
+            ),
+            RawZipEntry::stored(b"data\\sets\\d1.json", br#"{"title":"A","replicates":[{"valueType":"real"}]}"#),
+            RawZipEntry::stored(b".\\data\\tables\\t1\\data.csv", b"42\n"),
+        ],
+        b"",
+    );
+    let rep = import_prism_bytes(&norm_zip).unwrap();
+    assert_eq!(rep.document.title, "Win Paths");
+    assert_eq!(rep.document.data_sheets.len(), 1);
+
+    // Post-normalization collision (`data\a.csv` vs `data/a.csv`) MUST fail with `DuplicateEntry`.
+    let collide_zip = build_raw_zip(&[RawZipEntry::stored(b"data\\a.csv", b"X\n1\n"), RawZipEntry::stored(b"data/a.csv", b"X\n2\n")], b"");
+    assert!(matches!(import_prism_bytes(&collide_zip), Err(FormatError::DuplicateEntry { .. })));
+}
+
+#[test]
+fn external_archive_rejects_pre_allocation_cell_budget_blowup_without_oom() {
+    // 60,000 empty lines (~60 KiB) x 200 repeated datasets x 3 subcolumns = 36,000,000 cells,
+    // which exceeds MAX_SHEET_CELLS / MAX_PROJECT_CELLS and must be rejected BEFORE dense allocation.
+    let repeated_ds: Vec<&str> = vec!["ds-y"; 200];
+    let doc_json = json_bytes(json!({
+        "title": "Budget Guard",
+        "sheets": { "data": ["s-huge"] }
+    }));
+    let sheet_json = json_bytes(json!({
+        "uid": "s-huge",
+        "title": "Huge",
+        "table": {
+            "uid": "t-huge",
+            "format": "grouped",
+            "dataFormat": "y_replicates",
+            "replicatesCount": 3,
+            "dataSets": repeated_ds
+        }
+    }));
+    let ds_json = json_bytes(json!({
+        "title": "Col",
+        "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "real"}]
+    }));
+    let csv = "\n".repeat(60_000).into_bytes();
+
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), doc_json),
+        ("data/sheets/s-huge/sheet.json".into(), sheet_json),
+        ("data/sets/ds-y.json".into(), ds_json),
+        ("data/tables/t-huge/data.csv".into(), csv),
+    ]);
+    let res = import_prism_bytes(&zip);
+    assert!(
+        matches!(res, Err(FormatError::InvalidPipeline { .. }) | Err(FormatError::Doc(curvebook_doc::DocError::TooManyCells { .. }))),
+        "expected pre-allocation cell-budget rejection, got: {res:?}"
+    );
+}
+
+#[test]
+fn experimental_archive_writer_swaps_excluded_flags_for_upper_lower_limits() {
+    let mut doc = ProjectDocument::new("Limits Exclusion Swap").unwrap();
+    let mut xy = XyTable::new(SubcolumnMode::UpperLowerLimits, 1, 1).unwrap();
+    xy.set_x_cell(0, Cell::number(1.0)).unwrap();
+    // CurveBook UpperLowerLimits: [0: Center=10.0, 1: Lower=8.0, 2: Upper=15.0 (excluded)]
+    xy.data_sets[0].cells[0] = vec![Cell::number(10.0), Cell::number(8.0), Cell { value: CellValue::Number(15.0), excluded: true }];
+    doc.add_data_sheet(DataSheet::new("xy-lim", "Limits", TableArchetype::Xy(xy)).unwrap()).unwrap();
+
+    let exported = export_prism_bytes_experimental(&doc).unwrap();
+    let archive = ZipArchive::from_bytes(&exported.bytes).unwrap();
+    let ds_json: serde_json::Value = serde_json::from_slice(archive.get("data/sets/set-1-y0.json").unwrap()).unwrap();
+    // In `.prism` `y_high_low`: replicate 1 is +Err (Upper - Center), replicate 2 is -Err (Center - Lower).
+    assert!(ds_json["replicates"][1]["cellAttributes"].is_array(), "excluded Upper must map to replicate 1 (+Err)");
+    assert!(ds_json["replicates"][2]["cellAttributes"].is_null(), "non-excluded Lower must stay unmasked on replicate 2 (-Err)");
+
+    let re = import_prism_bytes(&exported.bytes).unwrap();
+    let TableArchetype::Xy(re_xy) = &re.document.data_sheets[0].archetype else { panic!() };
+    assert_eq!(re_xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh);
+    assert_eq!(re_xy.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(10.0));
+    assert_eq!(re_xy.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(2.0));
+    assert!(!re_xy.data_sets[0].cell(0, 1).unwrap().excluded);
+    assert_eq!(re_xy.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(5.0));
+    assert!(re_xy.data_sets[0].cell(0, 2).unwrap().excluded);
+}
+
+#[test]
+fn external_archive_heterogeneous_per_dataset_replicate_widths_never_shift_columns() {
+    let zip = build_zip_owned(vec![
+        ("document.json".into(), json_bytes(json!({ "title": "Heterogeneous Widths", "sheets": { "data": ["s-rep", "s-pm"] } }))),
+        // Dataset 0 has 2 replicates, dataset 1 has 3 replicates (table replicatesCount=2 < max 3).
+        (
+            "data/sheets/s-rep/sheet.json".into(),
+            json_bytes(json!({
+                "title": "Mixed Reps",
+                "table": {
+                    "uid": "t-rep", "format": "grouped", "dataFormat": "y_replicates", "replicatesCount": 2,
+                    "dataSets": ["ds-r2", "ds-r3"]
+                }
+            })),
+        ),
+        ("data/sets/ds-r2.json".into(), json_bytes(json!({"title": "Two", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        (
+            "data/sets/ds-r3.json".into(),
+            json_bytes(json!({"title": "Three", "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "real"}]})),
+        ),
+        ("data/tables/t-rep/data.csv".into(), b"10,20,100,200,300\n".to_vec()),
+        // Mixed y_plus_minus: dataset 0 has 2 CSV cols (symmetric), dataset 1 has 3 CSV cols (asymmetric swap).
+        (
+            "data/sheets/s-pm/sheet.json".into(),
+            json_bytes(json!({
+                "title": "Mixed PM",
+                "table": {
+                    "uid": "t-pm", "format": "xy", "dataFormat": "y_plus_minus", "xDataSet": "ds-xpm",
+                    "dataSets": ["ds-pm2", "ds-pm3"]
+                }
+            })),
+        ),
+        ("data/sets/ds-xpm.json".into(), json_bytes(json!({"title": "X", "replicates": [{"valueType": "real"}]}))),
+        ("data/sets/ds-pm2.json".into(), json_bytes(json!({"title": "Sym", "replicates": [{"valueType": "real"}, {"valueType": "real"}]}))),
+        (
+            "data/sets/ds-pm3.json".into(),
+            json_bytes(json!({"title": "Asym", "replicates": [{"valueType": "real"}, {"valueType": "real"}, {"valueType": "real"}]})),
+        ),
+        ("data/tables/t-pm/data.csv".into(), b"1,50,3,80,7,2\n".to_vec()),
+    ]);
+
+    let rep = import_prism_bytes(&zip).unwrap();
+    let TableArchetype::Grouped(grp) = &rep.document.data_sheet(&SheetId::new("s-rep")).unwrap().archetype else { panic!() };
+    assert_eq!(grp.subcolumn_mode, SubcolumnMode::RawReplicates(3));
+    assert_eq!(grp.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(10.0));
+    assert_eq!(grp.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(20.0));
+    assert_eq!(grp.data_sets[0].cell(0, 2).unwrap().value, CellValue::Empty);
+    assert_eq!(grp.data_sets[1].cell(0, 0).unwrap().value, CellValue::Number(100.0));
+    assert_eq!(grp.data_sets[1].cell(0, 1).unwrap().value, CellValue::Number(200.0));
+    assert_eq!(grp.data_sets[1].cell(0, 2).unwrap().value, CellValue::Number(300.0));
+
+    let TableArchetype::Xy(xy) = &rep.document.data_sheet(&SheetId::new("s-pm")).unwrap().archetype else { panic!() };
+    assert_eq!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh);
+    assert_eq!(xy.data_sets[0].cell(0, 0).unwrap().value, CellValue::Number(50.0));
+    assert_eq!(xy.data_sets[0].cell(0, 1).unwrap().value, CellValue::Number(3.0));
+    assert_eq!(xy.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(3.0));
+    assert_eq!(xy.data_sets[1].cell(0, 0).unwrap().value, CellValue::Number(80.0));
+    assert_eq!(xy.data_sets[1].cell(0, 1).unwrap().value, CellValue::Number(2.0));
+    assert_eq!(xy.data_sets[1].cell(0, 2).unwrap().value, CellValue::Number(7.0));
+}
+
+#[test]
+fn external_archive_rich_text_escapes_stars_and_dollars_preserving_plain_text() {
+    let val = json!({
+        "string": "Rate *a* and $x=1$ plus <b>raw</b>",
+        "version": 1,
+        "formatting": [
+            { "range": "0~3", "attributes": { "fontWeight": "bold" } }
+        ]
+    });
+    let (markup, plain) = curvebook_format::prism::parse_rich_text_value(&val);
+    assert_eq!(plain, "Rate *a* and $x=1$ plus <b>raw</b>");
+    assert!(markup.starts_with("<b>Rate</b>"), "got: {markup}");
+    assert!(markup.contains(r"\*a*"), "paired star trigger must be escaped: {markup}");
+    assert!(markup.contains(r"\$x=1\$"), "paired dollar triggers must be escaped: {markup}");
+    assert!(markup.contains(r"\<b>raw\</b>"), "literal markup tags must be escaped: {markup}");
+
+    // Single unpaired `*` (significance marker) stays unescaped.
+    let single_star = json!({
+        "string": "p < 0.05 *",
+        "version": 1,
+        "formatting": [{ "range": "0", "attributes": { "italic": true } }]
+    });
+    let (star_markup, _) = curvebook_format::prism::parse_rich_text_value(&single_star);
+    assert_eq!(star_markup, "<i>p</i> < 0.05 *");
+}
+
+#[test]
+fn external_archive_navigator_fallback_and_chained_analysis_source() {
+    // 1. Layout-only archive with no `uiSettings.currentSheets` gets non-None navigator fallback.
+    let png = encode_rgba_png(4, 4);
+    let layout_only = build_zip_owned(vec![
+        ("document.json".into(), json_bytes(json!({ "title": "Layout Only", "sheets": { "data": [], "layouts": ["lay-1"] } }))),
+        ("layouts/lay-1/sheet.json".into(), json_bytes(json!({"uid": "lay-1", "title": "Plate Fig"}))),
+        ("layouts/lay-1/preview.png".into(), png),
+    ]);
+    let layout_rep = import_prism_bytes(&layout_only).unwrap();
+    assert_eq!(layout_rep.document.layout_sheets.len(), 1);
+    assert_eq!(layout_rep.document.active_sheet_id, Some(SheetId::new("lay-1")));
+    assert_eq!(layout_rep.document.family_anchor_sheet_id, Some(SheetId::new("lay-1")));
+
+    // 2. Chained analysis `an-2` referencing upstream analysis `an-1` preserves `source_sheet_id`.
+    let chained = build_zip_owned(vec![
+        (
+            "document.json".into(),
+            json_bytes(json!({
+                "title": "Chained Analyses",
+                "sheets": { "data": ["d-1"], "analyses": ["an-1", "an-2"] }
+            })),
+        ),
+        (
+            "data/sheets/d-1/sheet.json".into(),
+            json_bytes(json!({"title": "Raw", "table": {"uid": "t-1", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-1"]}})),
+        ),
+        ("data/sets/ds-1.json".into(), json_bytes(json!({"title": "Y", "replicates": [{"valueType": "real"}]}))),
+        ("data/tables/t-1/data.csv".into(), b"1\n2\n3\n".to_vec()),
+        (
+            "analyses/an-1/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-1", "title": "Transform", "analysisClass": "TRNSFORM",
+                "inputSheets": [{ "uid": "d-1", "title": "Raw" }]
+            })),
+        ),
+        (
+            "analyses/an-2/sheet.json".into(),
+            json_bytes(json!({
+                "uid": "an-2", "title": "Desc of Transform", "analysisClass": "DESCRIPTIVE_STATISTICS",
+                "inputSheets": [{ "uid": "an-1", "title": "Transform" }]
+            })),
+        ),
+    ]);
+    let chain_rep = import_prism_bytes(&chained).unwrap();
+    assert_eq!(chain_rep.document.result_sheets.len(), 2);
+    assert_eq!(chain_rep.document.result_sheets[0].analysis.source_sheet_id, Some(SheetId::new("d-1")));
+    assert_eq!(chain_rep.document.result_sheets[1].analysis.source_sheet_id, Some(SheetId::new("an-1")));
+}
+
+#[test]
+fn external_archive_lazy_zip_index_exceeds_4096_entries_while_native_limits_and_byte_caps_hold() {
+    use curvebook_format::open_project_bytes;
+    use curvebook_format::prism::import::{MAX_ARCHIVE_ZIP_ENTRIES, external_archive_zip_limits, import_prism_bytes_with_limits};
+    use curvebook_format::zip::{MAX_ZIP_ENTRIES, ZipLimits};
+
+    // Native default entry cap MUST remain 4_096 while external `.prism` raises only the lazy
+    // central-directory entry cap to 32_768 with identical cumulative decompressed byte bounds.
+    assert_eq!(MAX_ZIP_ENTRIES, 4_096);
+    assert_eq!(ZipLimits::default().max_entries, 4_096);
+    assert_eq!(MAX_ARCHIVE_ZIP_ENTRIES, 32_768);
+    assert_eq!(external_archive_zip_limits().max_entries, 32_768);
+    assert_eq!(external_archive_zip_limits().max_total_uncompressed_bytes, ZipLimits::default().max_total_uncompressed_bytes);
+    assert_eq!(external_archive_zip_limits().max_entry_uncompressed_bytes, ZipLimits::default().max_entry_uncompressed_bytes);
+
+    let mut entries = vec![
+        (
+            String::from("document.json"),
+            json_bytes(json!({
+                "formatVersion": "1-6-0",
+                "title": "Large Multi-Study Archive",
+                "sheets": { "data": ["s-1"], "info": [], "analyses": [], "graphs": [], "layouts": [] },
+                "sheetAttributesMap": { "s-1": { "title": "Study 1" } }
+            })),
+        ),
+        (
+            String::from("data/sheets/s-1/sheet.json"),
+            json_bytes(json!({
+                "uid": "s-1",
+                "title": "Study 1",
+                "table": { "uid": "t-1", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-1"] }
+            })),
+        ),
+        (String::from("data/sets/ds-1.json"), json_bytes(json!({ "title": "Arm A", "replicates": [{ "valueType": "real" }] }))),
+        (String::from("data/tables/t-1/data.csv"), b"12.5\n25.0\n".to_vec()),
+    ];
+    // Add 4,200 unread opaque digest stubs so total entry count exceeds native MAX_ZIP_ENTRIES (4,096).
+    for i in 0..4_200_usize {
+        entries.push((format!("data/digests/stub-{i:05}.dt"), b"ok".to_vec()));
+    }
+    let raw_entries: Vec<RawZipEntry<'_>> = entries.iter().map(|(k, v)| RawZipEntry::stored(k.as_bytes(), v.as_slice())).collect();
+    let big_zip = build_raw_zip(&raw_entries, b"");
+
+    // 1. `.prism` lazy importer succeeds cleanly across >4,096 entries.
+    let rep = import_prism_bytes(&big_zip).unwrap();
+    assert_eq!(rep.document.data_sheets.len(), 1);
+    let TableArchetype::Column(ref col) = rep.document.data_sheets[0].archetype else { panic!("expected Column") };
+    assert_eq!(col.data_sets[0].cell(0, 0).unwrap().active_number(), Some(12.5));
+    assert_eq!(col.data_sets[0].cell(1, 0).unwrap().active_number(), Some(25.0));
+
+    // 2. Native `.curvebook` opener STILL enforces the 4,096-entry ZipLimits::default() cap!
+    let native_err = open_project_bytes(&big_zip).unwrap_err();
+    assert!(matches!(native_err, FormatError::ZipBomb { .. }), "expected ZipBomb for >4,096 native entries, got {native_err:?}");
+
+    // 3. Cumulative *decompressed* byte cap is still strictly enforced on `.prism` reads!
+    let tiny_byte_cap = ZipLimits { max_total_uncompressed_bytes: 64, ..external_archive_zip_limits() };
+    let cap_err = import_prism_bytes_with_limits(&big_zip, tiny_byte_cap).unwrap_err();
+    assert!(matches!(cap_err, FormatError::ZipBomb { .. }), "expected ZipBomb for decompressed byte cap, got {cap_err:?}");
+}

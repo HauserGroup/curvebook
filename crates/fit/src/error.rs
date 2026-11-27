@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use curvebook_doc::{DocError, TableKind};
+use curvebook_doc::{DocError, SubcolumnMode, TableKind};
 use curvebook_math::MathError;
 
 /// Convergence or validity outcome of a linear or nonlinear regression fit.
@@ -102,6 +102,17 @@ pub enum FitError {
     },
     /// Robust / ROUT / normality diagnostics require raw replicates rather than pre-summarized moments.
     RequiresRawReplicates,
+    /// Regression configuration does not support the input table's pre-summarized [`SubcolumnMode`] (for example missing `N` or missing `SD` for `1/SD^2` weighting).
+    UnsupportedSubcolumnMode {
+        /// Canonical regression procedure label that refused the summary mode.
+        analysis: &'static str,
+        /// Input table archetype (`Xy` or `Grouped`).
+        table_kind: TableKind,
+        /// Pre-summarized subcolumn layout encountered on the input sheet.
+        mode: SubcolumnMode,
+        /// Neutral explanation of why this mode is refused.
+        reason: &'static str,
+    },
     /// Starting parameter values produced non-finite predictions and could not be rescued.
     BadInitialValues {
         /// Diagnostic summary of why initial evaluation or simplex rescue failed.
@@ -166,6 +177,9 @@ impl fmt::Display for FitError {
             Self::IncompatibleTable { kind } => write!(f, "table kind {kind:?} is not compatible with regression"),
             Self::ImpossibleWeights { reason } => write!(f, "impossible weights: {reason}"),
             Self::RequiresRawReplicates => f.write_str("selected robust/outlier/normality option requires raw replicate observations"),
+            Self::UnsupportedSubcolumnMode { analysis, table_kind, mode, reason } => {
+                write!(f, "{analysis} does not support {mode:?} subcolumns on {table_kind:?} tables: {reason}")
+            }
             Self::BadInitialValues { reason } => write!(f, "bad initial parameter values: {reason}"),
             Self::DslCompileError { message, line, column } => {
                 write!(f, "equation compile error at line {line}, column {column}: {message}")

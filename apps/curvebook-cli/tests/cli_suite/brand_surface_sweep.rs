@@ -34,6 +34,10 @@ fn import_cmd_id() -> String {
     join(&["table.", "im", "port", "Pr", "ism"])
 }
 
+fn export_cmd_id() -> String {
+    join(&["project.", "ex", "port", "Pr", "ism"])
+}
+
 /// Scan all registered 16-locale `i18n::CATALOG` translations and locale display names.
 #[must_use]
 pub fn check_i18n_catalog() -> Vec<BrandHit> {
@@ -619,9 +623,11 @@ fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
 }
 
 fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
+    let import_id = import_cmd_id();
+    let export_id = export_cmd_id();
     for spec in engine_cmd_registry().specs() {
-        let is_import_ext_cmd = spec.id == import_cmd_id();
-        check_ui_text_run(&format!("engine_cmd:{}:id", spec.id), 1, spec.id, false, is_import_ext_cmd, hits);
+        let is_ext_fmt_cmd = spec.id == import_id || spec.id == export_id;
+        check_ui_text_run(&format!("engine_cmd:{}:id", spec.id), 1, spec.id, false, is_ext_fmt_cmd, hits);
         for (field, val) in [("label", spec.label), ("menu_path", spec.menu_path), ("summary", spec.summary), ("beginner", spec.beginner)] {
             check_ui_text_run(&format!("engine_cmd:{}:{field}", spec.id), 1, val, false, false, hits);
         }
@@ -630,8 +636,8 @@ fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
         }
     }
     for cmd in UI_COMMANDS {
-        let is_import_ext_cmd = cmd.id == import_cmd_id();
-        check_ui_text_run(&format!("ui_cmd:{}:id", cmd.id), 1, cmd.id, false, is_import_ext_cmd, hits);
+        let is_ext_fmt_cmd = cmd.id == import_id || cmd.id == export_id;
+        check_ui_text_run(&format!("ui_cmd:{}:id", cmd.id), 1, cmd.id, false, is_ext_fmt_cmd, hits);
         for (field, val) in [("label", cmd.label), ("params_doc", cmd.params_doc), ("summary", cmd.summary), ("beginner", cmd.beginner)] {
             check_ui_text_run(&format!("ui_cmd:{}:{field}", cmd.id), 1, val, false, false, hits);
         }
@@ -816,6 +822,7 @@ fn collect_egui_surface_hits(
         }
         if let Some(cmd) = &entry.command_id
             && cmd != &import_cmd_id()
+            && cmd != &export_cmd_id()
         {
             hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:command_id"), [cmd.as_str()]));
         }
@@ -933,8 +940,9 @@ fn mask_allowed_dot_ext(text: &str) -> String {
 fn assert_clean_ui_string(ctx: &str, text: &str, locale: &str, allow_palette_cmd_id: bool) -> Result<(), String> {
     let dot_masked = mask_allowed_dot_ext(text);
     let normalized_text = if allow_palette_cmd_id {
-        let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
-        dot_masked.replace(&cmd_id, "table.import_ext")
+        let import_id = import_cmd_id();
+        let export_id = export_cmd_id();
+        dot_masked.replace(&import_id, "table.import_ext").replace(&export_id, "project.export_ext")
     } else {
         dot_masked
     };
@@ -1149,9 +1157,12 @@ fn r021_live_egui_shell_and_a11y_clean_across_all_16_locales_and_5_sheets() -> R
             }
         }
     }
+    let import_id = import_cmd_id();
+    let export_id = export_cmd_id();
     for spec in engine_cmd_registry().specs() {
-        assert_clean_ui_string(&format!("engine_cmd:{}", spec.id), spec.label, "en", false)?;
-        assert_clean_ui_string(&format!("engine_cmd_summary:{}", spec.id), spec.summary, "en", false)?;
+        let allow_ext = spec.id == import_id || spec.id == export_id;
+        assert_clean_ui_string(&format!("engine_cmd:{}", spec.id), spec.label, "en", allow_ext)?;
+        assert_clean_ui_string(&format!("engine_cmd_summary:{}", spec.id), spec.summary, "en", allow_ext)?;
     }
     for cmd in UI_COMMANDS {
         assert_clean_ui_string(&format!("ui_cmd:{}", cmd.id), cmd.label, "en", false)?;
@@ -1167,7 +1178,10 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
     let dot_ext = join(&[".pr", "ism"]);
     let mime_proj = join(&["application/x-pr", "ism-project"]);
     let mime_xml = join(&["application/x-pr", "ism-xml"]);
-    let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
+    let cmd_id = import_cmd_id();
+    let export_id = export_cmd_id();
+    let export_fn = join(&["export_pr", "ism_bytes_with_options"]);
+    let desc_const = join(&["DESC_PR", "ISM"]);
 
     // 1. Verify packaging files carry zero brand waivers and zero product titles.
     for pkg_rel in [
@@ -1188,7 +1202,8 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
             .replace(&dot_ext, ".ext")
             .replace(&mime_proj, "application/x-ext")
             .replace(&mime_xml, "application/x-ext-xml")
-            .replace(&format!("<string>{}</string>", join(&["pr", "ism"])), "<string>ext</string>");
+            .replace(&format!("<string>{}</string>", join(&["pr", "ism"])), "<string>ext</string>")
+            .replace(&format!("<Extension Id=\"{}\"", join(&["pr", "ism"])), "<Extension Id=\"ext\"");
         for probe in banned_probe_tokens() {
             if contains_ascii_word(&cleaned, &probe) {
                 return Err(format!("{pkg_rel} leaked prohibited token `{probe}`"));
@@ -1202,8 +1217,13 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
         let path = entry.map_err(|e| e.to_string())?.path();
         if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let cleaned =
-                txt.replace(&cmd_id, "table.import_ext").replace(&dot_ext, ".ext").replace(&format!("\"{}\"", join(&["pr", "ism"])), "\"ext\"");
+            let cleaned = txt
+                .replace(&cmd_id, "table.import_ext")
+                .replace(&export_id, "project.export_ext")
+                .replace(&export_fn, "export_ext_bytes_with_options")
+                .replace(&desc_const, "DESC_EXT")
+                .replace(&dot_ext, ".ext")
+                .replace(&format!("\"{}\"", join(&["pr", "ism"])), "\"ext\"");
             for probe in banned_probe_tokens() {
                 if contains_ascii_word(&cleaned, &probe) {
                     return Err(format!("{} leaked `{probe}`", path.display()));
@@ -1213,7 +1233,7 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
     }
     for rel in ["docs/commands.md", "docs/index.html", "docs/site.css"] {
         let txt = fs::read_to_string(root.join(rel)).map_err(|e| e.to_string())?;
-        let cleaned = txt.replace(&cmd_id, "table.import_ext").replace(&dot_ext, ".ext");
+        let cleaned = txt.replace(&cmd_id, "table.import_ext").replace(&export_id, "project.export_ext").replace(&dot_ext, ".ext");
         for probe in banned_probe_tokens() {
             if contains_ascii_word(&cleaned, &probe) {
                 return Err(format!("{rel} leaked `{probe}`"));
@@ -1227,7 +1247,7 @@ fn r021_mcp_packaging_and_command_artefacts_strictly_clean() -> Result<(), Strin
             let path = entry.map_err(|e| e.to_string())?.path();
             if path.extension().and_then(|e| e.to_str()) == Some("json") {
                 let txt = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                let cleaned = txt.replace(&cmd_id, "table.import_ext").replace(&dot_ext, ".ext");
+                let cleaned = txt.replace(&cmd_id, "table.import_ext").replace(&export_id, "project.export_ext").replace(&dot_ext, ".ext");
                 for probe in banned_probe_tokens() {
                     if contains_ascii_word(&cleaned, &probe) {
                         return Err(format!("{} leaked `{probe}`", path.display()));
@@ -1381,8 +1401,10 @@ fn check_mcp_json_strict(ctx: &str, method: &str, called_tool: Option<&str>, res
     let pre_rename = join(&["lum", "encraft"]);
     let raw_ext = join(&["pr", "ism"]);
     let dot_ext = join(&[".pr", "ism"]);
-    let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
+    let cmd_id = import_cmd_id();
+    let export_id = export_cmd_id();
     let mcp_tool_id = join(&["table_im", "port_pr", "ism"]);
+    let mcp_export_tool_id = join(&["project_ex", "port_pr", "ism"]);
     let serialized = serde_json::to_string(resp).map_err(|e| e.to_string())?;
 
     let mut masked = mask_allowed_dot_ext(&serialized);
@@ -1390,24 +1412,71 @@ fn check_mcp_json_strict(ctx: &str, method: &str, called_tool: Option<&str>, res
         if let Some(tools) = resp.pointer("/result/tools").and_then(serde_json::Value::as_array) {
             for tool in tools {
                 let name = tool.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
-                if name == "open_file" {
+                if matches!(name, "open_file" | "save_file" | "export") {
                     let desc = tool.get("description").and_then(serde_json::Value::as_str).unwrap_or("");
                     if desc.contains(&dot_ext) {
                         let clean_desc = desc.replace(&dot_ext, ".ext");
                         masked = masked.replace(desc, &clean_desc);
                     }
-                    let fmt_enum_pat =
-                        format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"{}\",\"pzfx\",\"xlsx\",\"csv\",\"tsv\"]", raw_ext);
-                    masked = masked.replace(&fmt_enum_pat, "\"enum\":[\"curvebook\",\"pzfx\"]");
+                    if let Some(props) = tool.pointer("/inputSchema/properties").and_then(serde_json::Value::as_object) {
+                        for prop in props.values() {
+                            if let Some(pdesc) = prop.get("description").and_then(serde_json::Value::as_str)
+                                && pdesc.contains(&dot_ext)
+                            {
+                                let clean_pdesc = pdesc.replace(&dot_ext, ".ext");
+                                masked = masked.replace(pdesc, &clean_pdesc);
+                            }
+                        }
+                    }
+                    for fmt_enum_pat in [
+                        format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"{raw_ext}\",\"pzfx\",\"xlsx\",\"csv\",\"tsv\"]"),
+                        format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"pzfx\",\"{raw_ext}\"]"),
+                        format!("\"enum\":[\"svg\",\"pdf\",\"emf\",\"png\",\"tiff\",\"csv\",\"tsv\",\"json\",\"pzfx\",\"{raw_ext}\"]"),
+                    ] {
+                        masked = masked.replace(&fmt_enum_pat, "\"enum\":[\"curvebook\",\"pzfx\"]");
+                    }
                 } else if name == mcp_tool_id {
+                    let desc = tool.get("description").and_then(serde_json::Value::as_str).unwrap_or("");
+                    if !desc.is_empty() {
+                        let clean_desc = desc.replace(&format!("[{cmd_id}]"), "[table.import_ext]").replace(&dot_ext, ".ext");
+                        masked = masked.replace(desc, &clean_desc);
+                    }
                     masked = masked.replace(&mcp_tool_id, "table_import_ext");
                     masked = masked.replace(&format!("[{cmd_id}]"), "[table.import_ext]");
+                } else if name == mcp_export_tool_id {
+                    let desc = tool.get("description").and_then(serde_json::Value::as_str).unwrap_or("");
+                    if !desc.is_empty() {
+                        let clean_desc = desc.replace(&format!("[{export_id}]"), "[project.export_ext]").replace(&dot_ext, ".ext");
+                        masked = masked.replace(desc, &clean_desc);
+                    }
+                    if let Some(sdesc) = tool.pointer("/inputSchema/description").and_then(serde_json::Value::as_str)
+                        && (sdesc.contains(&dot_ext) || sdesc.contains(&export_id))
+                    {
+                        let clean_sdesc = sdesc.replace(&export_id, "project.export_ext").replace(&dot_ext, ".ext");
+                        masked = masked.replace(sdesc, &clean_sdesc);
+                    }
+                    if let Some(props) = tool.pointer("/inputSchema/properties").and_then(serde_json::Value::as_object) {
+                        for prop in props.values() {
+                            if let Some(pdesc) = prop.get("description").and_then(serde_json::Value::as_str)
+                                && (pdesc.contains(&dot_ext) || pdesc.contains(&export_id))
+                            {
+                                let clean_pdesc = pdesc.replace(&export_id, "project.export_ext").replace(&dot_ext, ".ext");
+                                masked = masked.replace(pdesc, &clean_pdesc);
+                            }
+                        }
+                    }
+                    masked = masked.replace(&mcp_export_tool_id, "project_export_ext");
+                    masked = masked.replace(&format!("[{export_id}]"), "[project.export_ext]");
                 }
             }
         }
     } else if method == "tools/call" && matches!(called_tool, Some("list_toolsets" | "command_list" | "ui_inspect")) {
-        masked = masked.replace(&mcp_tool_id, "table_import_ext");
-        masked = masked.replace(&cmd_id, "table.import_ext");
+        masked = masked
+            .replace(&mcp_tool_id, "table_import_ext")
+            .replace(&cmd_id, "table.import_ext")
+            .replace(&mcp_export_tool_id, "project_export_ext")
+            .replace(&export_id, "project.export_ext")
+            .replace(&dot_ext, ".ext");
     }
 
     // Strip base64 PNG image data blocks after verifying their binary PNG chunks cleanly.

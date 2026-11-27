@@ -161,6 +161,7 @@ pub fn is_read_only_ui_command(command_id: &str) -> bool {
             | "ui.export.tableCsv.open"
             | "ui.export.resultsCsv.open"
             | "ui.export.allTablesCsv.open"
+            | "ui.export.pzfx.open"
             | "ui.import.warnings.open"
             | "ui.import.reshape.open"
             | "ui.result.copyMethodsReport"
@@ -364,6 +365,8 @@ fn is_command_read_only_depth(command_id: &str, params: Option<&Value>, depth: u
             | "export.png"
             | "graph.exportPng"
             | "export.tiff"
+            | "project.exportPzfx"
+            | "project.exportPrism"
             | "doc.export"
             | "render.pdf"
     ) {
@@ -439,11 +442,11 @@ pub fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
                 return Some(src.clone());
             }
         }
-        if let Some(res) = doc.result_sheet(active) {
-            let src = &res.analysis.source_sheet_id;
-            if doc.data_sheet(src).is_some() {
-                return Some(src.clone());
-            }
+        if let Some(res) = doc.result_sheet(active)
+            && let Some(src) = res.analysis.source_sheet_id.as_ref()
+            && doc.data_sheet(src).is_some()
+        {
+            return Some(src.clone());
         }
     }
     doc.data_sheets.first().map(|s| s.id.clone())

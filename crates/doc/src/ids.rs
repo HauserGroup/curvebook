@@ -5,7 +5,7 @@ use std::fmt;
 
 use curvebook_palette::Rgba8;
 
-use crate::error::{DocError, MAX_SHEET_ID_BYTES};
+use crate::error::{DocError, MAX_SHEET_ID_BYTES, validate_title};
 
 /// Stable project-unique identifier for a `DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`,
 /// or `LayoutSheet`.
@@ -328,4 +328,39 @@ pub struct SourceCellId {
     pub col: usize,
     /// Zero-based replicate subcolumn within that column.
     pub subcol: usize,
+}
+
+/// Origin provenance recording the external file or project from which a sheet was imported or merged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SheetOrigin {
+    /// Neutral filename or basename label of the originating file (must not contain `/` or `\`).
+    pub source_label: String,
+    /// Lowercase source format identifier (for example `"pzfx"`, `"curvebook"`, `"xlsx"`, or `"csv"`).
+    pub source_format: String,
+    /// Caller-supplied deterministic UTC timestamp when the sheet was imported or merged (may be empty if unspecified).
+    #[serde(default)]
+    pub merged_at: String,
+}
+
+impl SheetOrigin {
+    /// Construct and validate a [`SheetOrigin`] record.
+    pub fn new(source_label: impl Into<String>, source_format: impl Into<String>, merged_at: impl Into<String>) -> Result<Self, DocError> {
+        let origin = Self { source_label: source_label.into(), source_format: source_format.into(), merged_at: merged_at.into() };
+        origin.validate()?;
+        Ok(origin)
+    }
+
+    /// Validate that `source_label` is a non-empty basename free of path separators and that all fields stay within [`crate::MAX_TITLE_BYTES`].
+    pub fn validate(&self) -> Result<(), DocError> {
+        if self.source_label.trim().is_empty() || self.source_format.trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        validate_title(&self.source_label)?;
+        validate_title(&self.source_format)?;
+        validate_title(&self.merged_at)?;
+        if self.source_label.contains('/') || self.source_label.contains('\\') || self.source_label.contains('\0') {
+            return Err(DocError::InvalidIdentifier { reason: "sheet origin source_label must not contain path separators or NUL bytes" });
+        }
+        Ok(())
+    }
 }

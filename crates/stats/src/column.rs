@@ -47,8 +47,8 @@
 //!   Wiley. Ch. 3 (signed-rank Hodges–Lehmann pseudomedian & Walsh-average confidence intervals).
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
-    ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet,
+    ResultTab, ResultTabKind, SubcolumnAggregation, SubcolumnMode, SummarizedPoint, SummaryPointError, TableArchetype, VariableRole,
 };
 use curvebook_math::dist::{
     chi2_isf, chi2_ppf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p,
@@ -60,10 +60,10 @@ use curvebook_math::{ConfidenceLevel, MathError};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell,
-    opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted, quartiles_hinge, rank_with_ties,
-    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell, try_resolve_selected_indices,
-    validate_finite_slice,
+    TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, enforce_summary_mode_matrix, init_result_sheet,
+    is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted,
+    quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell,
+    try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -317,10 +317,93 @@ struct IndexedPooledSeries {
     points: Vec<SummarizedPoint>,
 }
 
+struct IndexedSpreadOnlySeries {
+    data_set_index: usize,
+    label: String,
+    mode: SubcolumnMode,
+    /// `(entered_mean, entered_spread)` pairs from `MeanSd` or `MeanSem` (no sample size `N`).
+    rows: Vec<(f64, Option<f64>)>,
+}
+
+struct IndexedIntervalSummarySeries {
+    data_set_index: usize,
+    label: String,
+    mode: SubcolumnMode,
+    /// `(center, sub1, sub2)` tuples from `MeanLowHigh` (`[Mean, -Error, +Error]`),
+    /// `UpperLowerLimits` (`[Mean, Lower, Upper]`), or `MedianIqr` (`[Median, Q1, Q3]`).
+    rows: Vec<(f64, Option<f64>, Option<f64>)>,
+}
+
 struct DescriptiveSeriesExtraction {
     raw: Vec<IndexedRawSeries>,
     pooled: Vec<IndexedPooledSeries>,
+    no_n_summary: Vec<IndexedSpreadOnlySeries>,
+    interval_summary: Vec<IndexedIntervalSummarySeries>,
     ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn extract_spread_only_series(
+    data_sets: &[curvebook_doc::DataSetColumn],
+    indices: &[usize],
+    mode: SubcolumnMode,
+) -> Result<Vec<IndexedSpreadOnlySeries>, StatsError> {
+    let mut out = Vec::new();
+    for &idx in indices {
+        let ds = &data_sets[idx];
+        let mut rows = Vec::new();
+        for row in &ds.cells {
+            let Some(mean) = row.first().and_then(|c| c.active_number()) else {
+                continue;
+            };
+            let spread = row.get(1).and_then(|c| c.active_number());
+            if let Some(s) = spread
+                && s < 0.0
+            {
+                return Err(StatsError::SummaryPoint(SummaryPointError::NegativeSpread { spread: s }));
+            }
+            rows.push((mean, spread));
+        }
+        if !rows.is_empty() {
+            out.push(IndexedSpreadOnlySeries { data_set_index: idx, label: ds.title.clone(), mode, rows });
+        }
+    }
+    Ok(out)
+}
+
+fn extract_interval_summary_series(
+    data_sets: &[curvebook_doc::DataSetColumn],
+    indices: &[usize],
+    mode: SubcolumnMode,
+) -> Result<Vec<IndexedIntervalSummarySeries>, StatsError> {
+    let mut out = Vec::new();
+    for &idx in indices {
+        let ds = &data_sets[idx];
+        let mut rows = Vec::new();
+        for row in &ds.cells {
+            let Some(center) = row.first().and_then(|c| c.active_number()) else {
+                continue;
+            };
+            let sub1 = row.get(1).and_then(|c| c.active_number());
+            let sub2 = row.get(2).and_then(|c| c.active_number());
+            if mode == SubcolumnMode::MeanLowHigh {
+                if let Some(down) = sub1
+                    && down < 0.0
+                {
+                    return Err(StatsError::SummaryPoint(SummaryPointError::NegativeSpread { spread: down }));
+                }
+                if let Some(up) = sub2
+                    && up < 0.0
+                {
+                    return Err(StatsError::SummaryPoint(SummaryPointError::NegativeSpread { spread: up }));
+                }
+            }
+            rows.push((center, sub1, sub2));
+        }
+        if !rows.is_empty() {
+            out.push(IndexedIntervalSummarySeries { data_set_index: idx, label: ds.title.clone(), mode, rows });
+        }
+    }
+    Ok(out)
 }
 
 fn compute_custom_percentiles(sorted: &[f64], custom_upper: Option<f64>) -> Result<OptionalCiPair, StatsError> {
@@ -605,7 +688,13 @@ fn extract_indexed_series_for_descriptive(
                     });
                 }
             }
-            Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric: ignored })
+            Ok(DescriptiveSeriesExtraction {
+                raw,
+                pooled: Vec::new(),
+                no_n_summary: Vec::new(),
+                interval_summary: Vec::new(),
+                ignored_non_numeric: ignored,
+            })
         }
         other => Err(StatsError::IncompatibleTable { analysis: "descriptive statistics", actual: other.kind() }),
     }
@@ -627,10 +716,33 @@ fn extract_column_table_for_desc(t: &curvebook_doc::ColumnTable, selected: &[usi
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled,
+            no_n_summary: Vec::new(),
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
     }
-    if t.subcolumn_mode.is_pre_summarized() {
-        return Err(StatsError::RequiresRawReplicates);
+    if matches!(t.subcolumn_mode, SubcolumnMode::MeanSd | SubcolumnMode::MeanSem) {
+        let no_n_summary = extract_spread_only_series(&t.data_sets, &indices, t.subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary,
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
+    }
+    if matches!(t.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
+        let interval_summary = extract_interval_summary_series(&t.data_sets, &indices, t.subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary: Vec::new(),
+            interval_summary,
+            ignored_non_numeric: Vec::new(),
+        });
     }
     let mut raw = Vec::new();
     let mut ignored = Vec::new();
@@ -666,7 +778,7 @@ fn extract_column_table_for_desc(t: &curvebook_doc::ColumnTable, selected: &[usi
             });
         }
     }
-    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric: ignored })
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), no_n_summary: Vec::new(), interval_summary: Vec::new(), ignored_non_numeric: ignored })
 }
 
 fn extract_xy_table_for_desc(
@@ -689,14 +801,37 @@ fn extract_xy_table_for_desc(
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled,
+            no_n_summary: Vec::new(),
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
     }
-    if t.y_subcolumn_mode.is_pre_summarized() {
-        return Err(StatsError::RequiresRawReplicates);
+    if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanSd | SubcolumnMode::MeanSem) {
+        let no_n_summary = extract_spread_only_series(&t.data_sets, &indices, t.y_subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary,
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
+    }
+    if matches!(t.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
+        let interval_summary = extract_interval_summary_series(&t.data_sets, &indices, t.y_subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary: Vec::new(),
+            interval_summary,
+            ignored_non_numeric: Vec::new(),
+        });
     }
     let raw = aggregate_replicate_datasets(&t.data_sets, &indices, aggregation);
     let ignored_non_numeric = collect_ignored_non_numeric(&raw);
-    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric })
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), no_n_summary: Vec::new(), interval_summary: Vec::new(), ignored_non_numeric })
 }
 
 fn extract_grouped_table_for_desc(
@@ -719,14 +854,37 @@ fn extract_grouped_table_for_desc(
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled,
+            no_n_summary: Vec::new(),
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
     }
-    if t.subcolumn_mode.is_pre_summarized() {
-        return Err(StatsError::RequiresRawReplicates);
+    if matches!(t.subcolumn_mode, SubcolumnMode::MeanSd | SubcolumnMode::MeanSem) {
+        let no_n_summary = extract_spread_only_series(&t.data_sets, &indices, t.subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary,
+            interval_summary: Vec::new(),
+            ignored_non_numeric: Vec::new(),
+        });
+    }
+    if matches!(t.subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
+        let interval_summary = extract_interval_summary_series(&t.data_sets, &indices, t.subcolumn_mode)?;
+        return Ok(DescriptiveSeriesExtraction {
+            raw: Vec::new(),
+            pooled: Vec::new(),
+            no_n_summary: Vec::new(),
+            interval_summary,
+            ignored_non_numeric: Vec::new(),
+        });
     }
     let raw = aggregate_replicate_datasets(&t.data_sets, &indices, aggregation);
     let ignored_non_numeric = collect_ignored_non_numeric(&raw);
-    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric })
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), no_n_summary: Vec::new(), interval_summary: Vec::new(), ignored_non_numeric })
 }
 
 fn aggregate_replicate_datasets(
@@ -1623,6 +1781,7 @@ pub(crate) fn ks_asymptotic_p(lambda: f64) -> f64 {
 
 /// Execute [`DescriptiveSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &DescriptiveSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::DescriptiveStats(desc.clone()))?;
     if let Some(mu0) = desc.hypothetical_value
         && !mu0.is_finite()
     {
@@ -1632,7 +1791,9 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
     let raw_series = extracted.raw;
     let pooled_series = extracted.pooled;
-    if raw_series.is_empty() && pooled_series.is_empty() {
+    let no_n_series = extracted.no_n_summary;
+    let interval_series = extracted.interval_summary;
+    if raw_series.is_empty() && pooled_series.is_empty() && no_n_series.is_empty() && interval_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
 
@@ -1642,6 +1803,16 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     let conf = spec.confidence_level;
     if !pooled_series.is_empty() {
         populate_pooled_descriptive_sheet(&mut res, &pooled_series, conf)?;
+        sanitize_result_sheet_floats(&mut res)?;
+        return Ok(res);
+    }
+    if !no_n_series.is_empty() {
+        populate_spread_only_descriptive_sheet(&mut res, &no_n_series)?;
+        sanitize_result_sheet_floats(&mut res)?;
+        return Ok(res);
+    }
+    if !interval_series.is_empty() {
+        populate_interval_summary_descriptive_sheet(&mut res, &interval_series)?;
         sanitize_result_sheet_floats(&mut res)?;
         return Ok(res);
     }
@@ -1731,9 +1902,13 @@ fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected:
                 {
                     raw_pts.push((x, pt.mean, pt.n));
                 }
-            } else if !xy.y_subcolumn_mode.is_pre_summarized()
-                && let Some(row) = ds.cells.get(r)
-            {
+            } else if xy.y_subcolumn_mode.is_pre_summarized() {
+                if let Some(center) = ds.cells.get(r).and_then(|row| row.first()).and_then(|c| c.active_number())
+                    && center.is_finite()
+                {
+                    raw_pts.push((x, center, 1.0));
+                }
+            } else if let Some(row) = ds.cells.get(r) {
                 for y in row.iter().filter_map(|c| c.active_number()) {
                     raw_pts.push((x, y, 1.0));
                 }
@@ -1953,6 +2128,258 @@ fn populate_pooled_descriptive_sheet(res: &mut ResultSheet, pooled_series: &[Ind
     Ok(())
 }
 
+fn populate_spread_only_descriptive_sheet(res: &mut ResultSheet, series: &[IndexedSpreadOnlySeries]) -> Result<(), StatsError> {
+    let mode = series.first().map_or(SubcolumnMode::MeanSd, |s| s.mode);
+    let spread_row_label = match mode {
+        SubcolumnMode::MeanSem => "Entered SEM (single row)",
+        _ => "Entered SD (single row)",
+    };
+    let spread_scalar_key = match mode {
+        SubcolumnMode::MeanSem => "SEM",
+        _ => "SD",
+    };
+
+    struct SpreadOnlySummary {
+        label: String,
+        row_count: usize,
+        min_mean: f64,
+        median_mean: f64,
+        max_mean: f64,
+        mean_of_means: f64,
+        single_row_spread: Option<f64>,
+    }
+
+    let mut summaries = Vec::with_capacity(series.len());
+    for s in series {
+        let means: Vec<f64> = s.rows.iter().map(|(m, _)| *m).collect();
+        validate_finite_slice(&means)?;
+        let sorted = sorted_finite(&means);
+        let (_, median_mean, _) = quartiles_hinge(&sorted).ok_or(StatsError::EmptyInput)?;
+        let moments = SummaryMoments::from_slice(&means)?;
+        let single_row_spread = if s.rows.len() == 1 { s.rows[0].1 } else { None };
+        let ds_idx = Some(s.data_set_index);
+        push_scalar(res, "Mean", ds_idx, moments.mean);
+        if let Some(sp) = single_row_spread {
+            push_scalar(res, spread_scalar_key, ds_idx, sp);
+        }
+        summaries.push(SpreadOnlySummary {
+            label: s.label.clone(),
+            row_count: s.rows.len(),
+            min_mean: sorted[0],
+            median_mean,
+            max_mean: sorted[sorted.len() - 1],
+            mean_of_means: moments.mean,
+            single_row_spread,
+        });
+    }
+
+    res.tabs.push(
+        TabBuilder::new("desc-summary-no-n", "Descriptive Statistics (No N)", ResultTabKind::DescriptiveSummary)
+            .headers(summaries.iter().map(|s| s.label.as_str()))
+            .row("Entered summary rows", summaries.iter().map(|s| num_cell(s.row_count as f64)))
+            .row("Minimum (entered means)", summaries.iter().map(|s| num_cell(s.min_mean)))
+            .row("Median (entered means)", summaries.iter().map(|s| num_cell(s.median_mean)))
+            .row("Maximum (entered means)", summaries.iter().map(|s| num_cell(s.max_mean)))
+            .row("Mean (entered / unweighted)", summaries.iter().map(|s| num_cell(s.mean_of_means)))
+            .row(spread_row_label, summaries.iter().map(|s| opt_num_cell(s.single_row_spread)))
+            .footnote(
+                "Sample size N is not recorded in MeanSd/MeanSem subcolumns; pooled variance across multiple rows, SD/SEM conversion, confidence intervals, quantiles, and normality tests require N or raw replicates.",
+            )
+            .build(),
+    );
+    res.checklist.push(checklist_item(
+        "Pre-summarized input without N",
+        ChecklistStatus::Info,
+        Some(format!("{mode:?}")),
+        "Reported entered means and single-row spread without fabricating N; pooled variance, CIs, and inferential tests require N or raw replicates.",
+    ));
+    Ok(())
+}
+
+/// Populate descriptive statistics for pre-summarized interval/limit/quartile columns
+/// (`MeanLowHigh`, `UpperLowerLimits`, and `MedianIqr`; Zar 2010, Ch. 3–4; Tukey 1977).
+///
+/// Never fabricates sample size `N`, `SD`, `SEM`, or parametric confidence intervals; for
+/// `MedianIqr` the entered central value is reported strictly as a median rather than a mean.
+fn populate_interval_summary_descriptive_sheet(res: &mut ResultSheet, series: &[IndexedIntervalSummarySeries]) -> Result<(), StatsError> {
+    let mode = series.first().map_or(SubcolumnMode::MeanLowHigh, |s| s.mode);
+
+    struct IntervalSummaryRow {
+        label: String,
+        row_count: usize,
+        min_center: f64,
+        median_center: f64,
+        max_center: f64,
+        mean_center: f64,
+        single_center: Option<f64>,
+        single_sub1: Option<f64>,
+        single_sub2: Option<f64>,
+        single_lower: Option<f64>,
+        single_upper: Option<f64>,
+        single_width: Option<f64>,
+    }
+
+    let mut summaries = Vec::with_capacity(series.len());
+    for s in series {
+        let centers: Vec<f64> = s.rows.iter().map(|(c, _, _)| *c).collect();
+        validate_finite_slice(&centers)?;
+        let sorted = sorted_finite(&centers);
+        let (_, median_center, _) = quartiles_hinge(&sorted).ok_or(StatsError::EmptyInput)?;
+        let moments = SummaryMoments::from_slice(&centers)?;
+        let ds_idx = Some(s.data_set_index);
+
+        let (single_center, single_sub1, single_sub2, single_lower, single_upper, single_width) = if s.rows.len() == 1 {
+            let (c, a, b) = s.rows[0];
+            match mode {
+                SubcolumnMode::MeanLowHigh => {
+                    let lo = a.map(|down| c - down).filter(|v| v.is_finite());
+                    let hi = b.map(|up| c + up).filter(|v| v.is_finite());
+                    let width = match (a, b) {
+                        (Some(down), Some(up)) if (down + up).is_finite() => Some(down + up),
+                        _ => None,
+                    };
+                    (Some(c), a, b, lo, hi, width)
+                }
+                SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+                    let (lo, hi) = match (a, b) {
+                        (Some(v1), Some(v2)) => (Some(v1.min(v2)), Some(v1.max(v2))),
+                        other => other,
+                    };
+                    let width = match (lo, hi) {
+                        (Some(v1), Some(v2)) if (v2 - v1).is_finite() => Some(v2 - v1),
+                        _ => None,
+                    };
+                    (Some(c), lo, hi, lo, hi, width)
+                }
+                _ => (Some(c), a, b, None, None, None),
+            }
+        } else {
+            (None, None, None, None, None, None)
+        };
+
+        match mode {
+            SubcolumnMode::MedianIqr => {
+                push_scalar(res, "Median", ds_idx, single_center.unwrap_or(median_center));
+                if let Some(q1) = single_lower {
+                    push_scalar(res, "Q1", ds_idx, q1);
+                }
+                if let Some(q3) = single_upper {
+                    push_scalar(res, "Q3", ds_idx, q3);
+                }
+                if let Some(iqr) = single_width {
+                    push_scalar(res, "IQR", ds_idx, iqr);
+                }
+            }
+            SubcolumnMode::UpperLowerLimits => {
+                push_scalar(res, "Mean", ds_idx, moments.mean);
+                if let Some(lo) = single_lower {
+                    push_scalar(res, "LowerLimit", ds_idx, lo);
+                }
+                if let Some(hi) = single_upper {
+                    push_scalar(res, "UpperLimit", ds_idx, hi);
+                }
+                if let Some(width) = single_width {
+                    push_scalar(res, "IntervalWidth", ds_idx, width);
+                }
+            }
+            _ => {
+                push_scalar(res, "Mean", ds_idx, moments.mean);
+                if let Some(lo) = single_lower {
+                    push_scalar(res, "LowerBound", ds_idx, lo);
+                }
+                if let Some(hi) = single_upper {
+                    push_scalar(res, "UpperBound", ds_idx, hi);
+                }
+                if let Some(width) = single_width {
+                    push_scalar(res, "IntervalWidth", ds_idx, width);
+                }
+            }
+        }
+
+        summaries.push(IntervalSummaryRow {
+            label: s.label.clone(),
+            row_count: s.rows.len(),
+            min_center: sorted[0],
+            median_center,
+            max_center: sorted[sorted.len() - 1],
+            mean_center: moments.mean,
+            single_center,
+            single_sub1,
+            single_sub2,
+            single_lower,
+            single_upper,
+            single_width,
+        });
+    }
+
+    match mode {
+        SubcolumnMode::MedianIqr => {
+            res.tabs.push(
+                TabBuilder::new("desc-summary-median-iqr", "Descriptive Statistics (Median & IQR)", ResultTabKind::DescriptiveSummary)
+                    .headers(summaries.iter().map(|s| s.label.as_str()))
+                    .row("Entered summary rows", summaries.iter().map(|s| num_cell(s.row_count as f64)))
+                    .row("Minimum (entered medians)", summaries.iter().map(|s| num_cell(s.min_center)))
+                    .row("Median (entered medians)", summaries.iter().map(|s| num_cell(s.median_center)))
+                    .row("Maximum (entered medians)", summaries.iter().map(|s| num_cell(s.max_center)))
+                    .row("Entered Median (single row)", summaries.iter().map(|s| opt_num_cell(s.single_center)))
+                    .row("Entered 25% Percentile / Q1 (single row)", summaries.iter().map(|s| opt_num_cell(s.single_lower)))
+                    .row("Entered 75% Percentile / Q3 (single row)", summaries.iter().map(|s| opt_num_cell(s.single_upper)))
+                    .row("Interquartile Range (IQR, single row)", summaries.iter().map(|s| opt_num_cell(s.single_width)))
+                    .footnote(
+                        "MedianIqr subcolumns store nonparametric quartiles [Median, Q1, Q3] without sample size N; arithmetic mean, SD, SEM, confidence intervals, normality tests, and inferential hypothesis tests require raw replicates or parametric Mean/SD/N summaries.",
+                    )
+                    .build(),
+            );
+        }
+        SubcolumnMode::UpperLowerLimits => {
+            res.tabs.push(
+                TabBuilder::new("desc-summary-limits", "Descriptive Statistics (Upper / Lower Limits)", ResultTabKind::DescriptiveSummary)
+                    .headers(summaries.iter().map(|s| s.label.as_str()))
+                    .row("Entered summary rows", summaries.iter().map(|s| num_cell(s.row_count as f64)))
+                    .row("Minimum (entered means)", summaries.iter().map(|s| num_cell(s.min_center)))
+                    .row("Median (entered means)", summaries.iter().map(|s| num_cell(s.median_center)))
+                    .row("Maximum (entered means)", summaries.iter().map(|s| num_cell(s.max_center)))
+                    .row("Mean (entered / unweighted)", summaries.iter().map(|s| num_cell(s.mean_center)))
+                    .row("Entered Lower limit (single row)", summaries.iter().map(|s| opt_num_cell(s.single_lower)))
+                    .row("Entered Upper limit (single row)", summaries.iter().map(|s| opt_num_cell(s.single_upper)))
+                    .row("Interval width (single row)", summaries.iter().map(|s| opt_num_cell(s.single_width)))
+                    .footnote(
+                        "UpperLowerLimits subcolumns store explicit bounds [Mean, Lower, Upper] without sample size N or parametric SD; pooled variance, CIs, and inferential tests require N and SD/SEM/%CV or raw replicates.",
+                    )
+                    .build(),
+            );
+        }
+        _ => {
+            res.tabs.push(
+                TabBuilder::new("desc-summary-interval", "Descriptive Statistics (Asymmetric Error Bounds)", ResultTabKind::DescriptiveSummary)
+                    .headers(summaries.iter().map(|s| s.label.as_str()))
+                    .row("Entered summary rows", summaries.iter().map(|s| num_cell(s.row_count as f64)))
+                    .row("Minimum (entered means)", summaries.iter().map(|s| num_cell(s.min_center)))
+                    .row("Median (entered means)", summaries.iter().map(|s| num_cell(s.median_center)))
+                    .row("Maximum (entered means)", summaries.iter().map(|s| num_cell(s.max_center)))
+                    .row("Mean (entered / unweighted)", summaries.iter().map(|s| num_cell(s.mean_center)))
+                    .row("Entered -Error (single row)", summaries.iter().map(|s| opt_num_cell(s.single_sub1)))
+                    .row("Entered +Error (single row)", summaries.iter().map(|s| opt_num_cell(s.single_sub2)))
+                    .row("Lower bound (single row)", summaries.iter().map(|s| opt_num_cell(s.single_lower)))
+                    .row("Upper bound (single row)", summaries.iter().map(|s| opt_num_cell(s.single_upper)))
+                    .row("Interval width (single row)", summaries.iter().map(|s| opt_num_cell(s.single_width)))
+                    .footnote(
+                        "MeanLowHigh subcolumns store asymmetric offsets [Mean, -Error, +Error] without sample size N or parametric SD; pooled variance, CIs, and inferential tests require N and SD/SEM/%CV or raw replicates.",
+                    )
+                    .build(),
+            );
+        }
+    }
+
+    res.checklist.push(checklist_item(
+        "Pre-summarized interval/quartile input",
+        ChecklistStatus::Info,
+        Some(format!("{mode:?}")),
+        "Reported entered central location and explicit interval/quartile bounds without fabricating N, SD, SEM, or inferential tests.",
+    ));
+    Ok(())
+}
+
 fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel) -> ResultTab {
     let custom_pair = summaries.iter().find_map(|s| match (s.custom_lower_percentile, s.custom_upper_percentile) {
         (Some((p_lo, _)), Some((p_hi, _))) => Some((p_lo, p_hi)),
@@ -2085,11 +2512,13 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
     let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
     let raw_series = extracted.raw;
     if raw_series.is_empty() {
-        if !extracted.pooled.is_empty() {
+        if !extracted.pooled.is_empty() || !extracted.no_n_summary.is_empty() || !extracted.interval_summary.is_empty() {
+            enforce_summary_mode_matrix(sheet, &AnalysisKind::OutlierDetection(outlier_spec))?;
             return Err(StatsError::RequiresRawReplicates);
         }
         return Err(StatsError::EmptyInput);
     }
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::OutlierDetection(outlier_spec))?;
     let mut tab = TabBuilder::new("outliers", "Identified Outliers", ResultTabKind::MainSummary).headers([
         "Column",
         "Row Index (1-based)",

@@ -1,6 +1,6 @@
 //! Editing and history commands (`edit.undo`, `edit.redo`, `edit.pasteResultTable`).
 
-use curvebook_doc::{DocError, EmbeddedTableStyle, ErrorCode, GraphAnnotation, LayoutItem, MAX_LAYOUT_ITEMS, RectPt, ResultStatus, SheetSection};
+use curvebook_doc::{DocError, EmbeddedTableStyle, ErrorCode, GraphAnnotation, LayoutItem, MAX_LAYOUT_ITEMS, RectPt, SheetSection};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -157,7 +157,7 @@ fn validate_optional_result_tab(
 ) -> Result<(), EngineError> {
     let res = require_result_sheet(doc, res_id)?;
     if let Some(tid) = tab_id
-        && res.status == ResultStatus::UpToDate
+        && res.has_displayable_output()
         && !res.tabs.iter().any(|t| t.id == tid || t.title.eq_ignore_ascii_case(tid))
     {
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("result tab `{tid}` not found on `{res_id}`"))

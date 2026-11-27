@@ -328,6 +328,13 @@ impl From<TransformError> for EngineError {
             TransformError::IncompatibleTable { operation, kind } => {
                 (ErrorCode::BadInput, Some(json!({ "operation": operation, "kind": format!("{kind:?}") })), None)
             }
+            TransformError::UnsupportedSubcolumnMode { operation, table_kind, mode, reason } => (
+                ErrorCode::BadInput,
+                Some(
+                    json!({ "operation": operation, "table_kind": format!("{table_kind:?}"), "subcolumn_mode": format!("{mode:?}"), "reason": reason }),
+                ),
+                Some("Use a compatible subcolumn layout or raw observations for this transform."),
+            ),
             TransformError::MissingHook { description } => {
                 (ErrorCode::NotFound, Some(json!({ "hook": description })), Some("Create or bind the referenced sheet, column, or constant hook."))
             }
@@ -359,6 +366,14 @@ impl From<StatsError> for EngineError {
             StatsError::RequiresRawReplicates => {
                 (ErrorCode::BadInput, None, Some("Provide raw replicate values rather than pre-averaged summary statistics."), false)
             }
+            StatsError::UnsupportedSubcolumnMode { analysis, table_kind, mode, reason } => (
+                ErrorCode::BadInput,
+                Some(
+                    json!({ "analysis": analysis, "table_kind": format!("{table_kind:?}"), "subcolumn_mode": format!("{mode:?}"), "reason": reason }),
+                ),
+                Some("Provide Mean/SD/N, Mean/SEM/N, Mean/%CV/N, or raw replicate observations for this analysis."),
+                false,
+            ),
             StatsError::IncompatibleTable { analysis, actual } => (
                 ErrorCode::BadInput,
                 Some(json!({ "analysis": analysis, "actual": format!("{actual:?}") })),
@@ -408,6 +423,14 @@ impl From<FitError> for EngineError {
                 (ErrorCode::BadInput, Some(json!({ "reason": reason })), Some("Switch weighting mode or remove non-positive Y values."), false)
             }
             FitError::RequiresRawReplicates => (ErrorCode::BadInput, None, Some("Provide raw Y replicates instead of summary-only entries."), false),
+            FitError::UnsupportedSubcolumnMode { analysis, table_kind, mode, reason } => (
+                ErrorCode::BadInput,
+                Some(
+                    json!({ "analysis": analysis, "table_kind": format!("{table_kind:?}"), "subcolumn_mode": format!("{mode:?}"), "reason": reason }),
+                ),
+                Some("Provide Mean/SD/N, Mean/SEM/N, Mean/%CV/N, or raw replicate observations for this regression."),
+                false,
+            ),
             FitError::BadInitialValues { reason } => (
                 ErrorCode::BadInput,
                 Some(json!({ "reason": reason })),

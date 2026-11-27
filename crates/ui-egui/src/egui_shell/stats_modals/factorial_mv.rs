@@ -26,7 +26,7 @@ pub(super) fn render_factorial_anova_design(
     let AnalysisKind::FactorialAnova(f) = &spec.kind else {
         return;
     };
-    let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
+    let paired_en = r1_paired_or_matched_allowed(doc, spec.source_sheet_id.as_ref());
     if render_modal_checkbox(
         ui,
         tokens,
@@ -89,7 +89,7 @@ pub(super) fn render_factorial_anova_design(
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
-    if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
+    if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src))
         && let TableArchetype::MultipleVariables(mv) = &ds.archetype
     {
         ui.add_space(4.0);
@@ -198,7 +198,7 @@ pub(super) fn render_multivariate_design_controls(
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
-            if let Some(ds) = resolve_source_data_sheet(doc, &spec.source_sheet_id)
+            if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src))
                 && let TableArchetype::MultipleVariables(mv_tbl) = &ds.archetype
             {
                 let selected_outcome = (*pcr_outcome_column).or(ep.pcr_outcome_column);

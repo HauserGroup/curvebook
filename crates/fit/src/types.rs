@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use curvebook_doc::{
-    Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype, VariableColumn,
-    VariableRole, parse_column_title_numeric_hook,
+    AnalysisKind, Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, SummaryModeRefusalReason,
+    SummaryModeSupport, TableArchetype, TableKind, VariableColumn, VariableRole, parse_column_title_numeric_hook, summary_mode_row_for_spec,
 };
 
 use crate::error::FitError;
@@ -233,6 +233,11 @@ impl<'a> HookContext<'a> {
         if let ResultStatus::Failed { message, .. } = &rs.status {
             return Err(FitError::HookResolutionError { message: format!("upstream result sheet `{result_sheet_id}` failed: {message}") });
         }
+        if rs.is_imported() {
+            return Err(FitError::HookResolutionError {
+                message: format!("upstream result sheet `{result_sheet_id}` is an imported snapshot and cannot supply computed hook scalars"),
+            });
+        }
         rs.lookup_scalar(parameter_key, data_set_index).ok_or_else(|| FitError::HookResolutionError {
             message: format!("scalar `{parameter_key}` missing or non-finite on `{result_sheet_id}`"),
         })
@@ -417,6 +422,38 @@ fn resolve_selected_indices(total: usize, selected: &[usize]) -> Result<Vec<usiz
     Ok(selected.to_vec())
 }
 
+/// Enforce the canonical `curvebook-doc` summary-mode support matrix ([`curvebook_doc::SUMMARY_MODE_MATRIX`])
+/// for linear and nonlinear regression analyses against `Xy` or `Grouped` tables.
+///
+/// Leaves incompatible table archetypes (`!kind.is_compatible_with(table_kind)`) to fail with
+/// [`FitError::IncompatibleTable`] downstream, and returns [`FitError::RequiresRawReplicates`] or
+/// [`FitError::UnsupportedSubcolumnMode`] for every refused summary cell.
+pub fn enforce_summary_mode_matrix(sheet: &DataSheet, kind: &AnalysisKind) -> Result<(), FitError> {
+    let table_kind = sheet.archetype.kind();
+    if !kind.is_compatible_with(table_kind) {
+        return Ok(());
+    }
+    let Some(mode) = sheet.archetype.primary_subcolumn_mode() else {
+        return Ok(());
+    };
+    if !mode.is_pre_summarized() {
+        return Ok(());
+    }
+    let Some(row) = summary_mode_row_for_spec(kind, table_kind) else {
+        return Ok(());
+    };
+    let Some(verdict) = row.support_for(mode) else {
+        return Ok(());
+    };
+    match verdict {
+        SummaryModeSupport::Supported(_) => Ok(()),
+        SummaryModeSupport::Refused(SummaryModeRefusalReason::RequiresRawReplicates) => Err(FitError::RequiresRawReplicates),
+        SummaryModeSupport::Refused(reason) => {
+            Err(FitError::UnsupportedSubcolumnMode { analysis: row.label, table_kind, mode, reason: reason.message() })
+        }
+    }
+}
+
 fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
     let indices = resolve_selected_indices(xy.data_sets.len(), selected_data_sets)?;
     let mut series_list = Vec::with_capacity(indices.len());
@@ -492,6 +529,13 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                 (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
                 _ => {}
             }
+        } else if matches!(xy.y_subcolumn_mode, curvebook_doc::SubcolumnMode::MeanSd | curvebook_doc::SubcolumnMode::MeanSem) {
+            return Err(FitError::UnsupportedSubcolumnMode {
+                analysis: "Regression fitting",
+                table_kind: TableKind::Xy,
+                mode: xy.y_subcolumn_mode,
+                reason: SummaryModeRefusalReason::MissingSampleSizeOrVariance.message(),
+            });
         } else if xy.y_subcolumn_mode.is_pre_summarized() {
             match (x_opt, subcells.first().and_then(Cell::active_number)) {
                 (Some(x), Some(y)) => {
@@ -578,6 +622,13 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                         row,
                     });
                 }
+            } else if matches!(g.subcolumn_mode, curvebook_doc::SubcolumnMode::MeanSd | curvebook_doc::SubcolumnMode::MeanSem) {
+                return Err(FitError::UnsupportedSubcolumnMode {
+                    analysis: "Regression fitting",
+                    table_kind: TableKind::Grouped,
+                    mode: g.subcolumn_mode,
+                    reason: SummaryModeRefusalReason::MissingSampleSizeOrVariance.message(),
+                });
             } else if g.subcolumn_mode.is_pre_summarized() {
                 if let Some(y) = subcells.first().and_then(Cell::active_number) {
                     points.push(DataPoint {

@@ -9,10 +9,10 @@ use curvebook_doc::analysis::{
 };
 use curvebook_doc::{
     AnalysisKind, AreaUnderCurveSpec, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod,
-    DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting, LeveneTestSpec,
-    LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec, SimpleLogisticSpec,
-    SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, GlmFamily, GlmSpec, ImportedSnapshotSpec, KappaWeighting,
+    LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, RocSpec,
+    SimpleLogisticSpec, SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -58,6 +58,10 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::FitSplineLowess, AnalysisKind::FitSplineLowess(SplineLowessSpec::default())),
         (AnalysisKindId::LeveneTest, AnalysisKind::LeveneTest(LeveneTestSpec::default())),
         (AnalysisKindId::AreaUnderCurve, AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default())),
+        (
+            AnalysisKindId::ImportedSnapshot,
+            AnalysisKind::ImportedSnapshot(ImportedSnapshotSpec { original_kind_label: String::from("Imported analysis") }),
+        ),
     ]
 }
 
@@ -141,8 +145,14 @@ fn slugs_shorthands_anchors_and_catalog_ids_are_unique_and_well_formed() {
         assert!(!desc.title.is_empty());
         assert!(!desc.short_label.is_empty());
         assert!(!desc.description.is_empty());
-        assert!(!desc.shorthands.is_empty());
-        assert!(desc.shorthands.contains(&desc.canonical_shorthand));
+        if desc.user_creatable {
+            assert!(!desc.shorthands.is_empty());
+            assert!(desc.shorthands.contains(&desc.canonical_shorthand));
+        } else {
+            assert!(desc.shorthands.is_empty());
+            assert!(desc.canonical_shorthand.is_empty());
+            assert!(desc.ui_catalog_ids.is_empty());
+        }
 
         for &alias in desc.shorthands {
             let norm = alias.to_ascii_lowercase();
@@ -175,7 +185,16 @@ fn slugs_shorthands_anchors_and_catalog_ids_are_unique_and_well_formed() {
 fn table_compatibility_and_domain_routing_invariants_hold() {
     for (_, kind) in representative_variants() {
         let desc = descriptor_for_kind(&kind);
-        assert!(!desc.compatible_table_kinds.is_empty());
+        if desc.user_creatable {
+            assert!(!desc.compatible_table_kinds.is_empty());
+        } else {
+            assert!(desc.compatible_table_kinds.is_empty());
+            assert_eq!(desc.recompute_strategy, AnalysisRecomputeStrategy::PreserveSnapshot);
+            for tk in TableKind::ALL {
+                assert!(!kind.is_compatible_with(tk));
+            }
+            continue;
+        }
 
         if !desc.has_method_specific_table_rules {
             for tk in TableKind::ALL {
@@ -223,11 +242,15 @@ fn lookup_helpers_resolve_every_descriptor_and_reject_unknown_queries() {
     for desc in &ALL_ANALYSIS_DESCRIPTORS {
         assert_eq!(descriptor_by_slug(desc.slug), Some(desc));
         assert_eq!(descriptor_by_serde_variant(desc.serde_variant), Some(desc));
-        assert_eq!(descriptor_by_shorthand(desc.canonical_shorthand), Some(desc));
-        assert_eq!(descriptor_by_shorthand(&format!("  {}  ", desc.canonical_shorthand.to_ascii_uppercase())), Some(desc));
         assert_eq!(resolve_analysis_descriptor(desc.slug), Some(desc));
         assert_eq!(resolve_analysis_descriptor(desc.serde_variant), Some(desc));
-        assert_eq!(resolve_analysis_descriptor(desc.canonical_shorthand), Some(desc));
+        if desc.user_creatable {
+            assert_eq!(descriptor_by_shorthand(desc.canonical_shorthand), Some(desc));
+            assert_eq!(descriptor_by_shorthand(&format!("  {}  ", desc.canonical_shorthand.to_ascii_uppercase())), Some(desc));
+            assert_eq!(resolve_analysis_descriptor(desc.canonical_shorthand), Some(desc));
+        } else {
+            assert_eq!(descriptor_by_shorthand(desc.canonical_shorthand), None);
+        }
         for &alias in desc.shorthands {
             assert_eq!(descriptor_by_shorthand(alias), Some(desc));
         }

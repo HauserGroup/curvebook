@@ -23,6 +23,7 @@ pub use ui_commands::{ActionRank, UI_COMMANDS, UiCommandSpec};
 /// OS pasteboard access (`R15-GUI-07`, `R15-GUI-13`, `R15-GUI-23`).
 pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "project.open",
+    "project.merge",
     "project.save",
     "project.saveAs",
     "project.saveTemplate",
@@ -51,6 +52,8 @@ pub const DESKTOP_HOST_ROUTED_COMMANDS: &[&str] = &[
     "analysis.exportJson",
     "analysis.exportCsv",
     "ui.export.allTablesCsv",
+    "ui.export.pzfx.open",
+    "project.exportPzfx",
     "result.generateReport",
     "graph.insertImage",
     "layout.insertImage",

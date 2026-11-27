@@ -10,8 +10,9 @@
 //!   `doi:10.1080/01621459.1952.10483441`.
 
 use curvebook_doc::{
-    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PairedObservationAccounting, RemediationKind, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PairedObservationAccounting, RemediationKind, ResultCell,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, SummaryModeRefusalReason, SummaryModeSupport,
+    TableArchetype, VariableRole, summary_mode_row_for_spec,
 };
 pub use curvebook_doc::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
@@ -400,6 +401,39 @@ pub fn t_crit_two_sided(confidence: ConfidenceLevel, df: f64) -> Result<f64, Sta
 #[must_use]
 pub const fn is_parametric_summary_mode(mode: SubcolumnMode) -> bool {
     mode.supports_parametric_moments()
+}
+
+/// Enforce the canonical `curvebook-doc` summary-mode support matrix ([`curvebook_doc::SUMMARY_MODE_MATRIX`])
+/// before running any statistical procedure on a `Column`, `Xy`, or `Grouped` [`DataSheet`].
+///
+/// Leaves archetype mismatches (`!kind.is_compatible_with(table_kind)`) to return
+/// [`StatsError::IncompatibleTable`] downstream, and returns the matrix-prescribed refusal
+/// ([`StatsError::RequiresRawReplicates`] or [`StatsError::UnsupportedSubcolumnMode`]) for every
+/// refused pre-summarized cell.
+pub fn enforce_summary_mode_matrix(sheet: &DataSheet, kind: &AnalysisKind) -> Result<(), StatsError> {
+    let table_kind = sheet.archetype.kind();
+    if !kind.is_compatible_with(table_kind) {
+        return Ok(());
+    }
+    let Some(mode) = sheet.archetype.primary_subcolumn_mode() else {
+        return Ok(());
+    };
+    if !mode.is_pre_summarized() {
+        return Ok(());
+    }
+    let Some(row) = summary_mode_row_for_spec(kind, table_kind) else {
+        return Ok(());
+    };
+    let Some(verdict) = row.support_for(mode) else {
+        return Ok(());
+    };
+    match verdict {
+        SummaryModeSupport::Supported(_) => Ok(()),
+        SummaryModeSupport::Refused(SummaryModeRefusalReason::RequiresRawReplicates) => Err(StatsError::RequiresRawReplicates),
+        SummaryModeSupport::Refused(reason) => {
+            Err(StatsError::UnsupportedSubcolumnMode { analysis: row.label, table_kind, mode, reason: reason.message() })
+        }
+    }
 }
 
 /// Append a warning checklist entry and tab footnote when unexcluded non-numeric or non-finite

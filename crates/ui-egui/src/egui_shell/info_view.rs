@@ -172,7 +172,7 @@ pub fn count_constant_hook_references(doc: &ProjectDocument, info_sheet_id: &She
         let mut count = 0usize;
         for hook in rs.analysis.kind.hooked_sources() {
             if let curvebook_doc::HookSource::InfoConstant { info_sheet_id: hid, constant_name: cname } = &hook
-                && matches_info_constant_hook(doc, info_sheet_id, needle, hid.as_ref(), cname, Some(&rs.analysis.source_sheet_id))
+                && matches_info_constant_hook(doc, info_sheet_id, needle, hid.as_ref(), cname, rs.analysis.source_sheet_id.as_ref())
             {
                 count += 1;
             }

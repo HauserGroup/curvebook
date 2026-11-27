@@ -224,6 +224,7 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "project.new", Some("menu.file.new_project"));
     push_action(&mut nodes, app, "project.open", Some("menu.file.open"));
     push_action(&mut nodes, app, "file.open_unpacked_dir", Some("menu.file.open_unpacked_dir"));
+    push_action(&mut nodes, app, "project.merge", Some("menu.file.merge_project"));
     push_action(&mut nodes, app, "project.save", Some("menu.file.save"));
     push_action(&mut nodes, app, "file.save_as", Some("menu.file.save_as"));
     nodes.push(CuratedMenuNode::Separator);
@@ -252,6 +253,8 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut export_children, app, "ui.export.allTablesCsv.open", None);
     push_action(&mut export_children, app, "ui.export.resultsCsv.open", None);
     push_action(&mut export_children, app, "analysis.exportJson", None);
+    export_children.push(CuratedMenuNode::Separator);
+    push_action(&mut export_children, app, "ui.export.pzfx.open", None);
     export_children.push(CuratedMenuNode::Separator);
     push_action(&mut export_children, app, "result.generateReport", Some("menu.file.save_methods_report"));
     nodes.push(submenu_node("menu.file.export", "menu.file.export", app, export_children));

@@ -243,7 +243,10 @@ fn analyze_autofocus_instant_launch_duplicate_and_retarget_modals() -> BoxRes {
     assert!(!incompat.enabled && incompat.disabled_reason.is_some());
     driver.click_widget_id("change_data.candidate.1")?;
     driver.click_widget_id("modal.ok")?;
-    assert_eq!(driver.state().app.document().result_sheet(&first_rs_id).ok_or("missing result")?.analysis.source_sheet_id.as_str(), "col-alt");
+    assert_eq!(
+        driver.state().app.document().result_sheet(&first_rs_id).ok_or("missing result")?.analysis.source_sheet_id.as_ref().map(SheetId::as_str),
+        Some("col-alt")
+    );
     Ok(())
 }
 

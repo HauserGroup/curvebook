@@ -15,15 +15,17 @@
 
 pub use curvebook_doc::RocCiMethod;
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultSheet, ResultTabKind, RocSpec, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultSheet, ResultTabKind, RocSpec,
+    TableArchetype, VariableRole,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{norm_two_sided_isf, norm_two_sided_p};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, ci_cell, extract_numeric_columns, init_result_sheet, num_cell,
-    opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices, validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, ci_cell, enforce_summary_mode_matrix, extract_numeric_columns,
+    init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -337,6 +339,7 @@ pub fn compare_roc_unpaired(roc_a: &RocResult, roc_b: &RocResult) -> RocComparis
 /// Execute a [`RocSpec`] against a 2-column `Column` or `MultipleVariables` [`DataSheet`]
 /// (column 0 = Controls / Negatives, column 1 = Cases / Positives).
 pub fn run_roc_analysis(sheet: &DataSheet, spec: &AnalysisSpec, roc_spec: &RocSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::RocCurve(*roc_spec))?;
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;

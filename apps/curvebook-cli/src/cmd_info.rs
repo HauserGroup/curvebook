@@ -184,8 +184,9 @@ fn summarize_result_sheet_json(res: &ResultSheet) -> Value {
     let mut payload = json!({
         "id": res.id.as_str(),
         "title": res.title(),
-        "source_sheet_id": res.analysis.source_sheet_id.as_str(),
+        "source_sheet_id": res.analysis.source_sheet_id.as_ref().map(curvebook_doc::SheetId::as_str),
         "status": format_result_status(&res.status),
+        "provenance": &res.provenance,
         "scalars": scalar_map,
         "scalar_entries": scalar_entries,
         "tabs": tabs,
@@ -204,6 +205,8 @@ fn format_result_status(status: &ResultStatus) -> Value {
     match status {
         ResultStatus::Dirty => json!({ "state": "dirty" }),
         ResultStatus::UpToDate => json!({ "state": "up_to_date" }),
+        ResultStatus::Imported => json!({ "state": "imported" }),
+        ResultStatus::ImportedStale => json!({ "state": "imported_stale" }),
         ResultStatus::Failed { code, message } => json!({ "state": "failed", "code": code, "message": message }),
     }
 }

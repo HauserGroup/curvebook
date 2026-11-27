@@ -1755,6 +1755,8 @@ fn paint_gallery_thumbnail(
                 let (status_lbl, status_col) = match &rs.status {
                     curvebook_doc::ResultStatus::Failed { .. } => ("Failed", tokens.link_red),
                     curvebook_doc::ResultStatus::Dirty => ("Pending", tokens.warning),
+                    curvebook_doc::ResultStatus::Imported => ("Imported", tokens.accent),
+                    curvebook_doc::ResultStatus::ImportedStale => ("Imported (stale)", tokens.warning),
                     curvebook_doc::ResultStatus::UpToDate => {
                         if rs.checklist.iter().any(|c| c.status == curvebook_doc::ChecklistStatus::Violated) {
                             ("Violated", tokens.link_red)

@@ -41,7 +41,10 @@ struct StatTabDef {
 }
 
 fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec, locale: &str) -> Vec<StatTabDef> {
-    let is_mv = resolve_source_data_sheet(app.document(), &spec.source_sheet_id)
+    let is_mv = spec
+        .source_sheet_id
+        .as_ref()
+        .and_then(|src| resolve_source_data_sheet(app.document(), src))
         .is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(_) => vec![
@@ -834,7 +837,7 @@ fn render_stat_rm_tab(
             render_cov_structure_picker(ui, spec, f.residual_covariance, &reml_ctrl_en, tokens, meta, intents);
         }
         AnalysisKind::TwoGroupComparison(_) => {
-            let paired_en = r1_paired_or_matched_allowed(app.document(), Some(&spec.source_sheet_id));
+            let paired_en = r1_paired_or_matched_allowed(app.document(), spec.source_sheet_id.as_ref());
             render_section_title(ui, tokens, "Within-Subject Matching");
             if render_modal_checkbox(
                 ui,
@@ -907,7 +910,7 @@ fn render_stat_multiplicity_tab(
         }
     }
     if let MultiplicityMethod::Dunnett { control_column } = cur {
-        let titles = column_titles_for_draft(app.document(), Some(&spec.source_sheet_id));
+        let titles = column_titles_for_draft(app.document(), spec.source_sheet_id.as_ref());
         if !titles.is_empty() {
             ui.add_space(6.0);
             render_section_title(ui, tokens, "Dunnett Control Group Column");

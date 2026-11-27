@@ -245,27 +245,64 @@ fn r17_1_drop_interchange_onto_empty_window_imports_without_prompt() -> Result<(
 }
 
 #[test]
-fn r17_1_drop_curvebook_onto_non_empty_project_is_unchanged() -> Result<(), Box<dyn std::error::Error>> {
-    let tmp = TempDirGuard::new("r17-1-drop-curvebook")?;
+fn s10_1_drop_curvebook_onto_non_empty_project_prompts_replace_merge_or_new_window() -> Result<(), Box<dyn std::error::Error>> {
+    let tmp = TempDirGuard::new("s10-1-drop-curvebook")?;
+    let base_title = column_three_group().title;
     let mut other = ProjectDocument::default();
     other.add_data_sheet(incoming_fixture().to_data_sheet("other-assay")?)?;
     let other_path = tmp.child("other.curvebook");
     save_project_file(&other_path, &other)?;
 
-    let (mut rt, wid, _) = saved_project_runtime(tmp.path())?;
-    let out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: other_path.clone() })?;
-    assert_eq!(out.action, "file.dropped_loaded_in_window");
-    assert!(matches!(rt.window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::None));
-    assert_eq!(sheet_titles(&rt, wid)?, vec![INCOMING_TITLE.to_owned()]);
-    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(other_path.as_path()));
+    // 1. Clean non-empty project: dropping `.curvebook` opens ImportProjectMode -> Merge routes to `project.merge` with origin badge.
+    {
+        let (rt, wid, saved) = saved_project_runtime(tmp.path())?;
+        let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
+        h.settle(2);
+        drop_file(&mut h, &other_path);
+        assert!(matches!(
+            &h.app.runtime().window(wid)?.app().canvas_dialogs.active_dialog,
+            ActiveDialog::ImportProjectMode { command_id, has_unsaved_changes: false, .. } if command_id == "project.open"
+        ));
+        let _ = h.click_widget("import_project_mode.merge")?;
+        let win = h.app.runtime().window(wid)?;
+        assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::None));
+        let titles = sheet_titles(h.app.runtime(), wid)?;
+        assert_eq!(titles, vec![base_title.to_owned(), INCOMING_TITLE.to_owned()]);
+        assert_eq!(win.app().session().file_path(), Some(saved.as_path()));
+        assert_eq!(win.app().document().data_sheets[0].origin, None);
+        assert_eq!(
+            win.app().document().data_sheets[1].origin.as_ref().map(|o| (o.source_label.as_str(), o.source_format.as_str())),
+            Some(("other.curvebook", "curvebook"))
+        );
+    }
 
-    let (mut rt, wid, _) = saved_project_runtime(tmp.path())?;
-    rt.window_mut(wid)?.execute_and_journal("sheet.rename", json!({ "sheet_id": BASE_SHEET_ID, "title": "Dirty Base" }))?;
-    let out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: other_path })?;
-    assert_eq!(out.action, "file.dropped_opened_new_window");
-    let new_wid = out.opened_window_id.ok_or("dirty drop must open new window")?;
-    assert!(matches!(rt.window(wid)?.app().canvas_dialogs.active_dialog, ActiveDialog::None));
-    assert_eq!(sheet_titles(&rt, wid)?, vec![String::from("Dirty Base")]);
-    assert_eq!(sheet_titles(&rt, new_wid)?, vec![INCOMING_TITLE.to_owned()]);
+    // 2. Replace choice opens the dropped `.curvebook` directly as the active document.
+    {
+        let (rt, wid, _) = saved_project_runtime(tmp.path())?;
+        let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
+        h.settle(2);
+        drop_file(&mut h, &other_path);
+        let _ = h.click_widget("import_project_mode.replace")?;
+        let win = h.app.runtime().window(wid)?;
+        assert!(matches!(win.app().canvas_dialogs.active_dialog, ActiveDialog::None));
+        assert_eq!(sheet_titles(h.app.runtime(), wid)?, vec![INCOMING_TITLE.to_owned()]);
+        assert!(win.app().document().data_sheets.iter().all(|s| s.origin.is_none()));
+    }
+
+    // 3. Dirty project: dropping `.curvebook` opens ImportProjectMode with unsaved warning -> Open in new window keeps dirty base intact.
+    {
+        let (mut rt, wid, _) = saved_project_runtime(tmp.path())?;
+        rt.window_mut(wid)?.execute_and_journal("sheet.rename", json!({ "sheet_id": BASE_SHEET_ID, "title": "Dirty Base" }))?;
+        let mut h = NativeHarness::new(CurveBookNativeApp::new(rt, wid, None));
+        h.settle(2);
+        drop_file(&mut h, &other_path);
+        assert!(matches!(
+            &h.app.runtime().window(wid)?.app().canvas_dialogs.active_dialog,
+            ActiveDialog::ImportProjectMode { command_id, has_unsaved_changes: true, .. } if command_id == "project.open"
+        ));
+        let _ = h.click_widget("import_project_mode.new_window")?;
+        assert_eq!(h.app.runtime().window_count(), 2);
+        assert_eq!(sheet_titles(h.app.runtime(), wid)?, vec![String::from("Dirty Base")]);
+    }
     Ok(())
 }

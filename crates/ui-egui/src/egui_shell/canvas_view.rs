@@ -9,7 +9,7 @@ use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
 use curvebook_doc::{
     AnalysisKind, EquationDisplayMode, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, LayoutItem, LayoutSheet, ProjectDocument,
-    RectPt as DocRectPt, ResultSheet, ResultStatus, ResultTabKind, SheetId, TableArchetype,
+    RectPt as DocRectPt, ResultSheet, ResultTabKind, SheetId, TableArchetype,
 };
 use curvebook_fit::tex_format::{
     format_linear_regression_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs, format_polynomial_equation_tex,
@@ -1620,7 +1620,7 @@ fn should_show_km_track(gs: &GraphSheet, doc: &ProjectDocument) -> bool {
     gs.spec.kind == GraphKind::Survival
         && (gs.spec.survival_number_at_risk
             || doc.result_sheets.iter().any(|r| {
-                r.analysis.source_sheet_id == gs.spec.primary_source_sheet_id
+                r.analysis.source_sheet_id.as_ref() == Some(&gs.spec.primary_source_sheet_id)
                     && matches!(r.analysis.kind, AnalysisKind::Survival(_))
                     && r.tabs.iter().any(|t| t.kind == ResultTabKind::NumberAtRisk)
             }))
@@ -1950,7 +1950,7 @@ pub fn resolve_live_equation_tex(
     mode: EquationDisplayMode,
 ) -> Option<String> {
     let rs = doc.result_sheet(result_sheet_id)?;
-    if matches!(rs.status, ResultStatus::Failed { .. } | ResultStatus::Dirty) {
+    if !rs.has_displayable_output() {
         return None;
     }
     let substituted = matches!(mode, EquationDisplayMode::Substituted);

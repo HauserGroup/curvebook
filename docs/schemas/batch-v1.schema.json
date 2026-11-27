@@ -110,6 +110,12 @@
             "null"
           ]
         },
+        "experimental": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "format": {
           "enum": [
             "curvebook",
@@ -117,6 +123,7 @@
             "curvebook-dir",
             "unpacked",
             "dir",
+            "pzfx",
             "csv",
             "tsv",
             "json",

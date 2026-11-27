@@ -356,10 +356,10 @@ fn r1_s07_14_prism_merge_remaps_colliding_ids_and_all_refs() {
         Some(&SheetId::new("data-1-2"))
     );
     let imp_r1 = merged.result_sheet(&SheetId::new("res-1-2")).unwrap();
-    assert_eq!((imp_r1.analysis.id.as_str(), imp_r1.analysis.source_sheet_id.as_str()), ("res-1-2", "data-1-2"));
+    assert_eq!((imp_r1.analysis.id.as_str(), imp_r1.analysis.source_sheet_id.as_ref().map(SheetId::as_str)), ("res-1-2", Some("data-1-2")));
     let imp_r2 = merged.result_sheet(&SheetId::new("res-2-2")).unwrap();
     let hooks = imp_r2.analysis.kind.hooked_sources();
-    assert_eq!(imp_r2.analysis.source_sheet_id.as_str(), "data-1-2");
+    assert_eq!(imp_r2.analysis.source_sheet_id.as_ref().map(SheetId::as_str), Some("data-1-2"));
     assert!(hooks.iter().any(|h| matches!(h, HookSource::InfoConstant { info_sheet_id: Some(id), .. } if id.as_str() == "info-1-2")));
     assert!(hooks.iter().any(|h| matches!(h, HookSource::ResultScalar { result_sheet_id, .. } if result_sheet_id.as_str() == "res-1-2")));
 

@@ -7,8 +7,8 @@ use std::cmp::Ordering;
 use crate::TableKind;
 use crate::cell::{Cell, CellValue, ReplicateStacking, SubcolumnMode, SummarizedPoint};
 use crate::error::{
-    DocError, MAX_SUBCOLUMNS, SummaryPointError, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
-    validate_title,
+    DocError, MAX_DISPLAY_DECIMALS, MAX_SUBCOLUMNS, SummaryPointError, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
+    validate_subcolumns, validate_title,
 };
 
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
@@ -51,6 +51,12 @@ pub fn default_column_label(mut index: usize) -> String {
 pub struct DataSetColumn {
     /// Column header title (`<= MAX_TITLE_BYTES` UTF-8 bytes; numeric titles can also supply hooked concentrations via [`crate::HookSource::ColumnTitleValue`]).
     pub title: String,
+    /// Optional per-subcolumn display titles (`empty` or `len() == subcolumn_count()`, each `<= MAX_TITLE_BYTES`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subcolumn_titles: Vec<String>,
+    /// Optional fixed decimal places for grid display formatting (`0..=15`; `None` uses automatic formatting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_decimals: Option<u8>,
     /// Rectangular 2D grid indexed as `cells[row][subcol]`.
     pub cells: Vec<Vec<Cell>>,
 }
@@ -63,7 +69,7 @@ impl DataSetColumn {
         validate_rows(row_count)?;
         validate_subcolumns(subcolumn_count)?;
         validate_cell_grid(row_count, 1, subcolumn_count, 0)?;
-        Ok(Self { title, cells: vec![vec![Cell::empty(); subcolumn_count]; row_count] })
+        Ok(Self { title, subcolumn_titles: Vec::new(), display_decimals: None, cells: vec![vec![Cell::empty(); subcolumn_count]; row_count] })
     }
 
     /// Number of allocated rows in this data-set column.
@@ -126,13 +132,40 @@ fn validate_title_vec(kind: TableKind, titles: &[String], row_count: usize, mism
     Ok(())
 }
 
+/// Check that optional fixed grid display decimal places lie within `0..=MAX_DISPLAY_DECIMALS`.
+fn validate_display_decimals(kind: TableKind, col_idx: usize, decimals: Option<u8>) -> Result<(), DocError> {
+    if decimals.is_some_and(|d| d > MAX_DISPLAY_DECIMALS) {
+        return Err(DocError::InvalidCellValue { archetype: kind, row: 0, col: col_idx, reason: "display_decimals must be in 0..=15" });
+    }
+    Ok(())
+}
+
+/// Check that optional per-subcolumn display titles are either empty or match `expected_subcols`
+/// and every entry stays within [`crate::MAX_TITLE_BYTES`].
+fn validate_subcolumn_titles(kind: TableKind, col_idx: usize, titles: &[String], expected_subcols: usize) -> Result<(), DocError> {
+    if !titles.is_empty() && titles.len() != expected_subcols {
+        return Err(DocError::InvalidCellValue {
+            archetype: kind,
+            row: titles.len(),
+            col: col_idx,
+            reason: "subcolumn_titles length does not match subcolumn count",
+        });
+    }
+    for title in titles {
+        validate_title(title)?;
+    }
+    Ok(())
+}
+
 /// Check that every [`DataSetColumn`] has rectangular dimensions `(row_count × expected_subcols)`
-/// and valid titles and subcolumn bounds.
+/// and valid titles, display metadata, and subcolumn bounds.
 fn validate_dataset_column_grid(kind: TableKind, columns: &[DataSetColumn], row_count: usize, expected_subcols: usize) -> Result<(), DocError> {
     validate_data_sets(columns.len())?;
     validate_subcolumns(expected_subcols)?;
     for (col_idx, col) in columns.iter().enumerate() {
         validate_title(&col.title)?;
+        validate_subcolumn_titles(kind, col_idx, &col.subcolumn_titles, expected_subcols)?;
+        validate_display_decimals(kind, col_idx, col.display_decimals)?;
         validate_rows(col.cells.len())?;
         if col.cells.len() != row_count {
             return Err(DocError::InvalidCellValue {
@@ -261,6 +294,12 @@ impl XColumnMode {
 pub struct XyTable {
     /// Display title of the independent *X* column (default `"X"`).
     pub x_title: String,
+    /// Optional per-subcolumn display titles for the independent *X* column (`empty` or `len() == x_mode.subcolumn_count()`, each `<= MAX_TITLE_BYTES`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub x_subcolumn_titles: Vec<String>,
+    /// Optional fixed decimal places for *X* column grid display formatting (`0..=15`; `None` uses automatic formatting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_display_decimals: Option<u8>,
     /// Storage and evaluation mode of the independent *X* column.
     pub x_mode: XColumnMode,
     /// Per-row *X* cells (`x_cells[row][subcol]`; width matches [`XColumnMode::subcolumn_count`], or optional `0..=1` exclusion-carrier cells under `GeneratedSequence`).
@@ -278,6 +317,10 @@ pub struct XyTable {
 #[derive(serde::Deserialize)]
 struct RawXyTable {
     x_title: String,
+    #[serde(default)]
+    x_subcolumn_titles: Vec<String>,
+    #[serde(default)]
+    x_display_decimals: Option<u8>,
     x_mode: XColumnMode,
     x_cells: Vec<Vec<Cell>>,
     row_titles: Vec<String>,
@@ -294,6 +337,8 @@ impl<'de> serde::Deserialize<'de> for XyTable {
         let raw = RawXyTable::deserialize(deserializer)?;
         let table = Self {
             x_title: raw.x_title,
+            x_subcolumn_titles: raw.x_subcolumn_titles,
+            x_display_decimals: raw.x_display_decimals,
             x_mode: raw.x_mode,
             x_cells: raw.x_cells,
             row_titles: raw.row_titles,
@@ -327,6 +372,8 @@ impl XyTable {
         }
         Ok(Self {
             x_title: String::from("X"),
+            x_subcolumn_titles: Vec::new(),
+            x_display_decimals: None,
             x_mode,
             x_cells: vec![vec![Cell::empty(); x_subs]; row_count],
             row_titles: vec![String::new(); row_count],
@@ -450,9 +497,12 @@ impl XyTable {
         match &self.x_mode {
             XColumnMode::GeneratedSequence { .. } | XColumnMode::DateOrElapsedTime { .. } => Ok(self.x_value_at(row)),
             XColumnMode::Numbers { subcolumn_mode } => match subcolumn_mode {
-                SubcolumnMode::Single | SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
-                    Ok(self.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number))
-                }
+                SubcolumnMode::Single
+                | SubcolumnMode::MeanSd
+                | SubcolumnMode::MeanSem
+                | SubcolumnMode::MeanLowHigh
+                | SubcolumnMode::UpperLowerLimits
+                | SubcolumnMode::MedianIqr => Ok(self.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number)),
                 SubcolumnMode::RawReplicates(_) => {
                     let Some(subs) = self.x_cells.get(row) else {
                         return Ok(None);
@@ -507,10 +557,12 @@ impl XyTable {
         pairs
     }
 
-    /// Validate rectangular row/subcolumn invariants, X-column mode, and dimension caps.
+    /// Validate rectangular row/subcolumn invariants, X-column mode, display metadata, and dimension caps.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.x_title)?;
         self.x_mode.validate_subcolumn_only()?;
+        validate_subcolumn_titles(TableKind::Xy, 0, &self.x_subcolumn_titles, self.x_mode.subcolumn_count())?;
+        validate_display_decimals(TableKind::Xy, 0, self.x_display_decimals)?;
         validate_table_subcolumn_mode(TableKind::Xy, self.y_subcolumn_mode)?;
         let row_count = self.row_count();
         validate_rows(row_count)?;
@@ -1446,6 +1498,9 @@ pub struct VariableColumn {
     pub source: VariableSource,
     /// Ordering specification for distinct categorical levels when `role == VariableRole::Categorical`.
     pub level_order: LevelOrderSpec,
+    /// Optional fixed decimal places for grid display formatting (`0..=15`; `None` uses automatic formatting).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_decimals: Option<u8>,
     /// Per-subject cells (`len() == row_count()`).
     pub cells: Vec<Cell>,
 }
@@ -1462,6 +1517,7 @@ impl VariableColumn {
             role_inferred: true,
             source: VariableSource::Entered,
             level_order: LevelOrderSpec::default(),
+            display_decimals: None,
             cells: vec![Cell::empty(); row_count],
         })
     }
@@ -1721,6 +1777,7 @@ impl MultipleVariablesTable {
         validate_title_vec(TableKind::MultipleVariables, &self.row_titles, row_count, "row title count does not match table row count")?;
         for (col_idx, var) in self.variables.iter().enumerate() {
             validate_title(&var.title)?;
+            validate_display_decimals(TableKind::MultipleVariables, col_idx, var.display_decimals)?;
             validate_rows(var.cells.len())?;
             if var.cells.len() != row_count {
                 return Err(DocError::InvalidCellValue {
@@ -1931,6 +1988,18 @@ impl TableArchetype {
             Self::PartsOfWhole(_) => TableKind::PartsOfWhole,
             Self::MultipleVariables(_) => TableKind::MultipleVariables,
             Self::Nested(_) => TableKind::Nested,
+        }
+    }
+
+    /// Primary data-set [`SubcolumnMode`] for table families that support subcolumn summary modes
+    /// (`Xy`, `Column`, `Grouped`); `None` for families without summary subcolumn modes.
+    #[must_use]
+    pub const fn primary_subcolumn_mode(&self) -> Option<SubcolumnMode> {
+        match self {
+            Self::Xy(t) => Some(t.y_subcolumn_mode),
+            Self::Column(t) => Some(t.subcolumn_mode),
+            Self::Grouped(t) => Some(t.subcolumn_mode),
+            Self::Contingency(_) | Self::Survival(_) | Self::PartsOfWhole(_) | Self::MultipleVariables(_) | Self::Nested(_) => None,
         }
     }
 

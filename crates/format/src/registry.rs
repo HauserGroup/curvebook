@@ -15,7 +15,7 @@ use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, decode_delimited_text_bytes, ex
 use crate::error::{FormatError, ImportReport};
 use crate::export::{export_result_sheet_json, try_export_result_sheet_tidy_csv};
 use crate::prism::import_prism_bytes;
-use crate::pzfx::import_pzfx_bytes;
+use crate::pzfx::{export_pzfx_bytes, import_pzfx_bytes};
 use crate::xlsx::{XlsxImportOptions, import_xlsx_bytes, import_xlsx_bytes_with_options};
 use crate::xml::MAX_XML_BYTES;
 
@@ -47,6 +47,7 @@ pub struct FormatDescriptor {
 
 /// Typed payload returned by an [`Importer`].
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum ImportPayload {
     Document(ProjectDocument),
     DataSheet(DataSheet),
@@ -222,6 +223,7 @@ impl FormatRegistry {
         reg.register_exporter(Arc::new(CurveBookArchiveAdapter));
         reg.register_exporter(Arc::new(UnpackedProjectDirAdapter));
         reg.register_exporter(Arc::new(CbtemplateAdapter));
+        reg.register_exporter(Arc::new(PzfxAdapter));
         reg.register_exporter(Arc::new(CsvAdapter));
         reg.register_exporter(Arc::new(TsvAdapter));
         reg.register_exporter(Arc::new(JsonResultAdapter));
@@ -359,9 +361,12 @@ const DESC_TEMPLATE: FormatDescriptor =
 /// Static format descriptor for versioned `.cbplate` microplate layout files (`R17.7`).
 pub const DESC_PLATE_MAP: FormatDescriptor =
     FormatDescriptor { id: "cbplate", label: "CurveBook Plate Map Layout", extensions: &["cbplate"], kind: FormatKind::Template };
-const DESC_PRISM: FormatDescriptor =
+/// Static format descriptor for external `.prism` project archives (import-only by default at Beta; §6.3).
+pub const DESC_PRISM: FormatDescriptor =
     FormatDescriptor { id: "prism", label: ".prism files", extensions: &["prism"], kind: FormatKind::ForeignProject };
-const DESC_PZFX: FormatDescriptor = FormatDescriptor { id: "pzfx", label: ".pzfx files", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
+/// Static format descriptor for `.pzfx` XML interchange files (import + deterministic data-only export).
+pub const DESC_PZFX: FormatDescriptor =
+    FormatDescriptor { id: "pzfx", label: ".pzfx files", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
 const DESC_XLSX: FormatDescriptor =
     FormatDescriptor { id: "xlsx", label: "Spreadsheet Workbook (.xlsx)", extensions: &["xlsx"], kind: FormatKind::ForeignProject };
 const DESC_CSV: FormatDescriptor =
@@ -511,6 +516,16 @@ impl Importer for PzfxAdapter {
 
     fn import_bytes(&self, bytes: &[u8], _opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
         Ok(ImportPayload::Report(import_pzfx_bytes(bytes)?))
+    }
+}
+impl Exporter for PzfxAdapter {
+    fn descriptor(&self) -> FormatDescriptor {
+        DESC_PZFX
+    }
+
+    fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
+        let doc = expect_document_source(source, DESC_PZFX.id)?;
+        Ok(export_pzfx_bytes(doc)?.bytes)
     }
 }
 

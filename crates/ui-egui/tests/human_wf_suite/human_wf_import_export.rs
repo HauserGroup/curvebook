@@ -869,12 +869,561 @@ fn r10_34_human_gui_file_extension_naming() -> TestRes {
     // 4. Command Palette matches `.pzfx files` and `.prism files` by file extension.
     run.click("toolbar.command_palette")?;
     run.replace_textbox("palette.query", ".pzfx")?;
-    let pal_pzfx = run.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing palette.item.0 for .pzfx")?.label.clone();
-    ensure(pal_pzfx.contains("Import .pzfx files"), format!("Command Palette `.pzfx` missing `Import .pzfx files`: {pal_pzfx:?}"))?;
+    let pal_pzfx: Vec<String> =
+        run.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("palette.item.")).map(|e| e.label.clone()).collect();
+    ensure(pal_pzfx.iter().any(|l| l.contains("Import .pzfx files")), format!("Command Palette `.pzfx` missing `Import .pzfx files`: {pal_pzfx:?}"))?;
     run.replace_textbox("palette.query", ".prism")?;
-    let pal_archive = run.frame_meta().find_by_widget_id("palette.item.0").ok_or("missing palette.item.0 for .prism")?.label.clone();
-    ensure(pal_archive.contains("Import .prism files"), format!("Command Palette `.prism` missing `Import .prism files`: {pal_archive:?}"))?;
+    let pal_archive: Vec<String> =
+        run.frame_meta().entries.iter().filter(|e| e.widget_id.starts_with("palette.item.")).map(|e| e.label.clone()).collect();
+    ensure(
+        pal_archive.iter().any(|l| l.contains("Import .prism files")),
+        format!("Command Palette `.prism` missing `Import .prism files`: {pal_archive:?}"),
+    )?;
     run.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE)?;
 
     run.assert_shell_health("R10.34-NAMING")
+}
+
+/// Build a self-authored `.curvebook` project file containing one Column table with colliding ID `data-1`.
+fn write_synthetic_curvebook_project(path: &Path, project_title: &str, sheet_title: &str, values: &[f64]) -> TestRes {
+    let mut doc = curvebook_doc::ProjectDocument::new(project_title).map_err(|e| e.to_string())?;
+    let mut col =
+        curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 1, values.len().max(1)).map_err(|e| e.to_string())?;
+    for (r, &val) in values.iter().enumerate() {
+        col.data_sets[0].cells[r][0] = curvebook_doc::Cell::number(val);
+    }
+    let sheet = DataSheet::new("data-1", sheet_title, curvebook_doc::TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+    doc.add_data_sheet(sheet).map_err(|e| e.to_string())?;
+    curvebook_format::save_project_file(path, &doc).map_err(|e| format!("failed to save `{}`: {e}", path.display()))
+}
+
+#[test]
+fn s10_6_human_file_merge_project_oracle_badges_and_live_edit() -> TestRes {
+    let dir = temp_dir("s10-6-merge-project")?;
+    let proj_a_path = dir.path().join("project_a.curvebook");
+    let proj_b_path = dir.path().join("project_b.curvebook");
+    write_synthetic_curvebook_project(&proj_a_path, "Study Alpha", "Cohort Alpha", &[10.0, 12.0, 14.0])?;
+    write_synthetic_curvebook_project(&proj_b_path, "Study Beta", "Cohort Beta", &[25.0, 27.0, 29.0])?;
+
+    // Stage 1: Start from an empty UiApp and open the first project via File > Open...
+    let mut run = WorkflowRun::start("S10.6-MERGE-PROJECT");
+    run.script_file_dialog_for("project.open", Some(proj_a_path.clone()));
+    run.open_menu_and_click("menu.file", &[], "menu.project.open")?;
+
+    ensure(
+        run.document().data_sheets.len() == 1 && run.document().data_sheets[0].title == "Cohort Alpha",
+        format!("S10.6: expected Cohort Alpha after File > Open, got {:?}", run.document().data_sheets.iter().map(|s| &s.title).collect::<Vec<_>>()),
+    )?;
+    ensure(run.document().data_sheets[0].origin.is_none(), "S10.6: opened project must not carry an origin badge")?;
+
+    // Stage 2: Merge the second project via File > Merge Project...
+    run.script_file_dialog_for("project.merge", Some(proj_b_path.clone()));
+    run.open_menu_and_click("menu.file", &[], "menu.project.merge")?;
+
+    let reqs = run.recorded_file_dialog_requests();
+    ensure(
+        reqs.iter().any(|r| r.command_id == "project.merge" && r.kind == NativeFileDialogKind::OpenFile),
+        format!("S10.6: expected OpenFile dialog request for project.merge, got {reqs:?}"),
+    )?;
+
+    // Stage 3 & 4: Verify merged sheets, colliding-ID renumbering, file path preservation, origin badge,
+    // and exact parity against a fresh headless Session merge oracle.
+    let mut oracle = Session::new();
+    oracle
+        .execute("project.open", json!({ "path": proj_a_path.to_string_lossy() }))
+        .map_err(|e| format!("S10.6: headless oracle project.open failed: {e}"))?;
+    oracle
+        .execute("project.merge", json!({ "path": proj_b_path.to_string_lossy() }))
+        .map_err(|e| format!("S10.6: headless oracle project.merge failed: {e}"))?;
+    assert_datasheets_match("S10.6-MERGE-PROJECT", &run.document().data_sheets, &oracle.document().data_sheets)?;
+
+    ensure(
+        run.app().session().file_path() == Some(proj_a_path.as_path()),
+        format!("S10.6: project.merge must preserve open file_path `{}`; got {:?}", proj_a_path.display(), run.app().session().file_path()),
+    )?;
+    ensure(run.document().data_sheets[0].origin.is_none(), "S10.6: original sheet must retain origin = None")?;
+
+    let merged_sheet = run.document().data_sheets.get(1).ok_or("S10.6: missing merged Cohort Beta sheet")?;
+    let merged_id = merged_sheet.id.clone();
+    ensure(merged_id.as_str() != "data-1", format!("S10.6: colliding ID should be renumbered, got `{merged_id}`"))?;
+    let origin = merged_sheet.origin.as_ref().ok_or("S10.6: merged sheet missing SheetOrigin")?;
+    ensure(
+        origin.source_label == "project_b.curvebook" && origin.source_format == "curvebook",
+        format!("S10.6: unexpected SheetOrigin: {origin:?}"),
+    )?;
+    ensure(
+        !origin.source_label.contains('/') && !origin.source_label.contains('\\'),
+        format!("S10.6: origin source_label must be basename only, got {:?}", origin.source_label),
+    )?;
+
+    // Verify navigator entry and ui.inspect surface the origin badge without mutating sheet title.
+    let snap = inspect_ui_tree(run.app(), None, false);
+    let merged_nav_wid = format!("nav.sheet.{}", merged_id.as_str());
+    let nav_node = snap
+        .navigator_sheets
+        .as_ref()
+        .and_then(|sheets| sheets.iter().find(|w| w.widget_id == merged_nav_wid))
+        .ok_or_else(|| format!("S10.6: missing navigator widget `{merged_nav_wid}` in ui.inspect"))?;
+    ensure(nav_node.title == "Cohort Beta", format!("S10.6: navigator title must remain unchanged, got {:?}", nav_node.title))?;
+    let nav_entry =
+        run.app().nav.entries.iter().find(|e| e.sheet_id == merged_id).ok_or_else(|| format!("S10.6: missing NavigatorEntry for `{merged_id}`"))?;
+    ensure(
+        nav_entry.origin.as_ref().map(|o| (o.source_label.as_str(), o.source_format.as_str())) == Some(("project_b.curvebook", "curvebook")),
+        format!("S10.6: NavigatorEntry missing expected origin badge: {:?}", nav_entry.origin),
+    )?;
+
+    // Stage 5: Live-edit a cell in the merged table via synthesized GUI grid input, then clear origin via Command Palette.
+    run.select_sheet(&merged_id)?;
+    run.enter_grid_cell(0, 0, 0, "77.25")?;
+    let edited_val = run.document().data_sheet(&merged_id).and_then(|ds| ds.cell(CellCoord::new(0, 0, 0))).map(|c| &c.value);
+    ensure(
+        matches!(edited_val, Some(CellValue::Number(v)) if (v - 77.25).abs() < 1e-9),
+        format!("S10.6: expected live-edited cell (0,0,0) on merged table to be 77.25, got {edited_val:?}"),
+    )?;
+    let orig_val = run.document().data_sheets[0].cell(CellCoord::new(0, 0, 0)).map(|c| &c.value);
+    ensure(
+        matches!(orig_val, Some(CellValue::Number(v)) if (v - 10.0).abs() < 1e-9),
+        format!("S10.6: editing merged table must not alter original sheet cell, got {orig_val:?}"),
+    )?;
+
+    run.click("toolbar.command_palette")?;
+    run.replace_textbox("palette.query", "sheet.clearOrigin")?;
+    run.click("palette.item.0")?;
+    ensure(
+        run.document().data_sheet(&merged_id).and_then(|ds| ds.origin.as_ref()).is_none(),
+        "S10.6: sheet.clearOrigin via Command Palette must clear the active merged sheet's origin badge",
+    )?;
+
+    run.assert_shell_health("S10.6-MERGE-PROJECT")
+}
+
+/// Build a hand-authored external ID-indexed `.prism` archive with a 3-hop analysis snapshot
+/// (`analyses/an-1/sheet.json` -> `result_sheets/rs-main.json` -> `data/sheets/view-1/sheet.json` -> `data.csv`).
+fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
+    let entries: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "document.json",
+            serde_json::to_vec(&json!({
+                "title": "Snapshot Study",
+                "sheets": { "data": ["d-src"], "analyses": ["an-1"] },
+                "sheetAttributesMap": {
+                    "d-src": { "title": "Groups" },
+                    "an-1": { "title": "Unpaired t test of Groups" }
+                }
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "data/sheets/d-src/sheet.json",
+            serde_json::to_vec(&json!({
+                "title": "Groups",
+                "table": { "uid": "t-src", "format": "column", "dataFormat": "y_single", "dataSets": ["ds-a", "ds-b"] }
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        ("data/sets/ds-a.json", serde_json::to_vec(&json!({ "title": "Ctrl", "replicates": [{ "valueType": "real" }] })).map_err(|e| e.to_string())?),
+        (
+            "data/sets/ds-b.json",
+            serde_json::to_vec(&json!({ "title": "Treated", "replicates": [{ "valueType": "real" }] })).map_err(|e| e.to_string())?,
+        ),
+        ("data/tables/t-src/data.csv", b"10,20\n12,22\n11,21\n".to_vec()),
+        (
+            "analyses/an-1/sheet.json",
+            serde_json::to_vec(&json!({
+                "uid": "an-1",
+                "title": "Unpaired t test of Groups",
+                "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+                "preferredResultSheet": "rs-main",
+                "inputSheets": [{ "uid": "d-src", "title": "Groups" }],
+                "resultSheets": [{ "uid": "rs-main", "title": "Tabular results" }]
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "analyses/an-1/parameters.json",
+            serde_json::to_vec(&json!({
+                "content": { "experimentalDesign": "UNPAIRED_T_TEST", "options": { "pValueTailType": "P_VALUE_TWO_TAILED" } }
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "analyses/an-1/results.json",
+            serde_json::to_vec(&json!({
+                "content": { "status": { "error": "", "warning": [] }, "tStatistic": 12.2474, "pValue": 0.00025 }
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "analyses/an-1/result_sheets/rs-main.json",
+            serde_json::to_vec(&json!({ "uid": "rs-main", "name": "Tabular results", "dataSheet": "view-1" })).map_err(|e| e.to_string())?,
+        ),
+        (
+            "data/sheets/view-1/sheet.json",
+            serde_json::to_vec(&json!({
+                "uid": "view-1",
+                "flags": ["ANALYSIS_VIEW"],
+                "table": { "uid": "t-view-1", "format": "view", "dataFormat": "text", "rowTitlesDataSet": "ds-vrt", "dataSets": ["ds-vcol"] }
+            }))
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "data/sets/ds-vrt.json",
+            serde_json::to_vec(&json!({ "title": "Metric", "replicates": [{ "valueType": "string" }] })).map_err(|e| e.to_string())?,
+        ),
+        (
+            "data/sets/ds-vcol.json",
+            serde_json::to_vec(&json!({ "title": "Value", "replicates": [{ "valueType": "string" }] })).map_err(|e| e.to_string())?,
+        ),
+        ("data/tables/t-view-1/data.csv", b"P value,0.00025\nt statistic,12.2474\n".to_vec()),
+    ];
+    let mut zw = ZipWriter::new();
+    for (name, bytes) in entries {
+        zw.add_file(name, bytes).map_err(|e| format!("failed to add `{name}`: {e}"))?;
+    }
+    zw.finish().map_err(|e| format!("failed to build synthetic 3-hop .prism zip: {e}"))
+}
+
+#[test]
+fn s7_human_archive_imported_result_banner_stale_and_undo() -> TestRes {
+    let dir = temp_dir("s7-imported-result")?;
+    let archive_path = dir.path().join("snapshot_3hop.prism");
+    fs::write(&archive_path, build_external_3hop_archive_fixture_bytes()?).map_err(|e| e.to_string())?;
+
+    // Stage 1: Import 3-hop .prism snapshot from empty UiApp via visible File > Import > Import .prism File.
+    let mut run = WorkflowRun::start("S7-IMPORTED-RESULT");
+    run.script_file_dialog_for("table.importPrism", Some(archive_path.clone()));
+    run.open_menu_and_click("menu.file", &["menu.file.import"], "menu.table.importPrism")?;
+    if matches!(run.active_dialog(), ActiveDialog::ImportWarnings) {
+        run.click("modal.cancel")?;
+    }
+
+    // Verify R10.34 native picker filter label (".prism files") and oracle parity.
+    let reqs = run.recorded_file_dialog_requests();
+    ensure(
+        reqs.iter().any(|r| r.command_id == "table.importPrism" && r.filter_label == ".prism files"),
+        format!("S7-IMPORTED-RESULT: expected R10.34 `.prism files` filter label, got {reqs:?}"),
+    )?;
+    let mut oracle = Session::new();
+    oracle
+        .execute("table.importPrism", json!({ "path": archive_path.to_string_lossy() }))
+        .map_err(|e| format!("S7-IMPORTED-RESULT: oracle import failed: {e}"))?;
+    assert_datasheets_match("S7-IMPORTED-RESULT", &run.document().data_sheets, &oracle.document().data_sheets)?;
+
+    // Stage 2 & 3: Select the imported ResultSheet and verify read-only banner, Edit Parameters refusal, and Re-run action.
+    let data_id = run.document().data_sheets.first().ok_or("S7-IMPORTED-RESULT: missing imported data sheet")?.id.clone();
+    let res_id = run.document().result_sheets.first().ok_or("S7-IMPORTED-RESULT: missing imported result sheet")?.id.clone();
+    run.select_sheet(&res_id)?;
+
+    let rs_initial = run.document().result_sheet(&res_id).ok_or("S7-IMPORTED-RESULT: missing result sheet")?;
+    ensure(rs_initial.status == curvebook_doc::ResultStatus::Imported, format!("expected ResultStatus::Imported, got {:?}", rs_initial.status))?;
+    ensure(rs_initial.is_imported(), "expected ResultSheet::is_imported() == true")?;
+
+    let banner =
+        run.frame_meta().find_by_widget_id("result.imported_banner").ok_or("S7-IMPORTED-RESULT: read-only imported result banner not rendered")?;
+    ensure(
+        banner.label.contains("Read-only imported result") && banner.label.contains("not computed by CurveBook"),
+        format!("S7-IMPORTED-RESULT: unexpected imported banner copy: {:?}", banner.label),
+    )?;
+
+    let edit_btn = run.frame_meta().find_by_widget_id("result.edit_params").ok_or("S7-IMPORTED-RESULT: missing result.edit_params toolbar button")?;
+    ensure(!edit_btn.enabled, "S7-IMPORTED-RESULT: Edit Parameters button must be disabled on imported result snapshots")?;
+    let mut probe = run.app().clone();
+    let edit_refusal = curvebook_ui_egui::dispatch_ui_command(&mut probe, "ui.editParams.open", &json!({ "sheet_id": res_id.as_str() }));
+    ensure(
+        matches!(&edit_refusal, Err(msg) if msg.contains("read-only imported snapshot")),
+        format!("S7-IMPORTED-RESULT: expected ui.editParams.open refusal on imported snapshot, got {edit_refusal:?}"),
+    )?;
+
+    // Clicking "Re-run as a CurveBook analysis" opens AnalyzeSheet targeting the upstream data table.
+    let rerun_btn = run
+        .frame_meta()
+        .find_by_widget_id("result.imported.rerun_analysis")
+        .ok_or("S7-IMPORTED-RESULT: missing Re-run as a CurveBook analysis button")?;
+    ensure(rerun_btn.label == "Re-run as a CurveBook analysis", format!("unexpected re-run label: {:?}", rerun_btn.label))?;
+    run.click("result.imported.rerun_analysis")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::AnalyzeSheet { source_sheet_id } if *source_sheet_id == data_id),
+        format!("S7-IMPORTED-RESULT: expected AnalyzeSheet for `{data_id}`, got {:?}", run.active_dialog()),
+    )?;
+    run.click("modal.cancel")?;
+
+    // Stage 4 & 5: Live-edit upstream data cell -> flips Imported to ImportedStale without wiping tabs -> Undo restores Imported.
+    run.select_sheet(&data_id)?;
+    run.enter_grid_cell(0, 0, 0, "42.5")?;
+    run.select_sheet(&res_id)?;
+
+    let rs_stale = run.document().result_sheet(&res_id).ok_or("S7-IMPORTED-RESULT: missing result sheet after edit")?;
+    ensure(
+        rs_stale.status == curvebook_doc::ResultStatus::ImportedStale,
+        format!("S7-IMPORTED-RESULT: upstream edit must flip Imported -> ImportedStale, got {:?}", rs_stale.status),
+    )?;
+    ensure(!rs_stale.tabs.is_empty(), "S7-IMPORTED-RESULT: ImportedStale must preserve imported result tabs")?;
+    let stale_banner = run.frame_meta().find_by_widget_id("result.imported_banner").ok_or("S7-IMPORTED-RESULT: missing stale imported banner")?;
+    ensure(
+        stale_banner.label.contains("stale: upstream data changed"),
+        format!("S7-IMPORTED-RESULT: stale banner copy mismatch: {:?}", stale_banner.label),
+    )?;
+
+    run.open_menu_and_click("menu.edit", &[], "menu.edit.undo")?;
+    run.select_sheet(&res_id)?;
+    let rs_restored = run.document().result_sheet(&res_id).ok_or("S7-IMPORTED-RESULT: missing result sheet after undo")?;
+    ensure(
+        rs_restored.status == curvebook_doc::ResultStatus::Imported,
+        format!("S7-IMPORTED-RESULT: Undo must restore ResultStatus::Imported, got {:?}", rs_restored.status),
+    )?;
+    let restored_banner =
+        run.frame_meta().find_by_widget_id("result.imported_banner").ok_or("S7-IMPORTED-RESULT: missing restored imported banner")?;
+    ensure(
+        restored_banner.label.contains("not computed by CurveBook") && !restored_banner.label.contains("stale"),
+        format!("S7-IMPORTED-RESULT: restored banner should not be stale: {:?}", restored_banner.label),
+    )?;
+
+    run.assert_shell_health("S7-IMPORTED-RESULT")
+}
+
+#[test]
+fn s7_human_file_export_pzfx_preflight_modal_roundtrip_and_skip_prompt() -> TestRes {
+    let dir = temp_dir("s7-export-pzfx")?;
+    let rich_proj_path = dir.path().join("rich_study.curvebook");
+    let data_only_proj_path = dir.path().join("data_only_study.curvebook");
+    let exported_rich_path = dir.path().join("rich_export.pzfx");
+    let exported_clean_path = dir.path().join("clean_export.pzfx");
+
+    // Seed a saved .curvebook project containing a 3-group Column table + linked InfoSheet + GraphSheet.
+    {
+        let mut doc = curvebook_doc::ProjectDocument::new("Rich PZFX Export Study").map_err(|e| e.to_string())?;
+        let mut col = curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 3, 3).map_err(|e| e.to_string())?;
+        col.data_sets[0].title = String::from("Control");
+        col.data_sets[1].title = String::from("Low");
+        col.data_sets[2].title = String::from("High");
+        for (r, (a, b, c)) in [(10.0, 14.0, 21.0), (11.0, 15.0, 22.0), (12.0, 16.0, 23.0)].into_iter().enumerate() {
+            col.data_sets[0].cells[r][0] = curvebook_doc::Cell::number(a);
+            col.data_sets[1].cells[r][0] = curvebook_doc::Cell::number(b);
+            col.data_sets[2].cells[r][0] = curvebook_doc::Cell::number(c);
+        }
+        let ds = DataSheet::new("data-rich", "Drug Assay", curvebook_doc::TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        let mut info = curvebook_doc::InfoSheet::new_preseeded("info-rich", "Study Notes").map_err(|e| e.to_string())?;
+        info.linked_data_sheets.push(ds.id.clone());
+        let graph =
+            curvebook_doc::GraphSheet::new_uninitialized_for_data(curvebook_doc::SheetId::new("graph-rich"), &ds).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.add_info_sheet(info).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(graph).map_err(|e| e.to_string())?;
+        curvebook_format::save_project_file(&rich_proj_path, &doc).map_err(|e| e.to_string())?;
+    }
+    write_synthetic_curvebook_project(&data_only_proj_path, "Data Only Study", "Plain Cohort", &[5.5, 6.5, 7.5])?;
+
+    // --- Part A: Project with analyses + graphs triggers pre-export confirmation modal ---
+    {
+        let mut run = WorkflowRun::start("S7-PZFX-EXPORT-MODAL");
+        run.script_file_dialog_for("project.open", Some(rich_proj_path.clone()));
+        run.open_menu_and_click("menu.file", &[], "menu.project.open")?;
+
+        // Verify File > Export contains .pzfx file… and NO .prism export entry (§6.3).
+        let menus = curvebook_ui_egui::menus::menu_bar_tooltips(run.app());
+        let file_cmds: Vec<&str> =
+            menus.iter().find(|m| m.menu_key == "menu.file").map(|m| m.items.iter().map(|i| i.command_id).collect()).unwrap_or_default();
+        ensure(file_cmds.contains(&"ui.export.pzfx.open"), format!("File menu missing ui.export.pzfx.open: {file_cmds:?}"))?;
+        ensure(!file_cmds.contains(&"project.exportPrism"), format!("File menu must NOT expose experimental .prism export: {file_cmds:?}"))?;
+
+        // Stage 2 & 3: Enter a live value and run One-way ANOVA through the GUI so the project has analyses, graphs, and dirty state.
+        let data_id = run.document().data_sheets[0].id.clone();
+        run.select_sheet(&data_id)?;
+        run.enter_grid_cell(0, 0, 0, "10.5")?;
+        let _res_id = run.run_analyze_entry("One-way", "analyze.entry.stats.one_way_anova")?;
+        ensure(run.app().session().is_dirty(), "S7-PZFX-EXPORT-MODAL: expected dirty session after running ANOVA")?;
+        ensure(
+            run.app().session().file_path() == Some(rich_proj_path.as_path()),
+            "S7-PZFX-EXPORT-MODAL: expected active file_path pointing to rich_study.curvebook",
+        )?;
+
+        let expected_preflight = curvebook_format::preflight_pzfx_export(run.document());
+        ensure(
+            expected_preflight.total_dropped_count() >= 2,
+            format!("S7-PZFX-EXPORT-MODAL: expected >=2 dropped items (analyses + graphs), got {expected_preflight:?}"),
+        )?;
+
+        // Open visible File > Export > .pzfx file… -> confirmation modal must show exact preflight counts & sheet names.
+        run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.pzfx.open")?;
+        match run.active_dialog() {
+            ActiveDialog::PzfxExportConfirm { preflight } => {
+                ensure(
+                    preflight == &expected_preflight,
+                    format!("S7-PZFX-EXPORT-MODAL: modal preflight diverged from preflight_pzfx_export: {preflight:?} vs {expected_preflight:?}"),
+                )?;
+            }
+            other => return Err(format!("S7-PZFX-EXPORT-MODAL: expected ActiveDialog::PzfxExportConfirm, got {other:?}")),
+        }
+
+        let notice_data_only = run
+            .frame_meta()
+            .find_by_widget_id("pzfx_export_confirm.data_only_notice")
+            .ok_or("S7-PZFX-EXPORT-MODAL: missing data_only_notice widget")?;
+        ensure(
+            notice_data_only.label == curvebook_engine::services::PZFX_EXPORT_DATA_ONLY_NOTICE,
+            format!("S7-PZFX-EXPORT-MODAL: data_only_notice mismatch: {:?}", notice_data_only.label),
+        )?;
+        let notice_structure = run
+            .frame_meta()
+            .find_by_widget_id("pzfx_export_confirm.structure_notice")
+            .ok_or("S7-PZFX-EXPORT-MODAL: missing structure_notice widget")?;
+        ensure(
+            notice_structure.label == curvebook_engine::services::PZFX_EXPORT_STRUCTURE_NOTICE,
+            format!("S7-PZFX-EXPORT-MODAL: structure_notice mismatch: {:?}", notice_structure.label),
+        )?;
+        for (idx, group) in expected_preflight.dropped.iter().enumerate() {
+            let hdr = run
+                .frame_meta()
+                .find_by_widget_id(&format!("pzfx_export_confirm.group.{idx}"))
+                .ok_or_else(|| format!("S7-PZFX-EXPORT-MODAL: missing dropped group {idx} header"))?;
+            ensure(
+                hdr.label.contains(&format!("({})", group.count)),
+                format!("S7-PZFX-EXPORT-MODAL: group {idx} header missing count ({}): {:?}", group.count, hdr.label),
+            )?;
+            if !group.items.is_empty() {
+                let items_w = run
+                    .frame_meta()
+                    .find_by_widget_id(&format!("pzfx_export_confirm.group.{idx}.items"))
+                    .ok_or_else(|| format!("S7-PZFX-EXPORT-MODAL: missing dropped group {idx} items"))?;
+                for item in &group.items {
+                    ensure(
+                        items_w.label.contains(item),
+                        format!("S7-PZFX-EXPORT-MODAL: group {idx} items {:?} missing sheet name `{item}`", items_w.label),
+                    )?;
+                }
+            }
+        }
+
+        // Cancel first -> no file written.
+        run.click("modal.cancel")?;
+        ensure(matches!(run.active_dialog(), ActiveDialog::None), "S7-PZFX-EXPORT-MODAL: Cancel must close modal")?;
+        ensure(!exported_rich_path.exists(), "S7-PZFX-EXPORT-MODAL: Cancel must not write .pzfx file")?;
+
+        // Reopen and click "Export data only" -> runs project.exportPzfx via SaveFile picker.
+        run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.pzfx.open")?;
+        run.script_file_dialog_for("project.exportPzfx", Some(exported_rich_path.clone()));
+        run.click("pzfx_export_confirm.export")?;
+
+        ensure(matches!(run.active_dialog(), ActiveDialog::None), "S7-PZFX-EXPORT-MODAL: modal should close after Export data only")?;
+        let reqs = run.recorded_file_dialog_requests();
+        ensure(
+            reqs.iter().any(|r| {
+                r.command_id == "project.exportPzfx"
+                    && r.kind == NativeFileDialogKind::SaveFile
+                    && r.filter_label == ".pzfx files"
+                    && r.extensions == vec![String::from("pzfx")]
+            }),
+            format!("S7-PZFX-EXPORT-MODAL: expected .pzfx SaveFile request, got {reqs:?}"),
+        )?;
+
+        // Session file_path & dirty stay unchanged, status repeats counts, and exported .pzfx re-imports cleanly.
+        ensure(
+            run.app().session().file_path() == Some(rich_proj_path.as_path()),
+            "S7-PZFX-EXPORT-MODAL: project.exportPzfx must not change active file_path",
+        )?;
+        ensure(run.app().session().is_dirty(), "S7-PZFX-EXPORT-MODAL: project.exportPzfx must not clear dirty state")?;
+        let status = run.app().canvas_dialogs.status_banner.as_deref().ok_or("S7-PZFX-EXPORT-MODAL: missing post-export status summary")?;
+        ensure(
+            status.contains("rich_export.pzfx")
+                && status.contains(&format!("{} dropped", expected_preflight.total_dropped_count()))
+                && status.contains("warning(s)"),
+            format!("S7-PZFX-EXPORT-MODAL: status banner missing expected counts: {status:?}"),
+        )?;
+
+        let mut oracle = Session::new();
+        oracle
+            .execute("table.importPzfx", json!({ "path": exported_rich_path.to_string_lossy() }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-MODAL: re-importing exported .pzfx failed: {e}"))?;
+        let snap_rich = dir.path().join("oracle_rich_snapshot.curvebook");
+        curvebook_format::save_project_file(&snap_rich, run.document()).map_err(|e| e.to_string())?;
+        let mut expected_reimport = Session::new();
+        expected_reimport
+            .execute("project.open", json!({ "path": snap_rich.to_string_lossy() }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-MODAL: oracle open failed: {e}"))?;
+        let oracle_pzfx = dir.path().join("oracle_rich_export.pzfx");
+        expected_reimport
+            .execute("project.exportPzfx", json!({ "path": oracle_pzfx.to_string_lossy(), "return_bytes": false }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-MODAL: headless oracle exportPzfx failed: {e}"))?;
+        assert_file_bytes_eq("S7-PZFX-EXPORT-MODAL (.pzfx bytes)", &exported_rich_path, &oracle_pzfx)?;
+        ensure(
+            oracle.document().data_sheets.len() == run.document().data_sheets.len(),
+            "S7-PZFX-EXPORT-MODAL: data sheet count mismatch on re-import",
+        )?;
+        let re_ds = &oracle.document().data_sheets[0];
+        ensure(re_ds.title == "Drug Assay", format!("unexpected re-imported title: {:?}", re_ds.title))?;
+        ensure(
+            re_ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()) == Some(10.5)
+                && re_ds.cell(CellCoord::new(2, 2, 0)).and_then(|c| c.active_number()) == Some(23.0),
+            "S7-PZFX-EXPORT-MODAL: re-imported cell values mismatch",
+        )?;
+        ensure(
+            oracle.document().info_sheets.len() == run.document().info_sheets.len(),
+            format!(
+                "S7-PZFX-EXPORT-MODAL: info sheet count mismatch on re-import: gui={}, reimport={}",
+                run.document().info_sheets.len(),
+                oracle.document().info_sheets.len()
+            ),
+        )?;
+
+        run.assert_shell_health("S7-PZFX-EXPORT-MODAL")?;
+    }
+
+    // --- Part B: Data-only project (0 dropped items) skips confirmation prompt and exports directly ---
+    {
+        let mut run = WorkflowRun::start("S7-PZFX-EXPORT-SKIP-PROMPT");
+        run.script_file_dialog_for("project.open", Some(data_only_proj_path.clone()));
+        run.open_menu_and_click("menu.file", &[], "menu.project.open")?;
+
+        let sheet_id = run.document().data_sheets[0].id.clone();
+        run.select_sheet(&sheet_id)?;
+        run.enter_grid_cell(0, 0, 0, "88.25")?;
+        ensure(run.app().session().is_dirty(), "S7-PZFX-EXPORT-SKIP-PROMPT: expected dirty session after cell edit")?;
+        ensure(
+            curvebook_format::preflight_pzfx_export(run.document()).total_dropped_count() == 0,
+            "S7-PZFX-EXPORT-SKIP-PROMPT: expected 0 dropped items on data-only project",
+        )?;
+
+        run.script_file_dialog_for("project.exportPzfx", Some(exported_clean_path.clone()));
+        run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.pzfx.open")?;
+
+        ensure(
+            matches!(run.active_dialog(), ActiveDialog::None),
+            format!("S7-PZFX-EXPORT-SKIP-PROMPT: data-only export must skip confirmation modal, got {:?}", run.active_dialog()),
+        )?;
+        ensure(exported_clean_path.is_file(), "S7-PZFX-EXPORT-SKIP-PROMPT: expected direct .pzfx export file on disk")?;
+        ensure(
+            run.app().session().file_path() == Some(data_only_proj_path.as_path()) && run.app().session().is_dirty(),
+            "S7-PZFX-EXPORT-SKIP-PROMPT: file_path and dirty must remain unchanged after direct .pzfx export",
+        )?;
+        let status = run.app().canvas_dialogs.status_banner.as_deref().ok_or("S7-PZFX-EXPORT-SKIP-PROMPT: missing status summary")?;
+        ensure(
+            status.contains("clean_export.pzfx") && status.contains("0 dropped"),
+            format!("S7-PZFX-EXPORT-SKIP-PROMPT: unexpected status summary: {status:?}"),
+        )?;
+
+        let mut oracle = Session::new();
+        oracle
+            .execute("table.importPzfx", json!({ "path": exported_clean_path.to_string_lossy() }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-SKIP-PROMPT: re-import failed: {e}"))?;
+        let snap_clean = dir.path().join("oracle_clean_snapshot.curvebook");
+        curvebook_format::save_project_file(&snap_clean, run.document()).map_err(|e| e.to_string())?;
+        let mut expected_reimport = Session::new();
+        expected_reimport
+            .execute("project.open", json!({ "path": snap_clean.to_string_lossy() }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-SKIP-PROMPT: oracle open failed: {e}"))?;
+        let oracle_pzfx = dir.path().join("oracle_clean_export.pzfx");
+        expected_reimport
+            .execute("project.exportPzfx", json!({ "path": oracle_pzfx.to_string_lossy(), "return_bytes": false }))
+            .map_err(|e| format!("S7-PZFX-EXPORT-SKIP-PROMPT: headless oracle exportPzfx failed: {e}"))?;
+        assert_file_bytes_eq("S7-PZFX-EXPORT-SKIP-PROMPT (.pzfx bytes)", &exported_clean_path, &oracle_pzfx)?;
+        let re_ds = oracle.document().data_sheets.first().ok_or("S7-PZFX-EXPORT-SKIP-PROMPT: missing re-imported sheet")?;
+        ensure(
+            re_ds.title == "Plain Cohort" && re_ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()) == Some(88.25),
+            format!("S7-PZFX-EXPORT-SKIP-PROMPT: re-imported data mismatch: title={:?}", re_ds.title),
+        )?;
+
+        run.assert_shell_health("S7-PZFX-EXPORT-SKIP-PROMPT")?;
+    }
+
+    Ok(())
 }

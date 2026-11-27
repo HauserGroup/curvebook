@@ -28,8 +28,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
-    finite_ci_cell, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats, text_cell, validate_finite_slice,
+    enforce_summary_mode_matrix, finite_ci_cell, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha,
+    push_scalar, sanitize_result_sheet_floats, text_cell, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, roc_curve_analysis};
@@ -1520,6 +1520,7 @@ fn resolve_glm_categorical_levels(
             source: var.source.clone(),
             level_order: var.level_order.clone(),
             cells,
+            display_decimals: var.display_decimals,
         };
         let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
         let explicit_ref = glm_spec.reference_levels.iter().rev().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone());
@@ -2134,6 +2135,7 @@ fn extract_passing_bablok_pairs(sheet: &DataSheet, selected: &[usize], x_col: us
 /// Execute a [`PassingBablokSpec`] against a `Column`, `Xy`, or `MultipleVariables` [`DataSheet`]
 /// using the caller's [`AnalysisSpec`] metadata.
 pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_spec: &PassingBablokSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::PassingBablok(*pb_spec))?;
     let mut out = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
@@ -2654,6 +2656,7 @@ fn populate_poisson_glm_sheet(
 
 /// Execute a [`GlmSpec`] (`Linear`, `Logistic`, or `Poisson`) against a `DataSheet`.
 pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::GeneralizedLinearModel(glm_spec.clone()))?;
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;

@@ -395,7 +395,7 @@ pub fn inspect_project_summary(
         .iter()
         .map(|rs| ResultSheetSummary {
             id: rs.id.as_str().to_owned(),
-            source_sheet_id: rs.analysis.source_sheet_id.as_str().to_owned(),
+            source_sheet_id: rs.analysis.source_sheet_id.as_ref().map_or_else(String::new, |id| id.as_str().to_owned()),
             title: rs.analysis.effective_title().to_owned(),
             status: format!("{:?}", rs.status),
             hook_count: count_analysis_hooks(&rs.analysis),
@@ -527,7 +527,7 @@ pub fn inspect_sheet_detail(doc: &ProjectDocument, sheet_id: &SheetId, include_c
                 "section": "Results",
                 "id": rs.id.as_str(),
                 "title": rs.analysis.effective_title(),
-                "source_sheet_id": rs.analysis.source_sheet_id.as_str(),
+                "source_sheet_id": rs.analysis.source_sheet_id.as_ref().map(SheetId::as_str),
                 "status": format!("{:?}", rs.status),
                 "tabs": rs.tabs.len(),
                 "scalars": rs.scalars.len(),
@@ -587,13 +587,22 @@ pub fn inspect_sheet_detail(doc: &ProjectDocument, sheet_id: &SheetId, include_c
 }
 
 fn slice_dataset_columns(cols: &[DataSetColumn], max_rows: usize) -> Vec<DataSetColumn> {
-    cols.iter().map(|c| DataSetColumn { title: c.title.clone(), cells: c.cells.iter().take(max_rows).cloned().collect() }).collect()
+    cols.iter()
+        .map(|c| DataSetColumn {
+            title: c.title.clone(),
+            subcolumn_titles: c.subcolumn_titles.clone(),
+            display_decimals: c.display_decimals,
+            cells: c.cells.iter().take(max_rows).cloned().collect(),
+        })
+        .collect()
 }
 
 fn slice_archetype_rows(archetype: &TableArchetype, max_rows: usize) -> TableArchetype {
     match archetype {
         TableArchetype::Xy(t) => TableArchetype::Xy(XyTable {
             x_title: t.x_title.clone(),
+            x_subcolumn_titles: t.x_subcolumn_titles.clone(),
+            x_display_decimals: t.x_display_decimals,
             x_mode: t.x_mode.clone(),
             x_cells: t.x_cells.iter().take(max_rows).cloned().collect(),
             row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
@@ -649,6 +658,7 @@ fn slice_archetype_rows(archetype: &TableArchetype, max_rows: usize) -> TableArc
                     role_inferred: v.role_inferred,
                     source: v.source.clone(),
                     level_order: v.level_order.clone(),
+                    display_decimals: v.display_decimals,
                     cells: v.cells.iter().take(max_rows).cloned().collect(),
                 })
                 .collect(),

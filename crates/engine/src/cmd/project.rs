@@ -1,14 +1,20 @@
 //! Project lifecycle, file I/O, template, inspection, recalculation, and checkpoint commands.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use curvebook_doc::{ErrorCode, NamedCheckpoint, ProjectDocument, SheetId, validate_title};
+use curvebook_doc::{
+    DocError, ErrorCode, MAX_PROJECT_IMAGE_ASSETS, MAX_SHEETS_PER_PROJECT, MAX_TITLE_BYTES, NamedCheckpoint, ProjectDocument, SheetId, SheetOrigin,
+    validate_project_cells, validate_title,
+};
+use curvebook_format::registry::DESC_PRISM;
 use curvebook_format::{
-    MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, migrate_document_json, open_project_bytes, open_project_file, open_project_unpacked_dir,
-    sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes, validate_project_document,
+    ArchiveExportOptions, ArchiveKind, MAX_ARCHIVE_FILE_BYTES, export_prism_bytes_with_options, export_pzfx_bytes, instantiate_template_bytes,
+    migrate_document_json, open_archive_bytes_with_warnings, open_project_bytes, open_project_file, open_project_unpacked_dir,
+    open_project_unpacked_dir_with_warnings, sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes,
+    strip_project_data_for_template, validate_project_document,
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -16,9 +22,11 @@ use serde_json::{Value, json};
 
 use crate::cmd::helpers::{
     always_enabled, bad_input, bad_input_ptr, decode_base64_capped, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides,
+    sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{command_schema, empty_object_schema, parse_params};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects, command_specs};
+use crate::services::{PZFX_EXPORT_DATA_ONLY_NOTICE, PZFX_EXPORT_STRUCTURE_NOTICE, format_import_or_archive_warning, format_pzfx_export_warning};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy, dag};
 
 /// Summary returned by project link/recalculation helpers.
@@ -85,6 +93,183 @@ pub(super) fn current_utc_timestamp() -> String {
         let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0_u64, |dur| dur.as_secs());
         format!("unix:{secs}")
     }
+}
+
+/// Validate an optional caller-supplied merge timestamp (`unix:<seconds>` or ISO-8601 UTC),
+/// defaulting to [`current_utc_timestamp`] when omitted.
+pub(super) fn resolve_optional_merged_at(raw: Option<&str>) -> Result<String, EngineError> {
+    match raw {
+        Some(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(bad_input_ptr("/merged_at", "`merged_at` cannot be empty"));
+            }
+            validate_title(trimmed)?;
+            if !is_valid_iso8601_utc_timestamp(trimmed) {
+                return Err(bad_input_ptr(
+                    "/merged_at",
+                    format!("invalid `merged_at` `{trimmed}`; expected ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) or `unix:<seconds>`"),
+                ));
+            }
+            Ok(trimmed.to_owned())
+        }
+        None => Ok(current_utc_timestamp()),
+    }
+}
+
+fn truncate_utf8_max_bytes(raw: &str, max_bytes: usize) -> &str {
+    if raw.len() <= max_bytes {
+        return raw;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    raw.get(..end).unwrap_or("")
+}
+
+/// Extract a sanitized basename-only `source_label` from an optional path (stripping both `/` and `\`
+/// directories and control characters, never leaking full paths, and capping to [`MAX_TITLE_BYTES`]).
+#[must_use]
+pub(super) fn extract_source_label(path: Option<&str>, fallback: &str) -> String {
+    let candidate = path
+        .map(|raw| {
+            let trimmed = raw.trim().trim_end_matches(['/', '\\']);
+            let leaf = trimmed.rsplit(['/', '\\']).next().unwrap_or("");
+            let cleaned: String = leaf.chars().filter(|ch| !ch.is_control() && *ch != '/' && *ch != '\\').collect();
+            cleaned.trim().to_owned()
+        })
+        .filter(|s| !s.is_empty() && s != "." && s != "..");
+    let chosen = candidate.unwrap_or_else(|| fallback.to_owned());
+    let clipped = truncate_utf8_max_bytes(&chosen, MAX_TITLE_BYTES).trim().to_owned();
+    if clipped.is_empty() { fallback.to_owned() } else { clipped }
+}
+
+/// Stamp `origin` onto every sheet across all five sections of `doc`.
+pub(super) fn stamp_document_origin(doc: &mut ProjectDocument, origin: &SheetOrigin) {
+    for ds in &mut doc.data_sheets {
+        ds.origin = Some(origin.clone());
+    }
+    for info in &mut doc.info_sheets {
+        info.origin = Some(origin.clone());
+    }
+    for rs in &mut doc.result_sheets {
+        rs.origin = Some(origin.clone());
+    }
+    for gs in &mut doc.graph_sheets {
+        gs.origin = Some(origin.clone());
+    }
+    for ls in &mut doc.layout_sheets {
+        ls.origin = Some(origin.clone());
+    }
+}
+
+pub(super) fn collect_all_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {
+    let mut ids = HashSet::with_capacity(doc.total_sheet_count());
+    for id in doc
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(doc.info_sheets.iter().map(|s| &s.id))
+        .chain(doc.result_sheets.iter().map(|s| &s.id))
+        .chain(doc.graph_sheets.iter().map(|s| &s.id))
+        .chain(doc.layout_sheets.iter().map(|s| &s.id))
+    {
+        ids.insert(id.as_str().to_owned());
+    }
+    ids
+}
+
+pub(super) fn next_collision_free_sheet_id(original: &SheetId, reserved: &mut HashSet<String>) -> Result<SheetId, EngineError> {
+    let raw = original.as_str().trim();
+    let base = if raw.is_empty() { "sheet" } else { raw };
+    for suffix in 2..=100_000_usize {
+        let candidate = SheetId::try_new(format!("{base}-{suffix}"))?;
+        if reserved.insert(candidate.as_str().to_owned()) {
+            return Ok(candidate);
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("exhausted collision-free sheet IDs for `{raw}`")))
+}
+
+fn plan_imported_id_remap(doc: &ProjectDocument, imported: &ProjectDocument) -> Result<HashMap<SheetId, SheetId>, EngineError> {
+    let doc_ids = collect_all_sheet_ids(doc);
+    let mut reserved = doc_ids.clone();
+    reserved.extend(collect_all_sheet_ids(imported));
+
+    let mut seen_imported: HashSet<String> = HashSet::with_capacity(imported.total_sheet_count());
+    let mut id_map: HashMap<SheetId, SheetId> = HashMap::new();
+
+    for orig_id in imported
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(imported.info_sheets.iter().map(|s| &s.id))
+        .chain(imported.result_sheets.iter().map(|s| &s.id))
+        .chain(imported.graph_sheets.iter().map(|s| &s.id))
+        .chain(imported.layout_sheets.iter().map(|s| &s.id))
+    {
+        let key = orig_id.as_str();
+        let needs_remap = doc_ids.contains(key) || !seen_imported.insert(key.to_owned());
+        if needs_remap {
+            let new_id = next_collision_free_sheet_id(orig_id, &mut reserved)?;
+            id_map.entry(orig_id.clone()).or_insert(new_id);
+        }
+    }
+    Ok(id_map)
+}
+
+/// Merge all sheets and referenced image assets from `imported` into `doc` using the single
+/// canonical cap-checked, collision-renumbering, DAG-cycle-checked path (§10.1, §10.2).
+///
+/// Leaves behind `imported.checkpoints`, project-level settings/title, `active_sheet_id`, and
+/// `family_anchor_sheet_id`, and preserves `ResultStatus::Imported` / `ImportedStale`.
+pub(super) fn merge_imported_document(doc: &mut ProjectDocument, mut imported: ProjectDocument) -> Result<(), EngineError> {
+    let total_sheets = doc.total_sheet_count().saturating_add(imported.total_sheet_count());
+    if total_sheets > MAX_SHEETS_PER_PROJECT {
+        return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
+    }
+    let existing_cells = doc.total_allocated_cells()?;
+    let added_cells = imported.total_allocated_cells()?;
+    validate_project_cells(existing_cells, added_cells)?;
+    let existing_asset_ids: HashSet<&str> = doc.image_assets.iter().map(|a| a.asset_id.as_str()).collect();
+    let mut added_asset_ids: HashSet<&str> = HashSet::new();
+    for asset in &imported.image_assets {
+        if !existing_asset_ids.contains(asset.asset_id.as_str()) {
+            added_asset_ids.insert(asset.asset_id.as_str());
+        }
+    }
+    let total_assets = doc.image_assets.len().saturating_add(added_asset_ids.len());
+    if total_assets > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(EngineError::from(DocError::TooManyImageAssets { count: total_assets, max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+
+    let id_map = plan_imported_id_remap(doc, &imported)?;
+    if !id_map.is_empty() {
+        let btree_map: BTreeMap<SheetId, SheetId> = id_map.into_iter().collect();
+        curvebook_doc::remap_document_sheet_ids(&mut imported, &btree_map);
+    }
+
+    for asset in imported.image_assets {
+        doc.upsert_image_asset(asset)?;
+    }
+    for ds in imported.data_sheets {
+        doc.add_data_sheet(ds)?;
+    }
+    for info in imported.info_sheets {
+        doc.add_info_sheet(info)?;
+    }
+    for res in imported.result_sheets {
+        doc.add_result_sheet(res)?;
+    }
+    for gs in imported.graph_sheets {
+        doc.add_graph_sheet(gs)?;
+    }
+    for ls in imported.layout_sheets {
+        doc.add_layout_sheet(ls)?;
+    }
+    let _ = dag::topological_order(doc)?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -157,6 +342,118 @@ fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
             "unpacked": used_unpacked,
         }),
     ))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct MergeProjectParams {
+    /// Filesystem path to `.curvebook` archive, `.curvebook.d/` directory, or `.cbtemplate` template.
+    path: Option<String>,
+    /// Base64-encoded `.curvebook` or `.cbtemplate` archive bytes.
+    bytes_base64: Option<String>,
+    /// Treat `path` as an unpacked `.curvebook.d/` project directory.
+    unpacked: Option<bool>,
+    /// Optional caller-supplied UTC timestamp (`unix:<seconds>` or ISO-8601 UTC) recorded in merged sheet origins.
+    merged_at: Option<String>,
+    /// Optional filename-only source label override (no path separators) when merging inline `bytes_base64`.
+    source_label: Option<String>,
+}
+
+fn load_merge_archive_bytes(bytes: &[u8]) -> Result<(ProjectDocument, &'static str, &'static str, Vec<String>), EngineError> {
+    let (kind, raw_doc, warnings) = open_archive_bytes_with_warnings(bytes)?;
+    match kind {
+        ArchiveKind::Project => Ok((raw_doc, "curvebook", "inline.curvebook", warnings)),
+        ArchiveKind::Template => {
+            let templated = strip_project_data_for_template(&raw_doc)?;
+            Ok((templated, "cbtemplate", "inline.cbtemplate", warnings))
+        }
+    }
+}
+
+fn run_project_merge(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: MergeProjectParams = parse_params(&command_schema::<MergeProjectParams>(), params)?;
+    let explicit_unpacked = parsed.unpacked.unwrap_or(false);
+    let merged_at = resolve_optional_merged_at(parsed.merged_at.as_deref())?;
+
+    let (mut loaded, source_format, fallback_label, used_unpacked, load_warnings) = if let Some(ref path) = parsed.path {
+        if path.trim().is_empty() {
+            return Err(bad_input_ptr("/path", "project.merge `path` must not be empty"));
+        }
+        let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_open_target(path, explicit_unpacked)?;
+        if use_unpacked {
+            let (doc, warnings) = open_project_unpacked_dir_with_warnings(&resolved)?;
+            (doc, "curvebook.d", "inline.curvebook.d", true, warnings)
+        } else {
+            let bytes = ctx.session.path_policy.read_binary_file(path, "project file", MAX_ARCHIVE_FILE_BYTES)?;
+            let (doc, fmt, fallback, warnings) = load_merge_archive_bytes(&bytes)?;
+            (doc, fmt, fallback, false, warnings)
+        }
+    } else if explicit_unpacked {
+        return Err(bad_input("project.merge with `unpacked: true` requires `path`")
+            .with_remediation("Provide a directory path in `path` when merging an unpacked project."));
+    } else if let Some(ref b64) = parsed.bytes_base64 {
+        let bytes = decode_base64_capped(b64, MAX_ARCHIVE_FILE_BYTES, "/bytes_base64")?;
+        let (doc, fmt, fallback, warnings) = load_merge_archive_bytes(&bytes)?;
+        (doc, fmt, fallback, false, warnings)
+    } else {
+        return Err(bad_input("project.merge requires `path` or `bytes_base64`").with_remediation("Pass either `path` or `bytes_base64`."));
+    };
+
+    let source_label = match parsed.source_label.as_deref() {
+        Some(raw) => raw.trim().to_owned(),
+        None => extract_source_label(parsed.path.as_deref(), fallback_label),
+    };
+    let origin = SheetOrigin::new(source_label, source_format, merged_at)?;
+    stamp_document_origin(&mut loaded, &origin);
+
+    let prev_active = ctx.session.doc.active_sheet_id.clone();
+    let prev_anchor = ctx.session.doc.family_anchor_sheet_id.clone();
+    let before_data = ctx.session.doc.data_sheets.len();
+    let before_info = ctx.session.doc.info_sheets.len();
+    let before_results = ctx.session.doc.result_sheets.len();
+    let before_graphs = ctx.session.doc.graph_sheets.len();
+    let before_layouts = ctx.session.doc.layout_sheets.len();
+    let added_sheets = loaded.total_sheet_count();
+
+    merge_imported_document(&mut ctx.session.doc, loaded)?;
+    sync_info_linked_data_sheets(&mut ctx.session.doc, &HashSet::new());
+
+    if prev_active.is_some() {
+        ctx.session.doc.active_sheet_id = prev_active;
+    }
+    if prev_anchor.is_some() {
+        ctx.session.doc.family_anchor_sheet_id = prev_anchor;
+    }
+
+    let merged_sheet_ids: Vec<String> = ctx
+        .session
+        .doc
+        .data_sheets
+        .iter()
+        .skip(before_data)
+        .map(|s| s.id.as_str().to_owned())
+        .chain(ctx.session.doc.info_sheets.iter().skip(before_info).map(|s| s.id.as_str().to_owned()))
+        .chain(ctx.session.doc.result_sheets.iter().skip(before_results).map(|s| s.id.as_str().to_owned()))
+        .chain(ctx.session.doc.graph_sheets.iter().skip(before_graphs).map(|s| s.id.as_str().to_owned()))
+        .chain(ctx.session.doc.layout_sheets.iter().skip(before_layouts).map(|s| s.id.as_str().to_owned()))
+        .collect();
+
+    let mut outcome = CommandOutcome::mutated(
+        "project.merge",
+        format!("merged {added_sheets} sheet(s) from `{}`", origin.source_label),
+        json!({
+            "title": ctx.session.doc.title,
+            "source_label": origin.source_label,
+            "source_format": origin.source_format,
+            "merged_at": origin.merged_at,
+            "added_sheets": added_sheets,
+            "merged_sheet_ids": merged_sheet_ids,
+            "sheet_count": ctx.session.doc.total_sheet_count(),
+            "unpacked": used_unpacked,
+        }),
+    );
+    outcome.warnings = load_warnings;
+    Ok(outcome)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -245,6 +542,94 @@ fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<Command
             "bytes_base64": encoded,
         }),
     ))
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExportPzfxParams {
+    /// Optional destination `.pzfx` file path written atomically without changing the session's active `file_path` or unsaved state.
+    path: Option<String>,
+    /// Include base64-encoded `.pzfx` XML bytes in response (defaults to true when `path` is omitted).
+    return_bytes: Option<bool>,
+}
+
+fn run_project_export_pzfx(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: ExportPzfxParams = parse_params(&command_schema::<ExportPzfxParams>(), params)?;
+    if let Some(ref path) = parsed.path
+        && path.trim().is_empty()
+    {
+        return Err(bad_input_ptr("/path", "project.exportPzfx `path` must not be empty"));
+    }
+    let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
+    let report = export_pzfx_bytes(&ctx.session.doc)?;
+    if let Some(ref path) = parsed.path {
+        ctx.session.path_policy.write_atomic_bytes(path, &report.bytes)?;
+    }
+    let encoded = if return_bytes { Some(encode_base64(&report.bytes)) } else { None };
+    let warning_lines: Vec<String> = report.warnings.iter().map(format_pzfx_export_warning).collect();
+    let mut outcome = CommandOutcome::read_only(
+        "project.exportPzfx",
+        "exported .pzfx data file",
+        json!({
+            "format": "pzfx",
+            "title": ctx.session.doc.title,
+            "path": parsed.path,
+            "bytes_len": report.bytes.len(),
+            "bytes_base64": encoded,
+            "data_sheet_count": report.preflight.data_sheet_count,
+            "info_sheet_count": report.preflight.info_sheet_count,
+            "total_dropped_count": report.preflight.total_dropped_count(),
+            "preflight": report.preflight,
+            "warnings": report.warnings,
+            "data_only_notice": PZFX_EXPORT_DATA_ONLY_NOTICE,
+            "notice": PZFX_EXPORT_STRUCTURE_NOTICE,
+        }),
+    );
+    outcome.warnings = warning_lines;
+    Ok(outcome)
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct ExportPrismParams {
+    /// Optional destination `.prism` file path written atomically without changing the session's active `file_path` or unsaved state.
+    path: Option<String>,
+    /// Include base64-encoded `.prism` archive bytes in response (defaults to true when `path` is omitted).
+    return_bytes: Option<bool>,
+    /// Explicit opt-in required to write experimental `.prism` archives (defaults to false; `.prism` is import-only at Beta per §6.3).
+    experimental: Option<bool>,
+}
+
+fn run_project_export_prism(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: ExportPrismParams = parse_params(&command_schema::<ExportPrismParams>(), params)?;
+    if let Some(ref path) = parsed.path
+        && path.trim().is_empty()
+    {
+        return Err(bad_input_ptr("/path", "project.exportPrism `path` must not be empty"));
+    }
+    let experimental = parsed.experimental.unwrap_or(false);
+    let report = export_prism_bytes_with_options(&ctx.session.doc, ArchiveExportOptions { experimental })?;
+    let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
+    if let Some(ref path) = parsed.path {
+        ctx.session.path_policy.write_atomic_bytes(path, &report.bytes)?;
+    }
+    let encoded = if return_bytes { Some(encode_base64(&report.bytes)) } else { None };
+    let warning_lines: Vec<String> = report.warnings.iter().map(format_import_or_archive_warning).collect();
+    let mut outcome = CommandOutcome::read_only(
+        "project.exportPrism",
+        "exported experimental .prism archive",
+        json!({
+            "format": DESC_PRISM.id,
+            "experimental": true,
+            "title": ctx.session.doc.title,
+            "path": parsed.path,
+            "bytes_len": report.bytes.len(),
+            "bytes_base64": encoded,
+            "warnings": report.warnings,
+        }),
+    );
+    outcome.warnings = warning_lines;
+    Ok(outcome)
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -669,6 +1054,17 @@ static SPECS: &[CommandSpec] = &command_specs!(
         run: run_project_open,
     },
     {
+        id: "project.merge",
+        label: "Merge Project",
+        menu_path: "File/Merge Project...",
+        summary: "Merge sheets and referenced image assets from another `.curvebook`, `.curvebook.d/`, or `.cbtemplate` project into the active project.",
+        beginner: "Brings data tables, info sheets, results, graphs, layouts, and embedded images from another project into this project in one undoable step without changing the open project's file path.",
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
+        input_schema: command_schema::<MergeProjectParams>,
+        enabled: always_enabled,
+        run: run_project_merge,
+    },
+    {
         id: "project.save",
         label: "Save Project",
         menu_path: "File/Save",
@@ -690,6 +1086,28 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: command_schema::<SaveTemplateParams>,
         enabled: always_enabled,
         run: run_project_save_template,
+    },
+    {
+        id: "project.exportPzfx",
+        label: "Export .pzfx File",
+        menu_path: "File/Export/Export .pzfx File...",
+        summary: "Export data tables and info sheets as a deterministic `.pzfx` XML file.",
+        beginner: "Saves data tables and info sheets only (analyses, graphs, and layouts stay in your `.curvebook` project; written to match the `.pzfx` structure of real files and not tested in other applications) without changing the active file path or unsaved state.",
+        effects: Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT),
+        input_schema: command_schema::<ExportPzfxParams>,
+        enabled: always_enabled,
+        run: run_project_export_pzfx,
+    },
+    {
+        id: "project.exportPrism",
+        label: "Export .prism File (Experimental)",
+        menu_path: "File/Export/Export .prism File (Experimental)...",
+        summary: "Experimental `.prism` archive export (disabled by default; requires `experimental: true`).",
+        beginner: "Requires explicit `experimental: true` opt-in because `.prism` is import-only at Beta; use `project.exportPzfx` for standard data interchange. Never changes the active file path or unsaved state.",
+        effects: Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT),
+        input_schema: command_schema::<ExportPrismParams>,
+        enabled: always_enabled,
+        run: run_project_export_prism,
     },
     {
         id: "project.instantiateTemplate",

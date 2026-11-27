@@ -458,7 +458,7 @@ fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
     };
     exec_intent(&mut app, cmd_draft.to_command_intent().expect("clone intent"));
     assert!(app.document().data_sheet(&SheetId::from("cloned-xy")).is_some());
-    assert!(app.document().result_sheets.iter().any(|r| r.analysis.source_sheet_id == SheetId::from("cloned-xy")));
+    assert!(app.document().result_sheets.iter().any(|r| r.analysis.source_sheet_id == Some(SheetId::from("cloned-xy"))));
     assert!(
         app.document()
             .graph_sheets

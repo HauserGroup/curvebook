@@ -34,13 +34,15 @@
 //!   rejected with [`StatsError::ZeroVariance`] rather than reporting `F = 0` or `F = +Inf`. The
 //!   threshold is the rounding-noise floor `N * (8 * eps * max |x|)^2`.
 
-use curvebook_doc::{AnalysisSpec, ChecklistStatus, DataSheet, LeveneCenter, LeveneTestSpec, ResultSheet, ResultTabKind, TableArchetype};
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, ChecklistStatus, DataSheet, LeveneCenter, LeveneTestSpec, ResultSheet, ResultTabKind, TableArchetype,
+};
 use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, extract_numeric_columns, init_result_sheet, num_cell,
-    push_scalar, sanitize_result_sheet_floats,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, enforce_summary_mode_matrix, extract_numeric_columns,
+    init_result_sheet, num_cell, push_scalar, sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
 use crate::two_group::{LeveneTestResult, levene_variance_core};
@@ -99,6 +101,7 @@ pub fn levene_test_groups(groups: &[(usize, &str, &[f64])], center: LeveneCenter
 /// Execute a [`LeveneTestSpec`] against a raw-replicate `Column` or `MultipleVariables` [`DataSheet`],
 /// treating each selected column as one group.
 pub fn run_levene_analysis(sheet: &DataSheet, spec: &AnalysisSpec, lt: &LeveneTestSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::LeveneTest(*lt))?;
     if !matches!(sheet.archetype, TableArchetype::Column(_) | TableArchetype::MultipleVariables(_)) {
         return Err(StatsError::IncompatibleTable { analysis: "Levene / Brown-Forsythe test", actual: sheet.archetype.kind() });
     }

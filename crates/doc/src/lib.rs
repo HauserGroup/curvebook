@@ -34,6 +34,7 @@ pub mod links;
 pub mod param_spellings;
 pub mod plate;
 pub mod project;
+pub mod remap;
 pub mod result;
 pub mod result_builder;
 pub mod schema;
@@ -42,16 +43,19 @@ pub use analysis::{
     ALL_ANALYSIS_DESCRIPTORS, AnalysisDomainKind, AnalysisKind, AnalysisKindDescriptor, AnalysisKindId, AnalysisRecomputeStrategy, AnalysisSpec,
     AnalysisUiCategory, AreaUnderCurveSpec, AucBaseline, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ColumnTitleHookError,
     ContingencyMethod, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, DemingErrorSpec, DerivedColumnFormula,
-    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmFamily, GlmSpec, IdentifiabilityMode, KappaWeighting,
-    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LowessPreset, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
-    ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
-    PowerTestFamily, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, RocCiMethod, RocSpec, SimpleLogisticSpec, SimulationNoise,
-    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource, all_analysis_descriptors, default_analysis_kind_id_for_table,
-    descriptor_by_serde_variant, descriptor_by_shorthand, descriptor_by_slug, descriptor_by_ui_catalog_id, descriptor_for_id, descriptor_for_kind,
-    parse_column_title_numeric_hook, resolve_analysis_descriptor,
+    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitFlagRules, FitMethod, GlmFamily, GlmSpec, IdentifiabilityMode,
+    ImportedSnapshotSpec, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LowessPreset, MathTransformPreset, MixedModelDfMethod,
+    ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec,
+    PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec,
+    PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance,
+    RocCiMethod, RocSpec, SUMMARY_CAPABLE_TABLE_KINDS, SUMMARY_MODE_MATRIX, SUMMARY_SUBCOLUMN_MODES, SimpleLogisticSpec, SimulationNoise,
+    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SumOfSquaresType, SummaryModeMatrixRow, SummaryModeProcedure,
+    SummaryModeRefusalReason, SummaryModeRowCells, SummaryModeSemantics, SummaryModeSupport, SurvivalAnalysisSpec, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource, all_analysis_descriptors,
+    default_analysis_kind_id_for_table, descriptor_by_serde_variant, descriptor_by_shorthand, descriptor_by_slug, descriptor_by_ui_catalog_id,
+    descriptor_for_id, descriptor_for_kind, parse_column_title_numeric_hook, resolve_analysis_descriptor, summary_mode_matrix_rows,
+    summary_mode_row_for_spec, summary_mode_support,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,
@@ -65,9 +69,9 @@ pub use cell::{
 };
 pub use delimited::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 pub use error::{
-    CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
-    MAX_SUBCOLUMNS, MAX_TITLE_BYTES, SummaryPointError, validate_cell_grid, validate_confidence_level, validate_data_sets, validate_project_cells,
-    validate_rows, validate_sheet_cells, validate_subcolumns, validate_title,
+    CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_DISPLAY_DECIMALS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS,
+    MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES, SummaryPointError, validate_cell_grid, validate_confidence_level, validate_data_sets,
+    validate_project_cells, validate_rows, validate_sheet_cells, validate_subcolumns, validate_title,
 };
 pub use graph::{
     AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
@@ -79,7 +83,7 @@ pub use graph::{
     ReplicateOverlayStyle, SeriesOffsetSpec, SeriesSpec, SizeChannelMapping, SummaryMeasure, SurvivalDisplayMetric, TickDirection, TickLabelFormat,
     WhiskerMethod,
 };
-pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, SourceCellId, extract_template_hooks};
+pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SheetOrigin, SizePt, SourceCellId, extract_template_hooks};
 pub use image::{
     CropInsetsPt, ImageBorderSpec, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, MAX_IMAGE_DIM_PX, MAX_IMAGE_PIXELS, MAX_PROJECT_IMAGE_ASSETS,
     ProjectImageAsset, content_addressed_asset_id, is_valid_asset_id, sha256_bytes,
@@ -95,10 +99,13 @@ pub use links::{
 };
 pub use plate::{MAX_PLATE_WELLS, PlateGeometry, PlateWellRole};
 pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
+pub use remap::{
+    remap_document_sheet_ids, remap_document_sheet_references, remap_graph_spec_references, remap_inline_hook_tokens, remap_layout_spec_references,
+};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairedObservationAccounting,
-    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultCellDetail, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
-    format_significant_digits,
+    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultCellDetail, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus,
+    ResultTab, ResultTabKind, format_significant_digits,
 };
 pub use result_builder::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
@@ -157,7 +164,18 @@ impl TableKind {
         match self {
             Self::Xy => true,
             Self::Column => {
-                matches!(mode, SubcolumnMode::Single | SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN)
+                matches!(
+                    mode,
+                    SubcolumnMode::Single
+                        | SubcolumnMode::MeanSd
+                        | SubcolumnMode::MeanSem
+                        | SubcolumnMode::MeanSdN
+                        | SubcolumnMode::MeanSemN
+                        | SubcolumnMode::MeanCvN
+                        | SubcolumnMode::MeanLowHigh
+                        | SubcolumnMode::UpperLowerLimits
+                        | SubcolumnMode::MedianIqr
+                )
             }
             Self::Grouped => !matches!(mode, SubcolumnMode::Single),
             Self::Contingency | Self::Survival | Self::PartsOfWhole | Self::MultipleVariables => matches!(mode, SubcolumnMode::Single),
@@ -383,7 +401,7 @@ mod tests {
         assert!(matches!(spec.retarget_source("surv-1", TableKind::Survival, vec![]), Err(DocError::IncompatibleRetargetTable { .. })));
         // Retargeting onto another Column or MultipleVariables table succeeds.
         spec.retarget_source("mv-1", TableKind::MultipleVariables, vec![0, 1, 2]).unwrap();
-        assert_eq!(spec.source_sheet_id.as_str(), "mv-1");
+        assert_eq!(spec.source_sheet_id.as_ref().map(SheetId::as_str), Some("mv-1"));
     }
 
     #[test]

@@ -616,4 +616,13 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         beginner: "Writes one CSV or TSV file per data table into a folder you choose.",
         rank: ActionRank::Overflow,
     },
+    UiCommandSpec {
+        id: "ui.export.pzfx.open",
+        label: ".pzfx file",
+        shortcut: "",
+        params_doc: "{}",
+        summary: "Preflight and export data tables and info sheets as a .pzfx file.",
+        beginner: "Saves your data tables and info sheets to .pzfx (confirming any dropped analyses, graphs, or layouts first) without changing your open .curvebook project.",
+        rank: ActionRank::Secondary,
+    },
 ];

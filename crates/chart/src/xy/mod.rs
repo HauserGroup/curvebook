@@ -326,6 +326,15 @@ fn summarize_pre_summarized(
             }
         }
     }
+    if matches!(mode, SubcolumnMode::MeanSd | SubcolumnMode::MeanSem) && eb.metric == ErrorBarMetric::ConfidenceInterval95 {
+        return center_only.map(|center| {
+            warnings.push(ChartWarning::new(
+                "missing_sample_size_for_ci",
+                format!("95% CI requires sample size N, which is absent in {mode:?} mode; error bar omitted"),
+            ));
+            (center, center, center)
+        });
+    }
     if let Some(b) = explicit {
         return Some((b.center, b.lower, b.upper));
     }
@@ -1127,7 +1136,7 @@ fn resolve_embedded_grid(scene: &mut ChartScene, doc: &ProjectDocument, spec: &E
                 .push(ChartWarning::new("failed_embedded_result_table", format!("result sheet '{}' failed; omitted embedded table", spec.sheet_id)));
             return None;
         }
-        if !matches!(res.status, ResultStatus::UpToDate) {
+        if !res.has_displayable_output() {
             scene.warnings.push(ChartWarning::new(
                 "pending_embedded_result_table",
                 format!("result sheet '{}' is pending recalculation; embedded table omitted", spec.sheet_id),

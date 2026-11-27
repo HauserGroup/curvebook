@@ -203,8 +203,10 @@ pub fn render_fit_modal(
     let param_names = resolve_parameter_names(nl);
     let locale_preset = &app.locale_preset;
     let (alerts, blocking_error) = compute_fit_alerts(nl, &param_names, state, locale_preset);
-    let log_x_warning = if nl.custom_dsl.is_none() {
-        let xs = collect_sheet_active_x_values(doc, &spec.source_sheet_id, nl.x_range_filter, &nl.mv_x_columns);
+    let log_x_warning = if nl.custom_dsl.is_none()
+        && let Some(src) = spec.source_sheet_id.as_ref()
+    {
+        let xs = collect_sheet_active_x_values(doc, src, nl.x_range_filter, &nl.mv_x_columns);
         curvebook_fit::detect_log_x_scale_mismatch(&nl.equation_id, &xs)
     } else {
         None
@@ -465,7 +467,8 @@ fn parse_fit_number(raw: &str, preset: &LocalePreset) -> Option<f64> {
 }
 
 fn resolve_fit_source_sheet<'a>(doc: &'a ProjectDocument, spec: &curvebook_doc::AnalysisSpec) -> Option<&'a curvebook_doc::DataSheet> {
-    doc.data_sheet(&spec.source_sheet_id).or_else(|| doc.result_sheet(&spec.source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()))
+    let src = spec.source_sheet_id.as_ref()?;
+    doc.data_sheet(src).or_else(|| doc.result_sheet(src).and_then(|rs| rs.analyzable_data.as_ref()))
 }
 
 fn extract_fit_data_points(doc: &ProjectDocument, spec: &curvebook_doc::AnalysisSpec, nl: &NonlinearFitSpec) -> Vec<DataPoint> {

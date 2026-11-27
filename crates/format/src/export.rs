@@ -2,8 +2,8 @@
 //! designed for downstream R, Python, Snakemake, and Nextflow analysis pipelines.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, CiBound, DataSheet, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultCellDetail, ResultScalarEntry,
-    ResultSheet, ResultStatus, ResultTab, SheetId, SourceCellId,
+    AnalysisSpec, ChecklistItem, CiBound, DataSheet, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultCellDetail, ResultProvenance,
+    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, SheetId, SourceCellId,
 };
 
 use crate::archive::validate_data_sheet_floats;
@@ -16,6 +16,7 @@ pub struct ResultSheetExportJson<'a> {
     pub id: &'a SheetId,
     pub title: &'a str,
     pub status: &'a ResultStatus,
+    pub provenance: &'a ResultProvenance,
     pub analysis: &'a AnalysisSpec,
     pub scalars: &'a [ResultScalarEntry],
     pub tabs: &'a [ResultTab],
@@ -27,6 +28,26 @@ pub struct ResultSheetExportJson<'a> {
     pub checklist: &'a [ChecklistItem],
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     pub cell_details: &'a [ResultCellDetail],
+}
+
+/// Return a human-readable provenance or staleness warning when exporting an imported [`ResultSheet`],
+/// or `None` for natively computed results.
+#[must_use]
+pub fn result_sheet_export_warning(sheet: &ResultSheet) -> Option<String> {
+    match &sheet.provenance {
+        ResultProvenance::Computed => None,
+        ResultProvenance::Imported { source_format, original_kind_label, .. } => {
+            let kind_suffix = if original_kind_label.trim().is_empty() { String::new() } else { format!(" ({original_kind_label})") };
+            if matches!(sheet.status, ResultStatus::ImportedStale) {
+                Some(format!(
+                    "Result `{}` is a stale imported snapshot from `{source_format}`{kind_suffix}; upstream data changed after import and values were not computed by CurveBook.",
+                    sheet.id
+                ))
+            } else {
+                Some(format!("Result `{}` is an imported snapshot from `{source_format}`{kind_suffix} and was not computed by CurveBook.", sheet.id))
+            }
+        }
+    }
 }
 
 /// Validate that `sheet` has not recorded [`ResultStatus::Failed`] before CSV export.
@@ -70,8 +91,19 @@ pub fn export_result_tab_csv(tab: &ResultTab, opts: &CsvOptions) -> String {
 
 /// Export a single [`ResultTab`] belonging to `sheet` as CSV/TSV, refusing failed result sheets.
 pub fn try_export_result_tab_csv(sheet: &ResultSheet, tab: &ResultTab, opts: &CsvOptions) -> Result<String, FormatError> {
+    try_export_result_tab_csv_with_warnings(sheet, tab, opts).map(|(csv, _)| csv)
+}
+
+/// Export a single [`ResultTab`] belonging to `sheet` as CSV/TSV, refusing failed result sheets
+/// and surfacing any imported-result provenance or staleness warning.
+pub fn try_export_result_tab_csv_with_warnings(
+    sheet: &ResultSheet,
+    tab: &ResultTab,
+    opts: &CsvOptions,
+) -> Result<(String, Vec<String>), FormatError> {
     ensure_result_sheet_csv_exportable(sheet)?;
-    Ok(export_result_tab_csv(tab, opts))
+    let warnings = result_sheet_export_warning(sheet).into_iter().collect();
+    Ok((export_result_tab_csv(tab, opts), warnings))
 }
 
 /// Export all tabs, hooked scalars, pairwise comparisons, fitted curve coordinates, and
@@ -83,6 +115,7 @@ pub fn export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> S
 
     let res_id = neutralize_csv_formula_text(sheet.id.as_str());
     let title = neutralize_csv_formula_text(sheet.title());
+    let provenance = tidy_provenance_value(sheet);
 
     append_tab_tidy_rows(&mut rows, &res_id, &title, &sheet.tabs, opts);
     append_scalar_tidy_rows(&mut rows, &res_id, &title, &sheet.scalars, opts);
@@ -91,13 +124,24 @@ pub fn export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> S
     append_eliminated_outlier_tidy_rows(&mut rows, &res_id, &title, &sheet.eliminated_outliers);
     append_checklist_tidy_rows(&mut rows, &res_id, &title, &sheet.checklist);
 
+    for row in rows.iter_mut().skip(1) {
+        row.push(provenance.clone());
+    }
+
     write_delimited_records(&rows, opts)
 }
 
 /// Export a [`ResultSheet`] as a tidy RFC-4180 CSV dataframe, refusing failed result sheets.
 pub fn try_export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> Result<String, FormatError> {
+    try_export_result_sheet_tidy_csv_with_warnings(sheet, opts).map(|(csv, _)| csv)
+}
+
+/// Export a [`ResultSheet`] as a tidy RFC-4180 CSV dataframe, refusing failed result sheets
+/// and surfacing any imported-result provenance or staleness warning.
+pub fn try_export_result_sheet_tidy_csv_with_warnings(sheet: &ResultSheet, opts: &CsvOptions) -> Result<(String, Vec<String>), FormatError> {
     ensure_result_sheet_csv_exportable(sheet)?;
-    Ok(export_result_sheet_tidy_csv(sheet, opts))
+    let warnings = result_sheet_export_warning(sheet).into_iter().collect();
+    Ok((export_result_sheet_tidy_csv(sheet, opts), warnings))
 }
 
 /// Export a [`ResultSheet`] to structured JSON (`serde_json`), validating that no non-finite
@@ -108,6 +152,7 @@ pub fn export_result_sheet_json(sheet: &ResultSheet, pretty: bool) -> Result<Str
         id: &sheet.id,
         title: sheet.title(),
         status: &sheet.status,
+        provenance: &sheet.provenance,
         analysis: &sheet.analysis,
         scalars: &sheet.scalars,
         tabs: &sheet.tabs,
@@ -120,6 +165,16 @@ pub fn export_result_sheet_json(sheet: &ResultSheet, pretty: bool) -> Result<Str
     };
     let json = if pretty { serde_json::to_string_pretty(&payload)? } else { serde_json::to_string(&payload)? };
     Ok(json)
+}
+
+fn tidy_provenance_value(sheet: &ResultSheet) -> String {
+    match (&sheet.provenance, &sheet.status) {
+        (ResultProvenance::Computed, _) => String::from("computed"),
+        (ResultProvenance::Imported { source_format, .. }, ResultStatus::ImportedStale) => {
+            neutralize_csv_formula_text(&format!("imported_stale:{source_format}"))
+        }
+        (ResultProvenance::Imported { source_format, .. }, _) => neutralize_csv_formula_text(&format!("imported:{source_format}")),
+    }
 }
 
 fn tidy_header() -> Vec<String> {
@@ -145,6 +200,7 @@ fn tidy_header() -> Vec<String> {
         String::from("diagnostic_metric"),
         String::from("pred_lower"),
         String::from("pred_upper"),
+        String::from("provenance"),
     ]
 }
 

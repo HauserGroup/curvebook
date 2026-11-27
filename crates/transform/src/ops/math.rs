@@ -409,7 +409,8 @@ fn transform_xy_x_axis(
     };
 
     for (r, row_cells) in xy.x_cells.iter_mut().enumerate() {
-        let mut temp_col = DataSetColumn { title: xy.x_title.clone(), cells: vec![row_cells.clone()] };
+        let mut temp_col =
+            DataSetColumn { title: xy.x_title.clone(), cells: vec![row_cells.clone()], subcolumn_titles: Vec::new(), display_decimals: None };
         transform_row_slice(&mut temp_col.cells[0], sub_mode, op, err_mode, None, true, info, r, 0, count, warnings);
         *row_cells = temp_col.cells.swap_remove(0);
     }
@@ -521,7 +522,7 @@ fn transform_row_slice(
             }
             false
         }
-        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN | SubcolumnMode::MeanSd | SubcolumnMode::MeanSem => {
             transform_parametric_summary(row_cells, mode, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
             false
         }
@@ -572,7 +573,7 @@ fn transform_parametric_summary(
     count: &mut usize,
     warnings: &mut Vec<String>,
 ) {
-    if row_cells.len() < 3 {
+    if row_cells.len() < 2 {
         return;
     }
     let mean_excluded = row_cells[0].excluded;

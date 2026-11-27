@@ -48,9 +48,9 @@ pub use formula::{
 };
 pub use import::{ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, apply_import_link_pipeline, detect_link_cycles};
 pub use ops::{
-    BaselineKind, MathTransformOp, PruneMethod, SelectRule, TransformContext, TransformOutput, execute_analysis_transform, execute_math_op,
-    execute_math_transform, execute_normalize, execute_prune, execute_remove_baseline, execute_remove_baseline_kind, execute_select,
-    execute_select_with_derived, execute_transform, execute_transpose,
+    BaselineKind, MathTransformOp, PruneMethod, SelectRule, TransformContext, TransformOutput, enforce_summary_mode_matrix,
+    execute_analysis_transform, execute_math_op, execute_math_transform, execute_normalize, execute_prune, execute_remove_baseline,
+    execute_remove_baseline_kind, execute_select, execute_select_with_derived, execute_transform, execute_transpose,
 };
 pub use plate_and_tidy::{
     ExtractedPlateValues, PlateGeometry, PlateGridBuildOptions, PlateKineticReducer, PlateMapOutput, PlateMapTemplate, PlateSourceExtraction,

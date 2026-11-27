@@ -21,4 +21,6 @@ mod r17_7_plate_origins;
 mod r63_window_and_conditional;
 mod rv_ledger_formula;
 mod rv_ledger_ops;
+mod summary_mode_matrix_oracles;
+mod transform_v9_no_n_modes;
 mod unit_transform;

@@ -1,25 +1,51 @@
-//! Bounded XML DOM parser backed by `quick-xml`'s event reader for clean-room scientific XML
-//! interchange.
+//! Bounded XML 1.0 DOM parser and deterministic writer backed by `quick-xml` for clean-room
+//! scientific XML interchange.
 //!
-//! Enforces explicit byte, nesting-depth, and node-count caps, strips UTF-8 BOM, preserves
-//! ordered mixed content, handles comments, CDATA sections, numeric character references, and
-//! scientific named character entities, and rejects `<!DOCTYPE` / `<!ENTITY` declarations (zero
-//! external entity expansion).
+//! Capabilities:
+//! - Automatic encoding detection (`UTF-8` with/without BOM, `UTF-16LE`/`UTF-16BE` with/without
+//!   BOM, and declared `ISO-8859-1`, `Windows-1252`, `MacRoman` via Unicode Consortium lookup
+//!   tables; unknown encodings fail with [`FormatError::UnsupportedFormat`]).
+//! - Optional stop-after-root parsing that reports unparsed `trailing_bytes` without decoding the
+//!   tail.
+//! - Configurable opaque-element body skipping with exact skipped byte counts while still charging
+//!   against raw input limits (enabling caller-configured caps up to 128 MiB when opaque skipping
+//!   is active).
+//! - Whitespace-only text nodes preserved in mixed content without counting against `max_nodes`
+//!   (while raw bytes still count against `max_bytes`).
+//! - Predefined XML 1.0 entities, full W3C HTML 4.01 named character entities, scientific aliases,
+//!   and numeric character references, with `<!DOCTYPE` and `<!ENTITY` strictly forbidden.
+//! - Deterministic [`XmlWriter`] preserving caller-controlled attribute order, escaping
+//!   `& < > " '`, and rejecting characters outside the XML 1.0 `Char` production.
+
+mod encoding;
+mod entities;
+mod writer;
 
 use std::collections::HashSet;
 
 use quick_xml::Reader;
 use quick_xml::events::{BytesStart, Event};
 
+pub use encoding::{XmlEncoding, detect_xml_encoding};
+pub use entities::{decode_xml_entities, is_valid_xml10_char, lookup_named_xml_entity};
+pub use writer::XmlWriter;
+
+use encoding::{SingleByteToUtf8Reader, Utf16ToUtf8Reader, tail_is_only_xml_whitespace, validate_str_declared_encoding};
+use entities::decode_xml_entity_name;
+
 use crate::error::FormatError;
 
 /// Default maximum XML payload size in bytes (64 MiB).
 pub const MAX_XML_BYTES: usize = 64 * 1024 * 1024;
 
+/// Maximum raw XML payload size in bytes permitted when opaque-body skipping is enabled (128 MiB).
+pub const MAX_XML_OPAQUE_BYTES: usize = 128 * 1024 * 1024;
+
 /// Default maximum XML element nesting depth.
 pub const MAX_XML_DEPTH: usize = 128;
 
-/// Default maximum number of XML elements in a single document.
+/// Default maximum number of non-whitespace XML nodes (elements, attributes, text, CDATA) in a
+/// single document.
 pub const MAX_XML_NODES: usize = 2_000_000;
 
 /// Security limits for XML parsing.
@@ -33,6 +59,104 @@ pub struct XmlLimits {
 impl Default for XmlLimits {
     fn default() -> Self {
         Self { max_bytes: MAX_XML_BYTES, max_depth: MAX_XML_DEPTH, max_nodes: MAX_XML_NODES }
+    }
+}
+
+/// Configuration for [`parse_xml_bytes_with_options`] and [`parse_xml_with_options`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct XmlParseOptions {
+    pub limits: XmlLimits,
+    /// When `true`, stop parsing immediately after the root element closes and report any
+    /// remaining non-whitespace bytes in [`ParsedXml::trailing_bytes`] without decoding them.
+    /// When `false` (default), trailing content or multiple root elements remain errors.
+    pub stop_after_root: bool,
+    /// Local element names whose bodies are skipped without constructing child DOM nodes.
+    /// Skipped byte counts are recorded in [`ParsedXml::skipped_opaque`] while still counting
+    /// against `limits.max_bytes`.
+    pub opaque_elements: Vec<String>,
+}
+
+impl XmlParseOptions {
+    /// Replace security limits.
+    #[must_use]
+    pub const fn with_limits(mut self, limits: XmlLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Configure whether parsing stops immediately once the root element closes.
+    #[must_use]
+    pub const fn with_stop_after_root(mut self, stop_after_root: bool) -> Self {
+        self.stop_after_root = stop_after_root;
+        self
+    }
+
+    /// Configure local element names whose bodies should be skipped as opaque byte payloads.
+    #[must_use]
+    pub fn with_opaque_elements<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.opaque_elements = names.into_iter().map(Into::into).filter(|name| !name.is_empty()).collect();
+        self
+    }
+
+    /// Validate that the configured byte cap respects the 64 MiB default ceiling (or up to
+    /// 128 MiB when at least one opaque element name is configured).
+    pub fn validate(&self) -> Result<(), FormatError> {
+        let has_opaque = self.opaque_elements.iter().any(|name| !name.is_empty());
+        let ceiling = if has_opaque { MAX_XML_OPAQUE_BYTES } else { MAX_XML_BYTES };
+        if self.limits.max_bytes > ceiling {
+            return Err(FormatError::XmlParse {
+                offset: 0,
+                reason: format!(
+                    "configured XML byte cap {} exceeds ceiling {} (opaque-body skipping {})",
+                    self.limits.max_bytes,
+                    ceiling,
+                    if has_opaque { "enabled" } else { "disabled" }
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Summary of an opaque element whose body was skipped without constructing child DOM nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedOpaqueElement {
+    /// Full tag name as written in the XML document (including any namespace prefix).
+    pub name: String,
+    /// Raw byte length of the skipped body between the start tag `>` and matching end tag `<`.
+    pub body_bytes: usize,
+}
+
+impl SkippedOpaqueElement {
+    /// Local element name stripped of any namespace prefix (`ns:Tag` -> `Tag`).
+    #[must_use]
+    pub fn local_name(&self) -> &str {
+        local_name_of(&self.name)
+    }
+}
+
+/// Result of parsing an XML document with encoding detection, optional root termination, and
+/// optional opaque-body skipping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedXml {
+    pub root: XmlElement,
+    pub encoding: XmlEncoding,
+    /// Number of unparsed raw bytes remaining after the root element closed when non-whitespace
+    /// trailing data is present; `0` when the root is followed only by EOF or XML whitespace.
+    pub trailing_bytes: usize,
+    /// Opaque elements whose bodies were skipped during parsing, in document order.
+    pub skipped_opaque: Vec<SkippedOpaqueElement>,
+}
+
+impl ParsedXml {
+    /// Cumulative raw bytes skipped across all recorded opaque element bodies.
+    #[must_use]
+    pub fn total_opaque_bytes(&self) -> usize {
+        self.skipped_opaque.iter().map(|entry| entry.body_bytes).fold(0_usize, usize::saturating_add)
     }
 }
 
@@ -55,7 +179,7 @@ impl XmlElement {
     /// Local element name stripped of any namespace prefix (`ns:Tag` -> `Tag`).
     #[must_use]
     pub fn local_name(&self) -> &str {
-        self.name.rsplit_once(':').map_or(self.name.as_str(), |(_, local)| local)
+        local_name_of(&self.name)
     }
 
     /// Look up an attribute value by exact or local name.
@@ -93,6 +217,10 @@ impl XmlElement {
     }
 }
 
+fn local_name_of(name: &str) -> &str {
+    name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
 fn collect_plain_text(el: &XmlElement, out: &mut String) {
     for node in &el.children {
         match node {
@@ -109,28 +237,133 @@ pub fn parse_xml(input: &str) -> Result<XmlElement, FormatError> {
 
 /// Parse an XML string enforcing explicit [`XmlLimits`].
 pub fn parse_xml_with_limits(input: &str, limits: XmlLimits) -> Result<XmlElement, FormatError> {
-    if input.len() > limits.max_bytes {
-        return Err(FormatError::XmlParse {
-            offset: limits.max_bytes,
-            reason: format!("XML byte length {} exceeds limit {}", input.len(), limits.max_bytes),
-        });
-    }
-    let src = input.strip_prefix('\u{FEFF}').unwrap_or(input);
-    let mut builder = XmlTreeBuilder::new(limits);
-    builder.parse(src)
+    let options = XmlParseOptions { limits, stop_after_root: false, opaque_elements: Vec::new() };
+    parse_str_inner(input, &options, false).map(|parsed| parsed.root)
 }
 
-struct XmlTreeBuilder {
+/// Parse an already-decoded UTF-8 XML string with full [`XmlParseOptions`].
+pub fn parse_xml_with_options(input: &str, options: &XmlParseOptions) -> Result<ParsedXml, FormatError> {
+    parse_str_inner(input, options, true)
+}
+
+/// Parse raw XML bytes with automatic encoding detection and strict [`XmlParseOptions::default`].
+pub fn parse_xml_bytes(bytes: &[u8]) -> Result<ParsedXml, FormatError> {
+    parse_xml_bytes_with_options(bytes, &XmlParseOptions::default())
+}
+
+/// Parse raw XML bytes with automatic encoding detection and explicit [`XmlParseOptions`].
+pub fn parse_xml_bytes_with_options(bytes: &[u8], options: &XmlParseOptions) -> Result<ParsedXml, FormatError> {
+    options.validate()?;
+    check_raw_byte_cap(bytes.len(), options.limits.max_bytes)?;
+
+    let (encoding, bom_len) = detect_xml_encoding(bytes)?;
+    let content = bytes.get(bom_len..).unwrap_or_default();
+    let mut builder = XmlTreeBuilder::new(options);
+
+    let consumed_end = match encoding {
+        XmlEncoding::Utf8 => builder.parse_utf8_slice(content, bom_len)?,
+        XmlEncoding::Utf16Le => builder.parse_utf16_slice(content, bom_len, false)?,
+        XmlEncoding::Utf16Be => builder.parse_utf16_slice(content, bom_len, true)?,
+        XmlEncoding::Iso8859_1 | XmlEncoding::Windows1252 | XmlEncoding::MacRoman => builder.parse_single_byte_slice(content, bom_len, encoding)?,
+    };
+
+    let trailing_bytes = compute_trailing_bytes(content, consumed_end, encoding, options.stop_after_root);
+    let root = builder.finish_root(bom_len.saturating_add(consumed_end))?;
+    Ok(ParsedXml { root, encoding, trailing_bytes, skipped_opaque: builder.skipped_opaque })
+}
+
+fn parse_str_inner(input: &str, options: &XmlParseOptions, validate_ceiling: bool) -> Result<ParsedXml, FormatError> {
+    if validate_ceiling {
+        options.validate()?;
+    }
+    check_raw_byte_cap(input.len(), options.limits.max_bytes)?;
+
+    let (src, bom_len) = match input.strip_prefix('\u{FEFF}') {
+        Some(stripped) => (stripped, 3_usize),
+        None => (input, 0_usize),
+    };
+    validate_str_declared_encoding(src)?;
+
+    let mut builder = XmlTreeBuilder::new(options);
+    let consumed_end = builder.parse_utf8_slice(src.as_bytes(), bom_len)?;
+    let trailing_bytes = compute_trailing_bytes(src.as_bytes(), consumed_end, XmlEncoding::Utf8, options.stop_after_root);
+    let root = builder.finish_root(bom_len.saturating_add(consumed_end))?;
+    Ok(ParsedXml { root, encoding: XmlEncoding::Utf8, trailing_bytes, skipped_opaque: builder.skipped_opaque })
+}
+
+fn check_raw_byte_cap(len: usize, max_bytes: usize) -> Result<(), FormatError> {
+    if len > max_bytes {
+        return Err(FormatError::XmlParse { offset: max_bytes, reason: format!("XML byte length {len} exceeds limit {max_bytes}") });
+    }
+    Ok(())
+}
+
+fn compute_trailing_bytes(content: &[u8], consumed_end: usize, encoding: XmlEncoding, stop_after_root: bool) -> usize {
+    if !stop_after_root {
+        return 0;
+    }
+    let tail = content.get(consumed_end..).unwrap_or_default();
+    if tail.is_empty() || tail_is_only_xml_whitespace(tail, encoding) { 0 } else { tail.len() }
+}
+
+struct ActiveOpaque {
+    element: XmlElement,
+    body_start: usize,
+    depth: usize,
+}
+
+struct XmlTreeBuilder<'opts> {
     limits: XmlLimits,
+    stop_after_root: bool,
+    opaque_elements: &'opts [String],
+    dom_bytes_cap: usize,
+    dom_bytes_used: usize,
     node_count: usize,
     stack: Vec<XmlElement>,
     pending_text: String,
     root: Option<XmlElement>,
+    active_opaque: Option<ActiveOpaque>,
+    skipped_opaque: Vec<SkippedOpaqueElement>,
 }
 
-impl XmlTreeBuilder {
-    fn new(limits: XmlLimits) -> Self {
-        Self { limits, node_count: 0, stack: Vec::new(), pending_text: String::new(), root: None }
+enum EventStep {
+    Continue,
+    StopAtRoot,
+    Eof,
+}
+
+impl<'opts> XmlTreeBuilder<'opts> {
+    fn new(options: &'opts XmlParseOptions) -> Self {
+        Self {
+            limits: options.limits,
+            stop_after_root: options.stop_after_root,
+            opaque_elements: &options.opaque_elements,
+            dom_bytes_cap: options.limits.max_bytes.min(MAX_XML_BYTES),
+            dom_bytes_used: 0,
+            node_count: 0,
+            stack: Vec::new(),
+            pending_text: String::new(),
+            root: None,
+            active_opaque: None,
+            skipped_opaque: Vec::new(),
+        }
+    }
+
+    fn is_opaque_tag(&self, name: &str) -> bool {
+        if self.opaque_elements.is_empty() {
+            return false;
+        }
+        let local = local_name_of(name);
+        self.opaque_elements.iter().any(|configured| configured == local)
+    }
+
+    fn charge_dom_bytes(&mut self, added: usize, offset: usize) -> Result<(), FormatError> {
+        let next = self.dom_bytes_used.saturating_add(added);
+        if next > self.dom_bytes_cap {
+            return Err(FormatError::XmlParse { offset, reason: format!("parsed XML DOM byte length {next} exceeds limit {}", self.dom_bytes_cap) });
+        }
+        self.dom_bytes_used = next;
+        Ok(())
     }
 
     fn bump_node_count(&mut self, offset: usize, kind: &str) -> Result<(), FormatError> {
@@ -147,7 +380,10 @@ impl XmlTreeBuilder {
         }
         let text = std::mem::take(&mut self.pending_text);
         if !self.stack.is_empty() {
-            self.bump_node_count(offset, "text node")?;
+            if !is_xml_whitespace_only(&text) {
+                self.bump_node_count(offset, "text node")?;
+            }
+            self.charge_dom_bytes(text.len(), offset)?;
             if let Some(parent) = self.stack.last_mut() {
                 parent.children.push(XmlNode::Text(text));
             }
@@ -170,6 +406,7 @@ impl XmlTreeBuilder {
         if name.is_empty() {
             return Err(FormatError::XmlParse { offset, reason: String::from("empty XML tag name") });
         }
+        self.charge_dom_bytes(name.len(), offset)?;
 
         let attrs = self.read_attributes(start, offset)?;
         Ok(XmlElement { name: name.to_owned(), attrs, children: Vec::new() })
@@ -191,28 +428,33 @@ impl XmlTreeBuilder {
             }
             let raw_val: &str = attr.value.as_ref();
             let decoded = decode_xml_entities(raw_val, offset)?;
+            validate_decoded_xml10_chars(&decoded, offset)?;
+            self.charge_dom_bytes(key.len().saturating_add(decoded.len()), offset)?;
             attrs.push((key.to_owned(), decoded));
         }
 
         Ok(attrs)
     }
 
-    fn attach_completed_element(&mut self, element: XmlElement) {
+    fn attach_completed_element(&mut self, element: XmlElement) -> EventStep {
         if let Some(parent) = self.stack.last_mut() {
             parent.children.push(XmlNode::Element(element));
+            EventStep::Continue
         } else {
             self.root = Some(element);
+            if self.stop_after_root { EventStep::StopAtRoot } else { EventStep::Continue }
         }
     }
 
     fn handle_text(&mut self, raw: &str, offset: usize) -> Result<(), FormatError> {
         if self.stack.is_empty() {
-            if !raw.trim().is_empty() {
+            if !is_xml_whitespace_only(raw) {
                 return Err(FormatError::XmlParse { offset, reason: String::from("unexpected character data outside root element") });
             }
             return Ok(());
         }
         let decoded = decode_xml_entities(raw, offset)?;
+        validate_decoded_xml10_chars(&decoded, offset)?;
         self.pending_text.push_str(&decoded);
         Ok(())
     }
@@ -230,9 +472,11 @@ impl XmlTreeBuilder {
         if self.stack.is_empty() {
             return Err(FormatError::XmlParse { offset, reason: String::from("unexpected CDATA outside root element") });
         }
+        validate_decoded_xml10_chars(cdata, offset)?;
         self.flush_pending_text(offset)?;
         if !cdata.is_empty() {
             self.bump_node_count(offset, "CDATA node")?;
+            self.charge_dom_bytes(cdata.len(), offset)?;
             if let Some(parent) = self.stack.last_mut() {
                 parent.children.push(XmlNode::Text(cdata.to_owned()));
             }
@@ -240,69 +484,229 @@ impl XmlTreeBuilder {
         Ok(())
     }
 
-    fn handle_event(&mut self, event: Event<'_>, offset: usize) -> Result<bool, FormatError> {
+    fn handle_opaque_event(&mut self, event: Event<'_>, tag_start_offset: usize, offset: usize) -> Result<EventStep, FormatError> {
+        match event {
+            Event::Start(_) => {
+                if let Some(active) = self.active_opaque.as_mut() {
+                    active.depth += 1;
+                    let total_depth = self.stack.len().saturating_add(active.depth);
+                    if total_depth > self.limits.max_depth {
+                        return Err(FormatError::XmlDepthExceeded { depth: total_depth, max: self.limits.max_depth });
+                    }
+                }
+                Ok(EventStep::Continue)
+            }
+            Event::Empty(_) => {
+                if let Some(active) = self.active_opaque.as_ref() {
+                    let total_depth = self.stack.len().saturating_add(active.depth).saturating_add(1);
+                    if total_depth > self.limits.max_depth {
+                        return Err(FormatError::XmlDepthExceeded { depth: total_depth, max: self.limits.max_depth });
+                    }
+                }
+                Ok(EventStep::Continue)
+            }
+            Event::End(end) => self.handle_opaque_end(end.name().as_ref(), tag_start_offset, offset),
+            Event::DocType(_) => {
+                Err(FormatError::XmlParse { offset, reason: String::from("DOCTYPE and external ENTITY declarations are forbidden") })
+            }
+            Event::Eof => Ok(EventStep::Eof),
+            Event::Text(_) | Event::GeneralRef(_) | Event::CData(_) | Event::Comment(_) | Event::PI(_) | Event::Decl(_) => Ok(EventStep::Continue),
+        }
+    }
+
+    fn handle_opaque_end(&mut self, close_name: &str, tag_start_offset: usize, offset: usize) -> Result<EventStep, FormatError> {
+        let finish_now = match self.active_opaque.as_mut() {
+            Some(active) if active.depth > 1 => {
+                active.depth -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if !finish_now {
+            return Ok(EventStep::Continue);
+        }
+        let Some(active) = self.active_opaque.take() else {
+            return Ok(EventStep::Continue);
+        };
+        if active.element.name != close_name {
+            return Err(FormatError::XmlParse {
+                offset,
+                reason: format!("mismatched closing tag `</{close_name}>`, expected `</{}>`", active.element.name),
+            });
+        }
+        let body_bytes = tag_start_offset.saturating_sub(active.body_start);
+        self.skipped_opaque.push(SkippedOpaqueElement { name: active.element.name.clone(), body_bytes });
+        Ok(self.attach_completed_element(active.element))
+    }
+
+    fn handle_event(
+        &mut self,
+        event: Event<'_>,
+        tag_start_offset: usize,
+        after_event_offset: usize,
+        diag_offset: usize,
+    ) -> Result<EventStep, FormatError> {
+        if self.active_opaque.is_some() {
+            return self.handle_opaque_event(event, tag_start_offset, diag_offset);
+        }
         match event {
             Event::Start(start) => {
-                self.flush_pending_text(offset)?;
-                let el = self.build_element(&start, offset)?;
-                self.stack.push(el);
+                self.flush_pending_text(diag_offset)?;
+                let el = self.build_element(&start, diag_offset)?;
+                if self.is_opaque_tag(&el.name) {
+                    self.active_opaque = Some(ActiveOpaque { element: el, body_start: after_event_offset, depth: 1 });
+                } else {
+                    self.stack.push(el);
+                }
+                Ok(EventStep::Continue)
             }
             Event::Empty(start) => {
-                self.flush_pending_text(offset)?;
-                let el = self.build_element(&start, offset)?;
-                self.attach_completed_element(el);
+                self.flush_pending_text(diag_offset)?;
+                let el = self.build_element(&start, diag_offset)?;
+                if self.is_opaque_tag(&el.name) {
+                    self.skipped_opaque.push(SkippedOpaqueElement { name: el.name.clone(), body_bytes: 0 });
+                }
+                Ok(self.attach_completed_element(el))
             }
             Event::End(end) => {
-                self.flush_pending_text(offset)?;
+                self.flush_pending_text(diag_offset)?;
                 let close_qname = end.name();
                 let close_name: &str = close_qname.as_ref();
                 let Some(el) = self.stack.pop() else {
-                    return Err(FormatError::XmlParse { offset, reason: format!("unexpected closing tag `</{close_name}>`") });
+                    return Err(FormatError::XmlParse { offset: diag_offset, reason: format!("unexpected closing tag `</{close_name}>`") });
                 };
                 if el.name != close_name {
                     return Err(FormatError::XmlParse {
-                        offset,
+                        offset: diag_offset,
                         reason: format!("mismatched closing tag `</{close_name}>`, expected `</{}>`", el.name),
                     });
                 }
-                self.attach_completed_element(el);
+                Ok(self.attach_completed_element(el))
             }
-            Event::Text(text) => self.handle_text(text.as_ref(), offset)?,
-            Event::GeneralRef(entity) => self.handle_general_ref(entity.as_ref(), offset)?,
-            Event::CData(cdata) => self.handle_cdata(cdata.as_ref(), offset)?,
-            Event::Comment(_) | Event::PI(_) | Event::Decl(_) => {
-                self.flush_pending_text(offset)?;
+            Event::Text(text) => {
+                self.handle_text(text.as_ref(), diag_offset)?;
+                Ok(EventStep::Continue)
             }
+            Event::GeneralRef(entity) => {
+                self.handle_general_ref(entity.as_ref(), diag_offset)?;
+                Ok(EventStep::Continue)
+            }
+            Event::CData(cdata) => {
+                self.handle_cdata(cdata.as_ref(), diag_offset)?;
+                Ok(EventStep::Continue)
+            }
+            Event::Comment(_) | Event::PI(_) | Event::Decl(_) => Ok(EventStep::Continue),
             Event::DocType(_) => {
-                return Err(FormatError::XmlParse { offset, reason: String::from("DOCTYPE and external ENTITY declarations are forbidden") });
+                Err(FormatError::XmlParse { offset: diag_offset, reason: String::from("DOCTYPE and external ENTITY declarations are forbidden") })
             }
-            Event::Eof => return Ok(true),
+            Event::Eof => Ok(EventStep::Eof),
         }
-        Ok(false)
     }
 
-    fn parse(&mut self, src: &str) -> Result<XmlElement, FormatError> {
-        let mut reader = Reader::from_str(src);
+    fn parse_utf8_slice(&mut self, src: &[u8], bom_len: usize) -> Result<usize, FormatError> {
+        let mut reader = Reader::from_reader(src);
         reader.config_mut().check_end_names = true;
         reader.config_mut().trim_text(false);
 
         loop {
-            let offset = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
-            let event = reader.read_event().map_err(|err| FormatError::XmlParse { offset, reason: format!("malformed XML: {err}") })?;
-            if self.handle_event(event, offset)? {
-                break;
+            let before = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
+            let diag_offset = bom_len.saturating_add(before);
+            let event = reader.read_event().map_err(|err| FormatError::XmlParse { offset: diag_offset, reason: format!("malformed XML: {err}") })?;
+            let after = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
+            match self.handle_event(event, before, after, diag_offset)? {
+                EventStep::Continue => {}
+                EventStep::StopAtRoot | EventStep::Eof => return Ok(after),
             }
         }
-
-        if let Some(unclosed) = self.stack.last() {
-            let offset = usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX);
-            return Err(FormatError::XmlParse { offset, reason: format!("unclosed XML tag `<{}>`", unclosed.name) });
-        }
-        self.root.take().ok_or_else(|| FormatError::XmlParse {
-            offset: usize::try_from(reader.buffer_position()).unwrap_or(usize::MAX),
-            reason: String::from("empty XML document"),
-        })
     }
+
+    fn parse_utf16_slice(&mut self, src: &[u8], bom_len: usize, big_endian: bool) -> Result<usize, FormatError> {
+        let adapter = Utf16ToUtf8Reader::new(src, big_endian);
+        let mut reader = Reader::from_reader(adapter);
+        reader.config_mut().check_end_names = true;
+        reader.config_mut().trim_text(false);
+        let mut scratch = Vec::new();
+
+        loop {
+            scratch.clear();
+            let pre_pos = reader.get_ref().raw_input_pos();
+            let diag_offset = bom_len.saturating_add(pre_pos);
+            let event = match reader.read_event_into(&mut scratch) {
+                Ok(ev) => ev,
+                Err(err) => {
+                    if let Some(mut decode_err) = reader.get_mut().take_error() {
+                        if let FormatError::XmlParse { ref mut offset, .. } = decode_err {
+                            *offset = offset.saturating_add(bom_len);
+                        }
+                        return Err(decode_err);
+                    }
+                    return Err(FormatError::XmlParse { offset: diag_offset, reason: format!("malformed XML: {err}") });
+                }
+            };
+            let tag_start = reader.get_ref().last_chunk_start_input_pos();
+            let after = reader.get_ref().raw_input_pos();
+            match self.handle_event(event, tag_start, after, diag_offset)? {
+                EventStep::Continue => {}
+                EventStep::StopAtRoot | EventStep::Eof => return Ok(after),
+            }
+        }
+    }
+
+    fn parse_single_byte_slice(&mut self, src: &[u8], bom_len: usize, encoding: XmlEncoding) -> Result<usize, FormatError> {
+        let adapter = SingleByteToUtf8Reader::new(src, encoding);
+        let mut reader = Reader::from_reader(adapter);
+        reader.config_mut().check_end_names = true;
+        reader.config_mut().trim_text(false);
+        let mut scratch = Vec::new();
+
+        loop {
+            scratch.clear();
+            let pre_pos = reader.get_ref().raw_input_pos();
+            let diag_offset = bom_len.saturating_add(pre_pos);
+            let event = match reader.read_event_into(&mut scratch) {
+                Ok(ev) => ev,
+                Err(err) => {
+                    if let Some(mut decode_err) = reader.get_mut().take_error() {
+                        if let FormatError::XmlParse { ref mut offset, .. } = decode_err {
+                            *offset = offset.saturating_add(bom_len);
+                        }
+                        return Err(decode_err);
+                    }
+                    return Err(FormatError::XmlParse { offset: diag_offset, reason: format!("malformed XML: {err}") });
+                }
+            };
+            let tag_start = reader.get_ref().last_chunk_start_input_pos();
+            let after = reader.get_ref().raw_input_pos();
+            match self.handle_event(event, tag_start, after, diag_offset)? {
+                EventStep::Continue => {}
+                EventStep::StopAtRoot | EventStep::Eof => return Ok(after),
+            }
+        }
+    }
+
+    fn finish_root(&mut self, eof_offset: usize) -> Result<XmlElement, FormatError> {
+        if let Some(opaque) = self.active_opaque.take() {
+            return Err(FormatError::XmlParse { offset: eof_offset, reason: format!("unclosed opaque XML tag `<{}>`", opaque.element.name) });
+        }
+        if let Some(unclosed) = self.stack.last() {
+            return Err(FormatError::XmlParse { offset: eof_offset, reason: format!("unclosed XML tag `<{}>`", unclosed.name) });
+        }
+        self.root.take().ok_or_else(|| FormatError::XmlParse { offset: eof_offset, reason: String::from("empty XML document") })
+    }
+}
+
+fn is_xml_whitespace_only(text: &str) -> bool {
+    text.bytes().all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+}
+
+fn validate_decoded_xml10_chars(text: &str, offset: usize) -> Result<(), FormatError> {
+    for ch in text.chars() {
+        if !is_valid_xml10_char(ch) {
+            return Err(FormatError::XmlParse { offset, reason: format!("forbidden XML 1.0 character U+{:04X}", ch as u32) });
+        }
+    }
+    Ok(())
 }
 
 fn is_duplicate_attr(attrs: &[(String, String)], seen: &mut Option<HashSet<String>>, key: &str) -> bool {
@@ -318,183 +722,6 @@ fn is_duplicate_attr(attrs: &[(String, String)], seen: &mut Option<HashSet<Strin
         *seen = Some(set);
     }
     false
-}
-
-/// Decode standard XML character entities (`&lt;`, `&gt;`, `&amp;`, `&apos;`, `&quot;`), scientific
-/// named entities, and numeric character references (`&#123;`, `&#x1F;`).
-pub fn decode_xml_entities(raw: &str, base_offset: usize) -> Result<String, FormatError> {
-    if !raw.contains('&') {
-        return Ok(raw.to_owned());
-    }
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some((before, after_amp)) = rest.split_once('&') {
-        out.push_str(before);
-        let Some((entity, after_semi)) = after_amp.split_once(';') else {
-            return Err(FormatError::XmlParse { offset: base_offset, reason: String::from("unterminated XML entity reference") });
-        };
-        out.push(decode_xml_entity_name(entity, base_offset)?);
-        rest = after_semi;
-    }
-    out.push_str(rest);
-    Ok(out)
-}
-
-/// Enforce XML 1.0 §2.2 `Char` validity (`#x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`).
-const fn is_valid_xml10_char(ch: char) -> bool {
-    matches!(ch as u32, 0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF)
-}
-
-fn decode_numeric_xml_char(code: u32, entity: &str, base_offset: usize) -> Result<char, FormatError> {
-    let ch =
-        char::from_u32(code).ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
-    if !is_valid_xml10_char(ch) {
-        return Err(FormatError::XmlParse { offset: base_offset, reason: format!("forbidden XML 1.0 character reference `&{entity};`") });
-    }
-    Ok(ch)
-}
-
-fn decode_xml_entity_name(entity: &str, base_offset: usize) -> Result<char, FormatError> {
-    if let Some(ch) = lookup_named_xml_entity(entity) {
-        Ok(ch)
-    } else if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
-        let code = u32::from_str_radix(hex, 16)
-            .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid hex XML entity `&{entity};`") })?;
-        decode_numeric_xml_char(code, entity, base_offset)
-    } else if let Some(digits) = entity.strip_prefix('#') {
-        let code = digits
-            .parse::<u32>()
-            .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid decimal XML entity `&{entity};`") })?;
-        decode_numeric_xml_char(code, entity, base_offset)
-    } else {
-        Err(FormatError::XmlParse { offset: base_offset, reason: format!("unknown XML entity `&{entity};`") })
-    }
-}
-
-fn lookup_named_xml_entity(entity: &str) -> Option<char> {
-    match entity {
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "amp" => Some('&'),
-        "apos" => Some('\''),
-        "quot" => Some('"'),
-        "nbsp" => Some('\u{00A0}'),
-        "alpha" => Some('\u{03B1}'),
-        "beta" => Some('\u{03B2}'),
-        "gamma" => Some('\u{03B3}'),
-        "delta" => Some('\u{03B4}'),
-        "epsilon" => Some('\u{03B5}'),
-        "varepsilon" => Some('\u{03F5}'),
-        "zeta" => Some('\u{03B6}'),
-        "eta" => Some('\u{03B7}'),
-        "theta" => Some('\u{03B8}'),
-        "vartheta" => Some('\u{03D1}'),
-        "iota" => Some('\u{03B9}'),
-        "kappa" => Some('\u{03BA}'),
-        "varkappa" => Some('\u{03F0}'),
-        "lambda" => Some('\u{03BB}'),
-        "mu" | "micro" => Some('\u{03BC}'),
-        "nu" => Some('\u{03BD}'),
-        "xi" => Some('\u{03BE}'),
-        "omicron" => Some('\u{03BF}'),
-        "pi" => Some('\u{03C0}'),
-        "varpi" => Some('\u{03D6}'),
-        "rho" => Some('\u{03C1}'),
-        "varrho" => Some('\u{03F1}'),
-        "varsigma" => Some('\u{03C2}'),
-        "sigma" => Some('\u{03C3}'),
-        "tau" => Some('\u{03C4}'),
-        "upsilon" => Some('\u{03C5}'),
-        "phi" => Some('\u{03C6}'),
-        "varphi" => Some('\u{03D5}'),
-        "chi" => Some('\u{03C7}'),
-        "psi" => Some('\u{03C8}'),
-        "omega" => Some('\u{03C9}'),
-        "Alpha" => Some('\u{0391}'),
-        "Beta" => Some('\u{0392}'),
-        "Gamma" => Some('\u{0393}'),
-        "Delta" => Some('\u{0394}'),
-        "Epsilon" => Some('\u{0395}'),
-        "Zeta" => Some('\u{0396}'),
-        "Eta" => Some('\u{0397}'),
-        "Theta" => Some('\u{0398}'),
-        "Iota" => Some('\u{0399}'),
-        "Kappa" => Some('\u{039A}'),
-        "Lambda" => Some('\u{039B}'),
-        "Mu" => Some('\u{039C}'),
-        "Nu" => Some('\u{039D}'),
-        "Xi" => Some('\u{039E}'),
-        "Omicron" => Some('\u{039F}'),
-        "Pi" => Some('\u{03A0}'),
-        "Rho" => Some('\u{03A1}'),
-        "Sigma" => Some('\u{03A3}'),
-        "Tau" => Some('\u{03A4}'),
-        "Upsilon" => Some('\u{03A5}'),
-        "Phi" => Some('\u{03A6}'),
-        "Chi" => Some('\u{03A7}'),
-        "Psi" => Some('\u{03A8}'),
-        "Omega" | "ohm" => Some('\u{03A9}'),
-        "deg" => Some('\u{00B0}'),
-        "pm" | "plusmn" => Some('\u{00B1}'),
-        "mp" => Some('\u{2213}'),
-        "sup1" => Some('\u{00B9}'),
-        "sup2" => Some('\u{00B2}'),
-        "sup3" => Some('\u{00B3}'),
-        "times" => Some('\u{00D7}'),
-        "divide" | "div" => Some('\u{00F7}'),
-        "cdot" | "middot" => Some('\u{00B7}'),
-        "bull" | "bullet" => Some('\u{2022}'),
-        "minus" => Some('\u{2212}'),
-        "ndash" => Some('\u{2013}'),
-        "mdash" => Some('\u{2014}'),
-        "hellip" => Some('\u{2026}'),
-        "prime" => Some('\u{2032}'),
-        "Prime" => Some('\u{2033}'),
-        "permil" => Some('\u{2030}'),
-        "infin" => Some('\u{221E}'),
-        "le" | "leq" => Some('\u{2264}'),
-        "ge" | "geq" => Some('\u{2265}'),
-        "ne" | "neq" => Some('\u{2260}'),
-        "asymp" | "approx" => Some('\u{2248}'),
-        "equiv" => Some('\u{2261}'),
-        "rarr" => Some('\u{2192}'),
-        "larr" => Some('\u{2190}'),
-        "uarr" => Some('\u{2191}'),
-        "darr" => Some('\u{2193}'),
-        "harr" => Some('\u{2194}'),
-        "copy" => Some('\u{00A9}'),
-        "reg" => Some('\u{00AE}'),
-        "trade" => Some('\u{2122}'),
-        "lsquo" => Some('\u{2018}'),
-        "rsquo" => Some('\u{2019}'),
-        "sbquo" => Some('\u{201A}'),
-        "ldquo" => Some('\u{201C}'),
-        "rdquo" => Some('\u{201D}'),
-        "bdquo" => Some('\u{201E}'),
-        "laquo" => Some('\u{00AB}'),
-        "raquo" => Some('\u{00BB}'),
-        "frac14" => Some('\u{00BC}'),
-        "frac12" => Some('\u{00BD}'),
-        "frac34" => Some('\u{00BE}'),
-        "Aring" => Some('\u{00C5}'),
-        "aring" => Some('\u{00E5}'),
-        "dagger" => Some('\u{2020}'),
-        "Dagger" => Some('\u{2021}'),
-        "sect" => Some('\u{00A7}'),
-        "para" => Some('\u{00B6}'),
-        "sdot" => Some('\u{22C5}'),
-        "sum" => Some('\u{2211}'),
-        "prod" => Some('\u{220F}'),
-        "radic" => Some('\u{221A}'),
-        "part" => Some('\u{2202}'),
-        "int" => Some('\u{222B}'),
-        "sim" => Some('\u{223C}'),
-        "cong" => Some('\u{2245}'),
-        "prop" => Some('\u{221D}'),
-        "perp" => Some('\u{22A5}'),
-        "ang" => Some('\u{2220}'),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

@@ -20,7 +20,7 @@
 //!   *Statistical Methods in Medical Research* 8(2):135–160. doi:10.1177/096228029900800204
 
 use curvebook_doc::{
-    AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
+    AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
     MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
     TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
 };
@@ -40,8 +40,8 @@ use super::parametric::{
 use crate::column::{OneSampleTResult, shapiro_wilk, summarize_pre_summarized_points, wilcoxon_max_achievable_coverage_percent};
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
-    extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell, num_cell, p_cell_at_alpha,
-    push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    enforce_summary_mode_matrix, extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell,
+    num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -96,6 +96,7 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
 }
 
 fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::TwoGroupComparison(*tg))?;
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
@@ -104,9 +105,6 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
     if let TableArchetype::Column(col_tab) = &sheet.archetype
         && col_tab.subcolumn_mode.is_pre_summarized()
     {
-        if !col_tab.subcolumn_mode.supports_parametric_moments() {
-            return Err(StatsError::RequiresRawReplicates);
-        }
         match tg.method {
             TwoGroupMethod::OneSampleT { hypothetical } => {
                 let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len())?;
@@ -295,6 +293,7 @@ fn report_paired_extraction(res: &mut ResultSheet, analysis: &str, lbl_a: &str, 
 /// Execute [`BlandAltmanSpec`] on a `Column`, `MultipleVariables`, or `Xy` [`DataSheet`] and emit a
 /// complete [`ResultSheet`] (`MainSummary`, pair coordinate table, `scalars`, and overlay curve).
 pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &BlandAltmanSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::BlandAltman(*ba))?;
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let ba_report = extract_bland_altman_pairs(sheet, ba)?;
@@ -374,6 +373,7 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
 /// Execute [`MultipleRowTestsSpec`] row-by-row across two groups and emit a complete [`ResultSheet`]
 /// (`MainSummary`, `MultipleComparisons`, `scalars`, and `PairwiseComparisonRecord`s for Volcano plots).
 pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mr: &MultipleRowTestsSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::MultipleRowTTests(*mr))?;
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;

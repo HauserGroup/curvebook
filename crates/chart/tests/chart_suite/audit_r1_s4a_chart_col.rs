@@ -60,6 +60,7 @@ fn compile_beeswarm_n(n: usize, uniform_val: Option<f64>) -> TestRes<ChartScene>
         spec,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     };
     doc.add_graph_sheet(graph.clone())?;
     Ok(compile_graph(&graph, &doc)?)
@@ -156,8 +157,15 @@ fn build_three_group_bracket_doc(status: ResultStatus) -> TestRes<(ProjectDocume
     let mut doc = make_doc("Brackets")?;
     doc.add_data_sheet(ds)?;
     doc.add_result_sheet(res)?;
-    let graph =
-        GraphSheet { id: SheetId::new("g_1"), title: String::from("Arms"), initialized: true, spec, floating_notes: Vec::new(), color_tag: None };
+    let graph = GraphSheet {
+        id: SheetId::new("g_1"),
+        title: String::from("Arms"),
+        initialized: true,
+        spec,
+        floating_notes: Vec::new(),
+        color_tag: None,
+        origin: None,
+    };
     doc.add_graph_sheet(graph.clone())?;
     Ok((doc, graph))
 }
@@ -236,8 +244,15 @@ fn compile_column_heatmap(rows: &[[Option<Cell>; 3]]) -> TestRes<ChartScene> {
     spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap);
     let mut doc = make_doc("HM")?;
     doc.add_data_sheet(ds)?;
-    let graph =
-        GraphSheet { id: SheetId::new("g_hm"), title: String::from("HM"), initialized: true, spec, floating_notes: Vec::new(), color_tag: None };
+    let graph = GraphSheet {
+        id: SheetId::new("g_hm"),
+        title: String::from("HM"),
+        initialized: true,
+        spec,
+        floating_notes: Vec::new(),
+        color_tag: None,
+        origin: None,
+    };
     doc.add_graph_sheet(graph.clone())?;
     Ok(compile_graph(&graph, &doc)?)
 }
@@ -346,6 +361,7 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
         spec: spec_mv,
         floating_notes: Vec::new(),
         color_tag: None,
+        origin: None,
     };
     doc_mv.add_graph_sheet(graph_mv.clone())?;
     let scene_mv = compile_graph(&graph_mv, &doc_mv)?;
@@ -387,8 +403,15 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
         spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap);
         let mut doc = make_doc("GrpHM")?;
         doc.add_data_sheet(ds)?;
-        let gs =
-            GraphSheet { id: SheetId::new("g_hm"), title: String::from("Grp"), initialized: true, spec, floating_notes: Vec::new(), color_tag: None };
+        let gs = GraphSheet {
+            id: SheetId::new("g_hm"),
+            title: String::from("Grp"),
+            initialized: true,
+            spec,
+            floating_notes: Vec::new(),
+            color_tag: None,
+            origin: None,
+        };
         doc.add_graph_sheet(gs.clone())?;
         Ok(compile_graph(&gs, &doc)?)
     };
@@ -434,6 +457,7 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
             spec,
             floating_notes: Vec::new(),
             color_tag: None,
+            origin: None,
         };
         doc.add_graph_sheet(gs.clone())?;
         Ok(compile_graph(&gs, &doc)?)

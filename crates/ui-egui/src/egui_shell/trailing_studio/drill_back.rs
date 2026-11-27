@@ -172,7 +172,7 @@ pub(super) fn render_data_point_drill_back_studio(
             gs.spec.series.iter().position(|s| s.source_sheet_id == brushed.sheet_id && s.data_set_index == brushed.col).or_else(|| {
                 gs.spec.series.iter().position(|s| {
                     s.data_set_index == brushed.col
-                        && doc.result_sheet(&s.source_sheet_id).is_some_and(|rs| rs.analysis.source_sheet_id == brushed.sheet_id)
+                        && doc.result_sheet(&s.source_sheet_id).is_some_and(|rs| rs.analysis.source_sheet_id.as_ref() == Some(&brushed.sheet_id))
                 })
             })
         })

@@ -7,8 +7,8 @@
 //! - Searle, S. R. (1987). *Linear Models for Unbalanced Data*. Wiley.
 
 use curvebook_doc::{
-    AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, PValueFormat, RepeatedMeasuresDesign, ResidualCovariance,
-    ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, PValueFormat, RepeatedMeasuresDesign,
+    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use curvebook_math::sum::SummaryMoments;
 
@@ -22,14 +22,15 @@ use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml, emit_random_intercept_reml, emit_unstructured_rm_reml,
 };
 use crate::common::{
-    TabBuilder, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats,
-    try_resolve_selected_indices,
+    TabBuilder, checklist_item, enforce_summary_mode_matrix, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
 /// Execute a [`FactorialAnovaSpec`] (Two-way, Three-way `2x2xK`, Repeated-Measures Two-way,
 /// Mixed-Effects REML on missing RM data, or Multifactor `N`-way ANOVA).
 pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &FactorialAnovaSpec) -> Result<ResultSheet, StatsError> {
+    enforce_summary_mode_matrix(sheet, &AnalysisKind::FactorialAnova(fac_spec.clone()))?;
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;

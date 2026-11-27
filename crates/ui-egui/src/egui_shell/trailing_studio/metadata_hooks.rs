@@ -70,7 +70,7 @@ pub fn collect_info_downstream_references(doc: &ProjectDocument, info: &InfoShee
         if let AnalysisKind::NonlinearRegression(nl) = &rs.analysis.kind {
             for rule in &nl.parameter_rules {
                 if let ParameterScope::HookedConstant(HookSource::InfoConstant { info_sheet_id, constant_name }) = &rule.scope
-                    && info_matches(info_sheet_id.as_ref(), Some(&rs.analysis.source_sheet_id))
+                    && info_matches(info_sheet_id.as_ref(), rs.analysis.source_sheet_id.as_ref())
                 {
                     refs.push(InfoDownstreamRef {
                         target_sheet_id: rs.id.clone(),

@@ -512,8 +512,16 @@ pub(super) fn render_results_view_for_sheet_with_options(
             intents.push(UiIntent::CopyResultTable { sheet_id: rs.id.clone(), force_full: false });
         }
 
+        let edit_enabled = enabled && !rs.is_imported();
         let (mut edit_resp, edit_clicked) =
-            ghost_action_button(ui, tokens, meta, "result.edit_params", edit_lbl, Some("ui.editParams.open"), false, enabled, ZLayer::Workspace);
+            ghost_action_button(ui, tokens, meta, "result.edit_params", edit_lbl, Some("ui.editParams.open"), false, edit_enabled, ZLayer::Workspace);
+        let edit_disabled_reason = if !enabled {
+            Some("modal dialog is active")
+        } else if rs.is_imported() {
+            Some("imported result snapshots are read-only")
+        } else {
+            None
+        };
         edit_resp = show_tooltip(
             &edit_resp,
             tokens,
@@ -521,11 +529,11 @@ pub(super) fn render_results_view_for_sheet_with_options(
                 title: edit_lbl,
                 shortcut: (!edit_shortcut.is_empty()).then_some(edit_shortcut.as_str()),
                 summary: (!edit_summary.is_empty()).then_some(edit_summary),
-                disabled_reason: (!enabled).then_some("modal dialog is active"),
+                disabled_reason: edit_disabled_reason,
             },
         );
         let _ = edit_resp;
-        if edit_clicked {
+        if edit_clicked && edit_enabled {
             intents.push_ui("ui.editParams.open", json!({ "sheet_id": rs.id.as_str() }));
         }
     });
@@ -659,6 +667,10 @@ pub(super) fn render_results_view_for_sheet_with_options(
     ui.scope_builder(egui::UiBuilder::new().max_rect(body_rect), |ui| {
         ui.set_clip_rect(body_rect);
         ui.painter().rect_filled(body_rect, CornerRadius::ZERO, tokens.surface_bg);
+
+        if rs.is_imported() {
+            render_imported_result_banner(ui, rs, tokens, enabled, meta, intents);
+        }
 
         let Some(tab) = rs.tabs.get(active_idx) else {
             render_empty_or_failed_result_body(ui, rs, tokens, enabled, meta, intents);
@@ -1249,6 +1261,89 @@ fn render_standalone_nl_diagnostic_banner(
             });
     }
     render_horizontal_line_comparison_popup(ui, tokens, banner_rect, false, &rs.id, state, enabled, meta);
+}
+
+fn render_imported_result_banner(
+    ui: &mut egui::Ui,
+    rs: &ResultSheet,
+    tokens: &Tokens,
+    enabled: bool,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let is_stale = matches!(rs.status, ResultStatus::ImportedStale);
+    let accent = if is_stale { tokens.warning } else { tokens.link_blue };
+    let banner_rect = ui.allocate_space(vec2(ui.available_width().max(1.0), 28.0)).1;
+    let fill = rgba8_to_color32(lerp_oklab(color32_to_rgba8(tokens.surface_bg), color32_to_rgba8(accent), 0.14));
+    ui.painter().rect_filled(banner_rect, CornerRadius::ZERO, fill);
+    ui.painter().rect_stroke(banner_rect, CornerRadius::ZERO, Stroke::new(tokens.metrics.stroke_thin_pt, accent), StrokeKind::Inside);
+
+    let prefix = tr_or_fallback(tokens.locale, "results.imported.banner_prefix", "Read-only imported result");
+    let not_computed = tr_or_fallback(tokens.locale, "results.imported.not_computed", "not computed by CurveBook");
+    let stale_suffix = tr_or_fallback(tokens.locale, "results.imported.stale_suffix", "stale: upstream data changed");
+    let msg = match &rs.provenance {
+        curvebook_doc::ResultProvenance::Imported { source_format, original_kind_label, .. } => {
+            if is_stale {
+                format!("{prefix} ({source_format}: {original_kind_label}) — {stale_suffix}.")
+            } else {
+                format!("{prefix} ({source_format}: {original_kind_label}; {not_computed}).")
+            }
+        }
+        curvebook_doc::ResultProvenance::Computed => format!("{prefix} ({not_computed})."),
+    };
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(banner_rect.shrink2(vec2(tokens.metrics.space_md, tokens.metrics.space_xxs))), |ui| {
+        ui.set_clip_rect(banner_rect);
+        ui.expand_to_include_rect(banner_rect);
+        ui.horizontal(|ui| {
+            let lbl = ui.add(egui::Label::new(RichText::new(&msg).small().color(tokens.text_strong)).truncate());
+            meta.record_response(
+                ui,
+                &lbl,
+                FrameInspectEntryInput {
+                    widget_id: "result.imported_banner",
+                    role: "label",
+                    label: &msg,
+                    command_id: None,
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            lbl.on_hover_text(&msg);
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let btn_lbl = tr_or_fallback(tokens.locale, "results.imported.rerun_analysis", "Re-run as a CurveBook analysis");
+                let btn = ui.add_enabled(enabled, egui::Button::new(RichText::new(btn_lbl).small()));
+                meta.record_response(
+                    ui,
+                    &btn,
+                    FrameInspectEntryInput {
+                        widget_id: "result.imported.rerun_analysis",
+                        role: "button",
+                        label: btn_lbl,
+                        command_id: Some("ui.analyze.open"),
+                        value: None,
+                        enabled,
+                        disabled_reason: (!enabled).then_some("modal dialog is active"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if btn.clicked() && enabled {
+                    let params = match rs.analysis.source_sheet_id.as_ref() {
+                        Some(src) => json!({ "sheet_id": src.as_str() }),
+                        None => json!({}),
+                    };
+                    intents.push_ui("ui.analyze.open", params);
+                }
+            });
+        });
+    });
 }
 
 fn render_ambiguity_callout(
@@ -2483,6 +2578,22 @@ fn render_empty_or_failed_result_body(
             }
             ResultStatus::UpToDate => {
                 ui.colored_label(tokens.text_muted, "No tabular output generated for this result sheet.");
+            }
+            ResultStatus::Imported => {
+                ui.colored_label(
+                    tokens.text_muted,
+                    tr_or_fallback(tokens.locale, "results.imported.empty_body", "Imported result snapshot (no tabular output stored)."),
+                );
+            }
+            ResultStatus::ImportedStale => {
+                ui.colored_label(
+                    tokens.stale,
+                    tr_or_fallback(
+                        tokens.locale,
+                        "results.imported.empty_stale_body",
+                        "Imported result snapshot is stale (upstream data changed; no tabular output stored).",
+                    ),
+                );
             }
         }
     });

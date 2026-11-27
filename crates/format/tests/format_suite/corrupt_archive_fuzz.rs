@@ -325,7 +325,12 @@ fn zip_slip_path_traversal_duplicates_and_local_header_spoofing_blocked() {
         let raw_zip = build_raw_zip(&[RawZipEntry::stored(path.as_bytes(), b"payload")], b"");
         assert!(matches!(ZipArchive::from_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "ZipArchive `{path:?}`");
         assert!(matches!(open_archive_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "open_archive `{path:?}`");
-        assert!(matches!(import_prism_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "import_prism_bytes `{path:?}`");
+        // `.prism` uses `ZipReadOptions::external_interop()`, which normalizes benign `./`
+        // segments while keeping strict rejection of traversal, absolute paths, drive prefixes,
+        // empty segments, and NUL bytes.
+        if curvebook_format::sanitize_zip_path_with_options(path, curvebook_format::ZipReadOptions::external_interop()).is_err() {
+            assert!(matches!(import_prism_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "import_prism_bytes `{path:?}`");
+        }
     }
 
     let dup_zip = build_raw_zip(&[RawZipEntry::stored(b"sheets/a.csv", b"1"), RawZipEntry::stored(b"sheets/a.csv", b"2")], b"");
@@ -454,12 +459,17 @@ fn adversarial_pzfx_xml_unclosed_deep_nesting_missing_tables_and_non_finite_toke
         "<PrismFile><Title>&custom;</Title></PrismFile>",
         "<!DOCTYPE x [<!ENTITY xx SYSTEM \"file:///etc/passwd\">]><PrismFile/>",
         "<!ENTITY x \"y\"><PrismFile/>",
-        "<PrismFile/><PrismFile/>",
         "<WrongRoot/>",
     ];
     for case in bad_xml_cases {
         check_no_panic("bad xml case", || assert!(import_pzfx_str(case).is_err(), "expected Err for `{case}`"));
     }
+    assert!(parse_xml("<PrismFile/><PrismFile/>").is_err(), "strict default XML parser must reject trailing root elements");
+    let trailing_rep = import_pzfx_str("<PrismFile/><PrismFile/>").unwrap();
+    assert!(
+        trailing_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::IgnoredSection),
+        "stop-after-root .pzfx import must report trailing bytes via IgnoredSection"
+    );
 
     for depth in [MAX_XML_DEPTH + 1, 512, 2_500] {
         let deep = format!("<PrismFile>{}{}</PrismFile>", "<A>".repeat(depth), "</A>".repeat(depth));
@@ -895,7 +905,9 @@ proptest! {
         let raw_zip = build_raw_zip(&[RawZipEntry::stored(path.as_bytes(), b"data")], b"");
         prop_assert!(matches!(ZipArchive::from_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "ZipArchive {path:?}");
         prop_assert!(matches!(open_archive_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "open_archive {path:?}");
-        prop_assert!(matches!(import_prism_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "import_prism_bytes {path:?}");
+        if curvebook_format::sanitize_zip_path_with_options(&path, curvebook_format::ZipReadOptions::external_interop()).is_err() {
+            prop_assert!(matches!(import_prism_bytes(&raw_zip), Err(FormatError::UnsafePath { .. })), "import_prism_bytes {path:?}");
+        }
     }
 
     #[test]

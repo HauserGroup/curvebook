@@ -575,6 +575,8 @@ fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<A
     let submodes = [
         (SubcolumnMode::Single, "single"),
         (SubcolumnMode::RawReplicates(3), "raw_replicates"),
+        (SubcolumnMode::MeanSd, "mean_sd"),
+        (SubcolumnMode::MeanSem, "mean_sem"),
         (SubcolumnMode::MeanSdN, "mean_sd_n"),
         (SubcolumnMode::MeanSemN, "mean_sem_n"),
         (SubcolumnMode::MeanCvN, "mean_cv_n"),

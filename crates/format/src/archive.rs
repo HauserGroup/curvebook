@@ -140,8 +140,24 @@ pub fn open_archive_bytes(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument)
     open_archive_bytes_with_limits(bytes, ZipLimits::default())
 }
 
+/// Load any native CurveBook archive (`.curvebook` or `.cbtemplate`), returning its [`ArchiveKind`],
+/// validated [`ProjectDocument`], and any non-fatal load warnings (such as cleared dangling selection IDs).
+pub fn open_archive_bytes_with_warnings(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument, Vec<String>), FormatError> {
+    open_archive_bytes_with_limits_and_warnings(bytes, ZipLimits::default())
+}
+
 /// Load a native archive with explicit [`ZipLimits`] for security testing.
 pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<(ArchiveKind, ProjectDocument), FormatError> {
+    let (kind, doc, _warnings) = open_archive_bytes_with_limits_and_warnings(bytes, limits)?;
+    Ok((kind, doc))
+}
+
+/// Load a native archive with explicit [`ZipLimits`], returning non-fatal load warnings alongside
+/// the validated [`ProjectDocument`].
+pub fn open_archive_bytes_with_limits_and_warnings(
+    bytes: &[u8],
+    limits: ZipLimits,
+) -> Result<(ArchiveKind, ProjectDocument, Vec<String>), FormatError> {
     let archive = ZipArchive::from_bytes_with_limits(bytes, limits)?;
     let manifest_text = archive.get_utf8(MANIFEST_PATH)?.ok_or_else(|| FormatError::MissingArchiveEntry { path: String::from(MANIFEST_PATH) })?;
     let manifest = parse_and_validate_manifest(manifest_text)?;
@@ -179,8 +195,9 @@ pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
 
     let mut doc = parse_and_migrate_document(doc_bytes, manifest.schema_version)?;
     hydrate_archive_image_assets(&mut doc, &manifest.assets, hydrated_assets)?;
+    let warnings = doc.clear_dangling_selection_ids();
     validate_project_document(&doc)?;
-    Ok((manifest.kind, doc))
+    Ok((manifest.kind, doc, warnings))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -471,23 +488,29 @@ where
 /// Read and validate an unpacked `.curvebook.d/` project directory, enforcing strict relative-path
 /// containment, symlink boundaries, CRC-32 verification, size caps, and schema migration.
 pub fn open_project_unpacked_dir(dir: &Path) -> Result<ProjectDocument, FormatError> {
+    open_project_unpacked_dir_with_warnings(dir).map(|(doc, _)| doc)
+}
+
+/// Read and validate an unpacked `.curvebook.d/` project directory, returning both the validated
+/// [`ProjectDocument`] and any non-fatal load warnings (such as cleared dangling selection IDs).
+pub fn open_project_unpacked_dir_with_warnings(dir: &Path) -> Result<(ProjectDocument, Vec<String>), FormatError> {
     if !std::fs::metadata(dir)?.is_dir() {
         return Err(FormatError::Io(format!("`{}` is not a directory", dir.display())));
     }
     let canon_root = std::fs::canonicalize(dir)?;
     let limits = ZipLimits::default();
     match inspect_pending_tx_state(&canon_root)? {
-        PendingUnpackedTx::None => open_validated_unpacked_snapshot(&canon_root, limits),
-        PendingUnpackedTx::Committing { next_dir, prev_dir } => match open_validated_unpacked_snapshot(&next_dir, limits) {
-            Ok(doc) => Ok(doc),
+        PendingUnpackedTx::None => open_validated_unpacked_snapshot_with_warnings(&canon_root, limits),
+        PendingUnpackedTx::Committing { next_dir, prev_dir } => match open_validated_unpacked_snapshot_with_warnings(&next_dir, limits) {
+            Ok(pair) => Ok(pair),
             Err(err @ (FormatError::UnsupportedSchemaVersion { .. } | FormatError::InvalidArchiveKind { .. } | FormatError::UnsafePath { .. })) => {
                 Err(err)
             }
             Err(next_err) => {
                 if let Some(prev) = prev_dir
-                    && let Ok(doc) = open_validated_unpacked_snapshot(&prev, limits)
+                    && let Ok(pair) = open_validated_unpacked_snapshot_with_warnings(&prev, limits)
                 {
-                    return Ok(doc);
+                    return Ok(pair);
                 }
                 Err(next_err)
             }
@@ -1214,6 +1237,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                 let mut color_tag: Option<Option<curvebook_palette::Rgba8>> = None;
                 let mut exclusion_notes: Option<Vec<CellExclusionNote>> = None;
                 let mut plate_well_origins: Option<Vec<PlateCellOrigin>> = None;
+                let mut origin: Option<Option<curvebook_doc::SheetOrigin>> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -1242,6 +1266,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                             plate_well_origins =
                                 Some(map.next_value_seed(BoundedTypedSeed::<Vec<PlateCellOrigin>>::new(self.0, MAX_SHEET_CELLS, max_total))?);
                         }
+                        "origin" => origin = Some(map.next_value()?),
                         _ => {
                             self.0.dom_budget.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
                             let _ = map.next_value_seed(BoundedValueSeed(&mut self.0.dom_budget))?;
@@ -1260,6 +1285,7 @@ impl<'de> serde::de::DeserializeSeed<'de> for LegacyDataSheetSeed<'_> {
                     color_tag: color_tag.unwrap_or(None),
                     exclusion_notes: exclusion_notes.unwrap_or_default(),
                     plate_well_origins: plate_well_origins.unwrap_or_default(),
+                    origin: origin.unwrap_or(None),
                 };
                 sheet.validate().map_err(serde::de::Error::custom)?;
                 sheet.validate_finite_metadata().map_err(serde::de::Error::custom)?;
@@ -1670,7 +1696,8 @@ fn decode_and_validate_document_inner(
     manifest_schema_version: u32,
     validate_checkpoint_entries: bool,
 ) -> Result<ProjectDocument, FormatError> {
-    let doc = parse_and_migrate_document(doc_bytes, manifest_schema_version)?;
+    let mut doc = parse_and_migrate_document(doc_bytes, manifest_schema_version)?;
+    let _ = doc.clear_dangling_selection_ids();
     validate_project_document_inner(&doc, validate_checkpoint_entries)?;
     Ok(doc)
 }
@@ -2009,6 +2036,7 @@ struct VerifiedUnpackedSnapshot {
     manifest: ArchiveManifest,
     entries: Vec<(String, Vec<u8>)>,
     doc: ProjectDocument,
+    warnings: Vec<String>,
 }
 
 fn verify_and_read_snapshot(canon_snap: &Path, limits: ZipLimits, collect_entries: bool) -> Result<VerifiedUnpackedSnapshot, FormatError> {
@@ -2085,12 +2113,13 @@ fn verify_and_read_snapshot(canon_snap: &Path, limits: ZipLimits, collect_entrie
 
     let mut doc = parse_and_migrate_document(&doc_bytes, manifest.schema_version)?;
     hydrate_archive_image_assets(&mut doc, &manifest.assets, hydrated_assets)?;
+    let warnings = doc.clear_dangling_selection_ids();
     validate_project_document(&doc)?;
-    Ok(VerifiedUnpackedSnapshot { manifest, entries, doc })
+    Ok(VerifiedUnpackedSnapshot { manifest, entries, doc, warnings })
 }
 
-fn open_validated_unpacked_snapshot(canon_snap: &Path, limits: ZipLimits) -> Result<ProjectDocument, FormatError> {
-    verify_and_read_snapshot(canon_snap, limits, false).map(|snap| snap.doc)
+fn open_validated_unpacked_snapshot_with_warnings(canon_snap: &Path, limits: ZipLimits) -> Result<(ProjectDocument, Vec<String>), FormatError> {
+    verify_and_read_snapshot(canon_snap, limits, false).map(|snap| (snap.doc, snap.warnings))
 }
 
 fn check_snapshot_project_dir(canon_snap: &Path, verify_doc_crc: bool) -> Result<bool, FormatError> {
@@ -2694,17 +2723,32 @@ fn unique_sheet_csv_path(idx: usize, id: &SheetId, used_lower: &mut HashSet<Stri
     candidate
 }
 
-/// Strip raw cell values and cached result tables to produce a clean reusable `.cbtemplate`.
+/// Strip raw cell values, imported snapshots, origin metadata, and cached result tables to produce a clean reusable `.cbtemplate`.
 pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectDocument, FormatError> {
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
     let mut out = doc.clone();
     out.schema_version = CURRENT_SCHEMA_VERSION;
     out.checkpoints.clear();
+
+    // Drop imported result snapshots (they cannot be recomputed from template data) and collect their IDs.
+    let mut dropped_result_ids: HashSet<SheetId> = HashSet::new();
+    out.result_sheets.retain(|res| {
+        if res.is_imported() || matches!(res.analysis.kind, AnalysisKind::ImportedSnapshot(_)) {
+            dropped_result_ids.insert(res.id.clone());
+            false
+        } else {
+            true
+        }
+    });
+
     for ds in &mut out.data_sheets {
         let was_frozen = ds.frozen;
         let notes = ds.floating_notes.clone();
-        let linked = ds.linked_regions.clone();
+        let mut linked = ds.linked_regions.clone();
+        if !dropped_result_ids.is_empty() {
+            linked.retain(|r| r.spec.source.upstream_sheet_id().is_none_or(|id| !dropped_result_ids.contains(id)));
+        }
         let opts = CloneDataSheetOptions {
             title: ds.title.clone(),
             keep_x_values: false,
@@ -2719,7 +2763,11 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         clean.linked_regions = linked;
         clean.exclusion_notes.clear();
         clean.plate_well_origins.clear();
+        clean.origin = None;
         *ds = clean;
+    }
+    for info in &mut out.info_sheets {
+        info.origin = None;
     }
     for res in &mut out.result_sheets {
         res.status = ResultStatus::Dirty;
@@ -2730,7 +2778,51 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         res.fitted_curves.clear();
         res.eliminated_outliers.clear();
         res.checklist.clear();
+        res.origin = None;
     }
+    let mut dropped_graph_ids: HashSet<SheetId> = HashSet::new();
+    out.graph_sheets.retain_mut(|graph| {
+        graph.origin = None;
+        if !dropped_result_ids.is_empty() {
+            graph.spec.series.retain(|s| !dropped_result_ids.contains(&s.source_sheet_id));
+            for series in &mut graph.spec.series {
+                if series.regression_overlay.as_ref().is_some_and(|ov| dropped_result_ids.contains(&ov.result_sheet_id)) {
+                    series.regression_overlay = None;
+                }
+            }
+            graph.spec.comparisons.retain(|cmp| !dropped_result_ids.contains(&cmp.result_sheet_id));
+            if graph.spec.compact_letter_display.as_ref().is_some_and(|cld| dropped_result_ids.contains(&cld.result_sheet_id)) {
+                graph.spec.compact_letter_display = None;
+            }
+            graph.spec.annotations.retain(|ann| match ann {
+                GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                    !dropped_result_ids.contains(result_sheet_id)
+                }
+                _ => true,
+            });
+            if dropped_result_ids.contains(&graph.spec.primary_source_sheet_id) {
+                if let Some(surviving_src) = graph.spec.series.first().map(|s| s.source_sheet_id.clone()) {
+                    graph.spec.primary_source_sheet_id = surviving_src;
+                } else {
+                    dropped_graph_ids.insert(graph.id.clone());
+                    return false;
+                }
+            }
+        }
+        true
+    });
+    for layout in &mut out.layout_sheets {
+        layout.origin = None;
+        if !dropped_result_ids.is_empty() || !dropped_graph_ids.is_empty() {
+            layout.spec.items.retain(|item| match item {
+                LayoutItem::LiveTable { source_sheet_id, .. } => !dropped_result_ids.contains(source_sheet_id),
+                LayoutItem::LiveGraph { graph_sheet_id, .. } => !dropped_graph_ids.contains(graph_sheet_id),
+                _ => true,
+            });
+        }
+    }
+    let _ = out.clear_dangling_selection_ids();
+
     let mut referenced_assets: HashSet<String> = HashSet::new();
     for graph in &out.graph_sheets {
         for ann in &graph.spec.annotations {
@@ -2747,6 +2839,7 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         }
     }
     out.image_assets.retain(|asset| referenced_assets.contains(&asset.asset_id));
+    validate_project_document(&out)?;
     Ok(out)
 }
 
@@ -2759,6 +2852,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 5, apply: migrate_v5_to_v6 },
     VersionStep { from_version: 6, apply: migrate_v6_to_v7 },
     VersionStep { from_version: 7, apply: migrate_v7_to_v8 },
+    VersionStep { from_version: 8, apply: migrate_v8_to_v9 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -2824,6 +2918,16 @@ fn migrate_v6_to_v7(value: &mut serde_json::Value) -> Result<(), FormatError> {
 
 fn migrate_v7_to_v8(value: &mut serde_json::Value) -> Result<(), FormatError> {
     migrate_result_sheet_step(value, 8);
+    if let Some(data_sheets) = value.get_mut("data_sheets").and_then(serde_json::Value::as_array_mut) {
+        for ds in data_sheets {
+            backfill_data_sheet_defaults(ds);
+        }
+    }
+    Ok(())
+}
+
+fn migrate_v8_to_v9(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 9);
     if let Some(data_sheets) = value.get_mut("data_sheets").and_then(serde_json::Value::as_array_mut) {
         for ds in data_sheets {
             backfill_data_sheet_defaults(ds);
@@ -2920,6 +3024,7 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
         return;
     };
     res_obj.entry(String::from("status")).or_insert_with(|| serde_json::Value::String(String::from("UpToDate")));
+    res_obj.entry(String::from("provenance")).or_insert_with(|| serde_json::Value::String(String::from("Computed")));
     res_obj.entry(String::from("analyzable_data")).or_insert(serde_json::Value::Null);
     for arr_key in ["tabs", "scalars", "pairwise_comparisons", "fitted_curves", "eliminated_outliers", "checklist", "floating_notes"] {
         res_obj.entry(String::from(arr_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -3007,6 +3112,7 @@ pub fn validate_project_document_skip_checkpoints(doc: &ProjectDocument) -> Resu
 
 fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_entries: bool) -> Result<(), FormatError> {
     doc.validate_structural_limits()?;
+    doc.validate_selection_ids()?;
     if let Some(location) = doc.first_non_finite_float() {
         return Err(FormatError::NonFiniteFloat { location });
     }
@@ -3183,14 +3289,14 @@ pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
     diagnostics
 }
 
-fn paired_info_for_result(doc: &ProjectDocument, source_sheet_id: &SheetId, default_info: Option<&SheetId>) -> Option<SheetId> {
-    doc.data_sheet(source_sheet_id).and_then(|d| d.info_sheet_id.clone()).or_else(|| default_info.cloned())
+fn paired_info_for_result(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>, default_info: Option<&SheetId>) -> Option<SheetId> {
+    source_sheet_id.and_then(|src| doc.data_sheet(src)).and_then(|d| d.info_sheet_id.clone()).or_else(|| default_info.cloned())
 }
 
 fn break_hook_edge_in_result_sheets(doc: &mut ProjectDocument, src_id: &SheetId, dst_id: &SheetId, default_info: Option<&SheetId>) -> Option<String> {
     let paired_info = {
         let res = doc.result_sheets.iter().find(|r| &r.id == src_id)?;
-        paired_info_for_result(doc, &res.analysis.source_sheet_id, default_info)
+        paired_info_for_result(doc, res.analysis.source_sheet_id.as_ref(), default_info)
     };
     let res = doc.result_sheets.iter_mut().find(|r| &r.id == src_id)?;
     match &mut res.analysis.kind {

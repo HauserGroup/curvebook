@@ -60,11 +60,13 @@ pub enum AnalysisKindId {
     LeveneTest = 21,
     /// Standalone trapezoidal Area Under the Curve (AUC) analysis ([`AnalysisKind::AreaUnderCurve`]).
     AreaUnderCurve = 22,
+    /// Preserved read-only imported result snapshot ([`AnalysisKind::ImportedSnapshot`]).
+    ImportedSnapshot = 23,
 }
 
 impl AnalysisKindId {
     /// Complete ordered list of every [`AnalysisKindId`] discriminant.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 24] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -88,6 +90,7 @@ impl AnalysisKindId {
         Self::FitSplineLowess,
         Self::LeveneTest,
         Self::AreaUnderCurve,
+        Self::ImportedSnapshot,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -123,6 +126,7 @@ impl AnalysisKindId {
             AnalysisKind::FitSplineLowess(_) => Self::FitSplineLowess,
             AnalysisKind::LeveneTest(_) => Self::LeveneTest,
             AnalysisKind::AreaUnderCurve(_) => Self::AreaUnderCurve,
+            AnalysisKind::ImportedSnapshot(_) => Self::ImportedSnapshot,
         }
     }
 
@@ -156,6 +160,7 @@ impl AnalysisKindId {
             Self::FitSplineLowess => &ALL_ANALYSIS_DESCRIPTORS[20],
             Self::LeveneTest => &ALL_ANALYSIS_DESCRIPTORS[21],
             Self::AreaUnderCurve => &ALL_ANALYSIS_DESCRIPTORS[22],
+            Self::ImportedSnapshot => &ALL_ANALYSIS_DESCRIPTORS[23],
         }
     }
 
@@ -226,6 +231,8 @@ pub enum AnalysisRecomputeStrategy {
     PowerWithInfoHooks,
     /// Validate/resolve `InfoSheet` constant hooks into `HookContext` and route through `curvebook_fit::execute_analysis`.
     Fit,
+    /// Preserve an imported read-only result snapshot without running a CurveBook solver, transitioning `Imported -> ImportedStale` on upstream edits or missing sources.
+    PreserveSnapshot,
 }
 
 impl AnalysisRecomputeStrategy {
@@ -237,6 +244,7 @@ impl AnalysisRecomputeStrategy {
             Self::Stats => "stats",
             Self::PowerWithInfoHooks => "power_with_info_hooks",
             Self::Fit => "fit",
+            Self::PreserveSnapshot => "preserve_snapshot",
         }
     }
 }
@@ -338,6 +346,8 @@ pub struct AnalysisKindDescriptor {
     pub ui_catalog_ids: &'static [&'static str],
     /// Static manual section anchor ID (`analysis-<slug>`).
     pub docs_anchor: &'static str,
+    /// Whether users and commands may create new analyses of this kind directly (`false` for import-only snapshots).
+    pub user_creatable: bool,
 }
 
 impl AnalysisKindDescriptor {
@@ -472,6 +482,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
             "transform.random_sample",
         ],
         docs_anchor: "analysis-transform",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::DescriptiveStats,
@@ -494,6 +505,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.descriptive"],
         docs_anchor: "analysis-descriptive-stats",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::OutlierDetection,
@@ -516,6 +528,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.outliers"],
         docs_anchor: "analysis-outlier-detection",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::TwoGroupComparison,
@@ -562,6 +575,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.two_group"],
         docs_anchor: "analysis-two-group-comparison",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::BlandAltman,
@@ -584,6 +598,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.bland_altman"],
         docs_anchor: "analysis-bland-altman",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::MultipleRowTTests,
@@ -614,6 +629,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.multiple_row_t_tests"],
         docs_anchor: "analysis-multiple-row-t-tests",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::PassingBablok,
@@ -636,6 +652,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.passing_bablok"],
         docs_anchor: "analysis-passing-bablok",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::OneWayAnova,
@@ -678,6 +695,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.one_way_anova"],
         docs_anchor: "analysis-one-way-anova",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::FactorialAnova,
@@ -716,6 +734,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.factorial_anova"],
         docs_anchor: "analysis-factorial-anova",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::NestedComparison,
@@ -738,6 +757,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.nested"],
         docs_anchor: "analysis-nested-comparison",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::Contingency,
@@ -780,6 +800,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.contingency"],
         docs_anchor: "analysis-contingency",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::Survival,
@@ -819,6 +840,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.survival_km", "stats.survival_cox"],
         docs_anchor: "analysis-survival",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::RocCurve,
@@ -841,6 +863,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.roc"],
         docs_anchor: "analysis-roc-curve",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::GeneralizedLinearModel,
@@ -863,6 +886,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.glm"],
         docs_anchor: "analysis-generalized-linear-model",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::Multivariate,
@@ -909,6 +933,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.pca", "stats.pcr", "stats.corr_matrix", "stats.clustering", "stats.multiple_imputation"],
         docs_anchor: "analysis-multivariate",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::LinearRegression,
@@ -945,6 +970,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["fit.linear"],
         docs_anchor: "analysis-linear-regression",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::NonlinearRegression,
@@ -1027,6 +1053,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["fit.nonlinear"],
         docs_anchor: "analysis-nonlinear-regression",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::PValueStack,
@@ -1049,6 +1076,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.pvalue_stack"],
         docs_anchor: "analysis-p-value-stack",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::PowerAnalysis,
@@ -1087,6 +1115,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.power"],
         docs_anchor: "analysis-power-analysis",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::SimpleLogisticRegression,
@@ -1109,6 +1138,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.simple_logistic"],
         docs_anchor: "analysis-simple-logistic-regression",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::FitSplineLowess,
@@ -1155,6 +1185,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["fit.spline_lowess"],
         docs_anchor: "analysis-fit-spline-lowess",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::LeveneTest,
@@ -1187,6 +1218,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.levene"],
         docs_anchor: "analysis-levene-test",
+        user_creatable: true,
     },
     AnalysisKindDescriptor {
         id: AnalysisKindId::AreaUnderCurve,
@@ -1209,6 +1241,30 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["transform.auc"],
         docs_anchor: "analysis-area-under-curve",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::ImportedSnapshot,
+        slug: "imported-snapshot",
+        serde_variant: "ImportedSnapshot",
+        title: "Imported Result Snapshot",
+        short_label: "Imported Snapshot",
+        description: "Preserved read-only result snapshot imported from an external format without native recomputation.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::PreserveSnapshot,
+        ui_category: AnalysisUiCategory::Column,
+        compatible_table_kinds: &[],
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "",
+        shorthands: &[],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["original_kind_label"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &[],
+        docs_anchor: "analysis-imported-snapshot",
+        user_creatable: false,
     },
 ];
 
@@ -1406,10 +1462,16 @@ const fn verify_descriptor_entry(idx: usize, expected_id: AnalysisKindId, desc: 
     assert!(!desc.title.is_empty());
     assert!(!desc.short_label.is_empty());
     assert!(!desc.description.is_empty());
-    assert!(!desc.canonical_shorthand.is_empty());
-    assert!(!desc.shorthands.is_empty());
-    assert!(!desc.compatible_table_kinds.is_empty());
-    assert!(const_slice_contains(desc.shorthands, desc.canonical_shorthand));
+    if desc.user_creatable {
+        assert!(!desc.canonical_shorthand.is_empty());
+        assert!(!desc.shorthands.is_empty());
+        assert!(!desc.compatible_table_kinds.is_empty());
+        assert!(const_slice_contains(desc.shorthands, desc.canonical_shorthand));
+    } else {
+        assert!(desc.canonical_shorthand.is_empty());
+        assert!(desc.shorthands.is_empty());
+        assert!(desc.ui_catalog_ids.is_empty());
+    }
     assert!(const_anchor_matches_slug(desc.docs_anchor, desc.slug));
 }
 

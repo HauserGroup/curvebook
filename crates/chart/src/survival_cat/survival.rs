@@ -166,7 +166,7 @@ fn transform_km_ci(ci_lo: f64, ci_hi: f64, metric: SurvivalDisplayMetric, scale_
 }
 
 fn is_survival_result_for(res: &ResultSheet, primary: &SheetId) -> bool {
-    res.analysis.source_sheet_id == *primary
+    res.analysis.source_sheet_id.as_ref() == Some(primary)
         && (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
             || (matches!(res.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
                 && !res.fitted_curves.is_empty()))
@@ -180,7 +180,7 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
                 .push(ChartWarning::new("failed_result_sheet", format!("survival result sheet '{}' failed; omitted failed result curves", res.id)));
             return Vec::new();
         }
-        if !matches!(res.status, ResultStatus::UpToDate) {
+        if !res.has_displayable_output() {
             warnings.push(ChartWarning::new(
                 "pending_analysis_result",
                 format!("survival result sheet '{}' is pending recalculation; omitted stale result curves", res.id),
@@ -196,14 +196,14 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
         .result_sheets
         .iter()
         .find(|r| {
-            r.analysis.source_sheet_id == *primary
-                && matches!(r.status, ResultStatus::UpToDate)
+            r.analysis.source_sheet_id.as_ref() == Some(primary)
+                && r.has_displayable_output()
                 && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
         })
         .or_else(|| {
             doc.result_sheets.iter().find(|r| {
-                r.analysis.source_sheet_id == *primary
-                    && matches!(r.status, ResultStatus::UpToDate)
+                r.analysis.source_sheet_id.as_ref() == Some(primary)
+                    && r.has_displayable_output()
                     && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
                     && !r.fitted_curves.is_empty()
             })
@@ -215,9 +215,7 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument, warnings: &mut 
                 "failed_result_sheet",
                 format!("survival result sheet '{}' failed; fell back to raw survival table", failed.id),
             ));
-        } else if let Some(pending) =
-            doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && !matches!(r.status, ResultStatus::UpToDate))
-        {
+        } else if let Some(pending) = doc.result_sheets.iter().find(|r| is_survival_result_for(r, primary) && !r.has_displayable_output()) {
             warnings.push(ChartWarning::new(
                 "pending_analysis_result",
                 format!("survival result sheet '{}' is pending recalculation; omitted stale result curves", pending.id),

@@ -34,8 +34,11 @@ pub const MAX_SHEET_CELLS: usize = 30_000_000;
 /// Hard ceiling on cumulative allocated [`crate::Cell`] slots across all data sheets in one project.
 pub const MAX_PROJECT_CELLS: usize = 50_000_000;
 
+/// Maximum fixed decimal places supported for per-column grid display formatting (`0..=15`).
+pub const MAX_DISPLAY_DECIMALS: u8 = 15;
+
 /// Current `.curvebook` document schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 /// Validate a title string against [`MAX_TITLE_BYTES`].
 pub fn validate_title(title: &str) -> Result<(), DocError> {

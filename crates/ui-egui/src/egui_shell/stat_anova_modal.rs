@@ -714,7 +714,7 @@ fn render_tab_contents(
 
 fn render_tab_experimental_design(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let reml_active = is_reml_mixed_effects_active(rc.ep, rc.doc);
-    let src_id = rc.ep.draft.as_ref().map(|d| &d.source_sheet_id);
+    let src_id = rc.ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
     let assume_en = r2_assume_gaussian_allowed(rc.doc, src_id);
     let paired_en = r1_paired_or_matched_allowed(rc.doc, src_id);
 
@@ -853,7 +853,7 @@ fn render_design_right_pane(ui: &mut Ui, rc: &TabRenderCtx<'_>, reml_active: boo
     draw_experimental_design_schematic(ui, rc, reml_active, meta, intents);
 
     ui.add_space(8.0);
-    let titles = column_titles_for_draft(rc.doc, rc.ep.draft.as_ref().map(|d| &d.source_sheet_id));
+    let titles = column_titles_for_draft(rc.doc, rc.ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
     let selected_sets = rc.ep.draft.as_ref().map_or(&[][..], |d| d.selected_data_sets.as_slice());
     let all_checked = selected_sets.is_empty();
     if render_modal_checkbox(ui, rc.tokens, meta, "edit.dataset.all", "All Data Sets / Columns", all_checked, &ControlEnablement::enabled()) {
@@ -1181,7 +1181,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
     }
 
     let ctrl_en = r3_control_column_picker(rc.ep.compare_against_control, mult.method);
-    let titles = column_titles_for_draft(rc.doc, rc.ep.draft.as_ref().map(|d| &d.source_sheet_id));
+    let titles = column_titles_for_draft(rc.doc, rc.ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
     let ctrl_name = titles.get(rc.ep.control_column).cloned().unwrap_or_else(|| format!("Col {}", rc.ep.control_column + 1));
     let ctrl_lbl = format!("Control Column: {ctrl_name} (col {})", rc.ep.control_column + 1);
     if render_modal_seg_btn(ui, rc.tokens, meta, "edit.control_column", &ctrl_lbl, ctrl_en.enabled, &ctrl_en) {

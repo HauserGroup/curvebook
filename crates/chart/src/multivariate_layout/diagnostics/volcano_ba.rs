@@ -266,7 +266,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument, warnings: &
         .or_else(|| find_matching_result_checked(graph, doc, warnings))
         && (matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_)) || doc.result_sheet(&graph.spec.primary_source_sheet_id).is_some())
     {
-        let ds_id = res.analysis.source_sheet_id.clone();
+        let ds_id = res.analysis.source_sheet_id.clone().unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
         let ds_opt = resolve_analysis_source_data_sheet(res, graph, doc);
         let default_col = graph.spec.series.first().map_or(0, |s| s.data_set_index);
         let is_mr = matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_));
@@ -744,7 +744,7 @@ fn extract_bland_altman_from_result(res: &ResultSheet, graph: &GraphSheet, doc: 
     let force_nonparametric = is_nonparametric_bland_altman(res);
     let (loa_hi_label, loa_lo_label) =
         format_bland_altman_loa_labels(bias, loa_lo, loa_hi, sd_bias_opt.or(Some(sd_fallback)), z_expected, force_nonparametric);
-    let fallback_id = res.analysis.source_sheet_id.clone();
+    let fallback_id = res.analysis.source_sheet_id.clone().unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
     let points: Vec<DiagPoint> = match ds_pairs {
         Some(extracted) if extracted.sources.len() == raw_pts.len() => raw_pts
             .into_iter()

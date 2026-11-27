@@ -60,6 +60,9 @@
                 "GeneralizedLinearModel": {
                   "type": "object"
                 },
+                "ImportedSnapshot": {
+                  "type": "object"
+                },
                 "LeveneTest": {
                   "type": "object"
                 },
@@ -165,7 +168,14 @@
           "type": "array"
         },
         "source_sheet_id": {
-          "$ref": "#/$defs/SheetId"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetId"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -327,6 +337,16 @@
             "$ref": "#/$defs/LinkedDataRegion"
           },
           "type": "array"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "plate_well_origins": {
           "items": {
@@ -519,6 +539,16 @@
         },
         "initialized": {
           "type": "boolean"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "spec": {
           "$ref": "#/$defs/GraphSpec"
@@ -775,6 +805,16 @@
         "notes_markdown": {
           "type": "string"
         },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "title": {
           "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
           "maxLength": 4096,
@@ -814,6 +854,16 @@
         },
         "id": {
           "$ref": "#/$defs/SheetId"
+        },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "spec": {
           "$ref": "#/$defs/LayoutSpec"
@@ -1525,6 +1575,51 @@
       "title": "ResultCellDetail",
       "type": "object"
     },
+    "ResultProvenance": {
+      "oneOf": [
+        {
+          "const": "Computed",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Imported": {
+              "additionalProperties": false,
+              "properties": {
+                "original_kind_label": {
+                  "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "reason": {
+                  "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                "source_format": {
+                  "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+                  "maxLength": 4096,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source_format",
+                "original_kind_label",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Imported"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ResultProvenance"
+    },
     "ResultScalarEntry": {
       "additionalProperties": false,
       "properties": {
@@ -1617,11 +1712,24 @@
         "id": {
           "$ref": "#/$defs/SheetId"
         },
+        "origin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "pairwise_comparisons": {
           "items": {
             "$ref": "#/$defs/PairwiseComparisonRecord"
           },
           "type": "array"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ResultProvenance"
         },
         "scalars": {
           "items": {
@@ -1663,6 +1771,14 @@
         },
         {
           "const": "UpToDate",
+          "type": "string"
+        },
+        {
+          "const": "Imported",
+          "type": "string"
+        },
+        {
+          "const": "ImportedStale",
           "type": "string"
         },
         {
@@ -1827,6 +1943,35 @@
       "pattern": "^(?!.*(?:\\{\\{|\\}\\}))[^\\s:\\x00-\\x1f\\x7f]{1,256}$",
       "title": "SheetId",
       "type": "string"
+    },
+    "SheetOrigin": {
+      "additionalProperties": false,
+      "properties": {
+        "merged_at": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "type": "string"
+        },
+        "source_format": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "source_label": {
+          "description": "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+          "maxLength": 4096,
+          "minLength": 1,
+          "pattern": "^[^/\\\\\\x00]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_label",
+        "source_format"
+      ],
+      "title": "SheetOrigin",
+      "type": "object"
     },
     "SizePt": {
       "additionalProperties": false,
@@ -2065,7 +2210,7 @@
       "type": "array"
     },
     "schema_version": {
-      "maximum": 8,
+      "maximum": 9,
       "minimum": 1,
       "type": "integer"
     },

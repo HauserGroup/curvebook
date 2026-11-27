@@ -3,16 +3,18 @@
 use curvebook_doc::{CurveSamplePoint, FittedCurveOverlay, LineConnectionKind, ProjectDocument, RegressionOverlaySpec, ResultStatus, SeriesSpec};
 use curvebook_math::AxisScale;
 use curvebook_palette::{LineDashStyle, Rgba8};
+use curvebook_text::RichText;
 
 use super::series::build_connecting_path;
 use super::{SegmentedAxis, is_log_like, stroke_with_dash};
 use crate::scales::{ResolvedSegment, scale_inverse, scale_transform};
-use crate::scene::{ChartWarning, FillPaint, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, SourceCellId};
+use crate::scene::{ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SourceCellId, TextAnchor};
 
 #[derive(Debug, Clone)]
 pub(super) struct FittedOverlayData {
     pub(super) spec: RegressionOverlaySpec,
     pub(super) curve: FittedCurveOverlay,
+    pub(super) imported_label: Option<String>,
 }
 
 pub(super) fn resolve_fitted_overlay<'a>(
@@ -29,7 +31,7 @@ pub(super) fn resolve_fitted_overlay<'a>(
         warnings.push(ChartWarning::new("failed_regression_result", format!("regression result sheet '{}' failed: {message}", spec.result_sheet_id)));
         return None;
     }
-    if !matches!(res.status, ResultStatus::UpToDate) {
+    if !res.has_displayable_output() {
         // Cached curve points describe the data before the pending recalculation; drawing them would
         // present an outdated fit as current.
         warnings.push(ChartWarning::new(
@@ -72,8 +74,13 @@ pub(super) fn resolve_fitted_overlay<'a>(
             pt.pred_upper = None;
         }
     }
-    let outliers = if matches!(res.status, ResultStatus::UpToDate) { res.eliminated_outliers.as_slice() } else { &[] };
-    Some((FittedOverlayData { spec: effective_spec, curve: effective_curve }, outliers))
+    let imported_label = if res.is_imported() {
+        Some(if matches!(res.status, ResultStatus::ImportedStale) { String::from("Imported (stale)") } else { String::from("Imported") })
+    } else {
+        None
+    };
+    let outliers = if res.has_displayable_output() { res.eliminated_outliers.as_slice() } else { &[] };
+    Some((FittedOverlayData { spec: effective_spec, curve: effective_curve, imported_label }, outliers))
 }
 
 #[derive(Clone, Copy)]
@@ -112,12 +119,21 @@ pub(super) fn render_fitted_curve_overlay(
     let total_samples = usize::from(overlay.spec.sample_segments.clamp(256, 1024));
     let total_x_span: f64 = target.x_axis.segments.iter().map(|s| (s.span_end_pt - s.span_start_pt).abs()).sum::<f64>().max(1.0);
 
+    let mut last_curve_pt: Option<PointPt> = None;
     for seg_x in &target.x_axis.segments {
         let seg_weight = ((seg_x.span_end_pt - seg_x.span_start_pt).abs() / total_x_span).clamp(0.1, 1.0);
         let seg_samples = ((total_samples as f64) * seg_weight).round().max(16.0) as usize;
         let resampled = resample_curve_for_x_segment(&src, seg_x, seg_samples);
         if resampled.len() < 2 {
             continue;
+        }
+        if overlay.imported_label.is_some() {
+            for sp in resampled.iter().rev() {
+                if let (Some(raw_px), Some((_, py))) = (seg_x.map_strict(sp.x), target.y_axis.map_value(sp.y)) {
+                    last_curve_pt = Some(PointPt::new(raw_px + target.dx_pt, py + target.dy_pt));
+                    break;
+                }
+            }
         }
         let ctx = OverlayRenderCtx {
             spec: &overlay.spec,
@@ -128,6 +144,18 @@ pub(super) fn render_fitted_curve_overlay(
             dy_pt: target.dy_pt,
         };
         emit_overlay_bands_and_curve(primitives, warnings, &resampled, seg_x, target.y_axis, ctx);
+    }
+    if let (Some(tag), Some(pt)) = (overlay.imported_label.as_deref(), last_curve_pt) {
+        let anchor_x = (pt.x - 4.0).clamp(target.clip.x + 4.0, (target.clip.right() - 4.0).max(target.clip.x + 4.0));
+        let anchor_y = (pt.y - 4.0).clamp(target.clip.y + 10.0, (target.clip.bottom() - 4.0).max(target.clip.y + 10.0));
+        primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: RichText::plain(format!("[{tag}]")),
+            anchor_pt: PointPt::new(anchor_x, anchor_y),
+            anchor: TextAnchor::End,
+            font_size_pt: 7.5,
+            rotation_deg: 0.0,
+            color: target.color,
+        }));
     }
 }
 

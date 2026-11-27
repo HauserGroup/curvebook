@@ -3,16 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Open .pzfx and .prism data files with CurveBook, a free, open-source, offline application for macOS, Windows, and Linux, and export each table to CSV or a CurveBook project.">
+  <meta name="description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline application for macOS, Windows, and Linux: import tables, inspect read-only .prism result snapshots, export to CSV or data-only .pzfx, and merge projects.">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
   <meta name="color-scheme" content="light">
-  <title>Open .pzfx and .prism files and export them to CSV — CurveBook</title>
+  <title>Open .pzfx and .prism files and export tables — CurveBook</title>
   <link rel="canonical" href="https://curvebook.org/open-pzfx-files.html">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="CurveBook">
-  <meta property="og:title" content="Open .pzfx and .prism files and export them to CSV — CurveBook">
-  <meta property="og:description" content="Open .pzfx and .prism data files with CurveBook, a free, open-source, offline application for macOS, Windows, and Linux, and export each table to CSV or a CurveBook project.">
+  <meta property="og:title" content="Open .pzfx and .prism files and export tables — CurveBook">
+  <meta property="og:description" content="Open .pzfx and .prism files with CurveBook, a free, open-source, offline application for macOS, Windows, and Linux: import tables, inspect read-only .prism result snapshots, export to CSV or data-only .pzfx, and merge projects.">
   <meta property="og:url" content="https://curvebook.org/open-pzfx-files.html">
   <meta property="og:image" content="https://curvebook.org/images/workspace-layout-dark.png">
   <meta property="og:image:alt" content="CurveBook dark-theme Page Layout Composer showing a two-panel publication figure with a 4PL dose-response curve, potency bar chart with significance brackets, embedded summary table, and millimeter rulers.">
@@ -23,7 +23,7 @@
   <link rel="stylesheet" href="site.css">
 </head>
 <body>
-  <!-- R12.8: CLI behaviour is checked by apps/curvebook-cli/tests/r12_8_pzfx_landing_page.rs; desktop GUI import/export behaviour is checked by crates/ui-egui/tests/human_wf_suite/human_wf_import_export.rs (R10.30). -->
+  <!-- R12.8: CLI behaviour is checked by apps/curvebook-cli/tests/cli_suite/r12_8_pzfx_landing_page.rs; desktop GUI import/export behaviour is checked by crates/ui-egui/tests/human_wf_suite/human_wf_import_export.rs (R10.30). -->
   <a class="skip-link" href="#main">Skip to content</a>
   <div class="site-shell">
     <header class="site-header">
@@ -47,8 +47,8 @@
       <div class="overview doc-body">
         <section id="summary" aria-labelledby="page-title" tabindex="-1">
           <p class="eyebrow">File formats · <code>.pzfx</code> · <code>.prism</code></p>
-          <h1 id="page-title">Open .pzfx and .prism files.<br><span>Export the tables to CSV.</span></h1>
-          <p class="lead"><strong>CurveBook</strong> is a free, open-source biostatistics and graphing application that reads the data tables in <code>.pzfx</code> and <code>.prism</code> files. You can list the tables, export any of them to CSV, or convert the whole file to a CurveBook project and analyse the data again. It runs offline on macOS, Windows, and Linux, needs no account, and never uploads your files.</p>
+          <h1 id="page-title">Open .pzfx and .prism files.<br><span>Export tables to CSV or data-only .pzfx.</span></h1>
+          <p class="lead"><strong>CurveBook</strong> is a free, open-source biostatistics and graphing application that reads data tables and info sheets from <code>.pzfx</code> and <code>.prism</code> files, plus read-only analysis result snapshots and preview images from <code>.prism</code> files. Export tables to CSV/TSV or data-only <code>.pzfx</code>, merge projects with origin badges, or save a full <code>.curvebook</code> project and re-run analyses offline on macOS, Windows, and Linux.</p>
           <ul class="pill-row" aria-label="Key facts">
             <li class="pill">Free &amp; open source</li>
             <li class="pill">Offline</li>
@@ -57,8 +57,8 @@
           <nav class="toc" aria-label="On this page">
             <p class="toc-title">On this page</p>
             <ul>
-              <li><a href="#what-is-read">What is read</a></li>
-              <li><a href="#desktop">Open and export in the desktop app</a></li>
+              <li><a href="#what-is-read">What is read &amp; written</a></li>
+              <li><a href="#desktop">Open, merge, and export in the desktop app</a></li>
               <li><a href="#convert">Convert to CSV from the command line</a></li>
               <li><a href="#limits">Limits and privacy</a></li>
               <li><a href="#get">Get CurveBook</a></li>
@@ -69,13 +69,14 @@
         <hr>
 
         <section id="what-is-read" aria-labelledby="what-is-read-title" tabindex="-1">
-          <p class="eyebrow">Import scope</p>
-          <h2 id="what-is-read-title">What CurveBook reads from these files</h2>
+          <p class="eyebrow">Import &amp; export scope</p>
+          <h2 id="what-is-read-title">What CurveBook reads and writes</h2>
           <ul>
-            <li><strong><code>.pzfx</code> files (XML):</strong> every data table, including XY, column, grouped, survival, and contingency tables, with replicate and summary (mean with SD or SEM) subcolumns, row and column titles, excluded values, and info notes.</li>
-            <li><strong><code>.prism</code> files (ZIP archives):</strong> the data tables stored inside the archive as CSV or TSV, with their table and info metadata when present. Parts CurveBook does not recognise are skipped and listed as warnings, so you can see exactly what was left out.</li>
-            <li><strong>Not imported:</strong> graphs, analysis results, and page layouts. Rerun the analyses in CurveBook on the imported tables; its methods and their published references are listed in the <a href="manual/latest/analyses.html">analyses reference</a>.</li>
-            <li><strong>Read only:</strong> CurveBook opens these formats but does not write them. Save your work as a <code>.curvebook</code> project, or export tables to CSV or TSV.</li>
+            <li><strong><code>.pzfx</code> files (XML import):</strong> all eight table archetypes (XY, Column, Grouped, Nested, Contingency, Survival, Parts of Whole, and Multiple Variables), including <code>&lt;HugeTable&gt;</code>, <code>&lt;Table1024&gt;</code>, and XSLT-wrapped files. Imports replicate subcolumns, parametric summary modes (mean with SD/SEM/%CV and N), two-subcolumn mean/SD and mean/SEM modes, Column asymmetric interval and quartile summary modes (mean with +/- error, upper/lower limits, median/IQR), row/column/subcolumn titles, display decimals, rich text and Symbol-font characters, excluded-value markers, floating notes, and top-level or per-table info sheets. Graphs, analyses, and layouts inside <code>.pzfx</code> files are not imported; rerun analyses in CurveBook (<a href="manual/latest/analyses.html">analyses reference</a>).</li>
+            <li><strong>Legacy binary <code>.pzf</code> files (not supported):</strong> older binary <code>.pzf</code> files — including binary <code>PCFF</code>-prefixed files carrying a <code>.pzfx</code> extension (observed in roughly 15–18% of public <code>.pzfx</code>-named files) — are not supported. CurveBook refuses them with a clear error message; re-save them as XML <code>.pzfx</code> or <code>.prism</code> before opening.</li>
+            <li><strong><code>.prism</code> files (import-only at Beta):</strong> reads data tables across all eight archetypes (headerless archive CSVs resolved by sheet ID, including generated X sequences, replicate/summary/offset modes, subcolumn titles, and display decimals), cell exclusions, rich text, and info sheets. Preferred analysis results are imported as clearly labelled read-only snapshots that show the stored values without feeding CurveBook calculations or hooks; opaque binary graphs and layouts surface typed warnings and retain raster preview PNGs when present. <strong><code>.prism</code> export is not shipped as a supported format at Beta</strong> because real <code>.prism</code> archives contain undocumented binary and digest entries; use <code>.pzfx</code> export for data interchange instead.</li>
+            <li><strong><code>.pzfx</code> data-only export:</strong> <code>.pzfx</code> export saves your data tables and info sheets only. Analyses, graphs and layouts stay in your <code>.curvebook</code> project. Every export is a separate copy (leaving your active <code>.curvebook</code> file path and unsaved state untouched) and reports every dropped non-tabular item. Written to match the <code>.pzfx</code> structure of real files; not tested in other applications — structure-conformant files may still be rejected by other applications for non-structural reasons such as checksums, cross-references, or version gates.</li>
+            <li><strong>Merging projects (<code>File › Merge Project…</code>):</strong> combine another <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, <code>.pzfx</code>, <code>.prism</code>, or <code>.xlsx</code> file into your open project as a one-time copy with automatic sheet ID remapping and removable navigator origin badges (showing only the source filename and format, never full directory paths). Merged sheets have no live cross-file links.</li>
           </ul>
         </section>
 
@@ -83,11 +84,11 @@
 
         <section id="desktop" aria-labelledby="desktop-title" tabindex="-1">
           <p class="eyebrow">Desktop app · <code>curvebook</code></p>
-          <h2 id="desktop-title">Open and export in the desktop app</h2>
+          <h2 id="desktop-title">Open, merge, and export in the desktop app</h2>
           <ol>
-            <li><strong>Import the file:</strong> open CurveBook and choose <strong>File › Open…</strong> or <strong>File › Import</strong>, then pick your <code>.pzfx</code> or <code>.prism</code> file. If your workspace already contains tables or unsaved edits, CurveBook asks whether to <strong>Add to current project</strong> or open the imported tables as a new project.</li>
-            <li><strong>Review any skipped items:</strong> when a file includes graphs or unrecognized archive entries, CurveBook opens the <strong>Import Warnings</strong> dialog so you can inspect every skipped part. You can reopen it later from the status bar or <strong>File › Import › Import Warnings…</strong>.</li>
-            <li><strong>Export tables to CSV or TSV:</strong> select any imported table and choose <strong>File › Export › CSV Table…</strong> (picking comma, semicolon, or tab delimiter and decimal mark), or choose <strong>File › Export › Export All Data Tables…</strong> to write every data table to a folder at once.</li>
+            <li><strong>Open or merge a file:</strong> choose <strong>File › Open…</strong> or <strong>File › Import</strong> to open a <code>.pzfx</code> or <code>.prism</code> file, or choose <strong>File › Merge Project…</strong> (or drag and drop a file onto an open project) to copy its sheets into the current workspace with automatic ID remapping and removable navigator origin badges.</li>
+            <li><strong>Review skipped items and imported snapshots:</strong> when a file contains unsupported elements or opaque binary chunks, CurveBook opens the <strong>Import Warnings</strong> dialog (reopenable from the status bar or <strong>File › Import › Import Warnings…</strong>). Read-only analysis snapshots read from <code>.prism</code> files carry a banner and never enter CurveBook computations or hooks; click <strong>Re-run as a CurveBook analysis…</strong> to compute fresh CurveBook results.</li>
+            <li><strong>Export tables:</strong> select any table and choose <strong>File › Export › CSV Table…</strong> (comma, semicolon, or tab delimiter), choose <strong>File › Export › Export All Data Tables…</strong> to write every data table to a folder, or export data tables and info sheets to <code>.pzfx</code> (reviewing the preflight summary of dropped non-tabular items before writing).</li>
           </ol>
         </section>
 

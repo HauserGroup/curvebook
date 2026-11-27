@@ -180,6 +180,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.export.resultsCsv.open" => ("menu.file", "File/Export/CSV Results"),
         "ui.export.allTablesCsv.open" => ("menu.file", "File/Export/Export All Data Tables"),
         "ui.export.allTablesCsv" => ("menu.file", "File/Export/Export All Data Tables"),
+        "ui.export.pzfx.open" => ("menu.file", "File/Export/.pzfx file"),
         "ui.import.warnings.open" => ("menu.file", "File/Import/Import Warnings"),
         "ui.import.reshape.open" => ("menu.file", "File/Import Reshape"),
         "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline"),
@@ -408,7 +409,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert!(seen.len() >= 60 && seen.len() <= 104, "expected curated menu size, got {}", seen.len());
+        assert!(seen.len() >= 60 && seen.len() <= 106, "expected curated menu size, got {}", seen.len());
         Ok(())
     }
 }

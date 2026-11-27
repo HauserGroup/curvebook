@@ -484,18 +484,35 @@ fn extract_column_presummarized(
         };
     }
 
+    let mut first_plottable = None;
+    let mut populated_rows = 0_usize;
     for (row, subcells) in ds.cells.iter().enumerate() {
-        if let Some((center, lower, upper)) = summarize_subcells(mode, subcells, SummaryMeasure::Mean, err_spec, warnings) {
-            return ExtractedKind::PreSummarized {
+        if subcells.first().and_then(curvebook_doc::Cell::active_number).is_none() {
+            continue;
+        }
+        populated_rows += 1;
+        if first_plottable.is_none()
+            && let Some((center, lower, upper)) = summarize_subcells(mode, subcells, SummaryMeasure::Mean, err_spec, warnings)
+        {
+            first_plottable = Some(ExtractedKind::PreSummarized {
                 mode,
                 center,
                 lower,
                 upper,
                 source: SourceCellId { sheet_id: sheet_id.clone(), row, col, subcol: 0 },
-            };
+            });
         }
     }
-    ExtractedKind::Raw(Vec::new())
+    if populated_rows > 1 {
+        warnings.push(ChartWarning::new(
+            "multiple_unpoolable_summary_rows",
+            format!(
+                "column `{}` has {populated_rows} pre-summarized {mode:?} rows without sample size N; plotted first active summary row only",
+                ds.title
+            ),
+        ));
+    }
+    first_plottable.unwrap_or_else(|| ExtractedKind::Raw(Vec::new()))
 }
 
 fn extract_nested_items(
