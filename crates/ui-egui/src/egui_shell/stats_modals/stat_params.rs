@@ -444,6 +444,8 @@ pub fn render_stat_params_modal(
     let base_apply_en = evaluate_dialog_button_for_app(app, "apply").unwrap_or_else(|| base_ok_en.clone());
     let wants_kb_before = ctx.egui_wants_keyboard_input();
 
+    let compact_footer = (ctx.content_rect().width() - 48.0).min(756.0) < 640.0;
+
     let mut report = StatsModalFrameReport::from(show_wave4_modal(
         ctx,
         tokens,
@@ -458,7 +460,7 @@ pub fn render_stat_params_modal(
             max_width_pt: 780.0,
             max_height_pt: 570.0,
             use_body_scroll: true,
-            footer_reserve_pt: 42.0,
+            footer_reserve_pt: if compact_footer { 78.0 } else { 42.0 },
         },
         |ui, state, meta, intents| {
             ui.add_space(4.0);
@@ -515,60 +517,52 @@ pub fn render_stat_params_modal(
             render_stat_params_tab_body(ui, state, StatTabBodyCtx { app, ep, spec, tab_slug: &tab_slug }, tokens, meta, intents);
         },
         |ui, state, meta, intents| {
-            ui.horizontal(|ui| {
-                if render_modal_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    "dialog.button.method_ref",
-                    tr(locale, "anova.method_ref"),
-                    false,
-                    state.show_method_reference,
-                    &ControlEnablement::enabled(),
-                ) {
-                    state.show_method_reference = !state.show_method_reference;
-                }
-                let save_lbl = if state.method_saved_as_default { tr(locale, "anova.saved_default") } else { tr(locale, "anova.save_default") };
-                if render_modal_action_button(
-                    ui,
-                    tokens,
-                    meta,
-                    "dialog.button.save_default",
-                    save_lbl,
-                    false,
-                    state.method_saved_as_default,
-                    &ControlEnablement::enabled(),
-                ) {
-                    let key = super::saved_default_kind_key(&spec.kind);
-                    state.saved_defaults.retain(|d| super::saved_default_kind_key(&d.kind) != key);
-                    state.saved_defaults.push(spec.clone());
-                    state.method_saved_as_default = true;
-                    intents.push(UiIntent::DialogButtonAction { action: String::from("__save_edit_params_default") });
-                }
-                let first_num_err = state.numeric_field_errors.values().next().cloned();
-                let ok_en = if !base_ok_en.enabled {
-                    base_ok_en.clone()
-                } else if let Some(err) = first_num_err.clone() {
-                    ControlEnablement::disabled(err)
-                } else {
-                    ControlEnablement::enabled()
-                };
-                let apply_en = if !base_apply_en.enabled {
-                    base_apply_en.clone()
-                } else if let Some(err) = first_num_err {
-                    ControlEnablement::disabled(err)
-                } else {
-                    ControlEnablement::enabled()
-                };
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ok_en) {
-                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+            let save_lbl = if state.method_saved_as_default { tr(locale, "anova.saved_default") } else { tr(locale, "anova.save_default") };
+            let first_num_err = state.numeric_field_errors.values().next().cloned();
+            let ok_en = if !base_ok_en.enabled {
+                base_ok_en.clone()
+            } else if let Some(err) = first_num_err.clone() {
+                ControlEnablement::disabled(err)
+            } else {
+                ControlEnablement::enabled()
+            };
+            let apply_en = if !base_apply_en.enabled {
+                base_apply_en.clone()
+            } else if let Some(err) = first_num_err {
+                ControlEnablement::disabled(err)
+            } else {
+                ControlEnablement::enabled()
+            };
+            let show_apply = !is_create_mode && doc.result_sheet(result_sheet_id).is_some();
+            if ui.available_width() < 640.0 {
+                ui.horizontal_wrapped(|ui| {
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "dialog.button.method_ref",
+                        tr(locale, "anova.method_ref"),
+                        false,
+                        state.show_method_reference,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        state.show_method_reference = !state.show_method_reference;
                     }
-                    if !is_create_mode
-                        && doc.result_sheet(result_sheet_id).is_some()
-                        && render_modal_action_button(ui, tokens, meta, "modal.apply", tr(locale, "anova.update_analysis"), false, false, &apply_en)
-                    {
-                        intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "dialog.button.save_default",
+                        save_lbl,
+                        false,
+                        state.method_saved_as_default,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let key = super::saved_default_kind_key(&spec.kind);
+                        state.saved_defaults.retain(|d| super::saved_default_kind_key(&d.kind) != key);
+                        state.saved_defaults.push(spec.clone());
+                        state.method_saved_as_default = true;
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("__save_edit_params_default") });
                     }
                     if render_modal_action_button(
                         ui,
@@ -582,8 +576,78 @@ pub fn render_stat_params_modal(
                     ) {
                         intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
                     }
+                    if show_apply
+                        && render_modal_action_button(ui, tokens, meta, "modal.apply", tr(locale, "anova.update_analysis"), false, false, &apply_en)
+                    {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
+                    }
+                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ok_en) {
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+                    }
                 });
-            });
+            } else {
+                ui.horizontal(|ui| {
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "dialog.button.method_ref",
+                        tr(locale, "anova.method_ref"),
+                        false,
+                        state.show_method_reference,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        state.show_method_reference = !state.show_method_reference;
+                    }
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "dialog.button.save_default",
+                        save_lbl,
+                        false,
+                        state.method_saved_as_default,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let key = super::saved_default_kind_key(&spec.kind);
+                        state.saved_defaults.retain(|d| super::saved_default_kind_key(&d.kind) != key);
+                        state.saved_defaults.push(spec.clone());
+                        state.method_saved_as_default = true;
+                        intents.push(UiIntent::DialogButtonAction { action: String::from("__save_edit_params_default") });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ok_en) {
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("ok") });
+                        }
+                        if show_apply
+                            && render_modal_action_button(
+                                ui,
+                                tokens,
+                                meta,
+                                "modal.apply",
+                                tr(locale, "anova.update_analysis"),
+                                false,
+                                false,
+                                &apply_en,
+                            )
+                        {
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("apply") });
+                        }
+                        if render_modal_action_button(
+                            ui,
+                            tokens,
+                            meta,
+                            "modal.cancel",
+                            tr(locale, "btn.cancel"),
+                            false,
+                            false,
+                            &ControlEnablement::enabled(),
+                        ) {
+                            intents.push(UiIntent::DialogButtonAction { action: String::from("cancel") });
+                        }
+                    });
+                });
+            }
         },
     ));
 

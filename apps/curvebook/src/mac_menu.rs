@@ -67,6 +67,7 @@ pub fn localized_window_submenu_title(locale: &str) -> &'static str {
 /// inserted ahead of `Help` (`R20.22`).
 pub const MACOS_WINDOW_SUBMENU_ITEMS: [&str; 4] = ["Minimize", "Zoom", "Enter Full Screen", "Bring All to Front"];
 
+#[cfg(target_os = "macos")]
 const MACOS_APP_SUBMENU_OWNED_COMMANDS: [&str; 3] = ["app.about", "app.preferences", "app.quit"];
 
 /// Canonical 8-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
@@ -399,6 +400,7 @@ pub fn install_egui_repaint_event_handler(ctx: eframe::egui::Context) {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl MacNativeMenuHost {
     /// Construct an empty macOS native menu host (no AppKit side-effects until windowed startup).
     #[must_use]
@@ -809,9 +811,7 @@ mod tests {
 
     #[test]
     fn r20_22_macos_window_menu_dot_free_settings_and_app_menu_dedup() -> Result<(), String> {
-        use crate::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
         use curvebook_ui_egui::i18n::LOCALES;
-        use curvebook_ui_egui::interaction::ViewportMetrics;
 
         assert_eq!(MACOS_WINDOW_SUBMENU_ITEMS, ["Minimize", "Zoom", "Enter Full Screen", "Bring All to Front"]);
         for &loc in LOCALES {
@@ -825,6 +825,8 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         {
+            use crate::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
+            use curvebook_ui_egui::interaction::ViewportMetrics;
             let mut rt_native =
                 DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: false, recovery_root: None, ..DesktopHostConfig::default() });
             let wid_native = rt_native.open_window(None, ViewportMetrics::default())?;

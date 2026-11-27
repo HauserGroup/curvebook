@@ -1016,12 +1016,18 @@ impl StageDirGuard {
             let seq = STAGE_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let nonce = stage_dir_nonce(seq);
             let path = base.join(format!("curvebook-{prefix}-{pid}-{nonce:016x}"));
-            let mut builder = std::fs::DirBuilder::new();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
-            }
+            let builder = {
+                #[cfg(unix)]
+                let mut builder = std::fs::DirBuilder::new();
+                #[cfg(not(unix))]
+                let builder = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    builder.mode(0o700);
+                }
+                builder
+            };
             match builder.create(&path) {
                 Ok(()) => {
                     let meta =

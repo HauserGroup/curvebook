@@ -85,6 +85,17 @@ fn plan(opts: &Options, nextest: bool, out: &Outputs) -> Vec<Vec<String>> {
     if opts.packages.is_empty() {
         test_run.push(s("--workspace"));
         EXCLUDED_PACKAGES.iter().for_each(|e| test_run.extend([s("--exclude"), s(e)]));
+        if nextest && opts.runner_args.is_empty() {
+            // Skip wall-clock performance micro-benchmarks whose millisecond budgets cannot hold
+            // under LLVM coverage instrumentation (`-C instrument-coverage`).
+            test_run.extend([
+                s("-E"),
+                format!(
+                    "not ({} | test(=grid_view::tests::rv50_one_million_row_range_selection_and_brushing_completes_under_5ms_without_giant_alloc))",
+                    crate::ci::PERFORMANCE_FILTER
+                ),
+            ]);
+        }
     } else {
         opts.packages.iter().for_each(|p| test_run.extend([s("-p"), p.clone()]));
     }
@@ -227,6 +238,8 @@ mod tests {
         );
         let p_steps = plan(&Options { packages: strs(&["curvebook-stats"]), runner_args: strs(&["anova"]) }, true, &Outputs::in_dir(Path::new("o")));
         assert_eq!(p_steps.get(1), Some(&strs(&["llvm-cov", "nextest", "--locked", "--no-report", "-p", "curvebook-stats", "--", "anova"])));
+        let ws_nextest = plan(&Options::default(), true, &Outputs::in_dir(Path::new("o")));
+        assert!(ws_nextest[1].windows(2).any(|w| w[0] == "-E" && w[1].contains(crate::ci::PERFORMANCE_FILTER)));
 
         let doc: serde_json::Value = serde_json::from_str(
             r#"{"data":[{"totals":{"lines":{"count":200,"covered":150},"functions":{"count":0,"covered":0},"regions":{"count":8,"covered":1}}}]}"#,

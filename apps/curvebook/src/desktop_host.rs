@@ -4510,6 +4510,11 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
             ui_command_id: String::from("ui.table.openFormulaBar"),
             params: sheet_id_obj_or_empty(resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
         })),
+        "table.unlinkCalculatedVariable" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_mv_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(base_cmd.to_owned()),
+        })),
         "table.setVariableRole" | "table.recodeLevels" | "table.setCategoricalOrder" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::VariablesDialog,
             target_sheet_id: resolve_mv_sheet_id(doc).map(|id| id.as_str().to_owned()),
@@ -4666,6 +4671,13 @@ fn resolve_analysis_export_graph_layout_info_route(
             Ok(Some(DesktopCommandRoute::UiCommand {
                 ui_command_id: String::from("ui.analyze.open"),
                 params: sheet_id_obj_or_empty(resolve_data_sheet_id(doc)),
+            }))
+        }
+        "fit.listUserEquations" | "fit.getUserEquation" | "fit.saveUserEquation" | "fit.deleteUserEquation" | "fit.cloneBuiltinEquation" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener {
+                kind: DesktopDialogOpener::CommandPalette,
+                target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+                query: Some(base_cmd.to_owned()),
             }))
         }
         "analysis.updateParams" => Ok(Some(DesktopCommandRoute::UiDialogOpener {

@@ -128,7 +128,6 @@ fn r032_light_gates_and_feature_parity() -> Result<(), String> {
         (&["citations"][..], "citations:"),
         (&["commands", "--check"][..], "commands:"),
         (&["schemas", "--check"][..], "schemas:"),
-        (&["status"][..], "status: verified"),
     ] {
         let out = run_xtask(args)?;
         assert!(
@@ -143,6 +142,21 @@ fn r032_light_gates_and_feature_parity() -> Result<(), String> {
 
     #[cfg(not(feature = "docs-site"))]
     {
+        // Light `xtask` (`default = []`) verifies `STATUS.md` locally (`CI=false`) and fails closed
+        // under `CI=true` where `--features docs-site` is required for live engine command parity.
+        let local_status = run_xtask_env(&["status"], &[("CI", Some("false"))])?;
+        assert!(
+            local_status.status.success(),
+            "xtask status (CI=false) failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&local_status.stdout),
+            String::from_utf8_lossy(&local_status.stderr)
+        );
+        assert!(String::from_utf8_lossy(&local_status.stdout).contains("status: verified"));
+
+        let ci_status = run_xtask_env(&["status"], &[("CI", Some("true"))])?;
+        assert!(!ci_status.status.success(), "light binary must fail closed on `status` when CI=true");
+        assert!(String::from_utf8_lossy(&ci_status.stderr).contains("--features docs-site"));
+
         let out = run_xtask(&["docs-site", "--check"])?;
         assert!(!out.status.success(), "light binary must fail closed on `docs-site --check`");
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -151,6 +165,15 @@ fn r032_light_gates_and_feature_parity() -> Result<(), String> {
 
     #[cfg(feature = "docs-site")]
     {
+        let status_out = run_xtask(&["status"])?;
+        assert!(
+            status_out.status.success(),
+            "xtask status failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&status_out.stdout),
+            String::from_utf8_lossy(&status_out.stderr)
+        );
+        assert!(String::from_utf8_lossy(&status_out.stdout).contains("status: verified"));
+
         let out = run_xtask(&["docs-site", "--check"])?;
         assert!(out.status.success(), "xtask docs-site --check failed:\n{}", String::from_utf8_lossy(&out.stderr));
     }

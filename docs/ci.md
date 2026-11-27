@@ -62,8 +62,9 @@ fail the required check. For the same required-corpus behavior locally, fetch
 the corpus first and run `CURVEBOOK_REQUIRE_CORPUS=1 cargo xtask ci`.
 
 Hosted jobs use the pinned nextest and actionlint binaries and SHA-256 checksums
-in `.github/actions/ci-setup/action.yml`, and only install `cargo-deny` in the
-shared-cache writer and `policy` stage. `.config/nextest.toml` keeps the existing
+in `.github/actions/ci-setup/action.yml`, install `cargo-deny` only in the
+shared-cache writer and `policy` stage, and install `cargo-about` only in the
+shared-cache writer and `tests` stage. `.config/nextest.toml` keeps the existing
 minimum-version requirement and adds a `ci` profile: no retries, failing
 five-minute per-test deadlines, and a one-minute deadline for `control_loopback`.
 The live macOS clipboard test reserves all test slots while it runs, preventing
