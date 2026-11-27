@@ -10,10 +10,11 @@ use std::borrow::Cow;
 use std::cell::Cell;
 
 use curvebook_palette::Rgba8;
+use read_fonts::model::Error as FontModelError;
 use read_fonts::ps::cff::CffFontRef;
 use read_fonts::ps::cff::blend::BlendState;
 use read_fonts::ps::cff::index::Index;
-use read_fonts::ps::cs::{self, CharstringContext, CharstringKind, CommandSink};
+use read_fonts::ps::charstring::{self, CharstringContext, CharstringKind, CommandSink};
 use read_fonts::tables::glyf::{Glyf, Glyph};
 use read_fonts::tables::loca::Loca;
 use read_fonts::types::{Fixed, GlyphId, Tag};
@@ -557,7 +558,8 @@ fn validate_glyf_budgets_rec(loca: &Loca<'_>, glyf: &Glyf<'_>, gid: u16, depth: 
         Glyph::Composite(composite) => {
             *state.active_gids.get_mut(depth)? = gid;
             for (comp_gid, _) in composite.component_glyphs_and_flags() {
-                validate_glyf_budgets_rec(loca, glyf, comp_gid.to_u16(), depth + 1, state)?;
+                let comp_gid_u16 = u16::try_from(comp_gid.to_u32()).ok()?;
+                validate_glyf_budgets_rec(loca, glyf, comp_gid_u16, depth + 1, state)?;
             }
             Some(())
         }
@@ -571,15 +573,15 @@ struct BoundedCharstringContext<'a> {
 }
 
 impl BoundedCharstringContext<'_> {
-    fn consume_call(&self, bytes_len: usize) -> Result<(), read_fonts::ps::error::Error> {
+    fn consume_call(&self, bytes_len: usize) -> Result<(), FontModelError> {
         let calls = self.remaining_calls.get();
         if calls == 0 {
-            return Err(read_fonts::ps::error::Error::CharstringNestingDepthLimitExceeded);
+            return Err(FontModelError::LimitExceeded);
         }
         self.remaining_calls.set(calls - 1);
         let rem = self.remaining_bytes.get();
         let Some(next_rem) = rem.checked_sub(bytes_len) else {
-            return Err(read_fonts::ps::error::Error::CharstringNestingDepthLimitExceeded);
+            return Err(FontModelError::LimitExceeded);
         };
         self.remaining_bytes.set(next_rem);
         Ok(())
@@ -591,19 +593,19 @@ impl CharstringContext for BoundedCharstringContext<'_> {
         CharstringKind::Type2
     }
 
-    fn seac_components(&self, base_code: i32, accent_code: i32) -> Result<[&[u8]; 2], read_fonts::ps::error::Error> {
+    fn seac_components(&self, base_code: i32, accent_code: i32) -> Result<[&[u8]; 2], FontModelError> {
         let [base, accent] = self.inner.seac_components(base_code, accent_code)?;
         self.consume_call(base.len().saturating_add(accent.len()))?;
         Ok([base, accent])
     }
 
-    fn global_subr(&self, index: i32) -> Result<&[u8], read_fonts::ps::error::Error> {
+    fn global_subr(&self, index: i32) -> Result<&[u8], FontModelError> {
         let subr = self.inner.global_subr(index)?;
         self.consume_call(subr.len())?;
         Ok(subr)
     }
 
-    fn subr(&self, index: i32) -> Result<&[u8], read_fonts::ps::error::Error> {
+    fn subr(&self, index: i32) -> Result<&[u8], FontModelError> {
         let subr = self.inner.subr(index)?;
         self.consume_call(subr.len())?;
         Ok(subr)
@@ -653,7 +655,7 @@ fn validate_cff_budgets(font: &FontRef<'_>, gid: u16, upem: u16, is_cff2: bool) 
     let subfont_idx = cff.subfont_index(gid_t)?;
     let subfont = cff.subfont(subfont_idx, &[]).ok()?;
     let charstrings = cff.charstrings();
-    let charstring_data = charstrings.get(usize::from(gid)).ok()?;
+    let charstring_data = charstrings.get(usize::from(gid))?;
     let remaining_bytes = MAX_CFF_TOTAL_BYTECODE.checked_sub(charstring_data.len())?;
     let local_subrs = if subfont.subrs_offset() != 0 {
         let subr_slice = cff.data().get(usize::try_from(subfont.subrs_offset()).ok()?..)?;
@@ -668,7 +670,7 @@ fn validate_cff_budgets(font: &FontRef<'_>, gid: u16, upem: u16, is_cff2: bool) 
         remaining_bytes: Cell::new(remaining_bytes),
     };
     let mut sink = CffBudgetSink { contours: 0, segments: 0, overflowed: false };
-    cs::evaluate(&ctx, blend, charstring_data, &mut sink).ok()?;
+    charstring::evaluate(&ctx, blend, charstring_data, &mut sink).ok()?;
     (!sink.overflowed).then_some(())
 }
 
