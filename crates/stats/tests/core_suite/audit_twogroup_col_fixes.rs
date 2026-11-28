@@ -526,27 +526,40 @@ fn audit_67_68_69_93_100_descriptive_normality_outliers_and_empty_guards() {
     assert_close(cell_num(row_cell(ln_tab, "Geometric mean ratio (A / B)", 0)), 0.5, 1e-12, "geo ratio");
     assert_eq!(row_cell(ln_tab, "Glass's Delta standardizing group", 0), &ResultCell::Text(String::from("ln(Ctrl)")));
 
-    // 2. Custom percentiles Type 7 (#68) & Glass's Delta zero-SD-A no fallback (#69).
+    // 2. Custom percentiles Type 6 (aligned with quartiles, R 4.5.2 `quantile(..., type = 6)`) & Glass's Delta zero-SD-A no fallback (#69).
     let vals = [2.0, 4.0, 4.0, 8.0, 16.0, 32.0];
     let direct = summarize_column("X", &vals, 0, conf, Some(90.0)).unwrap();
-    assert_eq!((direct.custom_lower_percentile, direct.custom_upper_percentile), (Some((10.0, 3.0)), Some((90.0, 24.0))));
-    let p_sh = col_sheet("pct", &[("X", &vals)]);
+    assert_eq!((direct.custom_lower_percentile, direct.custom_upper_percentile), (Some((10.0, 2.0)), Some((90.0, 32.0))));
+    let vals10 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
+    let p_sh = col_sheet("pct", &[("X", &vals10)]);
     let r90 = run_kind(
         &p_sh,
         AnalysisKind::DescriptiveStats(DescriptiveSpec { custom_upper_percentile: Some(90.0), run_normality_battery: false, ..Default::default() }),
     )
     .unwrap();
-    assert_close(cell_num(row_cell(tab_by_id(&r90, "desc-summary"), "10% Percentile (Type 7)", 0)), 3.0, 1e-12, "p10");
-    assert_close(cell_num(row_cell(tab_by_id(&r90, "desc-summary"), "90% Percentile (Type 7)", 0)), 24.0, 1e-12, "p90");
+    assert_close(cell_num(row_cell(tab_by_id(&r90, "desc-summary"), "10% Percentile (Type 6)", 0)), 2.2, 1e-12, "p10");
+    assert_close(cell_num(row_cell(tab_by_id(&r90, "desc-summary"), "90% Percentile (Type 6)", 0)), 19.8, 1e-12, "p90");
     let r75 = run_kind(
         &p_sh,
         AnalysisKind::DescriptiveStats(DescriptiveSpec { custom_upper_percentile: Some(75.0), run_normality_battery: false, ..Default::default() }),
     )
     .unwrap();
     let t75 = tab_by_id(&r75, "desc-summary");
-    for lbl in ["25% Percentile", "75% Percentile", "25% Percentile (Type 7)", "75% Percentile (Type 7)"] {
+    for lbl in ["25% Percentile", "75% Percentile", "25% Percentile (Type 6)", "75% Percentile (Type 6)"] {
         assert!(t75.row_labels.iter().any(|l| l == lbl), "missing `{lbl}`");
     }
+    assert_close(
+        cell_num(row_cell(t75, "25% Percentile", 0)),
+        cell_num(row_cell(t75, "25% Percentile (Type 6)", 0)),
+        1e-12,
+        "custom 25% matches Q1 Type 6",
+    );
+    assert_close(
+        cell_num(row_cell(t75, "75% Percentile", 0)),
+        cell_num(row_cell(t75, "75% Percentile (Type 6)", 0)),
+        1e-12,
+        "custom 75% matches Q3 Type 6",
+    );
 
     let (z_a, v_b) = ([5.0, 5.0, 5.0], [1.0, 2.0, 3.0]);
     assert_eq!(unpaired_t_test(&z_a, &v_b, true, conf).unwrap().effect_sizes.glass_delta, None);

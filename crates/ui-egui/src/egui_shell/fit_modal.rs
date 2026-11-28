@@ -1136,7 +1136,7 @@ fn sync_summary_parameter_for_fit(fit: &mut NonlinearFitSpec) {
 }
 
 /// Collect active finite predictor `X` values from a sheet for `EXT-01` log-X scale checks.
-pub(super) fn collect_sheet_active_x_values(
+pub(crate) fn collect_sheet_active_x_values(
     doc: &ProjectDocument,
     sheet_id: &SheetId,
     x_range_filter: Option<(Option<f64>, Option<f64>)>,
@@ -2011,18 +2011,27 @@ fn render_fit_output_tab(
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }
+    let unstable_checked = nl.effective_identifiability_mode() == Some(IdentifiabilityMode::IdentifyUnstableParameters);
     if render_modal_checkbox(
         ui,
         tokens,
         meta,
         "fit.out.unstable",
         "Identify unstable / ambiguous parameters",
-        nl.identify_unstable_parameters,
+        unstable_checked,
         &ControlEnablement::enabled(),
     ) {
         let mut next = spec.clone();
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-            fit.identify_unstable_parameters = !nl.identify_unstable_parameters;
+            let next_val = !unstable_checked;
+            fit.identify_unstable_parameters = next_val;
+            fit.identifiability_mode = if next_val {
+                Some(IdentifiabilityMode::IdentifyUnstableParameters)
+            } else if fit.identifiability_mode == Some(IdentifiabilityMode::IdentifyUnstableParameters) {
+                None
+            } else {
+                fit.identifiability_mode
+            };
         }
         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
     }

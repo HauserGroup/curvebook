@@ -19,6 +19,9 @@
 //! - Bullen, P. S. (2003). *Handbook of Means and Their Inequalities* (2nd ed.). Kluwer Academic /
 //!   Springer. Ch. III (generalized power means: harmonic, geometric, arithmetic, and quadratic/RMS).
 //!   `doi:10.1007/978-94-017-0399-4`.
+//! - Hyndman, R. J., & Fan, Y. (1996). Sample quantiles in statistical packages. *The American
+//!   Statistician*, 50(4), 361-365. `doi:10.1080/00031305.1996.10473566` (Definition 6 quartiles
+//!   and custom symmetric percentiles).
 //! - Blom, G. (1958). *Statistical Estimates and Transformed Beta-Variables*. Stockholm: Almqvist &
 //!   Wiksell; New York: Wiley.
 //! - D'Agostino, R. B. (1970). Transformation to normality of the null distribution of `g1`.
@@ -47,8 +50,9 @@
 //!   Wiley. Ch. 3 (signed-rank Hodges–Lehmann pseudomedian & Walsh-average confidence intervals).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet,
-    ResultTab, ResultTabKind, SubcolumnAggregation, SubcolumnMode, SummarizedPoint, SummaryPointError, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveMetricVisibility, DescriptiveSpec, OutlierSpec, PValueFormat,
+    ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnAggregation, SubcolumnMode, SummarizedPoint, SummaryPointError, TableArchetype,
+    VariableRole,
 };
 use curvebook_math::dist::{
     chi2_isf, chi2_ppf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p,
@@ -61,8 +65,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, enforce_summary_mode_matrix, init_result_sheet,
-    is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted,
-    quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell,
+    is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, quantile_type6_sorted, quartiles_hinge,
+    rank_with_ties, sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell,
     try_resolve_selected_indices, unpaired_observation_accounting, validate_finite_slice,
 };
 use crate::error::StatsError;
@@ -159,9 +163,9 @@ pub struct DescriptiveSummary {
     pub iqr: f64,
     /// Full sample span `max - min` in original units.
     pub range: f64,
-    /// Lower symmetric custom percentile `(percentile_percent, value)` corresponding to `100 - upper`, computed via Hyndman & Fan (1996) Type 7 continuous linear interpolation (`None` when `custom_upper_percentile` was omitted).
+    /// Lower symmetric custom percentile `(percentile_percent, value)` corresponding to `100 - upper`, computed via Hyndman & Fan (1996) Type 6 (`p(n + 1)` linear interpolation, matching `q1`/`q3`; `None` when `custom_upper_percentile` was omitted).
     pub custom_lower_percentile: Option<(f64, f64)>,
-    /// Upper custom percentile `(percentile_percent, value)`, computed via Hyndman & Fan (1996) Type 7 continuous linear interpolation (`None` when `custom_upper_percentile` was omitted).
+    /// Upper custom percentile `(percentile_percent, value)`, computed via Hyndman & Fan (1996) Type 6 (`p(n + 1)` linear interpolation, matching `q1`/`q3`; `None` when `custom_upper_percentile` was omitted).
     pub custom_upper_percentile: Option<(f64, f64)>,
     /// Arithmetic sum of all active values.
     pub sum: f64,
@@ -220,8 +224,8 @@ pub struct DescriptiveSummary {
 /// Compute comprehensive descriptive statistics on raw finite observations.
 ///
 /// Moments use the compensated pairwise algorithm of Chan, Golub & LeVeque (1983); quartiles
-/// (`q1`, `median`, `q3`) use Hyndman & Fan (1996) Definition 6, optional custom symmetric
-/// percentiles use Hyndman & Fan (1996) Definition 7, the mean CI is the Student (1908) *t*
+/// (`q1`, `median`, `q3`) and optional custom symmetric percentiles use Hyndman & Fan (1996)
+/// Definition 6 (`p(n + 1)` linear interpolation), the mean CI is the Student (1908) *t*
 /// interval, the SD CI is the chi-square interval on `n - 1` df, and the generalized power-mean
 /// CIs (`geometric_mean_ci`, `harmonic_mean_ci`, `quadratic_mean_ci`; Bullen 2003) are monotone
 /// back-transformations of the Student (1908) *t* interval on `ln x`, `1 / x`, and `x^2`
@@ -414,8 +418,8 @@ fn compute_custom_percentiles(sorted: &[f64], custom_upper: Option<f64>) -> Resu
         return Err(StatsError::InvalidParameter { name: "custom_upper_percentile", value: p_hi });
     }
     let p_lo = 100.0 - p_hi;
-    let v_lo = quantile_sorted(sorted, p_lo / 100.0).map(|v| (p_lo, v));
-    let v_hi = quantile_sorted(sorted, p_hi / 100.0).map(|v| (p_hi, v));
+    let v_lo = quantile_type6_sorted(sorted, p_lo / 100.0).map(|v| (p_lo, v));
+    let v_hi = quantile_type6_sorted(sorted, p_hi / 100.0).map(|v| (p_hi, v));
     Ok((v_lo, v_hi))
 }
 
@@ -1849,6 +1853,11 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     {
         return Err(StatsError::InvalidParameter { name: "hypothetical_value", value: mu0 });
     }
+    if let Some(d) = desc.significant_digits
+        && !(1..=15).contains(&d)
+    {
+        return Err(StatsError::InvalidParameter { name: "significant_digits", value: f64::from(d) });
+    }
     let mut res = init_result_sheet(spec)?;
     let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
     let raw_series = extracted.raw;
@@ -1884,7 +1893,7 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         summaries.push(summarize_column(&series.label, &series.values, series.excluded_count, conf, desc.custom_upper_percentile)?);
     }
     if !desc.normality_only {
-        res.tabs.push(build_descriptive_tab(&summaries, conf));
+        res.tabs.push(build_descriptive_tab(&summaries, conf, &desc.visible_metrics));
     }
 
     for (series, s) in raw_series.iter().zip(&summaries) {
@@ -2509,7 +2518,7 @@ fn populate_interval_summary_descriptive_sheet(res: &mut ResultSheet, series: &[
     Ok(())
 }
 
-fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel) -> ResultTab {
+fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel, visible: &DescriptiveMetricVisibility) -> ResultTab {
     let custom_pair = summaries.iter().find_map(|s| match (s.custom_lower_percentile, s.custom_upper_percentile) {
         (Some((p_lo, _)), Some((p_hi, _))) => Some((p_lo, p_hi)),
         _ => None,
@@ -2518,43 +2527,73 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
     let mut tab = TabBuilder::new("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary)
         .headers(summaries.iter().map(|s| s.label.as_str()))
         .row("Number of values", summaries.iter().map(|s| num_cell(s.n as f64)))
-        .row("Excluded values", summaries.iter().map(|s| num_cell(s.excluded_count as f64)))
-        .row("Minimum", summaries.iter().map(|s| num_cell(s.min)))
-        .row("25% Percentile", summaries.iter().map(|s| num_cell(s.q1)))
-        .row("Median", summaries.iter().map(|s| num_cell(s.median)))
-        .row("75% Percentile", summaries.iter().map(|s| num_cell(s.q3)))
-        .row("Maximum", summaries.iter().map(|s| num_cell(s.max)))
-        .row("Range", summaries.iter().map(|s| num_cell(s.range)))
-        .row("IQR", summaries.iter().map(|s| num_cell(s.iqr)))
-        .row("Mean", summaries.iter().map(|s| num_cell(s.mean)))
-        .row("Std. Deviation", summaries.iter().map(|s| opt_num_cell(s.sd)))
-        .row("CI of SD", summaries.iter().map(|s| opt_ci_cell(s.sd_ci)))
-        .row("Std. Error of Mean", summaries.iter().map(|s| opt_num_cell(s.sem)))
-        .row(format!("{pct}% CI of Mean"), summaries.iter().map(|s| opt_ci_cell(s.mean_ci)))
-        .row(format!("{pct}% CI of Median"), summaries.iter().map(|s| opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper)))))
-        .row("Median CI actual confidence (%)", summaries.iter().map(|s| opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent))))
-        .row("Coefficient of variation (%)", summaries.iter().map(|s| opt_num_cell(s.cv_percent)))
-        .row("Geometric mean", summaries.iter().map(|s| opt_num_cell(s.geometric_mean)))
-        .row("Geometric SD factor", summaries.iter().map(|s| opt_num_cell(s.geometric_sd_factor)))
-        .row(format!("{pct}% CI of Geometric mean"), summaries.iter().map(|s| opt_ci_cell(s.geometric_mean_ci)))
-        .row("Harmonic mean", summaries.iter().map(|s| opt_num_cell(s.harmonic_mean)))
-        .row(format!("{pct}% CI of Harmonic mean"), summaries.iter().map(|s| opt_ci_cell(s.harmonic_mean_ci)))
-        .row("Quadratic mean (RMS)", summaries.iter().map(|s| num_cell(s.quadratic_mean)))
-        .row(format!("{pct}% CI of Quadratic mean (RMS)"), summaries.iter().map(|s| opt_ci_cell(s.quadratic_mean_ci)))
-        .row("Skewness", summaries.iter().map(|s| opt_num_cell(s.skewness)))
-        .row("Excess kurtosis", summaries.iter().map(|s| opt_num_cell(s.excess_kurtosis)))
-        .row("Sum", summaries.iter().map(|s| num_cell(s.sum)));
+        .row("Excluded values", summaries.iter().map(|s| num_cell(s.excluded_count as f64)));
+    if visible.min_max_range {
+        tab.push_row("Minimum", summaries.iter().map(|s| num_cell(s.min)));
+    }
+    if visible.quartiles {
+        tab.push_row("25% Percentile", summaries.iter().map(|s| num_cell(s.q1)))
+            .push_row("Median", summaries.iter().map(|s| num_cell(s.median)))
+            .push_row("75% Percentile", summaries.iter().map(|s| num_cell(s.q3)));
+    }
+    if visible.min_max_range {
+        tab.push_row("Maximum", summaries.iter().map(|s| num_cell(s.max))).push_row("Range", summaries.iter().map(|s| num_cell(s.range)));
+    }
+    if visible.quartiles {
+        tab.push_row("IQR", summaries.iter().map(|s| num_cell(s.iqr)));
+    }
+    if visible.mean_sd_sem {
+        tab.push_row("Mean", summaries.iter().map(|s| num_cell(s.mean))).push_row("Std. Deviation", summaries.iter().map(|s| opt_num_cell(s.sd)));
+    }
+    if visible.ci_of_sd {
+        tab.push_row("CI of SD", summaries.iter().map(|s| opt_ci_cell(s.sd_ci)));
+    }
+    if visible.mean_sd_sem {
+        tab.push_row("Std. Error of Mean", summaries.iter().map(|s| opt_num_cell(s.sem)));
+    }
+    if visible.ci_of_mean {
+        tab.push_row(format!("{pct}% CI of Mean"), summaries.iter().map(|s| opt_ci_cell(s.mean_ci)));
+    }
+    if visible.ci_of_median {
+        tab.push_row(format!("{pct}% CI of Median"), summaries.iter().map(|s| opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper)))))
+            .push_row("Median CI actual confidence (%)", summaries.iter().map(|s| opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent))));
+    }
+    if visible.cv_percent {
+        tab.push_row("Coefficient of variation (%)", summaries.iter().map(|s| opt_num_cell(s.cv_percent)));
+    }
+    if visible.geometric_mean {
+        tab.push_row("Geometric mean", summaries.iter().map(|s| opt_num_cell(s.geometric_mean)))
+            .push_row("Geometric SD factor", summaries.iter().map(|s| opt_num_cell(s.geometric_sd_factor)))
+            .push_row(format!("{pct}% CI of Geometric mean"), summaries.iter().map(|s| opt_ci_cell(s.geometric_mean_ci)));
+    }
+    if visible.harmonic_mean {
+        tab.push_row("Harmonic mean", summaries.iter().map(|s| opt_num_cell(s.harmonic_mean)))
+            .push_row(format!("{pct}% CI of Harmonic mean"), summaries.iter().map(|s| opt_ci_cell(s.harmonic_mean_ci)));
+    }
+    if visible.quadratic_mean {
+        tab.push_row("Quadratic mean (RMS)", summaries.iter().map(|s| num_cell(s.quadratic_mean)))
+            .push_row(format!("{pct}% CI of Quadratic mean (RMS)"), summaries.iter().map(|s| opt_ci_cell(s.quadratic_mean_ci)));
+    }
+    if visible.skewness_kurtosis {
+        tab.push_row("Skewness", summaries.iter().map(|s| opt_num_cell(s.skewness)))
+            .push_row("Excess kurtosis", summaries.iter().map(|s| opt_num_cell(s.excess_kurtosis)));
+    }
+    if visible.sum {
+        tab.push_row("Sum", summaries.iter().map(|s| num_cell(s.sum)));
+    }
     if let Some((p_lo, p_hi)) = custom_pair {
-        tab.push_row(format!("{p_lo}% Percentile (Type 7)"), summaries.iter().map(|s| opt_num_cell(s.custom_lower_percentile.map(|(_, v)| v))))
-            .push_row(format!("{p_hi}% Percentile (Type 7)"), summaries.iter().map(|s| opt_num_cell(s.custom_upper_percentile.map(|(_, v)| v))))
+        tab.push_row(format!("{p_lo}% Percentile (Type 6)"), summaries.iter().map(|s| opt_num_cell(s.custom_lower_percentile.map(|(_, v)| v))))
+            .push_row(format!("{p_hi}% Percentile (Type 6)"), summaries.iter().map(|s| opt_num_cell(s.custom_upper_percentile.map(|(_, v)| v))))
             .push_footnote(format!(
-                "Standard quartiles (25%, Median, 75%) use Hyndman & Fan (1996) Type 6; custom percentiles ({p_lo}%, {p_hi}%) use Hyndman & Fan (1996) Type 7 continuous linear interpolation."
+                "Standard quartiles (25%, Median, 75%) and custom percentiles ({p_lo}%, {p_hi}%) use Hyndman & Fan (1996) Type 6 (p(n + 1) linear interpolation)."
             ));
     }
-    tab.footnote(format!(
-        "{pct}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality."
-    ))
-    .build()
+    if visible.ci_of_sd {
+        tab.push_footnote(format!(
+            "{pct}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality."
+        ));
+    }
+    tab.build()
 }
 
 fn finite_ratio_cell(val: Option<f64>) -> ResultCell {

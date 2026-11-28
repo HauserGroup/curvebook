@@ -823,6 +823,56 @@ fn dataset_ci_unavailable(fit: &NonlinearFitResult, dataset_index: Option<usize>
         .is_some_and(|ds| ds.df == 0 || !matches!(ds.status, FitStatus::Converged | FitStatus::Ambiguous))
 }
 
+/// Relative span threshold (`(upper - lower) > VERY_WIDE_CI_SPAN_FACTOR * max(|estimate|, 1)`)
+/// above which a finite confidence interval on an identifiability-flagged parameter is reported as
+/// `"Very wide"` instead of printing misleading astronomically wide bounds.
+const VERY_WIDE_CI_SPAN_FACTOR: f64 = 1_000.0;
+
+fn is_ambiguous_param_estimate(p: &FittedParameterSummary, fit: &NonlinearFitResult, mode: Option<IdentifiabilityMode>) -> bool {
+    if matches!(mode, Some(IdentifiabilityMode::ReportAll)) || !p.estimate.is_finite() {
+        return false;
+    }
+    p.notes.contains(&ParameterNote::Ambiguous)
+        || (matches!(mode, Some(IdentifiabilityMode::IdentifyAmbiguousFits))
+            && param_dataset_ambiguous(fit, p)
+            && (!p.se.is_finite() || p.dependency > 0.9999 || p.notes.contains(&ParameterNote::UnboundedCi)))
+}
+
+fn is_very_wide_ci(p: &FittedParameterSummary, fit: &NonlinearFitResult, mode: Option<IdentifiabilityMode>) -> bool {
+    if matches!(mode, Some(IdentifiabilityMode::ReportAll)) {
+        return false;
+    }
+    let flagged = is_ambiguous_param_estimate(p, fit, mode) || p.notes.contains(&ParameterNote::Unstable);
+    if !flagged {
+        return false;
+    }
+    match (p.ci_lower, p.ci_upper) {
+        (CiBound::Finite(lo), CiBound::Finite(hi)) => {
+            let span = hi - lo;
+            let scale = if p.estimate.is_finite() { p.estimate.abs().max(1.0) } else { 1.0 };
+            !span.is_finite() || span > VERY_WIDE_CI_SPAN_FACTOR * scale
+        }
+        (CiBound::Open, CiBound::Open) => p.se.is_finite(),
+        _ => false,
+    }
+}
+
+fn format_very_wide_ci_detail(p: &FittedParameterSummary, sig_figs: Option<u8>) -> String {
+    let mut parts = vec![String::from("Very wide confidence interval on identifiability-flagged parameter")];
+    if let (CiBound::Finite(lo), CiBound::Finite(hi)) = (p.ci_lower, p.ci_upper) {
+        parts.push(format!("raw CI = [{}, {}]", fmt_fit_scalar(lo, sig_figs), fmt_fit_scalar(hi, sig_figs)));
+    } else if matches!(p.ci_lower, CiBound::Open) && matches!(p.ci_upper, CiBound::Open) {
+        parts.push(String::from("profile-likelihood interval unbounded on both sides"));
+    }
+    if p.se.is_finite() {
+        parts.push(format!("raw SE = {}", fmt_fit_scalar(p.se, sig_figs)));
+    }
+    if p.dependency.is_finite() {
+        parts.push(format!("Dependency = {:.4}", p.dependency));
+    }
+    parts.join("; ")
+}
+
 fn nonlinear_param_ci_cell(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p: &FittedParameterSummary) -> ResultCell {
     if dataset_ci_unavailable(fit, p.dataset_index)
         || fit.is_robust_cauchy()
@@ -831,6 +881,9 @@ fn nonlinear_param_ci_cell(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec,
         || (!p.se.is_finite() && matches!(p.ci_lower, CiBound::Open) && matches!(p.ci_upper, CiBound::Open))
     {
         return ResultCell::ConfidenceInterval { lower: CiBound::Unavailable, upper: CiBound::Unavailable };
+    }
+    if is_very_wide_ci(p, fit, nl_spec.effective_identifiability_mode()) {
+        return text_cell("Very wide");
     }
     ci_bounds_cell(p.ci_lower, p.ci_upper)
 }
@@ -911,7 +964,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         if p.notes.contains(&ParameterNote::Unstable) || (flagged_unstable && unstable_as_text) {
             label.push_str(" (Unstable)");
         }
-        let prefix = (!flagged_unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
+        let prefix = (!flagged_unstable && is_ambiguous_param_estimate(p, fit, ident_mode)).then(|| "~".to_owned());
         if is_robust || !p.inference_availability.is_available() {
             let na = text_cell("Not applicable");
             if show_se {
@@ -933,27 +986,35 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
                 raw_value: p.estimate.is_finite().then_some(p.estimate),
                 detail: format_unstable_detail(p, sig_figs),
             });
-        } else if show_se {
-            tab.push_row(
-                label,
-                [
-                    ResultCell::Number { value: p.estimate, prefix, units: None },
-                    num_cell(p.se),
-                    nonlinear_param_ci_cell(fit, nl_spec, p),
-                    num_cell(p.dependency),
-                    num_cell(p.hougaard_g1.abs()),
-                ],
-            );
         } else {
-            tab.push_row(
-                label,
-                [
-                    ResultCell::Number { value: p.estimate, prefix, units: None },
-                    nonlinear_param_ci_cell(fit, nl_spec, p),
-                    num_cell(p.dependency),
-                    num_cell(p.hougaard_g1.abs()),
-                ],
-            );
+            let ci_cell = nonlinear_param_ci_cell(fit, nl_spec, p);
+            let ci_col = if show_se { 2 } else { 1 };
+            if matches!(&ci_cell, ResultCell::Text(s) if s == "Very wide") {
+                result.cell_details.push(ResultCellDetail {
+                    tab_id: String::from("nonlinear_parameters"),
+                    row: row_idx,
+                    col: ci_col,
+                    raw_value: p.se.is_finite().then_some(p.se),
+                    detail: format_very_wide_ci_detail(p, sig_figs),
+                });
+            }
+            if show_se {
+                tab.push_row(
+                    label,
+                    [
+                        ResultCell::Number { value: p.estimate, prefix, units: None },
+                        num_cell(p.se),
+                        ci_cell,
+                        num_cell(p.dependency),
+                        num_cell(p.hougaard_g1.abs()),
+                    ],
+                );
+            } else {
+                tab.push_row(
+                    label,
+                    [ResultCell::Number { value: p.estimate, prefix, units: None }, ci_cell, num_cell(p.dependency), num_cell(p.hougaard_g1.abs())],
+                );
+            }
         }
         emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
         if !(flagged_unstable && unstable_as_text) && p.estimate.is_finite() {
@@ -1980,6 +2041,7 @@ struct ParamSummaryRow {
     label: String,
     title_x: Option<f64>,
     est: f64,
+    prefix: Option<String>,
     se: f64,
     ci_cell: ResultCell,
     is_unstable: bool,
@@ -2008,17 +2070,19 @@ fn append_parameter_summary_tab_and_data(
             .find(|p| p.name.eq_ignore_ascii_case(target_param) && (p.dataset_index == Some(ds_res.data_set_index) || p.dataset_index.is_none()))
         {
             let is_unstable = unstable_as_text && should_mask_parameter_as_unstable(p, fit, ident_mode);
+            let prefix = (!is_unstable && is_ambiguous_param_estimate(p, fit, ident_mode)).then(|| "~".to_owned());
             let ci_cell = if p.estimate.is_finite() {
                 nonlinear_param_ci_cell(fit, nl_spec, p)
             } else {
                 ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable)
             };
-            rows_data.push(ParamSummaryRow { label, title_x, est: p.estimate, se: p.se, ci_cell, is_unstable });
+            rows_data.push(ParamSummaryRow { label, title_x, est: p.estimate, prefix, se: p.se, ci_cell, is_unstable });
         } else if let Some(d) = fit.derived_scalars.get(idx).and_then(|list| list.iter().find(|d| d.name.eq_ignore_ascii_case(target_param))) {
             rows_data.push(ParamSummaryRow {
                 label,
                 title_x,
                 est: d.value,
+                prefix: None,
                 se: f64::NAN,
                 ci_cell: ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable),
                 is_unstable: false,
@@ -2030,6 +2094,7 @@ fn append_parameter_summary_tab_and_data(
                 label,
                 title_x,
                 est: val,
+                prefix: None,
                 se: f64::NAN,
                 ci_cell: ci_bounds_cell(CiBound::Unavailable, CiBound::Unavailable),
                 is_unstable: false,
@@ -2070,7 +2135,9 @@ fn append_parameter_summary_tab_and_data(
             });
             (u.clone(), u.clone(), u)
         } else {
-            (num_cell(row.est), num_cell(row.se), row.ci_cell.clone())
+            let est_cell =
+                if row.est.is_finite() { ResultCell::Number { value: row.est, prefix: row.prefix.clone(), units: None } } else { ResultCell::Empty };
+            (est_cell, num_cell(row.se), row.ci_cell.clone())
         };
         match (has_numeric_x, show_se) {
             (true, true) => {

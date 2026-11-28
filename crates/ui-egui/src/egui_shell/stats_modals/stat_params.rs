@@ -1077,6 +1077,59 @@ fn render_stat_options_tab(
     if step != 0 {
         intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::StepPValueDigits { delta: i32::from(step) }));
     }
+
+    if let AnalysisKind::DescriptiveStats(d) = &spec.kind {
+        let locale = tokens.locale;
+        ui.add_space(6.0);
+        render_section_title(ui, tokens, tr(locale, "desc.output_precision"));
+        let sig_display = d.significant_digits.map_or_else(|| String::from("Auto"), |n| n.to_string());
+        ui.horizontal_wrapped(|ui| {
+            let sig_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.desc.sig_figs",
+                    label: tr(locale, "desc.sig_figs"),
+                    value_text: &sig_display,
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if sig_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                    let cur = i16::from(ds.significant_digits.unwrap_or(4));
+                    let updated = (cur + i16::from(sig_step)).clamp(1, 15) as u8;
+                    ds.significant_digits = Some(updated);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            if d.significant_digits.is_some()
+                && render_modal_seg_btn(ui, tokens, meta, "edit.desc.sig_figs.auto", "Auto", false, &ControlEnablement::enabled())
+            {
+                let mut next = spec.clone();
+                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                    ds.significant_digits = None;
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        });
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.desc.save_as_default",
+            tr(locale, "desc.save_as_default"),
+            d.save_as_default,
+            &ControlEnablement::enabled(),
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                ds.save_as_default = !d.save_as_default;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
 }
 
 fn render_stat_diagnostics_tab(

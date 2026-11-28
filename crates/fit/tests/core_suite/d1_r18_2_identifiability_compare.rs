@@ -486,3 +486,63 @@ fn r18_2_dual_interpolated_tabs_analyzable_data_and_antilog_r_oracle() {
         assert_close(10.0_f64.powf(ixy.x_cells[r][2].active_number().unwrap()), exp_hi, 5e-2, &format!("{lbl} 10^CI_hi"));
     }
 }
+
+#[test]
+fn ambiguous_tilde_prefix_very_wide_ci_and_raw_x_scale_warning() {
+    // Collinear model Y = A*X + B + C*(X + 1 + 1e-5 * X^2) where C has Dependency > 0.9999 and huge Wald CI.
+    let xs: Vec<f64> = (0..12).map(f64::from).collect();
+    let noise = [0.02, -0.015, 0.01, -0.025, 0.015, -0.01, 0.02, -0.02, 0.005, -0.015, 0.025, -0.01];
+    let ys: Vec<f64> = xs.iter().zip(noise).map(|(&x, e)| 1.5 + 2.5 * x + e).collect();
+    let sheet = xy_sheet_single("xy-ambig", "Ambiguous Collinear", "A", &xs, &ys);
+
+    // 1) IdentifyAmbiguousFits prefixes ambiguous estimates with `~` in both main and summary tabs
+    //    and formats astronomically wide CIs as `"Very wide"` with a cell detail entry.
+    let mut nl_amb = nl_fast("ill_cond_amb");
+    nl_amb.custom_dsl = Some("Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
+    nl_amb.identifiability_mode = Some(IdentifiabilityMode::IdentifyAmbiguousFits);
+    nl_amb.summary_parameter = Some("C".to_owned());
+    let res_amb = exec_nl(&sheet, nl_amb);
+    assert_eq!(res_amb.status, ResultStatus::UpToDate);
+    let row_c = tab_row(&res_amb, "nonlinear_parameters", "C");
+    assert!(
+        matches!(&row_c[0], ResultCell::Number { prefix: Some(p), value, .. } if p == "~" && value.is_finite()),
+        "ambiguous parameter C must carry `~` prefix, got {:?}",
+        row_c[0]
+    );
+    assert_eq!(row_c[2], ResultCell::Text(String::from("Very wide")), "very wide CI on ambiguous parameter C must format as `Very wide`");
+    assert!(
+        res_amb.cell_details.iter().any(|d| d.tab_id == "nonlinear_parameters" && d.col == 2 && d.detail.contains("Very wide")),
+        "expected cell_details record for `Very wide` CI cell"
+    );
+    let sum_row_c = tab_row(&res_amb, "nonlinear_parameter_summary", "A");
+    assert!(
+        matches!(&sum_row_c[0], ResultCell::Number { prefix: Some(p), .. } if p == "~"),
+        "parameter summary tab must also carry `~` prefix for ambiguous parameter C, got {:?}",
+        sum_row_c[0]
+    );
+    assert_eq!(sum_row_c[2], ResultCell::Text(String::from("Very wide")));
+
+    // 2) ReportAll suppresses both `~` prefix and `"Very wide"` masking.
+    let mut nl_all = nl_fast("ill_cond_all");
+    nl_all.custom_dsl = Some("Y = A*X + B + C*(X + 1 + 0.00001*X*X)\n# Inits: A=2.0, B=1.0, C=0.0".to_owned());
+    nl_all.identifiability_mode = Some(IdentifiabilityMode::ReportAll);
+    let res_all = exec_nl(&sheet, nl_all);
+    let row_c_all = tab_row(&res_all, "nonlinear_parameters", "C");
+    assert!(matches!(&row_c_all[0], ResultCell::Number { prefix: None, .. }));
+    assert!(matches!(&row_c_all[2], ResultCell::ConfidenceInterval { lower: CiBound::Finite(_), upper: CiBound::Finite(_) }));
+
+    // 3) Running a `log_*` dose-response equation on raw molar X values (1e-9..1e-5) succeeds
+    //    without panicking and surfaces the X-scale mismatch warning offering the non-log counterpart.
+    let raw_x = [1e-9, 1e-8, 1e-7, 1e-6, 1e-5];
+    let raw_y = [5.0, 18.0, 52.0, 86.0, 96.0];
+    let raw_sheet = xy_sheet_single("xy-raw-molar", "Raw Molar Dose", "Drug", &raw_x, &raw_y);
+    let res_raw = exec_nl(&raw_sheet, nl_fast("log_agonist_vs_response_4pl"));
+    assert_eq!(res_raw.status, ResultStatus::UpToDate);
+    let scale_warn = res_raw
+        .checklist
+        .iter()
+        .find(|item| item.assumption == "X-axis scale matches log10(X) equation")
+        .expect("expected X-scale mismatch checklist warning for raw molar X");
+    assert_eq!(scale_warn.status, ChecklistStatus::Warn);
+    assert!(scale_warn.explanation.contains("agonist_vs_response_4pl"));
+}

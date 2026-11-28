@@ -47,7 +47,10 @@ pub(in crate::solver) fn build_fitted_parameter_summaries(
         if !report_all {
             if unstable.get(idx).copied().unwrap_or(false) {
                 notes.push(ParameterNote::Unstable);
-            } else if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
+            } else if !is_robust
+                && (cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999
+                    || (cov.ambiguous && !cov.standard_errors.get(idx).copied().unwrap_or(f64::NAN).is_finite()))
+            {
                 notes.push(ParameterNote::Ambiguous);
             }
         }

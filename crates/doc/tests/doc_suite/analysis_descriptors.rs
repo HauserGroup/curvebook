@@ -646,3 +646,49 @@ fn frequency_distribution_and_histogram_spec_serde_and_finiteness_guards() {
     gs_bad_w.histogram.binning_rule = FrequencyBinningRule::ExplicitWidth { width: -1.0 };
     assert!(gs_bad_w.validate().is_err());
 }
+
+#[test]
+fn descriptive_spec_additive_extensions_preserve_legacy_json_and_precision_helper() {
+    use curvebook_doc::DescriptiveMetricVisibility;
+
+    // Legacy JSON omitting visible_metrics, significant_digits, and save_as_default must deserialize cleanly.
+    let legacy: DescriptiveSpec =
+        serde_json::from_str(r#"{"aggregation":"RowMeans","run_normality_battery":true,"hypothetical_value":null,"custom_upper_percentile":90.0}"#)
+            .expect("legacy DescriptiveSpec JSON must deserialize");
+    assert_eq!(legacy.visible_metrics, DescriptiveMetricVisibility::all());
+    assert_eq!(legacy.visible_metrics.hidden_count(), 0);
+    assert_eq!(legacy.significant_digits, None);
+    assert!(!legacy.save_as_default);
+
+    // Default serialization omits the additive defaults for backward-compatible archives.
+    let default_val = serde_json::to_value(DescriptiveSpec::default()).expect("serialize default DescriptiveSpec");
+    let obj = default_val.as_object().expect("DescriptiveSpec JSON object");
+    assert!(!obj.contains_key("visible_metrics"));
+    assert!(!obj.contains_key("significant_digits"));
+    assert!(!obj.contains_key("save_as_default"));
+
+    // Partial visibility patch preserves all omitted flags as true.
+    let partial: DescriptiveSpec =
+        serde_json::from_str(r#"{"visible_metrics":{"harmonic_mean":false,"sum":false},"significant_digits":4,"save_as_default":true}"#)
+            .expect("partial DescriptiveSpec JSON must deserialize");
+    assert!(!partial.visible_metrics.harmonic_mean);
+    assert!(!partial.visible_metrics.sum);
+    assert!(partial.visible_metrics.mean_sd_sem);
+    assert!(partial.visible_metrics.geometric_mean);
+    assert_eq!(partial.visible_metrics.hidden_count(), 2);
+    assert_eq!(partial.significant_digits, Some(4));
+    assert!(partial.save_as_default);
+
+    // Round-trip non-default DescriptiveSpec.
+    let round_trip: DescriptiveSpec =
+        serde_json::from_str(&serde_json::to_string(&partial).expect("serialize partial")).expect("deserialize round-trip");
+    assert_eq!(round_trip, partial);
+
+    // Unified significant-digits helper covers both DescriptiveStats and NonlinearRegression.
+    assert_eq!(AnalysisKind::DescriptiveStats(partial).output_significant_digits(), Some(4));
+    assert_eq!(AnalysisKind::DescriptiveStats(DescriptiveSpec::default()).output_significant_digits(), None);
+    let mut nl = NonlinearFitSpec::new("straight_line");
+    nl.output_significant_digits = Some(5);
+    assert_eq!(AnalysisKind::NonlinearRegression(nl).output_significant_digits(), Some(5));
+    assert_eq!(AnalysisKind::LinearRegression(LinearRegressionSpec::default()).output_significant_digits(), None);
+}

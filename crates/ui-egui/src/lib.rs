@@ -203,6 +203,62 @@ pub fn write_ui_scale_to_preferences_extra(extra: &mut serde_json::Map<String, s
     }
 }
 
+/// Extract a persisted Descriptive Statistics default [`curvebook_doc::DescriptiveSpec`] from a
+/// `PreferencesFile.extra` map.
+///
+/// # Errors
+/// Returns an error if a present `"descriptive_stats_default"` entry is malformed or carries
+/// invalid numeric bounds (`custom_upper_percentile`, `hypothetical_value`, or `significant_digits`).
+pub fn extract_descriptive_default_from_preferences_extra(
+    extra: &serde_json::Map<String, serde_json::Value>,
+) -> Result<Option<curvebook_doc::DescriptiveSpec>, String> {
+    let Some(val) = extra.get("descriptive_stats_default") else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let mut spec: curvebook_doc::DescriptiveSpec =
+        serde_json::from_value(val.clone()).map_err(|err| format!("`descriptive_stats_default` preference is invalid: {err}"))?;
+    if let Some(p) = spec.custom_upper_percentile
+        && (!p.is_finite() || !(50.0..100.0).contains(&p))
+    {
+        return Err(format!("`descriptive_stats_default.custom_upper_percentile` ({p}) must lie in [50, 100)"));
+    }
+    if let Some(mu) = spec.hypothetical_value
+        && !mu.is_finite()
+    {
+        return Err(String::from("`descriptive_stats_default.hypothetical_value` must be finite"));
+    }
+    if let Some(d) = spec.significant_digits
+        && !(1..=15).contains(&d)
+    {
+        return Err(format!("`descriptive_stats_default.significant_digits` ({d}) must lie in 1..=15"));
+    }
+    spec.save_as_default = false;
+    Ok(Some(spec))
+}
+
+/// Store or clear the user's persisted Descriptive Statistics default inside a `PreferencesFile.extra` map.
+pub fn write_descriptive_default_to_preferences_extra(
+    extra: &mut serde_json::Map<String, serde_json::Value>,
+    spec: Option<&curvebook_doc::DescriptiveSpec>,
+) {
+    let Some(spec) = spec else {
+        extra.remove("descriptive_stats_default");
+        return;
+    };
+    let mut normalized = spec.clone();
+    normalized.save_as_default = false;
+    if normalized == curvebook_doc::DescriptiveSpec::default() {
+        extra.remove("descriptive_stats_default");
+        return;
+    }
+    if let Ok(val) = serde_json::to_value(&normalized) {
+        extra.insert(String::from("descriptive_stats_default"), val);
+    }
+}
+
 /// Migrate a raw `preferences.json` JSON object (`v0` -> `v1`), extracting normalized `ui_scale`
 /// while refusing any schema version newer than [`CURRENT_UI_PREFERENCES_VERSION`].
 ///
@@ -541,6 +597,42 @@ impl UiApp {
         app.grid.apply_locale_preset(&app.locale_preset);
         app.sync_views();
         app
+    }
+
+    /// Saved user default [`curvebook_doc::DescriptiveSpec`] applied to new Descriptive Statistics
+    /// analyses and persisted in `preferences.json` (`R19.1`).
+    #[must_use]
+    pub fn saved_descriptive_default(&self) -> Option<&curvebook_doc::DescriptiveSpec> {
+        self.canvas_dialogs.saved_descriptive_default.as_ref()
+    }
+
+    /// Update (or clear with `None`) the user's persisted default [`curvebook_doc::DescriptiveSpec`],
+    /// syncing the `Analyze Data...` dialog and `egui_shell` modal saved-default state cleanly.
+    pub fn set_saved_descriptive_default(&mut self, spec: Option<curvebook_doc::DescriptiveSpec>) {
+        let normalized = spec.map(|mut s| {
+            s.save_as_default = false;
+            if s.significant_digits.is_some_and(|d| !(1..=15).contains(&d)) {
+                s.significant_digits = None;
+            }
+            s
+        });
+        if let Some(ref saved) = normalized {
+            self.canvas_dialogs.analyze.apply_saved_descriptive_default(saved);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.egui_views.stats_modals.saved_defaults.retain(|existing| !matches!(existing.kind, curvebook_doc::AnalysisKind::DescriptiveStats(_)));
+            if let Some(ref saved) = normalized
+                && let Ok(tpl) = curvebook_doc::AnalysisSpec::new(
+                    "default-descriptive",
+                    "default-source",
+                    curvebook_doc::AnalysisKind::DescriptiveStats(saved.clone()),
+                )
+            {
+                self.egui_views.stats_modals.saved_defaults.push(tpl);
+            }
+        }
+        self.canvas_dialogs.saved_descriptive_default = normalized;
     }
 
     /// Capture only the UI shell fields (excluding `Session` and its undo history) for lightweight rollback.

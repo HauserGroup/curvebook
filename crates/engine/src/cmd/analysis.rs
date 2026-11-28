@@ -412,6 +412,18 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
         props.push(("normality_only", nullable_schema(bool_schema("Run normality/lognormality battery and relative likelihood only"))));
         props.push(("emit_qq_tabs", nullable_schema(bool_schema("Emit normal and lognormal Q-Q coordinate tabs"))));
         props.push((
+            "visible_metrics",
+            nullable_schema(any_json_schema(
+                "Per-metric visibility toggles for Descriptive Statistics (`min_max_range`, `quartiles`, `mean_sd_sem`, `ci_of_mean`, `ci_of_sd`, `ci_of_median`, `cv_percent`, `geometric_mean`, `harmonic_mean`, `quadratic_mean`, `skewness_kurtosis`, `sum`)",
+            )),
+        ));
+        props.push((
+            "significant_digits",
+            nullable_schema(int_schema("Displayed significant-digit precision (1..=15) for Descriptive Statistics tables", Some(1), Some(15))),
+        ));
+        props
+            .push(("save_as_default", nullable_schema(bool_schema("Mark Descriptive Statistics configuration to be persisted as the user default"))));
+        props.push((
             "sphericity_correction",
             nullable_schema(str_schema("RM ANOVA sphericity adjustment (`none`, `greenhouse_geisser`, `huynh_feldt`)")),
         ));
@@ -2467,6 +2479,13 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
                 ));
             }
         }
+        AnalysisKind::DescriptiveStats(desc) => {
+            if let Some(d) = desc.significant_digits
+                && !(1..=15).contains(&d)
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`significant_digits` ({d}) must lie in 1..=15")));
+            }
+        }
         AnalysisKind::FitSplineLowess(sp) => validate_spline_lowess_spec_semantics(sp)?,
         AnalysisKind::AreaUnderCurve(auc) => validate_area_under_curve_spec_semantics(auc)?,
         AnalysisKind::OneWayAnova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
@@ -3198,7 +3217,15 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
         AnalysisKind::DescriptiveStats(_) => {
             matches!(
                 key,
-                "aggregation" | "custom_upper_percentile" | "run_normality_battery" | "hypothetical_value" | "normality_only" | "emit_qq_tabs"
+                "aggregation"
+                    | "custom_upper_percentile"
+                    | "run_normality_battery"
+                    | "hypothetical_value"
+                    | "normality_only"
+                    | "emit_qq_tabs"
+                    | "visible_metrics"
+                    | "significant_digits"
+                    | "save_as_default"
             )
         }
         AnalysisKind::OutlierDetection(OutlierSpec::Rout { .. }) => matches!(key, "q_percent" | "fdr_q_percent"),
@@ -3989,7 +4016,9 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
                 | "include_variable_name_prefixes"
         ),
         AnalysisKind::Transform(TransformAnalysisSpec::Simulate { .. }) => key == "simulation_mode",
-        AnalysisKind::DescriptiveStats(_) => matches!(key, "normality_only" | "emit_qq_tabs"),
+        AnalysisKind::DescriptiveStats(_) => {
+            matches!(key, "normality_only" | "emit_qq_tabs" | "visible_metrics" | "significant_digits" | "save_as_default")
+        }
         AnalysisKind::MultipleRowTTests(_) => key == "lognormal_mode",
         AnalysisKind::FactorialAnova(_) => matches!(
             key,
@@ -4069,6 +4098,7 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "plot_segments",
     "custom_upper_percentile",
     "hypothetical_value",
+    "significant_digits",
     "mv_group_column",
     "mv_response_column",
     "mv_time_column",
@@ -4189,6 +4219,7 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "mv_x_columns",
     "mv_y_columns",
     "output_significant_digits",
+    "significant_digits",
     "subject_column",
     "row_title_column",
     "contingency_count_column",

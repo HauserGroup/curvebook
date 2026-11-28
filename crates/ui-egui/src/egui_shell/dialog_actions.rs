@@ -133,6 +133,9 @@ fn commit_import_project_mode_action(app: &mut UiApp, merge: bool) -> Result<Val
 fn commit_save_edit_params_default_action(app: &mut UiApp) -> Value {
     sync_edit_params_text_buffers(app);
     if let Some(spec) = app.canvas_dialogs.edit_params.draft.clone() {
+        if let AnalysisKind::DescriptiveStats(ref desc) = spec.kind {
+            app.set_saved_descriptive_default(Some(desc.clone()));
+        }
         let key = super::stats_modals::saved_default_kind_key(&spec.kind);
         app.egui_views.stats_modals.saved_defaults.retain(|d| super::stats_modals::saved_default_kind_key(&d.kind) != key);
         app.egui_views.stats_modals.saved_defaults.push(spec);
@@ -853,6 +856,10 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
     if intents.is_empty() {
         return Err(bad_input("missing analysis parameter draft"));
     }
+    let save_desc_default = app.canvas_dialogs.edit_params.draft.as_ref().and_then(|draft| match &draft.kind {
+        AnalysisKind::DescriptiveStats(desc) if desc.save_as_default => Some(desc.clone()),
+        _ => None,
+    });
     let primary_out = app.execute_atomic_group(|app| {
         let mut iter = intents.into_iter();
         let mut primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
@@ -871,6 +878,9 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
         }
         Ok::<curvebook_engine::CommandOutcome, EngineError>(out)
     })?;
+    if let Some(desc_default) = save_desc_default {
+        app.set_saved_descriptive_default(Some(desc_default));
+    }
     if close {
         super::fit_modal::reset_session_drafts(&mut app.egui_views.fit_modal);
         close_active_modal(app);

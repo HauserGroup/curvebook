@@ -209,7 +209,10 @@ fn result_cell_is_ambiguous(cell: &ResultCell, is_survival_summary: bool) -> boo
         ResultCell::Number { value, prefix, .. } => value.is_finite() && prefix.as_deref() == Some("~"),
         ResultCell::ConfidenceInterval { lower, upper } => !is_survival_summary && (matches!(lower, CiBound::Open) || matches!(upper, CiBound::Open)),
         ResultCell::Text(s) => {
-            s.contains("???") || contains_ascii_case_insensitive(s, b"ambiguous") || contains_ascii_case_insensitive(s, b"unstable")
+            s.contains("???")
+                || contains_ascii_case_insensitive(s, b"ambiguous")
+                || contains_ascii_case_insensitive(s, b"unstable")
+                || contains_ascii_case_insensitive(s, b"very wide")
         }
     }
 }
@@ -308,8 +311,17 @@ fn format_result_cell_semantic_localized(
                     is_significant: false,
                     is_muted: false,
                 }
+            } else if trimmed.eq_ignore_ascii_case("Very wide") {
+                FormattedCellDisplay {
+                    text: tr_or_fallback(locale, "results.ci.very_wide", "Very wide").to_owned(),
+                    is_ambiguous: true,
+                    is_significant: false,
+                    is_muted: false,
+                }
             } else {
-                let is_amb = contains_ascii_case_insensitive(trimmed, b"ambiguous") || contains_ascii_case_insensitive(trimmed, b"unstable");
+                let is_amb = contains_ascii_case_insensitive(trimmed, b"ambiguous")
+                    || contains_ascii_case_insensitive(trimmed, b"unstable")
+                    || contains_ascii_case_insensitive(trimmed, b"very wide");
                 FormattedCellDisplay { text: s.clone(), is_ambiguous: is_amb, is_significant: false, is_muted: false }
             }
         }
@@ -340,10 +352,7 @@ fn format_ci_bound_semantic_sig(bound: CiBound, is_survival_summary: bool, sig_f
 #[must_use]
 pub fn format_result_cell_display_text(cell: &ResultCell, rs: &ResultSheet, tab: &ResultTab) -> String {
     let is_survival_summary = matches!(rs.analysis.kind, AnalysisKind::Survival(_)) && matches!(tab.kind, ResultTabKind::MainSummary);
-    let sig_figs = match &rs.analysis.kind {
-        AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
-        _ => None,
-    };
+    let sig_figs = rs.analysis.kind.output_significant_digits();
     format_result_cell_semantic(cell, rs.analysis.p_value_format, is_survival_summary, sig_figs).text
 }
 
@@ -1572,10 +1581,7 @@ fn compute_or_reuse_table_layout(
     let avail_w_q = (avail_w * 2.0).round() as i32;
     let vis_bucket = vis_row_start / 64;
     let font_size_q = (tokens.metrics.font_ui_small_pt * 10.0).round() as i32;
-    let sig_figs = match &rs.analysis.kind {
-        AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
-        _ => None,
-    };
+    let sig_figs = rs.analysis.kind.output_significant_digits();
     let p_fmt = rs.analysis.p_value_format;
     let locale = app.locale.as_str();
 
@@ -2019,10 +2025,7 @@ fn render_result_data_row(
         }
         row_painter.line_segment([cell_rect.left_top(), cell_rect.left_bottom()], Stroke::new(1.0, tokens.divider));
         let cell = row.get(c_idx).unwrap_or(&ResultCell::Empty);
-        let sig_figs = match &rs.analysis.kind {
-            AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
-            _ => None,
-        };
+        let sig_figs = rs.analysis.kind.output_significant_digits();
         let fmt = format_result_cell_semantic_localized(cell, rs.analysis.p_value_format, is_survival_summary, sig_figs, locale);
 
         let mut cell_resp = ui.interact(

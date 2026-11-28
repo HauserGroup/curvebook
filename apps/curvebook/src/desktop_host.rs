@@ -2998,8 +2998,10 @@ impl DesktopHostRuntime {
     }
 
     fn sync_preferences_from_window(&mut self, source_id: DesktopWindowId) {
-        let Some((locale, theme_mode, ui_scale, shortcuts)) =
-            self.windows.get(&source_id).map(|w| (w.app.locale.clone(), w.app.theme.mode, w.app.ui_scale(), w.app.shortcuts.clone()))
+        let Some((locale, theme_mode, ui_scale, shortcuts, desc_default)) = self
+            .windows
+            .get(&source_id)
+            .map(|w| (w.app.locale.clone(), w.app.theme.mode, w.app.ui_scale(), w.app.shortcuts.clone(), w.app.saved_descriptive_default().cloned()))
         else {
             return;
         };
@@ -3018,6 +3020,9 @@ impl DesktopHostRuntime {
             }
             if win.app.shortcuts != shortcuts {
                 win.app.shortcuts = shortcuts.clone();
+            }
+            if win.app.saved_descriptive_default() != desc_default.as_ref() {
+                win.app.set_saved_descriptive_default(desc_default.clone());
             }
             win.app.sync_views();
         }
@@ -3355,6 +3360,7 @@ impl DesktopHostRuntime {
             app.set_theme_mode(donor.app.theme.mode);
             let _ = app.set_ui_scale(donor.app.ui_scale());
             app.shortcuts = donor.app.shortcuts.clone();
+            app.set_saved_descriptive_default(donor.app.saved_descriptive_default().cloned());
         }
         if let Err(err) = configure_app_overrides(&mut app, &self.config) {
             if let Some((_, journal, _)) = recovery {

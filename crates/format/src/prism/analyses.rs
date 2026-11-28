@@ -2438,6 +2438,7 @@ fn translate_normality_tests(content: Option<&JsonMap>, blocking: &mut Vec<Strin
         hypothetical_value: None,
         normality_only: false,
         emit_qq_tabs: false,
+        ..DescriptiveSpec::default()
     })
 }
 
@@ -2633,6 +2634,7 @@ fn translate_descriptive(content: Option<&JsonMap>, blocking: &mut Vec<String>) 
         hypothetical_value: None,
         normality_only: false,
         emit_qq_tabs: false,
+        ..DescriptiveSpec::default()
     })
 }
 

@@ -284,6 +284,8 @@ pub struct CanvasDialogState {
     pub checkpoints: CheckpointsDialogState,
     #[serde(default)]
     pub csv_export: CsvExportOptionsState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved_descriptive_default: Option<curvebook_doc::DescriptiveSpec>,
     #[serde(skip)]
     pub(crate) suppress_auto_open_fit_params: bool,
 }
@@ -334,6 +336,7 @@ impl Default for CanvasDialogState {
             format_image: FormatImageDialogState::default(),
             checkpoints: CheckpointsDialogState::default(),
             csv_export: CsvExportOptionsState::default(),
+            saved_descriptive_default: None,
             suppress_auto_open_fit_params: false,
         }
     }
@@ -438,6 +441,9 @@ impl CanvasDialogState {
             self.active_inspector = ActiveInspector::ResultDetails;
         } else if let Some(ds) = doc.data_sheet(sheet_id) {
             self.analyze.open_for_data_sheet(ds);
+            if let Some(saved) = &self.saved_descriptive_default {
+                self.analyze.apply_saved_descriptive_default(saved);
+            }
             self.active_inspector = ActiveInspector::None;
         }
     }
@@ -560,12 +566,18 @@ impl CanvasDialogState {
     pub fn open_analyze_dialog(&mut self, doc: &ProjectDocument, source_sheet_id: &SheetId) -> bool {
         if let Some(ds) = doc.data_sheet(source_sheet_id) {
             self.analyze.open_for_data_sheet(ds);
+            if let Some(saved) = &self.saved_descriptive_default {
+                self.analyze.apply_saved_descriptive_default(saved);
+            }
             self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: ds.id.clone() };
             return true;
         }
         if let Some(rs) = doc.result_sheet(source_sheet_id) {
             if let Some(analyzable) = &rs.analyzable_data {
                 self.analyze.open_for_data_sheet(analyzable);
+                if let Some(saved) = &self.saved_descriptive_default {
+                    self.analyze.apply_saved_descriptive_default(saved);
+                }
                 self.analyze.source_sheet_id = Some(rs.id.clone());
                 self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: rs.id.clone() };
                 return true;
@@ -577,6 +589,9 @@ impl CanvasDialogState {
                 .or_else(|| rs.tabs.iter().find(|t| !t.column_headers.is_empty() && !t.rows.is_empty()));
             if let Some(tab) = active_tab {
                 self.analyze.open_for_result_tab(rs, tab);
+                if let Some(saved) = &self.saved_descriptive_default {
+                    self.analyze.apply_saved_descriptive_default(saved);
+                }
                 self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: rs.id.clone() };
                 return true;
             }

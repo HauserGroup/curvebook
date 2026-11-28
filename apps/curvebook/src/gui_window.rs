@@ -1521,6 +1521,7 @@ impl CurveBookNativeApp {
         let prev_theme = self.runtime.window(window_id).ok().map(|w| w.app().theme.mode);
         let prev_locale = self.runtime.window(window_id).ok().map(|w| w.app().locale.clone());
         let prev_shortcuts = self.runtime.window(window_id).ok().map(|w| w.app().shortcuts.clone());
+        let prev_desc_default = self.runtime.window(window_id).ok().and_then(|w| w.app().saved_descriptive_default().cloned());
         let mut unsaved_action = None;
         if !remaining_intents.is_empty()
             && let Ok(win) = self.runtime.window_mut(window_id)
@@ -1574,7 +1575,8 @@ impl CurveBookNativeApp {
             let changed = Some(win.app().ui_scale()) != prev_scale
                 || Some(win.app().theme.mode) != prev_theme
                 || Some(win.app().locale.clone()) != prev_locale
-                || Some(&win.app().shortcuts) != prev_shortcuts.as_ref();
+                || Some(&win.app().shortcuts) != prev_shortcuts.as_ref()
+                || win.app().saved_descriptive_default() != prev_desc_default.as_ref();
             if changed {
                 self.runtime.notify_preferences_changed(window_id);
             }

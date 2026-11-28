@@ -59,6 +59,7 @@ pub enum AnalyzePickerIntent {
     SetPValueStackColumn { column: Option<usize> },
     SetDuplicateChoice { choice: DuplicateChoice },
     SetDuplicateTarget { target_id: String },
+    SetEquationId { equation_id: String },
 }
 
 /// Typed `EditAnalysisParameters` statistical modal actions (with `R1`–`R9` predicate gating).

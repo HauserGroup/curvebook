@@ -625,7 +625,9 @@ fn is_ambiguous_nl_cell(cell: &curvebook_doc::ResultCell) -> bool {
         curvebook_doc::ResultCell::ConfidenceInterval { lower, upper } => {
             matches!(lower, curvebook_doc::CiBound::Open) || matches!(upper, curvebook_doc::CiBound::Open)
         }
-        curvebook_doc::ResultCell::Text(s) => s.contains("???") || contains_ascii_ci(s, "ambiguous") || contains_ascii_ci(s, "unstable"),
+        curvebook_doc::ResultCell::Text(s) => {
+            s.contains("???") || contains_ascii_ci(s, "ambiguous") || contains_ascii_ci(s, "unstable") || contains_ascii_ci(s, "very wide")
+        }
         _ => false,
     }
 }

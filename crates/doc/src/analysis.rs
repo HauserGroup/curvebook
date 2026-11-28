@@ -928,12 +928,129 @@ pub enum SubcolumnAggregation {
     PooledGrandSample,
 }
 
+/// Per-metric visibility toggles for [`DescriptiveSpec`] controlling which statistic groups are
+/// emitted in the `"Descriptive Statistics"` result tab.
+///
+/// Every group defaults to `true` so existing documents and default analyses preserve the full
+/// descriptive summary table. Core sample-size rows (`Number of values`, `Excluded values`) are
+/// always emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DescriptiveMetricVisibility {
+    /// Show Minimum, Maximum, and Range rows.
+    #[serde(default = "default_true")]
+    pub min_max_range: bool,
+    /// Show 25% Percentile, Median, 75% Percentile, and IQR rows.
+    #[serde(default = "default_true")]
+    pub quartiles: bool,
+    /// Show Mean, Std. Deviation, and Std. Error of Mean rows.
+    #[serde(default = "default_true")]
+    pub mean_sd_sem: bool,
+    /// Show the confidence interval of the arithmetic mean.
+    #[serde(default = "default_true")]
+    pub ci_of_mean: bool,
+    /// Show the chi-square confidence interval of the standard deviation.
+    #[serde(default = "default_true")]
+    pub ci_of_sd: bool,
+    /// Show the exact binomial confidence interval of the median and its achieved coverage (%).
+    #[serde(default = "default_true")]
+    pub ci_of_median: bool,
+    /// Show the percent coefficient of variation (`100 * SD / |Mean|`).
+    #[serde(default = "default_true")]
+    pub cv_percent: bool,
+    /// Show Geometric mean, Geometric SD factor, and confidence interval of Geometric mean.
+    #[serde(default = "default_true")]
+    pub geometric_mean: bool,
+    /// Show Harmonic mean and confidence interval of Harmonic mean.
+    #[serde(default = "default_true")]
+    pub harmonic_mean: bool,
+    /// Show Quadratic mean (RMS) and confidence interval of Quadratic mean (RMS).
+    #[serde(default = "default_true")]
+    pub quadratic_mean: bool,
+    /// Show Skewness and Excess kurtosis rows.
+    #[serde(default = "default_true")]
+    pub skewness_kurtosis: bool,
+    /// Show the arithmetic Sum row.
+    #[serde(default = "default_true")]
+    pub sum: bool,
+}
+
+impl DescriptiveMetricVisibility {
+    /// Visibility preset with every descriptive statistic group enabled.
+    #[must_use]
+    pub const fn all() -> Self {
+        Self {
+            min_max_range: true,
+            quartiles: true,
+            mean_sd_sem: true,
+            ci_of_mean: true,
+            ci_of_sd: true,
+            ci_of_median: true,
+            cv_percent: true,
+            geometric_mean: true,
+            harmonic_mean: true,
+            quadratic_mean: true,
+            skewness_kurtosis: true,
+            sum: true,
+        }
+    }
+
+    /// Count how many of the 12 descriptive metric groups are currently hidden (`false`).
+    #[must_use]
+    pub const fn hidden_count(&self) -> usize {
+        let mut hidden = 0_usize;
+        if !self.min_max_range {
+            hidden += 1;
+        }
+        if !self.quartiles {
+            hidden += 1;
+        }
+        if !self.mean_sd_sem {
+            hidden += 1;
+        }
+        if !self.ci_of_mean {
+            hidden += 1;
+        }
+        if !self.ci_of_sd {
+            hidden += 1;
+        }
+        if !self.ci_of_median {
+            hidden += 1;
+        }
+        if !self.cv_percent {
+            hidden += 1;
+        }
+        if !self.geometric_mean {
+            hidden += 1;
+        }
+        if !self.harmonic_mean {
+            hidden += 1;
+        }
+        if !self.quadratic_mean {
+            hidden += 1;
+        }
+        if !self.skewness_kurtosis {
+            hidden += 1;
+        }
+        if !self.sum {
+            hidden += 1;
+        }
+        hidden
+    }
+}
+
+impl Default for DescriptiveMetricVisibility {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
 /// Column descriptive statistics, normality/lognormality battery, and optional one-sample location test specification.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DescriptiveSpec {
     /// How multi-subcolumn replicates are collapsed prior to computing moments and quantiles.
     pub aggregation: SubcolumnAggregation,
-    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-7 percentiles); `None` reports standard quartiles/extrema only.
+    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-6 percentiles matching standard quartiles); `None` reports standard quartiles/extrema only.
     pub custom_upper_percentile: Option<f64>,
     /// When `true`, runs Shapiro–Wilk (`3 <= n <= 5000`; Royston 1995), D'Agostino–Pearson omnibus `K^2` (`n >= 8`), Anderson–Darling `A^2*`, and Lilliefors KS normality & lognormality tests.
     pub run_normality_battery: bool,
@@ -945,6 +1062,15 @@ pub struct DescriptiveSpec {
     /// When `true`, emits Normal and Lognormal Q–Q coordinate tabs alongside normality/lognormality test tables.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub emit_qq_tabs: bool,
+    /// Per-metric visibility toggles controlling which statistic groups appear in the descriptive summary table (all enabled by default).
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub visible_metrics: DescriptiveMetricVisibility,
+    /// Optional significant-digit precision (`1..=15`) controlling displayed numeric formatting on descriptive statistics tables and Embedded Result tables; `None` uses automatic formatting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub significant_digits: Option<u8>,
+    /// When `true`, persists this descriptive statistics configuration as the user's preferred default for subsequent Descriptive Statistics analyses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub save_as_default: bool,
 }
 
 impl Default for DescriptiveSpec {
@@ -956,6 +1082,9 @@ impl Default for DescriptiveSpec {
             hypothetical_value: None,
             normality_only: false,
             emit_qq_tabs: false,
+            visible_metrics: DescriptiveMetricVisibility::default(),
+            significant_digits: None,
+            save_as_default: false,
         }
     }
 }
@@ -2806,7 +2935,15 @@ pub struct NonlinearFitSpec {
     pub parameter_rules: Vec<ParameterRule>,
     /// When `true`, computes Venzon–Moolgavkar (1988) / Bates–Watts (1988) asymmetrical profile-likelihood confidence intervals (falling back to [`crate::CiBound::Open`] on flat plateaus) at [`AnalysisSpec::confidence_level`]; when `false`, reports symmetric Wald-*t* intervals.
     pub profile_likelihood_ci: bool,
-    /// Assess whether the fitted data support stable estimation of the free parameters.
+    /// Opt-in greedy Hessian condition-number identifiability reduction (`kappa(H_eq) > 10 / sqrt(eps_mach)`)
+    /// plus open-profile-limit and sparse-dataset checks (`IdentifiabilityMode::IdentifyUnstableParameters`).
+    ///
+    /// Intentionally defaults to `false` (paired with `identifiability_mode: None`) to preserve
+    /// backwards compatibility with persisted specs and interactive opt-in workflows; even when
+    /// `false`, covariance-level rank deficiency and extreme collinearity (`Dependency > 0.9999`)
+    /// are still detected and formatted safely (`~` prefix, `"Very wide"` / open CIs, and
+    /// `"Unstable"` masking for non-finite SEs) unless `identifiability_mode` is explicitly set to
+    /// [`IdentifiabilityMode::ReportAll`].
     #[serde(default)]
     pub identify_unstable_parameters: bool,
     /// Warn when the reported unweighted R squared is below this threshold in [0, 1].
@@ -4121,6 +4258,17 @@ pub enum AnalysisKind {
 }
 
 impl AnalysisKind {
+    /// Optional output significant-digit display precision (`1..=15`) configured on this analysis,
+    /// or `None` when automatic formatting applies.
+    #[must_use]
+    pub const fn output_significant_digits(&self) -> Option<u8> {
+        match self {
+            Self::NonlinearRegression(nl) => nl.output_significant_digits,
+            Self::DescriptiveStats(desc) => desc.significant_digits,
+            _ => None,
+        }
+    }
+
     /// Dynamically derive the canonical default `ResultSheet` base title (e.g. switching from
     /// `"Ordinary one-way ANOVA"` to `"RM one-way ANOVA"` when parameters change in-place).
     #[must_use]

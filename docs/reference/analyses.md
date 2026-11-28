@@ -57,9 +57,12 @@ This analysis summarizes the distribution of each column, tests for Gaussian or 
     - `RowMeans` (default) first collapses replicate subcolumns to their row means.
     - `PerSubcolumn` summarizes each replicate subcolumn separately.
     - `PooledGrandSample` pools all active replicates into one sample.
-  - `custom_upper_percentile` is an optional $p_{\text{hi}} \in [50.0, 100.0)$. When set, the analysis reports the Hyndman–Fan Type-7 quantiles $(100 - p_{\text{hi}}, p_{\text{hi}})$. It is unset by default.
+  - `custom_upper_percentile` is an optional $p_{\text{hi}} \in [50.0, 100.0)$. When set, the analysis reports the Hyndman–Fan Type-6 quantiles $(100 - p_{\text{hi}}, p_{\text{hi}})$ (`p(n + 1)` linear interpolation, matching standard quartiles). It is unset by default.
   - `run_normality_battery` is a boolean (default `true`). Set `normality_only` to skip the descriptive tables and report only the normality and lognormality tests. Set `emit_qq_tabs` to add both the `normal-qq` and `lognormal-qq` coordinate tabs.
   - `hypothetical_value` is an optional finite $\mu_0$ (unset by default). When set, the analysis also runs a one-sample Student *t* test and a Wilcoxon signed-rank test.
+  - `visible_metrics` toggles which of the 12 descriptive statistic groups (`min_max_range`, `quartiles`, `mean_sd_sem`, `ci_of_mean`, `ci_of_sd`, `ci_of_median`, `cv_percent`, `geometric_mean`, `harmonic_mean`, `quadratic_mean`, `skewness_kurtosis`, `sum`) appear in the summary table (all `true` by default; `Number of values` and `Excluded values` always remain visible).
+  - `significant_digits` is an optional integer in `1..=15` (default `None`, automatic) controlling displayed numeric precision on descriptive statistics tables and embedded result tables while keeping stored values full-precision `f64`.
+  - `save_as_default` is a boolean (default `false`); when enabled in the desktop UI, saves the current descriptive statistics configuration into user preferences to seed future Descriptive Statistics analyses.
 - **Reported outputs:**
   - **Descriptive Summary** (`desc-summary` or `desc-pooled`):
     - $N$, Minimum, 25% Percentile, Median, 75% Percentile, Maximum, Interquartile Range (IQR), Range, Sum, Mean, Std. Deviation, Std. Error of Mean, and %CV.
@@ -75,7 +78,7 @@ This analysis summarizes the distribution of each column, tests for Gaussian or 
   - On [pre-summarized subcolumns](tables.md#subcolumn-modes) (Mean/SD/N, Mean/SEM/N, Mean/%CV/N), CurveBook reconstructs the exact pooled mean, SD, SEM, $N$, and CI of the mean. Nonparametric quantiles, medians, Q–Q plots, and the normality and Wilcoxon tests need raw values, so they are omitted.
   - For a zero-variance column, the analysis reports the constant summaries and leaves out the *t* statistics. A column with no finite numeric values returns an empty-input error.
 - **References and verification:**
-  - References: Hyndman & Fan (1996) Type-7 quantiles; Royston (1995) AS R94; D'Agostino, Belanger & D'Agostino (1990); Anscombe & Glynn (1983); Stephens (1986); Lilliefors (1967) & Dallal & Wilkinson (1986); Pratt (1959) & Hollander, Wolfe & Chicken (2014); Kirkwood (1979).
+  - References: Hyndman & Fan (1996) Type-6 quantiles; Royston (1995) AS R94; D'Agostino, Belanger & D'Agostino (1990); Anscombe & Glynn (1983); Stephens (1986); Lilliefors (1967) & Dallal & Wilkinson (1986); Pratt (1959) & Hollander, Wolfe & Chicken (2014); Kirkwood (1979).
   - Verified against: NIST StRD Univariate benchmarks, `SciPy 1.18.1` (`normaltest`, `anderson`), and `statsmodels 0.15.0` (`normal_ad`, `lilliefors`) ([statistics evidence](../evidence/statistics.md)).
 
 ---

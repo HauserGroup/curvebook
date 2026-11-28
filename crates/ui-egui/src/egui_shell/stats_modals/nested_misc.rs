@@ -253,6 +253,7 @@ pub(super) fn render_misc_stats_design(
             }
         }
         AnalysisKind::DescriptiveStats(d) => {
+            let locale = tokens.locale;
             let (_, _, max_sub) = source_table_shape(doc, spec.source_sheet_id.as_ref());
             let sub_en = r8_subcolumn_aggregation(max_sub);
             render_section_title(ui, tokens, "Replicate Aggregation & Distribution Tests");
@@ -323,12 +324,51 @@ pub(super) fn render_misc_stats_design(
                         intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
                     }
                     let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
-                    ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 7)")).small().color(tokens.text_muted));
+                    ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 6)")).small().color(tokens.text_muted));
                 });
                 render_numeric_field_errors(ui, state, tokens, &["edit.desc.custom_pct"]);
             } else {
                 state.numeric_field_errors.remove("edit.desc.custom_pct");
             }
+
+            ui.add_space(6.0);
+            render_section_title(ui, tokens, tr(locale, "desc.displayed_stats"));
+            let vm = d.visible_metrics;
+            type MetricToggle<'a> = (&'static str, &'a str, bool, fn(&mut curvebook_doc::DescriptiveMetricVisibility));
+            let metric_toggles: [MetricToggle<'_>; 12] = [
+                ("edit.desc.metric.min_max_range", tr(locale, "desc.metric.min_max_range"), vm.min_max_range, |v| v.min_max_range = !v.min_max_range),
+                ("edit.desc.metric.quartiles", tr(locale, "desc.metric.quartiles"), vm.quartiles, |v| v.quartiles = !v.quartiles),
+                ("edit.desc.metric.mean_sd_sem", tr(locale, "desc.metric.mean_sd_sem"), vm.mean_sd_sem, |v| v.mean_sd_sem = !v.mean_sd_sem),
+                ("edit.desc.metric.ci_of_mean", tr(locale, "desc.metric.ci_of_mean"), vm.ci_of_mean, |v| v.ci_of_mean = !v.ci_of_mean),
+                ("edit.desc.metric.ci_of_sd", tr(locale, "desc.metric.ci_of_sd"), vm.ci_of_sd, |v| v.ci_of_sd = !v.ci_of_sd),
+                ("edit.desc.metric.ci_of_median", tr(locale, "desc.metric.ci_of_median"), vm.ci_of_median, |v| v.ci_of_median = !v.ci_of_median),
+                ("edit.desc.metric.cv_percent", tr(locale, "desc.metric.cv_percent"), vm.cv_percent, |v| v.cv_percent = !v.cv_percent),
+                ("edit.desc.metric.geometric_mean", tr(locale, "desc.metric.geometric_mean"), vm.geometric_mean, |v| {
+                    v.geometric_mean = !v.geometric_mean
+                }),
+                ("edit.desc.metric.harmonic_mean", tr(locale, "desc.metric.harmonic_mean"), vm.harmonic_mean, |v| v.harmonic_mean = !v.harmonic_mean),
+                ("edit.desc.metric.quadratic_mean", tr(locale, "desc.metric.quadratic_mean"), vm.quadratic_mean, |v| {
+                    v.quadratic_mean = !v.quadratic_mean
+                }),
+                ("edit.desc.metric.skewness_kurtosis", tr(locale, "desc.metric.skewness_kurtosis"), vm.skewness_kurtosis, |v| {
+                    v.skewness_kurtosis = !v.skewness_kurtosis
+                }),
+                ("edit.desc.metric.sum", tr(locale, "desc.metric.sum"), vm.sum, |v| v.sum = !v.sum),
+            ];
+            egui::Grid::new("edit.desc.metrics.grid").num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+                for (idx, (wid, lbl, checked, toggle_fn)) in metric_toggles.into_iter().enumerate() {
+                    if render_modal_checkbox(grid, tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                            toggle_fn(&mut ds.visible_metrics);
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                    if idx % 2 == 1 {
+                        grid.end_row();
+                    }
+                }
+            });
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::OutlierDetection(out) => {

@@ -32,8 +32,8 @@ use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::install_fonts;
 use curvebook_ui_egui::{
     ControlAuth, ControlPostRequestContext, DEFAULT_UI_SCALE, ScreenshotRegionTarget, UiApp, UiThemeMode, bind_control_tcp_listener,
-    extract_ui_scale_from_preferences_extra, normalize_beta_gui_locale, normalize_locale, parse_control_port, validate_loopback_addr,
-    write_ui_scale_to_preferences_extra,
+    extract_descriptive_default_from_preferences_extra, extract_ui_scale_from_preferences_extra, normalize_beta_gui_locale, normalize_locale,
+    parse_control_port, validate_loopback_addr, write_descriptive_default_to_preferences_extra, write_ui_scale_to_preferences_extra,
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
@@ -1281,6 +1281,15 @@ fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize,
                 eprintln!("curvebook preferences warning: ignoring invalid ui_scale in `{}`: {err}", paths.preferences_file.display());
             }
         }
+        match extract_descriptive_default_from_preferences_extra(&prefs.extra) {
+            Ok(spec) => app.set_saved_descriptive_default(spec),
+            Err(err) => {
+                eprintln!(
+                    "curvebook preferences warning: ignoring invalid descriptive_stats_default in `{}`: {err}",
+                    paths.preferences_file.display()
+                );
+            }
+        }
         if prefs.shortcuts.is_empty() {
             return Ok(0);
         }
@@ -1323,6 +1332,7 @@ fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String
     prefs.version = CURRENT_PREFERENCES_VERSION;
     prefs.shortcuts = shortcuts;
     write_ui_scale_to_preferences_extra(&mut prefs.extra, app.ui_scale());
+    write_descriptive_default_to_preferences_extra(&mut prefs.extra, app.saved_descriptive_default());
     save_preferences_file(&paths.preferences_file, &prefs)
         .map_err(|err| format!("failed to write preferences `{}`: {err}", paths.preferences_file.display()))
 }
@@ -1729,6 +1739,23 @@ mod tests {
         assert_eq!(after_save["version"], json!(CURRENT_PREFERENCES_VERSION));
         assert_eq!(after_save["locale"], json!("en-US"));
         assert_eq!(after_save["future_flag"], json!(true));
+
+        // 1b. Descriptive statistics defaults persist cleanly in PreferencesFile.extra and hydrate on reload.
+        let desc_default = curvebook_doc::DescriptiveSpec {
+            significant_digits: Some(4),
+            custom_upper_percentile: Some(95.0),
+            visible_metrics: curvebook_doc::DescriptiveMetricVisibility {
+                harmonic_mean: false,
+                sum: false,
+                ..curvebook_doc::DescriptiveMetricVisibility::all()
+            },
+            ..curvebook_doc::DescriptiveSpec::default()
+        };
+        app.set_saved_descriptive_default(Some(desc_default.clone()));
+        super::save_shortcut_preferences(&app, &paths)?;
+        let mut reloaded_desc = UiApp::new();
+        super::load_shortcut_preferences(&mut reloaded_desc, &paths)?;
+        assert_eq!(reloaded_desc.saved_descriptive_default(), Some(&desc_default));
 
         std::fs::write(&paths.preferences_file, r#"{"locale":"ar","theme":"dark","scale":1.35}"#)?;
         let mut scale_app = UiApp::new();

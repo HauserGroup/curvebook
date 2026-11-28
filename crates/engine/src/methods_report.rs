@@ -3222,11 +3222,19 @@ fn describe_descriptive(s: &DescriptiveSpec) -> Vec<ReportBlock> {
         ""
     };
     let qq_note = if s.emit_qq_tabs { " Normal and lognormal Q-Q coordinate tables were emitted." } else { "" };
+    let pct_note = s.custom_upper_percentile.map_or_else(String::new, |p_hi| {
+        let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
+        format!(" Custom symmetric percentiles ({p_lo}% and {p_hi}%) were computed via Hyndman-Fan Type 6 linear interpolation matching standard quartiles.")
+    });
+    let sig_note = s.significant_digits.map_or_else(String::new, |d| format!(" Results were formatted to {d} significant digits."));
+    let hidden_count = s.visible_metrics.hidden_count();
+    let vis_note =
+        if hidden_count > 0 { format!(" A customized metric subset was displayed ({hidden_count} metric group(s) hidden).") } else { String::new() };
     let hypo = s.hypothetical_value.map_or_else(String::new, |v| {
         format!(" One-sample t and Wilcoxon tests evaluated departures from hypothetical reference {}.", format_exact_float(v))
     });
     vec![ReportBlock::Paragraph(vec![plain(format!(
-        "Descriptive statistics (mean, SD, SEM, median, IQR, range, geometric mean, and confidence intervals) summarized {agg}.{norm}{qq_note}{hypo}"
+        "Descriptive statistics (mean, SD, SEM, median, IQR, range, geometric mean, and confidence intervals) summarized {agg}.{pct_note}{norm}{qq_note}{hypo}{sig_note}{vis_note}"
     ))])]
 }
 

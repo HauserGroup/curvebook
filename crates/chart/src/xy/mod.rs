@@ -1163,10 +1163,7 @@ fn resolve_embedded_grid(scene: &mut ChartScene, doc: &ProjectDocument, spec: &E
             res.tabs.first()
         };
         if let Some(t) = tab {
-            let sig_figs = match &res.analysis.kind {
-                curvebook_doc::AnalysisKind::NonlinearRegression(nl) => nl.output_significant_digits,
-                _ => None,
-            };
+            let sig_figs = res.analysis.kind.output_significant_digits();
             let rows =
                 t.rows.iter().map(|r| r.iter().map(|cell| crate::survival_cat::format_result_cell_with_sig_figs(cell, sig_figs)).collect()).collect();
             return Some(crate::survival_cat::SheetGrid { headers: t.column_headers.clone(), row_labels: t.row_labels.clone(), rows });

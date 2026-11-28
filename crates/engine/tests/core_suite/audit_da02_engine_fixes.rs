@@ -424,3 +424,76 @@ fn da02_07_analysis_exports_enforce_path_policy() {
     );
     assert!(!out_json.exists() && !out_csv.exists() && !out_md.exists());
 }
+
+#[test]
+fn descriptive_parity_options_methods_report_and_raw_x_scale_warning() {
+    let raw_molar_xy = xy_sheet(
+        "xy-raw-molar",
+        "Raw Molar Dose",
+        "Concentration (M)",
+        &[1e-9, 1e-8, 1e-7, 1e-6, 1e-5],
+        &[("Response", &[5.0, 18.0, 52.0, 86.0, 96.0])],
+    );
+    let mut session = session_with("R19-1-Engine", vec![make_da02_col("col2", 2, 10), raw_molar_xy]);
+
+    // 1) Descriptive stats additive options (`visible_metrics`, `significant_digits`, `save_as_default`) + methods report.
+    ok_cmd(
+        &mut session,
+        "stats.run",
+        json!({
+            "sheet_id": "desc-parity",
+            "source_sheet_id": "col2",
+            "kind": "descriptive",
+            "custom_upper_percentile": 90.0,
+            "significant_digits": 4,
+            "save_as_default": true,
+            "visible_metrics": { "harmonic_mean": false, "sum": false }
+        }),
+    );
+    let desc_rs = rs(&session, "desc-parity");
+    assert!(matches!(
+        &desc_rs.analysis.kind,
+        AnalysisKind::DescriptiveStats(d)
+            if d.significant_digits == Some(4)
+                && d.save_as_default
+                && !d.visible_metrics.harmonic_mean
+                && !d.visible_metrics.sum
+                && d.visible_metrics.mean_sd_sem
+    ));
+    let tab = desc_rs.tabs.iter().find(|t| t.id == "desc-summary").expect("desc-summary tab");
+    assert!(tab.row_labels.iter().any(|l| l == "10% Percentile (Type 6)"));
+    assert!(tab.row_labels.iter().any(|l| l == "90% Percentile (Type 6)"));
+    assert!(!tab.row_labels.iter().any(|l| l == "Harmonic mean" || l == "Sum"));
+
+    let report = ok_cmd(&mut session, "result.generateReport", json!({ "result_sheet_id": "desc-parity", "format": "markdown" }));
+    let md = report.payload["report"].as_str().unwrap_or("");
+    assert!(md.contains("Hyndman-Fan Type 6"), "methods report should cite Type 6 custom percentiles: {md}");
+    assert!(md.contains("4 significant digits"), "methods report should note significant_digits: {md}");
+    assert!(md.contains("2 metric group(s) hidden"), "methods report should note hidden metric groups: {md}");
+
+    // `analysis.updateParams` supports resetting `significant_digits` to `null` and rejects out-of-range values.
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "desc-parity", "significant_digits": null }));
+    assert!(matches!(&rs(&session, "desc-parity").analysis.kind, AnalysisKind::DescriptiveStats(d) if d.significant_digits.is_none()));
+    assert_bad_inputs(
+        &mut session,
+        &[
+            ("stats.run", json!({ "source_sheet_id": "col2", "kind": "descriptive", "significant_digits": 0 })),
+            ("stats.run", json!({ "source_sheet_id": "col2", "kind": "descriptive", "significant_digits": 16 })),
+            ("analysis.updateParams", json!({ "sheet_id": "desc-parity", "significant_digits": 0 })),
+        ],
+    );
+
+    // 2) Nonlinear `log_*` equation run on raw molar X values returns non-crashing scale warning offering non-log counterpart.
+    let fit_out = ok_cmd(
+        &mut session,
+        "fit.run",
+        json!({ "sheet_id": "fit-raw-molar", "source_sheet_id": "xy-raw-molar", "equation_id": "log_agonist_vs_response_4pl" }),
+    );
+    assert!(
+        fit_out.warnings.iter().any(|w| w.contains("agonist_vs_response_4pl")),
+        "expected outcome.warnings to offer non-log counterpart, got {:?}",
+        fit_out.warnings
+    );
+    let scale_warnings = fit_out.payload["scale_warnings"].as_array().expect("scale_warnings array");
+    assert!(scale_warnings.iter().any(|w| w.as_str().is_some_and(|s| s.contains("agonist_vs_response_4pl"))));
+}

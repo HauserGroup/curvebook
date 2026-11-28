@@ -95,6 +95,10 @@ pub(super) fn apply_analyze_picker_intent(app: &mut UiApp, intent: AnalyzePicker
             app.canvas_dialogs.analyze.duplicate_target_id = Some(target_id);
             app.canvas_dialogs.analyze.duplicate_choice = DuplicateChoice::ModifyExisting;
         }
+        AnalyzePickerIntent::SetEquationId { equation_id } => {
+            app.canvas_dialogs.analyze.equation_id = equation_id;
+            app.canvas_dialogs.analyze.custom_dsl = None;
+        }
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }

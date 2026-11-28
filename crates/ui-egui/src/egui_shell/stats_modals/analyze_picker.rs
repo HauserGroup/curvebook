@@ -418,6 +418,71 @@ fn render_analyze_datasets_pane(
     render_analyze_entry_specific_options(ui, app, az, tokens, meta, intents);
 }
 
+fn render_analyze_log_x_scale_warning(
+    ui: &mut Ui,
+    app: &UiApp,
+    az: &AnalyzeDialogState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !matches!(az.selected_entry_id.as_deref(), Some("fit.nonlinear" | "nonlinear_regression" | "nonlinear")) || az.custom_dsl.is_some() {
+        return;
+    }
+    let Some(src_id) = az.source_sheet_id.as_ref() else {
+        return;
+    };
+    let xs = crate::egui_shell::fit_modal::collect_sheet_active_x_values(app.document(), src_id, None, &az.mv_x_columns);
+    let eq_id = if az.equation_id.trim().is_empty() { "log_agonist_vs_response_4pl" } else { az.equation_id.as_str() };
+    let Some(warn) = curvebook_fit::detect_log_x_scale_mismatch(eq_id, &xs) else {
+        return;
+    };
+    ui.add_space(6.0);
+    egui::Frame::NONE
+        .fill(tokens.panel_bg)
+        .stroke(egui::Stroke::new(1.0, tokens.warning))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(Vec2::new(8.0, 5.0))
+        .show(ui, |ui| {
+            let alt_name = warn
+                .suggested_equation_id
+                .as_deref()
+                .map(|alt_id| curvebook_fit::get_builtin_model(alt_id).map_or_else(|| alt_id.to_owned(), |m| m.name().to_owned()));
+            let msg = if let Some(ref name) = alt_name {
+                format!("X-scale mismatch: {} Suggested non-log counterpart: {name}.", warn.reason)
+            } else {
+                format!("X-scale mismatch: {} Transform X to log10(X) before fitting this log-X model.", warn.reason)
+            };
+            render_clipped_text(
+                ui,
+                meta,
+                ClippedTextSpec {
+                    widget_id: "analyze.warning.log_x_scale",
+                    role: "status",
+                    text: &msg,
+                    font_size: tokens.metrics.font_ui_small_pt,
+                    color: tokens.warning,
+                    z_layer: ZLayer::ModalDialog,
+                    tooltip: Some(&msg),
+                    record_meta: true,
+                },
+            );
+            if let (Some(alt_id), Some(name)) = (&warn.suggested_equation_id, &alt_name)
+                && render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    "analyze.warning.switch_non_log",
+                    &format!("Switch to {name}"),
+                    false,
+                    &ControlEnablement::enabled(),
+                )
+            {
+                intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetEquationId { equation_id: alt_id.clone() }));
+            }
+        });
+}
+
 fn render_analyze_entry_specific_options(
     ui: &mut Ui,
     app: &UiApp,
@@ -426,6 +491,7 @@ fn render_analyze_entry_specific_options(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    render_analyze_log_x_scale_warning(ui, app, az, tokens, meta, intents);
     if matches!(az.selected_entry_id.as_deref(), Some("stats.outliers" | "outliers")) {
         ui.add_space(6.0);
         render_section_title(ui, tokens, "Outlier Identification Mode");

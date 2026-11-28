@@ -1161,6 +1161,9 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
                         app.egui_views.fit_modal.method_saved_as_default = true;
                     }
                     _ => {
+                        if let curvebook_doc::AnalysisKind::DescriptiveStats(ref desc) = spec.kind {
+                            app.set_saved_descriptive_default(Some(desc.clone()));
+                        }
                         let disc = std::mem::discriminant(&spec.kind);
                         app.egui_views.stats_modals.saved_defaults.retain(|d| std::mem::discriminant(&d.kind) != disc);
                         app.egui_views.stats_modals.saved_defaults.push(spec);

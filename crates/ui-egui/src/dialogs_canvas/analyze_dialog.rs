@@ -252,6 +252,14 @@ pub struct AnalyzeDialogState {
     pub descriptive_aggregation: SubcolumnAggregation,
     #[serde(default)]
     pub descriptive_custom_upper_percentile: Option<f64>,
+    #[serde(default = "default_true_flag")]
+    pub descriptive_run_normality_battery: bool,
+    #[serde(default)]
+    pub descriptive_visible_metrics: curvebook_doc::DescriptiveMetricVisibility,
+    #[serde(default)]
+    pub descriptive_significant_digits: Option<u8>,
+    #[serde(default)]
+    pub descriptive_save_as_default: bool,
     #[serde(default)]
     pub pvalue_stack_method: PValueStackMethod,
     #[serde(default = "default_pvalue_stack_threshold")]
@@ -400,6 +408,10 @@ impl Default for AnalyzeDialogState {
             sample_proportional: true,
             descriptive_aggregation: SubcolumnAggregation::RowMeans,
             descriptive_custom_upper_percentile: None,
+            descriptive_run_normality_battery: true,
+            descriptive_visible_metrics: curvebook_doc::DescriptiveMetricVisibility::default(),
+            descriptive_significant_digits: None,
+            descriptive_save_as_default: false,
             pvalue_stack_method: PValueStackMethod::default(),
             pvalue_stack_threshold: default_pvalue_stack_threshold(),
             pvalue_stack_column: None,
@@ -442,17 +454,39 @@ impl AnalyzeDialogState {
         *self = Self { equation_id, ..Self::default() };
     }
 
+    /// Seed Descriptive Statistics fields from a saved user default [`curvebook_doc::DescriptiveSpec`].
+    pub fn apply_saved_descriptive_default(&mut self, default_spec: &curvebook_doc::DescriptiveSpec) {
+        self.descriptive_aggregation = default_spec.aggregation;
+        self.descriptive_custom_upper_percentile = default_spec.custom_upper_percentile;
+        self.descriptive_run_normality_battery = default_spec.run_normality_battery;
+        self.descriptive_visible_metrics = default_spec.visible_metrics;
+        self.descriptive_significant_digits = default_spec.significant_digits;
+        self.descriptive_save_as_default = false;
+    }
+
     /// Populate defaults and variable candidates for `sheet`.
     pub fn open_for_data_sheet(&mut self, sheet: &DataSheet) {
         self.reset_for_open();
         self.source_sheet_id = Some(sheet.id.clone());
         self.source_table_kind = Some(sheet.kind());
         self.variable_candidates = collect_variable_candidates(sheet);
-        if let TableArchetype::Xy(xy) = &sheet.archetype {
-            let xs: Vec<f64> = (0..xy.row_count()).filter_map(|r| xy.x_summary_at(r).ok().flatten().filter(|x| x.is_finite())).collect();
-            self.equation_id = String::from(curvebook_fit::suggested_default_dose_response_equation(&xs));
-        } else {
-            self.equation_id = String::from("log_agonist_vs_response_4pl");
+        match &sheet.archetype {
+            TableArchetype::Xy(xy) => {
+                let xs: Vec<f64> = (0..xy.row_count()).filter_map(|r| xy.x_summary_at(r).ok().flatten().filter(|x| x.is_finite())).collect();
+                self.equation_id = String::from(curvebook_fit::suggested_default_dose_response_equation(&xs));
+            }
+            TableArchetype::MultipleVariables(mv) => {
+                let xs: Vec<f64> = mv
+                    .variables
+                    .iter()
+                    .find(|v| !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+                    .map(|v| v.cells.iter().filter_map(|c| c.active_number()).collect())
+                    .unwrap_or_default();
+                self.equation_id = String::from(curvebook_fit::suggested_default_dose_response_equation(&xs));
+            }
+            _ => {
+                self.equation_id = String::from("log_agonist_vs_response_4pl");
+            }
         }
         self.selected_entry_id = self.compatible_entries().first().map(|item| item.id.to_owned());
     }
@@ -670,6 +704,10 @@ impl AnalyzeDialogState {
             AnalysisKind::DescriptiveStats(desc) => {
                 desc.aggregation = self.descriptive_aggregation;
                 desc.custom_upper_percentile = self.descriptive_custom_upper_percentile;
+                desc.run_normality_battery = self.descriptive_run_normality_battery;
+                desc.visible_metrics = self.descriptive_visible_metrics;
+                desc.significant_digits = self.descriptive_significant_digits;
+                desc.save_as_default = self.descriptive_save_as_default;
             }
             AnalysisKind::TwoGroupComparison(tg) => {
                 if let Some(m) = self.two_group_method {

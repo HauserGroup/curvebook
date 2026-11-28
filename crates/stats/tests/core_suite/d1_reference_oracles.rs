@@ -144,10 +144,16 @@ fn oracle_descriptive_quantiles_ratios_median_ci_and_exclusions() {
     assert_approx_eq(s.q1, 3.5, 1e-14, 0.0, "q1 type6");
     assert_approx_eq(s.q3, 20.0, 1e-14, 0.0, "q3 type6");
     assert_approx_eq(s.iqr, 16.5, 1e-14, 0.0, "iqr");
-    // Type-7 custom 90th percentile: h = 0.9 * 5 + 1 = 5.5 -> 0.5*(16 + 32) = 24.0
-    assert_approx_eq(s.custom_upper_percentile.unwrap().1, 24.0, 1e-13, 0.0, "P90 type7");
-    // Type-7 10th percentile: h = 0.1 * 5 + 1 = 1.5 -> 0.5*(2 + 4) = 3.0
-    assert_approx_eq(s.custom_lower_percentile.unwrap().1, 3.0, 1e-13, 0.0, "P10 type7");
+    // Type-6 custom 90th/10th percentiles on n=6 (R 4.5.2 `quantile(c(2,4,4,8,16,32), c(0.1, 0.9), type = 6)`):
+    // h_lo = 0.1 * 7 = 0.7 <= 1 -> 2.0; h_hi = 0.9 * 7 = 6.3 >= 6 -> 32.0.
+    assert_approx_eq(s.custom_upper_percentile.unwrap().1, 32.0, 1e-13, 0.0, "P90 type6");
+    assert_approx_eq(s.custom_lower_percentile.unwrap().1, 2.0, 1e-13, 0.0, "P10 type6");
+    // Interior Type-6 custom percentiles on n=10 (R 4.5.2 `quantile(seq(2, 20, by=2), c(0.1, 0.9), type = 6)`):
+    // h_lo = 0.1 * 11 = 1.1 -> 2 + 0.1*(4 - 2) = 2.2; h_hi = 0.9 * 11 = 9.9 -> 18 + 0.9*(20 - 18) = 19.8.
+    let vals10 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
+    let s10 = summarize_column("Sample10", &vals10, 0, conf_95(), Some(90.0)).unwrap();
+    assert_approx_eq(s10.custom_lower_percentile.unwrap().1, 2.2, 1e-13, 0.0, "P10 type6 n=10");
+    assert_approx_eq(s10.custom_upper_percentile.unwrap().1, 19.8, 1e-13, 0.0, "P90 type6 n=10");
     // Geometric mean = (2*4*4*8*16*32)^(1/6) = 2^(1+2+2+3+4+5)/6 = 2^(17/6) = 7.127189745122714
     assert_approx_eq(s.geometric_mean.unwrap(), 2.0_f64.powf(17.0 / 6.0), 1e-12, 1e-12, "geom mean");
     // Harmonic mean = 6 / (1/2 + 1/4 + 1/4 + 1/8 + 1/16 + 1/32) = 6 / (39/32) = 192/39 = 64/13
@@ -188,6 +194,141 @@ fn oracle_descriptive_quantiles_ratios_median_ci_and_exclusions() {
     let res = run_analysis(&sheet, &spec).unwrap();
     assert_approx_eq(scalar_val(&res, "Mean"), 12.0, 1e-12, 0.0, "excluded points omitted from mean");
     assert_approx_eq(scalar_val(&res, "N"), 3.0, 1e-12, 0.0, "excluded points omitted from N");
+}
+
+#[test]
+fn oracle_descriptive_type6_percentiles_visibility_and_precision_validation() {
+    use curvebook_doc::DescriptiveMetricVisibility;
+
+    // D1 Provenance: R 4.5.2 `quantile(x, probs, type = 6)` (Hyndman & Fan 1996 Definition 6).
+    let x7 = [1.5, 2.2, 3.7, 5.1, 8.9, 13.4, 21.0];
+    let s7_80 = summarize_column("X7", &x7, 0, conf_95(), Some(80.0)).unwrap();
+    assert_approx_eq(s7_80.custom_lower_percentile.unwrap().1, 1.92, 1e-13, 0.0, "n=7 Type 6 P20");
+    assert_approx_eq(s7_80.custom_upper_percentile.unwrap().1, 16.44, 1e-13, 0.0, "n=7 Type 6 P80");
+    let s7_75 = summarize_column("X7", &x7, 0, conf_95(), Some(75.0)).unwrap();
+    assert_approx_eq(s7_75.custom_lower_percentile.unwrap().1, s7_75.q1, 1e-13, 0.0, "n=7 Type 6 P25 == Q1");
+    assert_approx_eq(s7_75.custom_upper_percentile.unwrap().1, s7_75.q3, 1e-13, 0.0, "n=7 Type 6 P75 == Q3");
+
+    let x10 = [2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0];
+    let s10_75 = summarize_column("X10", &x10, 0, conf_95(), Some(75.0)).unwrap();
+    assert_approx_eq(s10_75.custom_lower_percentile.unwrap().1, 5.5, 1e-13, 0.0, "n=10 Type 6 P25");
+    assert_approx_eq(s10_75.custom_upper_percentile.unwrap().1, 16.5, 1e-13, 0.0, "n=10 Type 6 P75");
+    let s10_95 = summarize_column("X10", &x10, 0, conf_95(), Some(95.0)).unwrap();
+    assert_approx_eq(s10_95.custom_lower_percentile.unwrap().1, 2.0, 1e-13, 0.0, "n=10 Type 6 P5 clamped");
+    assert_approx_eq(s10_95.custom_upper_percentile.unwrap().1, 20.0, 1e-13, 0.0, "n=10 Type 6 P95 clamped");
+
+    // Degenerate / invalid input guards.
+    assert!(matches!(summarize_column("Empty", &[], 0, conf_95(), None), Err(StatsError::EmptyInput)));
+    assert!(matches!(
+        summarize_column("NaN", &[1.0, f64::NAN, 3.0], 0, conf_95(), None),
+        Err(StatsError::Math(curvebook_math::MathError::DomainError { .. }))
+    ));
+    assert!(matches!(
+        summarize_column("Inf", &[1.0, f64::INFINITY, 3.0], 0, conf_95(), None),
+        Err(StatsError::Math(curvebook_math::MathError::DomainError { .. }))
+    ));
+    let s10_50 = summarize_column("X10", &x10, 0, conf_95(), Some(50.0)).unwrap();
+    assert_approx_eq(s10_50.custom_lower_percentile.unwrap().1, s10_50.median, 1e-13, 0.0, "n=10 P50 == median");
+    assert_approx_eq(s10_50.custom_upper_percentile.unwrap().1, s10_50.median, 1e-13, 0.0, "n=10 P50 upper == median");
+    for bad_p in [49.9, 100.0, 0.0, -5.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            matches!(summarize_column("BadP", &x10, 0, conf_95(), Some(bad_p)), Err(StatsError::InvalidParameter { .. })),
+            "expected InvalidParameter for P={bad_p}"
+        );
+    }
+
+    // Per-metric visibility toggles and significant_digits bounds via run_analysis.
+    let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, x10.len()).unwrap();
+    table.data_sets[0].title = String::from("Assay");
+    for (r, &v) in x10.iter().enumerate() {
+        *table.data_sets[0].cell_mut(r, 0).unwrap() = Cell::number(v);
+    }
+    let sheet = DataSheet::new("d-vis", "Visibility", TableArchetype::Column(table)).unwrap();
+
+    // Baseline run with all 12 metric groups enabled proves every hidden-row assertion below is non-vacuous.
+    let target_hidden_rows = [
+        "Harmonic mean",
+        "95% CI of Harmonic mean",
+        "Quadratic mean (RMS)",
+        "95% CI of Quadratic mean (RMS)",
+        "CI of SD",
+        "Skewness",
+        "Excess kurtosis",
+    ];
+    let sd_ci_footnote = "CI of SD uses exact chi-square variance bounds";
+    let base_spec = AnalysisSpec::new(
+        "r-vis-all",
+        "d-vis",
+        AnalysisKind::DescriptiveStats(DescriptiveSpec { custom_upper_percentile: Some(90.0), ..DescriptiveSpec::default() }),
+    )
+    .unwrap();
+    let base_res = run_analysis(&sheet, &base_spec).unwrap();
+    let base_tab = base_res.tabs.iter().find(|t| t.id == "desc-summary").expect("baseline desc-summary tab");
+    for lbl in target_hidden_rows {
+        assert!(base_tab.row_labels.iter().any(|l| l == lbl), "baseline desc-summary must include `{lbl}`");
+    }
+    assert!(base_tab.footnotes.iter().any(|f| f.contains(sd_ci_footnote)), "baseline desc-summary must include SD CI footnote (`{sd_ci_footnote}`)");
+
+    let mut vis = DescriptiveMetricVisibility::all();
+    vis.harmonic_mean = false;
+    vis.quadratic_mean = false;
+    vis.ci_of_sd = false;
+    vis.skewness_kurtosis = false;
+    let desc_spec = DescriptiveSpec {
+        visible_metrics: vis,
+        significant_digits: Some(4),
+        custom_upper_percentile: Some(90.0),
+        save_as_default: true,
+        ..DescriptiveSpec::default()
+    };
+    let spec = AnalysisSpec::new("r-vis", "d-vis", AnalysisKind::DescriptiveStats(desc_spec)).unwrap();
+    let res = run_analysis(&sheet, &spec).unwrap();
+    let tab = res.tabs.iter().find(|t| t.id == "desc-summary").expect("desc-summary tab");
+    for present in ["Number of values", "Excluded values", "Mean", "10% Percentile (Type 6)", "90% Percentile (Type 6)", "Geometric mean"] {
+        assert!(tab.row_labels.iter().any(|l| l == present), "expected row `{present}`");
+    }
+    for hidden in target_hidden_rows {
+        assert!(!tab.row_labels.iter().any(|l| l == hidden), "row `{hidden}` should be hidden");
+    }
+    assert!(tab.footnotes.iter().any(|f| f.contains("Hyndman & Fan (1996) Type 6")));
+    assert!(!tab.footnotes.iter().any(|f| f.contains(sd_ci_footnote)));
+
+    // Hiding all 12 toggleable groups still leaves sample counts intact without panicking.
+    let none_vis = DescriptiveMetricVisibility {
+        min_max_range: false,
+        quartiles: false,
+        mean_sd_sem: false,
+        ci_of_mean: false,
+        ci_of_sd: false,
+        ci_of_median: false,
+        cv_percent: false,
+        geometric_mean: false,
+        harmonic_mean: false,
+        quadratic_mean: false,
+        skewness_kurtosis: false,
+        sum: false,
+    };
+    assert_eq!(none_vis.hidden_count(), 12);
+    let spec_min = AnalysisSpec::new(
+        "r-min",
+        "d-vis",
+        AnalysisKind::DescriptiveStats(DescriptiveSpec { visible_metrics: none_vis, ..DescriptiveSpec::default() }),
+    )
+    .unwrap();
+    let res_min = run_analysis(&sheet, &spec_min).unwrap();
+    let tab_min = res_min.tabs.iter().find(|t| t.id == "desc-summary").expect("desc-summary tab");
+    assert_eq!(tab_min.row_labels, vec!["Number of values", "Excluded values"]);
+
+    // significant_digits validation rejects out-of-range values cleanly.
+    for bad_digits in [0_u8, 16_u8] {
+        let bad_spec = AnalysisSpec::new(
+            "r-bad-sig",
+            "d-vis",
+            AnalysisKind::DescriptiveStats(DescriptiveSpec { significant_digits: Some(bad_digits), ..DescriptiveSpec::default() }),
+        )
+        .unwrap();
+        assert!(matches!(run_analysis(&sheet, &bad_spec), Err(StatsError::InvalidParameter { name: "significant_digits", .. })));
+    }
 }
 
 // ============================================================================
