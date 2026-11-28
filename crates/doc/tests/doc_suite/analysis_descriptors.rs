@@ -9,13 +9,14 @@ use curvebook_doc::analysis::{
 };
 use curvebook_doc::{
     AnalysisKind, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, BlandAltmanSpec, ClusterDirection, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySpec, CorrelationMethod, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula, DescriptiveSpec,
-    ErrorPropagationMode, FactorialAnovaSpec, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmFamily,
-    GlmSpec, GraphKind, GraphSpec, HistogramBinAlignment, HistogramDisplayStyle, HistogramMultiSeriesMode, HistogramSpec, ImportedSnapshotSpec,
-    KMeansAlgorithm, KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec,
-    PValueStackSpec, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec,
-    SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    CmhSpec, CompetingRisksSpec, ContingencyMethod, ContingencySpec, CorrelationMethod, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula,
+    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec,
+    FrequencyOutputMode, GlmFamily, GlmSpec, GraphKind, GraphSpec, HistogramBinAlignment, HistogramDisplayStyle, HistogramMultiSeriesMode,
+    HistogramSpec, ImportedSnapshotSpec, KMeansAlgorithm, KappaWeighting, LeveneTestSpec, LinearRegressionSpec, ManovaSpec, MathTransformPreset,
+    MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, RegressionCiMethod,
+    RocSpec, RowStatisticsSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableKind,
+    TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -78,6 +79,9 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::MonteCarloSimulation, AnalysisKind::MonteCarloSimulation(MonteCarloSpec::default())),
         (AnalysisKindId::FrequencyDistribution, AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())),
         (AnalysisKindId::Ancova, AnalysisKind::Ancova(AncovaSpec::default())),
+        (AnalysisKindId::Manova, AnalysisKind::Manova(ManovaSpec::default())),
+        (AnalysisKindId::CompetingRisks, AnalysisKind::CompetingRisks(CompetingRisksSpec::default())),
+        (AnalysisKindId::CochranMantelHaenszel, AnalysisKind::CochranMantelHaenszel(CmhSpec::default())),
     ]
 }
 
@@ -570,6 +574,7 @@ fn r23_additive_extensions_preserve_v8_deserialization_and_round_trip() {
         DiagnosticPlotKind::LognormalQqPlot,
         DiagnosticPlotKind::Dendrogram,
         DiagnosticPlotKind::PcaBiplot,
+        DiagnosticPlotKind::EstimationPlot,
     ] {
         let json = serde_json::to_string(&plot).expect("serialize DiagnosticPlotKind");
         let parsed: DiagnosticPlotKind = serde_json::from_str(&json).expect("deserialize DiagnosticPlotKind");

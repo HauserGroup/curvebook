@@ -3724,6 +3724,25 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
     if let Some(levene) = kind.get_mut("LeveneTest").and_then(serde_json::Value::as_object_mut) {
         levene.entry(String::from("center")).or_insert_with(|| serde_json::Value::String(String::from("Median")));
     }
+    if let Some(manova) = kind.get_mut("Manova").and_then(serde_json::Value::as_object_mut) {
+        manova.entry(String::from("group_column")).or_insert(serde_json::Value::Null);
+        manova.entry(String::from("response_columns")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    if let Some(cr) = kind.get_mut("CompetingRisks").and_then(serde_json::Value::as_object_mut) {
+        for opt_key in ["time_column", "status_column", "group_column", "competing_event_code"] {
+            cr.entry(String::from(opt_key)).or_insert(serde_json::Value::Null);
+        }
+        cr.entry(String::from("censored_code")).or_insert_with(|| serde_json::json!(0.0));
+        cr.entry(String::from("primary_event_code")).or_insert_with(|| serde_json::json!(1.0));
+        cr.entry(String::from("gray_rho")).or_insert_with(|| serde_json::json!(0.0));
+        cr.entry(String::from("log_log_ci")).or_insert(serde_json::Value::Bool(true));
+    }
+    if let Some(cmh) = kind.get_mut("CochranMantelHaenszel").and_then(serde_json::Value::as_object_mut) {
+        cmh.entry(String::from("continuity_correction")).or_insert(serde_json::Value::Bool(true));
+        for opt_key in ["exposure_column", "outcome_column", "stratum_column", "count_column"] {
+            cmh.entry(String::from(opt_key)).or_insert(serde_json::Value::Null);
+        }
+    }
 }
 
 fn backfill_graph_sheet_defaults(gs: &mut serde_json::Value) {

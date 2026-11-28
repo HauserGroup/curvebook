@@ -697,6 +697,7 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot),
         GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram),
         GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::EstimationPlot),
     ]
     .into_iter()
     .map(|k| match k {
@@ -723,6 +724,7 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => ("diagnostic-lognormal-qq-plot", "Diagnostic: Lognormal Q–Q Plot", "Theoretical lognormal quantiles versus observed positive-value quantiles."),
         GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram) => ("diagnostic-dendrogram", "Diagnostic: Hierarchical Dendrogram", "Standalone hierarchical clustering merge tree ordered by leaf cluster topology with optional cut-height line."),
         GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot) => ("diagnostic-pca-biplot", "Diagnostic: PCA Biplot", "PC1 versus PC2 observation scores overlaid with scaled variable loading vectors and variance-explained axes."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::EstimationPlot) => ("diagnostic-estimation-plot", "Diagnostic: Estimation Plot (Gardner–Altman)", "Dual-axis two-group estimation graphic aligning Group A's mean to zero on a floating mean-difference axis with 95% confidence interval and optional paired slope lines."),
     })
     .collect();
     let _ = writeln!(

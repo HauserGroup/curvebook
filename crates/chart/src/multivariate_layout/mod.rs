@@ -40,6 +40,7 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => diagnostics::compile_lognormal_qq_plot(graph, doc, scene),
         GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram) => diagnostics::compile_dendrogram_plot(graph, doc, scene),
         GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot) => diagnostics::compile_pca_biplot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::EstimationPlot) => diagnostics::compile_estimation_plot(graph, doc, scene),
         _ => {
             scene.warnings.push(ChartWarning::new("unexpected_graph_kind", "non-multivariate graph kind dispatched"));
             draw_empty_open_frame(scene);

@@ -35,12 +35,14 @@ pub mod categorical;
 pub mod cld;
 pub mod column;
 pub mod common;
+pub mod competing_risks;
 pub mod cox_ext;
 pub mod error;
 pub mod formula_design;
 pub mod frequency;
 pub mod glm_ext;
 pub mod lognormal;
+pub mod manova;
 pub mod multiplicity;
 pub mod multivariate;
 pub mod power;
@@ -142,6 +144,9 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::LeveneTest(lt) => variance_homogeneity::run_levene_analysis(sheet, spec, lt),
         AnalysisKind::FrequencyDistribution(fd) => frequency::run_frequency_distribution_analysis(sheet, spec, fd),
         AnalysisKind::Ancova(anc) => anova::run_ancova_analysis(sheet, spec, anc),
+        AnalysisKind::Manova(m) => manova::run_manova_analysis(sheet, spec, m),
+        AnalysisKind::CompetingRisks(cr) => competing_risks::run_competing_risks_analysis(sheet, spec, cr),
+        AnalysisKind::CochranMantelHaenszel(cmh) => categorical::run_cmh_analysis(sheet, spec, cmh),
         AnalysisKind::ImportedSnapshot(_) => {
             Err(StatsError::IncompatibleAnalysisSpec { expected: "computed statistical analysis (imported snapshot)" })
         }

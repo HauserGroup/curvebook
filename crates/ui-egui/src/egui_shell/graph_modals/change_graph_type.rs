@@ -467,6 +467,23 @@ fn paint_thumbnail_glyph(painter: &egui::Painter, rect: Rect, kind: ThumbnailGly
                 painter.line_segment([c, lerp_rect(inner, fx, fy)], arrow_st);
             }
         }
+        ThumbnailGlyphKind::EstimationPlot => {
+            // Left raw clusters (Group A & B)
+            for (fx, fy) in [(0.18, 0.72), (0.24, 0.62), (0.21, 0.54)] {
+                painter.circle_filled(lerp_rect(inner, fx, fy), 1.8, c1);
+            }
+            for (fx, fy) in [(0.45, 0.42), (0.51, 0.30), (0.48, 0.22)] {
+                painter.circle_filled(lerp_rect(inner, fx, fy), 1.8, c0);
+            }
+            // Alignment reference lines to right floating difference axis
+            let ref_st = Stroke::new(0.8, tokens.text_muted);
+            painter.line_segment([lerp_rect(inner, 0.22, 0.62), lerp_rect(inner, 0.88, 0.62)], ref_st);
+            painter.line_segment([lerp_rect(inner, 0.48, 0.31), lerp_rect(inner, 0.88, 0.31)], ref_st);
+            // Floating difference spine + effect estimate dot & CI bar
+            painter.line_segment([lerp_rect(inner, 0.88, 0.16), lerp_rect(inner, 0.88, 0.74)], axis_st);
+            painter.line_segment([lerp_rect(inner, 0.76, 0.18), lerp_rect(inner, 0.76, 0.44)], Stroke::new(1.5, c1));
+            painter.circle_filled(lerp_rect(inner, 0.76, 0.31), 2.5, c1);
+        }
     }
 }
 

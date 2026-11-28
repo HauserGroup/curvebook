@@ -1,11 +1,11 @@
 //! Static searchable `Analyze...` catalog, categories, and default [`AnalysisKind`] mapping.
 
 use curvebook_doc::{
-    AnalysisKind, AncovaSpec, AreaUnderCurveSpec, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, CurveCalculusSpec,
-    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FrequencyDistributionSpec, GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec,
-    MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind,
-    TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AncovaSpec, AreaUnderCurveSpec, BaselineOperation, BlandAltmanSpec, CmhSpec, CompetingRisksSpec, ContingencySpec, CoxTieMethod,
+    CurveCalculusSpec, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FrequencyDistributionSpec, GlmFamily, GlmSpec, LeveneTestSpec,
+    LinearRegressionSpec, ManovaSpec, MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec,
+    SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 use serde::{Deserialize, Serialize};
@@ -315,6 +315,27 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         keywords: "spline lowess akima smoothing cubic point to point curve interpolation nonparametric",
         summary: "Model-free XY natural cubic spline, Akima subspline, smoothing spline, LOWESS, or point-to-point curve.",
     },
+    AnalysisCatalogItem {
+        id: "stats.manova",
+        label: "One-Way MANOVA",
+        category: AnalysisCategory::Multivariate,
+        keywords: "manova multivariate anova pillai wilks lambda hotelling lawley roy sscp responses",
+        summary: "One-way multivariate ANOVA across multiple responses (Pillai, Wilks, Hotelling-Lawley, Roy).",
+    },
+    AnalysisCatalogItem {
+        id: "stats.competing_risks",
+        label: "Competing-Risks CIF (Aalen-Johansen / Gray)",
+        category: AnalysisCategory::Survival,
+        keywords: "competing risks cif cumulative incidence aalen johansen gray subdistribution survival",
+        summary: "Aalen-Johansen cumulative incidence curves with Greenwood CIs and Gray's K-sample test.",
+    },
+    AnalysisCatalogItem {
+        id: "stats.cmh",
+        label: "Stratified 2x2xK (Cochran-Mantel-Haenszel)",
+        category: AnalysisCategory::Contingency,
+        keywords: "cmh cochran mantel haenszel stratified 2x2xk common odds ratio breslow day tarone homogeneity",
+        summary: "Stratified 2x2xK CMH chi-square test, common Mantel-Haenszel OR CI, and Breslow-Day/Tarone homogeneity.",
+    },
 ];
 
 /// Map a static catalog identifier into its default [`AnalysisKind`].
@@ -465,6 +486,9 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.simple_logistic" => Some(AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())),
         "stats.levene" => Some(AnalysisKind::LeveneTest(LeveneTestSpec::default())),
         "stats.frequency_distribution" => Some(AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())),
+        "stats.manova" => Some(AnalysisKind::Manova(ManovaSpec::default())),
+        "stats.competing_risks" => Some(AnalysisKind::CompetingRisks(CompetingRisksSpec::default())),
+        "stats.cmh" => Some(AnalysisKind::CochranMantelHaenszel(CmhSpec::default())),
         _ => None,
     }
 }

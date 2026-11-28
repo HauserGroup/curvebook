@@ -135,6 +135,9 @@ pub enum MultiplicityMethod {
     /// Unadjusted Fisher's Least Significant Difference pairwise *t* comparisons using the omnibus residual MSE and *df* (Fisher 1935).
     #[serde(alias = "fisher_lsd", alias = "lsd", alias = "uncorrected_fisher_lsd")]
     FisherLsd,
+    /// Scheffé's simultaneous FWER procedure valid across all possible linear contrasts (`sqrt((k - 1) F_{alpha, k-1, df_err})`; Scheffé 1953).
+    #[serde(alias = "scheffe", alias = "scheffé")]
+    Scheffe,
 }
 
 /// Multiple-comparisons configuration shared across ANOVA, nonparametrics, and survival curves.
@@ -188,6 +191,7 @@ impl MultiplicitySpec {
                 | MultiplicityMethod::HolmBonferroni
                 | MultiplicityMethod::DunnRankSum
                 | MultiplicityMethod::FisherLsd
+                | MultiplicityMethod::Scheffe
                 | MultiplicityMethod::DunnettT3
                 | MultiplicityMethod::TamhaneT2
                 | MultiplicityMethod::BenjaminiHochbergFdr
@@ -208,6 +212,7 @@ impl MultiplicitySpec {
                 | MultiplicityMethod::HolmBonferroni
                 | MultiplicityMethod::DunnRankSum
                 | MultiplicityMethod::FisherLsd
+                | MultiplicityMethod::Scheffe
                 | MultiplicityMethod::DunnettT3
                 | MultiplicityMethod::TamhaneT2
                 | MultiplicityMethod::BenjaminiHochbergFdr
@@ -1588,6 +1593,111 @@ pub struct LeveneTestSpec {
     /// Deviation centre (default [`LeveneCenter::Median`], the Brown–Forsythe variant).
     #[serde(default)]
     pub center: LeveneCenter,
+}
+
+const fn default_cr_primary_event_code() -> f64 {
+    1.0
+}
+
+/// One-way multivariate analysis of variance (MANOVA) specification (`crates/stats::manova`).
+///
+/// Computes hypothesis (`H`) and error (`E`) SSCP matrices, Pillai's trace, Wilks' Lambda,
+/// Hotelling–Lawley trace, and Roy's largest root with exact/Rao *F* approximations alongside
+/// univariate one-way ANOVA summaries (Pillai 1955; Wilks 1932; Rao 1951; Rencher 2002).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ManovaSpec {
+    /// Optional zero-based categorical grouping column index on `MultipleVariables` tables;
+    /// `None` auto-selects the first categorical column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_column: Option<usize>,
+    /// Ordered zero-based numeric response variable column indices (`>= 2`); when empty, uses
+    /// `AnalysisSpec::selected_data_sets` or auto-selects all numeric columns other than `group_column`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_columns: Vec<usize>,
+}
+
+/// Competing-risks Aalen–Johansen cumulative incidence function (CIF) and Gray's *K*-sample
+/// weighted log-rank test specification (`crates/stats::competing_risks`; Aalen & Johansen 1978;
+/// Gray 1988; Fine & Gray 1999).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CompetingRisksSpec {
+    /// Optional zero-based elapsed-time column index on `MultipleVariables` tables (`None` auto-selects first continuous column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_column: Option<usize>,
+    /// Optional zero-based event status code column index on `MultipleVariables` tables (`None` auto-selects second numeric column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_column: Option<usize>,
+    /// Optional zero-based categorical grouping column index on `MultipleVariables` tables (`None` auto-selects first categorical column if present, or analyzes a single pooled cohort).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_column: Option<usize>,
+    /// Numeric status code denoting right-censoring (default `0.0`).
+    #[serde(default)]
+    pub censored_code: f64,
+    /// Numeric status code denoting the primary event of interest (default `1.0`).
+    #[serde(default = "default_cr_primary_event_code")]
+    pub primary_event_code: f64,
+    /// Optional explicit numeric code denoting competing events; `None` treats any finite status code
+    /// other than `censored_code` and `primary_event_code` as a competing event (standard convention: `2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub competing_event_code: Option<f64>,
+    /// Non-negative Gray (1988) weight exponent `rho >= 0.0` (default `0.0` for unweighted Gray test).
+    #[serde(default)]
+    pub gray_rho: f64,
+    /// When `true` (default), computes asymmetrical complementary log-log confidence intervals
+    /// bounded in `[0, 1]`; when `false`, uses symmetric linear CIs clamped to `[0, 1]`.
+    #[serde(default = "default_true")]
+    pub log_log_ci: bool,
+}
+
+impl Default for CompetingRisksSpec {
+    fn default() -> Self {
+        Self {
+            time_column: None,
+            status_column: None,
+            group_column: None,
+            censored_code: 0.0,
+            primary_event_code: default_cr_primary_event_code(),
+            competing_event_code: None,
+            gray_rho: 0.0,
+            log_log_ci: true,
+        }
+    }
+}
+
+/// Stratified `2 × 2 × K` Cochran–Mantel–Haenszel contingency specification (`crates/stats::categorical`;
+/// Mantel & Haenszel 1959; Robins, Breslow & Greenland 1986; Tarone 1985).
+///
+/// Accepts either `MultipleVariables` tables (exposure/row, outcome/column, stratum, plus optional
+/// frequency count column) or `Contingency` tables with `4` columns `[a, b, c, d]` where each row
+/// represents one `2 × 2` stratum.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CmhSpec {
+    /// When `true` (default), applies Mantel–Haenszel's `0.5` continuity correction as the primary CMH test
+    /// (both continuity-corrected and uncorrected statistics are always reported).
+    #[serde(default = "default_true")]
+    pub continuity_correction: bool,
+    /// Optional zero-based binary exposure (row) column index on `MultipleVariables` tables (`None` auto-selects first categorical column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exposure_column: Option<usize>,
+    /// Optional zero-based binary outcome (column) column index on `MultipleVariables` tables (`None` auto-selects second categorical column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_column: Option<usize>,
+    /// Optional zero-based stratum grouping column index on `MultipleVariables` tables (`None` auto-selects third categorical column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stratum_column: Option<usize>,
+    /// Optional zero-based non-negative integer frequency/count column index on `MultipleVariables` tables;
+    /// `None` treats each row as a single subject (`count = 1`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count_column: Option<usize>,
+}
+
+impl Default for CmhSpec {
+    fn default() -> Self {
+        Self { continuity_correction: true, exposure_column: None, outcome_column: None, stratum_column: None, count_column: None }
+    }
 }
 
 /// Omnibus one-way comparison method across `k >= 2` groups (`crates/stats::anova`).
@@ -4342,6 +4452,12 @@ pub enum AnalysisKind {
     FrequencyDistribution(FrequencyDistributionSpec),
     /// General *k*-group one-way Analysis of Covariance adjusting for continuous covariates ([`AncovaSpec`]).
     Ancova(AncovaSpec),
+    /// One-way multivariate analysis of variance (MANOVA) with Pillai, Wilks, Hotelling–Lawley, and Roy tests ([`ManovaSpec`]).
+    Manova(ManovaSpec),
+    /// Competing-risks Aalen–Johansen cumulative incidence and Gray's *K*-sample test ([`CompetingRisksSpec`]).
+    CompetingRisks(CompetingRisksSpec),
+    /// Stratified `2 × 2 × K` Cochran–Mantel–Haenszel test, common odds ratio, and Breslow–Day / Tarone homogeneity ([`CmhSpec`]).
+    CochranMantelHaenszel(CmhSpec),
 }
 
 impl AnalysisKind {
@@ -4490,6 +4606,9 @@ impl AnalysisKind {
             Self::MonteCarloSimulation(_) => String::from("Monte Carlo simulation"),
             Self::FrequencyDistribution(_) => String::from("Frequency distribution"),
             Self::Ancova(_) => String::from("ANCOVA"),
+            Self::Manova(_) => String::from("One-way MANOVA"),
+            Self::CompetingRisks(_) => String::from("Competing-risks cumulative incidence"),
+            Self::CochranMantelHaenszel(_) => String::from("Cochran-Mantel-Haenszel test"),
         }
     }
 

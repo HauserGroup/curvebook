@@ -12,6 +12,7 @@ mod audit_r1_s4b_chart_scales;
 mod audit_r2_s08_s09;
 mod chart_v9_provenance_and_no_n;
 mod column_summary_modes;
+mod estimation_plot;
 mod gap_chart_core_fixes;
 mod gap_chart_sci_fixes;
 mod histogram_chart;

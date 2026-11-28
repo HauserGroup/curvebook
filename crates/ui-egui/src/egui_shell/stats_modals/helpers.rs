@@ -509,6 +509,7 @@ pub(super) fn multiplicity_short_label(m: MultiplicityMethod) -> &'static str {
         MultiplicityMethod::NewmanKeuls => "Newman-Keuls",
         MultiplicityMethod::Duncan => "Duncan",
         MultiplicityMethod::FisherLsd => "Fisher LSD",
+        MultiplicityMethod::Scheffe => "Scheff\u{00e9}",
     }
 }
 
@@ -555,6 +556,15 @@ pub(super) fn method_reference_text(spec: &curvebook_doc::AnalysisSpec) -> &'sta
         }
         AnalysisKind::CurveCalculus(_) => {
             "Savitzky-Golay (1964) local polynomial smoothing, Cleveland (1979) LOWESS, centered finite-difference derivatives, and cumulative trapezoidal integration."
+        }
+        AnalysisKind::Manova(_) => {
+            "One-way MANOVA H/E SSCP matrices with Pillai (1955), Wilks (1932) / Rao (1951), Hotelling-Lawley, and Roy criteria (Rencher 2002)."
+        }
+        AnalysisKind::CompetingRisks(_) => {
+            "Aalen & Johansen (1978) cumulative incidence function with Marubini-Valsecchi/Greenwood SE and Gray (1988) K-sample subdistribution test."
+        }
+        AnalysisKind::CochranMantelHaenszel(_) => {
+            "Mantel & Haenszel (1959) stratified 2x2xK chi-square test, Robins-Breslow-Greenland (1986) common OR CI, and Breslow-Day/Tarone (1985) homogeneity test."
         }
         _ => "Exact peer-reviewed CurveBook statistical reference equations and confidence limits evaluated at the active alpha level.",
     }

@@ -1021,6 +1021,21 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
             }
         }
         AnalysisKind::Multivariate(spec) => remap_multivariate_kind_columns(spec, plan, err),
+        AnalysisKind::Manova(spec) => {
+            plan.map_opt_or_oob(&mut spec.group_column, "Manova group_column", err);
+            spec.response_columns = plan.map_col_list_or_oob(&spec.response_columns, "Manova response_columns", err);
+        }
+        AnalysisKind::CompetingRisks(spec) => {
+            plan.map_opt_or_oob(&mut spec.time_column, "CompetingRisks time_column", err);
+            plan.map_opt_or_oob(&mut spec.status_column, "CompetingRisks status_column", err);
+            plan.map_opt_or_oob(&mut spec.group_column, "CompetingRisks group_column", err);
+        }
+        AnalysisKind::CochranMantelHaenszel(spec) => {
+            plan.map_opt_or_oob(&mut spec.exposure_column, "CMH exposure_column", err);
+            plan.map_opt_or_oob(&mut spec.outcome_column, "CMH outcome_column", err);
+            plan.map_opt_or_oob(&mut spec.stratum_column, "CMH stratum_column", err);
+            plan.map_opt_or_oob(&mut spec.count_column, "CMH count_column", err);
+        }
         AnalysisKind::NonlinearRegression(nl) => {
             nl.mv_group_columns = plan.map_col_list_or_oob(&nl.mv_group_columns, "NonlinearRegression mv_group_columns", err);
             nl.mv_x_columns = plan.map_col_list_or_oob(&nl.mv_x_columns, "NonlinearRegression mv_x_columns", err);

@@ -253,6 +253,7 @@ pub(super) fn on_format_graph_committed(app: &mut UiApp, close: bool) {
     fg.offset_x_data_dirty = false;
     fg.bar_border_width_dirty = false;
     fg.forest_show_pooled_diamond_dirty = false;
+    fg.estimation_paired_lines_dirty = false;
     fg.pending_overlay_result_id = None;
     fg.series_gdo_dirty = false;
 }

@@ -175,6 +175,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 MultiplicityProcedure::TukeyKramer
                 | MultiplicityProcedure::NewmanKeuls
                 | MultiplicityProcedure::Duncan
+                | MultiplicityProcedure::Scheffe
                 | MultiplicityProcedure::GamesHowell
                 | MultiplicityProcedure::DunnettT3 => (
                     "Dunn's multiple comparisons (Bonferroni fallback)",
@@ -1140,7 +1141,8 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     MultiplicityMethod::TukeyHsd
                     | MultiplicityMethod::Dunnett { .. }
                     | MultiplicityMethod::NewmanKeuls
-                    | MultiplicityMethod::Duncan => {
+                    | MultiplicityMethod::Duncan
+                    | MultiplicityMethod::Scheffe => {
                         append_rm_non_sphericity_family_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
                     }
                     _ => {
@@ -1529,7 +1531,7 @@ fn validate_rm_parametric_multiplicity(method: MultiplicityMethod) -> Result<(),
         MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3 | MultiplicityMethod::DunnRankSum
     ) {
         return Err(StatsError::IncompatibleAnalysisSpec {
-            expected: "repeated-measures parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+            expected: "repeated-measures parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Scheffe, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
         });
     }
     Ok(())
@@ -1716,6 +1718,36 @@ fn append_welch_multiplicity(
             ));
             Ok(())
         }
+        MultiplicityProcedure::Scheffe => {
+            let pair_indices = resolve_family_pair_positions(inputs, &family)?;
+            let mut pairs = Vec::with_capacity(pair_indices.len());
+            for (i, j) in pair_indices {
+                let (se, df) = welch_pair_se_df(&inputs[i], &inputs[j]);
+                pairs.push((i, j, ContrastEstimate { diff: inputs[i].mean - inputs[j].mean, se, df, ctrl_var_pair: None, cov_vectors: None }));
+            }
+            let numbered_levels: Vec<(usize, String)> = inputs.iter().map(|g| (g.index, g.label.clone())).collect();
+            let level_means: Vec<Option<f64>> = inputs.iter().map(|g| Some(g.mean)).collect();
+            let (details, _) = compare_contrast_family(ContrastFamilyEval {
+                levels: &numbered_levels,
+                level_means: &level_means,
+                mult_spec: mult,
+                confidence,
+                n_slices: 1,
+                pairs,
+            })?;
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons",
+                "Multiple comparisons (Welch Scheffe)",
+                p_fmt,
+                confidence,
+                Some(String::from(
+                    "Per-pair Welch unequal-variance t tests with Welch-Satterthwaite degrees of freedom and Scheffe simultaneous adjustment (df1 = k - 1).",
+                )),
+            );
+            Ok(())
+        }
         MultiplicityProcedure::Dunnett { control_column } => append_welch_dunnett_vs_control(out, inputs, control_column, mult, p_fmt, confidence),
         MultiplicityProcedure::LinearTrend => append_welch_linear_trend(out, inputs, p_fmt, confidence.alpha()),
         MultiplicityProcedure::Bonferroni
@@ -1829,9 +1861,35 @@ fn append_rm_subject_linear_trend(
     Ok(())
 }
 
+fn resolve_family_pair_positions(
+    inputs: &[GroupComparisonInput],
+    family: &crate::multiplicity::MultiplicityFamilySelection<'_>,
+) -> Result<Vec<(usize, usize)>, StatsError> {
+    let k = inputs.len();
+    match family {
+        crate::multiplicity::MultiplicityFamilySelection::ControlVsAll(ctrl) => {
+            let ctrl_pos =
+                inputs.iter().position(|g| g.index == *ctrl).ok_or(StatsError::InvalidParameter { name: "control_column", value: *ctrl as f64 })?;
+            Ok((0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect())
+        }
+        crate::multiplicity::MultiplicityFamilySelection::SelectedPairs(pairs) => {
+            crate::multiplicity::resolve_selected_pair_positions(pairs, |idx| inputs.iter().position(|g| g.index == idx))
+        }
+        crate::multiplicity::MultiplicityFamilySelection::AllPairs => {
+            let mut pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    pairs.push((i, j));
+                }
+            }
+            Ok(pairs)
+        }
+    }
+}
+
 /// Non-sphericity subject-level paired-difference post-hoc family (`TukeyHsd`, `Dunnett`,
-/// `NewmanKeuls`) on `df = n - 1` using individual contrast standard errors (Maxwell & Delaney,
-/// 2004, ch. 11, pp. 542–554).
+/// `NewmanKeuls`, `Scheffe`) on `df = n - 1` using individual contrast standard errors (Maxwell &
+/// Delaney, 2004, ch. 11, pp. 542–554).
 fn append_rm_non_sphericity_family_multiplicity(
     out: &mut ResultSheet,
     blocks: &[Vec<f64>],
@@ -1840,6 +1898,7 @@ fn append_rm_non_sphericity_family_multiplicity(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
+    let family = crate::multiplicity::validate_multiplicity_family_spec(mult)?;
     let k = inputs.len();
     let n = blocks.len();
     let nf = n as f64;
@@ -1887,14 +1946,13 @@ fn append_rm_non_sphericity_family_multiplicity(
         }
         out_pairs
     } else {
-        let mut out_pairs = Vec::with_capacity(k * k.saturating_sub(1) / 2);
-        for i in 0..k {
-            for j in (i + 1)..k {
-                let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
-                let moments = SummaryMoments::from_slice(&diffs)?;
-                let se = moments.sample_sd().unwrap_or(0.0) / nf.sqrt();
-                out_pairs.push((i, j, ContrastEstimate { diff: moments.mean, se, df, ctrl_var_pair: None, cov_vectors: None }));
-            }
+        let pair_indices = resolve_family_pair_positions(inputs, &family)?;
+        let mut out_pairs = Vec::with_capacity(pair_indices.len());
+        for (i, j) in pair_indices {
+            let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
+            let moments = SummaryMoments::from_slice(&diffs)?;
+            let se = moments.sample_sd().unwrap_or(0.0) / nf.sqrt();
+            out_pairs.push((i, j, ContrastEstimate { diff: moments.mean, se, df, ctrl_var_pair: None, cov_vectors: None }));
         }
         out_pairs
     };
@@ -2011,6 +2069,7 @@ fn append_friedman_multiplicity(
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::Duncan
+        | MultiplicityProcedure::Scheffe
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::TamhaneT2

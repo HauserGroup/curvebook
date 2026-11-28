@@ -2,6 +2,7 @@
 
 mod actual_vs_predicted;
 mod dendrogram;
+mod estimation_plot;
 mod gap_statistic;
 mod heatmap;
 mod homoscedasticity;
@@ -18,6 +19,7 @@ use curvebook_doc::{
 
 pub(super) use actual_vs_predicted::compile_actual_vs_predicted_plot;
 pub(super) use dendrogram::compile_dendrogram_plot;
+pub(super) use estimation_plot::compile_estimation_plot;
 pub(super) use gap_statistic::compile_gap_statistic_plot;
 pub(super) use heatmap::compile_heatmap;
 pub(super) use homoscedasticity::compile_homoscedasticity_plot;

@@ -205,31 +205,54 @@ fn resolve_factorial_anova_banner(app: &UiApp, f: &curvebook_doc::FactorialAnova
     (String::from("Parameters: Factorial / Multifactor ANOVA"), format!("{kind} ANOVA ({rm}, {ss})"))
 }
 
+fn resolve_two_group_banner(t: &curvebook_doc::TwoGroupSpec, alpha: f64) -> (String, String) {
+    let tail = if t.two_tailed { "two-tailed" } else { "one-tailed" };
+    let m = match t.method {
+        TwoGroupMethod::UnpairedT => "Unpaired Student t-test",
+        TwoGroupMethod::WelchT => "Welch's unpaired t-test",
+        TwoGroupMethod::PairedT => "Paired Student t-test",
+        TwoGroupMethod::RatioPairedT => "Ratio paired t-test",
+        TwoGroupMethod::LognormalUnpairedT => "Lognormal unpaired t-test",
+        TwoGroupMethod::MannWhitneyU => "Mann-Whitney U rank test",
+        TwoGroupMethod::WilcoxonSignedRank => "Wilcoxon signed-rank test",
+        TwoGroupMethod::KolmogorovSmirnov => "Kolmogorov-Smirnov test",
+        TwoGroupMethod::OneSampleT { .. } => "One-sample t-test",
+        TwoGroupMethod::OneSampleWilcoxon { .. } => "One-sample Wilcoxon test",
+        TwoGroupMethod::PairedSignTest => "Paired binomial sign test",
+        TwoGroupMethod::OneSampleRatioT { .. } => "One-sample ratio t-test",
+        TwoGroupMethod::LognormalWelchT => "Lognormal Welch t-test",
+    };
+    (String::from("Parameters: Two-Group / One-Sample Test"), format!("{m} ({tail}, α={alpha:.3})"))
+}
+
+fn resolve_linear_regression_banner(lin: &curvebook_doc::LinearRegressionSpec) -> (String, String) {
+    let summary = if lin.deming_model_ii {
+        match lin.deming_error {
+            curvebook_doc::DemingErrorSpec::EqualError => String::from("Deming Model II orthogonal regression (λ = 1)"),
+            curvebook_doc::DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
+                format!("Deming Model II regression (SD_X={sd_x}, SD_Y={sd_y})")
+            }
+            curvebook_doc::DemingErrorSpec::VarianceRatio { lambda } => format!("Deming Model II regression (λ = {lambda})"),
+        }
+    } else {
+        let constraint = match lin.effective_fixed_point() {
+            Some((0.0, 0.0)) => String::from(" (through origin)"),
+            Some((x0, y0)) => format!(" (fixed ({x0}, {y0}))"),
+            None => String::new(),
+        };
+        let sa = if lin.standard_addition { ", standard addition" } else { "" };
+        format!("Ordinary Least Squares (Model I){constraint}{sa}")
+    };
+    (String::from("Parameters: Simple Linear / Deming Regression"), summary)
+}
+
 /// Resolve the live dynamic header title and test banner for any `AnalysisSpec`.
 #[must_use]
 pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpec) -> (String, String) {
     let conf = spec.confidence_level.percent();
     let alpha = (1.0 - conf / 100.0).max(0.0001);
     match &spec.kind {
-        AnalysisKind::TwoGroupComparison(t) => {
-            let tail = if t.two_tailed { "two-tailed" } else { "one-tailed" };
-            let m = match t.method {
-                TwoGroupMethod::UnpairedT => "Unpaired Student t-test",
-                TwoGroupMethod::WelchT => "Welch's unpaired t-test",
-                TwoGroupMethod::PairedT => "Paired Student t-test",
-                TwoGroupMethod::RatioPairedT => "Ratio paired t-test",
-                TwoGroupMethod::LognormalUnpairedT => "Lognormal unpaired t-test",
-                TwoGroupMethod::MannWhitneyU => "Mann-Whitney U rank test",
-                TwoGroupMethod::WilcoxonSignedRank => "Wilcoxon signed-rank test",
-                TwoGroupMethod::KolmogorovSmirnov => "Kolmogorov-Smirnov test",
-                TwoGroupMethod::OneSampleT { .. } => "One-sample t-test",
-                TwoGroupMethod::OneSampleWilcoxon { .. } => "One-sample Wilcoxon test",
-                TwoGroupMethod::PairedSignTest => "Paired binomial sign test",
-                TwoGroupMethod::OneSampleRatioT { .. } => "One-sample ratio t-test",
-                TwoGroupMethod::LognormalWelchT => "Lognormal Welch t-test",
-            };
-            (String::from("Parameters: Two-Group / One-Sample Test"), format!("{m} ({tail}, α={alpha:.3})"))
-        }
+        AnalysisKind::TwoGroupComparison(t) => resolve_two_group_banner(t, alpha),
         AnalysisKind::FactorialAnova(f) => resolve_factorial_anova_banner(app, f),
         AnalysisKind::NestedComparison(n) => (
             String::from("Parameters: Nested Comparison"),
@@ -286,28 +309,7 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
         AnalysisKind::PValueStack(ps) => {
             (String::from("Parameters: Analyze Stack of P Values"), format!("{} (threshold {:.3})", ps.method.label(), ps.threshold))
         }
-        AnalysisKind::LinearRegression(lin) => {
-            let summary = if lin.deming_model_ii {
-                match lin.deming_error {
-                    curvebook_doc::DemingErrorSpec::EqualError => String::from("Deming Model II orthogonal regression (λ = 1)"),
-                    curvebook_doc::DemingErrorSpec::StandardDeviations { sd_x, sd_y } => {
-                        format!("Deming Model II regression (SD_X={sd_x}, SD_Y={sd_y})")
-                    }
-                    curvebook_doc::DemingErrorSpec::VarianceRatio { lambda } => {
-                        format!("Deming Model II regression (λ = {lambda})")
-                    }
-                }
-            } else {
-                let constraint = match lin.effective_fixed_point() {
-                    Some((0.0, 0.0)) => String::from(" (through origin)"),
-                    Some((x0, y0)) => format!(" (fixed ({x0}, {y0}))"),
-                    None => String::new(),
-                };
-                let sa = if lin.standard_addition { ", standard addition" } else { "" };
-                format!("Ordinary Least Squares (Model I){constraint}{sa}")
-            };
-            (String::from("Parameters: Simple Linear / Deming Regression"), summary)
-        }
+        AnalysisKind::LinearRegression(lin) => resolve_linear_regression_banner(lin),
         AnalysisKind::PassingBablok(_) => {
             (String::from("Parameters: Passing-Bablok Regression"), format!("Nonparametric median-slope + Cusum ({conf:.0}% CI)"))
         }
@@ -377,6 +379,28 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
                 }
             };
             (String::from("Parameters: Smooth, Differentiate, or Integrate"), desc)
+        }
+        AnalysisKind::Manova(ms) => {
+            let resp_desc = if ms.response_columns.is_empty() {
+                String::from("all continuous responses")
+            } else {
+                format!("{} selected responses", ms.response_columns.len())
+            };
+            (String::from("Parameters: One-Way MANOVA"), format!("Pillai / Wilks / Hotelling-Lawley / Roy ({resp_desc}, α={alpha:.3})"))
+        }
+        AnalysisKind::CompetingRisks(cr) => {
+            let ci_lbl = if cr.log_log_ci { "log-log CI" } else { "linear CI" };
+            (
+                String::from("Parameters: Competing-Risks Cumulative Incidence"),
+                format!("Aalen-Johansen CIF + Gray's test (rho={:.1}, {ci_lbl}, {conf:.0}% CI)", cr.gray_rho),
+            )
+        }
+        AnalysisKind::CochranMantelHaenszel(cmh) => {
+            let cc_lbl = if cmh.continuity_correction { "continuity-corrected" } else { "uncorrected" };
+            (
+                String::from("Parameters: Cochran-Mantel-Haenszel (2x2xK)"),
+                format!("Stratified CMH ({cc_lbl}), common OR ({conf:.0}% RBG CI) & Breslow-Day/Tarone"),
+            )
         }
         _ => (String::from("Parameters: Analysis"), format!("{} (α={alpha:.3})", spec.effective_title())),
     }
@@ -1013,12 +1037,17 @@ fn render_stat_multiplicity_tab(
         ("sidak", "Sidak (FWER)", MultiplicityMethod::Sidak),
         ("holm_sidak", "Holm-Sidak (step-down FWER)", MultiplicityMethod::HolmSidak),
         ("duncan", tr(tokens.locale, "stat_params.post_hoc.duncan_desc"), MultiplicityMethod::Duncan),
+        ("scheffe", "Scheff\u{00e9} (simultaneous contrasts)", MultiplicityMethod::Scheffe),
         ("dunnett", "Dunnett (compare vs. control)", MultiplicityMethod::Dunnett { control_column: default_ctrl_col }),
         ("bh", "Benjamini-Hochberg (FDR)", MultiplicityMethod::BenjaminiHochbergFdr),
         ("bky", "Two-Stage BKY (adaptive FDR)", MultiplicityMethod::TwoStageBkyFdr),
         ("none", "None (uncorrected)", MultiplicityMethod::None),
     ] {
-        let en = if is_row_t && matches!(m, MultiplicityMethod::TukeyHsd | MultiplicityMethod::Duncan | MultiplicityMethod::Dunnett { .. }) {
+        let en = if is_row_t
+            && matches!(
+                m,
+                MultiplicityMethod::TukeyHsd | MultiplicityMethod::Duncan | MultiplicityMethod::Scheffe | MultiplicityMethod::Dunnett { .. }
+            ) {
             ControlEnablement::disabled("Multiple Row t-Tests support Bonferroni, Holm-Bonferroni, Sidak, Holm-Sidak, BH/BKY FDR, or None.")
         } else {
             r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, m)

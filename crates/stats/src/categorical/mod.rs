@@ -49,6 +49,7 @@
 //! builders (`sheet`). Every public item is re-exported here.
 
 mod binomial;
+mod cmh;
 mod contingency;
 mod kappa;
 mod ratios_nnt;
@@ -56,6 +57,7 @@ mod sheet;
 mod types;
 
 pub use binomial::{agresti_coull_ci, clopper_pearson_ci, exact_binomial_test, wilson_score_ci};
+pub use cmh::{CmhResult, CmhStratum, CmhStratumSummary, cochran_mantel_haenszel, run_cmh_analysis};
 pub use contingency::{
     analyze_contingency, barnard_exact_2x2, barnard_exact_2x2_with_ordering, cochran_armitage_trend, fisher_exact_2x2, fisher_exact_rxc,
     mcnemar_detailed, mcnemar_test,

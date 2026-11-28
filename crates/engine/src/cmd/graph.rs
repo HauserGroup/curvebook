@@ -509,6 +509,10 @@ fn schema_graph_set_spec() -> Value {
             ("paper_fill", nullable_schema(any_json_schema("Outer canvas paper background color or null for transparent"))),
             ("orientation", nullable_schema(enum_str_schema("Cartesian plot orientation", &["vertical", "horizontal"]))),
             ("forest_show_pooled_diamond", nullable_schema(bool_schema("Show pooled summary diamond row on diagnostic forest plots"))),
+            (
+                "estimation_paired_lines",
+                nullable_schema(bool_schema("Connect matched subject pairs with slope lines on Gardner-Altman estimation plots")),
+            ),
             ("heatmap_labels", nullable_schema(json!({ "type": "object", "description": "Heatmap row/column label mode and rotation spec" }))),
             (
                 "histogram",
@@ -1604,7 +1608,10 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let base_ptr = if params.spec.is_some() { "/spec" } else { "" };
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
-    let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels", "histogram"]);
+    let patch_clean = strip_keys(
+        &patch,
+        &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "estimation_paired_lines", "heatmap_labels", "histogram"],
+    );
 
     let (kind, series_count) = mutate_graph_sheet(&mut ctx.session.doc, &id, false, true, |doc, current_spec| {
         let mut merged = merge_json_struct(current_spec, &patch_clean)?;
@@ -1638,6 +1645,9 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         }
         if let Some(f_val) = patch.get("forest_show_pooled_diamond").or_else(|| params.patch_fields.get("forest_show_pooled_diamond")) {
             new_spec.forest_show_pooled_diamond = f_val.as_bool().ok_or_else(|| bad_input("`forest_show_pooled_diamond` must be a boolean"))?;
+        }
+        if let Some(e_val) = patch.get("estimation_paired_lines").or_else(|| params.patch_fields.get("estimation_paired_lines")) {
+            new_spec.estimation_paired_lines = e_val.as_bool().ok_or_else(|| bad_input("`estimation_paired_lines` must be a boolean"))?;
         }
         if let Some(hm_val) = patch.get("heatmap_labels").or_else(|| params.patch_fields.get("heatmap_labels")) {
             new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
@@ -2477,6 +2487,9 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
         "diag.lognormal_qq" | "lognormal_qq" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot), None, None)),
         "diag.dendrogram" | "dendrogram" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram), None, None)),
         "diag.pca_biplot" | "pca_biplot" | "biplot" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot), None, None)),
+        "diag.estimation_plot" | "estimation_plot" | "estimation" | "gardner_altman" => {
+            Some((GraphKind::Diagnostic(DiagnosticPlotKind::EstimationPlot), None, None))
+        }
         "xy.scatter" => Some((GraphKind::Xy, None, Some("xy.scatter"))),
         "xy.scatter_line" | "xy_points_connecting" => Some((GraphKind::Xy, None, Some("xy.scatter_line"))),
         "col.bar_replicates" | "col.scatter_bar" => Some((GraphKind::Column, None, Some("col.bar_replicates"))),

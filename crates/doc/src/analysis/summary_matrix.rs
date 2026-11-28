@@ -514,7 +514,12 @@ impl SummaryModeProcedure {
             AnalysisKind::MonteCarloSimulation(_) => Some(Self::MonteCarloSimulation),
             AnalysisKind::FrequencyDistribution(_) => Some(Self::FrequencyDistribution),
             AnalysisKind::Ancova(_) => Self::when(is_xy, Self::Ancova),
-            AnalysisKind::NestedComparison(_) | AnalysisKind::Survival(_) | AnalysisKind::ImportedSnapshot(_) => None,
+            AnalysisKind::NestedComparison(_)
+            | AnalysisKind::Survival(_)
+            | AnalysisKind::ImportedSnapshot(_)
+            | AnalysisKind::Manova(_)
+            | AnalysisKind::CompetingRisks(_)
+            | AnalysisKind::CochranMantelHaenszel(_) => None,
         }
     }
 }

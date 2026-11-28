@@ -21,7 +21,7 @@ use curvebook_doc::{
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
-    StudentizedRangeCache, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, student_t_two_sided_isf, student_t_two_sided_p,
+    StudentizedRangeCache, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_isf, f_sf, student_t_two_sided_isf, student_t_two_sided_p,
 };
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
@@ -1250,6 +1250,53 @@ pub(in crate::anova) fn compare_contrast_family_with_memo(
         }
         MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo, false)?, None)),
         MultiplicityProcedure::Duncan => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo, true)?, None)),
+        MultiplicityProcedure::Scheffe => {
+            let df1 = k.saturating_sub(1).max(1) as f64;
+            let slice_ci_alpha = if n_slices > 1 { -((-ci_alpha.clamp(1e-12, 0.9999)).ln_1p() / (n_slices as f64)).exp_m1() } else { ci_alpha };
+            let mut out = Vec::with_capacity(eval.pairs.len());
+            for &(i, j, ref est) in &eval.pairs {
+                let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+                    let t = est.diff / est.se;
+                    let rp = student_t_two_sided_p(t, est.df)?;
+                    let ap_slice = f_sf((t * t) / df1, df1, est.df)?;
+                    let ap = if n_slices > 1 {
+                        let pc = ap_slice.clamp(0.0, 1.0);
+                        if pc >= 1.0 { 1.0 } else { (-((n_slices as f64) * (-pc).ln_1p()).exp_m1()).clamp(pc, 1.0) }
+                    } else {
+                        ap_slice
+                    };
+                    (t, rp, ap)
+                } else {
+                    let (st, rp) = zero_se_pair(est.diff, false);
+                    (st, rp, rp)
+                };
+                let ci = if report_ci {
+                    let s_crit = (df1 * f_isf(slice_ci_alpha.clamp(1e-12, 0.9999), df1, est.df)?).max(0.0).sqrt();
+                    Some((est.diff - s_crit * est.se, est.diff + s_crit * est.se))
+                } else {
+                    None
+                };
+                out.push(mark_pair_significance(
+                    PairwiseComparisonDetail {
+                        group_a: eval.levels[i].0,
+                        group_b: eval.levels[j].0,
+                        label_a: eval.levels[i].1.clone(),
+                        label_b: eval.levels[j].1.clone(),
+                        mean_diff: est.diff,
+                        se_diff: est.se,
+                        df: est.df,
+                        statistic: t_stat,
+                        raw_p,
+                        adjusted_p_or_q: adj_p,
+                        is_fdr_q: false,
+                        ci,
+                        significant: false,
+                    },
+                    threshold,
+                ));
+            }
+            Ok((out, None))
+        }
         _ => {
             let entries: Vec<NamedSliceContrast<'_>> = eval
                 .pairs
@@ -1856,9 +1903,13 @@ pub(in crate::anova) fn run_simple_effects_for_pair(
                 df: it.est.df,
             })
             .collect();
+        let eff_proc = match MultiplicityProcedure::from(cfg.mult_spec.method) {
+            MultiplicityProcedure::Scheffe => MultiplicityProcedure::Sidak,
+            other => other,
+        };
         let combined = compare_independent_contrast_family_with_memo(
             &slice_refs,
-            cfg.mult_spec.method.into(),
+            eff_proc,
             cfg.mult_spec.threshold,
             ci_alpha,
             cfg.mult_spec.report_confidence_intervals,
@@ -2096,6 +2147,57 @@ fn evaluate_cell_pair_family(
             ));
         }
         out_det
+    } else if mult_spec.method == MultiplicityMethod::Scheffe {
+        let (n_slices, k_means) = opts.tukey_family_hint.unwrap_or_else(|| {
+            let total_cells: usize = obs.factor_levels.iter().map(Vec::len).product();
+            (1, total_cells.max(2))
+        });
+        let n_slices = n_slices.max(1);
+        let df1 = k_means.saturating_sub(1).max(1) as f64;
+        let slice_ci_alpha = if n_slices > 1 { -((-ci_alpha.clamp(1e-12, 0.9999)).ln_1p() / (n_slices as f64)).exp_m1() } else { ci_alpha };
+        let mut out_det = Vec::with_capacity(labels_owned.len());
+        for (id_a, id_b, label_a, label_b, est) in labels_owned {
+            let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+                let t = est.diff / est.se;
+                let rp = student_t_two_sided_p(t, est.df)?;
+                let ap_slice = f_sf((t * t) / df1, df1, est.df)?;
+                let ap = if n_slices > 1 {
+                    let pc = ap_slice.clamp(0.0, 1.0);
+                    if pc >= 1.0 { 1.0 } else { (-((n_slices as f64) * (-pc).ln_1p()).exp_m1()).clamp(pc, 1.0) }
+                } else {
+                    ap_slice
+                };
+                (t, rp, ap)
+            } else {
+                let (st, p) = zero_se_pair(est.diff, false);
+                (st, p, p)
+            };
+            let ci = if mult_spec.report_confidence_intervals {
+                let s_crit = (df1 * f_isf(slice_ci_alpha.clamp(1e-12, 0.9999), df1, est.df)?).max(0.0).sqrt();
+                Some((est.diff - s_crit * est.se, est.diff + s_crit * est.se))
+            } else {
+                None
+            };
+            out_det.push(mark_pair_significance(
+                PairwiseComparisonDetail {
+                    group_a: id_a,
+                    group_b: id_b,
+                    label_a,
+                    label_b,
+                    mean_diff: est.diff,
+                    se_diff: est.se,
+                    statistic: t_stat,
+                    df: est.df,
+                    raw_p,
+                    adjusted_p_or_q: adj_p,
+                    is_fdr_q: false,
+                    ci,
+                    significant: false,
+                },
+                mult_spec.threshold,
+            ));
+        }
+        out_det
     } else {
         let entries: Vec<NamedSliceContrast<'_>> = labels_owned
             .iter()
@@ -2110,9 +2212,10 @@ fn evaluate_cell_pair_family(
             })
             .collect();
         let proc_eff = match MultiplicityProcedure::from(mult_spec.method) {
-            MultiplicityProcedure::Dunnett { .. } | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::Duncan => {
-                MultiplicityProcedure::Sidak
-            }
+            MultiplicityProcedure::Dunnett { .. }
+            | MultiplicityProcedure::NewmanKeuls
+            | MultiplicityProcedure::Duncan
+            | MultiplicityProcedure::Scheffe => MultiplicityProcedure::Sidak,
             other => other,
         };
         compare_independent_contrast_family_with_memo(

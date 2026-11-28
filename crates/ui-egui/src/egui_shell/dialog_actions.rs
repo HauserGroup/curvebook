@@ -1127,10 +1127,11 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
         "edit.cluster.k_means_auto" => {
             app.canvas_dialogs.edit_params.toggle_k_means_auto();
         }
-        "edit.post_hoc.tukey" | "edit.post_hoc.dunnett" | "edit.post_hoc.dunn" => {
+        "edit.post_hoc.tukey" | "edit.post_hoc.dunnett" | "edit.post_hoc.dunn" | "edit.post_hoc.scheffe" => {
             let method = match wid {
                 "edit.post_hoc.tukey" => MultiplicityMethod::TukeyHsd,
                 "edit.post_hoc.dunnett" => MultiplicityMethod::Dunnett { control_column: ep.control_column },
+                "edit.post_hoc.scheffe" => MultiplicityMethod::Scheffe,
                 _ => MultiplicityMethod::DunnRankSum,
             };
             let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, is_reml_mixed_effects_active(ep, app.document()), method);

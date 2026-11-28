@@ -60,6 +60,10 @@ pub enum DiagnosticPlotKind {
     /// Principal Component Analysis biplot combining observation scores `(PC1, PC2)` and scaled variable loading vectors (Gabriel 1971).
     #[serde(alias = "pca_biplot", alias = "biplot")]
     PcaBiplot,
+    /// Gardner–Altman (1986) / Ho et al. (2019) dual-axis estimation plot showing raw group data and
+    /// mean/CI alongside a floating right-hand difference axis aligned at Group A's mean = 0.
+    #[serde(alias = "estimation", alias = "estimation_plot", alias = "gardner_altman")]
+    EstimationPlot,
 }
 
 /// Primary visual family of a [`GraphSpec`].
@@ -1520,6 +1524,9 @@ pub struct GraphSpec {
     /// Display, alignment, cumulative, Gaussian overlay, and raw-table binning configuration on [`GraphKind::Histogram`].
     #[serde(default)]
     pub histogram: HistogramSpec,
+    /// When `true` on [`DiagnosticPlotKind::EstimationPlot`], connects matched paired observations with slope lines.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub estimation_paired_lines: bool,
 }
 
 /// Return `true` only when `archetype` is a `MultipleVariables` study-level meta-analysis table
@@ -1669,6 +1676,7 @@ impl GraphSpec {
             forest_show_pooled_diamond: is_meta_analysis_forest_table(&sheet.archetype),
             heatmap_labels: HeatmapLabelSpec::default(),
             histogram: HistogramSpec::default(),
+            estimation_paired_lines: false,
         }
     }
 
@@ -2130,6 +2138,8 @@ impl<'de> serde::Deserialize<'de> for GraphSpec {
             heatmap_labels: HeatmapLabelSpec,
             #[serde(default)]
             histogram: HistogramSpec,
+            #[serde(default)]
+            estimation_paired_lines: bool,
         }
 
         let raw = RawGraphSpec::deserialize(deserializer)?;
@@ -2158,6 +2168,7 @@ impl<'de> serde::Deserialize<'de> for GraphSpec {
             forest_show_pooled_diamond: raw.forest_show_pooled_diamond,
             heatmap_labels: raw.heatmap_labels,
             histogram: raw.histogram,
+            estimation_paired_lines: raw.estimation_paired_lines,
         };
         spec.validate_geometry_and_bounds().map_err(serde::de::Error::custom)?;
         Ok(spec)

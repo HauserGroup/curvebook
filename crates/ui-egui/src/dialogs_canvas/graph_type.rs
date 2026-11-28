@@ -42,6 +42,7 @@ pub enum ThumbnailGlyphKind {
     Histogram,
     Dendrogram,
     PcaBiplot,
+    EstimationPlot,
 }
 
 /// Entry in the `Change Graph Type` schematic thumbnail chooser.
@@ -255,6 +256,14 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot),
         thumbnail: ThumbnailGlyphKind::PcaBiplot,
         compatible_tables: &[TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "diag.estimation_plot",
+        label: "Estimation Plot (Gardner-Altman)",
+        subtitle: "Two-group raw data alongside aligned floating mean-difference axis & CI",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::EstimationPlot),
+        thumbnail: ThumbnailGlyphKind::EstimationPlot,
+        compatible_tables: &[TableKind::Column, TableKind::MultipleVariables],
     },
 ];
 

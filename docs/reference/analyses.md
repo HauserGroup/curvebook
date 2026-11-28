@@ -14,7 +14,7 @@ Use the sidebar to jump to a specific test. Compact summaries of table compatibi
   - An empty `selected_data_sets` selects every compatible column, unless the analysis requires explicit indices.
   - Excluded cells are always removed before any computation ([Cell exclusions](concepts.md#cell-exclusions)).
 - **Running analyses:** Run an analysis with [`analysis.run`](../commands.md) (or `transform.run`, `stats.run`, `fit.run`), change it with [`analysis.updateParams`](../commands.md), or point it at different data with [`analysis.retargetData`](../commands.md). [`analyze.run`](../commands.md) recalculates every pending sheet in the project. An unknown option key returns `bad_input` ([Engine error codes](registry/tables.html#error-codes)).
-- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_bonferroni` (alias `holm`), `holm_sidak`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, `duncan` (alias `duncan_mrt`), and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Supplying `selected_pairs` (`[[a, b], ...]`, mutually exclusive with `control_column` and `dunnett`) restricts comparisons to $m$ planned pairs for `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
+- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_bonferroni` (alias `holm`), `holm_sidak`, `scheffe`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, `duncan` (alias `duncan_mrt`), and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `scheffe`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Supplying `selected_pairs` (`[[a, b], ...]`, mutually exclusive with `control_column` and `dunnett`) restricts comparisons to $m$ planned pairs for `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `scheffe`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Scheffé's procedure uses the simultaneous critical factor $\sqrt{(k - 1) F_{\alpha,\, k-1,\, \nu_{\text{err}}}}$, adjusted $P = P(F_{k-1,\, \nu_{\text{err}}} \ge t^2 / (k - 1))$, and simultaneous confidence intervals valid across all linear contrasts (Scheffé 1953). FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
 
 ---
 
@@ -814,3 +814,72 @@ This analysis partitions numeric observations into uniform right-closed interval
 - **References and verification:**
   - References: Sturges (1926); Scott (1979); Freedman & Diaconis (1981); Hyndman & Fan (1996).
   - Verified against: `R 4.5.2` (`hist`, `nclass.Sturges`, `nclass.scott`, `nclass.FD`, `ecdf`, `dnorm`, `pnorm`) ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## One-way MANOVA {#analysis-manova}
+
+One-way multivariate analysis of variance (MANOVA) tests whether the vector of means across $p \ge 2$ continuous response variables differs across $g \ge 2$ independent groups in a single joint test. It decomposes total multivariate variation into the between-group Hypothesis sums-of-squares-and-cross-products (SSCP) matrix $H$ and the within-group Error SSCP matrix $E$, computes the eigenvalues $\lambda_1 \ge \dots \ge \lambda_s \ge 0$ of $E^{-1} H$ where $s = \min(p, g - 1)$, and reports all four classical multivariate test criteria alongside follow-up univariate one-way ANOVA $F$ tests. It works with Multiple Variables tables (see [Analysis Registry: `manova`](registry/tables.html#analysis-kind-manova)).
+
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `manova` (the preferred name), `one_way_manova`, or `stats.manova`.
+- **Options and defaults:**
+  - `group_column`: optional zero-based column index of the categorical grouping variable; when omitted, CurveBook selects the first categorical variable column.
+  - `response_columns`: optional list of two or more zero-based numeric response column indices; when empty, CurveBook includes every continuous/calculated column other than `group_column`.
+- **Reported outputs:**
+  - **Multivariate Tests** (`manova-multivariate`): **Pillai's trace** $V = \sum_{i=1}^{s} \lambda_i / (1 + \lambda_i)$, **Wilks' $\Lambda$** $= \prod_{i=1}^{s} (1 + \lambda_i)^{-1}$ with Rao's $F$ approximation (exact whenever $s \le 2$), **Hotelling–Lawley trace** $U = \sum_{i=1}^{s} \lambda_i$, and **Roy's largest root** $\lambda_1$ (upper bound on $F$ for $s > 1$), each with approximate or exact $F$, numerator and denominator degrees of freedom, and $P$ value.
+  - **Univariate ANOVAs** (`manova-univariate`): per-response between-group SS, within-group SS, $F$, $P$ value, and $\eta^2$.
+  - **Hypothesis SSCP Matrix (H)** (`manova-sscp-h`), **Error SSCP Matrix (E)** (`manova-sscp-e`), and **Group Mean Vectors** (`manova-group-means`).
+  - **Scalars:** `Pillai's trace`, `Pillai F`, `Pillai num df`, `Pillai den df`, `Pillai P`, `Wilks' Lambda`, `Wilks F`, `Wilks num df`, `Wilks den df`, `Wilks P`, `Hotelling-Lawley trace`, `Hotelling-Lawley F`, `Hotelling-Lawley num df`, `Hotelling-Lawley den df`, `Hotelling-Lawley P`, `Roy's largest root`, `Roy F`, `Roy num df`, `Roy den df`, `Roy P`, `Observations`, `Groups`, `Response variables`, `Hypothesis df`, `Error df`, and per-response `Univariate F` and `Univariate P`.
+- **Diagnostic checks:** Complete-case listwise row alignment drops incomplete or excluded rows and reports the retained and omitted counts. The checklist notes the Pillai's trace omnibus decision and warns when total sample size is small relative to $g \times p$.
+- **Edge cases and limits:**
+  - Requires at least $g \ge 2$ groups, $p \ge 2$ response columns, and error degrees of freedom $\nu_e = N - g \ge p$ so that $E$ is strictly positive definite.
+  - Perfectly collinear responses or zero within-group error variance produce a clear zero-variance error instead of `NaN`.
+- **References and verification:**
+  - References: Wilks (1932); Rao (1951); Pillai (1955); Rencher (2002) *Methods of Multivariate Analysis* (2nd ed., Ch. 6).
+  - Verified against: `R 4.5.2` `summary(manova(Y ~ g), test = ...)` across Pillai, Wilks, Hotelling–Lawley, Roy, and univariate `summary.aov` oracles ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Competing-risks cumulative incidence (Aalen–Johansen & Gray) {#analysis-competing-risks}
+
+When subjects are exposed to mutually exclusive failure causes, treating competing events as ordinary right-censoring in a Kaplan–Meier curve systematically overestimates the cumulative failure probability. Competing-risks analysis estimates the nonparametric **Aalen–Johansen cumulative incidence function (CIF)** for the primary event of interest and for competing events simultaneously, computes Greenwood/Marubini–Valsecchi standard errors and confidence intervals, and compares primary-event CIF curves across two or more groups using **Gray's (1988) $K$-sample weighted subdistribution test**. It works with Survival tables (using numeric status codes such as `0` = censored, `1` = primary event, `2` = competing event) and Multiple Variables tables (see [Analysis Registry: `competing-risks`](registry/tables.html#analysis-kind-competing-risks)).
+
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `competing_risks` (the preferred name), `competing_risk`, `cif`, `aalen_johansen`, `gray_test`, or `stats.competing_risks`.
+- **Options and defaults:**
+  - `time_column`, `status_column`, `group_column`: optional zero-based column indices when analyzing a Multiple Variables table (inferred automatically when omitted).
+  - `censored_code`: numeric status code denoting right-censored subjects (default `0.0`).
+  - `primary_event_code`: numeric status code denoting the primary event of interest (default `1.0`).
+  - `competing_event_code`: optional specific status code for competing events; when omitted, every finite status value other than `censored_code` and `primary_event_code` is treated as a competing event.
+  - `gray_rho`: nonnegative Fleming–Harrington weight exponent $\rho \ge 0$ for Gray's test (default `0.0`, equal weighting across time; $\rho = 1$ emphasizes early differences).
+  - `log_log_ci`: boolean (default `true`). When `true`, computes complementary log-log transformed confidence intervals guaranteed to stay inside $[0, 1]$ (Choudhury 2002); when `false`, reports symmetric linear Wald intervals clipped to $[0, 1]$.
+- **Reported outputs:**
+  - **Competing-Risks Summary** (`cr-summary`): per-cohort $N$, primary events, competing events, censored counts, final primary CIF and its confidence interval, and final competing CIF and its confidence interval.
+  - **Gray's K-Sample Test** (`cr-gray-test`, when $K \ge 2$ groups): weight exponent $\rho$, test statistic $\chi^2$, degrees of freedom, $P$ value, and interpretation for both the primary event CIF and the competing event CIF.
+  - **CIF Schedule** (`cr-cif-<index>`): time-indexed step schedule with risk set size, primary/competing/censored counts, overall event-free survival $S(t)$ (satisfying $S(t) + I_1(t) + I_2(t) = 1$ at every event time), primary and competing CIFs, Marubini–Valsecchi/Greenwood SEs, and confidence intervals, plus step-curve overlays for plotting.
+- **Diagnostic checks:** Non-negative survival times are validated; incomplete or excluded rows are summarized in the checklist. When no competing events occur, Gray's test with $\rho = 0$ reduces algebraically to the Mantel–Cox log-rank test.
+- **Edge cases and limits:** Negative or non-finite follow-up times and negative `gray_rho` are rejected cleanly. Cohorts with zero primary events yield a flat zero CIF with zero SE.
+- **References and verification:**
+  - References: Aalen & Johansen (1978); Gray (1988); Marubini & Valsecchi (1995); Fine & Gray (1999); Choudhury (2002).
+  - Verified against: `R 4.5.2` `survival::survfit` multi-state Aalen–Johansen CIF and standard-error oracles plus exact Gray (1988) martingale variance and null-calibration checks ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Stratified 2 × 2 × K Cochran–Mantel–Haenszel test {#analysis-cochran-mantel-haenszel}
+
+The Cochran–Mantel–Haenszel (CMH) analysis evaluates conditional independence between a binary exposure and a binary outcome across $K \ge 1$ stratified $2 \times 2$ tables (such as clinical trial centers, age brackets, or experimental blocks), estimates the pooled common Mantel–Haenszel odds ratio with a Robins–Breslow–Greenland confidence interval, and tests homogeneity of odds ratios across strata via the Breslow–Day and Tarone procedures. It works with Contingency tables ($K$ stratum rows $\times$ 4 count columns `[a, b, c, d]`) and Multiple Variables tables (`exposure`, `outcome`, `stratum`, and optional `count` column) (see [Analysis Registry: `cochran-mantel-haenszel`](registry/tables.html#analysis-kind-cochran-mantel-haenszel)).
+
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `cmh` (the preferred name), `cochran_mantel_haenszel`, `mantel_haenszel`, `stratified_contingency`, or `stats.cmh`.
+- **Options and defaults:**
+  - `continuity_correction`: boolean (default `true`). Selects whether the primary checklist and headline scalar emphasize the 0.5 continuity-corrected CMH $\chi^2$ statistic or the uncorrected statistic; both values and their two-sided $P$ values are always reported in the summary tab.
+  - `exposure_column`, `outcome_column`, `stratum_column`, `count_column`: optional zero-based column indices for Multiple Variables tables (inferred automatically from binary categorical columns and optional numeric count column when omitted).
+- **Reported outputs:**
+  - **CMH Summary** (`cmh-summary`): continuity-corrected and uncorrected CMH $\chi^2$ ($1\text{ df}$) and $P$ values, common Mantel–Haenszel odds ratio $\widehat{\text{OR}}_{\text{MH}}$ with Robins–Breslow–Greenland `(1 - alpha)` confidence interval, and both Breslow–Day and Tarone-adjusted homogeneity $\chi^2$ ($K_{\text{eff}} - 1\text{ df}$) and $P$ values.
+  - **Per-Stratum 2×2 Tables** (`cmh-strata`): stratum counts $a_k, b_k, c_k, d_k$, stratum total $N_k$, expected count $E(a_k)$, hypergeometric variance $V(a_k)$, stratum odds ratio, and Mantel–Haenszel fitted cell count $\hat{a}_k$.
+  - **Scalars:** `CMH chi-square`, `CMH P`, `CMH chi-square (continuity-corrected)`, `CMH P (continuity-corrected)`, `CMH chi-square (uncorrected)`, `CMH P (uncorrected)`, `Common OR (Mantel-Haenszel)`, `SE(ln Common OR)`, `Common OR CI lower`, `Common OR CI upper`, `Breslow-Day chi-square`, `Breslow-Day-Tarone chi-square`, `Breslow-Day df`, `Breslow-Day P`, `Breslow-Day-Tarone P`, `Strata`, and `Total N`.
+- **Diagnostic checks:** The checklist flags significant heterogeneity of odds ratios across strata ($P_{\text{Tarone}} < \alpha$) as a warning so users do not over-interpret a pooled common odds ratio when effect modification is present.
+- **Edge cases and limits:**
+  - Non-integer or negative cell counts are rejected. Empty or degenerate zero-margin strata are retained in the stratum table as non-informative without dividing by zero; if pooled hypergeometric variance across all strata equals zero, the analysis returns a clear zero-variance error.
+  - When only one informative stratum is available, Breslow–Day homogeneity is omitted because $\text{df} = 0$.
+- **References and verification:**
+  - References: Mantel & Haenszel (1959); Breslow & Day (1980); Tarone (1985); Robins, Breslow & Greenland (1986).
+  - Verified against: `R 4.5.2` `mantelhaen.test(..., correct = TRUE/FALSE)` and exact Robins–Breslow–Greenland / Breslow–Day–Tarone reference scripts ([statistics evidence](../evidence/statistics.md)).

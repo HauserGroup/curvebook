@@ -410,6 +410,15 @@ pub(super) fn render_misc_stats_design(
         AnalysisKind::FrequencyDistribution(fd) => {
             render_frequency_distribution_design(ui, app, state, spec, fd, tokens, meta, intents);
         }
+        AnalysisKind::Manova(ms) => {
+            render_manova_design(ui, doc, spec, ms, tokens, meta, intents);
+        }
+        AnalysisKind::CompetingRisks(cr) => {
+            render_competing_risks_design(ui, doc, spec, cr, tokens, meta, intents);
+        }
+        AnalysisKind::CochranMantelHaenszel(cmh) => {
+            render_cmh_design(ui, spec, cmh, tokens, meta, intents);
+        }
         AnalysisKind::LinearRegression(lin) => {
             render_linear_regression_design(ui, app, state, spec, lin, tokens, meta, intents);
         }
@@ -766,6 +775,147 @@ fn render_curve_calculus_design(
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
+fn render_manova_design(
+    ui: &mut Ui,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    ms: &curvebook_doc::ManovaSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let titles = column_titles_for_draft(doc, spec.source_sheet_id.as_ref());
+    render_section_title(ui, tokens, "Grouping Variable Column");
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_seg_btn(ui, tokens, meta, "edit.manova.group.auto", "Auto", ms.group_column.is_none(), &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::Manova(m) = &mut next.kind {
+                m.group_column = None;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+        for (idx, t) in titles.iter().enumerate() {
+            if render_modal_seg_btn(
+                ui,
+                tokens,
+                meta,
+                &format!("edit.manova.group.{idx}"),
+                t,
+                ms.group_column == Some(idx),
+                &ControlEnablement::enabled(),
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::Manova(m) = &mut next.kind {
+                    m.group_column = Some(idx);
+                    m.response_columns.retain(|&c| c != idx);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+    });
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Numeric Response Columns (blank = all continuous)");
+    ui.horizontal_wrapped(|ui| {
+        for (idx, t) in titles.iter().enumerate() {
+            if ms.group_column == Some(idx) {
+                continue;
+            }
+            let selected = ms.response_columns.contains(&idx);
+            if render_modal_seg_btn(ui, tokens, meta, &format!("edit.manova.resp.{idx}"), t, selected, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::Manova(m) = &mut next.kind {
+                    if let Some(pos) = m.response_columns.iter().position(|&c| c == idx) {
+                        m.response_columns.remove(pos);
+                    } else {
+                        m.response_columns.push(idx);
+                        m.response_columns.sort_unstable();
+                    }
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+    });
+}
+
+fn render_competing_risks_design(
+    ui: &mut Ui,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    cr: &curvebook_doc::CompetingRisksSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Confidence Interval Transformation");
+    for (wid, lbl, ll) in [
+        ("edit.cr.ci.loglog", "Complementary log-log CI (Choudhury 2002; recommended)", true),
+        ("edit.cr.ci.linear", "Linear Wald CI clipped to [0, 1]", false),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, cr.log_log_ci == ll, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::CompetingRisks(c) = &mut next.kind {
+                c.log_log_ci = ll;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Gray's K-Sample Weight Exponent (rho)");
+    ui.horizontal_wrapped(|ui| {
+        for (wid, lbl, rho) in [("edit.cr.rho.0", "rho = 0 (Gray log-rank)", 0.0_f64), ("edit.cr.rho.1", "rho = 1 (early-time weight)", 1.0_f64)] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (cr.gray_rho - rho).abs() < 1e-9, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::CompetingRisks(c) = &mut next.kind {
+                    c.gray_rho = rho;
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(format!(
+            "Event status codes: censored = {}, primary event = {}, competing = {}.",
+            cr.censored_code,
+            cr.primary_event_code,
+            cr.competing_event_code.map_or_else(|| String::from("all other non-censored"), |v| format!("{v}"))
+        ))
+        .small()
+        .color(tokens.text_muted),
+    );
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+fn render_cmh_design(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    cmh: &curvebook_doc::CmhSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Cochran-Mantel-Haenszel Chi-Square Test");
+    for (wid, lbl, cc) in [
+        ("edit.cmh.cc.true", "Apply 0.5 continuity correction (Mantel & Haenszel 1959)", true),
+        ("edit.cmh.cc.false", "Uncorrected CMH statistic (M^2)", false),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, cmh.continuity_correction == cc, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::CochranMantelHaenszel(c) = &mut next.kind {
+                c.continuity_correction = cc;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    ui.add_space(4.0);
+    ui.label(
+        egui::RichText::new(
+            "Reports both corrected and uncorrected CMH chi-square, common Mantel-Haenszel OR with Robins-Breslow-Greenland CI, and Breslow-Day/Tarone homogeneity test.",
+        )
+        .small()
+        .color(tokens.text_muted),
+    );
+}
 fn render_pvalue_stack_design(
     ui: &mut Ui,
     doc: &ProjectDocument,

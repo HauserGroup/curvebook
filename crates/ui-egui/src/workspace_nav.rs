@@ -1500,6 +1500,7 @@ fn graph_kind_label(spec: &GraphSpec) -> &'static str {
             DiagnosticPlotKind::LognormalQqPlot => "Lognormal Q\u{2013}Q",
             DiagnosticPlotKind::Dendrogram => "Dendrogram",
             DiagnosticPlotKind::PcaBiplot => "PCA Biplot",
+            DiagnosticPlotKind::EstimationPlot => "Estimation Plot",
         },
     }
 }

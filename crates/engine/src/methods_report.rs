@@ -8,22 +8,22 @@ use std::fmt::Write as _;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation,
-    BlandAltmanSpec, CURVEBOOK_CITATION, Cell, ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySimDesign, ContingencySpec, ConvergenceStrictness, CorrelationMethod, CorrelationPowerMethod, CoxTieMethod,
-    CurveCalculusOp, CurveCalculusSpec, DataSetColumn, DataSheet, DescriptiveSpec, DistributionTailShade, ErrorPropagationMode, FactorialAnovaSpec,
-    FactorialComparisonFamilyMode, FitMethod, FractionDenominator, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec,
-    FrequencyOutputMode, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode, KMeansAlgorithm, KappaWeighting,
-    LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod,
-    ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, ObservationAccounting, ObservationAccountingKind, OneWayAnovaSpec,
-    OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule,
-    ParameterScope, PassingBablokSpec, PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
-    PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp,
-    RemlZeroVariancePolicy, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab,
-    ResultTabKind, RmSphericityCorrection, RocCiMethod, RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode,
-    SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec,
-    SurvivalOtherValuePolicy, TableArchetype, TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
+    BlandAltmanSpec, CURVEBOOK_CITATION, Cell, ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage, CmhSpec,
+    CompetingRisksSpec, ContingencyMethod, ContingencySimDesign, ContingencySpec, ConvergenceStrictness, CorrelationMethod, CorrelationPowerMethod,
+    CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSetColumn, DataSheet, DescriptiveSpec, DistributionTailShade, ErrorPropagationMode,
+    FactorialAnovaSpec, FactorialComparisonFamilyMode, FitMethod, FractionDenominator, FractionOfTotalSpec, FrequencyBinningRule,
+    FrequencyDistributionSpec, FrequencyOutputMode, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode,
+    KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, ManovaSpec, MathTransformPreset,
+    MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, ObservationAccounting,
+    ObservationAccountingKind, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec,
+    PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec,
+    PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, ProportionCiMethod,
+    RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy, RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, RmSphericityCorrection, RocCiMethod, RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId,
+    SimpleLogisticSpec, SimulationMode, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType,
+    SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TheoreticalDistributionFamily, TheoreticalDistributionSpec,
+    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -885,6 +885,9 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::Transform(s) => describe_transform(s),
         AnalysisKind::SimpleLogisticRegression(s) => describe_simple_logistic(s),
         AnalysisKind::LeveneTest(s) => describe_levene_test(s),
+        AnalysisKind::Manova(s) => describe_manova(s, source_ds),
+        AnalysisKind::CompetingRisks(s) => describe_competing_risks(s, source_ds),
+        AnalysisKind::CochranMantelHaenszel(s) => describe_cmh(s, source_ds),
         AnalysisKind::ImportedSnapshot(s) => {
             let label = if s.original_kind_label.trim().is_empty() { "Imported analysis" } else { s.original_kind_label.as_str() };
             vec![ReportBlock::Paragraph(vec![plain(format!("Preserved external result snapshot ({label}); not computed by CurveBook."))])]
@@ -1175,6 +1178,7 @@ fn describe_multiple_row_tests(s: &MultipleRowTestsSpec, res: &ResultSheet) -> V
         MultiplicityMethod::TukeyHsd
         | MultiplicityMethod::NewmanKeuls
         | MultiplicityMethod::Duncan
+        | MultiplicityMethod::Scheffe
         | MultiplicityMethod::Dunnett { .. }
         | MultiplicityMethod::DunnettT3
         | MultiplicityMethod::GamesHowell
@@ -1374,6 +1378,7 @@ fn append_one_way_posthoc_runs(runs: &mut Vec<TextRun>, s: &OneWayAnovaSpec, res
             | MultiplicityMethod::TukeyHsd
             | MultiplicityMethod::NewmanKeuls
             | MultiplicityMethod::Duncan
+            | MultiplicityMethod::Scheffe
             | MultiplicityMethod::GamesHowell
             | MultiplicityMethod::DunnettT3
             | MultiplicityMethod::TamhaneT2
@@ -1484,7 +1489,8 @@ fn append_welch_posthoc_runs(runs: &mut Vec<TextRun>, mult: &MultiplicitySpec, r
                 "A heteroscedastic polynomial test for linear trend across ordered groups was performed using per-group variances and Welch-Satterthwaite denominator degrees of freedom.",
             ));
         }
-        MultiplicityMethod::Bonferroni
+        MultiplicityMethod::Scheffe
+        | MultiplicityMethod::Bonferroni
         | MultiplicityMethod::Sidak
         | MultiplicityMethod::HolmBonferroni
         | MultiplicityMethod::HolmSidak
@@ -1814,6 +1820,79 @@ fn describe_levene_test(s: &LeveneTestSpec) -> Vec<ReportBlock> {
         }
     };
     vec![ReportBlock::Paragraph(vec![plain(text)])]
+}
+
+fn describe_manova(s: &ManovaSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+    let mut runs = vec![plain(
+        "Joint differences in group mean vectors across multiple numeric responses were evaluated using one-way multivariate analysis of variance (MANOVA), computing Hypothesis (H) and Error (E) SSCP matrices and all four classical multivariate test criteria—Pillai's trace (Pillai 1955), Wilks' Lambda with Rao's F approximation (Wilks 1932; Rao 1951), Hotelling-Lawley trace, and Roy's largest root (Rencher 2002)—alongside follow-up univariate one-way ANOVA F tests for each response.",
+    )];
+    if let Some(g_col) = s.group_column {
+        runs.push(plain(" Grouping variable: "));
+        runs.push(code(column_title_at(source_ds, g_col)));
+        runs.push(plain("."));
+    }
+    if !s.response_columns.is_empty() {
+        runs.push(plain(" Response variables: "));
+        push_code_list(&mut runs, s.response_columns.iter().map(|&c| column_title_at(source_ds, c)));
+        runs.push(plain("."));
+    }
+    vec![ReportBlock::Paragraph(runs)]
+}
+
+fn describe_competing_risks(s: &CompetingRisksSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+    let ci_desc = if s.log_log_ci {
+        "complementary log-log transformed confidence intervals (Choudhury 2002)"
+    } else {
+        "linear symmetric Wald confidence intervals clipped to [0, 1]"
+    };
+    let mut runs = vec![plain(format!(
+        "Cumulative incidence functions (CIF) in the presence of competing risks were estimated nonparametrically via the Aalen-Johansen estimator (Aalen & Johansen 1978) with Greenwood/Marubini-Valsecchi standard errors and {ci_desc}, encoding censored = {}, primary event = {}, and competing event = {}. Between-group equality of primary-event CIFs was evaluated using Gray's K-sample weighted subdistribution test (Gray 1988; Fine & Gray 1999) with weight exponent rho = {}.",
+        format_exact_float(s.censored_code),
+        format_exact_float(s.primary_event_code),
+        s.competing_event_code.map_or_else(|| String::from("all other non-censored codes"), format_exact_float),
+        format_exact_float(s.gray_rho),
+    ))];
+    if let Some(tc) = s.time_column {
+        runs.push(plain(" Time column: "));
+        runs.push(code(column_title_at(source_ds, tc)));
+        runs.push(plain("."));
+    }
+    if let Some(sc) = s.status_column {
+        runs.push(plain(" Status column: "));
+        runs.push(code(column_title_at(source_ds, sc)));
+        runs.push(plain("."));
+    }
+    if let Some(gc) = s.group_column {
+        runs.push(plain(" Group column: "));
+        runs.push(code(column_title_at(source_ds, gc)));
+        runs.push(plain("."));
+    }
+    vec![ReportBlock::Paragraph(runs)]
+}
+
+fn describe_cmh(s: &CmhSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+    let cc_desc = if s.continuity_correction {
+        "with the 0.5 continuity correction (primary) and without continuity correction"
+    } else {
+        "without continuity correction (primary) and with the 0.5 continuity correction"
+    };
+    let mut runs = vec![plain(format!(
+        "Stratified 2 x 2 x K contingency tables were analyzed using the Cochran-Mantel-Haenszel (CMH) conditional independence chi-square test {cc_desc} (Mantel & Haenszel 1959). The common Mantel-Haenszel odds ratio and its variance-stabilized confidence interval were estimated via the Robins-Breslow-Greenland (1986) variance estimator, and homogeneity of odds ratios across strata was assessed via the Breslow-Day test with Tarone's adjustment (Tarone 1985)."
+    ))];
+    if let (Some(ec), Some(oc), Some(sc)) = (s.exposure_column, s.outcome_column, s.stratum_column) {
+        runs.push(plain(" Columns: exposure "));
+        runs.push(code(column_title_at(source_ds, ec)));
+        runs.push(plain(", outcome "));
+        runs.push(code(column_title_at(source_ds, oc)));
+        runs.push(plain(", stratum "));
+        runs.push(code(column_title_at(source_ds, sc)));
+        if let Some(cc) = s.count_column {
+            runs.push(plain(", count "));
+            runs.push(code(column_title_at(source_ds, cc)));
+        }
+        runs.push(plain("."));
+    }
+    vec![ReportBlock::Paragraph(runs)]
 }
 
 fn describe_passing_bablok(s: &PassingBablokSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
@@ -2158,6 +2237,7 @@ fn describe_survival_pairwise_runs(mult: &MultiplicitySpec, source_ds: Option<&D
         MultiplicityMethod::TukeyHsd
         | MultiplicityMethod::NewmanKeuls
         | MultiplicityMethod::Duncan
+        | MultiplicityMethod::Scheffe
         | MultiplicityMethod::GamesHowell
         | MultiplicityMethod::TamhaneT2
         | MultiplicityMethod::DunnettT3
@@ -3512,6 +3592,7 @@ fn describe_multiplicity_runs(mult: &MultiplicitySpec, ci_available: bool) -> Ve
     let ci_note = if mult.report_confidence_intervals && ci_available {
         match mult.method {
             MultiplicityMethod::TukeyHsd
+            | MultiplicityMethod::Scheffe
             | MultiplicityMethod::Dunnett { .. }
             | MultiplicityMethod::Sidak
             | MultiplicityMethod::Bonferroni
@@ -3554,6 +3635,7 @@ fn describe_multiplicity_runs(mult: &MultiplicitySpec, ci_available: bool) -> Ve
             false,
         ),
         MultiplicityMethod::FisherLsd => ("Fisher's unprotected least significant difference (LSD)", false),
+        MultiplicityMethod::Scheffe => ("Scheff\u{00e9}'s simultaneous linear-contrast FWER procedure (Scheff\u{00e9} 1953)", false),
     };
     if matches!(mult.method, MultiplicityMethod::None) {
         return vec![plain(format!("Multiple comparisons used {kind_lbl}{ci_note}."))];
@@ -3574,6 +3656,7 @@ fn dunn_adjustment_desc(method: MultiplicityMethod) -> (&'static str, bool) {
         | MultiplicityMethod::TukeyHsd
         | MultiplicityMethod::NewmanKeuls
         | MultiplicityMethod::Duncan
+        | MultiplicityMethod::Scheffe
         | MultiplicityMethod::GamesHowell
         | MultiplicityMethod::DunnettT3
         | MultiplicityMethod::Bonferroni

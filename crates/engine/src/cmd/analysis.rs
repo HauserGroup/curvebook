@@ -4,17 +4,17 @@ use std::collections::HashSet;
 
 use curvebook_doc::{
     AnalysisDomainKind, AnalysisKind, AnalysisSpec, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineOperation,
-    BlandAltmanSpec, CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CorrelationMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode,
-    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, GlmFamily, GlmSpec,
-    GraphKind, GraphSheet, HistogramSpec, HookSource, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
-    MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultipleVariablesTable,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, PowerEffectSpec,
-    PowerOneSidedDirection, PowerTailMode, ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod,
-    RocSpec, RowStatisticsSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType,
-    SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn,
-    VariableRole, XyTable,
+    BlandAltmanSpec, CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, CmhSpec, CompetingRisksSpec, ContingencyMethod,
+    ContingencySpec, CorrelationMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError,
+    ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, GlmFamily,
+    GlmSpec, GraphKind, GraphSheet, HistogramSpec, HookSource, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
+    MAX_SHEETS_PER_PROJECT, ManovaSpec, MathTransformPreset, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
+    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign,
+    ResultSheet, ResultStatus, RocCiMethod, RocSpec, RowStatisticsSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
+    SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TableKind, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -627,7 +627,7 @@ fn schema_transform_run() -> Value {
 
 fn schema_stats_run() -> Value {
     schema_analysis_base(
-        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `ancova`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `frequency_distribution`, `rout`, `grubbs`, `levene`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `kendall`, `clustering`) or typed AnalysisKind object",
+        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `ancova`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `frequency_distribution`, `rout`, `grubbs`, `levene`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `cmh`, `kaplan_meier`, `cox_ph`, `competing_risks`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `kendall`, `clustering`, `manova`) or typed AnalysisKind object",
         false,
         true,
     )
@@ -2541,7 +2541,7 @@ fn validate_multiplicity_spec_semantics(mult: &MultiplicitySpec, allow_selected_
         if !MultiplicitySpec::supports_selected_pairs(mult.method) {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, Scheffe, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
         validate_selected_pairs_list(pairs)?;
@@ -3409,6 +3409,21 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                 | "aggregation"
                 | "create_histogram_graph"
         ),
+        AnalysisKind::Manova(_) => matches!(key, "group_column" | "response_columns"),
+        AnalysisKind::CompetingRisks(_) => matches!(
+            key,
+            "time_column"
+                | "status_column"
+                | "group_column"
+                | "censored_code"
+                | "primary_event_code"
+                | "competing_event_code"
+                | "gray_rho"
+                | "log_log_ci"
+        ),
+        AnalysisKind::CochranMantelHaenszel(_) => {
+            matches!(key, "continuity_correction" | "exposure_column" | "outcome_column" | "stratum_column" | "count_column")
+        }
         AnalysisKind::Transform(_)
         | AnalysisKind::FitSplineLowess(_)
         | AnalysisKind::AreaUnderCurve(_)
@@ -3854,6 +3869,13 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
             emit_anova_tab: false,
         }),
         "multiple_imputation" | "stats.multiple_imputation" | "mice" => AnalysisKind::Multivariate(default_multiple_imputation(42)),
+        "manova" | "one_way_manova" | "stats.manova" => AnalysisKind::Manova(ManovaSpec::default()),
+        "competing_risks" | "competing_risk" | "cif" | "aalen_johansen" | "gray_test" | "stats.competing_risks" => {
+            AnalysisKind::CompetingRisks(CompetingRisksSpec::default())
+        }
+        "cmh" | "cochran_mantel_haenszel" | "mantel_haenszel" | "stratified_contingency" | "stats.cmh" => {
+            AnalysisKind::CochranMantelHaenszel(CmhSpec::default())
+        }
         _ => return None,
     };
     Some(kind)
@@ -3980,6 +4002,10 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "ancova",
         "clustering",
         "multiple_imputation",
+        "manova",
+        "competing_risks",
+        "cmh",
+        "cochran_mantel_haenszel",
         "linear",
         "deming",
         "4pl",
@@ -4126,6 +4152,9 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
             matches!(key, "info_sheet_id" | "survival_method" | "target_events" | "event_prob_group1" | "event_prob_group2")
         }
         AnalysisKind::SimpleLogisticRegression(_) => matches!(key, "plot_x_min" | "plot_x_max" | "plot_segments"),
+        AnalysisKind::Manova(_) => matches!(key, "group_column" | "response_columns"),
+        AnalysisKind::CompetingRisks(_) => matches!(key, "time_column" | "status_column" | "group_column" | "competing_event_code"),
+        AnalysisKind::CochranMantelHaenszel(_) => matches!(key, "exposure_column" | "outcome_column" | "stratum_column" | "count_column"),
         _ => false,
     }
 }
@@ -4196,6 +4225,12 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "selected_pairs",
     "first_bin_center",
     "last_bin_center",
+    "group_column",
+    "competing_event_code",
+    "exposure_column",
+    "outcome_column",
+    "stratum_column",
+    "count_column",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -4266,6 +4301,12 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "row_title_column",
     "contingency_count_column",
     "control_factor",
+    "group_column",
+    "response_columns",
+    "exposure_column",
+    "outcome_column",
+    "stratum_column",
+    "count_column",
 ];
 
 fn coerce_whole_int_value(val: &Value, key: &str) -> Result<Value, EngineError> {
@@ -4474,6 +4515,9 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             }
             apply_enum_field(norm, "aggregation", &mut spec.aggregation, "FrequencyDistribution `aggregation`")?;
         }
+        AnalysisKind::CompetingRisks(spec) if !spec.gray_rho.is_finite() || spec.gray_rho < 0.0 => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`gray_rho` must be finite and >= 0"));
+        }
         _ => {}
     }
     Ok(())
@@ -4662,7 +4706,7 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allo
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, Scheffe, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
     }
@@ -4678,7 +4722,7 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allo
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, Scheffe, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
     }
@@ -5007,7 +5051,8 @@ fn patch_analysis_kind_fields(kind: &mut AnalysisKind, patch: &Value) -> Result<
             if !target_map.contains_key(ks) && !is_omitted_optional_field(kind, ks) {
                 continue;
             }
-            let is_nullable = NULLABLE_KIND_FIELDS.contains(&ks)
+            let is_nullable = (NULLABLE_KIND_FIELDS.contains(&ks)
+                || (matches!(kind, AnalysisKind::CompetingRisks(_)) && matches!(ks, "time_column" | "status_column")))
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { .. }) if ks == "sample_size")
                 && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) | AnalysisKind::Ancova(_) if ks == "response_column")
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::Simulate { .. }) if matches!(ks, "x_min" | "x_max"));

@@ -512,6 +512,18 @@ fn render_fg_gdo_and_bar_controls(
             *dirty = true;
         }
     }
+    if draft.graph_kind == Some(curvebook_doc::GraphKind::Diagnostic(curvebook_doc::DiagnosticPlotKind::EstimationPlot)) {
+        ui.add_space(4.0);
+        let mut paired_on = draft.estimation_paired_lines;
+        let paired_lbl = "Connect matched pairs with slope lines";
+        let paired_chk = ui.checkbox(&mut paired_on, paired_lbl);
+        record_checkbox(ui, &paired_chk, gctx.meta, "format_graph.estimation_paired_lines", paired_lbl, paired_on);
+        if paired_chk.changed() {
+            draft.estimation_paired_lines = paired_on;
+            draft.estimation_paired_lines_dirty = true;
+            *dirty = true;
+        }
+    }
 }
 
 fn render_fg_error_bars_section(

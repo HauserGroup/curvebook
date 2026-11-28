@@ -41,6 +41,8 @@
 //!   Comparison Perspective* (2nd ed.). Lawrence Erlbaum Associates.
 //! - Newman, D. (1939). The distribution of range in samples from a normal population, expressed in
 //!   terms of an independent estimate of standard deviation. *Biometrika*, 31(1/2), 20-30.
+//! - Scheffé, H. (1953). A method for judging all contrasts in the analysis of variance.
+//!   *Biometrika*, 40(1/2), 87-104. `doi:10.1093/biomet/40.1-2.87`.
 //! - Šidák, Z. (1967). Rectangular confidence regions for the means of multivariate normal
 //!   distributions. *Journal of the American Statistical Association*, 62(318), 626-633.
 //! - Tamhane, A. C. (1979). A comparison of procedures for multiple comparisons of means with
@@ -55,8 +57,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
 use curvebook_math::dist::{
-    StudentizedRangeCache, dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, norm_two_sided_p, student_t_two_sided_isf,
-    student_t_two_sided_p, studentized_range_sf,
+    StudentizedRangeCache, dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_isf, f_sf, norm_two_sided_p,
+    student_t_two_sided_isf, student_t_two_sided_p, studentized_range_sf,
 };
 use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
@@ -96,6 +98,8 @@ pub enum MultiplicityProcedure {
     LinearTrend,
     /// Unprotected Fisher's Least Significant Difference pairwise *t* tests (`raw_p`; Fisher 1935).
     FisherLsd,
+    /// Scheffé's simultaneous FWER procedure across all linear contrasts (`sqrt((k - 1) F_{alpha, k-1, df_err})`; Scheffé 1953).
+    Scheffe,
     /// Student–Newman–Keuls step-down studentized range comparison (FWER stepwise; Newman 1939 / Keuls 1952).
     NewmanKeuls,
     /// Duncan's new multiple range test using Studentized range critical values with protection levels `alpha_p = 1 - (1 - alpha)^(p - 1)` (Duncan 1955; Kramer 1956 for unequal `n`).
@@ -129,6 +133,7 @@ impl From<MultiplicityMethod> for MultiplicityProcedure {
             MultiplicityMethod::HolmSidak => Self::HolmSidak,
             MultiplicityMethod::HolmBonferroni => Self::HolmBonferroni,
             MultiplicityMethod::FisherLsd => Self::FisherLsd,
+            MultiplicityMethod::Scheffe => Self::Scheffe,
             MultiplicityMethod::DunnettT3 => Self::DunnettT3,
             MultiplicityMethod::GamesHowell => Self::GamesHowell,
             MultiplicityMethod::TamhaneT2 => Self::TamhaneT2,
@@ -489,6 +494,7 @@ pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshol
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::Duncan
+        | MultiplicityProcedure::Scheffe
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell
@@ -514,6 +520,7 @@ pub fn try_adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, thre
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::Duncan
+        | MultiplicityProcedure::Scheffe
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell
@@ -789,6 +796,7 @@ fn compare_groups_impl(
             }
             compare_duncan(groups, mse, df_error, threshold)
         }
+        MultiplicityProcedure::Scheffe => compare_scheffe(groups, mse, df_error, family, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::GamesHowell => {
             if !matches!(family, MultiplicityFamilySelection::AllPairs) {
                 return Err(StatsError::IncompatibleAnalysisSpec {
@@ -892,6 +900,64 @@ fn compare_pooled_or_fdr(
             significant: adj_p.is_finite() && adj_p <= threshold,
         })
         .collect();
+    Ok(out)
+}
+
+/// Scheffé (1953) simultaneous multiple comparisons across all linear contrasts among `k` group
+/// means under pooled `mse` and `df_error`.
+///
+/// For any contrast pair `(i, j)` with pooled `SE = sqrt(MSE * (1/n_i + 1/n_j))` and
+/// `t = (mean_i - mean_j) / SE`, Scheffé's adjusted *p*-value is
+/// `P(F_{k-1, df_error} >= t^2 / (k - 1))` and the simultaneous `(1 - alpha)` confidence interval
+/// is `(mean_i - mean_j) +/- sqrt((k - 1) * F_{alpha, k-1, df_error}) * SE` (Scheffé 1953; Hsu 1996).
+fn compare_scheffe(
+    groups: &[GroupComparisonInput],
+    mse: f64,
+    df_error: f64,
+    family: MultiplicityFamilySelection<'_>,
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let pair_indices = resolve_group_pair_indices(groups, family)?;
+    if pair_indices.is_empty() {
+        return Ok(Vec::new());
+    }
+    let df1 = (groups.len() - 1) as f64;
+    let s_crit = if report_ci { Some((df1 * f_isf(ci_alpha.clamp(1e-12, 0.9999), df1, df_error)?).max(0.0).sqrt()) } else { None };
+    let mut out = Vec::with_capacity(pair_indices.len());
+    for (i, j) in pair_indices {
+        let ga = &groups[i];
+        let gb = &groups[j];
+        let diff = ga.mean - gb.mean;
+        let se = (mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
+        let (t_stat, raw_p, adj_p) = if se > 0.0 {
+            let t = diff / se;
+            let rp = student_t_two_sided_p(t, df_error)?;
+            let f_stat = (t * t) / df1;
+            let ap = f_sf(f_stat, df1, df_error)?;
+            (t, rp, ap)
+        } else {
+            let (stat, p) = zero_se_stat_p(diff, true);
+            (stat, p, p)
+        };
+        let ci = s_crit.map(|sc| (diff - sc * se, diff + sc * se));
+        out.push(PairwiseComparisonDetail {
+            group_a: ga.index,
+            group_b: gb.index,
+            label_a: ga.label.clone(),
+            label_b: gb.label.clone(),
+            mean_diff: diff,
+            se_diff: se,
+            statistic: t_stat,
+            df: df_error,
+            raw_p,
+            adjusted_p_or_q: adj_p,
+            is_fdr_q: false,
+            ci,
+            significant: adj_p.is_finite() && adj_p <= threshold,
+        });
+    }
     Ok(out)
 }
 
@@ -1543,6 +1609,7 @@ pub fn compare_dunn_ranks(
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::Duncan
+        | MultiplicityProcedure::Scheffe
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::Dunnett { .. } => MultiplicityProcedure::Bonferroni,

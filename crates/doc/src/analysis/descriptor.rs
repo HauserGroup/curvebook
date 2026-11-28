@@ -74,11 +74,17 @@ pub enum AnalysisKindId {
     FrequencyDistribution = 28,
     /// General *k*-group one-way Analysis of Covariance ([`AnalysisKind::Ancova`]).
     Ancova = 29,
+    /// One-way multivariate analysis of variance (MANOVA; [`AnalysisKind::Manova`]).
+    Manova = 30,
+    /// Competing-risks Aalen–Johansen cumulative incidence and Gray's *K*-sample test ([`AnalysisKind::CompetingRisks`]).
+    CompetingRisks = 31,
+    /// Stratified `2 × 2 × K` Cochran–Mantel–Haenszel contingency analysis ([`AnalysisKind::CochranMantelHaenszel`]).
+    CochranMantelHaenszel = 32,
 }
 
 impl AnalysisKindId {
     /// Complete ordered list of every [`AnalysisKindId`] discriminant.
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 33] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -109,6 +115,9 @@ impl AnalysisKindId {
         Self::MonteCarloSimulation,
         Self::FrequencyDistribution,
         Self::Ancova,
+        Self::Manova,
+        Self::CompetingRisks,
+        Self::CochranMantelHaenszel,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -151,6 +160,9 @@ impl AnalysisKindId {
             AnalysisKind::MonteCarloSimulation(_) => Self::MonteCarloSimulation,
             AnalysisKind::FrequencyDistribution(_) => Self::FrequencyDistribution,
             AnalysisKind::Ancova(_) => Self::Ancova,
+            AnalysisKind::Manova(_) => Self::Manova,
+            AnalysisKind::CompetingRisks(_) => Self::CompetingRisks,
+            AnalysisKind::CochranMantelHaenszel(_) => Self::CochranMantelHaenszel,
         }
     }
 
@@ -191,6 +203,9 @@ impl AnalysisKindId {
             Self::MonteCarloSimulation => &ALL_ANALYSIS_DESCRIPTORS[27],
             Self::FrequencyDistribution => &ALL_ANALYSIS_DESCRIPTORS[28],
             Self::Ancova => &ALL_ANALYSIS_DESCRIPTORS[29],
+            Self::Manova => &ALL_ANALYSIS_DESCRIPTORS[30],
+            Self::CompetingRisks => &ALL_ANALYSIS_DESCRIPTORS[31],
+            Self::CochranMantelHaenszel => &ALL_ANALYSIS_DESCRIPTORS[32],
         }
     }
 
@@ -432,6 +447,8 @@ const COL_MV: &[TableKind] = &[TableKind::Column, TableKind::MultipleVariables];
 const GROUPED_MV: &[TableKind] = &[TableKind::Grouped, TableKind::MultipleVariables];
 const SURVIVAL_MV: &[TableKind] = &[TableKind::Survival, TableKind::MultipleVariables];
 const CONTINGENCY_TABLES: &[TableKind] = &[TableKind::Contingency, TableKind::PartsOfWhole, TableKind::Column];
+const CONTINGENCY_MV: &[TableKind] = &[TableKind::Contingency, TableKind::MultipleVariables];
+const MV_ONLY: &[TableKind] = &[TableKind::MultipleVariables];
 const NESTED_ONLY: &[TableKind] = &[TableKind::Nested];
 const FRACTION_OF_TOTAL_TABLES: &[TableKind] =
     &[TableKind::Column, TableKind::Xy, TableKind::Grouped, TableKind::Contingency, TableKind::PartsOfWhole, TableKind::MultipleVariables];
@@ -1545,6 +1562,84 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &["stats.ancova"],
         docs_anchor: "analysis-ancova",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::Manova,
+        slug: "manova",
+        serde_variant: "Manova",
+        title: "One-Way MANOVA",
+        short_label: "One-Way MANOVA",
+        description: "Multivariate one-way analysis of variance reporting Pillai's trace, Wilks' Lambda, Hotelling–Lawley trace, Roy's largest root, SSCP matrices, and univariate ANOVAs.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Multivariate,
+        compatible_table_kinds: MV_ONLY,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "manova",
+        shorthands: &["manova", "one_way_manova", "stats.manova"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["group_column", "response_columns"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["stats.manova"],
+        docs_anchor: "analysis-manova",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::CompetingRisks,
+        slug: "competing-risks",
+        serde_variant: "CompetingRisks",
+        title: "Competing-Risks Cumulative Incidence (Aalen–Johansen & Gray's Test)",
+        short_label: "Competing Risks (CIF)",
+        description: "Nonparametric Aalen–Johansen cumulative incidence functions with variance/CIs and Gray's K-sample weighted log-rank test across groups.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Survival,
+        compatible_table_kinds: SURVIVAL_MV,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "competing_risks",
+        shorthands: &["competing_risks", "competing_risk", "cif", "aalen_johansen", "gray_test", "stats.competing_risks"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &[
+            "time_column",
+            "status_column",
+            "group_column",
+            "censored_code",
+            "primary_event_code",
+            "competing_event_code",
+            "gray_rho",
+            "log_log_ci",
+        ],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["stats.competing_risks"],
+        docs_anchor: "analysis-competing-risks",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::CochranMantelHaenszel,
+        slug: "cochran-mantel-haenszel",
+        serde_variant: "CochranMantelHaenszel",
+        title: "Stratified 2 × 2 × K Cochran–Mantel–Haenszel Test",
+        short_label: "Cochran–Mantel–Haenszel",
+        description: "Stratified 2 x 2 x K CMH chi-square test, common Mantel–Haenszel odds ratio with Robins–Breslow–Greenland CI, and Breslow–Day / Tarone homogeneity test.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Contingency,
+        compatible_table_kinds: CONTINGENCY_MV,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "cmh",
+        shorthands: &["cmh", "cochran_mantel_haenszel", "mantel_haenszel", "stratified_contingency", "stats.cmh"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &["continuity_correction", "exposure_column", "outcome_column", "stratum_column", "count_column"],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["stats.cmh"],
+        docs_anchor: "analysis-cochran-mantel-haenszel",
         user_creatable: true,
     },
 ];

@@ -165,6 +165,11 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
                 .or_else(|| non_finite_opt(fd.last_bin_center, at("last_bin_center")))
         }
         AnalysisKind::Ancova(s) => non_finite(s.multiplicity.threshold, at("multiplicity.threshold")),
+        AnalysisKind::Manova(_) | AnalysisKind::CochranMantelHaenszel(_) => None,
+        AnalysisKind::CompetingRisks(cr) => non_finite(cr.censored_code, at("competing_risks.censored_code"))
+            .or_else(|| non_finite(cr.primary_event_code, at("competing_risks.primary_event_code")))
+            .or_else(|| non_finite_opt(cr.competing_event_code, at("competing_risks.competing_event_code")))
+            .or_else(|| non_finite(cr.gray_rho, at("competing_risks.gray_rho"))),
     }
 }
 

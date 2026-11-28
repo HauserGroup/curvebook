@@ -109,6 +109,10 @@ pub struct FormatGraphState {
     #[serde(default)]
     pub forest_show_pooled_diamond_dirty: bool,
     #[serde(default)]
+    pub estimation_paired_lines: bool,
+    #[serde(default)]
+    pub estimation_paired_lines_dirty: bool,
+    #[serde(default)]
     pub pending_overlay_result_id: Option<Option<SheetId>>,
     #[serde(default)]
     pub series_gdo_bar: bool,
@@ -181,6 +185,8 @@ impl Default for FormatGraphState {
             bar_border_width_dirty: false,
             forest_show_pooled_diamond: false,
             forest_show_pooled_diamond_dirty: false,
+            estimation_paired_lines: false,
+            estimation_paired_lines_dirty: false,
             pending_overlay_result_id: None,
             series_gdo_bar: false,
             series_gdo_dirty: false,
@@ -207,6 +213,8 @@ impl FormatGraphState {
         self.orientation_dirty = false;
         self.forest_show_pooled_diamond = graph.spec.forest_show_pooled_diamond;
         self.forest_show_pooled_diamond_dirty = false;
+        self.estimation_paired_lines = graph.spec.estimation_paired_lines;
+        self.estimation_paired_lines_dirty = false;
         self.show_legend = graph.spec.legend.visible;
         self.legend_bordered = graph.spec.legend.bordered;
         self.model_equation_annotations.clone_from(&graph.spec.annotations);
@@ -442,6 +450,9 @@ impl FormatGraphState {
         if self.forest_show_pooled_diamond_dirty {
             spec.forest_show_pooled_diamond = self.forest_show_pooled_diamond;
         }
+        if self.estimation_paired_lines_dirty {
+            spec.estimation_paired_lines = self.estimation_paired_lines;
+        }
         if let Some(kind) = self.graph_kind {
             spec.kind = kind;
         }
@@ -550,6 +561,9 @@ impl FormatGraphState {
         }
         if self.forest_show_pooled_diamond_dirty {
             spec_patch.insert(String::from("forest_show_pooled_diamond"), json!(self.forest_show_pooled_diamond));
+        }
+        if self.estimation_paired_lines_dirty {
+            spec_patch.insert(String::from("estimation_paired_lines"), json!(self.estimation_paired_lines));
         }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
         let mut intents = vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch))];

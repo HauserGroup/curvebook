@@ -18,6 +18,7 @@ mod engine_smoke;
 mod frequency_distribution;
 mod glm_cox_r23_5_oracles;
 mod lognormal_anova_kmeans_oracles;
+mod manova_cif_cmh_scheffe_oracles;
 mod parity_g3_g7;
 mod parity_g8_barnard_pb_mi;
 mod power_oracle;

@@ -48,6 +48,12 @@
                 "BlandAltman": {
                   "type": "object"
                 },
+                "CochranMantelHaenszel": {
+                  "type": "object"
+                },
+                "CompetingRisks": {
+                  "type": "object"
+                },
                 "Contingency": {
                   "type": "object"
                 },
@@ -79,6 +85,9 @@
                   "type": "object"
                 },
                 "LinearRegression": {
+                  "type": "object"
+                },
+                "Manova": {
                   "type": "object"
                 },
                 "MonteCarloSimulation": {

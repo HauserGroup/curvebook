@@ -575,6 +575,7 @@ fn parse_mult_method(raw: &str, ctrl: usize) -> Result<MultiplicityMethod, Engin
         "newman_keuls" => Ok(MultiplicityMethod::NewmanKeuls),
         "duncan" => Ok(MultiplicityMethod::Duncan),
         "fisher_lsd" => Ok(MultiplicityMethod::FisherLsd),
+        "scheffe" => Ok(MultiplicityMethod::Scheffe),
         _ => Err(conflict(format!("unknown multiplicity `{raw}`"))),
     }
 }

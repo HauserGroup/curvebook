@@ -151,6 +151,7 @@ fn post_hoc_banner_name(method: MultiplicityMethod) -> &'static str {
         MultiplicityMethod::NewmanKeuls => "Newman-Keuls",
         MultiplicityMethod::Duncan => "Duncan",
         MultiplicityMethod::FisherLsd => "Fisher's LSD",
+        MultiplicityMethod::Scheffe => "Scheff\u{00e9}",
     }
 }
 
@@ -1121,7 +1122,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
     }
 
     ui.add_space(4.0);
-    let seg_methods: [(&str, &str, &str, MultiplicityMethod); 11] = [
+    let seg_methods: [(&str, &str, &str, MultiplicityMethod); 12] = [
         ("edit.post_hoc.bonferroni", "bonferroni", "Bonferroni", MultiplicityMethod::Bonferroni),
         (
             "edit.post_hoc.holm_bonferroni",
@@ -1132,6 +1133,7 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
         ("edit.post_hoc.sidak", "sidak", tr(rc.locale, "stat_params.post_hoc.sidak"), MultiplicityMethod::Sidak),
         ("edit.post_hoc.holm_sidak", "holm_sidak", "Holm-Sidak", MultiplicityMethod::HolmSidak),
         ("edit.post_hoc.duncan", "duncan", tr(rc.locale, "stat_params.post_hoc.duncan"), MultiplicityMethod::Duncan),
+        ("edit.post_hoc.scheffe", "scheffe", tr(rc.locale, "stat_params.post_hoc.scheffe"), MultiplicityMethod::Scheffe),
         ("edit.post_hoc.fisher_lsd", "fisher_lsd", tr(rc.locale, "stat_params.post_hoc.fisher_lsd"), MultiplicityMethod::FisherLsd),
         ("edit.post_hoc.games_howell", "games_howell", "Games-Howell", MultiplicityMethod::GamesHowell),
         ("edit.post_hoc.none", "none", "None", MultiplicityMethod::None),
@@ -1708,7 +1710,7 @@ fn render_multiplicity_dropdown(
     intents: &mut PendingUiIntents,
 ) {
     let selected_text = post_hoc_banner_name(rc.anova.multiplicity.method);
-    let options: [(&str, &str, MultiplicityMethod); 14] = [
+    let options: [(&str, &str, MultiplicityMethod); 15] = [
         ("tukey", "Tukey HSD", MultiplicityMethod::TukeyHsd),
         ("dunnett", "Dunnett", MultiplicityMethod::Dunnett { control_column: rc.ep.control_column }),
         ("dunn", "Dunn", MultiplicityMethod::DunnRankSum),
@@ -1717,6 +1719,7 @@ fn render_multiplicity_dropdown(
         ("sidak", "Sidak", MultiplicityMethod::Sidak),
         ("holm_sidak", "Holm-Sidak", MultiplicityMethod::HolmSidak),
         ("duncan", tr(rc.locale, "stat_params.post_hoc.duncan"), MultiplicityMethod::Duncan),
+        ("scheffe", "Scheff\u{00e9}", MultiplicityMethod::Scheffe),
         ("fisher_lsd", "Fisher's LSD", MultiplicityMethod::FisherLsd),
         ("games_howell", "Games-Howell", MultiplicityMethod::GamesHowell),
         ("bh", "BH (FDR)", MultiplicityMethod::BenjaminiHochbergFdr),
@@ -2095,6 +2098,7 @@ fn cld_status_message(method: MultiplicityMethod) -> &'static str {
         | MultiplicityMethod::FisherLsd
         | MultiplicityMethod::NewmanKeuls
         | MultiplicityMethod::Duncan
+        | MultiplicityMethod::Scheffe
         | MultiplicityMethod::DunnettT3
         | MultiplicityMethod::TamhaneT2 => "CLD supported: compact grouping letters (a, b, c) connect non-significantly different groups.",
         MultiplicityMethod::Dunnett { .. } | MultiplicityMethod::LinearTrend => {

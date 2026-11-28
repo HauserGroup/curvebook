@@ -987,6 +987,9 @@ fn evaluate_edit_params_widget(
     if norm.contains("fisherlsd") || norm.contains("lsd") {
         return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::FisherLsd);
     }
+    if norm.contains("scheffe") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Scheffe);
+    }
     if norm.contains("posthoc") {
         return r2_post_hoc_option_enabled(edit.assume_gaussian, true);
     }

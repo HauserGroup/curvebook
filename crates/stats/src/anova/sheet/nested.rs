@@ -49,7 +49,7 @@ fn validate_nested_multiplicity(method: MultiplicityMethod) -> Result<(), StatsE
         MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3 | MultiplicityMethod::DunnRankSum
     ) {
         return Err(StatsError::IncompatibleAnalysisSpec {
-            expected: "nested REML parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+            expected: "nested REML parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Scheffe, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
         });
     }
     Ok(())
