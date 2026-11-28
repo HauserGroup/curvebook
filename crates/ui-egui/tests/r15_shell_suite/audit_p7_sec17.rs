@@ -414,6 +414,7 @@ fn fa_sec17_06_survival_codes_validated_and_parts_dead_checkbox_removed() -> Tes
     }
 
     let mut drv = make_merge_driver(UiApp::new(), 1200.0, 800.0);
+    drv.click_widget_id("welcome.arch.additional_toggle")?;
     drv.click_widget_id("welcome.arch.parts_of_whole")?;
     assert!(!has_widget(&drv, "welcome.pow.check_total"));
     for wid in ["welcome.arch.survival", "welcome.survival.event_code.inc", "welcome.survival.censored_code.dec", "welcome.btn.create"] {
@@ -713,9 +714,17 @@ fn fa_sec17_11_polish_headers_date_validation_mv_roles_and_template_error() -> T
     });
     w_drv.click_widget_id("welcome.btn.create")?;
     assert!(has_widget(&w_drv, "welcome.template.error"));
+    w_drv.click_widget_id("welcome.mode.new_table")?;
+    let mv_scroll_pt = w_drv.frame_meta().find_by_widget_id("welcome.arch.multiple_variables").ok_or("mv")?.clipped_rect.center();
     w_drv.click_widget_id("welcome.arch.multiple_variables")?;
     w_drv.state_mut().1.schema.cols = 8;
     w_drv.run_settled();
+    for _ in 0..8 {
+        if has_widget(&w_drv, "welcome.mv.role.7.Label") {
+            break;
+        }
+        w_drv.wheel_at(mv_scroll_pt, egui::Vec2::new(0.0, -180.0))?;
+    }
     w_drv.click_widget_id("welcome.mv.role.7.Label")?;
     assert_eq!(w_drv.state().1.schema.mv_role_kinds.get(7).copied(), Some(2));
     Ok(())

@@ -18,7 +18,7 @@ CurveBook provides eight graph families. Each family accepts specific kinds of d
 | **Column** (`Column`) | Column, Nested | Vertical or horizontal bars, replicate dots, summary lines, before-after lines, box plots, and violin plots. |
 | **Grouped** (`Grouped`) | Grouped, Nested | Interleaved, separated, stacked, or superimposed bars, boxes, violins, and points (including population pyramids). |
 | **Contingency** (`Contingency`) | Contingency | Grouped count bars, stacked count bars, and 100% stacked bars of normalized fractions. |
-| **Parts of Whole** (`PartsOfWhole`) | Parts of Whole | Pie, donut (with an optional total in the center), 100% horizontal stacked bar, and 10×10 waffle grid. |
+| **Parts of Whole** (`PartsOfWhole`) | Parts of Whole | Pie, donut (with an optional total in the center), and 100% horizontal stacked bar. |
 | **Survival** (`Survival`) | Survival table or results | Kaplan–Meier curves drawn as steps or polylines, censor ticks, error bands or SEM, median crosshairs, Number at Risk tables, and Cox survival overlays for covariate profiles. |
 | **Multiple Variables** (`MultipleVariables`) | Multiple Variables | Bubble and scatter plots that map columns to X, Y, colour, size, marker symbol, or split panels. |
 | **Diagnostic** (`Diagnostic`) | Results sheets and specialized inputs | Heatmaps, parameter correlation heatmaps, volcano plots, Bland–Altman, Gardner–Altman estimation plots, ROC curves, forest plots, residual plots, homoscedasticity, actual vs. predicted (calibration), residual vs. row, gap statistic, normal and lognormal Q–Q plots, standalone hierarchical dendrograms, and PCA biplots. |

@@ -31,10 +31,10 @@ All roadmap work follows [`AGENTS.md`](../AGENTS.md) §3 (headless-first `L0`–
 | **R0** Align with house principles | Beta / Hygiene | in progress | Open: [`R0.16`](#r016-local-source-coverage-reports-cargo-llvm-cov), [`R0.27`](#r027-user-first-readme-overhaul-beta-gate), [`R0.35`](#r035-keep-the-ci-cache-under-the-repository-budget), [`R0.36`](#r036-full-workspace-gap--delta-audit-remediation-beta-gate). Archived: [`r0.md`](history/roadmap/r0.md). |
 | **R1**–**R7** Core math, tables, stats, fit, charts, MV, automation | Alpha / 1.0 | done | All items verified & archived ([`r1.md`](history/roadmap/r1.md)–[`r7.md`](history/roadmap/r7.md)). |
 | **R8** Desktop/WASM shell, localization & `1.0` hardening | 1.0 / Store | in progress | Open: [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening), [`R8.9`](#r89-windows-msix-packaging--microsoft-store-distribution), [`R8.11`](#r811-windows-authenticode-signing-after-beta), [`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate) (`ar`/`he` RTL unlikely), [`R8.13`](#r813-older-macos-metal-device-lost-hardening--windows-console-suppression). Archived: [`r8.md`](history/roadmap/r8.md). |
-| **R9** Scientific quality-of-life suite | Deferred | done (active scope) | Active `QOL` items archived ([`r9.md`](history/roadmap/r9.md)); `R9.10`, `R9.11`, `R9.13`, `R9.15` deferred ([scope](planning/qol-enhancements.md)). |
-| **R10** Human-operable GUI & `65`-workflow completion | Beta (done) / 1.0 | in progress | `65/65` automated workflows, `R10.29`–`R10.30`, `R10.34`–`R10.36` archived ([`r10.md`](history/roadmap/r10.md)). Open: [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate) (**1.0**); [`R10.31`](#r1031-desktop-graph-image-gallery--linked-region-ui-parity-fixes)–[`R10.33`](#r1033-advanced-importpaste-special-live-link-persistence--export-figure-options) (post-Beta). |
-| **R11** Usable browser app (`eframe::WebRunner`) | 1.0 | in progress | `apps/curvebook-web` is a strict-CSP placeholder until [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate); browser tests & QA (`R11.1`–`R11.10`) deferred to **1.0**. |
-| **R12** User documentation, Pages site & workflow guides | Beta / post-Beta / 1.0 | in progress | Open: [`R12.1`](#r121-documentation-site-on-github-pages) (**Beta** live check); [`R12.2`](#r122-example-workflow-guides), [`R12.3`](#r123-functionality-and-methods-reference), [`R12.7`](#r127-application-user-guide-desktop-and-browser), [`R12.8`](#r128-search-discoverability-for-the-pages-site). Archived: [`r12.md`](history/roadmap/r12.md). |
+| **R9** Scientific quality-of-life suite | Deferred | done (active scope) | Active `QOL` items archived ([`r9.md`](history/roadmap/r9.md)); `R9.10` and `R9.11` deferred. Standalone calculators (`R9.13`, `R9.15`) dropped ([scope](planning/qol-enhancements.md)). |
+| **R10** Human-operable GUI & `65`-workflow completion | Optional before Beta (done locally) / post-Beta / 1.0 | in progress | `65/65` automated workflows, `R10.29`–`R10.30`, `R10.34`–`R10.36` archived ([`r10.md`](history/roadmap/r10.md)); [`R10.37`](#r1037-simplify-the-core-desktop-workflow) (optional before Beta, done locally). Open: [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate) (**1.0**); [`R10.31`](#r1031-desktop-graph-image-gallery--linked-region-ui-parity-fixes)–[`R10.33`](#r1033-advanced-importpaste-special-live-link-persistence--export-figure-options) (post-Beta). |
+| **R11** Usable browser app | None | parked | Browser delivery and parity are unscheduled. See [scope](#r11-usable-browser-app) and the [parked proposal](history/roadmap/r11.md). |
+| **R12** User documentation, Pages site & workflow guides | Beta / post-Beta / 1.0 | in progress | Open: [`R12.1`](#r121-documentation-site-on-github-pages) (**Beta** live check); [`R12.2`](#r122-example-workflow-guides), [`R12.3`](#r123-functionality-and-methods-reference), [`R12.7`](#r127-desktop-application-user-guide), [`R12.8`](#r128-search-discoverability-for-the-pages-site). Archived: [`r12.md`](history/roadmap/r12.md). |
 | **R13** Advanced regression, graphing, layouts & `WF-51`–`WF-65` | Beta | done | `R13.1`–`R13.10` archived ([`r13.md`](history/roadmap/r13.md)). |
 | **R14** Releases & distribution | Beta / post-Beta | in progress | Open: [`R14.1`](#r141-beta-release-pipeline) (**Beta**); [`R14.2`](#r142-release-sbom-and-ci-runner-hardening)–[`R14.5`](#r145-mcp-bundle-mcpb-and-mcp-registry-listing-post-beta), [`R14.7`](#r147-software-citation-citationcff-zenodo-doi--versioned-methods-paragraph-post-beta). Archived: [`r14.md`](history/roadmap/r14.md). |
 | **R15** Modern `egui` desktop GUI overhaul | Beta | done | `R15.1`–`R15.10` archived ([`r15.md`](history/roadmap/r15.md)). |
@@ -45,13 +45,13 @@ All roadmap work follows [`AGENTS.md`](../AGENTS.md) §3 (headless-first `L0`–
 | **R21** Structural LOC, test-layer & docs reduction | none | done | `R21.1`–`R21.4` archived ([`r21.md`](history/roadmap/r21.md)). |
 | **R22** `.pzfx`/`.prism` compatibility & project merging | Beta | done | `R22.1`–`R22.6` landed in `03c7b15` & archived ([`r22.md`](history/roadmap/r22.md)). |
 | **R23** Analytical, statistical, regression & formula breadth | Optional before Beta | in progress | Open: [`R23.3`](#r233-data-reduction-curve-calculus-unwired-transforms--chained-monte-carlo-simulation)–[`R23.6`](#r236-nonlinear-regression-constraints-derived-ci-transforms-equation-catalog-dsl-depth--theoretical-plotting-62) (non-blocking). `R23.1`–`R23.2` archived ([`r23.md`](history/roadmap/r23.md)). |
-| **R24** Advanced graph formatting, pipelines, layouts & visual audit | post-Beta (deferred) | todo | [`R24.1`](#r241-advanced-graph-formatting-axes-scale-bars-heatmaps--multivariate-visuals-post-beta)–[`R24.3`](#r243-workflow-specification-backlog--full-visual-parity-audit-post-beta). |
+| **R24** Advanced graph formatting, layouts & visual audit | post-Beta (deferred) | todo | [`R24.1`](#r241-advanced-graph-formatting-axes-scale-bars-heatmaps--multivariate-visuals-post-beta)–[`R24.3`](#r243-workflow-specification-backlog--full-visual-parity-audit-post-beta). |
 | **R25** Imported analysis live recompute & interop accuracy | Beta (done) / post-Beta | in progress | [`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate) (**Beta**, done locally). Open: [`R25.2`](#r252-imported-analysis-accuracy-gaps-post-beta)–[`R25.4`](#r254-interop-follow-ups-saving-rebuilt-graphs--post-test-cost-post-beta) (post-Beta, tracked in GitHub issues). |
 
 **Gate summary:**
 - **Alpha:** Released 2026-11-17 as [`v0.1.0-alpha.1`](https://github.com/HauserGroup/curvebook/releases/tag/v0.1.0-alpha.1).
-- **Beta (automated only; no manual human step required):** All local Beta code is complete, including desktop GUI (`65/65` five-stage `WorkflowRun`), `.pzfx`/`.prism` interop & schema `v9` project merging (`R22`), live recompute of corpus-verified imported `.prism` analyses ([`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate), done locally), and `GAP-01`–`GAP-07` / delta-audit fixes (`R0.36`). Remaining Beta gates are hosted-only: hosted `ci.yml` & `release.yml` dry-run/rehearsal checks ([`R14.1`](#r141-beta-release-pipeline), [`R0.36`](#r036-full-workspace-gap--delta-audit-remediation-beta-gate)), scripted README rehearsal check ([`R0.27`](#r027-user-first-readme-overhaul-beta-gate)), and automated live Pages verification ([`R12.1`](#r121-documentation-site-on-github-pages)). Browser app (`R11`) is deferred to **1.0**; desktop RTL (`ar`/`he`) support is **unlikely** and unscheduled.
-- **1.0:** Recorded desktop/browser walkthroughs ([`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa)), Windows/Linux smoke & VM QA ([`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening)), native-speaker review of shipped LTR/CJK `[Draft]` translations ([`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate)), Windows Authenticode signing ([`R8.11`](#r811-windows-authenticode-signing-after-beta)), and `eframe::WebRunner` browser app ([`R11`](#r11-usable-browser-app)).
+- **Beta (automated only; no manual human step required):** All local Beta code is complete, including desktop GUI (`65/65` five-stage `WorkflowRun`), `.pzfx`/`.prism` interop & schema `v9` project merging (`R22`), live recompute of corpus-verified imported `.prism` analyses ([`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate), done locally), and `GAP-01`–`GAP-07` / delta-audit fixes (`R0.36`). Remaining Beta gates are hosted-only: hosted `ci.yml` & `release.yml` dry-run/rehearsal checks ([`R14.1`](#r141-beta-release-pipeline), [`R0.36`](#r036-full-workspace-gap--delta-audit-remediation-beta-gate)), scripted README rehearsal check ([`R0.27`](#r027-user-first-readme-overhaul-beta-gate)), and automated live Pages verification ([`R12.1`](#r121-documentation-site-on-github-pages)). Desktop RTL (`ar`/`he`) support is **unlikely** and unscheduled.
+- **1.0:** Recorded desktop walkthroughs ([`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa)), Windows/Linux smoke & VM QA ([`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening)), native-speaker review of shipped LTR/CJK `[Draft]` translations ([`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate)), and Windows Authenticode signing ([`R8.11`](#r811-windows-authenticode-signing-after-beta)).
 
 > **Retired `gui_only` note:** Historical `gui_wf_*` tests (retired under `R21.1`) drove semantic widget patches rather than drawn widgets. Beta's GUI gate (`R10.25`) counts only five-stage `EguiHumanPathDriver` runs (`human_wf_*`).
 
@@ -98,7 +98,7 @@ Owner: open · Status: in progress · Was: G13, M7 (**1.0**)
 Windows MSIX/Store distribution lives in [`R8.9`](#r89-windows-msix-packaging--microsoft-store-distribution); Apple signing is in [`R14.1`](#r141-beta-release-pipeline); Windows Authenticode signing is in [`R8.11`](#r811-windows-authenticode-signing-after-beta).
 
 - [x] Verified local macOS universal `.dmg` packaging/validation (`plutil`, `codesign`, `verify.sh`, `check-app-specific.sh`), keyless Sigstore build-provenance attestations (`actions/attest-build-provenance` with `--signer-workflow`), and active `Release tags` / immutable-releases GitHub settings (2026-11-18).
-- [ ] Complete Windows VM and Linux X11/Wayland VM (AppImage, the only Linux format after [`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files)) QA runs (live browser QA is [`R11.10`](#r1110-live-browser-qa--supported-browser-matrix); FreeBSD is Tier 2 CLI-only with no desktop GUI QA). Apple Developer ID signing and notarization moved to [`R14.1`](#r141-beta-release-pipeline); Windows code signing moved to [`R8.11`](#r811-windows-authenticode-signing-after-beta) (after Beta).
+- [ ] Complete Windows VM and Linux X11/Wayland VM (AppImage, the only Linux format after [`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files)) QA runs. FreeBSD is Tier 2 CLI-only. Apple Developer ID signing and notarization moved to [`R14.1`](#r141-beta-release-pipeline); Windows code signing moved to [`R8.11`](#r811-windows-authenticode-signing-after-beta) (after Beta).
 
 ### R8.9 Windows MSIX packaging & Microsoft Store distribution
 Owner: maintainers · Status: in progress · Was: Windows distribution planning (2026-11-16)
@@ -157,16 +157,6 @@ Owner: maintainers · Status: deferred · Was: QOL-11, M8+ · Scheduling: no mil
 
 - Existing `.curvebook.d/` I/O and `NamedCheckpoint` commands remain supported; further QoL development is deferred.
 
-### R9.13 Instant statistical, distribution & Bayesian calculators (`QOL-13`)
-Owner: open · Status: deferred · Was: QOL-13, M8+ · Scheduling: no milestone assigned ([reference specification](planning/calculators-and-quick-stats.md))
-
-- Deferred reference scope: stateless `calc.*` commands, scalar formula builtins, and a Calculators drawer.
-
-### R9.15 Bench molarity, stock dilution & radiochemical decay calculators (`QOL-15`)
-Owner: open · Status: deferred · Was: QOL-15, M8+ · Scheduling: no milestone assigned ([reference specification](planning/calculators-and-quick-stats.md))
-
-- Deferred reference scope: molarity, stock/serial dilution, moles/grams, and radiochemical calculators.
-
 ---
 
 ## R10 Human-operable GUI & 50-workflow human completion
@@ -176,11 +166,12 @@ Automated five-stage completion of all `65` reference workflows (`WF-01`–`WF-6
 **Binding rules:** (1) A step counts only when driven by raw pointer, wheel, keyboard, or IME events against drawn widgets (`EguiHumanPathDriver` or physical OS input; [pitfalls §6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)). (2) All wording, icons, and styling are original (`xtask {brands,cleanroom,assets}`); lowercase `".pzfx files"` and `".prism files"` are explicitly allowed and preferred (`AGENTS.md` §1).
 
 ### R10.13 Human-operable 50-workflow acceptance & manual QA
-Owner: maintainers · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. note: 50–80 h · Depends on: [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R14.1`](#r141-beta-release-pipeline), [`R11.10`](#r1110-live-browser-qa--supported-browser-matrix) · Gate: **1.0** (Beta relies on automated [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate))
+Owner: maintainers · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. note: 50–80 h · Depends on: [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R14.1`](#r141-beta-release-pipeline) · Gate: **1.0** (Beta relies on automated [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate))
 
 - [x] Automated `human_wf_*` suites (`65 / 65` five-stage complete), screenshot baselines (`cargo xtask screenshots --check`), and [`gui-workflows.md`](gui-workflows.md) §6.2 evidence table are complete and enforced by `cargo xtask status`.
 - [ ] **Desktop (1.0):** Run and record a walkthrough of all 65 workflows (`WF-01`–`WF-65`, plus kinetic microplate/AUC UI spot-checks from [`R17.7`](history/roadmap/r17.md#r177-multi-block-tabular-import-standalone-auc-analysis-and-composable-microplate-mapping)) on the macOS desktop app, installed from a signed release candidate build ([`R14.1`](#r141-beta-release-pipeline) pipeline), using either an agent with "computer use" mouse and screen (driving the real rendered window strictly from screen pixels, OS mouse movement, clicks, drags, wheel scroll, and keyboard input — never `--control`, MCP, `--event-script`, or `dispatch_gui_action`) or a manual human. Include the real native open/save/export dialogs and the system clipboard, which the human-path harness stubs. File defects against new `R10` items; **1.0** ships only when every workflow completes. *(Moved from **Beta** 2026-11-20.)*
-- [ ] **Browser (1.0):** Run and record the same walkthrough in one browser under the same rules, delivered by [`R11.10`](#r1110-live-browser-qa--supported-browser-matrix), filing defects against `R11` items.
+
+Begin the desktop walkthrough by importing a workbook. Edit a dose-response measurement, inspect the updated fit, and export a figure. See the [desktop simplification scope](#r1037-simplify-the-core-desktop-workflow).
 
 ### R10.24 Windows & Linux desktop GUI smoke QA (1.0 gate)
 Owner: maintainers · Status: in progress · Was: Beta GUI scope review 2026-11-18 · Est. note: 12–24 h, plus Windows/Linux desktops · Depends on: [`R14.1`](#r141-beta-release-pipeline), [`R10.23`](history/roadmap/r10.md#r1023-close-the-remaining-desktop-gui-gaps-beta-gate) (done), [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done) · Gate: **1.0**
@@ -196,7 +187,8 @@ Owner: open · Status: in progress · Was: GUI & layout spec audit 2026-11-24 ·
 - [x] Fixed `build_legend_items` dataset-title fallback (`column_grouped/`) and targeted linked-region **Unlink** (`linked_regions.rs`) with regression tests.
 - [ ] Expose a `Bar width (pt)` numeric spinner bound to `SeriesSpec::bar_width_override_pt` in `crates/ui-egui/src/egui_shell/graph_modals/format_graph/series.rs`.
 - [ ] Expose `(X, Y)` position inputs and a `pt`/`mm`/`cm`/`in` unit selector in `render_format_image_geometry` (`crates/ui-egui/src/egui_shell/graph_modals/r13_modals.rs`).
-- [ ] Add `Export Selected` and `Place Selected onto New Layout` batch actions to `PortfolioGallery` (`crates/ui-egui/src/egui_shell/portfolio_gallery.rs`) and a `Target Scope` toggle (`Active sheet` vs `Selected gallery sheets`) to `ActiveDialog::ExportFigure` (`crates/ui-egui/src/egui_shell/app_modals.rs`).
+
+Gallery bulk style application is covered by [`R10.37`](#r1037-simplify-the-core-desktop-workflow). Batch export and batch placement from Gallery are out of scope.
 
 ### R10.32 Desktop workbench authoring, Welcome Hub, Paste Transpose & sheet-lifecycle ergonomics
 Owner: open · Status: in progress · Was: desktop workbench spec audit 2026-11-24 · Depends on: none · Gate: post-Beta · Est. note: 16–28 h
@@ -206,7 +198,7 @@ Owner: open · Status: in progress · Was: desktop workbench spec audit 2026-11-
 - [x] **Direct Paste Transpose & interactive row sorting (Slice 1):** added one-click `Edit › Paste Transpose` (`table.pasteTranspose`), `TableArchetype::permute_rows` / `DataSheet::permute_rows`, `table.sortRows`, and interactive data-grid row-sorting column-header/menu/dialog controls (`crates/ui-egui/src/egui_shell/data_grid/`).
 - [x] **Clone a Graph replicate override, Slice 1 catalog/i18n sync & `EguiHumanPathDriver` coverage:** added the `override_replicates` subcolumn-format control to `Clone a Graph` (`welcome_hub.rs`), regenerated `docs/commands.md` and `crates/mcp/src/ui_catalog.rs`, added all new Slice 1 UI/command strings across all `16` locales, and added `EguiHumanPathDriver` regression tests covering Floating Notes authoring (`r15_3_stage_canvas.rs`), Welcome Hub sample notes & `override_replicates` (`r15_3_welcome_nav.rs`), Paste Transpose (`r15_4_grids_and_ingestion.rs`), and interactive row sorting (`r15_2_column_grid.rs`).
 - [ ] **Sheet-lifecycle ergonomics (Slice 2):** add cascading auto-title rename propagation in `crates/engine/src/cmd/sheet.rs` (`run_sheet_rename` updates linked auto-titled `ResultSheet` and `GraphSheet` titles while preserving user-edited `custom_title`s), and replace hard `Conflict` rejection when deleting a `GraphSheet` embedded on a `LayoutSheet` with an unassigned placeholder frame on the layout.
-- [ ] **Welcome Hub completions (Slice 3):** add Recently Accessed Files and Recently Accessed Folders MRU lists to `Open a File`; add cross-project / recent / saved-example source tabs to `Clone a Graph` (`crates/ui-egui/src/egui_shell/welcome_hub.rs`); and provide curated styled example portfolio projects alongside the starter templates.
+- [ ] **Recent files and folders (Slice 3):** Add recently used files and folders to **Open a File**. [`R10.37`](#r1037-simplify-the-core-desktop-workflow) owns the Welcome screen entry points. Extra clone-source tabs and curated portfolio projects are out of scope.
 - [ ] Add `EguiHumanPathDriver` regression coverage, `crates/mcp/src/ui_catalog.rs` updates, and `16`-locale catalog entries for remaining Slice 2–3 additions.
 
 ### R10.33 Advanced Import/Paste Special live-link persistence & Export Figure options
@@ -216,84 +208,25 @@ Owner: open · Status: in progress · Was: import/export spec audit 2026-11-24 �
 - [ ] Add `skipRowsUntil`, `skipRowsAfter`, `skipEveryRowWhere` (row omission vs exclusion), `decimateCols`, `renameTableMode` (`imported_filename` / `fromSourceRow1Based`), `<Info>...</Info>` / `<Notes>...</Notes>` tag and explicit row-range extraction in `ImportWizard` (`crates/ui-egui/src/egui_shell/import_wizard.rs`), and optional OS file-watcher refresh (`autoUpdateOnChange`) for `LinkSource::ExternalDelimitedFile`.
 - [ ] Complete `Export Figure` options (`crates/ui-egui/src/egui_shell/app_modals.rs`, `crates/render/`): true alpha-channel transparent canvas background export, `Grayscale` and `1-bit Monochrome` color spaces, `JPG` and `BMP` raster output options, `Save as default`, and `Open folder after export`. *(True alpha-channel `transparent_bg` export for SVG/PNG/TIFF landed locally; `Grayscale` / `1-bit Monochrome`, `JPG` / `BMP`, `Save as default`, and `Open folder after export` remain open.)*
 
+### R10.37 Simplify the core desktop workflow
+Owner: maintainers · Status: done · Was: Desktop scope review 2026-11-27 · Depends on: none · Gate: optional before Beta (non-blocking)
+
+Prioritize opening or importing data, preparing a table, running an analysis or fit, inspecting linked results, and exporting a figure. Alpha can drop superseded commands, UI routes, and persisted waffle charts directly.
+
+- [x] **Start a project.** Put **Open**, **Import**, **New Data Table**, and **Sample Data** first in Welcome. Group **New from Template** and **Clone Pipeline** under one **Reuse an Analysis** entry. Keep **Save as Template** available from an open project. Offer **Parts of Whole** under additional table types.
+- [x] **Use one Gallery entry.** Keep **View › Gallery** and remove the footer and navigator launch controls. Verify opening a graph from its thumbnail and applying a style to multiple selected graphs. The navigator remains the primary sheet browser.
+- [x] **Clear the Multiple Variables toolbar.** Move **Randomize Groups** and **Sample Rows** to **Data**. Keep **Analyze** and the formula bar directly accessible. Verify both moved commands still run from the menu.
+- [x] **Use one figure-export dialog.** Route the File menu, graph toolbar, and layout toolbar to **Export Figure…**. Put format choice inside the dialog and remove the duplicate per-format File entries. Data, results, and methods exports stay available for their respective outputs.
+- [x] **Remove 10×10 waffle charts.** Remove the renderer, persisted variant, `parts.waffle` preset, and UI and documentation references. Keep the other Parts of Whole displays and table analysis. Update schemas and registries through their generators.
+- [x] **Verify the desktop paths.** Update affected rendered-widget workflow steps, menus on macOS and in-window hosts, translations, screenshots, and user guides. Exercise workbook import, a live dose-response fit after a cell edit, and figure export from a graph and a layout. Use the same tasks as first-run probes in the recorded desktop walkthrough.
+
 ---
 
 ## R11 Usable browser app
 
-**Status & architecture (deferred to `1.0`; not a Beta requirement):** Following desktop `egui` cutover (`R15.5`, `0bce30e`), the legacy inline-JS/native web bridge (`chrome_bridge.rs`, `text_bridge.rs`, `host_adapters.rs`, and legacy `HumanPathDriver`) was removed. `apps/curvebook-web` is currently a minimal strict-CSP, zero-egress `wasm32` placeholder pending [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (`eframe::WebRunner`). `R11.1`–`R11.10` retain the browser capability requirements that `R11.11` and subsequent `1.0` browser work must satisfy and prove in real browsers.
+**Parked (`2026-11-27`).** The browser app and full desktop parity have no release milestone. A future browser release needs a separate product decision based on a concrete user workflow. The current host is a strict-CSP WebAssembly placeholder. The core's `wasm32-unknown-unknown` support and on-demand `cargo xtask wasm` checks continue.
 
-### R11.1 Real-browser test harness & web CI gates
-Owner: maintainers · Status: in progress · Was: Browser-app audit 2026-11-17 · Est. note: 24–40 h
-
-- [x] Paused automatic WASM CI (keeping `cargo xtask ci wasm` and `cargo xtask web-bundle` on demand), added `wasm32` Clippy + `trunk build --cargo-profile web-release`, and implemented `verify_web_bundle_zip_bytes` (`xtask/src/web_fonts.rs`).
-- [ ] **Decision:** choose the in-browser test runner. Recommended: the `wasm-bindgen-test` dev-dependency run headless through an externally installed `wasm-bindgen-cli` test runner with chromedriver/geckodriver in CI only. Rust WebDriver client crates are excluded because they are HTTP clients (Zero Telemetry). Confirm with `cargo xtask licenses` and `cargo xtask telemetry`.
-- [ ] Add a browser smoke suite (boot, first frame, click, type, open project bytes, export) and run it in CI when automatic WASM verification resumes.
-
-### R11.2 Rust-owned browser host glue & direct frame upload
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 40–64 h · Depends on: `R11.1`, [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] Keep DOM listeners, file pickers, multi-tab locks, and autosave scheduling in Rust (`web-sys`) modules under `apps/curvebook-web/src/` alongside `eframe::WebRunner`, keeping `apps/curvebook-web/index.html` a minimal strict-CSP shell.
-- [ ] Avoid base64-in-JSON frame transport (use direct WebGPU/WebGL canvas presentation via `eframe::WebRunner` or direct wasm memory upload).
-- [ ] Cover host glue with `R11.1` browser tests while keeping strict CSP, zero egress, and `cargo xtask telemetry` passing.
-
-### R11.3 Browser text measurement drives layout
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 16–28 h · Depends on: [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] Ensure browser-side font loading and text measurement in the `eframe::WebRunner` build match rendered hit boxes without network requests or unused Trunk `fonts/` copy hooks.
-- [ ] Browser test: hit-box centres match the accessibility tree and drawn text is not clipped for long and CJK labels at `1.0x` and `2.0x`.
-
-### R11.4 Text entry, IME, focus & pointer input
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 24–40 h · Depends on: [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] Verify composition (IME), soft-keyboard, native cut/copy/paste, pointer capture for drags leaving the canvas, focus-exit (`Tab`/`Esc` outside modals), and touch inertia in the `WebRunner` browser host.
-- [ ] Browser tests for IME commit in a grid cell (`ja`, `zh-CN`, `ko`), drag outside the canvas, and focus exit.
-
-### R11.5 Document lifecycle: save-in-place, folders & recovery
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 20–32 h · Depends on: [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] Save back to the retained file handle where the File System Access API allows it (download fallback unchanged), and mark the document clean after a successful save or export.
-- [ ] Write opened `.curvebook.d/` folders back through `SyncDirectory`.
-- [ ] Key autosave per document, prompt before restoring, and clear the snapshot after a successful save.
-- [ ] Supply real timestamps on `wasm32` through the caller-supplied timestamp path (no `chrono`, no hand-rolled calendar math).
-
-### R11.6 Responsiveness: off-main-thread compute & frame cadence
-Owner: maintainers · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 32–56 h · Depends on: [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] **Decision:** run the engine session in a same-origin Web Worker (CSP `'self'`) or make long commands chunked and cancellable on the main thread.
-- [ ] Show a busy state with cancel for long analyses and fits; collapse duplicate resize renders; schedule frames cleanly with `requestAnimationFrame`.
-- [ ] Measure the `R10.22` budgets in a browser on the `1M`-cell grid and a nonlinear-fit workflow.
-
-### R11.7 Fonts, export & clipboard fidelity on web
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 12–20 h · Depends on: `R11.3`
-
-- [ ] Let the user supply a TrueType/OpenType font file for PDF/SVG embedding (`SystemFontSet::from_sfnt_bytes`, `embedded_truetype_font` in `crates/pdf/src/writer.rs`).
-- [ ] **Decision:** offer EMF as a web download, or document it as desktop-only.
-- [ ] Support image paste from the clipboard, or document it as unsupported on web.
-
-### R11.8 Browser accessibility
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 16–28 h · Depends on: [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate), `R11.4`
-
-- [ ] Ensure the browser accessibility tree exposes actionable, incrementally updated controls routed through the same input path as pointer and keyboard events.
-- [ ] Record a screen-reader walkthrough (VoiceOver with Safari, NVDA with Firefox); feeds [`R10.20`](history/roadmap/r10.md#r1020-keyboard--screen-reader-accessibility).
-
-### R11.9 50-workflow human-path parity on the web host
-Owner: open · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 30–48 h · Depends on: `R11.3`, `R11.4`, [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate)
-
-- [ ] Run `WF-01`–`WF-65` human-path parity against the `WebRunner` web host (sharing `EguiHumanPathDriver` / browser test driver) plus a five-workflow subset in a real browser under `R11.1`.
-
-### R11.10 Live browser QA & supported-browser matrix
-Owner: maintainers · Status: todo · Was: Browser-app audit 2026-11-17 · Est. note: 16–24 h · Depends on: `R11.1`–`R11.9`, [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) · Gate: **1.0**
-
-- [ ] Record walkthroughs using an agent with "computer use" mouse and screen or a manual human on current Chrome or Edge, Firefox, Safari, and iPad Safari, filing defects against `R11` items.
-- [ ] Confirm or correct the minimum browser versions stated in [`packaging/web/README.md`](../packaging/web/README.md).
-- [ ] Use these walkthroughs as the browser part of [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa) QA and the live browser QA of [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening) (required for the **1.0** full release, not **Beta**).
-
-### R11.11 Migrate browser host to eframe WebRunner (1.0 gate)
-Owner: maintainers · Status: todo · Was: Post-Beta browser overhaul boundary 2026-11-19 · Est. note: 36–60 h · Depends on: [`R15.5`](history/roadmap/r15.md#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness) (done), `R11.1` · Gate: **1.0**
-
-- [ ] Rebuild `apps/curvebook-web` onto `eframe::WebRunner` sharing [`R15`](history/roadmap/r15.md#r15-modern-egui-desktop-gui-overhaul-beta-gate)'s `egui` views, solving zero-`fetch(` staged first-paint font loading under CurveBook's strict shipping CSP (`AGENTS.md` §1) and keeping the compressed bundle within `MAX_WEB_RELEASE_ZIP_BYTES` (`6,243,591` B in `xtask/src/web_fonts.rs`).
-- [ ] Use tagged Serde messages for the surviving scalar metadata browser-bridge events/commands (`R11-1` maintainability follow-up: keep frame pixels, file bytes, and legacy compatibility decoding behind adapters until characterized).
-- [ ] Reconcile or fold superseded subtasks in `R11.2`–`R11.9` once `WebRunner` runs under `R11.1`, and verify `R11` IME, browser accessibility, save/recovery, clipboard, and `R11.10` live browser acceptance.
+See the [parked implementation and QA proposal](history/roadmap/r11.md) for `R11.1`–`R11.11`.
 
 ---
 
@@ -329,13 +262,12 @@ Owner: open · Status: todo · Was: Maintainer request 2026-11-18; pilot scoped 
 - [ ] Keep the guides executable: back each guide's MCP steps with a test (for example a `curvebook.batch.v1` script or a `command_batch` sequence) that runs in CI, so a guide fails CI when the product changes under it.
 - [ ] Publish the guides on GitHub Pages next to the reference and link them from the README and the beginner's guide.
 
-### R12.7 Application user guide (desktop and browser)
-Owner: open · Status: todo · Was: Maintainer scope decision 2026-11-18 · Est. note: 32–56 h · Depends on: `R12.1`, `R12.3`, [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R10.30`](history/roadmap/r10.md#r1030-human-path-tests-for-import-and-export-beta-gate); browser part on `R11.10` · Gate: none (browser part waits for **1.0**)
+### R12.7 Desktop application user guide
+Owner: open · Status: todo · Was: Maintainer scope decision 2026-11-18 · Est. note: 32–56 h · Depends on: `R12.1`, `R12.3`, [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R10.30`](history/roadmap/r10.md#r1030-human-path-tests-for-import-and-export-beta-gate) · Gate: none
 
 - [ ] Add a **Using the app** section: workspace layout, navigator and sheets, menus and dialogs (from `UI_COMMANDS`), keyboard shortcuts (generated from the same registry), accessibility and screen-reader support, and how each `R12.3` capability is reached in the interface.
 - [ ] Document a GUI path only when a passing human-path test or a recorded computer-use or manual walkthrough covers it, and cite that evidence in the page source ([pitfalls §6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity)). Agent-harness tests do not count.
 - [ ] Take screenshots from the clean-room screenshot generator (`cargo xtask screenshots`), with an `ASSETS.md` row for each (`cargo xtask assets`).
-- [ ] Add the browser app's differences (file access, saving, fonts, supported browsers) once `R11.10` passes.
 
 ### R12.8 Search discoverability for the Pages site
 Owner: open · Status: in progress · Was: Maintainer request 2026-11-23 · Est. note: 4–8 h · Depends on: `R12.1` · Gate: none
@@ -482,9 +414,9 @@ Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster
 
 ---
 
-## R24 Advanced graph formatting, workbench pipelines, layouts & visual audit (post-Beta deferral)
+## R24 Advanced graph formatting, layouts & visual audit (post-Beta deferral)
 
-**Goal (explicitly deferred to post-Beta; decided 2026-11-26):** Capture remaining non-blocking visual customization, reusable pipeline, layout/drawing/printing, lab-standardization, and visual-audit backlog cleanly without widening Beta scope.
+**Goal (explicitly deferred to post-Beta; decided 2026-11-26):** Track post-Beta graph formatting, publication layout, lab preferences, and visual review.
 
 ### R24.1 Advanced graph formatting, axes, scale bars, heatmaps & multivariate visuals (post-Beta)
 Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster 1; deferred post-Beta) · Depends on: **Beta** release · Gate: post-Beta (deferred) · Est. note: 40–65 h
@@ -493,12 +425,14 @@ Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster
 - [ ] Extend `GraphSpec` and `Format Graph`: independent plot-area fill & axis color, custom user-defined named Color Schemes, bar/box/violin/shape fill patterns & hatching, per-dataset heterogeneous Grouped bar arrangements, custom bar baseline $\ne 0$, granular bar spacing %, bar/point value annotations, connecting-line `"gap at symbols"`, XY per-dataset row skipping, subset bulk editing (`Select Datasets…`), reset individual point formatting, independent canvas axis-length drag vs. proportional `Resize Graph`, multi-table compound graph UI (`SeriesSpec::source_sheet_id`), cross-file/recent-donor `ApplyStyleFrom`, and wiring dead visual fields (`ScatterAndLine::area_fill`, `KaplanMeierStep::show_all_points`, `Sheet::color_tag`).
 - [ ] Extend Heatmaps, Multivariate graphs, Survival & Post-hoc overlays: heatmap square-cell lock, cell borders, group-separator gaps, 3-stop diverging midpoint, `'×'` missing/excluded marker, and **2D categorical aggregation** (`Count`/`Mean`/`Median`/`SD`/`Sum`); MV bubble sizing modes (smallest-only/largest-only/categorical, clamp-vs-omit, 3-circle & combined fill+size legends, decoupled grouping & configurable CI level on Confidence Ellipses/Convex Hulls); MV categorical summary lines / error bars / before–after strips; `Format Number at Risk Table`; CLD outside-graph/direction/numeric modes; and `PairwiseBracketSpec` custom prefix & split asterisk/text sizes.
 
-### R24.2 Reusable pipelines (`.cbmethod`), sheet freezing, page layout objects, drawing, printing & lab preferences (post-Beta)
-Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster 6; deferred post-Beta) · Depends on: **Beta** release · Gate: post-Beta (deferred) · Est. note: 32–52 h
+### R24.2 Sheet freezing, figure layouts, printing & lab preferences (post-Beta)
+Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster 6; deferred post-Beta) · Depends on: **Beta** release · Gate: post-Beta (deferred)
 
-- [ ] Add an apply-pipeline-to-populated-table workflow and reusable `.cbmethod` files (applying analysis + graph chains to already-populated data tables, distinct from blank `.cbtemplate` and style-only `graph.applyStyleFrom`), plus `frozen: bool` snapshot freezing on `ResultSheet` and `GraphSheet`.
-- [ ] Add missing Page Layout & drawing tools: **Master Legends** (shared across panels), unlinked static graph snapshots, 90° rotated depth-chart panels, bulk `Resize Layout`, double-headed/curved arrows, capped lines, text-centered brackets/zigzags, arrowhead styles/sizes, object rotation/group/ungroup/lock, Distribute / Center on Page / exact Position Object `(X, Y, angle)`, ruler guides, and reverse legend order.
-- [ ] Add paginated Data/Info/Results table printing, Gallery contact-sheet printing, pure-black print mode, tiled multi-page poster printing, cell background highlighting, extended raster/vector export formats (CMYK TIFF, 8-bit indexed RGB / PackBits TIFF, Grayscale SVG, multi-page PDF batch bundling, export-time width scaling), and lab standardization (read-only locked teaching-lab prefs, shared lab templates/methods/equation folders, and rich application defaults beyond `settings.md`).
+- [ ] Scope snapshot freezing on result and graph sheets.
+- [ ] Improve figure layout with shared legends, bulk resize, panel and legend positioning, ruler guides, and reverse legend order.
+- [ ] Add paginated Data/Info/Results table printing, pure-black print mode, cell background highlighting, extended raster/vector export formats (CMYK TIFF, 8-bit indexed RGB / PackBits TIFF, Grayscale SVG, multi-page PDF batch bundling, export-time width scaling), and lab standardization (read-only locked teaching-lab prefs, shared lab templates and equation folders, and rich application defaults beyond `settings.md`).
+
+General-purpose drawing, Gallery contact sheets, and tiled poster printing are dropped. Reconsider applying a pipeline to populated tables or introducing a `.cbmethod` format only if labs report a gap after using templates and pipeline cloning under [`R10.37`](#r1037-simplify-the-core-desktop-workflow).
 
 ### R24.3 Workflow specification backlog & full visual parity audit (post-Beta)
 Owner: open · Status: todo · Was: reference-coverage audit 2026-11-26 (Cluster 7; deferred post-Beta) · Depends on: **Beta** release · Gate: post-Beta (deferred) · Est. note: 16–28 h
@@ -558,18 +492,18 @@ Active tracks only; see [earlier sequencing](history/roadmap.md#earlier-sequenci
 | Track | Open items | Depends on | Target gate |
 |---|---|---|---|
 | **Beta hosted checks & rehearsal** | [`R0.36`](#r036-full-workspace-gap--delta-audit-remediation-beta-gate), [`R14.1`](#r141-beta-release-pipeline), [`R0.27`](#r027-user-first-readme-overhaul-beta-gate), [`R12.1`](#r121-documentation-site-on-github-pages) | Apple credentials (configured); local code complete (incl. [`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate) done locally) | **Beta** |
+| **Optional pre-Beta desktop simplification** | [`R10.37`](#r1037-simplify-the-core-desktop-workflow) (done locally) | Independent | Optional before **Beta** (done locally) |
 | **Optional pre-Beta analytical wave** | [`R23.3`](#r233-data-reduction-curve-calculus-unwired-transforms--chained-monte-carlo-simulation)–[`R23.6`](#r236-nonlinear-regression-constraints-derived-ci-transforms-equation-catalog-dsl-depth--theoretical-plotting-62) (`R23.1`–`R23.2` archived in [`r23.md`](history/roadmap/r23.md)) | Coordinates with [`R19.2`](history/roadmap/r19.md#r192-high-usage-statistical-analyses--graph-families) (done) | Optional before **Beta** |
 | **Post-Beta distribution & citation** | [`R14.4`](#r144-homebrew-tap-for-macos-post-beta), [`R14.5`](#r145-mcp-bundle-mcpb-and-mcp-registry-listing-post-beta), [`R14.7`](#r147-software-citation-citationcff-zenodo-doi--versioned-methods-paragraph-post-beta) | [`R14.1`](#r141-beta-release-pipeline) | Post-**Beta** |
-| **Post-Beta guides & search** | [`R12.2`](#r122-example-workflow-guides), [`R12.3`](#r123-functionality-and-methods-reference), [`R12.7`](#r127-application-user-guide-desktop-and-browser), [`R12.8`](#r128-search-discoverability-for-the-pages-site) | `R12.1`, **Beta** release (`R12.7` browser part waits for `R11.10`) | Post-**Beta** / **1.0** |
+| **Post-Beta guides & search** | [`R12.2`](#r122-example-workflow-guides), [`R12.3`](#r123-functionality-and-methods-reference), [`R12.7`](#r127-desktop-application-user-guide), [`R12.8`](#r128-search-discoverability-for-the-pages-site) | `R12.1`, **Beta** release | Post-**Beta** / **1.0** |
 | **Post-Beta polish & external QA** | [`R8.13`](#r813-older-macos-metal-device-lost-hardening--windows-console-suppression), [`R10.31`](#r1031-desktop-graph-image-gallery--linked-region-ui-parity-fixes)–[`R10.33`](#r1033-advanced-importpaste-special-live-link-persistence--export-figure-options), [`R17.2`](#r172-downstream-vector-and-document-export-interoperability)–[`R17.4`](#r174-live-llm-mcp-usability-trials-and-ergonomics-fixes) | Independent (external apps/hardware for `R17.2`–`R17.4`) | Post-**Beta** |
 | **Post-Beta analytical & graphing backlog** | [`R24.1`](#r241-advanced-graph-formatting-axes-scale-bars-heatmaps--multivariate-visuals-post-beta)–[`R24.3`](#r243-workflow-specification-backlog--full-visual-parity-audit-post-beta) | **Beta** release for `R24` (`R19.1`–`R19.7` done) | Post-**Beta** |
 | **Post-Beta imported-analysis accuracy & interop** | [`R25.2`](#r252-imported-analysis-accuracy-gaps-post-beta)–[`R25.4`](#r254-interop-follow-ups-saving-rebuilt-graphs--post-test-cost-post-beta) | [#69](https://github.com/HauserGroup/curvebook/pull/69); [`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate) pairwise crosswalk done locally for [#77](https://github.com/HauserGroup/curvebook/issues/77) | Post-**Beta** |
 | **Engineering hygiene** | [`R0.16`](#r016-local-source-coverage-reports-cargo-llvm-cov), [`R0.35`](#r035-keep-the-ci-cache-under-the-repository-budget), [`R14.2`](#r142-release-sbom-and-ci-runner-hardening), [`R14.3`](#r143-retry-transient-release-verification-failures) | `R14.1` for `R14.2`–`R14.3` | none |
-| **1.0 desktop QA, signing & translations** | [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening), [`R8.11`](#r811-windows-authenticode-signing-after-beta), [`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate) (`ar`/`he` RTL unlikely) | [`R14.1`](#r141-beta-release-pipeline) (`R11.10` for `R10.13` browser part) | **1.0** |
-| **1.0 browser app (`eframe::WebRunner`)** | [`R11.1`](#r111-real-browser-test-harness--web-ci-gates) -> [`R11.11`](#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) -> `R11.2`–`R11.9` -> [`R11.10`](#r1110-live-browser-qa--supported-browser-matrix) | Deferred post-**Beta** | **1.0** |
+| **1.0 desktop QA, signing & translations** | [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening), [`R8.11`](#r811-windows-authenticode-signing-after-beta), [`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate) (`ar`/`he` RTL unlikely) | [`R14.1`](#r141-beta-release-pipeline) | **1.0** |
 | **Microsoft Store (MSIX)** | [`R8.9`](#r89-windows-msix-packaging--microsoft-store-distribution) | Packaging independent; submission needs `R14.1`, `R8.5`, `R10.13` | Store channel |
 
-**Open decisions:** `R11.1` browser test runner (`wasm-bindgen-test` recommended) and `R11.6` Web Worker vs. chunked main-thread compute; `R0.36` Cividis ΔL* stop-band tolerance; `R14.2` CI runner egress allowlist.
+**Open decisions:** `R0.36` Cividis ΔL* stop-band tolerance; `R14.2` CI runner egress allowlist.
 
 ---
 
@@ -587,13 +521,15 @@ Under [`R0.21`](history/roadmap/r0.md#r021-strict-alpha-branding-and-asset-prove
 | **Agent-harness workflows** | `R8.3`, `R8.6`–`R8.8` | **Done (historical).** Replaced by five-stage `EguiHumanPathDriver` runs after `--gui-only` retirement (`R21.1`). |
 | **Human GUI workflows** | `R10.23`, `R15.1`–`R15.10`, `R13.1`–`R13.10`, `R10.25`–`R10.28` (**Beta**); `R10.13`, `R10.24` (**1.0**) | **Beta automated gate done (`65 / 65` complete).** Recorded human/computer-use walkthroughs (`R10.13`, `R10.24`) remain **1.0**. |
 | **Beta** | **Alpha** + `R10.23`, `R10.25`–`R10.30`, `R10.34`, `R13`, `R15`, `R20.19`, `R5.4`, `R22`, `R12.4`–`R12.5` (done on `main`) + [`R25.1`](#r251-promote-corpus-verified-imported-analyses-to-live-recompute-beta-gate) (done locally) + [`R0.36`](#r036-full-workspace-gap--delta-audit-remediation-beta-gate), [`R14.1`](#r141-beta-release-pipeline), [`R0.27`](#r027-user-first-readme-overhaul-beta-gate), [`R12.1`](#r121-documentation-site-on-github-pages) | **Local code complete** (incl. `R25.1`); **hosted checks open:** green `ci.yml` on `main`, Windows `.msi` `release-scan` confirmation, one `v0.1.0-alpha.2` rehearsal release + automated clean-runner macOS/Windows checks (`R14.1`, `R0.36`), scripted README check (`R0.27`), and automated live Pages verification (`R12.1`). Zero manual human steps. |
-| **1.0** | **Beta** + [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening), [`R8.11`](#r811-windows-authenticode-signing-after-beta), [`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate) (LTR/CJK native review; `ar`/`he` RTL unlikely), [`R11`](#r11-usable-browser-app) | Open for full release after Beta. |
+| **1.0** | **Beta** + [`R10.13`](#r1013-human-operable-50-workflow-acceptance--manual-qa), [`R10.24`](#r1024-windows--linux-desktop-gui-smoke-qa-10-gate), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening), [`R8.11`](#r811-windows-authenticode-signing-after-beta), [`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate) (LTR/CJK native review, with `ar`/`he` RTL unlikely) | Open for full release after Beta. |
 
 ---
 
 ## Parked
 
 Items explicitly deferred or unlikely:
+
+- **Browser delivery and parity:** unscheduled under [`R11`](#r11-usable-browser-app).
 
 - **Arabic (`ar`) & Hebrew (`he`) desktop RTL GUI mirroring:** **unlikely / unscheduled** (`fa`/`ur` likewise unscheduled); existing `ar`/`he` catalog columns remain hidden behind `"en"` fallback in `normalize_beta_gui_locale` ([`R8.12`](#r812-desktop-rtl-gui-mirroring--native-speaker-translation-review-10-gate)).
 - **Translated READMEs:** deferred beyond initial `1.0` (`R0.27`).
@@ -618,7 +554,7 @@ Each item ID links directly to its archived section and verification record.
 | [R6 Multiple Variables workflows, Calculated Variables & Multifactor ANOVA](history/roadmap/r6.md#r6-multiple-variables-workflows-calculated-variables--multifactor-anova) | [`R6.1`](history/roadmap/r6.md#r61--calculated-variables-role-locking--level-ordering), [`R6.2`](history/roadmap/r6.md#r62-multifactor-anova-mv-groupingsplits--five-channel-mv-plots), [`R6.3`](history/roadmap/r6.md#r63-window-clauses-over-where-order-by-rows--conditional-aggregations) |
 | [R7 Headless automation, CLI, `--control`, MCP & performance budgets](history/roadmap/r7.md#r7-headless-automation-cli---control-mcp--performance-budgets) | [`R7.1`](history/roadmap/r7.md#r71-slice-0-headless-cli---control-tcp-jsonl--mcp-server), [`R7.2`](history/roadmap/r7.md#r72-performance-budgets-1m-cell-virtualization--propertyfuzz-suites), [`R7.3`](history/roadmap/r7.md#r73-mcp-workflow-parity-proof--shared-live-window), [`R7.4`](history/roadmap/r7.md#r74-accessible-mcp-guide-and-minimal-readme) |
 | [R8 Desktop & WebAssembly live shell, localization & `1.0` hardening](history/roadmap/r8.md#r8-desktop--webassembly-live-shell-localization--10-hardening) | [`R8.1`](history/roadmap/r8.md#r81-pure-rust-uiapp-shell-software-rgba-compositor-hidpirtl-input--webworkspacehost), [`R8.2`](history/roadmap/r8.md#r82-16-locale-i18n-rtl-mirroring--desktop-cjkrtl-fontpasteboard-checks), [`R8.3`](history/roadmap/r8.md#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop), [`R8.4`](history/roadmap/r8.md#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting), [`R8.6`](history/roadmap/r8.md#r86-semantic-ui-inspection-gui-mcp-toolset--strict---gui-only-lock), [`R8.7`](history/roadmap/r8.md#r87-interactive-power--sample-size-wizard-dynamic-modal-predicates--chained-gui-surfaces), [`R8.8`](history/roadmap/r8.md#r88-clean-room-28-workflow-gui_only-acceptance-suite), [`R8.10`](history/roadmap/r8.md#r810-signed-macos-installers--download-verification-beta-gate) *(merged)* |
-| [R9 Post-parity scientific quality-of-life suite](history/roadmap/r9.md#r9-post-parity-scientific-quality-of-life-suite) | [`R9.1`](history/roadmap/r9.md#r91-non-destructive-table-archetype-conversion-qol-1), [`R9.2`](history/roadmap/r9.md#r92-96384-well-microplate-mapper--tidy-long-to-wide-pivot-qol-2), [`R9.3`](history/roadmap/r9.md#r93-auditable-cell-exclusion-reasons--provenance-audit-qol-3), [`R9.4`](history/roadmap/r9.md#r94-optional-side-by-side-split-workspace-qol-4), [`R9.5`](history/roadmap/r9.md#r95-two-way-data-to-graph-point-brushing-qol-5), [`R9.6`](history/roadmap/r9.md#r96-one-click-methods--statistical-reporting-generator-qol-6), [`R9.7`](history/roadmap/r9.md#r97-inline-assumption-diagnostic-banners-diagnostics-only-qol-7), [`R9.8`](history/roadmap/r9.md#r98-journal-figure-dimension--typography-lock-presets-qol-8), [`R9.9`](history/roadmap/r9.md#r99-live-color-vision-deficiency--grayscale-canvas-preview-qol-9), [`R9.12`](history/roadmap/r9.md#r912-categorical--continuous-table-analysis-completions-qol-12), [`R9.14`](history/roadmap/r9.md#r914-experimental-subject-randomization--random-subset-sampling-qol-14), [`R9.16`](history/roadmap/r9.md#r916-live-best-fit-tex-equation-annotations-equations-only-qol-16), [`R9.17`](history/roadmap/r9.md#r917-extended-multivariable-clustering-glm--statistical-graphing-gui_only-acceptance-suite-qol-17) |
+| [R9 Post-parity scientific quality-of-life suite](history/roadmap/r9.md#r9-post-parity-scientific-quality-of-life-suite) | [`R9.1`](history/roadmap/r9.md#r91-non-destructive-table-archetype-conversion-qol-1), [`R9.2`](history/roadmap/r9.md#r92-96384-well-microplate-mapper--tidy-long-to-wide-pivot-qol-2), [`R9.3`](history/roadmap/r9.md#r93-auditable-cell-exclusion-reasons--provenance-audit-qol-3), [`R9.4`](history/roadmap/r9.md#r94-optional-side-by-side-split-workspace-qol-4), [`R9.5`](history/roadmap/r9.md#r95-two-way-data-to-graph-point-brushing-qol-5), [`R9.6`](history/roadmap/r9.md#r96-one-click-methods--statistical-reporting-generator-qol-6), [`R9.7`](history/roadmap/r9.md#r97-inline-assumption-diagnostic-banners-diagnostics-only-qol-7), [`R9.8`](history/roadmap/r9.md#r98-journal-figure-dimension--typography-lock-presets-qol-8), [`R9.9`](history/roadmap/r9.md#r99-live-color-vision-deficiency--grayscale-canvas-preview-qol-9), [`R9.12`](history/roadmap/r9.md#r912-categorical--continuous-table-analysis-completions-qol-12), [`R9.14`](history/roadmap/r9.md#r914-experimental-subject-randomization--random-subset-sampling-qol-14), [`R9.16`](history/roadmap/r9.md#r916-live-best-fit-tex-equation-annotations-equations-only-qol-16), [`R9.17`](history/roadmap/r9.md#r917-extended-multivariable-clustering-glm--statistical-graphing-gui_only-acceptance-suite-qol-17), dropped [`R9.13`](history/roadmap/r9.md#r913-instant-statistical-distribution--bayesian-calculators-qol-13) and [`R9.15`](history/roadmap/r9.md#r915-bench-molarity-stock-dilution--radiochemical-decay-calculators-qol-15) |
 | [R10 Human-operable GUI & 50-workflow human completion](history/roadmap/r10.md#r10-human-operable-gui--50-workflow-human-completion) | [`R10.1`](history/roadmap/r10.md#r101-interactive-chrome-architecture-decision--spike)–[`R10.12`](history/roadmap/r10.md#r1012-import--paste-special-and-linked-region-provenance), [`R10.14`](history/roadmap/r10.md#r1014-external-branding-exclusion-sweep--gate)–[`R10.23`](history/roadmap/r10.md#r1023-close-the-remaining-desktop-gui-gaps-beta-gate), [`R10.25`](history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate)–[`R10.30`](history/roadmap/r10.md#r1030-human-path-tests-for-import-and-export-beta-gate), [`R10.34`](history/roadmap/r10.md#r1034-main-gui-file-extension-naming-for-imported-project-files-beta-gate), [`R10.35`](history/roadmap/r10.md#r1035-portfolio-gallery-live-thumbnails-batch-workflows--navigation-overhaul), [`R10.36`](history/roadmap/r10.md#r1036-project-navigator-collapsed-rail--section-vector-icons) |
 | [R12 User documentation](history/roadmap/r12.md#r12-user-documentation) | [`R12.4`](history/roadmap/r12.md#r124-automation-reference-mcp-cli-control-protocol-and-batch), [`R12.5`](history/roadmap/r12.md#r125-getting-started-files-settings-and-support), [`R12.6`](history/roadmap/r12.md#r126-contributor-documentation-on-pages) *(dropped)*, [`R12.9`](history/roadmap/r12.md#r129-publish-only-the-site-on-pages)–[`R12.14`](history/roadmap/r12.md#r1214-manual-rendering--layout-bug-fixes) |
 | [R13 Advanced regression, composite graphing & layout objects](history/roadmap/r13.md#r13-advanced-regression-diagnostics-composite-graphing-layout-objects--65-workflow-human-completion) | [`R13.1`](history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays)–[`R13.10`](history/roadmap/r13.md#r1310-missing-format-graph-controls-and-65-workflow-control-gap-sweep) |

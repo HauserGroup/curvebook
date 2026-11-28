@@ -1003,7 +1003,8 @@ fn commit_edit_params_dialog(app: &mut UiApp) -> Result<UiEventOutcome, String> 
 fn commit_export_figure_dialog(app: &mut UiApp, sheet_id: &SheetId) -> Result<UiEventOutcome, String> {
     let selected_renderables = crate::egui_shell::app_modals::gallery_selected_renderable_ids(app);
     let batch_scope = app.egui_views.app_modals.export_selected_gallery_scope && !selected_renderables.is_empty();
-    let (format, opts_snapshot, pdf_cs) = {
+    let export_emf = app.egui_views.app_modals.export_emf_selected;
+    let (format, opts_snapshot) = {
         let export_opts = &app.canvas_dialogs.export_figure;
         (
             export_opts.format,
@@ -1011,44 +1012,35 @@ fn commit_export_figure_dialog(app: &mut UiApp, sheet_id: &SheetId) -> Result<Ui
                 "transparent_bg": export_opts.transparent_bg,
                 "color_space": export_opts.color_space,
                 "unit": export_opts.unit,
+                "emf": export_emf,
             }),
-            if export_opts.color_space == "CMYK-Proof" { "cmyk" } else { "srgb" },
         )
     };
-    let (cmd_used, mut payload) = if batch_scope && matches!(format, ExportFigureFormat::Pdf) && selected_renderables.len() >= 2 {
-        let mut intent = app.canvas_dialogs.export_figure.commit_intent(&selected_renderables[0]);
-        if let Some(obj) = intent.params.as_object_mut() {
+    let (cmd_used, mut payload) = if batch_scope && !export_emf && matches!(format, ExportFigureFormat::Pdf) && selected_renderables.len() >= 2 {
+        let (_, mut params) = crate::egui_shell::app_modals::export_figure_command_and_params(app, false, &selected_renderables[0], false);
+        if let Some(obj) = params.as_object_mut() {
             obj.remove("sheet_id");
             let ids: Vec<&str> = selected_renderables.iter().map(SheetId::as_str).collect();
             obj.insert(String::from("sheet_ids"), json!(ids));
-            obj.insert(String::from("color_space"), json!(pdf_cs));
         }
-        let out = app.execute_command("export.pdf", intent.params).map_err(|e| e.to_string())?;
+        let out = app.execute_command("export.pdf", params).map_err(|e| e.to_string())?;
         (String::from("export.pdf"), out.payload)
     } else if batch_scope {
         let mut last_cmd = String::new();
         let mut payloads = Vec::with_capacity(selected_renderables.len());
         for sid in &selected_renderables {
-            let mut intent = app.canvas_dialogs.export_figure.commit_intent(sid);
-            if matches!(format, ExportFigureFormat::Pdf)
-                && let Some(obj) = intent.params.as_object_mut()
-            {
-                obj.insert(String::from("color_space"), json!(pdf_cs));
-            }
-            last_cmd = intent.command_id.clone();
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+            let is_layout = app.document().layout_sheet(sid).is_some();
+            let (cmd, params) = crate::egui_shell::app_modals::export_figure_command_and_params(app, is_layout, sid, export_emf);
+            last_cmd = String::from(cmd);
+            let out = app.execute_command(cmd, params).map_err(|e| e.to_string())?;
             payloads.push(out.payload);
         }
         (last_cmd, json!({ "exports": payloads }))
     } else {
-        let mut intent = app.canvas_dialogs.export_figure.commit_intent(sheet_id);
-        if matches!(format, ExportFigureFormat::Pdf)
-            && let Some(obj) = intent.params.as_object_mut()
-        {
-            obj.insert(String::from("color_space"), json!(pdf_cs));
-        }
-        let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
-        (intent.command_id, out.payload)
+        let is_layout = app.document().layout_sheet(sheet_id).is_some();
+        let (cmd, params) = crate::egui_shell::app_modals::export_figure_command_and_params(app, is_layout, sheet_id, export_emf);
+        let out = app.execute_command(cmd, params).map_err(|e| e.to_string())?;
+        (String::from(cmd), out.payload)
     };
     app.egui_views.app_modals.export_emf_selected = false;
     app.egui_views.app_modals.export_selected_gallery_scope = false;

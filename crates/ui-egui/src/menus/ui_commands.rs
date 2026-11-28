@@ -484,9 +484,9 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         id: "ui.export.figure.open",
         label: "Export Figure",
         shortcut: "",
-        params_doc: "{\"sheet_id\":\"optional SheetId\",\"format\":\"svg|pdf|png|tiff\"}",
-        summary: "Open Export Figure options for SVG, PDF, PNG, or TIFF output resolution and DPI.",
-        beginner: "Choose publication vector (SVG/PDF) or high-DPI raster export settings for the active figure.",
+        params_doc: "{\"sheet_id\":\"optional SheetId\",\"format\":\"svg|pdf|png|tiff|emf\",\"dpi\":\"optional 72..=2400\"}",
+        summary: "Open Export Figure options for SVG, PDF, PNG, TIFF, or EMF output format, resolution, and DPI.",
+        beginner: "Choose publication vector (SVG/PDF/EMF) or high-DPI raster (PNG/TIFF) export settings for the active graph or layout.",
         rank: ActionRank::Secondary,
     },
     UiCommandSpec {

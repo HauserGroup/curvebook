@@ -690,6 +690,7 @@ fn render_gallery_batch_toolbar(ui: &mut egui::Ui, app: &UiApp, spec: GalleryBat
                         );
                         if resp.clicked() && style_en {
                             let target_ids: Vec<&str> = selected_graphs.iter().map(SheetId::as_str).collect();
+                            intents.push(UiIntent::SetLauncherOpen { open: false });
                             intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
                             intents.push_ui("ui.applyStyleFrom.open", json!({ "target_sheet_ids": target_ids }));
                         }
@@ -910,6 +911,7 @@ fn handle_gallery_keyboard(
         && let Some(id) = target_id
     {
         views.center_stage.gallery_anchor_id = Some(id.clone());
+        intents.push(UiIntent::SetLauncherOpen { open: false });
         intents.push(UiIntent::SetGallerySelection { sheet_ids: vec![id.clone()] });
         intents.push_engine("sheet.select", json!({ "sheet_id": id.as_str() }));
         intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
@@ -1578,6 +1580,7 @@ fn render_gallery_card(
             intents.push(UiIntent::SetGallerySelection { sheet_ids: range_ids });
         } else {
             views.center_stage.gallery_anchor_id = Some(card.sheet_id.clone());
+            intents.push(UiIntent::SetLauncherOpen { open: false });
             intents.push(UiIntent::SetGallerySelection { sheet_ids: vec![card.sheet_id.clone()] });
             intents.push_engine("sheet.select", json!({ "sheet_id": card.sheet_id.as_str() }));
             intents.push_ui("ui.gallery.toggle", json!({ "open": false }));

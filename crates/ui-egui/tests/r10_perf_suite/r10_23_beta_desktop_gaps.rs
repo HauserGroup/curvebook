@@ -241,8 +241,10 @@ fn build_multi_sheet_gallery_app() -> Result<UiApp, String> {
 fn r10_23_portfolio_gallery_f6_visible_pane_cycling_and_quick_stats_footer() -> TestRes {
     let mut h = EguiWfHarness::from_app(build_multi_sheet_gallery_app()?, ViewportMetrics::new(1280.0, 720.0, 1.0));
 
-    // 1. Portfolio Gallery toggle, filter Graphs, return to All, and click layout-1 card.
-    h.click("status.section.gallery")?;
+    // 1. Portfolio Gallery toggle via View > Gallery, filter Graphs, return to All, and click layout-1 card.
+    ensure(h.driver.frame_meta().find_by_widget_id("status.section.gallery").is_none(), "footer Gallery chip must be removed")?;
+    h.click("menu.view")?;
+    h.click("menu.ui.gallery.toggle")?;
     assert!(h.app().nav.gallery.open);
     assert_widgets(
         &h.driver,

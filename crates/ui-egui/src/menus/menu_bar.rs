@@ -244,11 +244,6 @@ fn build_file_menu(app: &UiApp) -> CuratedMenuSection {
     let mut export_children = Vec::new();
     push_action(&mut export_children, app, "ui.export.figure.open", None);
     export_children.push(CuratedMenuNode::Separator);
-    push_action(&mut export_children, app, "export.pdf", None);
-    push_action(&mut export_children, app, "export.png", None);
-    push_action(&mut export_children, app, "export.svg", None);
-    push_action(&mut export_children, app, "export.tiff", None);
-    export_children.push(CuratedMenuNode::Separator);
     push_action(&mut export_children, app, "ui.export.tableCsv.open", None);
     push_action(&mut export_children, app, "ui.export.allTablesCsv.open", None);
     push_action(&mut export_children, app, "ui.export.resultsCsv.open", None);
@@ -307,7 +302,7 @@ fn build_view_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "ui.inspector.toggle", Some("menu.view.inspector"));
     push_action(&mut nodes, app, "ui.family.toggle", Some("menu.view.family_pane"));
     push_action(&mut nodes, app, "ui.split.toggle", None);
-    push_action(&mut nodes, app, "ui.gallery.toggle", None);
+    push_action(&mut nodes, app, "ui.gallery.toggle", Some("w5.gallery.status_prefix"));
     push_action(&mut nodes, app, "ui.workspacePreset.set", None);
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "ui.rulers.toggle", None);

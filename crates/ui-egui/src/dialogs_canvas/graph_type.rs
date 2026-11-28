@@ -173,7 +173,7 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
     GraphTypeOption {
         id: "parts.donut",
         label: "Donut / Pie Parts of Whole",
-        subtitle: "Proportional slices or 10x10 waffle grid with center total",
+        subtitle: "Proportional pie, donut with center total, or stacked bar",
         graph_kind: GraphKind::PartsOfWhole,
         thumbnail: ThumbnailGlyphKind::Donut,
         compatible_tables: &[TableKind::PartsOfWhole],

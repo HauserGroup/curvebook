@@ -1,6 +1,6 @@
 # CurveBook Overall GUI Layout Specification
 
-> **Scope:** Canonical clean-room layout, information-hierarchy, responsive-geometry, and interaction specification for the CurveBook desktop graphical user interface (`apps/curvebook`, `crates/ui-egui`) built under [`R15`](../history/roadmap/r15.md#r15-modern-egui-desktop-gui-overhaul-beta-gate) (**Beta** gate) and refined under [`R20`](../history/roadmap/r20.md#r20-desktop-gui-visual-system--layout-overhaul) (`R20.1`–`R20.22`, landed). In `R15.5`, desktop cutover deleted the legacy `LayoutTree`, `SoftwareTextPainter`, `layout/paint.rs`, `compositor.rs`, and legacy `HumanPathDriver` code without retaining legacy GUI code for `apps/curvebook-web`; browser (`apps/curvebook-web`) `eframe::WebRunner` migration waits until post-Beta [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (**1.0** gate). Unshipped post-Beta extensions (`R10.31`, `R24.1`, and `R11.11`) are noted inline.
+> **Scope:** Canonical clean-room layout, information-hierarchy, responsive-geometry, and interaction specification for the CurveBook desktop graphical user interface (`apps/curvebook`, `crates/ui-egui`) built under [`R15`](../history/roadmap/r15.md#r15-modern-egui-desktop-gui-overhaul-beta-gate) (**Beta** gate) and refined under [`R20`](../history/roadmap/r20.md#r20-desktop-gui-visual-system--layout-overhaul) (`R20.1`–`R20.22`, landed). In `R15.5`, desktop cutover deleted the legacy `LayoutTree`, `SoftwareTextPainter`, `layout/paint.rs`, `compositor.rs`, and legacy `HumanPathDriver` code without retaining legacy GUI code for `apps/curvebook-web`; browser delivery is parked under [`R11`](../ROADMAP.md#r11-usable-browser-app). Unshipped desktop extensions (`R10.31`, `R24.1`) are noted inline.
 > **Related Tracked Docs:** [`../design-language.md`](../design-language.md), [`../architecture.md`](../architecture.md), [`../evidence/user-interface.md`](../evidence/user-interface.md), [`../gui-workflows.md`](../gui-workflows.md), [`../localization.md`](../localization.md), [`../ROADMAP.md`](../ROADMAP.md), [`../../AGENTS.md`](../../AGENTS.md).
 
 ---
@@ -14,7 +14,7 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 1. **Headless-First Engine Parity (`L5` <- `L6`):**
    Every document, cell, formula, analysis, fit, graph, or layout mutation initiated by a GUI control commits exclusively through `curvebook_engine::Session::execute` (`Caller::Ui`), preserving exact parity with CLI batch scripts, crash-recovery journals, undo/redo history, and MCP automation. Opt-in semantic GUI automation tools (`ui_inspect`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_screenshot` — enabled via `--control <port>` or MCP `enable_toolset("gui")`; legacy `--gui-only` is retired) drive the identical interactive widget tree used by a human operator.
 2. **Single Retained Layout Source (`egui` + AccessKit + `FrameInspectMeta`):**
-   All chrome regions, scrollable viewports, hit boxes, clip rectangles, focus rings, and accessibility roles derive from a single settled stock `egui 0.37` layout pass (`!ctx.will_discard()`) paired with `egui` AccessKit output and a thin `FrameInspectMeta` side-table, plus a pure-Rust CPU `egui` tessellation rasterizer for GPU-less CI screenshots, so rendered pixels, pointer hit-testing, and desktop accessibility nodes never diverge (`verify_pixel_to_hit_box_parity`). Legacy `LayoutTree` was deleted on desktop cutover (`R15.5`); browser `eframe::WebRunner` adoption awaits post-Beta [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) (**1.0**).
+   All chrome regions, scrollable viewports, hit boxes, clip rectangles, focus rings, and accessibility roles derive from a single settled stock `egui 0.37` layout pass (`!ctx.will_discard()`) paired with `egui` AccessKit output and a thin `FrameInspectMeta` side-table, plus a pure-Rust CPU `egui` tessellation rasterizer for GPU-less CI screenshots, so rendered pixels, pointer hit-testing, and desktop accessibility nodes never diverge (`verify_pixel_to_hit_box_parity`). Legacy `LayoutTree` was deleted on desktop cutover (`R15.5`).
 3. **Modeless Inspection First, Deep Modals on Escalation:**
    Everyday exploration—changing symbol encodings, rescaling axes, editing column formulas, inspecting assumption checklists, or drilling from an outlier point back to its source row—happens live inside the **Trailing Inspector & Studio Dock** with immediate undoable canvas/grid feedback. Multi-tab modal dialogs (`Edit Analysis Parameters`, `Format Graph`, `Format Axes`, `Import & Paste Special`) handle multi-property batch configuration with explicit `Apply` (non-closing preview), `Cancel`, and primary commit actions.
 4. **Surface-First Single Theme, Single-Owner Navigation & Attributed Reuse:**
@@ -49,7 +49,7 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 |   Dose-Response       |                        |                      |  [Apply Style From]                     |
 |     4PL Curve Fit     |                        |                      |                                         |
 +-----------------------+------------------------+----------------------+-----------------------------------------+
-| [< >] [Gallery] [Sheet v*] [Link OK] | Quick-Stats / Canvas Size               | [CVD] [- Fit v +]              |  26 pt  Tier 3: Status Footer
+| [< >] [Sheet v*] [Link OK]           | Quick-Stats / Canvas Size               | [CVD] [- Fit v +]              |  26 pt  Tier 3: Status Footer
 +-----------------------------------------------------------------------------------------------------------------+
    240 pt (180-380 pt)                Protected Flexible Center Stage                  280 pt (220-420 pt)
    * 38 pt total top chrome when host_draws_menu_bar == true (macOS); 28 + 38 = 66 pt with in-window menu bar.
@@ -80,7 +80,7 @@ flowchart TB
         end
     end
 
-    Footer["Tier 3: Status & Viewport Footer (26 pt) — History, Gallery, Collapsed-Nav Sheet Switcher, Link Status, Readout, CVD & Fit Zoom"]
+    Footer["Tier 3: Status & Viewport Footer (26 pt) — History, Collapsed-Nav Sheet Switcher, Link Status, Readout, CVD & Fit Zoom"]
 
     AppBar --> ActionStrip --> Body --> Footer
     NavTree --- FamilyDAG
@@ -188,13 +188,13 @@ A single uncluttered horizontal bar (`38 pt` across all platforms) divided by su
 
 | Active Context | Fixed Leading Anchors | Primary Contextual CTA Group | Secondary Contextual Tools | Trailing Output & View Group |
 |---|---|---|---|---|
-| **`EmptyWorkspace` / Launcher** | `New Project`, `Open` | `New Data Table`, `Browse Samples`, `Clone Pipeline` | `Import CSV / TSV`, `Power & Sample Size` | `Theme`, `Language` |
+| **`EmptyWorkspace` / Launcher** | `New Project`, `Open` | `Open`, `Import`, `New Data Table`, `Sample Data` | `Reuse an Analysis` (`New from Template` / `Clone Pipeline`), `Power & Sample Size` | `Theme`, `Language` |
 | **`DataSheet` (Structured)** | `+ Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze`** (accent button) + **Archetype Quick-Run Actions** (e.g., `t-Test` / `ANOVA` on Column; `Fit Curve` / `Linear Reg.` on XY; `2-Way ANOVA` on Grouped; `Contingency` on Contingency; `Kaplan-Meier` on Survival) | `Import / Reshape`, `Transform`, `Exclude (Cmd+E)`, `Freeze Table`, `Prune` / `Sort`, `Decimals (.00)` | `New Graph`, `Inspector`, `⋯` |
-| **`DataSheet` (`MultipleVariables`)** | `+ Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Actions** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables`, `Filter & Transform`, `Extract & Rearrange`, `Exclude (Cmd+E)`, `Freeze Table` | `New MV Graph`, `Formula Studio`, `⋯` |
+| **`DataSheet` (`MultipleVariables`)** | `+ Sheet v`, `Undo`, `Redo`, `Cut/Copy/Paste`, `Paste Link` | **`Analyze`** (accent button) + **`+ Calculated Variable (fx)`** + **Quick-Run Actions** (`Linear/GLM`, `PCA`, `Cluster`, `MV Plot`) | `Manage Variables`, `Filter & Transform`, `Extract & Rearrange`, `Exclude (Cmd+E)`, `Freeze Table` (`Randomize Groups` & `Sample Rows` live in the `Data` menu per `R10.37`) | `New MV Graph`, `Formula Studio`, `⋯` |
 | **`InfoSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy/Paste` | **`+ Add Constant`** | `Add Date/ID Preset`, `Link Constant`, `Format Notes` (`Bold`, `Italic`, `List`) | `Inspector`, `⋯` |
 | **`ResultSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy`, `Copy Methods` | **`Edit Parameters (Cmd+Shift+P)`** (accent button) + **`Interpret & Checklist`** (badge shows warning count) | `Change Data Analyzed`, `Chain Analysis`, `New Graph from Tab` | `Export Table`, `Inspector`, `⋯` |
 | **`GraphSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`Graph Type`** + **`Analyze / Fit`** | `Format Graph`, `Format Axes`, `Pairwise / CLD v`, `Insert Text / TeX / Bracket v`, `Palette` | **`Export Figure`**, `Print`, `Inspector`, `⋯` |
-| **`LayoutSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`+ Place Graph`** + **`Arrange Grid`** | `Align / Distribute v`, `Sync Panel Scales`, `Panel Badges (A, B, C)`, `Add Text / TeX` / `Scale Bar` | **`Export Layout`**, `Print`, `Inspector`, `⋯` |
+| **`LayoutSheet`** | `+ Sheet v`, `Undo`, `Redo`, `Copy Vector` | **`+ Place Graph`** + **`Arrange Grid`** | `Align / Distribute v`, `Sync Panel Scales`, `Panel Badges (A, B, C)`, `Add Text / TeX` / `Scale Bar` | **`Export Figure`**, `Print`, `Inspector`, `⋯` |
 
 ---
 
@@ -217,7 +217,7 @@ A single uncluttered horizontal bar (`38 pt` across all platforms) divided by su
 4. **Row Anatomy (`26 pt` height, `>= 24 pt` hit box, scrollbar never overlaps right-edge badges):**
    - **Vector disclosure triangles & frameless sheet icons:** Crisp `1.5 pt`-stroke disclosure triangles (pointing inward collapsed, downward expanded—never dot-like Unicode bullets) + frameless semantic sheet-kind icons (never checkbox-like checkmark-in-box or slash-in-box frames) + editable sheet title + trailing status badges (`Frozen` lock badge, `Color Tag` dot, `Warning/Unconverged` indicator).
    - Active selection uses `active_bg` when Navigator holds focus and neutral `selection_unemphasized_bg` when focus lives in another pane.
-   - Clicking a section header's **`Folder Gallery`** icon switches the Center Stage into the Multi-Sheet Thumbnail Gallery filtered to that section.
+   - Section headers carry no per-folder Gallery launch icons (`R10.37`); `Project Navigator` remains the sole primary sheet browser, and the thumbnail Gallery opens solely via **View › Gallery** (`ui.gallery.toggle`).
    - Each section ends with a **neutral muted** inline **`+ New <Kind>`** row (`text_muted` at rest, `text_strong` on hover—never accent blue) for zero-menu sheet creation.
 5. **Direct Manipulation & Cascading Integrity:**
    - **Double-click title (`F2`):** Inline rename (`sheet.rename`), automatically cascading updated titles to dependent default analysis headers, graph titles, and legend labels.
@@ -249,8 +249,8 @@ The Center Stage is a protected dock target (cannot be closed or floated away) t
    - **Unified Native Renderers (Zero Preview-Grid Fallback):** Both panes instantiate the real sheet renderer parameterized by explicit `sheet_id`—including the virtualized contiguous `DataGrid` (§8.2) with independent per-pane scroll and selection state—**retiring `render_split_non_column_preview` and `render_split_column_sheet_preview`**.
    - **Live Two-Way Point Brushing:** Selecting or hovering rows in a Data/Residual Grid highlights the corresponding plotted marks/bars on an adjacent `GraphSheet`, and box-selecting or clicking plotted marks on a `GraphSheet` scrolls to and highlights the originating cells in the adjacent `DataSheet`.
 3. **Multi-Sheet Portfolio Gallery Mode:**
-   - Activated by clicking a Navigator folder gallery icon, the `Gallery` footer button (`ui.gallery.toggle`), or `View › Sheet Gallery`.
-   - Renders a responsive grid of live-rendered sheet preview cards with folder filter chips (`All`, `Graphs`, `Layouts`, `Data`, `Results`), thumbnail zoom slider, `F6` pane cycling, click-to-open, multi-card selection (`Shift+Click` range, `Cmd/Ctrl+Click` multi-select), and batch `Apply Style From` (`R13.3`/`R13.8`). Additional batch gallery actions (`Export Selected`, `Place Selected onto New Layout`) are planned under [`R10.31`](../ROADMAP.md#r1031-desktop-graph-image-gallery--linked-region-ui-parity-fixes).
+   - Activated solely via **View › Gallery** (`ui.gallery.toggle`); footer and Navigator folder Gallery launch controls are removed (`R10.37`).
+   - Renders a responsive grid of live-rendered sheet preview cards with folder filter chips (`All`, `Graphs`, `Layouts`, `Data`, `Results`), thumbnail zoom slider, `F6` pane cycling, click-to-open directly to the selected sheet (dismissing Gallery without reopening Welcome), multi-card selection (`Shift+Click` range, `Cmd/Ctrl+Click` multi-select), and batch `Apply Style From` (`R13.3`/`R13.8`, `R10.37`).
 4. **Project Launcher Mode:** Shown automatically when `total_sheet_count() == 0` or when `Home` / `File › New Data Table` is invoked in full-stage mode (see §8.1).
 5. **Prospective Power & Sample Size Studio Mode:** Full-stage or large-modal interactive study-planning workflow (see §8.13).
 
@@ -285,7 +285,7 @@ Instead of forcing users into modal dialogs for routine edits—or hiding multiv
 | **`ResultSheet`** | **Interpret & Diagnostics** | 1. **`Assumptions`**: Interactive methodological checklist (`Pass`, `Review`, `Violated` badges + severity filter).<br/>2. **`Guidance`**: Diagnostics-only plain-language explanation of test structure and effect sizes (strictly non-prescriptive).<br/>3. **`Methods`**: Copyable publication methods paragraph interpolating exact model settings, sample sizes, and software version. | `Edit Parameters (Cmd+Shift+P)` |
 | **`GraphSheet` (No single point selected)** | **Graph Inspector** | Five underline tabs (full labels):<br/>1. **`Data`** (color-dot Series/Channel selector, `Symbols` segmented controls, `Bars/Boxes`, `Error Bars`, `Lines/Curves`, affirmative visibility checkboxes, `Ellipses/Hulls`, `Heatmap/Dendrogram`)<br/>2. **`Axes`** (`X` / `Left Y` / `Right Y`: auto/manual range, interval, scale, breaks, titles, label angle)<br/>3. **`Legend`** (visibility, placement, discrete vs 3-point continuous bubble/colorbar legends)<br/>4. **`Annotations`** (`Pairwise Brackets` vs `Compact Letter Display`, equations, threshold lines)<br/>5. **`Canvas`** (palette cards, background fill & alpha, plot-area fill *(planned: `R24.1`)*, aspect ratio, display checkboxes) | `Format Graph` / `Apply Style From` |
 | **`GraphSheet` (Single plotted point clicked)** | **Data Point Drill-Back** | Source `DataSheet` link, `Row #` & Row Title, series/variable coordinates (`X`, `Y`, `Color`, `Size`), individual point style override controls, `Exclude Point`, and primary **`Jump to Row in Data Table`** button (`← Back to Graph Inspector` in header). | `Format Selected Point` |
-| **`LayoutSheet`** | **Page Layout Composer** | 1. **`Page`** (Journal width presets: `85 mm` 1-col, `114 mm` 1.5-col, `174 mm` 2-col, `A4`/`Letter`; orientation; margins; DPI preflight).<br/>2. **`Grid & Align`** (rows×cols template, snap guides, align plot frames vs outer bounds, lock shared scale).<br/>3. **`Annotations`** (auto `A, B, C` panel badges, scale bar generator *(planned: `R24.1`)*, hooked constants). | `Export Layout` |
+| **`LayoutSheet`** | **Page Layout Composer** | 1. **`Page`** (Journal width presets: `85 mm` 1-col, `114 mm` 1.5-col, `174 mm` 2-col, `A4`/`Letter`; orientation; margins; DPI preflight).<br/>2. **`Grid & Align`** (rows×cols template, snap guides, align plot frames vs outer bounds, lock shared scale).<br/>3. **`Annotations`** (auto `A, B, C` panel badges, scale bar generator *(planned: `R24.1`)*, hooked constants). | `Export Figure` |
 
 Every section header inside the `Graph Inspector` includes a compact **`Format`** or **`Details`** link (dot-free) that opens the corresponding tab of `Format Graph` or `Format Axes` when advanced multi-series or sub-tick editing is needed.
 
@@ -297,8 +297,7 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
 
 1. **Leading Navigation & Link Cluster:**
    - `Back (<)` / `Forward (>)` sheet-visit history steppers.
-   - **No duplicate 5-category jump pills:** Duplicate `Data`, `Info`, `Results`, `Graphs`, and `Layouts` category jump pills are retired so sheet navigation has one primary home in `Project Navigator`.
-   - Concise **`Gallery`** toggle button (decoupled from the Command Palette label `"Toggle Portfolio Gallery"`, preserving `ui.gallery.toggle` and avoiding `"Toggle Portf…"` truncation).
+   - **No duplicate 5-category jump pills or footer Gallery button:** Duplicate `Data`, `Info`, `Results`, `Graphs`, and `Layouts` category jump pills and the footer `Gallery` chip are retired (`R10.37`) so sheet navigation lives in `Project Navigator` and the Gallery opens solely via **View › Gallery** (`ui.gallery.toggle`).
    - **Collapsed-Navigator Active Sheet Switcher:** Renders a compact active-sheet dropdown **when Leading Navigator is collapsed** so researchers working in narrow or focused split views still have one-click sheet switching without reopening the dock.
    - `Upstream Link Status` icon (green/blue when all live links and formulas are up to date; amber with warning glyph if an external file link is stale).
 2. **Center Contextual Readout (`status.summary`):**
@@ -318,27 +317,32 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
 
 ```text
 +------------------------------------------------------------------------------------+
-|  New Data Table & Workspace Hub                                              [Esc] |
+|  Welcome to CurveBook                                                        [Esc] |
 +--------------------+----------------------------------+----------------------------+
-| CREATE DATA TABLE  | Archetype: Coordinate (XY)       |  STRUCTURAL SCHEMATIC      |
-| * Coordinate (XY)  | Table Title: [Assay 1         ]  |  +----+--------+--------+  |
-|   Column (1-Way)   |                                  |  | X  | Grp A  | Grp B  |  |
-|   Grouped (2-Way)  | Data Source:                     |  |Conc| Y1 Y2  | Y1 Y2  |  |
-|   Contingency      |  (o) Empty table for data entry  |  +----+--------+--------+  |
-|   Survival         |  ( ) Tutorial sample dataset     |                            |
-|   Parts of Whole   |                                  |  DEFAULT LINKED PLOT       |
-|   Multiple Vars    | X Column Format:                 |     ^  *                   |
-|   Nested           |  [Numbers                   v]   |     |    o  *              |
-|                    |                                  |     +---------> X          |
-| WORKSPACE & REUSE  | Y Subcolumns:                    |                            |
-|   Starter Templates|  ( ) Single Y value              |  [x] Auto-create Graph     |
-|   Clone Pipeline   |  (o) Replicates: [- 3 +]         |  [x] Attach Info Sheet     |
-|   Sample Gallery   |  ( ) Pre-computed: [Mean,SD,N v] |                            |
-|   Open File        |                                  |         [Cancel]  [Create] |
+| START A PROJECT    | Table Type:                      |  STRUCTURAL SCHEMATIC      |
+|   Open             |  (o) XY          ( ) Column      |  +----+--------+--------+  |
+|   Import           |  ( ) Grouped     ( ) Contingency |  | X  | Grp A  | Grp B  |  |
+| * New Data Table   |  ( ) Survival    ( ) Multi Vars  |  |Conc| Y1 Y2  | Y1 Y2  |  |
+|   Sample Data      |  ( ) Nested                      |  +----+--------+--------+  |
+| ------------------ |  > Additional table types        |                            |
+|   Reuse an Analysis|    ( ) Parts of Whole            |  DEFAULT LINKED PLOT       |
+|                    |                                  |     ^  *                   |
+|                    | Table Title: [Assay 1         ]  |     |    o  *              |
+|                    | X Column Format: [Numbers    v]  |     +---------> X          |
+|                    | Y Values & Error:                |                            |
+|                    |  ( ) Single Y                    |  [x] Create linked graph   |
+|                    |  (o) Replicates: [- 3 +]         |  [x] Create paired Info    |
+|                    |  ( ) Pre-computed: [Mean,SD,N v] |     [Cancel][Create Table] |
 +--------------------+----------------------------------+----------------------------+
 ```
 
 - When `total_sheet_count() == 0`, the launcher renders inside a centered bounded card on `CenterStage` with `Navigator`/`TrailingDock` collapsed and `Cancel` hidden.
+- **Primary Left-Rail Order (`R10.37`):**
+  1. **`Open` (`WelcomeLeftMode::OpenFile`):** Opens `.curvebook`, `.cbtemplate`, `.pzfx files`, or `.prism files` via OS file picker or path input (respecting `ExternalPathPolicy`).
+  2. **`Import` (`WelcomeLeftMode::ImportData`):** Routes directly to `Import XLSX Workbook` (`table.importXlsx`), `CSV / TSV / Clipboard` (`ImportWizard`), `Import .pzfx files` (`table.importPzfx`), `Import .prism files` (`table.importPrism`), and `Plate / Tidy Long Import` (`ui.import.reshape.open`).
+  3. **`New Data Table` (`WelcomeLeftMode::NewTableArchetype`, default active):** Displays the `7` core table types (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Multiple Variables`, `Nested`) in a 2-column selector plus a collapsible **`Additional table types`** disclosure revealing **`Parts of Whole`**, with conditional schema controls and right-pane schematic + auto-created sheet toggles (`Create linked graph sheet`, `Create paired Info sheet`).
+  4. **`Sample Data` (`WelcomeLeftMode::SampleData`):** Top-level browser across clean-room `SAMPLE_FIXTURES` with live schematic preview, custom title, and auto-create toggles.
+  5. **`Reuse an Analysis` (`WelcomeLeftMode::StarterTemplates | ClonePipeline`, separated by a divider):** Hosts a 2-tab switcher grouping **`New from Template`** (curated `.cbtemplate` project starters plus `Open .cbtemplate File`) and **`Clone Pipeline`** (source data table picker plus **Clone Options** sub-modal with toggles to clear Y response cells, keep X/time values, and clone downstream analyses/graphs/layouts). Saving a project as a reusable template remains directly available from any open project via **`File › Save Template`** (`project.saveTemplate`).
 - **Conditional Schema Adaptation across all `8` Table Archetypes:**
   - **`XY` (Coordinate):** Exposes `X Column Format` (`Numbers`, `Numbers + X Error`, `ISO Dates / Elapsed Time`, `Row Sequence`) and `Y Subcolumns` (`Single Y`, `N Side-by-Side Replicates` stepper `1..256`, or `Pre-computed Summary` tuple `Mean/SD/N`, `Mean/SEM/N`, `Mean/95% CI`, `Median/IQR`).
   - **`Column` (Single-Factor):** Hides `X` format; exposes `Experimental Design Hint`:
@@ -348,12 +352,9 @@ All footer controls render as quiet, borderless **Ghost Actions** on `surface_ch
   - **`Grouped` (Two-Factor):** Exposes `Y Subcolumns` (`Single`, `N Replicates` representing subjects/repeats across row × column factors, or `Pre-computed Summary`).
   - **`Contingency`:** Disables replicate and summary subcolumn controls; enforces non-negative integer count cells across `Row Categories × Column Outcomes`.
   - **`Survival`:** Locks schema to `Time` (`X`), `Group Columns` (`Y`), and configurable numeric `Event / Censored` codes (`1 = Event`, `0 = Censored` default).
-  - **`PartsOfWhole`:** Single numeric column + category row labels (optional total check).
+  - **`PartsOfWhole` (under `Additional table types`):** Single numeric column + category row labels (optional total check).
   - **`MultipleVariables`:** Tidy observation-by-variable schema (`Rows = Observations`, `Columns = Typed Variables`); exposes initial variable count stepper.
   - **`Nested`:** Hierarchical `GroupColumns × ReplicateSubcolumns` representing sub-replicates nested within biological units (e.g., technical replicates per animal/well).
-- **Clone Pipeline Mode (`Clone a Graph / Pipeline`):**
-  - Tabs across `Open Projects`, `Recent Files`, and `Saved .cbtemplate Pipelines` with a thumbnail zoom slider.
-  - Clicking `Clone` opens the **Clone Options Sub-Modal** with checkboxes to selectively `Clear raw data values`, `Keep column titles`, `Keep row titles`, and `Rename cloned family prefix`, instantiating the full linked Data -> Transform -> Analysis -> Graph chain ready for new assay measurements.
 
 ---
 
@@ -633,7 +634,8 @@ Includes cross-jump buttons (`Change Graph Type`, `Format Axes`) plus `Cancel`, 
 
 ### 8.14 Publication Export, Print & Preferences Modals
 
-1. **`Export Figure / Layout` Modal (`ExportFigure`):**
+1. **Unified `Export Figure` Modal (`ExportFigure`):**
+   - Single entry point for both `GraphSheet` and `LayoutSheet` exports: `File › Export › Export Figure`, the `GraphSheet` toolbar (`Export Figure`), and the `LayoutSheet` toolbar (`Export Figure`) all open this modal (`R10.37`), replacing duplicate per-format `File › Export` entries while keeping data, results, `.pzfx`, and methods exports in `File › Export`.
    - Controls: `Target Scope` (active sheet vs selected gallery sheets), `Format` (`PDF`, `SVG`, `EMF`, `PNG`, `TIFF` matching `crates/render/src/emf.rs` and `crates/engine/src/cmd/export.rs`), `Physical Width` (`Actual Size` vs journal preset `85 / 114 / 174 mm` or custom `mm`/`in`/`px`), `Resolution (DPI)` (`300`, `600`, `1200`), `Color Space` (`sRGB`, `Grayscale`, `CMYK`), `Background` (`Opaque` vs `Transparent`), and `TIFF Compression` (`LZW` / `Deflate` / `None`).
    - **Conditional Gating:** Selecting pure vector formats (`PDF`, `SVG`) disables raster-only `DPI` and `TIFF Compression` controls with explanatory tooltips (while `EMF` preserves vector/device-context scaling); selecting formats without alpha (`PDF`, `EMF`) disables `Transparent` background.
 2. **`Application Preferences` Modal:**
@@ -686,9 +688,9 @@ Per [`../clean-room.md`](../clean-room.md#attributed-vectorcraft-gui-source-reus
 
 ### 9.4 Mandatory Layout Verification Gates
 
-Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (and browser `apps/curvebook-web` aligns post-Beta in [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate) on **1.0**):
+Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass these checks:
 
-1. **Pixel-to-Hit-Box & Phantom-Widget Gate (`verify_pixel_to_hit_box_parity`):** Every interactive node in AccessKit-backed `ui.inspect` (`FrameInspectMeta`) and `EguiHumanPathDriver` / `egui_kittest` has non-zero visible bounds matching CPU-rasterized `ui.screenshot` pixels across `Light`/`Dark`/`HighContrast` and `1.0x`–`3.0x` HiDPI scales (Web ARIA planned for **1.0** in `R11.11`; desktop `RTL` mirroring unscheduled / unlikely per `R8.12`), with `100%` `ZLayer::ModalBackdrop` outside click/wheel capture and zero click-through.
+1. **Pixel-to-Hit-Box & Phantom-Widget Gate (`verify_pixel_to_hit_box_parity`):** Every interactive node in AccessKit-backed `ui.inspect` (`FrameInspectMeta`) and `EguiHumanPathDriver` / `egui_kittest` has non-zero visible bounds matching CPU-rasterized `ui.screenshot` pixels across `Light`/`Dark`/`HighContrast` and `1.0x`–`3.0x` HiDPI scales (desktop `RTL` mirroring unscheduled / unlikely per `R8.12`), with `100%` `ZLayer::ModalBackdrop` outside click/wheel capture and zero click-through.
 2. **Scrollbar, Interactive Non-Overlap & WCAG 2.2 SC 2.5.8 Target-Size Gate (`verify_egui_frame_parity` in [`driver.rs`](../../crates/ui-egui/src/egui_shell/driver.rs) & integration test suite [`zz_overlap_probe.rs`](../../crates/ui-egui/tests/r15_shell_suite/zz_overlap_probe.rs)):** Zero `Role::ScrollBar` intersections with clickable/focusable child controls and zero partial overlaps between enabled clickable chrome controls on the same `ZLayer` (nesting and user-positioned `ZLayer::FloatingOverlay` WYSIWYG canvas panels/annotations permitted) across `640 × 420 pt` through `1920 × 1080 pt`. For target sizes, CurveBook applies WCAG 2.2 SC 2.5.8 (Level AA, `24 × 24 CSS px`) by WCAG2ICT analogy (`24 × 24` logical `pt` at `1.0x` `ui_scale`) and separates automated test-gate exclusions from per-control WCAG justifications (noting that WCAG's **Equivalent** exception requires another qualifying `>= 24 × 24 pt` **pointer** control on the same screen; keyboard alternatives alone do not qualify):
    - *Automated `wcag_258_target_size` gate exclusions:* spreadsheet `gridcell`s, `Role::Splitter` sashes, and canvas corner/rotation grips are excluded from the standalone-button bounding-box assertion.
    - *Per-control WCAG 2.2 SC 2.5.8 justifications:*

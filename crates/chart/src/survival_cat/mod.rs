@@ -47,7 +47,6 @@ mod tests {
     };
 
     use super::compile_survival_or_categorical_graph;
-    use super::parts_of_whole::largest_remainder_100;
     use crate::scene::{ChartScene, ScenePrimitive};
 
     #[test]
@@ -80,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn waffle_10x10_emits_100_cells_and_donut_emits_center_total() {
+    fn parts_of_whole_donut_pie_and_stacked_bar_compile() {
         let mut pow = PartsOfWholeTable::new(1, 3).expect("pow");
         pow.slice_labels = vec![String::from("Alpha"), String::from("Beta"), String::from("Gamma")];
         for (r, v) in [50.0, 30.0, 20.0].into_iter().enumerate() {
@@ -90,20 +89,28 @@ mod tests {
         let mut doc = ProjectDocument::default();
         doc.add_data_sheet(ds.clone()).expect("add");
 
-        let mut waffle_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-w"), &ds).expect("gs");
-        waffle_gs.spec.series[0].gdo = GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Waffle10x10, show_center_total: true };
-        let mut w_scene = ChartScene::new("g-w", "Waffle", 420.0, 300.0, None);
-        compile_survival_or_categorical_graph(&waffle_gs, &doc, &mut w_scene).expect("compile waffle");
-        let waffle_cells = w_scene.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Path { fill: Some(_), .. })).count();
-        assert!(waffle_cells >= 100);
-
         let donut_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-d"), &ds).expect("gs");
         let mut d_scene = ChartScene::new("g-d", "Donut", 420.0, 300.0, None);
         compile_survival_or_categorical_graph(&donut_gs, &doc, &mut d_scene).expect("compile donut");
         assert!(d_scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text().contains("Total: 100"))));
 
+        let mut pie_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-p"), &ds).expect("gs");
+        pie_gs.spec.series[0].gdo = GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Pie, show_center_total: true };
+        let mut p_scene = ChartScene::new("g-p", "Pie", 420.0, 300.0, None);
+        compile_survival_or_categorical_graph(&pie_gs, &doc, &mut p_scene).expect("compile pie");
+        assert!(p_scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(_), .. })));
+        assert!(!p_scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text().contains("Total: 100"))));
+
+        let mut bar_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-b"), &ds).expect("gs");
+        bar_gs.spec.series[0].gdo = GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::StackedFractionBar, show_center_total: false };
+        let mut b_scene = ChartScene::new("g-b", "StackedBar", 420.0, 300.0, None);
+        compile_survival_or_categorical_graph(&bar_gs, &doc, &mut b_scene).expect("compile stacked bar");
+        assert!(b_scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "100%")));
+
         let fractions = ds.archetype_fractions_test();
-        assert_eq!(largest_remainder_100(&fractions).iter().sum::<usize>(), 100);
+        assert_eq!(fractions.len(), 3);
+        let sum: f64 = fractions.iter().map(|s| s.fraction).sum();
+        assert!((sum - 1.0).abs() < 1e-12);
     }
 
     trait PowHelper {

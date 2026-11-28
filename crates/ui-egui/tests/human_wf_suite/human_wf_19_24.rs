@@ -955,7 +955,7 @@ fn wf24_human_significance_brackets_stars_and_axes() -> TestRes {
     }
 
     // Export check via ExportFigure SVG dialog.
-    run.click("toolbar.export_svg")?;
+    run.click("toolbar.export_figure")?;
     ensure(matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "WF-24 expected ExportFigure modal")?;
     run.click("export.fmt.svg")?;
     run.commit_modal_ok()?;

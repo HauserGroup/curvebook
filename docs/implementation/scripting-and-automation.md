@@ -14,7 +14,7 @@ Traditional desktop biostatistics tools accumulated proprietary, imperative text
 CurveBook replaces ad-hoc macro scripting with a **single unified, headless-capable command architecture**:
 1. **Every operation is a registered `CommandSpec`** in `curvebook-engine` (`crates/engine/src/cmd/*`, `cmd::registry()`) taking schema-validated JSON parameters and returning a structured `Result<CommandOutcome, EngineError>`.
 2. **Four identical execution transports** share the exact same command registry and deterministic L0–L5 execution engine:
-   - **Interactive GUI (`curvebook` / `curvebook-web`):** Menu items, dialogs, spreadsheet edits, and canvas tools in the `egui 0.37` desktop shell (`apps/curvebook`, `crates/ui-egui`, `65 / 65` five-stage human-path workflows complete) dispatch commands onto `Session`; `apps/curvebook-web` provides a strict-CSP `wasm32` bridge pending full `eframe::WebRunner` adoption in [`R11.11`](../ROADMAP.md#r1111-migrate-browser-host-to-eframe-webrunner-10-gate).
+   - **Interactive GUI (`curvebook` / `curvebook-web`):** Menu items, dialogs, spreadsheet edits, and canvas tools in the `egui 0.37` desktop shell (`apps/curvebook`, `crates/ui-egui`, `65 / 65` five-stage human-path workflows complete) dispatch commands onto `Session`; `apps/curvebook-web` is a strict-CSP `wasm32` placeholder. Browser delivery is parked under [`R11`](../ROADMAP.md#r11-usable-browser-app).
    - **Reusable Method & Project Templates (`.cbtemplate`):** Zero-code Assay / Plate repetition — open a template pre-wired with transforms, statistical tests, nonlinear fits, significance brackets, and page layouts, drop in new CSV/plate data, and every downstream result and figure updates deterministically.
    - **Headless Batch CLI (`curvebook-cli`):** Run batch pipelines and inspect, convert, or export projects headlessly via `run`, `batch`, `convert`, `export`, `info`, `commands`, direct `<command-id>` dispatch (for example `table.importCsv`, `stats.run`, `fit.run`), `bench`, `perf`, and `mcp` in CI, Snakemake, Nextflow, R, or Python without a display server (`xvfb` or GUI never required).
    - **Live Socket (`--control <port>`) & AI Agent Server (`curvebook-cli mcp`):** Drive an in-memory headless project, a headless `curvebook --control` session, or a live desktop window over JSONL / stdio MCP.
@@ -61,7 +61,7 @@ For reproducible laboratory pipelines (e.g. processing 96-well / 384-well dose�
 
 | Scientist Workflow | CurveBook Mechanism |
 |---|---|
-| Repeat yesterday's analysis & graph on a new experiment | `File › New From Template…` (`project.instantiateTemplate`, `.cbtemplate`) or `sheet.clonePipeline` ("Clone Pipeline" / "Clone Family") |
+| Repeat yesterday's analysis & graph on a new experiment | Welcome **Reuse an Analysis** (**New from Template** / **Clone Pipeline**), `File › Save Template` (`project.saveTemplate`) / `File › New Project From Template` (`project.instantiateTemplate`, `.cbtemplate`), or `Data › Clone Analysis Pipeline` (`sheet.clonePipeline`) |
 | Restyle 12 graphs in a manuscript to match Figure 1A | `graph.applyStyleFrom` ("Apply Graph Style / Clone Style") across selected graph IDs |
 | Fit 200 compound plates and export $\text{IC}_{50}$ + $95\%$ profile CIs to CSV | `curvebook-cli batch` applying a `.cbtemplate` over plate CSVs $\to$ tidy `csv` result tables + multi-page `pdf` |
 | Inspect, fit, diagnose & plot interactively from an AI research assistant | `curvebook-cli mcp` (`doc_inspect`, `command_batch`, `render_preview`, `export`) |

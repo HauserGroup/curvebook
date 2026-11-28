@@ -2509,7 +2509,6 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
         "survival.km" => Some((GraphKind::Survival, None, Some("survival.km"))),
         "parts.donut" => Some((GraphKind::PartsOfWhole, None, Some("parts.donut"))),
         "parts.pie" => Some((GraphKind::PartsOfWhole, None, Some("parts.pie"))),
-        "parts.waffle" => Some((GraphKind::PartsOfWhole, None, Some("parts.waffle"))),
         "mv.bubble" => Some((GraphKind::MultipleVariables, None, Some("mv.bubble"))),
         "hist.bars" | "histogram" | "hist.histogram" => Some((GraphKind::Histogram, None, Some("hist.bars"))),
         "hist.curve" | "hist.xy_curve" => Some((GraphKind::Histogram, None, Some("hist.curve"))),
@@ -2567,7 +2566,6 @@ fn default_gdo_for_option(preset: &str, color: Rgba8) -> GraphicalDataObject {
         "survival.km" => default_gdo_for_kind(GraphKind::Survival, color),
         "parts.donut" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
         "parts.pie" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Pie, show_center_total: false },
-        "parts.waffle" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Waffle10x10, show_center_total: true },
         "hist.bars" | "hist.curve" | "hist.step" | "hist.cumulative" => default_gdo_for_kind(GraphKind::Histogram, color),
         _ => default_gdo_for_kind(GraphKind::Xy, color),
     }

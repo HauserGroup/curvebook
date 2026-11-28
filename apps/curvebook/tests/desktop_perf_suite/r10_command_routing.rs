@@ -498,9 +498,9 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
         ("project.open", &csv_path),
         ("project.save", &save_path),
         ("file.save_as", &save_as_path),
-        ("export.svg", &svg_path),
-        ("export.pdf", &pdf_path),
-        ("export.png", &png_path),
+        ("graph.exportSvg", &svg_path),
+        ("graph.exportPdf", &pdf_path),
+        ("graph.exportPng", &png_path),
     ] {
         adapter.push_response(cmd, Some(p.clone()));
     }
@@ -577,11 +577,14 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
             && !open_project_file(&save_as_path)?.data_sheets.is_empty()
     );
 
-    h.open_menu_item("menu.file", Some("menu.file.export"), "menu.export.svg")?;
+    for (fmt_wid, expected_path) in [("export.fmt.svg", &svg_path), ("export.fmt.pdf", &pdf_path), ("export.fmt.png", &png_path)] {
+        h.open_menu_item("menu.file", Some("menu.file.export"), "menu.ui.export.figure.open")?;
+        let _ = h.click_widget(fmt_wid)?;
+        let _ = h.click_widget("modal.ok")?;
+        assert!(expected_path.is_file(), "expected exported file at `{}`", expected_path.display());
+    }
     assert!(fs::read_to_string(&svg_path)?.contains("<svg"));
-    h.open_menu_item("menu.file", Some("menu.file.export"), "menu.export.pdf")?;
     assert!(fs::read(&pdf_path)?.starts_with(b"%PDF"));
-    h.open_menu_item("menu.file", Some("menu.file.export"), "menu.export.png")?;
     assert!(fs::read(&png_path)?.starts_with(b"\x89PNG"));
 
     let recorded = adapter.requests();

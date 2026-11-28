@@ -31,7 +31,7 @@ fn typed_ui_intents_and_i18n_catalog_smoke() -> TestRes {
     let batch = intents.commit_all_if_settled(&mut app, false);
     assert!(batch.results.len() == 1 && batch.results[0].is_ok() && app.grid.row_titles_collapsed_override == Some(true));
 
-    assert!(EXTRA_SHARD_CATALOGS.is_empty() && all_keys().count() == 1120 && missing_translations().is_empty());
+    assert!(EXTRA_SHARD_CATALOGS.is_empty() && all_keys().count() == 1139 && missing_translations().is_empty());
     assert!(LOCALES.iter().all(|loc| try_tr(loc, "menu.file").is_some()));
     Ok(())
 }

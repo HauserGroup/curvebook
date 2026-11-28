@@ -28,7 +28,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
+use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget, ExportFigureFormat};
 use crate::grid_view::ImportReshapeMode;
 use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
@@ -2399,11 +2399,45 @@ const SHEET_DIALOGS: &[SheetDialogSpec] = &[
         }
     })
     .extra(|a| json!({ "source_sheet_id": a.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str) })),
-    SheetDialogSpec::sheet("ui.export.figure.open", "ExportFigure", SheetDialogTarget::Renderable, |a, _, sid| {
+    SheetDialogSpec::custom("ui.export.figure.open", "ExportFigure", SheetDialogTarget::Renderable, |a, _, id, params| {
+        let Some(sid) = id else { return require_open_ok(false, SheetDialogTarget::Renderable, None) };
         a.canvas_dialogs.open_export_figure(sid);
-        true
+        let mut emf_selected = false;
+        if let Some(raw_fmt) = opt_non_empty_str_param(params, &["format"])? {
+            match raw_fmt.trim().to_ascii_lowercase().as_str() {
+                "svg" => a.canvas_dialogs.export_figure.format = ExportFigureFormat::Svg,
+                "pdf" => a.canvas_dialogs.export_figure.format = ExportFigureFormat::Pdf,
+                "png" => a.canvas_dialogs.export_figure.format = ExportFigureFormat::Png,
+                "tiff" | "tif" | "tiff_deflate" | "deflate" => {
+                    a.canvas_dialogs.export_figure.format = ExportFigureFormat::Tiff(TiffCompression::Deflate);
+                }
+                "tiff_lzw" | "lzw" => {
+                    a.canvas_dialogs.export_figure.format = ExportFigureFormat::Tiff(TiffCompression::Lzw);
+                }
+                "tiff_none" => {
+                    a.canvas_dialogs.export_figure.format = ExportFigureFormat::Tiff(TiffCompression::None);
+                }
+                "emf" => emf_selected = true,
+                other => return Err(format!("unsupported export format `{other}`; expected svg, pdf, png, tiff, or emf")),
+            }
+        }
+        a.egui_views.app_modals.export_emf_selected = emf_selected;
+        if let Some(dpi_val) = params.get("dpi").filter(|v| !v.is_null()) {
+            let dpi_num = dpi_val
+                .as_u64()
+                .or_else(|| dpi_val.as_f64().filter(|v| v.is_finite() && *v > 0.0).map(|v| v.round() as u64))
+                .ok_or_else(|| String::from("ui.export.figure.open 'dpi' must be a positive number between 72 and 2400"))?;
+            a.canvas_dialogs.export_figure.dpi = dpi_num.clamp(72, 2400) as u16;
+        }
+        Ok(())
     })
-    .extra(|a| json!({ "format": a.canvas_dialogs.export_figure.format })),
+    .extra(|a| {
+        if a.egui_views.app_modals.export_emf_selected {
+            json!({ "format": "Emf" })
+        } else {
+            json!({ "format": a.canvas_dialogs.export_figure.format })
+        }
+    }),
     SheetDialogSpec::custom("ui.import.warnings.open", "ImportWarnings", SheetDialogTarget::None, |a, _, _, _| {
         a.import_warnings.panel_open = true;
         a.canvas_dialogs.active_dialog = ActiveDialog::ImportWarnings;

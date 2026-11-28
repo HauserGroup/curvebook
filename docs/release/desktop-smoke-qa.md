@@ -29,12 +29,20 @@ Automated interactive regression backing is tracked in [GUI Workflows](../gui-wo
 
 ## 2. End-to-End Beta Desktop Walkthrough
 
-Execute every stage below sequentially on each target OS session:
+Execute the first-run core desktop probe (`R10.13` / `R10.37`), then complete every stage below sequentially on each target OS session:
 
-1. **Install & Launch from Candidate**: Install/run the OS Beta candidate above and confirm clean startup to the Welcome / New Data Table Launcher.
-2. **Create a Table from Welcome Dialog**:
-   - Inspect all 8 archetypes, `Tutorial Sample Data`, and `.cbtemplate` starter templates.
-   - Create a typed table (e.g., `XY` with concentration/response columns, plus repeat on `MultipleVariables` for picker coverage).
+### First-Run Core Desktop Probe (`R10.13` / `R10.37`)
+1. **Import a dose-response workbook:** Launch CurveBook and import an `.xlsx` dose-response workbook via the Welcome **Import** view (or **File › Import**).
+2. **Fit and inspect live update after a cell edit:** Run a `4PL` nonlinear dose-response curve fit on the imported table, edit a dose-response measurement cell directly in the rendered grid (`Enter` to commit), and confirm the linked result scalars (`EC50`, `R^2`) and fitted curve redraw immediately.
+3. **Export from both a graph and a layout:** Open unified **Export Figure** from both the linked `GraphSheet` (toolbar **Export Figure** or **File › Export › Export Figure**) and a `LayoutSheet` containing that graph, choose a format (`SVG` / `PDF` / `PNG`) inside the dialog, commit via the native save dialog, and verify both output files.
+
+### Full Walkthrough Stages
+
+1. **Install & Launch from Candidate**: Install/run the OS Beta candidate above and confirm clean startup to the **Welcome to CurveBook** launcher.
+2. **Start a Project from Welcome Hub (`R10.37`)**:
+   - Confirm the left rail puts **Open**, **Import**, **New Data Table**, and **Sample Data** first, followed by grouped **Reuse an Analysis** (**New from Template** and **Clone Pipeline** tabs).
+   - Under **New Data Table**, inspect the 7 core archetypes (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Multiple Variables`, `Nested`), expand **Additional table types** to confirm **Parts of Whole** is present, and inspect **Sample Data** and **Reuse an Analysis** (curated `.cbtemplate` starters + `Open .cbtemplate File` and **Clone Pipeline**).
+   - Create a typed table (e.g., `XY` with concentration/response columns, plus repeat on `MultipleVariables` confirming **Analyze** and the formula bar stay directly on the MV toolbar while **Data › Randomize Groups** and **Data › Sample Rows** run cleanly from the **Data** menu), and verify saving as a template via **File › Save Template** remains available from the open project.
 3. **Enter, Edit & Paste Data**:
    - Double-click an `X` cell (`GridXCell`) and `Y` data cell (`GridCell`), type/compose IME input (e.g., `"7.5"` or `"濃度"`), verify live inline editing buffer updates, commit with `Enter`, and confirm `Escape` cancels an edit cleanly without mutating the cell or recording an undo entry.
    - Click a row title (`grid.row_title.*`) -> cancel with `Escape`, then rename and commit with `Enter`.
@@ -45,17 +53,18 @@ Execute every stage below sequentially on each target OS session:
    - Click **Analyze…**, run a group/statistical analysis (e.g., One-way ANOVA or two-group comparison), press `Cmd/Ctrl+T` to adjust parameters in **Edit Analysis Parameters**, and verify live recomputation.
    - On a `MultipleVariables` sheet, open **Analyze…** and `Cmd/Ctrl+T`: verify the role filter chips (`All`, `Continuous`, `Categorical`, `Label`, `Calculated`) filter variables cleanly and colour-coded role badges (`NUM`, `CAT`, `LBL`, `FX=`) match variable roles.
    - Run a **nonlinear fit** (e.g., `4PL` sigmoidal dose-response or `One-Phase Exponential Decay` from the built-in equation catalog), verify fit summary scalars (`R^2`, `EC50`/rate constant, `95% CI`) and assumption diagnostic banner (`QOL-7`), and confirm parameter constraints / comparison via `Cmd/Ctrl+T`.
-5. **Make a Graph, Portfolio Gallery & `F6` Pane Cycling**:
+5. **Make a Graph, `View › Gallery` & `F6` Pane Cycling**:
    - Open or create a `GraphSheet` showing the data and fitted curve; test Inspector formatting (`Format Graph` / `Format Axes`) and `Cmd/Ctrl+Z` undo / `Cmd/Ctrl+Shift+Z` redo.
-   - Open the **Portfolio Gallery**, filter by folder (`All`, `Data`, `Info`, `Results`, `Graphs`, `Layouts`), wheel-scroll the card grid, and single-click a card to switch sheets and dismiss the gallery.
+   - Confirm no Gallery launch control appears in the footer or Navigator folder headers; open the **Portfolio Gallery** via its single entry point **View › Gallery**, filter by folder (`All`, `Data`, `Info`, `Results`, `Graphs`, `Layouts`), wheel-scroll the card grid, click a graph thumbnail to open it directly (confirming Welcome does not reappear), and multi-select graphs (`Shift` / `Cmd/Ctrl+Click`) to verify bulk **Graph › Apply Style From**.
    - Cycle focus with `F6` and `Shift+F6`: confirm focus moves strictly across visible panes, and hiding Inspector (`Cmd/Ctrl+Shift+I`) or Family (`Cmd/Ctrl+Shift+F`) skips hidden panes cleanly.
 6. **Native File Dialogs (`Open`, `Save`, `Save As`), Drag-and-Drop & Reopen**:
    - Trigger `File › Save` and save the project as `.curvebook` via the native OS file picker (confirm XDG file-chooser portal on Linux Wayland & X11); confirm dirty indicator clears and subsequent `File › Save` writes in place.
    - Trigger `File › Save As…` and verify the native picker always prompts for a new path.
    - **Close and reopen the saved `.curvebook` project** (via `File › Open…` or relaunching and opening); verify every data sheet, analysis, nonlinear fit curve, and graph renders identically.
    - Test opening and dragging-and-dropping `.pzfx`, `.prism`, `.csv`, and `.curvebook` files onto the window canvas (verifying foreign imports detach the native `.curvebook` archive path safely).
-7. **Export SVG, PDF & PNG through Native Save Dialogs**:
-   - On an initialized `GraphSheet` or `LayoutSheet`, trigger `File › Export › SVG…`, `File › Export › PDF…`, and `File › Export › PNG…` through native save dialogs and inspect the exported files (`<svg`, `%PDF-1.7`, PNG signature & dimensions).
+7. **Export Figures (`SVG`, `PDF`, `PNG`, `TIFF`, `EMF`) through Unified `Export Figure`**:
+   - On an initialized `GraphSheet` and on a `LayoutSheet`, open the unified **Export Figure** dialog via **File › Export › Export Figure** and via the graph/layout toolbar **Export Figure** button (confirming duplicate per-format `SVG`/`PDF`/`PNG`/`TIFF` entries are absent from **File › Export**, while CSV/JSON/`.pzfx`/Methods Report exports stay available).
+   - Select `SVG`, `PDF`, and `PNG` inside **Export Figure**, commit through native save dialogs, and inspect the exported files (`<svg`, `%PDF-1.7`, PNG signature & dimensions).
 8. **Copy Graph & Paste into Another Application**:
    - Focus an active `GraphSheet` (and `LayoutSheet`), press `Cmd/Ctrl+C`, and paste into an external vector editor or office document consumer to verify multi-flavor vector/raster clipboard delivery (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`).
 9. **Open Print Preview (`File › Print…`)**:

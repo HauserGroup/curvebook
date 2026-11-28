@@ -186,8 +186,8 @@ fn popup_matrix_all_ten_menus_across_viewports_and_de_locale_pass_parity_and_two
             checked_cases += 1;
         }
 
-        // 2. Toolbar `⋯` overflow dropdown (`popup.toolbar.overflow`) — guaranteed at 640×420 on ds-mv.
-        select_sheet_and_settle(&mut drv, "ds-mv").unwrap();
+        // 2. Toolbar `⋯` overflow dropdown (`popup.toolbar.overflow`) — guaranteed at 640×420 on gs-xy.
+        select_sheet_and_settle(&mut drv, "gs-xy").unwrap();
         if drv.frame_meta().find_by_widget_id("toolbar.overflow").is_some_and(|e| e.enabled) {
             drv.click_widget_id("toolbar.overflow").unwrap();
             verify_open_popup_and_dismiss(
@@ -202,6 +202,7 @@ fn popup_matrix_all_ten_menus_across_viewports_and_de_locale_pass_parity_and_two
         }
 
         // 3. MV variable-role dropdown (`popup.mv.role`).
+        select_sheet_and_settle(&mut drv, "ds-mv").unwrap();
         if drv.frame_meta().find_by_widget_id("mv_formula.role_badge.0").is_some_and(|e| e.enabled) {
             drv.click_widget_id("mv_formula.role_badge.0").unwrap();
             verify_open_popup_and_dismiss(&mut drv, "popup.mv.role", ZLayer::DropdownMenu, &format!("mv_role/{cfg_name}"), &mut failures);

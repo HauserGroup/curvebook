@@ -38,7 +38,7 @@ Creating a new `DataSheet` automatically provisions a paired `GraphSheet` (`init
      - `Interleaved` bars/symbols cluster series at each Row factor $r$ along the X-axis (defaulting X tick labels to `Row titles`), comparing Column series side-by-side within each row.
      - `Separated` bars/symbols render all rows of Column $A$ as Block 1 followed by all rows of Column $B$ as Block 2 (defaulting X tick labels to `Column titles`, or switchable to `Row titles` / `Row numbers` in `Format Axes` while numeric range bounds stay disabled on categorical axes). Swapping which factor controls series color vs. cluster grouping is achieved cleanly via `Transpose`.
 3. **Contingency & Parts-of-Whole Graphs:**
-   - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, ring/donut (with center total callout), and $10 \times 10$ unit/waffle grid.
+   - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, and ring/donut (with center total callout).
 4. **Survival Graphs:**
    - Kaplan–Meier curves supporting `SurvivalDisplayMetric::{PercentSurvival, PercentCumulativeEvent, FractionSurvival}`, `Staircase` vs. `PointToPoint` rendering, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood `SE` / `95% CI` bands, an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks (including 100%-censored arms and blank spacer rows), and **Cox PH baseline + covariate-profile survival overlays** (`cox-profile-survival` / `cox_profile:{idx}` rendered directly on `GraphKind::Survival`).
 5. **Multiple Variables & Diagnostic Graphs:**

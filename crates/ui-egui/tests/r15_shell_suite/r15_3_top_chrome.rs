@@ -227,8 +227,10 @@ fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Te
         .execute_command("sheet.createData", json!({ "sheet_id": "ds-mv", "title": "Cohort MV", "kind": "multiple_variables", "cols": 3, "rows": 4 }))
         .map_err(|e| e.to_string())?;
     driver.run_settled();
-    for wid in ["toolbar.formula_bar", "toolbar.randomize_groups", "toolbar.sample_rows"] {
-        assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "missing MV `{wid}`");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.analyze").is_some(), "missing MV `toolbar.analyze`");
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.formula_bar").is_some(), "missing MV `toolbar.formula_bar`");
+    for removed in ["toolbar.randomize_groups", "toolbar.sample_rows"] {
+        assert!(driver.frame_meta().find_by_widget_id(removed).is_none(), "MV toolbar must not expose `{removed}`");
     }
 
     let rs_out = driver
@@ -246,9 +248,10 @@ fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Te
     driver.state_mut().app.execute_command("graph.create", json!({ "sheet_id": "gs-col", "data_sheet_id": "ds-col" })).map_err(|e| e.to_string())?;
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "gs-col" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    for wid in ["toolbar.graph_type", "toolbar.axes", "toolbar.format_graph", "toolbar.export_svg"] {
+    for wid in ["toolbar.graph_type", "toolbar.axes", "toolbar.format_graph", "toolbar.export_figure"] {
         assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "GraphSheet missing `{wid}`");
     }
+    assert!(driver.frame_meta().find_by_widget_id("toolbar.export_svg").is_none());
 
     if let Some(info_id) = driver.state().app.document().info_sheets.first().map(|s| s.id.as_str().to_owned()) {
         let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": info_id }));
@@ -271,7 +274,9 @@ fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Te
     assert_eq!(composer_btn.command_id.as_deref(), Some("ui.layout.composer.open"));
     assert_eq!(composer_btn.label, curvebook_ui_egui::tr("en", "cmd.ui.layout.composer.open"));
     assert!(
-        driver.frame_meta().find_by_widget_id("toolbar.rulers").is_some() && driver.frame_meta().find_by_widget_id("toolbar.canvas_preset").is_some()
+        driver.frame_meta().find_by_widget_id("toolbar.rulers").is_some()
+            && driver.frame_meta().find_by_widget_id("toolbar.canvas_preset").is_some()
+            && driver.frame_meta().find_by_widget_id("toolbar.export_figure").is_some()
     );
 
     driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));

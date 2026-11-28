@@ -705,7 +705,7 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Column => ("column", "Column Bar / Box / Violin / Dot", "One-way vertical or horizontal categorical comparisons with bar, box, violin, raincloud, beeswarm, or paired before-after lines."),
         GraphKind::Grouped => ("grouped", "Grouped Multi-Factor Figure", "Clustered, separated, stacked, or superimposed multi-factor vertical or horizontal (population pyramid) bar and point figures."),
         GraphKind::Contingency => ("contingency", "Contingency Bar / Stacked Proportions", "Categorical count or percentage bars from contingency tables."),
-        GraphKind::PartsOfWhole => ("parts-of-whole", "Parts of Whole (Pie / Donut / Waffle)", "Pie, donut, stacked fraction bar, or 10x10 waffle chart."),
+        GraphKind::PartsOfWhole => ("parts-of-whole", "Parts of Whole (Pie / Donut / Stacked Bar)", "Pie, donut, or 100% stacked fraction bar chart."),
         GraphKind::Survival => ("survival", "Kaplan–Meier Survival Curve", "Kaplan–Meier staircase or direct trajectories (survival % / cumulative event % / fraction) with censoring ticks, Greenwood SEM/95% CI bands, and risk tables."),
         GraphKind::MultipleVariables => ("multiple-variables", "Multiple Variables Bubble / Matrix", "Multivariate bubble scatter or categorical summary mapping continuous/categorical axes, colour, size, hulls, and confidence ellipses."),
         GraphKind::Histogram => ("histogram", "Histogram & Frequency Distribution", "Contiguous frequency bars, XY frequency polygons, stepped outlines, cumulative distribution curves, and optional fitted Gaussian density/CDF overlays."),

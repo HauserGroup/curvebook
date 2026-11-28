@@ -1939,30 +1939,6 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
-            actions.push(make_ui_action(
-                app,
-                Tier2ActionInput {
-                    widget_id: "toolbar.randomize_groups",
-                    label: "Randomize Groups",
-                    command_id: "ui.table.randomizeGroups",
-                    params: json!({}),
-                    enabled: modal_enabled,
-                    disabled_reason: None,
-                    primary: false,
-                },
-            ));
-            actions.push(make_ui_action(
-                app,
-                Tier2ActionInput {
-                    widget_id: "toolbar.sample_rows",
-                    label: "Sample Rows",
-                    command_id: "ui.table.randomSampleRows",
-                    params: json!({}),
-                    enabled: modal_enabled,
-                    disabled_reason: None,
-                    primary: false,
-                },
-            ));
             if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
                 actions.push(note_act);
             }
@@ -2095,8 +2071,8 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             actions.push(make_ui_action(
                 app,
                 Tier2ActionInput {
-                    widget_id: "toolbar.export_svg",
-                    label: tr(&app.locale, "toolbar.export_svg"),
+                    widget_id: "toolbar.export_figure",
+                    label: tr(&app.locale, "cmd.ui.export.figure.open"),
                     command_id: "ui.export.figure.open",
                     params: json!({}),
                     enabled: modal_enabled,
@@ -2162,8 +2138,8 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             actions.push(make_ui_action(
                 app,
                 Tier2ActionInput {
-                    widget_id: "toolbar.export_svg",
-                    label: tr(&app.locale, "toolbar.export_svg"),
+                    widget_id: "toolbar.export_figure",
+                    label: tr(&app.locale, "cmd.ui.export.figure.open"),
                     command_id: "ui.export.figure.open",
                     params: json!({}),
                     enabled: modal_enabled,

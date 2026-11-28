@@ -160,7 +160,7 @@ fn sec19_02_in_window_menus_and_intents_route_to_native_dialogs_respecting_inlin
     fs::write(&in_csv, "X,Y\n1.0,2.0\n3.0,6.0\n")?;
 
     for (cmd, resp) in [
-        ("export.png", Some(seed_png.clone())),
+        ("graph.exportPng", Some(seed_png.clone())),
         ("export.tiff", Some(out_tiff.clone())),
         ("project.saveTemplate", Some(out_tpl.clone())),
         ("table.importCsv", Some(in_csv)),
@@ -183,9 +183,12 @@ fn sec19_02_in_window_menus_and_intents_route_to_native_dialogs_respecting_inlin
     let mut h = NativeHarness::with_screen(CurveBookNativeApp::new(rt, w1, None), Vec2::new(1280.0, 820.0));
     h.settle(4);
 
+    for fmt_wid in ["export.fmt.png", "export.fmt.tiff_deflate"] {
+        h.open_menu_item("menu.file", Some("menu.file.export"), "menu.ui.export.figure.open")?;
+        let _ = h.click_widget(fmt_wid)?;
+        let _ = h.click_widget("modal.ok")?;
+    }
     for (top, sub, item) in [
-        ("menu.file", Some("menu.file.export"), "menu.export.png"),
-        ("menu.file", Some("menu.file.export"), "menu.export.tiff"),
         ("menu.file", None, "menu.project.saveTemplate"),
         ("menu.file", Some("menu.file.import"), "menu.table.importCsv"),
         ("menu.insert", None, "menu.graph.insertImage"),

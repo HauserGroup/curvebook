@@ -1,6 +1,6 @@
 # Quality-of-Life Enhancements (`M8+`)
 
-> **Status:** All `13` active Wave A (`QOL-1`–`QOL-9`, diagnostics-only `QOL-7`) and Wave B (`QOL-12`, `QOL-14`, equations-only `QOL-16`, and `QOL-17`) items are **done** ([`history/roadmap/r9.md`](../history/roadmap/r9.md)). Four items (`QOL-10`, `QOL-11`, `QOL-13`, `QOL-15`) remain **deferred** without scheduled milestones. Compact Letter Display (`CLD`) shipped separately under [`R10.11`](../history/roadmap/r10.md#r1011-compact-letter-display-cld); legacy `gui_only` `QOL-17` tests were superseded by five-stage `human_wf_*` desktop suites ([`R10.25`](../history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R21.1`](../history/roadmap/r21.md#r211-retire---gui-only-and-synthetic-ui-automation-plumbing)) · **Updated:** 2026-11-27 · **Roadmap:** [`ROADMAP.md#r9`](../ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) · **Evidence:** [`STATUS.md`](../STATUS.md)
+> **Status:** All `13` active Wave A (`QOL-1`–`QOL-9`, diagnostics-only `QOL-7`) and Wave B (`QOL-12`, `QOL-14`, equations-only `QOL-16`, and `QOL-17`) items are **done** ([`history/roadmap/r9.md`](../history/roadmap/r9.md)). `QOL-10` and `QOL-11` are **deferred**. The standalone calculator proposals (`QOL-13` and `QOL-15`) were **dropped**. Compact Letter Display (`CLD`) shipped separately under [`R10.11`](../history/roadmap/r10.md#r1011-compact-letter-display-cld); legacy `gui_only` `QOL-17` tests were superseded by five-stage `human_wf_*` desktop suites ([`R10.25`](../history/roadmap/r10.md#r1025-automated-gui-completion-of-all-65-workflows-beta-gate), [`R21.1`](../history/roadmap/r21.md#r211-retire---gui-only-and-synthetic-ui-automation-plumbing)) · **Updated:** 2026-11-27 · **Roadmap:** [`ROADMAP.md#r9`](../ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) · **Evidence:** [`STATUS.md`](../STATUS.md)
 
 **Deferral policy:** Deferred items stay outside the active queue; existing unpacked-directory, checkpoint, and `VirtualWorkspaceFolder` code and file compatibility remain supported. Supporting specifications live in [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md) and [`gui-workflows.md`](../gui-workflows.md).
 
@@ -32,9 +32,9 @@
 | [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `curvebook-web` | **Deferred; existing code retained** (`R9.10`) |
 | [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & named checkpoints | Persistence | `format`, `engine`, `ui-egui` | **Deferred; existing code retained** (`R9.11`) |
 | [QOL-12](#qol-12-categorical-and-continuous-table-analysis-completions) | Factorial ANOVA post-hoc tabs, Cohen/Fleiss $\kappa$, `NNT` CIs, custom GOF $\chi^2$, Binomial/Sign tests, $\chi^2$ SD CIs & summary *t*-tests | Biostatistics | `doc`, `stats`, `engine`, `ui-egui` | **Done** (`R9.12`) |
-| [QOL-13](#qol-13-instant-statistical-distribution-and-bayesian-calculators) | Stateless statistical, distribution, and Bayesian calculators | Calculators & DSL | `stats`, `transform`, `engine`, `mcp`, `ui-egui` | **Deferred; no scheduled milestone** (`R9.13`) |
+| [QOL-13](#qol-13-instant-statistical-distribution-and-bayesian-calculators) | Stateless statistical, distribution, and Bayesian calculators | Calculators & DSL | `stats`, `transform`, `engine`, `mcp`, `ui-egui` | **Dropped** (`R9.13`) |
 | [QOL-14](#qol-14-experimental-subject-randomization-and-random-subset-sampling) | Seeded complete/permuted-block group randomization, uniform/stratified $k$-of-$N$ row sampling & multi-distribution table generation | Experimental Design | `doc`, `transform`, `engine`, `ui-egui` | **Done** (`R9.14`) |
-| [QOL-15](#qol-15-bench-molarity-dilution-and-radiochemical-decay-calculators) | Molarity, dilution, moles/grams, and radiochemical calculators | Bench Lab Tools | `stats`, `engine`, `ui-egui` | **Deferred; no scheduled milestone** (`R9.15`) |
+| [QOL-15](#qol-15-bench-molarity-dilution-and-radiochemical-decay-calculators) | Molarity, dilution, moles/grams, and radiochemical calculators | Bench Lab Tools | `stats`, `engine`, `ui-egui` | **Dropped** (`R9.15`) |
 | [QOL-16](#qol-16-live-tex-model-equation-annotations-equations-only) | Symbolic and live-substituted $\TeX$-subset best-fit equation callouts only | Graphing | `doc`, `fit`, `text`, `chart`, `engine`, `ui-egui` | **Done (equations only)** (`R9.16`, `R10.19`) |
 | [QOL-17](#qol-17-extended-multivariable-clustering-glm-and-statistical-graphing-gui_only-suite) | Extended 21-workflow multivariable, clustering, GLM & graphing coverage (`WF-29`–`WF-49`) | GUI Parity & QA | `ui-egui`, `mcp`, `testkit` | **Done** (`R9.17`; superseded by `human_wf_*`) |
 
@@ -83,10 +83,10 @@ Implemented (`R9.17`; see [`gui-workflows.md` §5](../gui-workflows.md#5-extende
 
 ---
 
-## Deferred Specifications (Retained for Reference)
+## Deferred and dropped specifications
 
 ### QOL-10 Zero-install client-side WASM viewer and browser folder workspaces
-- **Planning status:** Deferred without a scheduled milestone (`R9.10`). Existing `VirtualWorkspaceFolder` code remains supported; baseline browser app work (`eframe::WebRunner`) is tracked under [`R11`](../ROADMAP.md#r11-usable-browser-app).
+- **Planning status:** Deferred without a scheduled milestone (`R9.10`). Existing `VirtualWorkspaceFolder` code remains supported; browser delivery is parked under [`R11`](../ROADMAP.md#r11-usable-browser-app).
 - **Crates:** `crates/format`, `crates/ui-egui`, `apps/curvebook-web`
 - **Problem:** Collaborators, students, and peer reviewers often inspect project archives on machines without native software installed, while institutional policies forbid uploading unpublished data to cloud servers.
 - **Scope:**
@@ -104,13 +104,13 @@ Implemented (`R9.17`; see [`gui-workflows.md` §5](../gui-workflows.md#5-extende
   - **Named Checkpoints:** Record and restore named snapshots inside a `.curvebook` session (existing snapshots store full project JSON).
 
 ### QOL-13 Instant statistical, distribution and Bayesian calculators
-- **Planning status:** Deferred without a scheduled milestone (`R9.13`). Reference only; none of these `calc.*` IDs exist today.
+- **Planning status:** Dropped (`R9.13`). Reference only; none of these `calc.*` IDs exist today.
 - **Crates:** `crates/stats`, `crates/transform`, `crates/engine`, `crates/mcp`, `crates/ui-egui` · **Spec:** [`calculators-and-quick-stats.md` §3](calculators-and-quick-stats.md#3-instant-statistical-distribution--bayesian-calculators-r913--qol-13)
 - **Scope:** Stateless read-only `calc.*` commands (`CommandGroup::Calculator`, `Effects::NONE`) and a non-modal **Calculators** drawer (`ui.calculator.open`) for binomial/Poisson CIs, clinical Bayes PPV/NPV/$\text{LR}^{\pm}$, two-mean error propagation & Fieller's quotient CI, summary ANOVA post-tests, forward/inverse probability distributions (also exposed in `=` Calculated Variables), Sellke–Bayarri–Berger & Colquhoun Bayesian $P$-value / FPR interpretation, summary $F$/$\text{AIC}_c$ fit comparisons, and scalar $\text{EC}_F$.
 - **Non-breaking invariant:** Zero document/undo mutation and zero archive-schema changes.
 
 ### QOL-15 Bench molarity, dilution and radiochemical decay calculators
-- **Planning status:** Deferred without a scheduled milestone (`R9.15`). Reference only; none of these `calc.*` IDs exist today.
+- **Planning status:** Dropped (`R9.15`). Reference only; none of these `calc.*` IDs exist today.
 - **Crates:** `crates/stats`, `crates/engine`, `crates/ui-egui` · **Spec:** [`calculators-and-quick-stats.md` §5](calculators-and-quick-stats.md#5-bench-molarity-dilution--radiochemical-calculators-r915--qol-15)
 - **Scope:** Stateless wet-lab calculators (`calc.molarity`, `calc.dilution`, `calc.molesGrams`, `calc.radioactivity`) solving $m = C \cdot V \cdot \text{FW}$, single & serial stock dilutions ($C_1 V_1 = C_2 V_2$), moles $\leftrightarrow$ grams, and NUBASE2020 radionuclide decay/specific activity with optional export to `InfoSheet` constants or `XY` dilution columns.
 - **Non-breaking invariant:** Pure read-only `calc.*` queries unless the user explicitly exports constants or creates a sheet.

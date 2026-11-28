@@ -18,12 +18,15 @@ use std::path::Path;
 
 use crate::human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
 use crate::human_wf_common::{TestRes, ensure};
-use curvebook_doc::{AnalysisKind, CellCoord, CellValue, DataSheet, GraphKind, NonlinearFitSpec, OneWayAnovaSpec, ResultStatus, SheetId};
+use curvebook_doc::{
+    AnalysisKind, CellCoord, CellValue, DataSheet, FramePreset, GraphKind, NonlinearFitSpec, OneWayAnovaSpec, ResultStatus, SheetId, TableArchetype,
+};
 use curvebook_engine::Session;
 use curvebook_format::zip::ZipWriter;
 use curvebook_testkit::wf_datasets::dose_response_4pl;
 use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, CsvExportTargetKind};
 use curvebook_ui_egui::inspect_ui_tree;
+use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
 use curvebook_ui_egui::os_integration::NativeFileDialogKind;
 use serde_json::json;
 
@@ -845,6 +848,12 @@ fn r10_34_human_gui_file_extension_naming() -> TestRes {
         ensure(lbl.contains(".pzfx") && lbl.contains(".prism"), format!("R10.34: {wid} missing .pzfx/.prism: {lbl:?}"))?;
     }
 
+    run.click("welcome.mode.import")?;
+    let pzfx_import = run.frame_meta().find_by_widget_id("welcome.import.pzfx").ok_or("missing welcome.import.pzfx")?.label.clone();
+    let archive_import = run.frame_meta().find_by_widget_id("welcome.import.archive").ok_or("missing welcome.import.archive")?.label.clone();
+    ensure(pzfx_import == "Import .pzfx files", format!("R10.34: expected `Import .pzfx files` in Welcome Import, got {pzfx_import:?}"))?;
+    ensure(archive_import == "Import .prism files", format!("R10.34: expected `Import .prism files` in Welcome Import, got {archive_import:?}"))?;
+
     let _ = run.create_table_via_welcome("welcome.arch.column", "Base Sheet", &[])?;
     run.click("menu.file")?;
     run.hover("menu.file.import")?;
@@ -1033,8 +1042,8 @@ fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
             "analyses/an-1/sheet.json",
             serde_json::to_vec(&json!({
                 "uid": "an-1",
-                "title": "Unpaired t test of Groups",
-                "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+                "title": "External snapshot of Groups",
+                "analysisClass": "UNMAPPED_EXTERNAL_ANALYSIS",
                 "preferredResultSheet": "rs-main",
                 "inputSheets": [{ "uid": "d-src", "title": "Groups" }],
                 "resultSheets": [{ "uid": "rs-main", "title": "Tabular results" }]
@@ -1508,6 +1517,7 @@ fn human_export_figure_pending_fit_warning_omits_curve_and_clears_on_clean_expor
     let graphs_before_clone: BTreeSet<SheetId> = run.document().graph_sheets.iter().map(|g| g.id.clone()).collect();
 
     run.click("toolbar.home")?;
+    run.click("welcome.mode.reuse")?;
     run.click("welcome.mode.clone")?;
     run.click(&format!("welcome.clone.source.{}", xy_id.as_str()))?;
     run.click("welcome.btn.clone_options")?;
@@ -1752,6 +1762,380 @@ fn human_export_figure_pending_fit_warning_omits_curve_and_clears_on_clean_expor
             LiveEditExpectation::graph_svg_changed(cloned_graph_id),
         ],
     )?;
+
+    run.finish()
+}
+
+/// Build a self-authored `.xlsx` dose-response workbook (`LogDose`, `Response`) following a clean
+/// 4PL Hill curve (`Bottom=5`, `Top=100`, `LogEC50=-6.5`, `HillSlope=1.2`) so `table.importXlsx`
+/// infers `TableKind::Xy` automatically with zero import warnings.
+fn build_dose_response_4pl_xlsx_bytes() -> Result<Vec<u8>, String> {
+    let workbook = r#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets>
+    <sheet name="Dose Response 4PL" sheetId="1" r:id="rId1"/>
+  </sheets>
+</workbook>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+</Relationships>"#;
+    let sheet = r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1"><c r="A1" t="inlineStr"><is><t>LogDose</t></is></c><c r="B1" t="inlineStr"><is><t>Response</t></is></c></row>
+    <row r="2"><c r="A2"><v>-9.0</v></c><c r="B2"><v>5.095</v></c></row>
+    <row r="3"><c r="A3"><v>-8.0</v></c><c r="B3"><v>6.480</v></c></row>
+    <row r="4"><c r="A4"><v>-7.5</v></c><c r="B4"><v>10.643</v></c></row>
+    <row r="5"><c r="A5"><v>-7.0</v></c><c r="B5"><v>24.084</v></c></row>
+    <row r="6"><c r="A6"><v>-6.5</v></c><c r="B6"><v>52.500</v></c></row>
+    <row r="7"><c r="A7"><v>-6.0</v></c><c r="B7"><v>80.916</v></c></row>
+    <row r="8"><c r="A8"><v>-5.0</v></c><c r="B8"><v>98.520</v></c></row>
+    <row r="9"><c r="A9"><v>-4.0</v></c><c r="B9"><v>99.905</v></c></row>
+  </sheetData>
+</worksheet>"#;
+    let mut zw = ZipWriter::new();
+    zw.add_file("xl/workbook.xml", workbook.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/workbook.xml: {e}"))?;
+    zw.add_file("xl/_rels/workbook.xml.rels", rels.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/_rels/workbook.xml.rels: {e}"))?;
+    zw.add_file("xl/worksheets/sheet1.xml", sheet.as_bytes().to_vec()).map_err(|e| format!("failed to add xl/worksheets/sheet1.xml: {e}"))?;
+    zw.finish().map_err(|e| format!("failed to build dose-response .xlsx zip: {e}"))
+}
+
+#[test]
+fn desktop_workflow_view_gallery_open_thumbnail_and_bulk_style() -> TestRes {
+    let mut run = WorkflowRun::start("GALLERY-THUMB-STYLE");
+
+    // Stage 1 & 2: Create two Column tables with auto-graphs and populate data through the rendered grid.
+    let ds_a = run.create_table_via_welcome("welcome.arch.column", "Gallery Cohort A", &[])?;
+    for (r, (v0, v1)) in [(10.0, 16.0), (11.5, 17.5), (12.0, 18.0)].iter().enumerate() {
+        run.enter_grid_cell(r, 0, 0, &format!("{v0}"))?;
+        run.enter_grid_cell(r, 1, 0, &format!("{v1}"))?;
+    }
+    let ds_b = run.create_table_via_welcome("welcome.arch.column", "Gallery Cohort B", &[])?;
+    for (r, (v0, v1)) in [(20.0, 29.0), (21.5, 31.0), (22.0, 32.5)].iter().enumerate() {
+        run.enter_grid_cell(r, 0, 0, &format!("{v0}"))?;
+        run.enter_grid_cell(r, 1, 0, &format!("{v1}"))?;
+    }
+
+    let g_a = run
+        .document()
+        .graph_sheets
+        .iter()
+        .find(|g| g.spec.primary_source_sheet_id == ds_a)
+        .ok_or("missing auto graph for Gallery Cohort A")?
+        .id
+        .clone();
+    let g_b = run
+        .document()
+        .graph_sheets
+        .iter()
+        .find(|g| g.spec.primary_source_sheet_id == ds_b)
+        .ok_or("missing auto graph for Gallery Cohort B")?
+        .id
+        .clone();
+
+    // Verify duplicate footer/navigator Gallery launch chips are absent.
+    ensure(
+        !run.frame_meta().entries.iter().any(|e| e.widget_id == "status.section.gallery"),
+        "removed status.section.gallery pill must not render in the footer",
+    )?;
+    ensure(
+        !run.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("nav.folder.gallery.")),
+        "removed nav.folder.gallery.* buttons must not render in the navigator",
+    )?;
+
+    // Style donor graph `g_a` with PlainBoxed frame preset, then navigate back to Data table `ds_a`.
+    run.select_sheet(&g_a)?;
+    run.click("inspector.graph.tab.axes")?;
+    run.click("inspector.graph.frame.PlainBoxed")?;
+    ensure(
+        run.document().graph_sheet(&g_a).is_some_and(|g| g.spec.frame_preset == FramePreset::PlainBoxed),
+        "donor graph should adopt PlainBoxed frame preset",
+    )?;
+    run.select_sheet(&ds_a)?;
+
+    // Open Gallery via View > Gallery and open graph `g_b` directly from its thumbnail.
+    run.open_menu_and_click("menu.view", &[], "menu.ui.gallery.toggle")?;
+    ensure(run.app().nav.gallery.open, "View > Gallery must open Portfolio Gallery")?;
+    run.click("gallery.filter.graphs")?;
+    run.click(&format!("gallery.card.{}", g_b.as_str()))?;
+    ensure(!run.app().nav.gallery.open, "clicking a graph thumbnail must close Portfolio Gallery")?;
+    ensure(!run.state().views.launcher_open, "opening a graph from Gallery thumbnail must not reopen Welcome Hub")?;
+    ensure(
+        run.document().active_sheet_id.as_ref() == Some(&g_b),
+        format!("clicking graph thumbnail must activate `{}`, got {:?}", g_b.as_str(), run.document().active_sheet_id),
+    )?;
+
+    // Reopen View > Gallery, multi-select both graphs, and apply donor style across the selection.
+    let donor_title = run.document().graph_sheet(&g_a).ok_or("missing donor graph")?.title.clone();
+    run.open_menu_and_click("menu.view", &[], "menu.ui.gallery.toggle")?;
+    run.click("gallery.filter.graphs")?;
+    run.click("gallery.clear_selection")?;
+    let p_a = run.widget_center(&format!("gallery.card.{}", g_a.as_str()))?;
+    run.click_at_button(p_a, PointerButton::Primary, KeyModifiers { ctrl: true, ..Default::default() })?;
+    let p_b = run.widget_center(&format!("gallery.card.{}", g_b.as_str()))?;
+    run.click_at_button(p_b, PointerButton::Primary, KeyModifiers { ctrl: true, ..Default::default() })?;
+    ensure(
+        run.app().nav.gallery.selected_ids.len() == 2,
+        format!("expected 2 selected graphs in Gallery, got {:?}", run.app().nav.gallery.selected_ids),
+    )?;
+    run.click("gallery.apply_style_from")?;
+    let donor_wid = run
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("apply_style.donor.") && e.label == donor_title)
+        .map(|e| e.widget_id.clone())
+        .ok_or("missing donor graph option in ApplyStyleFrom modal")?;
+    run.click(&donor_wid)?;
+    run.commit_modal_ok()?;
+
+    ensure(!run.app().nav.gallery.open && !run.state().views.launcher_open, "bulk Apply Style From must leave Gallery and Welcome closed")?;
+    for gid in [&g_a, &g_b] {
+        let gs = run.document().graph_sheet(gid).ok_or("missing styled graph")?;
+        ensure(
+            gs.spec.frame_preset == FramePreset::PlainBoxed,
+            format!("graph `{}` must adopt PlainBoxed after bulk Apply Style From, got {:?}", gid.as_str(), gs.spec.frame_preset),
+        )?;
+    }
+
+    run.assert_shell_health("GALLERY-THUMB-STYLE")
+}
+
+#[test]
+fn desktop_workflow_mv_toolbar_and_data_menu_randomize_sample() -> TestRes {
+    let mut run = WorkflowRun::start("MV-DATA-MENU");
+
+    // Create and populate a 6-row Multiple Variables table through Welcome Hub and the rendered grid.
+    let mv_id = run.create_table_via_welcome("welcome.arch.multiple_variables", "MV Screening Cohort", &["welcome.mv.role.1.Continuous"])?;
+    run.select_sheet(&mv_id)?;
+    run.set_mv_role(0, "categorical")?;
+    run.set_mv_role(1, "continuous")?;
+    run.set_mv_role(2, "continuous")?;
+    for (r, (grp, y1, y2)) in [
+        ("Ctrl", "10.2", "4.1"),
+        ("Ctrl", "11.4", "4.8"),
+        ("Ctrl", "12.1", "5.0"),
+        ("Drug", "18.5", "8.2"),
+        ("Drug", "19.8", "8.9"),
+        ("Drug", "21.0", "9.4"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        run.enter_grid_cell(r, 0, 0, grp)?;
+        run.enter_grid_cell(r, 1, 0, y1)?;
+        run.enter_grid_cell(r, 2, 0, y2)?;
+    }
+
+    // Confirm MV toolbar omits Randomize Groups and Sample Rows while keeping Analyze and Formula Bar directly accessible.
+    ensure(
+        !run.frame_meta().entries.iter().any(|e| e.widget_id == "toolbar.randomize_groups"),
+        "MV toolbar must not show removed toolbar.randomize_groups button",
+    )?;
+    ensure(
+        !run.frame_meta().entries.iter().any(|e| e.widget_id == "toolbar.sample_rows"),
+        "MV toolbar must not show removed toolbar.sample_rows button",
+    )?;
+    ensure(
+        run.frame_meta().entries.iter().any(|e| e.widget_id == "toolbar.analyze" && e.enabled),
+        "MV toolbar must keep toolbar.analyze directly accessible",
+    )?;
+    ensure(
+        run.frame_meta().entries.iter().any(|e| e.widget_id == "toolbar.formula_bar" && e.enabled),
+        "MV toolbar must keep toolbar.formula_bar directly accessible",
+    )?;
+    run.click("toolbar.formula_bar")?;
+
+    // Run and commit Data > Randomize Groups from the Data menu.
+    let ds_before_rand = run.document().data_sheets.len();
+    run.open_menu_and_click("menu.data", &[], "menu.ui.table.randomizeGroups")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::RandomizeGroups),
+        format!("Data > Randomize Groups must open RandomizeGroups modal, got {:?}", run.active_dialog()),
+    )?;
+    run.click("rand_groups.p3")?;
+    run.commit_modal_ok()?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::None), "RandomizeGroups modal must close after OK")?;
+    ensure(run.document().data_sheets.len() == ds_before_rand + 1, "Data > Randomize Groups must create a randomization schedule DataSheet")?;
+    let rand_ds = run.document().data_sheets.last().ok_or("missing created Randomize Groups DataSheet")?;
+    ensure(
+        rand_ds.archetype.row_count() > 0 && rand_ds.info_sheet_id.is_some(),
+        format!("Randomize Groups sheet `{}` must contain allocated rows and a linked InfoSheet", rand_ds.title),
+    )?;
+    let rand_info_id = rand_ds.info_sheet_id.as_ref().ok_or("missing linked InfoSheet ID on randomized DataSheet")?;
+    let rand_info = run
+        .document()
+        .info_sheet(rand_info_id)
+        .ok_or_else(|| format!("missing linked InfoSheet `{}` for Randomize Groups", rand_info_id.as_str()))?;
+    ensure(!rand_info.constants.is_empty(), "Data > Randomize Groups must record ARRIVE constants on its linked InfoSheet")?;
+
+    // Select the MV table again, then run and commit Data > Sample Rows from the Data menu.
+    run.select_sheet(&mv_id)?;
+    let ds_before_sample = run.document().data_sheets.len();
+    run.open_menu_and_click("menu.data", &[], "menu.ui.table.randomSampleRows")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::RandomSampleRows { .. }),
+        format!("Data > Sample Rows must open RandomSampleRows modal, got {:?}", run.active_dialog()),
+    )?;
+    run.click("rand_sample.strat.0")?;
+    run.click("sample.proportional_allocation")?;
+    run.click("rand_sample.n.dec")?;
+    run.commit_modal_ok()?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::None), "RandomSampleRows modal must close after OK")?;
+    ensure(run.document().data_sheets.len() == ds_before_sample + 1, "Data > Sample Rows must create a sampled DataSheet")?;
+    let sample_ds = run.document().data_sheets.last().ok_or("missing created Sample Rows DataSheet")?;
+    ensure(
+        sample_ds.title.contains("Sample") && sample_ds.archetype.row_count() > 0 && sample_ds.archetype.row_count() <= 6,
+        format!("unexpected sampled DataSheet `{}` (rows={})", sample_ds.title, sample_ds.archetype.row_count()),
+    )?;
+
+    run.assert_shell_health("MV-DATA-MENU")
+}
+
+#[test]
+fn desktop_workflow_xlsx_import_live_4pl_fit_and_export_figure() -> TestRes {
+    let dir = temp_dir("first-run-xlsx-4pl-export")?;
+    let xlsx_path = dir.path().join("dose_response_4pl.xlsx");
+    fs::write(&xlsx_path, build_dose_response_4pl_xlsx_bytes()?).map_err(|e| e.to_string())?;
+
+    let mut run = WorkflowRun::start("FIRST-RUN-XLSX-4PL-EXPORT");
+
+    // 1. Verify Welcome Hub top-level ordering (Open, Import, New Data Table, Sample Data, Reuse an Analysis)
+    //    and confirm Parts of Whole is reachable under Additional table types.
+    let rail_order =
+        ["welcome.action.open_existing", "welcome.mode.import", "welcome.mode.new_table", "welcome.mode.sample_data", "welcome.mode.reuse"];
+    let mut prev_y = -1.0_f32;
+    for wid in rail_order {
+        let pos = run.widget_center(wid)?;
+        ensure(pos.y > prev_y, format!("Welcome rail item `{wid}` out of vertical order ({} <= {prev_y})", pos.y))?;
+        prev_y = pos.y;
+    }
+    ensure(
+        !run.frame_meta().entries.iter().any(|e| e.widget_id == "welcome.arch.parts_of_whole"),
+        "Parts of Whole should stay collapsed under Additional table types by default",
+    )?;
+    run.click("welcome.arch.additional_toggle")?;
+    ensure(
+        run.frame_meta().entries.iter().any(|e| e.widget_id == "welcome.arch.parts_of_whole"),
+        "Expanding Additional table types must expose Parts of Whole",
+    )?;
+
+    // 2. Stage 1 & 2: Import the .xlsx dose-response workbook through Welcome Hub > Import.
+    run.script_file_dialog_for("table.importXlsx", Some(xlsx_path.clone()));
+    run.click("welcome.mode.import")?;
+    run.click("welcome.import.xlsx")?;
+    run.click("welcome.btn.import")?;
+
+    ensure(!run.state().views.launcher_open, "Welcome Hub must close after importing .xlsx workbook")?;
+    let ds_id = run.document().data_sheets.first().ok_or("missing imported .xlsx dose-response sheet")?.id.clone();
+    ensure(
+        matches!(run.document().data_sheet(&ds_id).map(|ds| &ds.archetype), Some(TableArchetype::Xy(_))),
+        "imported numeric dose-response workbook should materialize as an XY table",
+    )?;
+
+    // 3. Stage 3 & 4: Run 4PL nonlinear dose-response fit and verify LogEC50 & HillSlope against headless Session oracle.
+    run.select_sheet(&ds_id)?;
+    let fit_id = run.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    ensure(
+        run.document().result_sheet(&fit_id).is_some_and(|rs| matches!(rs.status, ResultStatus::UpToDate)),
+        "4PL nonlinear fit ResultSheet must be UpToDate after commit",
+    )?;
+    let xlsx_for_oracle = xlsx_path.clone();
+    let fit_kind =
+        serde_json::to_value(AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))).map_err(|e| e.to_string())?;
+    run.verify_reference(
+        ReferenceSpec::for_result(fit_id.clone(), move |sess| {
+            sess.execute("table.importXlsx", json!({ "path": xlsx_for_oracle.to_string_lossy() }))
+                .map_err(|e| format!("oracle table.importXlsx failed: {e}"))?;
+            let ref_ds_id = sess.document().data_sheets.first().ok_or("oracle missing imported sheet")?.id.as_str().to_owned();
+            sess.execute("analysis.run", json!({ "source_sheet_id": ref_ds_id, "kind": fit_kind }))
+                .map(|_| ())
+                .map_err(|e| format!("oracle 4PL analysis.run failed: {e}"))
+        })
+        .scalar("LogEC50", Some(0), 1e-6, 1e-6)
+        .scalar("HillSlope", Some(0), 1e-6, 1e-6),
+    )?;
+
+    // 4. Stage 5: Live-edit a dose-response cell in the rendered grid and verify the linked 4PL fit recomputes.
+    run.live_edit(
+        LiveEditTarget::sheet_grid_cell(ds_id.clone(), 3, 0, 0, "82.0"),
+        LiveEditExpectation::scalar_changed(fit_id.clone(), "LogEC50", Some(0), 0.05),
+    )?;
+
+    // 5. Create a GraphSheet for the imported dose-response table and verify unified Export Figure (menu + toolbar).
+    run.select_sheet(&ds_id)?;
+    run.open_menu_and_click("menu.insert", &[], "menu.ui.graph.create.open")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::CreateGraph { .. }), "Insert > New Graph must open CreateGraph modal")?;
+    run.commit_modal_ok()?;
+    let graph_id = run.document().graph_sheets.last().ok_or("missing created GraphSheet")?.id.clone();
+
+    run.select_sheet(&graph_id)?;
+    run.click("menu.file")?;
+    run.hover("menu.file.export")?;
+    for removed in ["menu.export.pdf", "menu.export.png", "menu.export.svg", "menu.export.tiff"] {
+        ensure(
+            !run.frame_meta().entries.iter().any(|e| e.widget_id == removed),
+            format!("File > Export must not expose duplicate `{removed}` entry"),
+        )?;
+    }
+    run.click("menu.ui.export.figure.open")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "File > Export > Export Figure must open ExportFigure")?;
+    run.click("export.fmt.svg")?;
+    run.commit_modal_ok()?;
+    {
+        let svg_out = run.last_engine_outcome("graph.exportSvg").ok_or("Graph ExportFigure SVG did not emit graph.exportSvg")?;
+        ensure(svg_out.payload["sheet_id"].as_str() == Some(graph_id.as_str()), format!("Graph SVG sheet_id mismatch: {}", svg_out.payload))?;
+        let svg = svg_out.payload["svg"].as_str().ok_or("Graph ExportFigure missing SVG payload")?;
+        ensure(svg.len() > 200 && svg.contains("<svg"), "Graph exported SVG unexpectedly short")?;
+        curvebook_svg::validate_svg_structure(svg).map_err(|e| format!("Graph exported SVG validation failed: {e}"))?;
+    }
+
+    run.click("toolbar.export_figure")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "Graph toolbar Export Figure must open ExportFigure")?;
+    run.click("export.fmt.pdf")?;
+    run.commit_modal_ok()?;
+    {
+        let pdf_out = run.last_engine_outcome("graph.exportPdf").ok_or("Graph ExportFigure PDF did not emit graph.exportPdf")?;
+        ensure(
+            pdf_out.payload["sheet_id"].as_str() == Some(graph_id.as_str())
+                && pdf_out.payload["byte_len"].as_u64().is_some_and(|n| n > 200)
+                && pdf_out.payload["page_count"].as_u64() == Some(1),
+            format!("unexpected Graph PDF payload: {}", pdf_out.payload),
+        )?;
+    }
+
+    // 6. Create a LayoutSheet, add the dose-response graph panel, and verify unified Export Figure on LayoutSheet.
+    run.open_menu_and_click("menu.insert", &[], "menu.layout.create")?;
+    let layout_id = run.document().layout_sheets.last().ok_or("missing created LayoutSheet")?.id.clone();
+    run.select_sheet(&layout_id)?;
+    run.click("studio.layout.add_panel.0")?;
+
+    run.click("toolbar.export_figure")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "Layout toolbar Export Figure must open ExportFigure")?;
+    run.click("export.fmt.svg")?;
+    run.commit_modal_ok()?;
+    {
+        let svg_out = run.last_engine_outcome("export.svg").ok_or("Layout ExportFigure SVG did not emit export.svg")?;
+        ensure(svg_out.payload["sheet_id"].as_str() == Some(layout_id.as_str()), format!("Layout SVG sheet_id mismatch: {}", svg_out.payload))?;
+        let svg = svg_out.payload["svg"].as_str().ok_or("Layout ExportFigure missing SVG payload")?;
+        ensure(svg.len() > 200 && svg.contains("<svg"), "Layout exported SVG unexpectedly short")?;
+        curvebook_svg::validate_svg_structure(svg).map_err(|e| format!("Layout exported SVG validation failed: {e}"))?;
+    }
+
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.figure.open")?;
+    ensure(matches!(run.active_dialog(), ActiveDialog::ExportFigure { .. }), "Layout File > Export > Export Figure must open ExportFigure")?;
+    run.click("export.fmt.pdf")?;
+    run.commit_modal_ok()?;
+    {
+        let pdf_out = run.last_engine_outcome("export.pdf").ok_or("Layout ExportFigure PDF did not emit export.pdf")?;
+        ensure(
+            pdf_out.payload["sheet_id"].as_str() == Some(layout_id.as_str())
+                && pdf_out.payload["byte_len"].as_u64().is_some_and(|n| n > 200)
+                && pdf_out.payload["page_count"].as_u64() == Some(1),
+            format!("unexpected Layout PDF payload: {}", pdf_out.payload),
+        )?;
+    }
 
     run.finish()
 }

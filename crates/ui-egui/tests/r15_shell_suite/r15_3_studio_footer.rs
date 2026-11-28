@@ -392,13 +392,16 @@ fn status_footer_history_sections_switcher_links_cursor_cvd_rulers_and_zoom_gate
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
     assert!(driver.frame_meta().find_by_widget_id("status.rulers").is_some() && driver.frame_meta().find_by_widget_id("status.zoom.in").is_some());
 
-    driver.click_widget_id("status.section.gallery")?;
+    assert!(driver.frame_meta().find_by_widget_id("status.section.gallery").is_none());
+    driver.click_widget_id("menu.view")?;
+    driver.click_widget_id("menu.ui.gallery.toggle")?;
     assert!(
         driver.state().app.nav.gallery.open
             && driver.frame_meta().find_by_widget_id("status.rulers").is_none()
             && driver.frame_meta().find_by_widget_id("status.zoom.in").is_some()
     );
-    driver.click_widget_id("status.section.gallery")?;
+    driver.click_widget_id("menu.view")?;
+    driver.click_widget_id("menu.ui.gallery.toggle")?;
     assert!(!driver.state().app.nav.gallery.open);
 
     driver.click_widget_id("status.history.back")?;

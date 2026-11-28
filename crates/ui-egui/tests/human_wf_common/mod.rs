@@ -16,6 +16,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::dispatch_gui_action;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
+use curvebook_ui_egui::egui_shell::welcome_hub::WelcomeLeftMode;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiIntent, UiIntentOutcome};
 use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
@@ -287,15 +288,69 @@ impl EguiWfHarness {
         self.type_replace_cell(&wid, text)
     }
 
+    fn welcome_middle_scroll_pos(&self) -> Result<Pos2, String> {
+        const PREFIXES: &[&str] = &[
+            "welcome.section.",
+            "welcome.arch.",
+            "welcome.input.",
+            "welcome.xmode.",
+            "welcome.subcol.",
+            "welcome.stepper.",
+            "welcome.design.",
+            "welcome.mv.",
+            "welcome.nested.",
+        ];
+        self.driver
+            .frame_meta()
+            .entries
+            .iter()
+            .find(|e| e.clipped_rect.is_positive() && PREFIXES.iter().any(|p| e.widget_id.starts_with(p)))
+            .map(|e| e.clipped_rect.center())
+            .ok_or_else(|| String::from("could not locate Welcome middle pane for wheel scrolling"))
+    }
+
+    fn ensure_welcome_middle_widget_visible(&mut self, wid: &str) -> TestRes {
+        let is_clickable = |meta: &curvebook_ui_egui::egui_shell::FrameInspectMeta| {
+            meta.find_by_widget_id(wid).is_some_and(|e| e.clipped_rect.height() >= 8.0 && e.clipped_rect.width() >= 8.0)
+        };
+        if is_clickable(self.driver.frame_meta()) {
+            return Ok(());
+        }
+        let scroll_pos = self.welcome_middle_scroll_pos()?;
+        for _ in 0..12 {
+            self.driver.wheel_at(scroll_pos, egui::Vec2::new(0.0, -120.0))?;
+            if is_clickable(self.driver.frame_meta()) {
+                return Ok(());
+            }
+        }
+        for _ in 0..16 {
+            self.driver.wheel_at(scroll_pos, egui::Vec2::new(0.0, 120.0))?;
+            if is_clickable(self.driver.frame_meta()) {
+                return Ok(());
+            }
+        }
+        Err(format!("Welcome widget `{wid}` remained scrolled out of view after wheel scrolling"))
+    }
+
     /// Create a data table via the Welcome Hub using real pointer/keyboard input.
     pub fn create_table_via_welcome(&mut self, arch_wid: &str, title: &str, extra_clicks: &[&str]) -> Result<SheetId, String> {
         if !self.driver.state().views.launcher_open && self.app().document().total_sheet_count() > 0 {
             self.click("toolbar.home")?;
         }
+        if !matches!(self.driver.state().views.welcome_hub.left_mode, WelcomeLeftMode::NewTableArchetype(_)) {
+            self.click("welcome.mode.new_table")?;
+        }
+        if arch_wid == "welcome.arch.parts_of_whole" && !self.driver.state().views.welcome_hub.additional_table_types_open {
+            self.ensure_welcome_middle_widget_visible("welcome.arch.additional_toggle")?;
+            self.click("welcome.arch.additional_toggle")?;
+        }
+        self.ensure_welcome_middle_widget_visible(arch_wid)?;
         self.click(arch_wid)?;
         for wid in extra_clicks {
+            self.ensure_welcome_middle_widget_visible(wid)?;
             self.click(wid)?;
         }
+        self.ensure_welcome_middle_widget_visible("welcome.input.title")?;
         let title_pos = self.widget_center("welcome.input.title")?;
         self.driver.click_at(title_pos)?;
         self.driver.press_egui_key(Key::A, Modifiers::COMMAND);

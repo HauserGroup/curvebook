@@ -89,6 +89,25 @@ fn welcome_hub_empty_project_rules_and_home_reopen_preserve_workspace() -> BoxRe
 #[test]
 fn welcome_hub_creates_all_eight_archetypes_with_conditional_schemas_single_commit() -> BoxRes {
     let mut driver = make_driver(UiApp::new(), 1440.0, 600.0);
+    let mid_scroll_pt = widget_center(&driver, "welcome.arch.xy")?;
+    let scroll_until_visible = |drv: &mut EguiHumanPathDriver<'static, ShellTestState>, wid: &str| -> BoxRes {
+        if drv.frame_meta().find_by_widget_id(wid).is_some() {
+            return Ok(());
+        }
+        for _ in 0..8 {
+            drv.wheel_at(mid_scroll_pt, egui::Vec2::new(0.0, -140.0))?;
+            if drv.frame_meta().find_by_widget_id(wid).is_some() {
+                return Ok(());
+            }
+        }
+        for _ in 0..8 {
+            drv.wheel_at(mid_scroll_pt, egui::Vec2::new(0.0, 140.0))?;
+            if drv.frame_meta().find_by_widget_id(wid).is_some() {
+                return Ok(());
+            }
+        }
+        Ok(())
+    };
 
     let title_center = widget_center(&driver, "welcome.input.title")?;
     driver.click_at(title_center)?;
@@ -119,12 +138,22 @@ fn welcome_hub_creates_all_eight_archetypes_with_conditional_schemas_single_comm
     for (idx, &(arch_wid, expect_present, clicks, expected_kind)) in cases.iter().enumerate() {
         if idx > 0 {
             driver.click_widget_id("toolbar.home")?;
+            for _ in 0..6 {
+                driver.wheel_at(mid_scroll_pt, egui::Vec2::new(0.0, 240.0))?;
+            }
         }
+        if arch_wid == "welcome.arch.parts_of_whole" && driver.frame_meta().find_by_widget_id(arch_wid).is_none() {
+            scroll_until_visible(&mut driver, "welcome.arch.additional_toggle")?;
+            driver.click_widget_id("welcome.arch.additional_toggle")?;
+        }
+        scroll_until_visible(&mut driver, arch_wid)?;
         driver.click_widget_id(arch_wid)?;
         for &wid in expect_present {
+            scroll_until_visible(&mut driver, wid)?;
             assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "{arch_wid}: missing `{wid}`");
         }
         for &wid in clicks {
+            scroll_until_visible(&mut driver, wid)?;
             driver.click_widget_id(wid)?;
         }
         let undo_before = driver.state().app.session().undo_depth();
@@ -149,8 +178,7 @@ fn welcome_hub_creates_all_eight_archetypes_with_conditional_schemas_single_comm
     }
 
     driver.click_widget_id("toolbar.home")?;
-    driver.click_widget_id("welcome.arch.xy")?;
-    driver.click_widget_id("welcome.entry_mode.sample")?;
+    driver.click_widget_id("welcome.mode.sample_data")?;
     driver.click_widget_id("welcome.btn.create")?;
     match &driver.state().app.document().data_sheets.last().ok_or("missing sample sheet")?.archetype {
         TableArchetype::Xy(t) => assert!(!t.x_cells.is_empty() && t.x_cells[0][0].active_number().is_some()),
@@ -163,6 +191,7 @@ fn welcome_hub_creates_all_eight_archetypes_with_conditional_schemas_single_comm
 fn welcome_hub_starter_templates_clone_options_and_open_file() -> BoxRes {
     let mut driver = make_driver(UiApp::new(), 1440.0, 600.0);
 
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.template")?;
     driver.click_widget_id("welcome.template.1")?;
     driver.click_widget_id("welcome.btn.create")?;
@@ -187,6 +216,7 @@ fn welcome_hub_starter_templates_clone_options_and_open_file() -> BoxRes {
     let (data_before, res_before) = (driver.state().app.document().data_sheets.len(), driver.state().app.document().result_sheets.len());
 
     driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.clone")?;
     driver.click_widget_id("welcome.clone.source.data-1")?;
     driver.click_widget_id("welcome.btn.clone_options")?;
@@ -657,8 +687,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
     let mut driver = make_driver(UiApp::new(), 1440.0, 720.0);
 
     // Unchecked (default) creates 0 floating notes.
-    driver.click_widget_id("welcome.arch.xy")?;
-    driver.click_widget_id("welcome.entry_mode.sample")?;
+    driver.click_widget_id("welcome.mode.sample_data")?;
     assert!(driver.frame_meta().find_by_widget_id("welcome.toggle.sample_notes").is_some());
     assert!(!driver.state().views.welcome_hub.schema.include_sample_notes);
     driver.click_widget_id("welcome.btn.create")?;
@@ -667,8 +696,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
 
     // Checked attaches the clean-room instructional FloatingNote and undoes atomically.
     driver.click_widget_id("toolbar.home")?;
-    driver.click_widget_id("welcome.arch.xy")?;
-    driver.click_widget_id("welcome.entry_mode.sample")?;
+    driver.click_widget_id("welcome.mode.sample_data")?;
     driver.click_widget_id("welcome.toggle.sample_notes")?;
     assert!(driver.state().views.welcome_hub.schema.include_sample_notes);
     let sheets_before_noted = driver.state().app.document().data_sheets.len();
@@ -700,6 +728,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
 
     // 1. XY source: initial replicates = 2, enable override, step to 4, apply & clone.
     driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.clone")?;
     driver.click_widget_id("welcome.clone.source.xy-src")?;
     driver.click_widget_id("welcome.btn.clone_options")?;
@@ -719,6 +748,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
 
     // 2. Grouped source: switches initial replicates to 2, step to 5, apply & clone.
     driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.clone")?;
     driver.click_widget_id("welcome.clone.source.grp-src")?;
     driver.click_widget_id("welcome.btn.clone_options")?;
@@ -739,6 +769,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
 
     // 3. Nested source: switches initial biological units to 3, step to 4, apply & clone.
     driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.clone")?;
     driver.click_widget_id("welcome.clone.source.nest-src")?;
     driver.click_widget_id("welcome.btn.clone_options")?;
@@ -757,6 +788,7 @@ fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes
 
     // 4. Column source: override_replicates is disabled with clear disabled_reason and forced false.
     driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.reuse")?;
     driver.click_widget_id("welcome.mode.clone")?;
     driver.click_widget_id("welcome.clone.source.col-src")?;
     driver.click_widget_id("welcome.btn.clone_options")?;

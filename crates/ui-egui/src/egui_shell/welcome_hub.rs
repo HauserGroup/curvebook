@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, doc_sheet_title};
-use crate::i18n::tr_or_fallback;
+use crate::grid_view::ImportOriginKind;
+use crate::i18n::{table_kind_label, tr_or_fallback};
 use crate::inspect::ZLayer;
 use crate::tr;
 use crate::workspace_nav::{SAMPLE_FIXTURES, SampleFixtureDescriptor, instantiate_sample_fixture, sample_fixture_instructional_note};
@@ -34,6 +35,33 @@ impl WelcomeArchetypeChoice {
     /// Ordered list of all eight supported CurveBook table archetypes.
     pub const ALL: [Self; 8] =
         [Self::Xy, Self::Column, Self::Grouped, Self::Contingency, Self::Survival, Self::PartsOfWhole, Self::MultipleVariables, Self::Nested];
+
+    /// Primary core table types shown first inside **New Data Table** (`R10.37`).
+    pub const PRIMARY: [Self; 7] = [Self::Xy, Self::Column, Self::Grouped, Self::Contingency, Self::Survival, Self::MultipleVariables, Self::Nested];
+
+    /// Additional table types offered under the **Additional table types** disclosure (`R10.37`).
+    pub const ADDITIONAL: [Self; 1] = [Self::PartsOfWhole];
+
+    /// Whether this archetype belongs under **Additional table types**.
+    #[must_use]
+    pub const fn is_additional(self) -> bool {
+        matches!(self, Self::PartsOfWhole)
+    }
+
+    /// Map a [`curvebook_doc::TableKind`] to its corresponding [`WelcomeArchetypeChoice`].
+    #[must_use]
+    pub const fn from_table_kind(kind: TableKind) -> Self {
+        match kind {
+            TableKind::Xy => Self::Xy,
+            TableKind::Column => Self::Column,
+            TableKind::Grouped => Self::Grouped,
+            TableKind::Contingency => Self::Contingency,
+            TableKind::Survival => Self::Survival,
+            TableKind::PartsOfWhole => Self::PartsOfWhole,
+            TableKind::MultipleVariables => Self::MultipleVariables,
+            TableKind::Nested => Self::Nested,
+        }
+    }
 
     /// Engine command kind string accepted by `sheet.createData`.
     #[must_use]
@@ -96,13 +124,85 @@ impl WelcomeArchetypeChoice {
     }
 }
 
+/// Data import route selectable inside `WelcomeLeftMode::ImportData` (`R10.37`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum WelcomeImportSource {
+    #[default]
+    XlsxWorkbook,
+    DelimitedWizard,
+    Pzfx,
+    ArchiveFile,
+    PlateOrTidy,
+}
+
+impl WelcomeImportSource {
+    /// Ordered list of import routes surfaced in the Welcome **Import** pane.
+    pub const ALL: [Self; 5] = [Self::XlsxWorkbook, Self::DelimitedWizard, Self::Pzfx, Self::ArchiveFile, Self::PlateOrTidy];
+
+    /// Inspector widget identifier for this import source option.
+    #[must_use]
+    pub const fn widget_id(self) -> &'static str {
+        match self {
+            Self::XlsxWorkbook => "welcome.import.xlsx",
+            Self::DelimitedWizard => "welcome.import.delimited",
+            Self::Pzfx => "welcome.import.pzfx",
+            Self::ArchiveFile => "welcome.import.archive",
+            Self::PlateOrTidy => "welcome.import.reshape",
+        }
+    }
+
+    /// Localized display label for this import source.
+    #[must_use]
+    pub fn label(self, locale: &str) -> &'static str {
+        match self {
+            Self::XlsxWorkbook => tr(locale, "cmd.table.importXlsx"),
+            Self::DelimitedWizard => tr(locale, "welcome.import.delimited"),
+            Self::Pzfx => tr(locale, "cmd.table.importPzfx"),
+            Self::ArchiveFile => tr(locale, "cmd.table.importPrism"),
+            Self::PlateOrTidy => tr(locale, "menu.file.import_reshape"),
+        }
+    }
+
+    /// Concise localized summary shown below the import source list.
+    #[must_use]
+    pub fn summary(self, locale: &str) -> &'static str {
+        match self {
+            Self::XlsxWorkbook => tr(locale, "welcome.import.xlsx_summary"),
+            Self::DelimitedWizard => tr(locale, "welcome.import.delimited_summary"),
+            Self::Pzfx => tr(locale, "welcome.import.pzfx_summary"),
+            Self::ArchiveFile => tr(locale, "welcome.import.prism_summary"),
+            Self::PlateOrTidy => tr(locale, "welcome.import.reshape_summary"),
+        }
+    }
+
+    /// Underlying engine or UI command identifier for inspection metadata.
+    #[must_use]
+    pub const fn command_id(self) -> Option<&'static str> {
+        match self {
+            Self::XlsxWorkbook => Some("table.importXlsx"),
+            Self::DelimitedWizard => Some("table.importCsv"),
+            Self::Pzfx => Some("table.importPzfx"),
+            Self::ArchiveFile => Some("table.importPrism"),
+            Self::PlateOrTidy => Some("ui.import.reshape.open"),
+        }
+    }
+
+    /// Whether this route opens an external file directly and is therefore blocked under `RejectExternal`.
+    #[must_use]
+    pub const fn requires_external_file(self) -> bool {
+        matches!(self, Self::XlsxWorkbook | Self::Pzfx | Self::ArchiveFile)
+    }
+}
+
 /// Active left-rail entry inside the 3-pane Welcome & Workspace Hub.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WelcomeLeftMode {
+    OpenFile,
+    ImportData,
     NewTableArchetype(WelcomeArchetypeChoice),
+    SampleData,
     StarterTemplates,
     ClonePipeline,
-    OpenFile,
 }
 
 impl Default for WelcomeLeftMode {
@@ -232,16 +332,28 @@ impl Default for WelcomeSchemaDraft {
 pub struct WelcomeHubEguiState {
     pub left_mode: WelcomeLeftMode,
     pub schema: WelcomeSchemaDraft,
+    /// Selected import format when [`WelcomeLeftMode::ImportData`] is active (`R10.37`).
+    pub import_source: WelcomeImportSource,
+    /// Whether the **Additional table types** disclosure (containing **Parts of Whole**) is expanded (`R10.37`).
+    pub additional_table_types_open: bool,
+    /// Remembers whether **Reuse an Analysis** last showed **Clone Pipeline** (`true`) or **New from Template** (`false`).
+    pub reuse_prefers_clone: bool,
     pub clone_options_open: bool,
     pub open_file_path_draft: String,
     pub open_file_request_count: u64,
     pub template_error: Option<String>,
     /// Inline error from the last failed `Load Sample` attempt (cleared on any sample-mode change).
     pub sample_error: Option<String>,
-    /// Inline error from the last failed or policy-rejected `Open Existing Project` attempt.
+    /// Inline error from the last failed or policy-rejected `Open` / `Import` attempt.
     pub open_file_error: Option<String>,
-    /// Snapshot of `app.mutation_seq()` when `project.open` was dispatched; closes launcher only once it succeeds.
+    /// Snapshot of `app.mutation_seq()` when `project.open` or an import command was dispatched; closes launcher only once it succeeds.
     pub pending_open_mutation_seq: Option<u64>,
+    /// `egui` frame counter when `pending_open_mutation_seq` was armed, so a cancelled native picker disarms on the next settled frame.
+    pub pending_open_frame_nr: u64,
+    /// Snapshot of `app.canvas_dialogs.status_banner` before dispatch so a stale pre-existing banner is never rendered as an error.
+    pub pending_open_prior_banner: Option<String>,
+    /// Whether the armed open/import dispatch came from `welcome.btn.open_template_file` (routes errors to `template_error`).
+    pub pending_open_is_template: bool,
 }
 
 /// Per-frame layout report returned by [`render_welcome_hub`].
@@ -276,6 +388,7 @@ struct WelcomeMiddleCtx<'a> {
     enabled: bool,
     z_layer: ZLayer,
     meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
     content_w: f32,
 }
 
@@ -342,6 +455,20 @@ struct StepperSpec<'a, T> {
     z_layer: ZLayer,
 }
 
+fn clear_pending_open(state: &mut WelcomeHubEguiState) {
+    state.pending_open_mutation_seq = None;
+    state.pending_open_frame_nr = 0;
+    state.pending_open_prior_banner = None;
+    state.pending_open_is_template = false;
+}
+
+fn begin_pending_open(app: &UiApp, state: &mut WelcomeHubEguiState, frame_nr: u64, is_template: bool) {
+    state.pending_open_mutation_seq = Some(app.mutation_seq());
+    state.pending_open_frame_nr = frame_nr;
+    state.pending_open_prior_banner = app.canvas_dialogs.status_banner.clone();
+    state.pending_open_is_template = is_template;
+}
+
 /// Render the centered 3-pane Welcome & Workspace Hub inside `CenterStage` (`§8.1`).
 pub fn render_welcome_hub(
     ui: &mut egui::Ui,
@@ -361,14 +488,22 @@ pub fn render_welcome_hub(
 
     if let Some(prev_seq) = state.pending_open_mutation_seq {
         if app.mutation_seq() != prev_seq {
-            state.pending_open_mutation_seq = None;
+            clear_pending_open(state);
             state.open_file_error = None;
+            state.template_error = None;
             intents.push(UiIntent::SetLauncherOpen { open: false });
-        } else if !ui.ctx().will_discard()
-            && let Some(banner) = app.canvas_dialogs.status_banner.as_ref()
-        {
-            state.open_file_error = Some(banner.clone());
-            state.pending_open_mutation_seq = None;
+        } else if !ui.ctx().will_discard() && ui.ctx().cumulative_frame_nr() > state.pending_open_frame_nr {
+            let new_banner = app.canvas_dialogs.status_banner.as_ref().filter(|b| state.pending_open_prior_banner.as_ref() != Some(*b)).cloned();
+            if let Some(banner) = new_banner {
+                if state.pending_open_is_template {
+                    state.template_error = Some(banner);
+                } else {
+                    state.open_file_error = Some(banner);
+                }
+                clear_pending_open(state);
+            } else if matches!(app.canvas_dialogs.active_dialog, crate::dialogs_canvas::ActiveDialog::None) {
+                clear_pending_open(state);
+            }
         }
     }
 
@@ -380,6 +515,7 @@ pub fn render_welcome_hub(
     if !empty_project {
         ui.painter().rect_filled(stage_rect, CornerRadius::ZERO, tokens.scrim);
         if enabled && !state.clone_options_open && ui.ctx().input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            clear_pending_open(state);
             intents.push(UiIntent::SetLauncherOpen { open: false });
         }
     }
@@ -437,7 +573,7 @@ pub fn render_welcome_hub(
     let mut mid_ui = card_ui.new_child(egui::UiBuilder::new().max_rect(mid_rect).layout(Layout::top_down(Align::Min)));
     mid_ui.set_clip_rect(mid_rect);
     mid_ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
-    render_middle_pane(&mut mid_ui, app, state, tokens, card_enabled, card_z, meta);
+    render_middle_pane(&mut mid_ui, app, state, tokens, card_enabled, card_z, meta, intents);
 
     card_ui.painter().vline(mid_rect.right() + 4.0, body_rect.y_range(), Stroke::new(1.0, tokens.divider));
 
@@ -572,6 +708,34 @@ fn render_card_header(ui: &mut egui::Ui, app: &UiApp, tokens: &Tokens, z_layer: 
     });
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RailModeGlyph {
+    Open,
+    Import,
+    NewTable,
+    SampleData,
+    Reuse,
+}
+
+fn apply_archetype_selection(state: &mut WelcomeHubEguiState, arch: WelcomeArchetypeChoice) {
+    clear_pending_open(state);
+    state.left_mode = WelcomeLeftMode::NewTableArchetype(arch);
+    state.schema.archetype = arch;
+    state.schema.entry_mode_sample = false;
+    state.sample_error = None;
+    if arch.is_additional() {
+        state.additional_table_types_open = true;
+    }
+    if matches!(arch, WelcomeArchetypeChoice::PartsOfWhole) {
+        state.schema.cols = 1;
+    } else if state.schema.cols < 2 {
+        state.schema.cols = 3;
+    }
+    if matches!(arch, WelcomeArchetypeChoice::Grouped) && state.schema.y_subcolumn_kind == 0 {
+        state.schema.y_subcolumn_kind = 1;
+    }
+}
+
 fn render_left_rail(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -583,121 +747,41 @@ fn render_left_rail(
 ) {
     let locale = &app.locale;
     let outer = ui.max_rect();
-    ui.painter().rect_filled(outer, CornerRadius::same(6), tokens.panel_bg);
-    ui.painter().rect_stroke(outer, CornerRadius::same(6), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
+    ui.painter().rect_filled(outer, CornerRadius::same(tokens.metrics.radius_lg), tokens.panel_bg);
+    ui.painter().rect_stroke(outer, CornerRadius::same(tokens.metrics.radius_lg), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
     let inner = outer.shrink(6.0);
     let mut rail_ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
     rail_ui.set_clip_rect(inner);
     rail_ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
 
     let max_w = inner.width().max(72.0);
+    let has_data = !app.document().data_sheets.is_empty();
     egui::ScrollArea::vertical().id_salt("welcome_left_rail_scroll").auto_shrink([false, false]).show(&mut rail_ui, |ui| {
         let row_w = (ui.available_width() - 12.0).clamp(64.0, max_w);
         render_clipped_text_label(
             ui,
-            "welcome.rail.archetypes",
-            tr(locale, "welcome.rail.archetypes"),
+            "welcome.rail.start",
+            tr(locale, "welcome.rail.start"),
             FontId::proportional(tokens.metrics.font_ui_small_pt),
             tokens.text_muted,
             z_layer,
             meta,
         );
-        ui.add_space(4.0);
+        ui.add_space(tokens.metrics.space_xs);
 
-        for arch in WelcomeArchetypeChoice::ALL {
-            let selected = matches!(state.left_mode, WelcomeLeftMode::NewTableArchetype(a) if a == arch);
-            if render_arch_rail_button(ui, tokens, meta, ArchRailButtonSpec { arch, width: row_w, selected, enabled, locale, z_layer }) && enabled {
-                state.left_mode = WelcomeLeftMode::NewTableArchetype(arch);
-                state.schema.archetype = arch;
-                state.schema.selected_sample_index = 0;
-                state.sample_error = None;
-                if matches!(arch, WelcomeArchetypeChoice::PartsOfWhole) {
-                    state.schema.cols = 1;
-                } else if state.schema.cols < 2 {
-                    state.schema.cols = 3;
-                }
-                if matches!(arch, WelcomeArchetypeChoice::Grouped) && state.schema.y_subcolumn_kind == 0 {
-                    state.schema.y_subcolumn_kind = 1;
-                }
-            }
-            ui.add_space(2.0);
-        }
-
-        ui.add_space(6.0);
-        ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
-        ui.add_space(6.0);
-
-        render_clipped_text_label(
-            ui,
-            "welcome.rail.actions",
-            tr(locale, "welcome.rail.actions"),
-            FontId::proportional(tokens.metrics.font_ui_small_pt),
-            tokens.text_muted,
-            z_layer,
-            meta,
-        );
-        ui.add_space(4.0);
-
-        let tpl_sel = matches!(state.left_mode, WelcomeLeftMode::StarterTemplates);
-        if render_pill_button(
-            ui,
-            row_w,
-            tokens,
-            meta,
-            LabelSpec {
-                widget_id: "welcome.mode.template",
-                role: "tab",
-                a11y_role: egui::Role::Tab,
-                label: tr(locale, "welcome.action.templates"),
-                command_id: None,
-                selected: tpl_sel,
-                enabled,
-                disabled_reason: None,
-                z_layer,
-            },
-        ) && enabled
-        {
-            state.left_mode = WelcomeLeftMode::StarterTemplates;
-        }
-        ui.add_space(2.0);
-
-        let has_data = !app.document().data_sheets.is_empty();
-        let clone_enabled = enabled && has_data;
-        let clone_sel = matches!(state.left_mode, WelcomeLeftMode::ClonePipeline);
-        if render_pill_button(
-            ui,
-            row_w,
-            tokens,
-            meta,
-            LabelSpec {
-                widget_id: "welcome.mode.clone",
-                role: "tab",
-                a11y_role: egui::Role::Tab,
-                label: tr(locale, "btn.clone_pipeline"),
-                command_id: None,
-                selected: clone_sel,
-                enabled: clone_enabled,
-                disabled_reason: (!has_data).then_some("Create or open a Data table before cloning a pipeline"),
-                z_layer,
-            },
-        ) && clone_enabled
-        {
-            state.left_mode = WelcomeLeftMode::ClonePipeline;
-            ensure_clone_source_default(app, state);
-        }
-        ui.add_space(2.0);
-
+        // 1. Open
         let open_sel = matches!(state.left_mode, WelcomeLeftMode::OpenFile);
-        if render_pill_button(
+        if render_rail_mode_button(
             ui,
             row_w,
+            RailModeGlyph::Open,
             tokens,
             meta,
             LabelSpec {
                 widget_id: "welcome.action.open_existing",
                 role: "tab",
                 a11y_role: egui::Role::Tab,
-                label: tr(locale, "welcome.action.open_existing"),
+                label: tr(locale, "menu.file.open"),
                 command_id: Some("project.open"),
                 selected: open_sel,
                 enabled,
@@ -706,11 +790,130 @@ fn render_left_rail(
             },
         ) && enabled
         {
+            clear_pending_open(state);
             state.left_mode = WelcomeLeftMode::OpenFile;
+            state.open_file_error = None;
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+
+        // 2. Import
+        let import_sel = matches!(state.left_mode, WelcomeLeftMode::ImportData);
+        if render_rail_mode_button(
+            ui,
+            row_w,
+            RailModeGlyph::Import,
+            tokens,
+            meta,
+            LabelSpec {
+                widget_id: "welcome.mode.import",
+                role: "tab",
+                a11y_role: egui::Role::Tab,
+                label: tr(locale, "menu.file.import"),
+                command_id: None,
+                selected: import_sel,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            clear_pending_open(state);
+            state.left_mode = WelcomeLeftMode::ImportData;
+            state.open_file_error = None;
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+
+        // 3. New Data Table
+        let new_table_sel = matches!(state.left_mode, WelcomeLeftMode::NewTableArchetype(_));
+        if render_rail_mode_button(
+            ui,
+            row_w,
+            RailModeGlyph::NewTable,
+            tokens,
+            meta,
+            LabelSpec {
+                widget_id: "welcome.mode.new_table",
+                role: "tab",
+                a11y_role: egui::Role::Tab,
+                label: tr(locale, "welcome.mode.new_table"),
+                command_id: None,
+                selected: new_table_sel,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            apply_archetype_selection(state, state.schema.archetype);
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+
+        // 4. Sample Data
+        let sample_sel = matches!(state.left_mode, WelcomeLeftMode::SampleData);
+        if render_rail_mode_button(
+            ui,
+            row_w,
+            RailModeGlyph::SampleData,
+            tokens,
+            meta,
+            LabelSpec {
+                widget_id: "welcome.mode.sample_data",
+                role: "tab",
+                a11y_role: egui::Role::Tab,
+                label: tr(locale, "welcome.mode.sample_data"),
+                command_id: None,
+                selected: sample_sel,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            clear_pending_open(state);
+            state.left_mode = WelcomeLeftMode::SampleData;
+            state.sample_error = None;
+        }
+
+        ui.add_space(tokens.metrics.space_md);
+        ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
+        ui.add_space(tokens.metrics.space_md);
+
+        // 5. Reuse an Analysis (groups New from Template + Clone Pipeline)
+        let reuse_sel = matches!(state.left_mode, WelcomeLeftMode::StarterTemplates | WelcomeLeftMode::ClonePipeline);
+        if render_rail_mode_button(
+            ui,
+            row_w,
+            RailModeGlyph::Reuse,
+            tokens,
+            meta,
+            LabelSpec {
+                widget_id: "welcome.mode.reuse",
+                role: "tab",
+                a11y_role: egui::Role::Tab,
+                label: tr(locale, "welcome.mode.reuse"),
+                command_id: None,
+                selected: reuse_sel,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            clear_pending_open(state);
+            if !reuse_sel {
+                if state.reuse_prefers_clone && has_data {
+                    state.left_mode = WelcomeLeftMode::ClonePipeline;
+                    ensure_clone_source_default(app, state);
+                } else {
+                    state.left_mode = WelcomeLeftMode::StarterTemplates;
+                }
+            }
+            state.template_error = None;
         }
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_middle_pane(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -719,25 +922,29 @@ fn render_middle_pane(
     enabled: bool,
     z_layer: ZLayer,
     meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
 ) {
     egui::ScrollArea::vertical().id_salt("welcome_mid_pane_scroll").auto_shrink([false, false]).show(ui, |ui| {
         let content_w = (ui.available_width() - 12.0).max(120.0);
         ui.set_max_width(content_w);
 
         let left_mode = state.left_mode;
-        let mut cx = WelcomeMiddleCtx { app, state, tokens, enabled, z_layer, meta, content_w };
+        let mut cx = WelcomeMiddleCtx { app, state, tokens, enabled, z_layer, meta, intents, content_w };
         match left_mode {
+            WelcomeLeftMode::OpenFile => {
+                render_middle_open_file(ui, &mut cx);
+            }
+            WelcomeLeftMode::ImportData => {
+                render_middle_import_data(ui, &mut cx);
+            }
             WelcomeLeftMode::NewTableArchetype(arch) => {
                 render_middle_new_table(ui, &mut cx, arch);
             }
-            WelcomeLeftMode::StarterTemplates => {
-                render_middle_starter_templates(ui, &mut cx);
+            WelcomeLeftMode::SampleData => {
+                render_middle_sample_data(ui, &mut cx);
             }
-            WelcomeLeftMode::ClonePipeline => {
-                render_middle_clone_pipeline(ui, &mut cx);
-            }
-            WelcomeLeftMode::OpenFile => {
-                render_middle_open_file(ui, &mut cx);
+            WelcomeLeftMode::StarterTemplates | WelcomeLeftMode::ClonePipeline => {
+                render_middle_reuse_analysis(ui, &mut cx);
             }
         }
     });
@@ -749,22 +956,77 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
     let enabled = cx.enabled;
     let z_layer = cx.z_layer;
     let content_w = cx.content_w;
+    let row_h = tokens.metrics.min_hit_target_pt;
 
     render_clipped_text_label(
         ui,
-        "welcome.section.setup",
-        tr(locale, "welcome.section.setup"),
+        "welcome.section.table_type",
+        tr(locale, "welcome.section.table_type"),
         FontId::proportional(tokens.metrics.font_ui_body_pt),
         tokens.text_strong,
         z_layer,
         cx.meta,
     );
-    ui.add_space(4.0);
+    ui.add_space(tokens.metrics.space_xs);
 
+    let chip_w = ((content_w - 6.0) * 0.5).max(56.0);
+    for pair in WelcomeArchetypeChoice::PRIMARY.chunks(2) {
+        if rect_visible_in_clip(ui, Vec2::new(content_w, row_h)) {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for &choice in pair {
+                    let selected = arch == choice;
+                    if render_arch_rail_button(
+                        ui,
+                        tokens,
+                        cx.meta,
+                        ArchRailButtonSpec { arch: choice, width: chip_w, selected, enabled, locale, z_layer },
+                    ) && enabled
+                    {
+                        apply_archetype_selection(cx.state, choice);
+                    }
+                }
+            });
+        } else {
+            ui.allocate_space(Vec2::new(content_w, row_h));
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+    }
+
+    if render_disclosure_button(
+        ui,
+        content_w,
+        tokens,
+        cx.meta,
+        "welcome.arch.additional_toggle",
+        tr(locale, "welcome.section.additional_tables"),
+        cx.state.additional_table_types_open,
+        enabled,
+        z_layer,
+    ) && enabled
+    {
+        cx.state.additional_table_types_open = !cx.state.additional_table_types_open;
+    }
+
+    if cx.state.additional_table_types_open {
+        ui.add_space(tokens.metrics.space_xxs);
+        for choice in WelcomeArchetypeChoice::ADDITIONAL {
+            let selected = arch == choice;
+            if render_arch_rail_button(ui, tokens, cx.meta, ArchRailButtonSpec { arch: choice, width: content_w, selected, enabled, locale, z_layer })
+                && enabled
+            {
+                apply_archetype_selection(cx.state, choice);
+            }
+            ui.add_space(tokens.metrics.space_xxs);
+        }
+    }
+
+    ui.add_space(tokens.metrics.space_xs);
     render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     render_clipped_text_edit(
         ui,
         &mut cx.state.schema.title,
+        tokens,
         cx.meta,
         TextEditSpec {
             widget_id: "welcome.input.title",
@@ -775,13 +1037,276 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
             z_layer,
         },
     );
-    ui.add_space(6.0);
+    ui.add_space(tokens.metrics.space_xs);
+
+    let active_arch = match cx.state.left_mode {
+        WelcomeLeftMode::NewTableArchetype(a) => a,
+        _ => arch,
+    };
+    render_archetype_schema_controls(ui, cx, active_arch);
+}
+
+fn render_middle_import_data(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let external_rejected = matches!(cx.app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
+
+    render_clipped_text_label(
+        ui,
+        "welcome.import.heading",
+        tr(locale, "welcome.import.heading"),
+        FontId::proportional(tokens.metrics.font_ui_body_pt),
+        tokens.text_strong,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xs);
+    render_clipped_text_label(
+        ui,
+        "welcome.import.subtitle",
+        tr(locale, "welcome.import.subtitle"),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xs);
+
+    for src in WelcomeImportSource::ALL {
+        let selected = cx.state.import_source == src;
+        if render_pill_button(
+            ui,
+            content_w,
+            tokens,
+            cx.meta,
+            LabelSpec {
+                widget_id: src.widget_id(),
+                role: "radio",
+                a11y_role: egui::Role::RadioButton,
+                label: src.label(locale),
+                command_id: None,
+                selected,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            cx.state.import_source = src;
+            cx.state.open_file_error = None;
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+    }
+
+    ui.add_space(tokens.metrics.space_xs);
+    render_plain_clipped_label(ui, cx.state.import_source.summary(locale), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
+
+    if external_rejected && cx.state.import_source.requires_external_file() {
+        ui.add_space(tokens.metrics.space_xs);
+        let notice = "External file access is disabled by host security policy.";
+        let resp = ui.add(egui::Label::new(egui::RichText::new(notice).small().color(tokens.text_muted)).wrap());
+        cx.meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.import.policy_notice",
+                role: "text",
+                label: notice,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+
+    if let Some(err_msg) = cx.state.open_file_error.as_deref() {
+        ui.add_space(tokens.metrics.space_xs);
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
+        cx.meta.record_response(
+            ui,
+            &err_resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.import.error",
+                role: "text",
+                label: err_msg,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+}
+
+fn render_middle_sample_data(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+
+    render_clipped_text_label(
+        ui,
+        "welcome.sample.heading",
+        tr(locale, "welcome.mode.sample_data"),
+        FontId::proportional(tokens.metrics.font_ui_body_pt),
+        tokens.text_strong,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xs);
+    render_clipped_text_label(
+        ui,
+        "welcome.sample.subtitle",
+        tr(locale, "welcome.sample.subtitle"),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xs);
+
+    let sel_idx = cx.state.schema.selected_sample_index.min(SAMPLE_FIXTURES.len().saturating_sub(1));
+    for (idx, fx) in SAMPLE_FIXTURES.iter().enumerate() {
+        let wid = format!("welcome.sample.{}", fx.id);
+        if render_pill_button(
+            ui,
+            content_w,
+            tokens,
+            cx.meta,
+            LabelSpec {
+                widget_id: &wid,
+                role: "radio",
+                a11y_role: egui::Role::RadioButton,
+                label: fx.title,
+                command_id: None,
+                selected: idx == sel_idx,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            cx.state.schema.selected_sample_index = idx;
+            cx.state.schema.archetype = WelcomeArchetypeChoice::from_table_kind(fx.kind);
+            cx.state.sample_error = None;
+        }
+        ui.add_space(tokens.metrics.space_xxs);
+    }
+
+    let chosen_hint = if let Some(chosen) = SAMPLE_FIXTURES.get(sel_idx) {
+        ui.add_space(tokens.metrics.space_xs);
+        let detail = format!("{}: {}", table_kind_label(locale, chosen.kind), chosen.summary);
+        render_plain_clipped_label(ui, &detail, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
+        chosen.title
+    } else {
+        ""
+    };
+
+    if !SAMPLE_FIXTURES.is_empty() {
+        ui.add_space(tokens.metrics.space_xs);
+        if render_check_toggle(
+            ui,
+            tokens,
+            cx.meta,
+            CheckToggleSpec {
+                widget_id: "welcome.toggle.sample_notes",
+                label: tr_or_fallback(locale, "welcome.toggle.sample_notes", "Include instructional note"),
+                checked: cx.state.schema.include_sample_notes,
+                enabled,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
+        {
+            cx.state.schema.include_sample_notes = !cx.state.schema.include_sample_notes;
+        }
+    }
+
+    if let Some(err_msg) = cx.state.sample_error.as_deref() {
+        ui.add_space(tokens.metrics.space_xs);
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
+        cx.meta.record_response(
+            ui,
+            &err_resp,
+            FrameInspectEntryInput {
+                widget_id: "welcome.sample.error",
+                role: "text",
+                label: err_msg,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+
+    ui.add_space(tokens.metrics.space_xs);
+    render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
+    render_clipped_text_edit(
+        ui,
+        &mut cx.state.schema.title,
+        tokens,
+        cx.meta,
+        TextEditSpec {
+            widget_id: "welcome.input.title",
+            label: tr(locale, "welcome.field.title"),
+            hint: chosen_hint,
+            width: (content_w - 8.0).max(80.0),
+            enabled,
+            z_layer,
+        },
+    );
+}
+
+fn render_middle_reuse_analysis(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let row_h = tokens.metrics.min_hit_target_pt;
+    let has_data = !cx.app.document().data_sheets.is_empty();
+
+    render_clipped_text_label(
+        ui,
+        "welcome.reuse.heading",
+        tr(locale, "welcome.mode.reuse"),
+        FontId::proportional(tokens.metrics.font_ui_body_pt),
+        tokens.text_strong,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xxs);
+    render_clipped_text_label(
+        ui,
+        "welcome.reuse.subtitle",
+        tr(locale, "welcome.reuse.subtitle"),
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
+        z_layer,
+        cx.meta,
+    );
+    ui.add_space(tokens.metrics.space_xs);
 
     let seg_w = ((content_w - 6.0) * 0.5).max(52.0);
-    let has_fixture = archetype_has_sample(arch);
-    let sample_enabled = enabled && has_fixture;
-    let sample_unavailable = tr(locale, "welcome.sample.unavailable");
-    if rect_visible_in_clip(ui, Vec2::new(content_w, 24.0)) {
+    let tpl_sel = matches!(cx.state.left_mode, WelcomeLeftMode::StarterTemplates);
+    let clone_sel = matches!(cx.state.left_mode, WelcomeLeftMode::ClonePipeline);
+    let clone_enabled = enabled && has_data;
+    if rect_visible_in_clip(ui, Vec2::new(content_w, row_h)) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             if render_pill_button(
@@ -790,20 +1315,22 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
                 tokens,
                 cx.meta,
                 LabelSpec {
-                    widget_id: "welcome.entry_mode.empty",
-                    role: "radio",
-                    a11y_role: egui::Role::RadioButton,
-                    label: tr(locale, "welcome.mode.empty"),
+                    widget_id: "welcome.mode.template",
+                    role: "tab",
+                    a11y_role: egui::Role::Tab,
+                    label: tr(locale, "welcome.reuse.new_from_template"),
                     command_id: None,
-                    selected: !cx.state.schema.entry_mode_sample,
+                    selected: tpl_sel,
                     enabled,
                     disabled_reason: None,
                     z_layer,
                 },
             ) && enabled
             {
-                cx.state.schema.entry_mode_sample = false;
-                cx.state.sample_error = None;
+                clear_pending_open(cx.state);
+                cx.state.left_mode = WelcomeLeftMode::StarterTemplates;
+                cx.state.reuse_prefers_clone = false;
+                cx.state.template_error = None;
             }
             if render_pill_button(
                 ui,
@@ -811,145 +1338,32 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
                 tokens,
                 cx.meta,
                 LabelSpec {
-                    widget_id: "welcome.entry_mode.sample",
-                    role: "radio",
-                    a11y_role: egui::Role::RadioButton,
-                    label: tr(locale, "welcome.mode.sample"),
+                    widget_id: "welcome.mode.clone",
+                    role: "tab",
+                    a11y_role: egui::Role::Tab,
+                    label: tr(locale, "btn.clone_pipeline"),
                     command_id: None,
-                    selected: cx.state.schema.entry_mode_sample,
-                    enabled: sample_enabled,
-                    disabled_reason: (!has_fixture).then_some(sample_unavailable),
+                    selected: clone_sel,
+                    enabled: clone_enabled,
+                    disabled_reason: (!has_data).then_some("Create or open a Data table before cloning a pipeline"),
                     z_layer,
                 },
-            ) && sample_enabled
+            ) && clone_enabled
             {
-                cx.state.schema.entry_mode_sample = true;
-                cx.state.schema.selected_sample_index = 0;
-                cx.state.sample_error = None;
+                clear_pending_open(cx.state);
+                cx.state.left_mode = WelcomeLeftMode::ClonePipeline;
+                cx.state.reuse_prefers_clone = true;
+                ensure_clone_source_default(cx.app, cx.state);
             }
         });
     } else {
-        ui.allocate_space(Vec2::new(content_w, 22.0));
+        ui.allocate_space(Vec2::new(content_w, row_h));
     }
-    ui.add_space(6.0);
+    ui.add_space(tokens.metrics.space_md);
 
-    if cx.state.schema.entry_mode_sample {
-        let fixtures = matching_samples_for(arch);
-        if fixtures.is_empty() {
-            render_plain_clipped_label(ui, sample_unavailable, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
-        } else {
-            let sel_idx = cx.state.schema.selected_sample_index.min(fixtures.len() - 1);
-            for (idx, fx) in fixtures.iter().enumerate() {
-                let wid = format!("welcome.sample.{}", fx.id);
-                if render_pill_button(
-                    ui,
-                    content_w,
-                    tokens,
-                    cx.meta,
-                    LabelSpec {
-                        widget_id: &wid,
-                        role: "radio",
-                        a11y_role: egui::Role::RadioButton,
-                        label: fx.title,
-                        command_id: None,
-                        selected: idx == sel_idx,
-                        enabled,
-                        disabled_reason: None,
-                        z_layer,
-                    },
-                ) && enabled
-                {
-                    cx.state.schema.selected_sample_index = idx;
-                    cx.state.sample_error = None;
-                }
-                ui.add_space(2.0);
-            }
-            if let Some(chosen) = fixtures.get(sel_idx) {
-                render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
-            }
-            ui.add_space(4.0);
-            if render_check_toggle(
-                ui,
-                tokens,
-                cx.meta,
-                CheckToggleSpec {
-                    widget_id: "welcome.toggle.sample_notes",
-                    label: tr_or_fallback(locale, "welcome.toggle.sample_notes", "Include instructional note"),
-                    checked: cx.state.schema.include_sample_notes,
-                    enabled,
-                    disabled_reason: None,
-                    z_layer,
-                },
-            ) && enabled
-            {
-                cx.state.schema.include_sample_notes = !cx.state.schema.include_sample_notes;
-            }
-        }
-        if let Some(err_msg) = cx.state.sample_error.as_deref() {
-            ui.add_space(4.0);
-            let err_resp = ui.add(egui::Label::new(egui::RichText::new(err_msg).small().color(tokens.link_red)).wrap());
-            cx.meta.record_response(
-                ui,
-                &err_resp,
-                FrameInspectEntryInput {
-                    widget_id: "welcome.sample.error",
-                    role: "text",
-                    label: err_msg,
-                    command_id: None,
-                    value: None,
-                    enabled: true,
-                    disabled_reason: None,
-                    z_layer,
-                    ellipsized: false,
-                    full_label: None,
-                },
-            );
-        }
-    } else {
-        render_archetype_schema_controls(ui, cx, arch);
-    }
-
-    ui.add_space(6.0);
-    render_clipped_text_label(
-        ui,
-        "welcome.section.options",
-        tr(locale, "welcome.section.options"),
-        FontId::proportional(11.5),
-        tokens.text_muted,
-        z_layer,
-        cx.meta,
-    );
-    if render_check_toggle(
-        ui,
-        tokens,
-        cx.meta,
-        CheckToggleSpec {
-            widget_id: "welcome.toggle.auto_graph",
-            label: tr(locale, "welcome.toggle.auto_graph"),
-            checked: cx.state.schema.auto_graph,
-            enabled,
-            disabled_reason: None,
-            z_layer,
-        },
-    ) && enabled
-    {
-        cx.state.schema.auto_graph = !cx.state.schema.auto_graph;
-    }
-    if render_check_toggle(
-        ui,
-        tokens,
-        cx.meta,
-        CheckToggleSpec {
-            widget_id: "welcome.toggle.auto_info",
-            label: tr(locale, "welcome.toggle.auto_info"),
-            checked: cx.state.schema.auto_info,
-            enabled,
-            disabled_reason: None,
-            z_layer,
-        },
-    ) && enabled
-    {
-        cx.state.schema.auto_info = !cx.state.schema.auto_info;
+    match cx.state.left_mode {
+        WelcomeLeftMode::ClonePipeline => render_middle_clone_pipeline(ui, cx),
+        _ => render_middle_starter_templates(ui, cx),
     }
 }
 
@@ -979,8 +1393,9 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                 ("welcome.x_mode.sequence", tr(locale, "welcome.x_mode.sequence")),
             ];
             let chip_w = ((content_w - 6.0) * 0.5).max(56.0);
+            let row_h = tokens.metrics.min_hit_target_pt;
             for chunk in [0usize..2, 2usize..4, 4usize..5] {
-                if rect_visible_in_clip(ui, Vec2::new(content_w, 22.0)) {
+                if rect_visible_in_clip(ui, Vec2::new(content_w, row_h)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 4.0;
                         for idx in chunk {
@@ -1008,7 +1423,7 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                         }
                     });
                 } else {
-                    ui.allocate_space(Vec2::new(content_w, 22.0));
+                    ui.allocate_space(Vec2::new(content_w, row_h));
                 }
                 ui.add_space(2.0);
             }
@@ -1194,8 +1609,9 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
             }
             let roles = [("Cont", "Continuous"), ("Cat", "Categorical"), ("Lbl", "Label")];
             let chip_w = ((content_w - 58.0) / 3.0).clamp(32.0, 68.0);
+            let row_h = tokens.metrics.min_hit_target_pt;
             for v_idx in 0..shown_vars {
-                if rect_visible_in_clip(ui, Vec2::new(content_w, 24.0)) {
+                if rect_visible_in_clip(ui, Vec2::new(content_w, row_h)) {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
                         render_plain_clipped_label_w(
@@ -1230,7 +1646,7 @@ fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx
                         }
                     });
                 } else {
-                    ui.allocate_space(Vec2::new(content_w, 22.0));
+                    ui.allocate_space(Vec2::new(content_w, row_h));
                 }
                 ui.add_space(2.0);
             }
@@ -1280,8 +1696,9 @@ fn render_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
         ("welcome.subcol.median_iqr", tr(locale, "welcome.subcol.median_iqr")),
     ];
     let chip_w = ((content_w - 6.0) * 0.5).max(56.0);
+    let row_h = tokens.metrics.min_hit_target_pt;
     for pair in sub_opts.chunks(2) {
-        if rect_visible_in_clip(ui, Vec2::new(content_w, 22.0)) {
+        if rect_visible_in_clip(ui, Vec2::new(content_w, row_h)) {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for &(wid, lbl) in pair {
@@ -1309,7 +1726,7 @@ fn render_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
                 }
             });
         } else {
-            ui.allocate_space(Vec2::new(content_w, 22.0));
+            ui.allocate_space(Vec2::new(content_w, row_h));
         }
         ui.add_space(2.0);
     }
@@ -1415,20 +1832,23 @@ fn render_dimension_steppers(
 }
 
 fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
-    let locale = cx.app.locale.as_str();
+    let app = cx.app;
+    let locale = app.locale.as_str();
     let tokens = cx.tokens;
     let enabled = cx.enabled;
     let z_layer = cx.z_layer;
     let content_w = cx.content_w;
+    let external_rejected = matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
     let state = &mut *cx.state;
     let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
 
     render_clipped_text_label(
         ui,
         "welcome.template.heading",
         tr(locale, "welcome.template.heading"),
-        FontId::proportional(tokens.metrics.font_ui_body_pt),
-        tokens.text_strong,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
         z_layer,
         meta,
     );
@@ -1489,6 +1909,7 @@ fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<
     render_clipped_text_edit(
         ui,
         &mut state.schema.title,
+        tokens,
         meta,
         TextEditSpec {
             widget_id: "welcome.input.title",
@@ -1499,6 +1920,31 @@ fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<
             z_layer,
         },
     );
+    ui.add_space(6.0);
+    let open_tpl_enabled = enabled && !external_rejected;
+    if render_pill_button(
+        ui,
+        content_w.min(200.0),
+        tokens,
+        meta,
+        LabelSpec {
+            widget_id: "welcome.btn.open_template_file",
+            role: "button",
+            a11y_role: egui::Role::Button,
+            label: tr(locale, "welcome.btn.open_template_file"),
+            command_id: None,
+            selected: false,
+            enabled: open_tpl_enabled,
+            disabled_reason: external_rejected.then_some("External file access is disabled by host security policy"),
+            z_layer,
+        },
+    ) && open_tpl_enabled
+    {
+        state.template_error = None;
+        state.open_file_error = None;
+        begin_pending_open(app, state, ui.ctx().cumulative_frame_nr(), true);
+        intents.push_engine("project.instantiateTemplate", json!({}));
+    }
 }
 
 fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
@@ -1515,12 +1961,22 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
         ui,
         "welcome.clone.heading",
         tr(locale, "welcome.clone.heading"),
-        FontId::proportional(tokens.metrics.font_ui_body_pt),
-        tokens.text_strong,
+        FontId::proportional(tokens.metrics.font_ui_small_pt),
+        tokens.text_muted,
         z_layer,
         meta,
     );
     ui.add_space(4.0);
+
+    if app.document().data_sheets.is_empty() {
+        render_plain_clipped_label(
+            ui,
+            "Create or open a Data table before cloning a pipeline.",
+            FontId::proportional(tokens.metrics.font_ui_small_pt),
+            tokens.text_muted,
+        );
+        return;
+    }
 
     render_plain_clipped_label(ui, tr(locale, "welcome.clone.source"), FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     for ds in &app.document().data_sheets {
@@ -1557,6 +2013,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
     render_clipped_text_edit(
         ui,
         &mut state.schema.title,
+        tokens,
         meta,
         TextEditSpec {
             widget_id: "welcome.input.title",
@@ -1629,6 +2086,7 @@ fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
     render_clipped_text_edit(
         ui,
         &mut state.open_file_path_draft,
+        tokens,
         meta,
         TextEditSpec {
             widget_id: "welcome.input.open_path",
@@ -1690,14 +2148,16 @@ fn render_right_pane(
     app: &UiApp,
     state: &mut WelcomeHubEguiState,
     tokens: &Tokens,
-    _enabled: bool,
+    enabled: bool,
     z_layer: ZLayer,
     meta: &mut FrameInspectMeta,
 ) -> Option<Rect> {
     let locale = &app.locale;
     let mut schematic_rect = None;
+    let show_auto_options = matches!(state.left_mode, WelcomeLeftMode::NewTableArchetype(_) | WelcomeLeftMode::SampleData);
     egui::ScrollArea::vertical().id_salt("welcome_right_pane_scroll").auto_shrink([false, false]).show(ui, |ui| {
         let preview_w = (ui.available_width() - 12.0).max(96.0);
+        ui.set_max_width(preview_w);
         render_clipped_text_label(
             ui,
             "welcome.section.preview",
@@ -1710,21 +2170,25 @@ fn render_right_pane(
         ui.add_space(4.0);
 
         let arch = active_preview_archetype(app, state);
-        let box_h = (ui.available_height() - 54.0).clamp(84.0, 176.0);
+        let box_h =
+            if show_auto_options { (ui.available_height() - 122.0).clamp(72.0, 148.0) } else { (ui.available_height() - 54.0).clamp(84.0, 176.0) };
         let (rect, _) = ui.allocate_exact_size(Vec2::new(preview_w, box_h), Sense::hover());
         schematic_rect = Some(rect);
 
-        ui.painter().rect_filled(rect, CornerRadius::same(6), tokens.paper_white);
-        ui.painter().rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
+        ui.painter().rect_filled(rect, CornerRadius::same(tokens.metrics.radius_lg), tokens.paper_white);
+        ui.painter().rect_stroke(rect, CornerRadius::same(tokens.metrics.radius_lg), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
+        let inset = tokens.metrics.space_xs + tokens.metrics.space_xxs;
         let split_x = rect.left() + rect.width() * 0.56;
-        let table_rect = Rect::from_min_max(rect.min + Vec2::splat(6.0), Pos2::new(split_x - 3.0, rect.bottom() - 6.0));
-        let plot_rect = Rect::from_min_max(Pos2::new(split_x + 3.0, rect.top() + 6.0), rect.max - Vec2::splat(6.0));
+        let table_rect = Rect::from_min_max(rect.min + Vec2::splat(inset), Pos2::new(split_x - 3.0, rect.bottom() - inset));
+        let plot_rect = Rect::from_min_max(Pos2::new(split_x + 3.0, rect.top() + inset), rect.max - Vec2::splat(inset));
         draw_vector_table_schematic(ui.painter(), table_rect, arch, &state.schema, tokens);
         draw_vector_plot_preview(ui.painter(), plot_rect, arch, &state.schema, tokens);
 
         ui.add_space(6.0);
         let pipeline = match state.left_mode {
+            WelcomeLeftMode::OpenFile => tr(locale, "welcome.open.pipeline_label"),
+            WelcomeLeftMode::ImportData => tr(locale, "welcome.import.pipeline_label"),
             WelcomeLeftMode::ClonePipeline => {
                 if state.schema.clone_include_downstream {
                     "Data -> Analyses -> Graphs -> Layouts"
@@ -1733,8 +2197,7 @@ fn render_right_pane(
                 }
             }
             WelcomeLeftMode::StarterTemplates => "Data -> Info -> Linked Graph",
-            WelcomeLeftMode::OpenFile => tr(locale, "welcome.open.pipeline_label"),
-            WelcomeLeftMode::NewTableArchetype(_) => match (state.schema.auto_info, state.schema.auto_graph) {
+            WelcomeLeftMode::NewTableArchetype(_) | WelcomeLeftMode::SampleData => match (state.schema.auto_info, state.schema.auto_graph) {
                 (true, true) => "Data + Info + Graph",
                 (true, false) => "Data + Info",
                 (false, true) => "Data + Graph",
@@ -1750,6 +2213,49 @@ fn render_right_pane(
             z_layer,
             meta,
         );
+
+        if show_auto_options {
+            ui.add_space(tokens.metrics.space_md);
+            render_clipped_text_label(
+                ui,
+                "welcome.section.options",
+                tr(locale, "welcome.section.options"),
+                FontId::proportional(tokens.metrics.font_ui_small_pt),
+                tokens.text_muted,
+                z_layer,
+                meta,
+            );
+            if render_check_toggle(
+                ui,
+                tokens,
+                meta,
+                CheckToggleSpec {
+                    widget_id: "welcome.toggle.auto_graph",
+                    label: tr(locale, "welcome.toggle.auto_graph"),
+                    checked: state.schema.auto_graph,
+                    enabled,
+                    z_layer,
+                },
+            ) && enabled
+            {
+                state.schema.auto_graph = !state.schema.auto_graph;
+            }
+            if render_check_toggle(
+                ui,
+                tokens,
+                meta,
+                CheckToggleSpec {
+                    widget_id: "welcome.toggle.auto_info",
+                    label: tr(locale, "welcome.toggle.auto_info"),
+                    checked: state.schema.auto_info,
+                    enabled,
+                    z_layer,
+                },
+            ) && enabled
+            {
+                state.schema.auto_info = !state.schema.auto_info;
+            }
+        }
     });
     schematic_rect
 }
@@ -1757,24 +2263,20 @@ fn render_right_pane(
 fn active_preview_archetype(app: &UiApp, state: &WelcomeHubEguiState) -> WelcomeArchetypeChoice {
     match state.left_mode {
         WelcomeLeftMode::NewTableArchetype(a) => a,
+        WelcomeLeftMode::SampleData => {
+            let idx = state.schema.selected_sample_index.min(SAMPLE_FIXTURES.len().saturating_sub(1));
+            SAMPLE_FIXTURES.get(idx).map_or(state.schema.archetype, |fx| WelcomeArchetypeChoice::from_table_kind(fx.kind))
+        }
         WelcomeLeftMode::StarterTemplates => {
             STARTER_TEMPLATES.get(state.schema.selected_template_index).map_or(WelcomeArchetypeChoice::Xy, |t| t.archetype)
         }
-        WelcomeLeftMode::ClonePipeline => {
-            state.schema.clone_source_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)).map_or(state.schema.archetype, |ds| {
-                match ds.archetype.kind() {
-                    TableKind::Xy => WelcomeArchetypeChoice::Xy,
-                    TableKind::Column => WelcomeArchetypeChoice::Column,
-                    TableKind::Grouped => WelcomeArchetypeChoice::Grouped,
-                    TableKind::Contingency => WelcomeArchetypeChoice::Contingency,
-                    TableKind::Survival => WelcomeArchetypeChoice::Survival,
-                    TableKind::PartsOfWhole => WelcomeArchetypeChoice::PartsOfWhole,
-                    TableKind::MultipleVariables => WelcomeArchetypeChoice::MultipleVariables,
-                    TableKind::Nested => WelcomeArchetypeChoice::Nested,
-                }
-            })
-        }
-        WelcomeLeftMode::OpenFile => state.schema.archetype,
+        WelcomeLeftMode::ClonePipeline => state
+            .schema
+            .clone_source_sheet_id
+            .as_ref()
+            .and_then(|id| app.document().data_sheet(id))
+            .map_or(state.schema.archetype, |ds| WelcomeArchetypeChoice::from_table_kind(ds.archetype.kind())),
+        WelcomeLeftMode::OpenFile | WelcomeLeftMode::ImportData => state.schema.archetype,
     }
 }
 
@@ -1808,23 +2310,41 @@ fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
             )
             && enabled
         {
+            clear_pending_open(state);
             intents.push(UiIntent::SetLauncherOpen { open: false });
         }
 
+        let external_rejected = matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
         let (cta_id, cta_label, cta_cmd, cta_enabled, disabled_reason) = match state.left_mode {
-            WelcomeLeftMode::NewTableArchetype(arch) => {
-                if state.schema.entry_mode_sample {
-                    let has_fixture = archetype_has_sample(arch);
-                    (
-                        "welcome.btn.create",
-                        tr(locale, "welcome.btn.load_sample"),
-                        Some("sheet.createData"),
-                        enabled && has_fixture,
-                        (!has_fixture).then(|| tr(locale, "welcome.sample.unavailable")),
-                    )
-                } else {
-                    ("welcome.btn.create", tr(locale, "welcome.btn.create_table"), Some("sheet.createData"), enabled, None)
-                }
+            WelcomeLeftMode::OpenFile => (
+                "welcome.btn.open_file",
+                tr(locale, "menu.file.open"),
+                Some("project.open"),
+                enabled && !external_rejected,
+                external_rejected.then_some("External file access is disabled by host security policy"),
+            ),
+            WelcomeLeftMode::ImportData => {
+                let blocked = external_rejected && state.import_source.requires_external_file();
+                (
+                    "welcome.btn.import",
+                    tr(locale, "menu.file.import"),
+                    state.import_source.command_id(),
+                    enabled && !blocked,
+                    blocked.then_some("External file access is disabled by host security policy"),
+                )
+            }
+            WelcomeLeftMode::NewTableArchetype(_) => {
+                ("welcome.btn.create", tr(locale, "welcome.btn.create_table"), Some("sheet.createData"), enabled, None)
+            }
+            WelcomeLeftMode::SampleData => {
+                let has_fixture = !SAMPLE_FIXTURES.is_empty();
+                (
+                    "welcome.btn.create",
+                    tr(locale, "welcome.btn.load_sample"),
+                    Some("sheet.createData"),
+                    enabled && has_fixture,
+                    (!has_fixture).then(|| tr(locale, "welcome.sample.unavailable")),
+                )
             }
             WelcomeLeftMode::StarterTemplates => {
                 ("welcome.btn.create", tr(locale, "welcome.btn.instantiate_template"), Some("project.instantiateTemplate"), enabled, None)
@@ -1837,16 +2357,6 @@ fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
                     Some("sheet.clonePipeline"),
                     enabled && has_src,
                     (!has_src).then_some("Select a Data table to clone"),
-                )
-            }
-            WelcomeLeftMode::OpenFile => {
-                let external_rejected = matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
-                (
-                    "welcome.btn.open_file",
-                    tr(locale, "welcome.action.open_existing"),
-                    Some("project.open"),
-                    enabled && !external_rejected,
-                    external_rejected.then_some("External file access is disabled by host security policy"),
                 )
             }
         };
@@ -1871,25 +2381,91 @@ fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
             },
         ) && cta_enabled
         {
-            dispatch_welcome_primary_action(app, state, intents);
+            dispatch_welcome_primary_action(app, state, ui.ctx().cumulative_frame_nr(), intents);
         }
     });
 }
 
-fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState, intents: &mut PendingUiIntents) {
+fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState, frame_nr: u64, intents: &mut PendingUiIntents) {
     match state.left_mode {
-        WelcomeLeftMode::NewTableArchetype(arch) => {
-            if state.schema.entry_mode_sample {
-                match dispatch_sample_creation(app, arch, &state.schema, intents) {
-                    Ok(()) => state.sample_error = None,
-                    Err(msg) => {
-                        state.sample_error = Some(msg);
+        WelcomeLeftMode::OpenFile => {
+            if matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal) {
+                state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
+                return;
+            }
+            let trimmed = state.open_file_path_draft.trim();
+            if trimmed.is_empty() {
+                state.open_file_error = None;
+                state.open_file_request_count = state.open_file_request_count.saturating_add(1);
+                begin_pending_open(app, state, frame_nr, false);
+                intents.push(UiIntent::OpenProjectFile);
+            } else {
+                let open_path = match app.session().path_policy() {
+                    curvebook_engine::ExternalPathPolicy::Unconstrained => trimmed.to_owned(),
+                    curvebook_engine::ExternalPathPolicy::RejectExternal => {
+                        state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
                         return;
                     }
+                    #[cfg(not(target_arch = "wasm32"))]
+                    curvebook_engine::ExternalPathPolicy::Workdir(guard) => match guard.resolve(trimmed) {
+                        Ok(resolved) => resolved.to_string_lossy().into_owned(),
+                        Err(err) => {
+                            state.open_file_error = Some(err.to_string());
+                            return;
+                        }
+                    },
+                };
+                state.open_file_error = None;
+                begin_pending_open(app, state, frame_nr, false);
+                intents.push_engine("project.open", json!({ "path": open_path }));
+            }
+        }
+        WelcomeLeftMode::ImportData => {
+            let external_rejected = matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal);
+            if external_rejected && state.import_source.requires_external_file() {
+                state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
+                return;
+            }
+            state.open_file_error = None;
+            match state.import_source {
+                WelcomeImportSource::XlsxWorkbook => {
+                    begin_pending_open(app, state, frame_nr, false);
+                    intents.push_engine("table.importXlsx", json!({}));
                 }
-            } else {
-                let params = build_empty_create_params(arch, &state.schema, &app.locale);
-                intents.push_engine("sheet.createData", params);
+                WelcomeImportSource::DelimitedWizard => {
+                    intents.push(UiIntent::SetLauncherOpen { open: false });
+                    intents.push(UiIntent::OpenImportWizard {
+                        origin: ImportOriginKind::ExternalDelimitedFile,
+                        is_live_link: false,
+                        target_sheet_id: None,
+                    });
+                }
+                WelcomeImportSource::Pzfx => {
+                    begin_pending_open(app, state, frame_nr, false);
+                    intents.push_engine("table.importPzfx", json!({}));
+                }
+                WelcomeImportSource::ArchiveFile => {
+                    begin_pending_open(app, state, frame_nr, false);
+                    intents.push_engine("table.importPrism", json!({}));
+                }
+                WelcomeImportSource::PlateOrTidy => {
+                    intents.push(UiIntent::SetLauncherOpen { open: false });
+                    intents.push(UiIntent::UiCommand { command_id: String::from("ui.import.reshape.open"), params: json!({}) });
+                }
+            }
+        }
+        WelcomeLeftMode::NewTableArchetype(arch) => {
+            let params = build_empty_create_params(arch, &state.schema, &app.locale);
+            intents.push_engine("sheet.createData", params);
+            intents.push(UiIntent::SetLauncherOpen { open: false });
+        }
+        WelcomeLeftMode::SampleData => {
+            match dispatch_sample_by_index(app, SAMPLE_FIXTURES, &state.schema, intents) {
+                Ok(()) => state.sample_error = None,
+                Err(msg) => {
+                    state.sample_error = Some(msg);
+                    return;
+                }
             }
             intents.push(UiIntent::SetLauncherOpen { open: false });
         }
@@ -1950,37 +2526,6 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
                 }
                 intents.push_engine("sheet.clonePipeline", params);
                 intents.push(UiIntent::SetLauncherOpen { open: false });
-            }
-        }
-        WelcomeLeftMode::OpenFile => {
-            if matches!(app.session().path_policy(), curvebook_engine::ExternalPathPolicy::RejectExternal) {
-                state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
-                return;
-            }
-            let trimmed = state.open_file_path_draft.trim();
-            if trimmed.is_empty() {
-                state.open_file_error = None;
-                state.open_file_request_count = state.open_file_request_count.saturating_add(1);
-                intents.push(UiIntent::OpenProjectFile);
-            } else {
-                let open_path = match app.session().path_policy() {
-                    curvebook_engine::ExternalPathPolicy::Unconstrained => trimmed.to_owned(),
-                    curvebook_engine::ExternalPathPolicy::RejectExternal => {
-                        state.open_file_error = Some(String::from("External file access is disabled by host security policy."));
-                        return;
-                    }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    curvebook_engine::ExternalPathPolicy::Workdir(guard) => match guard.resolve(trimmed) {
-                        Ok(resolved) => resolved.to_string_lossy().into_owned(),
-                        Err(err) => {
-                            state.open_file_error = Some(err.to_string());
-                            return;
-                        }
-                    },
-                };
-                state.open_file_error = None;
-                state.pending_open_mutation_seq = Some(app.mutation_seq());
-                intents.push_engine("project.open", json!({ "path": open_path }));
             }
         }
     }
@@ -2339,16 +2884,32 @@ fn subcolumn_mode_from_index(idx: usize, replicates: usize) -> SubcolumnMode {
     }
 }
 
+#[cfg(test)]
 fn matching_samples_in(fixtures: &'static [SampleFixtureDescriptor], arch: WelcomeArchetypeChoice) -> Vec<&'static SampleFixtureDescriptor> {
     fixtures.iter().filter(|f| f.kind == arch.table_kind()).collect()
 }
 
-fn matching_samples_for(arch: WelcomeArchetypeChoice) -> Vec<&'static SampleFixtureDescriptor> {
-    matching_samples_in(SAMPLE_FIXTURES, arch)
-}
-
-fn archetype_has_sample(arch: WelcomeArchetypeChoice) -> bool {
-    !matching_samples_for(arch).is_empty()
+/// Queue creation of the selected sample fixture at `schema.selected_sample_index` from `catalog`.
+///
+/// Never falls back to an empty table: an empty catalog, or a fixture that fails to build,
+/// returns a localized error and queues nothing.
+fn dispatch_sample_by_index(
+    app: &UiApp,
+    catalog: &'static [SampleFixtureDescriptor],
+    schema: &WelcomeSchemaDraft,
+    intents: &mut PendingUiIntents,
+) -> Result<(), String> {
+    let Some(fx) = catalog.get(schema.selected_sample_index.min(catalog.len().saturating_sub(1))) else {
+        return Err(tr(&app.locale, "welcome.sample.unavailable").to_owned());
+    };
+    match build_sample_creation_intent_with_options(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info, schema.include_sample_notes)
+    {
+        Ok(intent) => {
+            intents.push(intent);
+            Ok(())
+        }
+        Err(err) => Err(format!("{} {err}", tr(&app.locale, "welcome.sample.load_failed"))),
+    }
 }
 
 /// Build an atomic [`UiIntent::EngineCommandGroup`] instantiating sample fixture `fixture_id`.
@@ -2449,6 +3010,7 @@ pub fn build_sample_creation_intent_with_options(
     Ok(UiIntent::EngineCommandGroup { commands })
 }
 
+#[cfg(test)]
 fn dispatch_sample_creation(
     app: &UiApp,
     arch: WelcomeArchetypeChoice,
@@ -2462,6 +3024,7 @@ fn dispatch_sample_creation(
 ///
 /// Never falls back to an empty table: an archetype with no fixture, or a fixture that fails to
 /// build, returns a localised error and queues nothing.
+#[cfg(test)]
 fn dispatch_sample_creation_from(
     app: &UiApp,
     catalog: &'static [SampleFixtureDescriptor],
@@ -2830,13 +3393,14 @@ fn allocate_visible_slot(ui: &mut egui::Ui, size: Vec2, sense: Sense) -> Option<
     Some(ui.allocate_exact_size(size, sense))
 }
 
-fn render_clipped_text_edit(ui: &mut egui::Ui, text: &mut String, meta: &mut FrameInspectMeta, spec: TextEditSpec<'_>) {
+fn render_clipped_text_edit(ui: &mut egui::Ui, text: &mut String, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: TextEditSpec<'_>) {
     let TextEditSpec { widget_id, label, hint, width, enabled, z_layer } = spec;
-    if !rect_visible_in_clip(ui, Vec2::new(width, 22.0)) {
-        ui.allocate_space(Vec2::new(width, 22.0));
+    let min_h = tokens.metrics.min_hit_target_pt;
+    if !rect_visible_in_clip(ui, Vec2::new(width, min_h)) {
+        ui.allocate_space(Vec2::new(width, min_h));
         return;
     }
-    let resp = ui.add_enabled(enabled, egui::TextEdit::singleline(text).hint_text(hint).desired_width(width));
+    let resp = ui.add_enabled(enabled, egui::TextEdit::singleline(text).hint_text(hint).desired_width(width).min_size(Vec2::new(width, min_h)));
     let ak_label = if label.is_empty() { hint.to_owned() } else { label.to_owned() };
     resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, ak_label.clone()));
     if resp.rect.intersect(ui.clip_rect()).height() >= 4.0 {
@@ -2868,9 +3432,206 @@ fn render_plain_clipped_label_w(ui: &mut egui::Ui, text: &str, max_w: f32, font:
     super::ui_kit::plain_clipped_label(ui, text, max_w, 15.0, font, color, true);
 }
 
+fn render_rail_mode_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    glyph: RailModeGlyph,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    spec: LabelSpec<'_>,
+) -> bool {
+    let row_h = tokens.metrics.min_hit_target_pt;
+    let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(width, row_h), if spec.enabled { Sense::click() } else { Sense::hover() })
+    else {
+        return false;
+    };
+    let fg = if !spec.enabled {
+        tokens.text_disabled
+    } else if spec.selected {
+        tokens.selected_accent_text()
+    } else {
+        tokens.text_primary
+    };
+    let text_max_w = (width - 28.0).max(16.0);
+    let (galley, ellipsized) =
+        super::ui_kit::elided_galley(ui.painter(), spec.label, FontId::proportional(tokens.metrics.font_ui_small_pt), fg, text_max_w, false);
+
+    let bg = if spec.selected {
+        tokens.active_bg
+    } else if resp.hovered() && spec.enabled {
+        tokens.hover_bg
+    } else {
+        Color32::TRANSPARENT
+    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, radius, bg);
+    }
+    if spec.selected {
+        ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
+    }
+
+    let glyph_w = 12.0;
+    let glyph_h = 10.0;
+    let glyph_rect = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.center().y - glyph_h * 0.5), Vec2::new(glyph_w, glyph_h));
+    draw_rail_mode_glyph(ui.painter(), glyph_rect, glyph, fg);
+
+    let text_rect = Rect::from_min_max(Pos2::new(rect.left() + 22.0, rect.top() + 2.0), Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0));
+    ui.painter().with_clip_rect(text_rect.intersect(ui.clip_rect())).galley(
+        Pos2::new(text_rect.left(), rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+
+    if ellipsized {
+        resp = resp.on_hover_text(spec.label);
+    }
+    let a11y_label = spec.label.to_owned();
+    let enabled = spec.enabled;
+    let selected = spec.selected;
+    let a11y_role = spec.a11y_role;
+    resp.widget_info(move || egui::WidgetInfo::selected(a11y_role, enabled, selected, a11y_label.clone()));
+    meta.record_response(
+        ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id: spec.widget_id,
+            role: spec.role,
+            label: spec.label,
+            command_id: spec.command_id,
+            value: Some(json!({ "selected": selected })),
+            enabled,
+            disabled_reason: (!enabled).then_some(spec.disabled_reason).flatten(),
+            z_layer: spec.z_layer,
+            ellipsized,
+            full_label: ellipsized.then_some(spec.label),
+        },
+    );
+    enabled && resp.clicked()
+}
+
+fn draw_rail_mode_glyph(painter: &egui::Painter, rect: Rect, glyph: RailModeGlyph, color: Color32) {
+    let s = Stroke::new(1.2, color);
+    match glyph {
+        RailModeGlyph::Open => {
+            // Simple vector folder outline
+            let tab = Rect::from_min_max(rect.min, Pos2::new(rect.left() + rect.width() * 0.45, rect.top() + 3.0));
+            let body = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + 2.5), rect.max);
+            painter.rect_stroke(tab, CornerRadius::same(1), s, StrokeKind::Inside);
+            painter.rect_stroke(body, CornerRadius::same(1), s, StrokeKind::Inside);
+        }
+        RailModeGlyph::Import => {
+            // Downward arrow into tray
+            let cx = rect.center().x;
+            painter.vline(cx, rect.top()..=(rect.bottom() - 3.5), s);
+            painter.line_segment([Pos2::new(cx - 2.5, rect.bottom() - 5.5), Pos2::new(cx, rect.bottom() - 3.0)], s);
+            painter.line_segment([Pos2::new(cx + 2.5, rect.bottom() - 5.5), Pos2::new(cx, rect.bottom() - 3.0)], s);
+            painter.hline((rect.left() + 1.0)..=(rect.right() - 1.0), rect.bottom() - 1.0, s);
+            painter.vline(rect.left() + 1.0, (rect.bottom() - 3.5)..=(rect.bottom() - 1.0), s);
+            painter.vline(rect.right() - 1.0, (rect.bottom() - 3.5)..=(rect.bottom() - 1.0), s);
+        }
+        RailModeGlyph::NewTable => {
+            // 2x2 grid table icon
+            painter.rect_stroke(rect, CornerRadius::same(1), s, StrokeKind::Inside);
+            painter.hline(rect.x_range(), rect.top() + 3.5, Stroke::new(1.0, color));
+            painter.vline(rect.center().x, rect.y_range(), Stroke::new(1.0, color));
+        }
+        RailModeGlyph::SampleData => {
+            // Mini three-bar chart glyph
+            painter.vline(rect.left() + 2.5, (rect.bottom() - 4.0)..=rect.bottom(), Stroke::new(1.6, color));
+            painter.vline(rect.center().x, (rect.top() + 1.5)..=rect.bottom(), Stroke::new(1.6, color));
+            painter.vline(rect.right() - 2.5, (rect.top() + 4.0)..=rect.bottom(), Stroke::new(1.6, color));
+        }
+        RailModeGlyph::Reuse => {
+            // Two overlapping cards (template / clone)
+            let back = Rect::from_min_max(rect.min, Pos2::new(rect.right() - 3.0, rect.bottom() - 2.5));
+            let front = Rect::from_min_max(Pos2::new(rect.left() + 3.0, rect.top() + 2.5), rect.max);
+            painter.rect_stroke(back, CornerRadius::same(1), Stroke::new(1.0, color), StrokeKind::Inside);
+            painter.rect_stroke(front, CornerRadius::same(1), s, StrokeKind::Inside);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_disclosure_button(
+    ui: &mut egui::Ui,
+    width: f32,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    widget_id: &str,
+    label: &str,
+    open: bool,
+    enabled: bool,
+    z_layer: ZLayer,
+) -> bool {
+    let row_h = tokens.metrics.min_hit_target_pt;
+    let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(width, row_h), if enabled { Sense::click() } else { Sense::hover() }) else {
+        return false;
+    };
+    let fg = if !enabled {
+        tokens.text_disabled
+    } else if resp.hovered() || open {
+        tokens.text_strong
+    } else {
+        tokens.text_muted
+    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    if resp.hovered() && enabled {
+        ui.painter().rect_filled(rect, radius, tokens.hover_bg);
+    }
+
+    // Crisp 1.5 pt vector disclosure chevron (pointing right when collapsed, downward when expanded)
+    let cx = rect.left() + 10.0;
+    let cy = rect.center().y;
+    let r = 3.2_f32;
+    let chevron_stroke = Stroke::new(1.5, fg);
+    if open {
+        ui.painter().line_segment([Pos2::new(cx - r, cy - r * 0.4), Pos2::new(cx, cy + r * 0.55)], chevron_stroke);
+        ui.painter().line_segment([Pos2::new(cx, cy + r * 0.55), Pos2::new(cx + r, cy - r * 0.4)], chevron_stroke);
+    } else {
+        ui.painter().line_segment([Pos2::new(cx - r * 0.4, cy - r), Pos2::new(cx + r * 0.55, cy)], chevron_stroke);
+        ui.painter().line_segment([Pos2::new(cx + r * 0.55, cy), Pos2::new(cx - r * 0.4, cy + r)], chevron_stroke);
+    }
+
+    let text_max_w = (width - 24.0).max(16.0);
+    let (galley, ellipsized) =
+        super::ui_kit::elided_galley(ui.painter(), label, FontId::proportional(tokens.metrics.font_ui_small_pt), fg, text_max_w, false);
+    let text_rect = Rect::from_min_max(Pos2::new(rect.left() + 20.0, rect.top() + 2.0), Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0));
+    ui.painter().with_clip_rect(text_rect.intersect(ui.clip_rect())).galley(
+        Pos2::new(text_rect.left(), rect.center().y - galley.size().y * 0.5),
+        galley,
+        fg,
+    );
+
+    if ellipsized {
+        resp = resp.on_hover_text(label);
+    }
+    let a11y_label = label.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::DisclosureTriangle, enabled, a11y_label.clone()));
+    ui.ctx().accesskit_node_builder(resp.id, |node| node.set_expanded(open));
+    meta.record_response(
+        ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "button",
+            label,
+            command_id: None,
+            value: Some(json!({ "expanded": open })),
+            enabled,
+            disabled_reason: None,
+            z_layer,
+            ellipsized,
+            full_label: ellipsized.then_some(label),
+        },
+    );
+    enabled && resp.clicked()
+}
+
 fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ArchRailButtonSpec<'_>) -> bool {
     let ArchRailButtonSpec { arch, width, selected, enabled, locale, z_layer } = spec;
-    let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(width, 24.0), if enabled { Sense::click() } else { Sense::hover() }) else {
+    let row_h = tokens.metrics.min_hit_target_pt;
+    let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(width, row_h), if enabled { Sense::click() } else { Sense::hover() }) else {
         return false;
     };
     let label = arch.label(locale);
@@ -2882,23 +3643,31 @@ fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameI
         tokens.text_primary
     };
     let text_max_w = (width - 28.0).max(16.0);
-    let (galley, ellipsized) = super::ui_kit::elided_galley(ui.painter(), label, FontId::proportional(11.5), fg, text_max_w, false);
+    let (galley, ellipsized) =
+        super::ui_kit::elided_galley(ui.painter(), label, FontId::proportional(tokens.metrics.font_ui_small_pt), fg, text_max_w, false);
 
     let bg = if selected {
         tokens.active_bg
     } else if resp.hovered() && enabled {
         tokens.hover_bg
     } else {
-        Color32::TRANSPARENT
+        tokens.button_bg
     };
-    if bg != Color32::TRANSPARENT {
-        ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    }
-    if selected {
-        ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, tokens.accent), StrokeKind::Inside);
-    }
+    let border = if !enabled {
+        tokens.divider
+    } else if selected {
+        tokens.accent
+    } else if resp.hovered() {
+        tokens.hover_border
+    } else {
+        tokens.button_border
+    };
+    let radius = CornerRadius::same(tokens.metrics.radius_md);
+    ui.painter().rect(rect, radius, bg, Stroke::new(1.0, border), StrokeKind::Inside);
 
-    let glyph_rect = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.center().y - 5.0), Vec2::new(12.0, 10.0));
+    let glyph_w = 12.0;
+    let glyph_h = 10.0;
+    let glyph_rect = Rect::from_min_size(Pos2::new(rect.left() + 6.0, rect.center().y - glyph_h * 0.5), Vec2::new(glyph_w, glyph_h));
     draw_tiny_arch_glyph(ui.painter(), glyph_rect, arch, fg);
 
     let text_rect = Rect::from_min_max(Pos2::new(rect.left() + 22.0, rect.top() + 2.0), Pos2::new(rect.right() - 4.0, rect.bottom() - 2.0));
@@ -2912,13 +3681,13 @@ fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameI
         resp = resp.on_hover_text(label);
     }
     let a11y_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Tab, enabled, selected, a11y_label.clone()));
+    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::RadioButton, enabled, selected, a11y_label.clone()));
     meta.record_response(
         ui,
         &resp,
         FrameInspectEntryInput {
             widget_id: arch.widget_id(),
-            role: "tab",
+            role: "radio",
             label,
             command_id: None,
             value: Some(json!({ "selected": selected })),
@@ -2929,7 +3698,7 @@ fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameI
             full_label: ellipsized.then_some(label),
         },
     );
-    resp.clicked()
+    enabled && resp.clicked()
 }
 
 fn draw_tiny_arch_glyph(painter: &egui::Painter, rect: Rect, arch: WelcomeArchetypeChoice, color: Color32) {
@@ -2975,8 +3744,8 @@ fn render_pill_button(ui: &mut egui::Ui, max_w: f32, tokens: &Tokens, meta: &mut
             tooltip: None,
             command_id: spec.command_id,
             width: super::ui_kit::ButtonWidth::Fixed(max_w.max(28.0)),
-            height: 22.0,
-            font_size: 11.5,
+            height: tokens.metrics.min_hit_target_pt,
+            font_size: tokens.metrics.font_ui_small_pt,
             radius: tokens.metrics.radius_md,
             text_align: super::ui_kit::ButtonTextAlign::Left(6.0),
             break_anywhere: false,
@@ -3009,7 +3778,7 @@ fn render_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInsp
             label: spec.label,
             tooltip: None,
             command_id: spec.command_id,
-            width: super::ui_kit::ButtonWidth::Fixed(spec.max_w.max(22.0)),
+            width: super::ui_kit::ButtonWidth::Fixed(spec.max_w.max(24.0)),
             height: 26.0,
             font_size: 12.0,
             radius: tokens.metrics.radius_md,
@@ -3043,8 +3812,8 @@ fn render_check_toggle(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspe
             is_radio: false,
             enabled: spec.enabled,
             disabled_reason: (!spec.enabled).then_some(spec.disabled_reason).flatten(),
-            font_size: 11.5,
-            row_height: 22.0,
+            font_size: tokens.metrics.font_ui_small_pt,
+            row_height: tokens.metrics.min_hit_target_pt,
             z_layer: spec.z_layer,
             value: json!({ "checked": spec.checked }),
             tooltip_mode: super::ui_kit::TooltipMode::Standard,
@@ -3208,14 +3977,10 @@ mod sample_error_tests {
     #[test]
     fn primary_action_in_sample_mode_clears_stale_error_and_queues_group() {
         let app = UiApp::new();
-        let mut state = WelcomeHubEguiState {
-            left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Xy),
-            sample_error: Some(String::from("stale")),
-            ..Default::default()
-        };
-        state.schema.entry_mode_sample = true;
+        let mut state =
+            WelcomeHubEguiState { left_mode: WelcomeLeftMode::SampleData, sample_error: Some(String::from("stale")), ..Default::default() };
         let mut intents = PendingUiIntents::default();
-        dispatch_welcome_primary_action(&app, &mut state, &mut intents);
+        dispatch_welcome_primary_action(&app, &mut state, 1, &mut intents);
         assert_eq!(state.sample_error, None);
         assert!(matches!(intents.intents().first(), Some(UiIntent::EngineCommandGroup { .. })));
     }
@@ -3268,6 +4033,125 @@ mod sample_error_tests {
     }
 
     #[test]
+    fn sample_data_mode_loads_every_fixture_by_index_and_rejects_empty_catalog() {
+        let app = UiApp::new();
+        for idx in 0..SAMPLE_FIXTURES.len() {
+            let schema = WelcomeSchemaDraft { selected_sample_index: idx, ..Default::default() };
+            let mut intents = PendingUiIntents::default();
+            assert_eq!(dispatch_sample_by_index(&app, SAMPLE_FIXTURES, &schema, &mut intents), Ok(()));
+            assert!(matches!(intents.intents().first(), Some(UiIntent::EngineCommandGroup { .. })));
+        }
+        let mut intents = PendingUiIntents::default();
+        let err = dispatch_sample_by_index(&app, &[], &WelcomeSchemaDraft::default(), &mut intents);
+        assert_eq!(err, Err(tr(&app.locale, "welcome.sample.unavailable").to_owned()));
+        assert!(intents.intents().is_empty());
+    }
+
+    #[test]
+    fn welcome_r10_37_left_rail_order_reuse_group_additional_tables_and_frame_parity() {
+        use crate::egui_shell::driver::{
+            RegionBudgets, TextBleedPolicy, build_driver_font_definitions, check_region_control_budgets, verify_egui_frame_parity,
+        };
+        use crate::theme::{UiThemeMode, UiThemeSpec};
+
+        let render_once = |app: &UiApp, state: &mut WelcomeHubEguiState, w: f32, h: f32, mode: UiThemeMode, locale: &str| {
+            let ctx = egui::Context::default();
+            ctx.enable_accesskit();
+            ctx.set_fonts(build_driver_font_definitions());
+            let spec = UiThemeSpec::for_mode(mode);
+            let tokens = Tokens::from_theme_spec(&spec, locale);
+            tokens.apply_to_ctx(&ctx);
+            let viewport = Rect::from_min_size(Pos2::ZERO, Vec2::new(w, h));
+            let mut meta = FrameInspectMeta::default();
+            let mut last_out: Option<egui::FullOutput> = None;
+            for _ in 0..2 {
+                if let Some(mut prev) = last_out.take() {
+                    prev.textures_delta.clear();
+                }
+                meta = FrameInspectMeta { pass_nr: 0, scale_factor: 1.0, viewport_rect: viewport, entries: Vec::new() };
+                let mut intents = PendingUiIntents::new();
+                let raw = egui::RawInput { screen_rect: Some(viewport), ..Default::default() };
+                let out = ctx.run_ui(raw, |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let _ = render_welcome_hub(ui, app, state, &tokens, true, &mut meta, &mut intents);
+                    });
+                });
+                last_out = Some(out);
+            }
+            let mut out = last_out.expect("egui pass output");
+            let parity = verify_egui_frame_parity(
+                out.platform_output.accesskit_update.as_ref(),
+                &meta,
+                &out.shapes,
+                viewport,
+                TextBleedPolicy::AllowVerticalScrollClip,
+            );
+            out.textures_delta.clear();
+            let budgets = check_region_control_budgets(&meta, &RegionBudgets::CANONICAL);
+            (meta, parity, budgets)
+        };
+
+        let app = UiApp::new();
+        // 1. Default Welcome: Open, Import, New Data Table, Sample Data come first in left rail,
+        //    followed by grouped Reuse an Analysis; Parts of Whole sits under Additional table types.
+        let mut st = WelcomeHubEguiState::default();
+        let (meta, parity, budgets) = render_once(&app, &mut st, 1280.0, 800.0, UiThemeMode::Light, "en");
+        assert!(parity.violations.is_empty(), "default welcome parity violations: {:?}", parity.violations);
+        assert!(budgets.is_empty(), "default welcome budget violations: {budgets:?}");
+
+        let rail_ids =
+            ["welcome.action.open_existing", "welcome.mode.import", "welcome.mode.new_table", "welcome.mode.sample_data", "welcome.mode.reuse"];
+        let mut prev_top = -1.0_f32;
+        for wid in rail_ids {
+            let entry = meta.find_by_widget_id(wid).unwrap_or_else(|| panic!("missing rail entry {wid}"));
+            assert!(entry.clipped_rect.top() > prev_top, "rail entry {wid} out of vertical order");
+            assert!(entry.clipped_rect.height() >= 23.5, "rail entry {wid} below 24pt target size");
+            prev_top = entry.clipped_rect.top();
+        }
+        // Parts of Whole is hidden until Additional table types disclosure is expanded.
+        assert!(meta.find_by_widget_id("welcome.arch.additional_toggle").is_some());
+        assert!(meta.find_by_widget_id("welcome.arch.parts_of_whole").is_none());
+
+        st.additional_table_types_open = true;
+        let (meta_exp, parity_exp, _) = render_once(&app, &mut st, 1280.0, 800.0, UiThemeMode::Light, "en");
+        assert!(parity_exp.violations.is_empty(), "expanded additional tables parity: {:?}", parity_exp.violations);
+        assert!(meta_exp.find_by_widget_id("welcome.arch.parts_of_whole").is_some());
+
+        // 2. Sweep all modes across narrow/wide viewports, themes, and long-word German locale.
+        let modes = [
+            WelcomeLeftMode::OpenFile,
+            WelcomeLeftMode::ImportData,
+            WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Column),
+            WelcomeLeftMode::SampleData,
+            WelcomeLeftMode::StarterTemplates,
+            WelcomeLeftMode::ClonePipeline,
+        ];
+        for left_mode in modes {
+            for (w, h, theme, loc) in [
+                (640.0, 420.0, UiThemeMode::Light, "en"),
+                (640.0, 420.0, UiThemeMode::Dark, "de"),
+                (1280.0, 800.0, UiThemeMode::HighContrast, "de"),
+                (1920.0, 1080.0, UiThemeMode::Light, "en"),
+            ] {
+                let mut mode_app = UiApp::new();
+                mode_app.locale = loc.to_owned();
+                let mut mode_st = WelcomeHubEguiState { left_mode, ..Default::default() };
+                let (m, p, b) = render_once(&mode_app, &mut mode_st, w, h, theme, loc);
+                assert!(p.violations.is_empty(), "mode={left_mode:?} {w}x{h} {theme:?} {loc} parity violations: {:?}", p.violations);
+                assert!(b.is_empty(), "mode={left_mode:?} {w}x{h} {theme:?} {loc} budget violations: {b:?}");
+                if matches!(left_mode, WelcomeLeftMode::StarterTemplates | WelcomeLeftMode::ClonePipeline) {
+                    assert!(m.find_by_widget_id("welcome.mode.template").is_some());
+                    assert!(m.find_by_widget_id("welcome.mode.clone").is_some());
+                }
+                if matches!(left_mode, WelcomeLeftMode::ImportData) {
+                    assert!(m.find_by_widget_id("welcome.import.xlsx").is_some());
+                    assert!(m.find_by_widget_id("welcome.btn.import").is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn clone_override_replicates_capabilities_sync_summary_and_dispatch() {
         let mut doc = ProjectDocument::new("Clone Test").unwrap();
         let xy = DataSheet::new("xy-4", "XY 4 Reps", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(4), 2, 5).unwrap())).unwrap();
@@ -3292,7 +4176,7 @@ mod sample_error_tests {
         assert!(summary.contains("Replicates: 6"), "summary={summary}");
 
         let mut intents = PendingUiIntents::new();
-        dispatch_welcome_primary_action(&app, &mut state, &mut intents);
+        dispatch_welcome_primary_action(&app, &mut state, 1, &mut intents);
         let cp = intents
             .intents()
             .iter()
@@ -3337,10 +4221,8 @@ mod sample_error_tests {
         let ctx = egui::Context::default();
         let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 640.0));
 
-        // 1. Sample mode shows welcome.toggle.sample_notes.
-        let mut sample_state =
-            WelcomeHubEguiState { left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Xy), ..Default::default() };
-        sample_state.schema.entry_mode_sample = true;
+        // 1. Sample Data mode shows welcome.toggle.sample_notes.
+        let mut sample_state = WelcomeHubEguiState { left_mode: WelcomeLeftMode::SampleData, ..Default::default() };
         let mut meta = FrameInspectMeta::default();
         let mut intents = PendingUiIntents::new();
         let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
@@ -3375,5 +4257,95 @@ mod sample_error_tests {
         out_en.textures_delta.clear();
         let ov_en = meta_en.find_by_widget_id("welcome.clone.override_replicates").expect("override checkbox");
         assert!(ov_en.enabled);
+    }
+
+    #[test]
+    fn import_mode_dispatches_expected_intents_for_every_source() {
+        let app = UiApp::new();
+        for (src, expected_cmd) in [
+            (WelcomeImportSource::XlsxWorkbook, Some("table.importXlsx")),
+            (WelcomeImportSource::Pzfx, Some("table.importPzfx")),
+            (WelcomeImportSource::ArchiveFile, Some("table.importPrism")),
+        ] {
+            let mut st = WelcomeHubEguiState { left_mode: WelcomeLeftMode::ImportData, import_source: src, ..Default::default() };
+            let mut intents = PendingUiIntents::default();
+            dispatch_welcome_primary_action(&app, &mut st, 1, &mut intents);
+            assert!(
+                intents
+                    .intents()
+                    .iter()
+                    .any(|i| matches!(i, UiIntent::EngineCommand { command_id, .. } if Some(command_id.as_str()) == expected_cmd)),
+                "{src:?}: missing {expected_cmd:?} intent in {:?}",
+                intents.intents()
+            );
+            assert!(st.pending_open_mutation_seq.is_some());
+            assert_eq!(st.pending_open_frame_nr, 1);
+            assert!(!st.pending_open_is_template);
+        }
+
+        let mut st_delim =
+            WelcomeHubEguiState { left_mode: WelcomeLeftMode::ImportData, import_source: WelcomeImportSource::DelimitedWizard, ..Default::default() };
+        let mut intents_delim = PendingUiIntents::default();
+        dispatch_welcome_primary_action(&app, &mut st_delim, 1, &mut intents_delim);
+        assert!(
+            intents_delim.intents().iter().any(|i| matches!(i, UiIntent::OpenImportWizard { origin: ImportOriginKind::ExternalDelimitedFile, .. }))
+        );
+
+        let mut st_reshape =
+            WelcomeHubEguiState { left_mode: WelcomeLeftMode::ImportData, import_source: WelcomeImportSource::PlateOrTidy, ..Default::default() };
+        let mut intents_reshape = PendingUiIntents::default();
+        dispatch_welcome_primary_action(&app, &mut st_reshape, 1, &mut intents_reshape);
+        assert!(
+            intents_reshape.intents().iter().any(|i| matches!(i, UiIntent::UiCommand { command_id, .. } if command_id == "ui.import.reshape.open"))
+        );
+    }
+
+    #[test]
+    fn pending_open_disarms_on_cancel_ignores_stale_banner_and_routes_template_errors() {
+        let run_frame = |ctx: &egui::Context, app: &UiApp, st: &mut WelcomeHubEguiState| -> (u64, FrameInspectMeta, PendingUiIntents) {
+            let tokens = Tokens::for_mode(crate::UiThemeMode::Light);
+            tokens.apply_to_ctx(ctx);
+            let mut meta = FrameInspectMeta::default();
+            let mut intents = PendingUiIntents::default();
+            let mut frame_nr = 0_u64;
+            let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| {
+                frame_nr = ui.ctx().cumulative_frame_nr();
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let _ = render_welcome_hub(ui, app, st, &tokens, true, &mut meta, &mut intents);
+                });
+            });
+            out.textures_delta.clear();
+            (frame_nr, meta, intents)
+        };
+
+        // 1. Cancelling a file picker with a pre-existing status banner disarms pending state
+        //    on the next settled frame without turning the stale banner into a red error.
+        let ctx = egui::Context::default();
+        let mut app = UiApp::new();
+        app.canvas_dialogs.status_banner = Some(String::from("Exported previous table cleanly"));
+        let mut st = WelcomeHubEguiState { left_mode: WelcomeLeftMode::ImportData, ..Default::default() };
+        let (dispatch_frame, _, _) = run_frame(&ctx, &app, &mut st);
+        begin_pending_open(&app, &mut st, dispatch_frame, false);
+        let (next_frame, _, intents_after_cancel) = run_frame(&ctx, &app, &mut st);
+        assert!(next_frame > dispatch_frame, "subsequent frame must advance cumulative_frame_nr");
+        assert!(st.pending_open_mutation_seq.is_none(), "cancelled file picker must disarm pending_open_mutation_seq");
+        assert!(st.open_file_error.is_none(), "pre-existing status banner must not surface as red open_file_error");
+        assert!(
+            !intents_after_cancel.intents().iter().any(|i| matches!(i, UiIntent::SetLauncherOpen { open: false })),
+            "cancelled file picker must not auto-close Welcome"
+        );
+
+        // 2. A fresh error banner from `welcome.btn.open_template_file` routes to `template_error`
+        //    and renders `welcome.template.error` inside the Starter Templates pane.
+        let mut st_tpl = WelcomeHubEguiState { left_mode: WelcomeLeftMode::StarterTemplates, ..Default::default() };
+        let (tpl_dispatch_frame, _, _) = run_frame(&ctx, &app, &mut st_tpl);
+        begin_pending_open(&app, &mut st_tpl, tpl_dispatch_frame, true);
+        app.canvas_dialogs.status_banner = Some(String::from("Template file is corrupted"));
+        let (_, meta_tpl, _) = run_frame(&ctx, &app, &mut st_tpl);
+        assert!(st_tpl.pending_open_mutation_seq.is_none());
+        assert_eq!(st_tpl.template_error.as_deref(), Some("Template file is corrupted"));
+        assert!(st_tpl.open_file_error.is_none());
+        assert!(meta_tpl.find_by_widget_id("welcome.template.error").is_some(), "template error must be rendered visibly");
     }
 }

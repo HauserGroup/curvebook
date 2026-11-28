@@ -1028,7 +1028,6 @@ fn render_footer_history_and_sections(
     ctx_in: StatusFooterContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    report: &mut StatusFooterFrameReport,
 ) -> (Option<Rect>, Option<LinkHealthSummary>) {
     let doc = app.document();
     let locale = &ctx_in.tokens.locale;
@@ -1036,7 +1035,7 @@ fn render_footer_history_and_sections(
     let gallery_open = app.nav.gallery.open;
     let _ = doc.active_sheet_id.as_ref().and_then(|sid| doc.sheet_section(sid));
     let is_welcome = (app.nav.welcome.open || views.launcher_open || doc.active_sheet_id.is_none()) && !gallery_open;
-    let compact = !report.section_pills_shown && ui.available_width() < 760.0;
+    let compact = ui.available_width() < 760.0;
 
     let back_resp = draw_footer_chip(
         ui,
@@ -1080,30 +1079,6 @@ fn render_footer_history_and_sections(
     );
     if fwd_resp.clicked() {
         intents.push(UiIntent::HistoryForward);
-    }
-
-    if report.section_pills_shown {
-        let gal_resp = draw_footer_chip(
-            ui,
-            ctx_in.tokens,
-            FooterChipSpec {
-                label: "Gallery",
-                tooltip: "Portfolio Gallery",
-                max_w: 88.0,
-                min_w: 44.0,
-                selected: gallery_open,
-                enabled: ctx_in.enabled,
-                accent_override: None,
-                widget_id: "status.section.gallery",
-                role: "button",
-                command_id: Some("ui.gallery.toggle"),
-                disabled_reason: None,
-            },
-            meta,
-        );
-        if gal_resp.clicked() {
-            intents.push_ui("ui.gallery.toggle", json!({}));
-        }
     }
 
     let navigator_collapsed = ctx_in.layout.leading_collapsed_to_rail || !ctx_in.layout.leading_visible;
@@ -1690,7 +1665,8 @@ pub fn render_status_footer(
                 Stroke::new(ctx_in.tokens.metrics.stroke_thin_pt, ctx_in.tokens.divider),
             );
             let total_w = ui.available_width().max(80.0);
-            report.section_pills_shown = total_w >= 860.0;
+            // Gallery is launched solely from View > Gallery (`R10.37`); no footer launch chip.
+            report.section_pills_shown = false;
 
             let compact = total_w < 760.0;
             let rulers_w = if show_rulers { if compact { 32.0 } else { 58.0 } } else { 0.0 };
@@ -1701,7 +1677,7 @@ pub fn render_status_footer(
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let mut anchors = FooterAnchors::default();
 
-                let (sheet_anchor, link_summary) = render_footer_history_and_sections(ui, app, views, ctx_in, meta, intents, &mut report);
+                let (sheet_anchor, link_summary) = render_footer_history_and_sections(ui, app, views, ctx_in, meta, intents);
                 anchors.sheet = sheet_anchor;
 
                 if let Some(ref link_info) = link_summary

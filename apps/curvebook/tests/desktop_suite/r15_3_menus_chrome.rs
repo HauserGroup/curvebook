@@ -95,6 +95,83 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
 }
 
 #[test]
+fn r10_37_muda_and_egui_menubar_enforce_single_gallery_data_moves_and_unified_export_figure() -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        new_instance: true,
+        locale_override: Some(String::from("en")),
+        initial_viewport: metrics,
+        ..DesktopHostConfig::default()
+    });
+    let win_id = rt.open_window(None, metrics)?;
+    {
+        let win = rt.window_mut(win_id)?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "title": "Cohort" }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "xy", "title": "Assay", "auto_graph": true }))?;
+        win.execute_and_journal("layout.create", json!({ "sheet_id": "lay-1", "title": "Layout 1" }))?;
+    }
+
+    let chrome = rt.window(win_id)?.chrome_state();
+    let egui_sections = collect_egui_menubar_parity(rt.window(win_id)?.app());
+    verify_menu_parity(&chrome, &egui_sections)?;
+
+    let check_sections = |sections: &[curvebook::mac_menu::MenuSectionParityEntry], host_tag: &str| -> Result<(), String> {
+        let file = sections.iter().find(|s| s.menu_key == "menu.file").ok_or_else(|| format!("{host_tag}: missing menu.file"))?;
+        assert!(
+            file.items.iter().any(|i| i.command_id == "ui.export.figure.open" && i.label == "Export Figure" && i.enabled),
+            "{host_tag}: missing enabled File > Export > Export Figure"
+        );
+        for removed in ["export.pdf", "export.png", "export.svg", "export.tiff"] {
+            assert!(
+                !file.items.iter().any(|i| i.command_id == removed),
+                "{host_tag}: duplicate per-format File menu item `{removed}` must be removed"
+            );
+        }
+        for required in [
+            "ui.export.tableCsv.open",
+            "ui.export.allTablesCsv.open",
+            "ui.export.resultsCsv.open",
+            "analysis.exportJson",
+            "ui.export.pzfx.open",
+            "result.generateReport",
+            "project.saveTemplate",
+        ] {
+            assert!(file.items.iter().any(|i| i.command_id == required), "{host_tag}: File menu missing `{required}`");
+        }
+
+        let view = sections.iter().find(|s| s.menu_key == "menu.view").ok_or_else(|| format!("{host_tag}: missing menu.view"))?;
+        assert!(
+            view.items.iter().any(|i| i.command_id == "ui.gallery.toggle" && i.label == "Gallery" && i.enabled),
+            "{host_tag}: View > Gallery missing or mislabeled"
+        );
+
+        let data = sections.iter().find(|s| s.menu_key == "menu.data").ok_or_else(|| format!("{host_tag}: missing menu.data"))?;
+        assert!(
+            data.items.iter().any(|i| i.command_id == "ui.table.randomizeGroups" && i.label == "Randomize Groups" && i.enabled),
+            "{host_tag}: Data > Randomize Groups missing or disabled"
+        );
+        assert!(
+            data.items.iter().any(|i| i.command_id == "ui.table.randomSampleRows" && i.label == "Sample Rows" && i.enabled),
+            "{host_tag}: Data > Sample Rows missing or disabled"
+        );
+        Ok(())
+    };
+
+    check_sections(&egui_sections, "egui::MenuBar")?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut mac_host = curvebook::mac_menu::MacNativeMenuHost::new();
+        mac_host.sync_from_chrome(&chrome)?;
+        verify_menu_parity(&chrome, mac_host.items_parity_entries())?;
+        assert_eq!(mac_host.items_parity_entries(), egui_sections.as_slice());
+        check_sections(mac_host.items_parity_entries(), "macOS muda")?;
+    }
+    Ok(())
+}
+
+#[test]
 fn wave2_qa_finding3_in_window_menus_and_native_mode_inspect_coordinate_parity() -> Result<(), Box<dyn std::error::Error>> {
     for &use_bundled_fonts in &[false, true] {
         for &in_window_menus in &[true, false] {

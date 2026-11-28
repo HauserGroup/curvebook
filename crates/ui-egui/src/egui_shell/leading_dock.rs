@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use curvebook_doc::{LayoutItem, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection};
+use curvebook_doc::{LayoutItem, ProjectDocument, ResultStatus, SheetId, SheetSection};
 use egui::{Align, Color32, CornerRadius, FontId, Id, Key, Layout, Modifiers, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
@@ -1219,37 +1219,12 @@ fn draw_disclosure_triangle(painter: &egui::Painter, center: Pos2, collapsed: bo
     }
 }
 
-const fn gallery_folder_slug(section: SheetSection) -> &'static str {
-    match section {
-        SheetSection::Data => "data",
-        SheetSection::Info => "info",
-        SheetSection::Analyses => "results",
-        SheetSection::Graphs => "graphs",
-        SheetSection::Layouts => "layouts",
-    }
-}
-
-const fn folder_gallery_widget_id(section: SheetSection) -> &'static str {
-    match section {
-        SheetSection::Data => "nav.folder.gallery.data",
-        SheetSection::Info => "nav.folder.gallery.info",
-        SheetSection::Analyses => "nav.folder.gallery.results",
-        SheetSection::Graphs => "nav.folder.gallery.graphs",
-        SheetSection::Layouts => "nav.folder.gallery.layouts",
-    }
-}
-
 fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
     let FolderHeaderSpec { section, count, collapsed, row_w, tokens, enabled } = spec;
     let folder_h = tokens.metrics.min_hit_target_pt;
-    let gallery_btn_w = tokens.metrics.min_hit_target_pt;
-    let gap = tokens.metrics.space_xxs;
-    let Some((full_rect, _)) = allocate_visible_slot(ui, Vec2::new(row_w, folder_h), Sense::hover()) else {
+    let Some((rect, _)) = allocate_visible_slot(ui, Vec2::new(row_w, folder_h), Sense::hover()) else {
         return;
     };
-    let header_w = (full_rect.width() - gallery_btn_w - gap).max(32.0);
-    let rect = Rect::from_min_size(full_rect.min, Vec2::new(header_w, folder_h));
-    let gallery_rect = Rect::from_min_size(Pos2::new(rect.right() + gap, full_rect.top()), Vec2::splat(gallery_btn_w));
 
     let mut resp = ui.interact(
         rect,
@@ -1306,62 +1281,6 @@ fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'
             z_layer: ZLayer::Workspace,
             ellipsized: elided,
             full_label: elided.then_some(&label),
-        },
-    );
-
-    let gal_wid = folder_gallery_widget_id(section);
-    let gal_tip = format!("{}: {folder_name}", tr(&app.locale, "nav.open_folder_gallery"));
-    let mut gal_resp =
-        ui.interact(gallery_rect, ui.make_persistent_id(("nav_folder_gallery_btn", gal_wid)), if enabled { Sense::click() } else { Sense::hover() });
-    let is_active_folder_gallery = app.nav.gallery.open
-        && matches!(
-            (app.nav.gallery.filter_folder, section),
-            (Some(SheetFolderKind::Data), SheetSection::Data)
-                | (Some(SheetFolderKind::Info), SheetSection::Info)
-                | (Some(SheetFolderKind::Results), SheetSection::Analyses)
-                | (Some(SheetFolderKind::Graphs), SheetSection::Graphs)
-                | (Some(SheetFolderKind::Layouts), SheetSection::Layouts)
-        );
-    if is_active_folder_gallery {
-        ui.painter().rect(
-            gallery_rect,
-            CornerRadius::same(tokens.metrics.radius_md),
-            tokens.active_bg,
-            Stroke::new(tokens.metrics.stroke_thin_pt, tokens.border),
-            StrokeKind::Inside,
-        );
-    } else if gal_resp.hovered() && enabled {
-        ui.painter().rect_filled(gallery_rect, CornerRadius::same(tokens.metrics.radius_md), tokens.hover_bg);
-    }
-    let gal_icon_rect = Rect::from_center_size(gallery_rect.center(), Vec2::splat(tokens.metrics.space_lg + tokens.metrics.space_xxs));
-    let gal_icon_col = if !enabled {
-        tokens.text_disabled
-    } else if is_active_folder_gallery || gal_resp.hovered() {
-        tokens.text_strong
-    } else {
-        tokens.icon
-    };
-    draw_all_sheets_vector_icon(ui.painter(), gal_icon_rect, gal_icon_col);
-    gal_resp = show_tooltip(&gal_resp, tokens, TooltipSpec::new(&gal_tip));
-    if gal_resp.clicked() && enabled {
-        intents.push_ui("ui.gallery.toggle", json!({ "open": true, "folder": gallery_folder_slug(section) }));
-    }
-    let gal_a11y = gal_tip.clone();
-    gal_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, gal_a11y.clone()));
-    meta.record_response(
-        ui,
-        &gal_resp,
-        FrameInspectEntryInput {
-            widget_id: gal_wid,
-            role: "button",
-            label: &gal_tip,
-            command_id: Some("ui.gallery.toggle"),
-            value: Some(json!({ "folder": gallery_folder_slug(section) })),
-            enabled,
-            disabled_reason: None,
-            z_layer: ZLayer::Workspace,
-            ellipsized: false,
-            full_label: None,
         },
     );
 }

@@ -465,7 +465,7 @@ fn wf16_human_linear_deming_pb_ancova_and_r8_r9() -> TestRes {
         run.enter_grid_cell(r, 2, 0, &format!("{}", (r + 1) * 3))?;
     }
     run.select_sheet(&mv_id)?;
-    run.click("toolbar.sample_rows")?;
+    run.open_menu_and_click("menu.data", &[], "menu.ui.table.randomSampleRows")?;
     ensure(!widget_enabled(&run, "sample.proportional_allocation")?, "R9: sample.proportional_allocation disabled without strata")?;
     run.click("modal.cancel")?;
 

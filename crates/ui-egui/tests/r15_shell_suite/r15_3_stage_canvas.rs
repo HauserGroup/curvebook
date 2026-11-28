@@ -2923,19 +2923,28 @@ mod r10_35_portfolio_gallery {
         driver.press_egui_key(Key::Enter, Modifiers::NONE);
         ensure(!driver.state().app.nav.gallery.open, "Enter on focused card must open sheet and close Gallery")?;
 
-        // Navigator Folder Gallery quick-launch opens Gallery filtered to that folder!
+        // Navigator Folder Gallery launch icons are removed (R10.37 single View > Gallery entry);
+        // verify Navigator stays clean and View > Gallery + Graphs filter works cleanly.
         driver.click_widget_id("nav.section.data")?;
         driver.click_widget_id("nav.section.info")?;
-        driver.click_widget_id("nav.folder.gallery.graphs")?;
+        for removed in [
+            "nav.folder.gallery.data",
+            "nav.folder.gallery.info",
+            "nav.folder.gallery.results",
+            "nav.folder.gallery.graphs",
+            "nav.folder.gallery.layouts",
+        ] {
+            ensure(driver.frame_meta().find_by_widget_id(removed).is_none(), format!("Navigator must not expose `{removed}`"))?;
+        }
+        driver.click_widget_id("menu.view")?;
+        driver.click_widget_id("menu.ui.gallery.toggle")?;
+        driver.click_widget_id("gallery.filter.graphs")?;
         ensure(
             driver.state().app.nav.gallery.open && driver.state().app.nav.gallery.filter_folder == Some(SheetFolderKind::Graphs),
-            "Navigator Folder Gallery button must open Gallery filtered to Graphs",
+            "View > Gallery + Graphs filter must open Gallery filtered to Graphs",
         )?;
-        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_some(), "Graphs card missing after Folder Gallery launch")?;
-        ensure(
-            driver.frame_meta().find_by_widget_id("gallery.card.ds-live").is_none(),
-            "non-Graph cards must be filtered out after Folder Gallery launch",
-        )?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.gs-init").is_some(), "Graphs card missing after Graphs filter")?;
+        ensure(driver.frame_meta().find_by_widget_id("gallery.card.ds-live").is_none(), "non-Graph cards must be filtered out after Graphs filter")?;
 
         Ok(())
     }

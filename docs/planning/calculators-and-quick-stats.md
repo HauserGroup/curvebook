@@ -1,12 +1,12 @@
-# Scientific QoL Extensions and Deferred Calculator Reference (`R9.12`–`R9.16`)
+# Scientific QoL Extensions and Archived Calculator Reference (`R9.12`–`R9.16`)
 
 > Related specifications: [`statistics-implementation.md`](../implementation/statistics-implementation.md), [`curve-fitting-implementation.md`](../implementation/curve-fitting-implementation.md), [`data-tables-and-transforms.md`](../implementation/data-tables-and-transforms.md), [`graphing-and-layouts.md`](../implementation/graphing-and-layouts.md), [`qol-enhancements.md`](qol-enhancements.md), [`gui-workflows.md`](../gui-workflows.md) · Roadmap: [`ROADMAP.md`](../ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) (`R9.12`–`R9.16` / `QOL-12`–`QOL-16`) · Live metrics: [`STATUS.md`](../STATUS.md)
 
-Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`) — all implemented across Waves 21–22b. Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) remain deferred without scheduled milestones; their detailed designs remain as inactive reference material. Compact Letter Display (`CLD`) is not part of any calculator or `R9` item; it is back in product scope and tracked separately as [`R10.11`](../history/roadmap/r10.md#r1011-compact-letter-display-cld) (scope confirmed 2026-11-15).
+Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`) — all implemented across Waves 21–22b. Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) were dropped from the roadmap. Their designs are historical reference material. Compact Letter Display (`CLD`) is not part of any calculator or `R9` item; it is back in product scope and tracked separately as [`R10.11`](../history/roadmap/r10.md#r1011-compact-letter-display-cld) (scope confirmed 2026-11-15).
 
 > **Status Note (Implemented scope vs. deferred calculators):**
 > - **Shipped end-to-end (`R1`–`R7` & Waves 21–22b `R9.12`/`R9.14`/`R9.16`):** $2 \times 2$ & $R \times C$ contingency ($\chi^2$, Yates, $G^2$, Fisher's exact, Barnard's exact, Baptista–Pike OR, Koopman RR, Newcombe RD, inverted Altman `NNTB`/`NNTH` CIs via `altman_nnt_from_rd`, McNemar's test + discordant-pair OR CIs via `mcnemar_detailed`, weighted Cohen's `cohens_kappa` & Fleiss' `fleiss_kappa`, exact binomial `ContingencyMethod::ExactBinomial`), uniform & custom expected proportion goodness-of-fit $\chi^2$, descriptive statistics + arbitrary $0.01\%\text{–}99.99\%$ mean CIs & exact $\chi^2$ `sd_ci` (`RawReplicates` and pre-summarized `Mean + SD/SEM + N`), Grubbs/ROUT outliers, unpaired/Welch/paired/ratio/one-sample *t*-tests (with direct `Mean + SD/SEM + N` in `run_two_group_analysis`) + paired exact Sign test (`TwoGroupMethod::PairedSignTest`), simple/Deming linear regression, factorial ANOVA main/simple-effect multiplicity post-hoc tabs (`run_factorial_anova`), extra-sum-of-squares *F* & $\text{AIC}_c$ fit comparisons, `log_agonist_vs_response_ecf` ($\log\text{EC}_F$ curve fitting), live pairwise significance brackets (`GraphSpec::comparisons`), seeded XY Monte Carlo simulation (`table.simulateXy`), seeded group randomization/row sampling/distribution simulation (`crates/transform/src/randomize.rs`: `table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), and linked symbolic/live-substituted $\TeX$ model equation annotations (`crates/fit/src/tex_format.rs`, `crates/chart/src/equation_box/`, `GraphAnnotation::ModelEquation`, `ui.graph.insertModelEquation`).
-> - **Deferred (outside active backlog):** `R9.13` (`QOL-13` instant statistical/distribution/Bayesian calculators) and `R9.15` (`QOL-15` bench molarity/dilution/radiochemical calculators) remain deferred without milestones; their reference sections below are not active implementation assignments. Existing core probability distributions (`norm`/`student_t`/`f`/`chi2`, noncentral, Dunnett, studentized range in `crates/math/src/dist/`), regularized incomplete beta/gamma special functions (`crates/math/src/special/`), and statistical routines remain supported. None of the `calc.*` command IDs below are registered in `cmd::registry()` (see the generated [`commands.md`](../commands.md)).
+> - **Dropped from the roadmap:** `R9.13` (`QOL-13` instant statistical/distribution/Bayesian calculators) and `R9.15` (`QOL-15` bench molarity/dilution/radiochemical calculators) are archived proposals. Existing core probability distributions (`norm`/`student_t`/`f`/`chi2`, noncentral, Dunnett, studentized range in `crates/math/src/dist/`), regularized incomplete beta/gamma special functions (`crates/math/src/special/`), and statistical routines remain supported. None of the `calc.*` command IDs below are registered in `cmd::registry()` (see the generated [`commands.md`](../commands.md)).
 
 ---
 
@@ -56,7 +56,7 @@ Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical/
 
 ## 3. Instant Statistical, Distribution & Bayesian Calculators (`R9.13` / `QOL-13`)
 
-**Deferred reference only:** No scheduled milestone, active implementation task, formula extension, or Calculators drawer is authorized by this section.
+**Archived proposal.** The standalone calculators, associated formula functions, and drawer were dropped.
 
 If resumed, the proposed design would use pure domain functions in `crates/stats/src/calculators.rs`, exposed via read-only `calc.*` commands (`crates/engine/src/cmd/calc.rs`), MCP tools, scalar table-formula builtins (`crates/transform/src/formula/eval.rs`), and the non-modal **Calculators** drawer (`ui.calculator.open` in `crates/ui-egui`).
 
@@ -94,7 +94,7 @@ Implemented in `crates/transform/src/randomize.rs` over `curvebook_math::Determi
 
 ## 5. Bench Molarity, Dilution & Radiochemical Calculators (`R9.15` / `QOL-15`)
 
-**Deferred reference only:** No scheduled milestone or active implementation task. The full calculator scope, including dilution-series conveniences, remains deferred.
+**Archived proposal.** Bench calculators and dilution-series conveniences were dropped.
 
 If resumed, the proposed stateless wet-lab preparation calculators would live in `crates/stats/src/calculators.rs` (proposed, not present) behind proposed `calc.*` commands (none registered), with optional one-click export of computed concentrations/masses into `InfoSheet` constants or `XY` dilution series:
 

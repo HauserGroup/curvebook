@@ -868,4 +868,84 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn r10_37_single_gallery_data_menu_and_unified_export_figure_menus() -> Result<(), String> {
+        use crate::desktop_host::{DesktopCommandRoute, DesktopHostConfig, DesktopHostRuntime, resolve_desktop_command_route};
+        use curvebook_ui_egui::interaction::ViewportMetrics;
+        use serde_json::json;
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: true, recovery_root: None, ..DesktopHostConfig::default() });
+        let wid = rt.open_window(None, ViewportMetrics::default())?;
+        {
+            let app = rt.window_mut(wid)?.app_mut();
+            app.execute_command("sheet.createData", json!({ "sheet_id": "mv1", "kind": "multiple_variables", "title": "Cohort" }))
+                .map_err(|e| e.to_string())?;
+            app.execute_command("sheet.createData", json!({ "sheet_id": "d1", "kind": "xy", "title": "Assay", "auto_graph": true }))
+                .map_err(|e| e.to_string())?;
+        }
+
+        let chrome = rt.window(wid)?.chrome_state();
+        let file_sec = chrome.sections.iter().find(|s| s.menu_key == "menu.file").ok_or("missing menu.file")?;
+        assert!(file_sec.items.iter().any(|i| i.command_id == "ui.export.figure.open" && i.localized_label == "Export Figure"));
+        for removed in ["export.pdf", "export.png", "export.svg", "export.tiff"] {
+            assert!(!file_sec.items.iter().any(|i| i.command_id == removed), "File menu must not expose duplicate per-format command `{removed}`");
+        }
+        for kept in [
+            "ui.export.tableCsv.open",
+            "ui.export.allTablesCsv.open",
+            "ui.export.resultsCsv.open",
+            "analysis.exportJson",
+            "ui.export.pzfx.open",
+            "result.generateReport",
+            "project.saveTemplate",
+        ] {
+            assert!(file_sec.items.iter().any(|i| i.command_id == kept), "File menu missing `{kept}`");
+        }
+
+        let view_sec = chrome.sections.iter().find(|s| s.menu_key == "menu.view").ok_or("missing menu.view")?;
+        let gallery_item = view_sec.items.iter().find(|i| i.command_id == "ui.gallery.toggle").ok_or("missing View > Gallery item")?;
+        assert_eq!(gallery_item.localized_label, "Gallery");
+
+        let data_sec = chrome.sections.iter().find(|s| s.menu_key == "menu.data").ok_or("missing menu.data")?;
+        let rand_item = data_sec.items.iter().find(|i| i.command_id == "ui.table.randomizeGroups").ok_or("missing Data > Randomize Groups")?;
+        let sample_item = data_sec.items.iter().find(|i| i.command_id == "ui.table.randomSampleRows").ok_or("missing Data > Sample Rows")?;
+        assert_eq!(rand_item.localized_label, "Randomize Groups");
+        assert_eq!(sample_item.localized_label, "Sample Rows");
+        assert!(rand_item.enabled);
+        assert!(sample_item.enabled);
+
+        // Verify desktop command routing resolves toolbar & menu actions cleanly.
+        let app = rt.window(wid)?.app();
+        assert!(matches!(
+            resolve_desktop_command_route(app, None, "toolbar.export_figure")?,
+            DesktopCommandRoute::UiCommand { ref ui_command_id, .. } if ui_command_id == "ui.export.figure.open"
+        ));
+        assert!(matches!(
+            resolve_desktop_command_route(app, None, "ui.table.randomizeGroups")?,
+            DesktopCommandRoute::UiCommand { ref ui_command_id, .. } if ui_command_id == "ui.table.randomizeGroups"
+        ));
+        assert!(matches!(
+            resolve_desktop_command_route(app, None, "ui.table.randomSampleRows")?,
+            DesktopCommandRoute::UiCommand { ref ui_command_id, .. } if ui_command_id == "ui.table.randomSampleRows"
+        ));
+
+        #[cfg(target_os = "macos")]
+        {
+            let mut mac_host = MacNativeMenuHost::new();
+            mac_host.sync_from_chrome(&chrome)?;
+            let mac_file = mac_host.muda_section_specs().iter().find(|s| s.menu_key == "menu.file").ok_or("missing macOS menu.file")?;
+            assert!(mac_file.items.iter().any(|i| i.command_id == "ui.export.figure.open" && i.label == "Export Figure"));
+            for removed in ["export.pdf", "export.png", "export.svg", "export.tiff"] {
+                assert!(!mac_file.items.iter().any(|i| i.command_id == removed), "macOS File menu still exposes `{removed}`");
+            }
+            let mac_view = mac_host.muda_section_specs().iter().find(|s| s.menu_key == "menu.view").ok_or("missing macOS menu.view")?;
+            assert!(mac_view.items.iter().any(|i| i.command_id == "ui.gallery.toggle" && i.label == "Gallery"));
+            let mac_data = mac_host.muda_section_specs().iter().find(|s| s.menu_key == "menu.data").ok_or("missing macOS menu.data")?;
+            assert!(mac_data.items.iter().any(|i| i.command_id == "ui.table.randomizeGroups" && i.label == "Randomize Groups" && i.enabled));
+            assert!(mac_data.items.iter().any(|i| i.command_id == "ui.table.randomSampleRows" && i.label == "Sample Rows" && i.enabled));
+        }
+
+        Ok(())
+    }
 }

@@ -1,4 +1,4 @@
-//! Parts-of-whole figure builders (pie, donut, stacked fraction bar, and 10x10 waffle grid).
+//! Parts-of-whole figure builders (pie, donut, and stacked fraction bar).
 
 use std::f64::consts::PI;
 
@@ -13,7 +13,7 @@ use super::shared::{
 use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, TextAnchor};
 
 // ============================================================================
-// 3. Parts-of-Whole (Pie, Donut, StackedFractionBar, 10x10 Waffle)
+// 3. Parts-of-Whole (Pie, Donut, StackedFractionBar)
 // ============================================================================
 
 pub(super) fn compile_parts_of_whole(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
@@ -51,7 +51,6 @@ pub(super) fn compile_parts_of_whole(graph: &GraphSheet, doc: &ProjectDocument, 
         PartsOfWholeLayout::Pie => render_pie_or_donut(scene, &graph.spec, &slices, 0.0, false),
         PartsOfWholeLayout::Donut => render_pie_or_donut(scene, &graph.spec, &slices, 0.56, show_center_total),
         PartsOfWholeLayout::StackedFractionBar => render_stacked_fraction_bar(scene, &graph.spec, &slices),
-        PartsOfWholeLayout::Waffle10x10 => render_waffle_10x10(scene, &graph.spec, &slices),
     }
 
     draw_legend_entries(scene, &graph.spec, &legend_entries, doc);
@@ -182,72 +181,4 @@ fn render_stacked_fraction_bar(scene: &mut ChartScene, spec: &GraphSpec, slices:
             color: Rgba8::BLACK,
         }));
     }
-}
-
-fn render_waffle_10x10(scene: &mut ChartScene, spec: &GraphSpec, slices: &[curvebook_doc::SliceFraction]) {
-    let r = scene.plot_rect_pt;
-    let side = r.width.min(r.height).max(40.0) * 0.88;
-    let gap = 2.0;
-    let cell = ((side - 9.0 * gap) / 10.0).max(2.5);
-    let total_side = 10.0 * cell + 9.0 * gap;
-    let origin_x = r.x + (r.width - total_side) * 0.5;
-    let origin_y = r.y + (r.height - total_side) * 0.5;
-
-    let counts = largest_remainder_100(slices);
-    let mut cell_colors = Vec::with_capacity(100);
-    for (idx, &cnt) in counts.iter().enumerate() {
-        let color = spec.palette.color_at(idx);
-        for _ in 0..cnt {
-            if cell_colors.len() < 100 {
-                cell_colors.push(color);
-            }
-        }
-    }
-    while cell_colors.len() < 100 {
-        cell_colors.push(Rgba8::rgb(220, 224, 230));
-    }
-
-    let cell_border = solid_stroke(Rgba8::rgba(255, 255, 255, 180), 0.5, LineDashStyle::Solid);
-    for idx in 0..100 {
-        let row_from_bottom = idx / 10;
-        let col = idx % 10;
-        let row_from_top = 9 - row_from_bottom;
-        let x = origin_x + (col as f64) * (cell + gap);
-        let y = origin_y + (row_from_top as f64) * (cell + gap);
-        let color = cell_colors.get(idx).copied().unwrap_or(Rgba8::rgb(220, 224, 230));
-        scene.primitives.push(ScenePrimitive::Path {
-            path: Path2D::rect(RectPt::new(x, y, cell, cell)),
-            fill: Some(FillPaint::solid(color)),
-            stroke: Some(cell_border),
-            clip: None,
-        });
-    }
-}
-
-pub(super) fn largest_remainder_100(slices: &[curvebook_doc::SliceFraction]) -> Vec<usize> {
-    if slices.is_empty() {
-        return Vec::new();
-    }
-    let sum_frac: f64 = slices.iter().map(|s| s.fraction.max(0.0)).sum();
-    if sum_frac <= 0.0 {
-        return vec![0; slices.len()];
-    }
-    let mut base: Vec<usize> = Vec::with_capacity(slices.len());
-    let mut remainders: Vec<(usize, f64)> = Vec::with_capacity(slices.len());
-    let mut assigned = 0_usize;
-    for (i, s) in slices.iter().enumerate() {
-        let exact = (s.fraction.max(0.0) / sum_frac) * 100.0;
-        let floor_i = crate::clamp_f64_safe(exact.floor(), 0.0, 100.0) as usize;
-        base.push(floor_i);
-        assigned += floor_i;
-        remainders.push((i, exact - (floor_i as f64)));
-    }
-    remainders.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let remaining = 100_usize.saturating_sub(assigned);
-    for (i, _) in remainders.into_iter().take(remaining) {
-        if let Some(slot) = base.get_mut(i) {
-            *slot += 1;
-        }
-    }
-    base
 }

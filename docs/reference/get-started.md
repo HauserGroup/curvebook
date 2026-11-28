@@ -93,7 +93,7 @@ Beta release files follow the naming pattern `curvebook-<version>-<os>-<arch>.<e
 Packaging notes:
 
 - **One format per OS:** The Beta does not build macOS CLI zips, 32-bit or portable Windows zips, or Linux .deb, .rpm, Flatpak, or zsync packages.
-- **Microsoft Store and browser app:** A signed Microsoft Store (MSIX) package is planned separately. The browser version of CurveBook is postponed until CurveBook 1.0.
+- A signed Microsoft Store (MSIX) package is planned separately. A browser version is unscheduled.
 - **Licenses and software inventory:** Every release includes a CycloneDX software bill of materials (SBOM) and third-party license notices.
 
 ---

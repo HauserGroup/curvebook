@@ -234,7 +234,9 @@ fn r15_4_r10_23_egui_pane_toggle_shortcuts_and_rtl_hidpi() -> TestRes {
 fn r15_4_r10_23_egui_portfolio_gallery_f6_cycling_and_quick_stats_footer() -> TestRes {
     let mut driver = make_shell_driver(build_r10_23_column_and_nav_app()?, ViewportMetrics::new(1280.0, 720.0, 1.0));
 
-    driver.click_widget_id("status.section.gallery")?;
+    assert!(driver.frame_meta().find_by_widget_id("status.section.gallery").is_none());
+    driver.click_widget_id("menu.view")?;
+    driver.click_widget_id("menu.ui.gallery.toggle")?;
     assert!(driver.state().app.nav.gallery.open);
     for wid in ["gallery.filter.all", "gallery.filter.graphs", "gallery.filter.layouts", "gallery.filter.data", "gallery.card.graph-1"] {
         assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "missing `{wid}`");

@@ -477,13 +477,13 @@ fn r10_2_and_r10_16_and_r10_20_full_sheets_26_dialogs_tabs_and_7_inspectors_pari
     // 1. Welcome screen + entry modes
     let welcome = UiApp::new();
     verify_driver_parity(&make_shell_driver(welcome.clone(), metrics), "welcome/initial")?;
-    verify_modal_tab_sweep(&welcome, metrics, &["welcome.entry_mode.sample", "welcome.entry_mode.empty"], "welcome_empty")?;
+    verify_modal_tab_sweep(&welcome, metrics, &["welcome.mode.import", "welcome.mode.sample_data", "welcome.mode.new_table"], "welcome_empty")?;
 
-    // 2. All 5 workspace sheet types + Welcome clone/template modes + Results interpret studio tabs
+    // 2. All 5 workspace sheet types + Welcome reuse (template/clone) modes + Results interpret studio tabs
     let mut app = build_rich_five_sheet_app()?;
     app.nav.welcome.open = true;
     app.egui_views.launcher_open = true;
-    verify_modal_tab_sweep(&app, metrics, &["welcome.mode.clone", "welcome.mode.template"], "welcome_clone")?;
+    verify_modal_tab_sweep(&app, metrics, &["welcome.mode.reuse", "welcome.mode.clone", "welcome.mode.template"], "welcome_clone")?;
     app.nav.welcome.open = false;
     app.egui_views.launcher_open = false;
 

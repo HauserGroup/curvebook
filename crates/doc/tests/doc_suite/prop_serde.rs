@@ -447,7 +447,9 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
     assert_json_roundtrip(&ColormapId::Cividis);
     assert_json_roundtrip(&CvdKind::Tritanopia);
     assert_json_roundtrip(&SummaryMeasure::GeometricMean);
-    assert_json_roundtrip(&PartsOfWholeLayout::Waffle10x10);
+    assert_json_roundtrip(&PartsOfWholeLayout::Pie);
+    assert_json_roundtrip(&PartsOfWholeLayout::Donut);
+    assert_json_roundtrip(&PartsOfWholeLayout::StackedFractionBar);
     assert_json_roundtrip(&SizePt::default());
     assert_json_roundtrip(&NoteId::new("note-1"));
 

@@ -81,7 +81,7 @@ pub enum GraphKind {
     /// Categorical count/proportion bar or stacked bar figure.
     #[serde(alias = "contingency", alias = "contingency_stacked", alias = "contingency_grouped")]
     Contingency,
-    /// Pie, donut, stacked fraction bar, or `10 × 10` waffle chart.
+    /// Pie, donut, or stacked fraction bar chart.
     #[serde(alias = "parts_of_whole", alias = "pie", alias = "donut")]
     PartsOfWhole,
     /// Kaplan–Meier staircase survival curve with censoring ticks, optional Greenwood CIs, and optional number-at-risk table.
@@ -816,8 +816,6 @@ pub enum PartsOfWholeLayout {
     Donut,
     /// Single `100%` stacked rectangular bar partitioned into proportional segments.
     StackedFractionBar,
-    /// `10 × 10` unit-cell grid (`100` squares) colored by rounded percentage share.
-    Waffle10x10,
 }
 
 /// Composable Graphical Data Object (GDO) describing how a series renders (`docs/implementation/graphing-and-layouts.md` §2).
@@ -925,7 +923,7 @@ pub enum GraphicalDataObject {
         #[serde(default)]
         error_display: Option<ErrorBarMetric>,
     },
-    /// Proportional categorical composition plot (`Pie`, `Donut`, `StackedFractionBar`, or `Waffle10x10`).
+    /// Proportional categorical composition plot (`Pie`, `Donut`, or `StackedFractionBar`).
     PartsOfWhole {
         /// Geometric layout of the categorical fractions.
         layout: PartsOfWholeLayout,

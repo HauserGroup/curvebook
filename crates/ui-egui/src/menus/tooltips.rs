@@ -65,7 +65,12 @@ pub const TOOLBAR_BUTTONS: &[ToolbarButtonSpec] = &[
     ToolbarButtonSpec { id: "toolbar.analyze", label_key: "btn.analyze", command_id: "ui.analyze.open", rank: ActionRank::Primary },
     ToolbarButtonSpec { id: "toolbar.axes", label_key: "inspector.format_axes", command_id: "graph.setAxes", rank: ActionRank::Secondary },
     ToolbarButtonSpec { id: "toolbar.palette", label_key: "menu.view.command_palette", command_id: "ui.palette.open", rank: ActionRank::Secondary },
-    ToolbarButtonSpec { id: "toolbar.export_svg", label_key: "menu.file.export_svg", command_id: "export.svg", rank: ActionRank::Secondary },
+    ToolbarButtonSpec {
+        id: "toolbar.export_figure",
+        label_key: "cmd.ui.export.figure.open",
+        command_id: "ui.export.figure.open",
+        rank: ActionRank::Secondary,
+    },
 ];
 
 /// Resolve the default [`ActionRank`] for any UI (`UI_COMMANDS`) or engine (`cmd::registry()`) command ID.
@@ -198,7 +203,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.zoom.in" => ("menu.view", "View/Zoom/Zoom In"),
         "ui.zoom.out" => ("menu.view", "View/Zoom/Zoom Out"),
         "ui.zoom.fitSheet" => ("menu.view", "View/Zoom/Zoom to Fit"),
-        "ui.gallery.toggle" => ("menu.view", "View/Gallery View"),
+        "ui.gallery.toggle" => ("menu.view", "View/Gallery"),
         "ui.rulers.toggle" => ("menu.view", "View/Rulers"),
         "ui.pane.cycle" => ("menu.view", "View/Cycle Focus Pane"),
         "ui.shortcut.set" => ("menu.edit", "Edit/Settings/Keyboard Shortcuts"),
@@ -230,7 +235,7 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.canvas.preflight" => ("menu.graph", "Graph/Preflight Check"),
         "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
         "ui.print.open" => ("menu.file", "File/Print"),
-        "ui.export.figure.open" => ("menu.file", "File/Export Figure"),
+        "ui.export.figure.open" => ("menu.file", "File/Export/Export Figure"),
         "ui.export.tableCsv.open" => ("menu.file", "File/Export/CSV Table"),
         "ui.export.resultsCsv.open" => ("menu.file", "File/Export/CSV Results"),
         "ui.export.allTablesCsv.open" => ("menu.file", "File/Export/Export All Data Tables"),
@@ -240,8 +245,8 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.import.reshape.open" => ("menu.file", "File/Import Reshape"),
         "ui.clonePipeline.open" => ("menu.data", "Data/Clone Pipeline"),
         "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Format"),
-        "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups Dialog"),
-        "ui.table.randomSampleRows" => ("menu.data", "Data/Random Sample Rows Dialog"),
+        "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups"),
+        "ui.table.randomSampleRows" => ("menu.data", "Data/Sample Rows"),
         "ui.table.sortRowsAsc" => ("menu.data", "Data/Sort Rows/Sort Rows Ascending"),
         "ui.table.sortRowsDesc" => ("menu.data", "Data/Sort Rows/Sort Rows Descending"),
         "ui.table.sortByRowTitles" => ("menu.data", "Data/Sort Rows/Sort by Row Titles"),
@@ -492,6 +497,57 @@ mod tests {
             }
         }
         assert!(seen.len() >= 60 && seen.len() <= 120, "expected curated menu size, got {}", seen.len());
+        Ok(())
+    }
+
+    #[test]
+    fn r10_37_curated_menus_and_toolbar_specs() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", json!({ "sheet_id": "mv1", "kind": "multiple_variables", "title": "Cohort" }))?;
+        app.execute_command("sheet.createData", json!({ "sheet_id": "d1", "kind": "xy", "title": "Assay", "auto_graph": true }))?;
+
+        assert!(TOOLBAR_BUTTONS.iter().any(|b| b.id == "toolbar.export_figure" && b.command_id == "ui.export.figure.open"));
+        assert!(!TOOLBAR_BUTTONS.iter().any(|b| b.id == "toolbar.export_svg"));
+
+        let sections = menu_bar_tooltips(&app);
+        let file = sections.iter().find(|s| s.menu_key == "menu.file").ok_or("missing menu.file")?;
+        assert!(file.items.iter().any(|i| i.command_id == "ui.export.figure.open" && i.localized_label == "Export Figure"));
+        for removed in ["export.pdf", "export.png", "export.svg", "export.tiff"] {
+            assert!(!file.items.iter().any(|i| i.command_id == removed), "duplicate `{removed}` in File menu");
+        }
+        for kept in [
+            "ui.export.tableCsv.open",
+            "ui.export.allTablesCsv.open",
+            "ui.export.resultsCsv.open",
+            "analysis.exportJson",
+            "ui.export.pzfx.open",
+            "result.generateReport",
+            "project.saveTemplate",
+        ] {
+            assert!(file.items.iter().any(|i| i.command_id == kept), "missing `{kept}` in File menu");
+        }
+
+        let view = sections.iter().find(|s| s.menu_key == "menu.view").ok_or("missing menu.view")?;
+        let gallery = view.items.iter().find(|i| i.command_id == "ui.gallery.toggle").ok_or("missing View > Gallery")?;
+        assert_eq!(gallery.localized_label, "Gallery");
+
+        let data = sections.iter().find(|s| s.menu_key == "menu.data").ok_or("missing menu.data")?;
+        let rand = data.items.iter().find(|i| i.command_id == "ui.table.randomizeGroups").ok_or("missing Data > Randomize Groups")?;
+        let sample = data.items.iter().find(|i| i.command_id == "ui.table.randomSampleRows").ok_or("missing Data > Sample Rows")?;
+        assert_eq!(rand.localized_label, "Randomize Groups");
+        assert_eq!(sample.localized_label, "Sample Rows");
+        assert!(rand.enabled && sample.enabled);
+
+        let emf_out = crate::control_io::dispatch_ui_command(&mut app, "ui.export.figure.open", &json!({ "format": "emf", "dpi": 600 }))?
+            .ok_or("missing emf export payload")?;
+        assert_eq!(emf_out["format"], "Emf");
+        assert!(app.egui_views.app_modals.export_emf_selected);
+        assert_eq!(app.canvas_dialogs.export_figure.dpi, 600);
+
+        let pdf_out = crate::control_io::dispatch_ui_command(&mut app, "ui.export.figure.open", &json!({ "format": "pdf" }))?
+            .ok_or("missing pdf export payload")?;
+        assert_eq!(pdf_out["format"], "Pdf");
+        assert!(!app.egui_views.app_modals.export_emf_selected);
         Ok(())
     }
 }

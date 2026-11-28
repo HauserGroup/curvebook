@@ -779,7 +779,8 @@ fn wf55_human_grouped_transpose_batch_graphs_and_gallery_apply_style() -> TestRe
     run.click("inspector.graph.frame.PlainBoxed")?;
 
     let donor_title = run.document().graph_sheet(&donor_id).ok_or("WF-55 missing donor graph")?.title.clone();
-    run.click("status.section.gallery")?;
+    run.open_menu_and_click("menu.view", &[], "menu.ui.gallery.toggle")?;
+    run.click("gallery.filter.graphs")?;
     let p_first = run.widget_center(&format!("gallery.card.{}", donor_id.as_str()))?;
     run.click_at_button(p_first, PointerButton::Primary, KeyModifiers { ctrl: true, ..Default::default() })?;
     let p_last = run.widget_center(&format!("gallery.card.{}", last_id.as_str()))?;

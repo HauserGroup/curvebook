@@ -137,7 +137,7 @@ fn survival_direct_and_result_backed_emit_km_ci_censors_and_aligned_at_risk() ->
 }
 
 #[test]
-fn parts_of_whole_all_four_layouts_and_contingency_modes() -> TestResult {
+fn parts_of_whole_all_three_layouts_and_contingency_modes() -> TestResult {
     let mut pow = PartsOfWholeTable::new(1, 4)?;
     pow.slice_labels = vec![String::from("CD4"), String::from("CD8"), String::from("NK"), String::from("B-Cell")];
     for (r, v) in [45.0, 25.0, 20.0, 10.0].into_iter().enumerate() {
@@ -147,7 +147,7 @@ fn parts_of_whole_all_four_layouts_and_contingency_modes() -> TestResult {
     let mut doc = ProjectDocument::default();
     doc.add_data_sheet(ds.clone())?;
 
-    for layout in [PartsOfWholeLayout::Pie, PartsOfWholeLayout::Donut, PartsOfWholeLayout::StackedFractionBar, PartsOfWholeLayout::Waffle10x10] {
+    for layout in [PartsOfWholeLayout::Pie, PartsOfWholeLayout::Donut, PartsOfWholeLayout::StackedFractionBar] {
         let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-pow"), &ds)?;
         gs.spec.series[0].gdo = GraphicalDataObject::PartsOfWhole { layout, show_center_total: true };
         let scene = compile_graph(&gs, &doc)?;
@@ -165,10 +165,6 @@ fn parts_of_whole_all_four_layouts_and_contingency_modes() -> TestResult {
             }
             PartsOfWholeLayout::StackedFractionBar => {
                 assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "100%")));
-            }
-            PartsOfWholeLayout::Waffle10x10 => {
-                let filled_tiles = scene.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Path { fill: Some(_), clip: None, .. })).count();
-                assert!(filled_tiles >= 100, "waffle grid should have >= 100 filled tiles");
             }
         }
     }

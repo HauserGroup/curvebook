@@ -127,6 +127,11 @@ fn r15_8_curated_menu_bar_hygiene_and_parity() -> Result<(), String> {
     assert_eq!(legacy_engine["command_id"], "table.setCell");
     app.sync_views();
 
+    assert_in_window_menu_popups(app)?;
+    assert_os_adaptive_menu_placement()
+}
+
+fn assert_in_window_menu_popups(app: UiApp) -> Result<(), String> {
     let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
     let mut driver = make_shell_driver_with_state(ShellTestState::new(app).with_merge_passes(), ViewportMetrics::new(1440.0, 820.0, 1.0), tokens);
     for (top, submenus) in [
@@ -134,21 +139,44 @@ fn r15_8_curated_menu_bar_hygiene_and_parity() -> Result<(), String> {
             "menu.file",
             &[
                 ("menu.file.import", "menu.ui.import.reshape.open"),
-                ("menu.file.export", "menu.export.svg"),
+                ("menu.file.export", "menu.ui.export.figure.open"),
                 ("menu.file.checkpoints", "menu.project.listCheckpoints"),
             ][..],
         ),
         ("menu.graph", &[("menu.graph.layout", "menu.ui.layout.composer.open")][..]),
     ] {
         driver.click_widget_id(top)?;
+        if top == "menu.file" {
+            assert!(driver.frame_meta().find_by_widget_id("menu.project.saveTemplate").is_some(), "File menu missing Save as Template");
+        }
         for &(sub, child) in submenus {
             driver.hover_widget_id(sub)?;
             assert!(driver.frame_meta().find_by_widget_id(child).is_some(), "{sub} must surface {child}");
+            if sub == "menu.file.export" {
+                for removed in ["menu.export.pdf", "menu.export.png", "menu.export.svg", "menu.export.tiff"] {
+                    assert!(driver.frame_meta().find_by_widget_id(removed).is_none(), "File > Export must not expose `{removed}`");
+                }
+            }
         }
         driver.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE);
     }
-    assert_eq!(driver.state().last_intent_error, None);
 
+    driver.click_widget_id("menu.view")?;
+    let gallery_entry = driver.frame_meta().find_by_widget_id("menu.ui.gallery.toggle").ok_or("View > Gallery missing")?;
+    assert_eq!(gallery_entry.label, "Gallery");
+    driver.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE);
+
+    driver.click_widget_id("menu.data")?;
+    let rand_entry = driver.frame_meta().find_by_widget_id("menu.ui.table.randomizeGroups").ok_or("Data > Randomize Groups missing")?;
+    let sample_entry = driver.frame_meta().find_by_widget_id("menu.ui.table.randomSampleRows").ok_or("Data > Sample Rows missing")?;
+    assert_eq!((rand_entry.label.as_str(), sample_entry.label.as_str()), ("Randomize Groups", "Sample Rows"));
+    assert!(rand_entry.enabled && sample_entry.enabled);
+    driver.press_egui_key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert_eq!(driver.state().last_intent_error, None);
+    Ok(())
+}
+
+fn assert_os_adaptive_menu_placement() -> Result<(), String> {
     // OS-adaptive placement & dot-free "Settings" across all 16 locales.
     for &loc in curvebook_ui_egui::i18n::LOCALES {
         let mut win_app = UiApp::new();
