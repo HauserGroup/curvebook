@@ -10,10 +10,11 @@ use crate::{
     pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, version, web_fonts, workflows,
 };
 
-// Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
-// input-to-paint budgets (`human_wf_*`), grid, curve-fit, and ANOVA/1M throughput gates
-// off the parallel correctness runner. The complement below still covers every other test.
-pub(crate) const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*) | binary(r15_2_anova_and_1m_bench)";
+// Keep genuine benchmark, throughput, and anti-DoS wall-clock suites off the parallel correctness
+// runner while letting pure functional GUI/routing/shaping suites (`human_wf_suite`, `r10_ui_shaping`,
+// `r10_command_routing`, `r10_29_desktop_import_export`, and non-benchmark `r10_perf_suite` modules)
+// execute in parallel in `ci tests` and `ci quick`.
+pub(crate) const PERFORMANCE_FILTER: &str = "(binary(*perf*) & not binary(r10_perf_suite) & not binary(desktop_perf_suite)) | binary(r15_2_anova_and_1m_bench) | (binary(desktop_perf_suite) & test(/^r17_3_perf_scenarios::/)) | (binary(r10_perf_suite) & (test(/^grid_perf_s1::spike_s1_/) | test(=r10_phase7_gates::r10_22_b1_cold_startup_under_3s_budget) | test(=r10_phase7_gates::r10_22_b2_mv_categorical_summary_10k_rows_20plus_levels_latency)))";
 const HOSTED_STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -149,9 +150,8 @@ const FEATURE_CHECK_COMMANDS: &[&[&str]] = &[
     // Verify every curvebook-ui-egui target (lib, bins, integration tests) compiles without
     // `bundled-fonts`, then run the unit tests and dedicated `install_fonts` integration test
     // rather than repeating all 90+ GUI workflow and serial performance binaries.
-    // Run with `--test-threads=1` so timing-sensitive unit tests (`rv50` 1M-row selection budget
-    // and `r1_s11_08` pasteboard drain) get the same isolation that `.config/nextest.toml` grants
-    // them in the `tests` stage.
+    // Run with `--test-threads=1` so the `r1_s11_08` backgrounded `sh` pasteboard drain test gets
+    // the same isolation that `.config/nextest.toml` grants it in the `tests` stage.
     &["check", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--all-targets"],
     &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--lib", "--test", "install_fonts", "--", "--test-threads=1"],
     &["test", "--locked", "-p", "curvebook-ui-egui", "--no-default-features", "--doc"],
@@ -230,10 +230,19 @@ mod tests {
     }
 
     #[test]
-    fn performance_filter_serializes_r10_and_human_path_latency_binaries() {
-        for binary in ["binary(r10_*)", "binary(human_wf_*)", "binary(*perf*)", "binary(r15_2_anova_and_1m_bench)"] {
-            assert!(PERFORMANCE_FILTER.split(" | ").any(|term| term == binary), "PERFORMANCE_FILTER must select {binary}");
+    fn performance_filter_serializes_benchmarks_without_sweeping_functional_gui_suites() {
+        for needle in [
+            "binary(*perf*)",
+            "binary(r15_2_anova_and_1m_bench)",
+            "test(/^r17_3_perf_scenarios::/)",
+            "test(/^grid_perf_s1::spike_s1_/)",
+            "r10_22_b1_cold_startup_under_3s_budget",
+            "r10_22_b2_mv_categorical_summary_10k_rows_20plus_levels_latency",
+        ] {
+            assert!(PERFORMANCE_FILTER.contains(needle), "PERFORMANCE_FILTER must select {needle}");
         }
+        assert!(!PERFORMANCE_FILTER.contains("binary(human_wf_*)"), "functional human_wf_suite belongs in parallel `ci tests`");
+        assert!(!PERFORMANCE_FILTER.contains("binary(r10_*)"), "functional r10 suites belong in parallel `ci tests`");
     }
 
     #[test]
