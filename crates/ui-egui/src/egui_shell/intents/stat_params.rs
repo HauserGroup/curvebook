@@ -11,8 +11,8 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, DuplicateChoice, EditAnalysisParametersState};
 use crate::modal_predicates::{
     is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled,
-    r1b_sphericity_correction, r2_assume_gaussian_allowed, r2_parametric_post_hoc_method, r3_control_column_picker, r4_two_group_diagnostics,
-    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r9_pvalue_precision_spinner, source_table_shape,
+    r1b_sphericity_correction, r2_assume_gaussian_allowed, r2_one_way_lognormal_allowed, r2_parametric_post_hoc_method, r3_control_column_picker,
+    r4_two_group_diagnostics, r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r9_pvalue_precision_spinner, source_table_shape,
 };
 
 fn conflict(msg: impl Into<String>) -> EngineError {
@@ -236,12 +236,21 @@ fn handle_schematic_toggle(app: &mut UiApp) -> Result<(), EngineError> {
 fn set_one_way_method(app: &mut UiApp, method_name: &str) -> Result<(), EngineError> {
     let ep = &app.canvas_dialogs.edit_params;
     let src = ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
-    let wants_nonparam = matches!(method_name, "kruskal" | "friedman");
-    let wants_paired = matches!(method_name, "rm" | "friedman");
+    let norm = method_name.trim().to_ascii_lowercase();
+    let wants_nonparam = matches!(norm.as_str(), "kruskal" | "kruskal_wallis" | "friedman");
+    let wants_paired = matches!(norm.as_str(), "rm" | "repeated_measures" | "lognormal_rm" | "lognormal_repeated_measures" | "friedman");
+    let wants_lognormal =
+        matches!(norm.as_str(), "lognormal_ordinary" | "lognormal_welch" | "lognormal_welch_bf" | "lognormal_rm" | "lognormal_repeated_measures");
     if wants_nonparam {
         let g = r2_assume_gaussian_allowed(app.document(), src);
         if !g.enabled {
             return Err(conflict(g.disabled_reason.unwrap_or_else(|| String::from("Nonparametric tests unavailable"))));
+        }
+    }
+    if wants_lognormal {
+        let lg = r2_one_way_lognormal_allowed(true, app.document(), src);
+        if !lg.enabled {
+            return Err(conflict(lg.disabled_reason.unwrap_or_else(|| String::from("Lognormal ANOVA unavailable"))));
         }
     }
     if wants_paired {
@@ -251,12 +260,15 @@ fn set_one_way_method(app: &mut UiApp, method_name: &str) -> Result<(), EngineEr
         }
     }
     let saved_gg = app.canvas_dialogs.edit_params.saved_rm_geisser_greenhouse;
-    let next_method = match method_name.trim().to_ascii_lowercase().as_str() {
+    let next_method = match norm.as_str() {
         "ordinary" | "ordinary_anova" | "anova" => OneWayMethod::OrdinaryAnova,
         "welch" | "brown_forsythe" | "brown_forsythe_welch" | "brown_forsythe_and_welch" => OneWayMethod::BrownForsytheAndWelch,
         "kruskal" | "kruskal_wallis" => OneWayMethod::KruskalWallis,
         "friedman" => OneWayMethod::Friedman,
         "rm" | "repeated_measures" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: saved_gg },
+        "lognormal_ordinary" => OneWayMethod::LognormalOrdinary,
+        "lognormal_welch" | "lognormal_welch_bf" => OneWayMethod::LognormalWelchBf,
+        "lognormal_rm" | "lognormal_repeated_measures" => OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: saved_gg },
         other => return Err(conflict(format!("unknown one-way ANOVA method `{other}`"))),
     };
     app.canvas_dialogs.edit_params.set_one_way_method(next_method);
@@ -287,9 +299,17 @@ fn handle_toggle_gg(app: &mut UiApp) -> Result<(), EngineError> {
     if !gate.enabled {
         return Err(conflict(gate.disabled_reason.unwrap_or_default()));
     }
-    let cur = ep.draft.as_ref().is_none_or(
-        |d| !matches!(d.kind, AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })),
-    );
+    let cur = ep.draft.as_ref().is_none_or(|d| {
+        !matches!(
+            d.kind,
+            AnalysisKind::OneWayAnova(ref a)
+                if matches!(
+                    a.method,
+                    OneWayMethod::RepeatedMeasures { geisser_greenhouse: false }
+                        | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+                )
+        )
+    });
     app.canvas_dialogs.edit_params.set_geisser_greenhouse(!cur).map_err(conflict)
 }
 
@@ -476,6 +496,17 @@ fn step_hypothetical_value(app: &mut UiApp, delta: f64) {
         AnalysisKind::TwoGroupComparison(t) => match &mut t.method {
             TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
                 *hypothetical += delta;
+                true
+            }
+            TwoGroupMethod::OneSampleRatioT { hypothetical } => {
+                let cand = *hypothetical + delta;
+                *hypothetical = if cand > 0.0 && cand.is_finite() {
+                    cand
+                } else if delta < 0.0 {
+                    (*hypothetical * 0.5).max(1e-6)
+                } else {
+                    1.0
+                };
                 true
             }
             _ => false,

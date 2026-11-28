@@ -728,6 +728,9 @@ impl AnalyzeDialogState {
                 }
                 if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = &mut tg.method {
                     *hypothetical = self.two_group_hypothetical;
+                } else if let TwoGroupMethod::OneSampleRatioT { hypothetical } = &mut tg.method {
+                    *hypothetical =
+                        if self.two_group_hypothetical.is_finite() && self.two_group_hypothetical > 0.0 { self.two_group_hypothetical } else { 1.0 };
                 }
                 if let Some(ces) = self.compute_effect_sizes {
                     tg.compute_effect_sizes = ces;
@@ -1057,6 +1060,7 @@ impl AnalyzeDialogState {
 
 fn same_analysis_family(a: &AnalysisKind, b: &AnalysisKind) -> bool {
     match (a, b) {
+        (AnalysisKind::DescriptiveStats(x), AnalysisKind::DescriptiveStats(y)) => x.normality_only == y.normality_only,
         (AnalysisKind::Transform(x), AnalysisKind::Transform(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
         (AnalysisKind::Multivariate(x), AnalysisKind::Multivariate(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),
         (AnalysisKind::Survival(x), AnalysisKind::Survival(y)) => std::mem::discriminant(x) == std::mem::discriminant(y),

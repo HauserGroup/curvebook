@@ -355,6 +355,14 @@ fn paint_thumbnail_glyph(painter: &egui::Painter, rect: Rect, kind: ThumbnailGly
                 painter.circle_filled(p, 2.0, c1);
             }
         }
+        ThumbnailGlyphKind::LognormalQqPlot => {
+            painter.line_segment([lerp_rect(inner, 0.12, 0.86), lerp_rect(inner, 0.9, 0.16)], Stroke::new(1.0, tokens.text_muted));
+            let pts = [lerp_rect(inner, 0.18, 0.82), lerp_rect(inner, 0.45, 0.66), lerp_rect(inner, 0.72, 0.44), lerp_rect(inner, 0.9, 0.16)];
+            painter.add(egui::Shape::line(pts.to_vec(), Stroke::new(1.5, tokens.role_fx)));
+            for p in pts {
+                painter.circle_filled(p, 2.1, c0);
+            }
+        }
         ThumbnailGlyphKind::BarReplicates | ThumbnailGlyphKind::GroupedInterleaved | ThumbnailGlyphKind::StackedBar => {
             for (idx, h) in [0.45, 0.75, 0.6].iter().enumerate() {
                 let x = inner.left() + 4.0 + (idx as f32) * (inner.width() / 3.2);

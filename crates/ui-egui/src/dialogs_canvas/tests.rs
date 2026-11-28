@@ -836,4 +836,124 @@ mod aud09_remediation_tests {
         let tsv = out.command_result.unwrap()["copied_text"].as_str().unwrap().to_owned();
         assert!(tsv.contains("Not bounded") && !tsv.contains("???"), "unexpected TSV: {tsv}");
     }
+
+    #[test]
+    fn lognormal_two_group_edit_params_round_trip() {
+        use crate::dialogs_canvas::TwoGroupSubmethodMemory;
+        use curvebook_doc::{TwoGroupMethod, TwoGroupSpec};
+
+        let mut mem = TwoGroupSubmethodMemory::default();
+        mem.remember(TwoGroupMethod::LognormalWelchT);
+        assert_eq!(mem.resolve(true, false, None), TwoGroupMethod::LognormalWelchT);
+        mem.remember(TwoGroupMethod::OneSampleRatioT { hypothetical: 2.5 });
+        assert_eq!(
+            mem.resolve(false, false, Some(TwoGroupMethod::OneSampleRatioT { hypothetical: 2.5 })),
+            TwoGroupMethod::OneSampleWilcoxon { hypothetical: 2.5 }
+        );
+        assert_eq!(
+            mem.resolve(true, false, Some(TwoGroupMethod::OneSampleWilcoxon { hypothetical: 2.5 })),
+            TwoGroupMethod::OneSampleRatioT { hypothetical: 2.5 }
+        );
+        assert_eq!(
+            mem.resolve(true, false, Some(TwoGroupMethod::OneSampleWilcoxon { hypothetical: 0.0 })),
+            TwoGroupMethod::OneSampleT { hypothetical: 0.0 }
+        );
+
+        let mut ep_tg = EditAnalysisParametersState::default();
+        ep_tg.open_for_result(&mk_rs(
+            "res-tg",
+            "col-1",
+            AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::LognormalUnpairedT, ..Default::default() }),
+        ));
+        assert!(!ep_tg.welch_correction);
+        ep_tg.set_welch_correction(true).unwrap();
+        assert!(ep_tg.welch_correction);
+        assert!(matches!(
+            &ep_tg.draft.as_ref().unwrap().kind,
+            AnalysisKind::TwoGroupComparison(t) if t.method == TwoGroupMethod::LognormalWelchT
+        ));
+        ep_tg.set_welch_correction(false).unwrap();
+        assert!(!ep_tg.welch_correction);
+        assert!(matches!(
+            &ep_tg.draft.as_ref().unwrap().kind,
+            AnalysisKind::TwoGroupComparison(t) if t.method == TwoGroupMethod::LognormalUnpairedT
+        ));
+    }
+
+    #[test]
+    fn lognormal_one_way_edit_params_round_trip() {
+        use crate::dialogs_canvas::edit_params::draft_forces_reml_mode;
+        use curvebook_doc::{OneWayAnovaSpec, OneWayMethod};
+
+        let mut ep_ow = EditAnalysisParametersState::default();
+        ep_ow.open_for_result(&mk_rs(
+            "res-ow",
+            "col-1",
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::LognormalOrdinary, ..Default::default() }),
+        ));
+        ep_ow.set_paired_or_matched(true);
+        assert!(ep_ow.paired_or_matched);
+        assert!(matches!(
+            &ep_ow.draft.as_ref().unwrap().kind,
+            AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true }
+        ));
+        ep_ow.set_geisser_greenhouse(false).unwrap();
+        assert!(matches!(
+            &ep_ow.draft.as_ref().unwrap().kind,
+            AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+        ));
+        ep_ow.set_assume_gaussian(false);
+        assert!(matches!(&ep_ow.draft.as_ref().unwrap().kind, AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::Friedman));
+        ep_ow.set_assume_gaussian(true);
+        assert!(matches!(
+            &ep_ow.draft.as_ref().unwrap().kind,
+            AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+        ));
+        ep_ow.set_mixed_effects_reml(true);
+        assert!(draft_forces_reml_mode(ep_ow.draft.as_ref().unwrap()));
+        ep_ow.set_paired_or_matched(false);
+        assert!(matches!(&ep_ow.draft.as_ref().unwrap().kind, AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::LognormalOrdinary));
+    }
+
+    #[test]
+    fn standalone_normality_catalog_and_lognormal_qq_graph_type() {
+        use crate::dialogs_canvas::{ANALYSIS_CATALOG, GRAPH_TYPE_OPTIONS};
+        use curvebook_doc::{DiagnosticPlotKind, GraphKind};
+
+        // Standalone Normality & Lognormality catalog entry + descriptor + non-duplicate with Descriptive
+        assert!(ANALYSIS_CATALOG.iter().any(|c| c.id == "stats.normality" && c.label == "Normality and Lognormality Tests"));
+        assert_eq!(curvebook_doc::descriptor_by_ui_catalog_id("stats.normality").map(|d| d.slug), Some("descriptive-stats"));
+        let Some(AnalysisKind::DescriptiveStats(norm_spec)) = default_analysis_kind_for_id("stats.normality") else {
+            panic!("expected DescriptiveStats for stats.normality");
+        };
+        assert!(norm_spec.run_normality_battery && norm_spec.normality_only && norm_spec.emit_qq_tabs);
+
+        let mut doc = ProjectDocument::new("Normality Dup Check").unwrap();
+        let ds = DataSheet::new(
+            SheetId::new("col-n"),
+            "Col",
+            TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 6).unwrap()),
+        )
+        .unwrap();
+        doc.data_sheets.push(ds.clone());
+        doc.result_sheets.push(mk_rs("res-desc", "col-n", default_analysis_kind_for_id("stats.descriptive").unwrap()));
+        let mut an = AnalyzeDialogState::default();
+        an.open_for_data_sheet(&ds);
+        an.select_catalog_entry("stats.normality");
+        assert!(an.matching_existing_analyses(&doc).is_empty(), "stats.normality must not collide with stats.descriptive");
+
+        // Lognormal Q-Q plot option in Change Graph Type gallery
+        let qq_idx = GRAPH_TYPE_OPTIONS.iter().position(|o| o.id == "diag.normal_qq").expect("diag.normal_qq");
+        let ln_qq = GRAPH_TYPE_OPTIONS.get(qq_idx + 1).expect("diag.lognormal_qq right after diag.normal_qq");
+        assert_eq!(ln_qq.id, "diag.lognormal_qq");
+        assert_eq!(ln_qq.graph_kind, GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot));
+        let cgt = ChangeGraphTypeState {
+            graph_sheet_id: Some(SheetId::new("g-qq")),
+            selected_option_id: String::from("diag.lognormal_qq"),
+            ..Default::default()
+        };
+        let intent = cgt.commit_intent().expect("commit intent");
+        assert_eq!(intent.command_id, "graph.setKind");
+        assert_eq!(intent.params["kind"], json!(GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot)));
+    }
 }

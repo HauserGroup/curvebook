@@ -246,6 +246,52 @@ fn resolve_linear_regression_banner(lin: &curvebook_doc::LinearRegressionSpec) -
     (String::from("Parameters: Simple Linear / Deming Regression"), summary)
 }
 
+fn resolve_row_t_banner(m: &curvebook_doc::MultipleRowTestsSpec) -> (String, String) {
+    let test = if m.nonparametric {
+        "Nonparametric rank"
+    } else {
+        match m.lognormal_mode {
+            curvebook_doc::LognormalRowTestMode::RatioPaired => "Ratio paired t",
+            curvebook_doc::LognormalRowTestMode::Lognormal => {
+                if m.paired {
+                    "Ratio paired t"
+                } else if m.assume_equal_sd {
+                    "Lognormal Student t"
+                } else {
+                    "Lognormal Welch t"
+                }
+            }
+            curvebook_doc::LognormalRowTestMode::None => {
+                if m.paired {
+                    "Paired t"
+                } else if m.assume_equal_sd {
+                    "Student t"
+                } else {
+                    "Welch t"
+                }
+            }
+        }
+    };
+    (String::from("Parameters: Multiple Row t-Tests"), format!("{test} row tests + {}", multiplicity_short_label(m.multiplicity.method)))
+}
+
+fn resolve_descriptive_banner(d: &curvebook_doc::DescriptiveSpec) -> (String, String) {
+    let title = if d.normality_only {
+        String::from("Parameters: Normality & Lognormality Tests")
+    } else {
+        String::from("Parameters: Descriptive Statistics")
+    };
+    let qq = if d.emit_qq_tabs || d.normality_only { " + Normal & Lognormal Q-Q" } else { "" };
+    let summary = if d.normality_only {
+        format!("{:?} | Normality & lognormality battery{qq}", d.aggregation)
+    } else if d.run_normality_battery {
+        format!("{:?} + Normality battery{qq}", d.aggregation)
+    } else {
+        format!("{:?}{qq}", d.aggregation)
+    };
+    (title, summary)
+}
+
 /// Resolve the live dynamic header title and test banner for any `AnalysisSpec`.
 #[must_use]
 pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpec) -> (String, String) {
@@ -258,18 +304,7 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
             String::from("Parameters: Nested Comparison"),
             format!("{} ({})", if n.two_group_t_test { "Nested t-test" } else { "Nested 1-way ANOVA" }, df_method_label(n.df_method)),
         ),
-        AnalysisKind::MultipleRowTTests(m) => {
-            let test = if m.nonparametric {
-                "Nonparametric rank"
-            } else if m.paired {
-                "Paired t"
-            } else if m.assume_equal_sd {
-                "Student t"
-            } else {
-                "Welch t"
-            };
-            (String::from("Parameters: Multiple Row t-Tests"), format!("{test} row tests + {}", multiplicity_short_label(m.multiplicity.method)))
-        }
+        AnalysisKind::MultipleRowTTests(m) => resolve_row_t_banner(m),
         AnalysisKind::Contingency(c) => (
             String::from("Parameters: Contingency / Categorical"),
             format!("{}{}", contingency_method_label(c.method), if c.compute_odds_and_risk_ratios { " + OR/RR" } else { "" }),
@@ -291,10 +326,7 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
             (String::from("Parameters: Generalized Linear Model"), format!("{fam}, {} predictors", glm.predictor_columns.len()))
         }
         AnalysisKind::Multivariate(mv) => resolve_multivariate_banner(mv, alpha),
-        AnalysisKind::DescriptiveStats(d) => (
-            String::from("Parameters: Descriptive Statistics"),
-            format!("{:?}{}", d.aggregation, if d.run_normality_battery { " + Normality battery" } else { "" }),
-        ),
+        AnalysisKind::DescriptiveStats(d) => resolve_descriptive_banner(d),
         AnalysisKind::OutlierDetection(o) => {
             let desc = match o {
                 OutlierSpec::Rout { fdr_q_percent } => format!("ROUT (Q = {fdr_q_percent:.2}%)"),
@@ -894,7 +926,7 @@ fn render_stat_design_tab(
 ) {
     let doc = app.document();
     match &spec.kind {
-        AnalysisKind::TwoGroupComparison(_) => render_two_group_design(ui, app, ep, spec, tokens, meta, intents),
+        AnalysisKind::TwoGroupComparison(_) => render_two_group_design(ui, app, state, ep, spec, tokens, meta, intents),
         AnalysisKind::FactorialAnova(_) => render_factorial_anova_design(ui, doc, ep, spec, tokens, meta, intents),
         AnalysisKind::GeneralizedLinearModel(glm) => {
             render_section_title(ui, tokens, "Exponential Family & Link Function");

@@ -241,3 +241,92 @@ fn analyze_modal_surfaces_log_x_scale_warning_and_very_wide_ci_formatting() {
     assert_eq!(format_result_cell_display_text(&ResultCell::Text(String::from("Very wide")), &nl_rs, &tab), "Very wide");
     assert!(AssumptionDiagnosticBanner::from_result(&nl_rs).is_some(), "`Very wide` cell must surface ambiguity banner");
 }
+
+#[test]
+fn standalone_normality_lognormality_and_dual_qq_ui_round_trip() {
+    use curvebook_doc::{DiagnosticPlotKind, GraphKind, GraphSheet, ResultStatus};
+    use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+
+    let (mut doc, col_id) = seed_column_doc(
+        "Standalone Normality & Dual Q-Q",
+        "col-norm",
+        "Positive Assay",
+        ColumnDesignHint::UnpairedReplicates,
+        &[("Vehicle", &[1.2, 1.8, 2.5, 3.9, 6.2, 10.5, 18.0, 31.0]), ("Drug", &[2.1, 3.0, 4.4, 6.8, 10.2, 16.5, 25.0, 42.0])],
+    )
+    .unwrap();
+    let gid = SheetId::try_new("graph-norm").unwrap();
+    let mut gs = GraphSheet::new_uninitialized_for_data(gid.clone(), doc.data_sheet(&col_id).unwrap()).unwrap();
+    gs.initialized = true;
+    doc.graph_sheets.push(gs);
+
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.sync_views();
+    let snap = app.document().clone();
+    assert!(app.canvas_dialogs.open_analyze_dialog(&snap, &col_id));
+    let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+    let mut driver = make_shell_driver_with_state(ShellTestState::new(app).with_commit_all().with_merge_passes(), ViewportMetrics::default(), tokens);
+
+    // Search for standalone Normality & Lognormality Tests and run immediately
+    set_textbox(&mut driver, "analyze.search", "lognormality").unwrap();
+    assert!(driver.frame_meta().find_by_widget_id("analyze.entry.stats.normality").is_some());
+    driver.click_widget_id("analyze.entry.stats.normality").unwrap();
+    driver.click_widget_id("modal.ok").unwrap();
+    driver.run_settled();
+
+    assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
+    let rs_id = {
+        let rs = driver.state().app.document().result_sheets.last().expect("created normality result sheet");
+        assert_eq!(rs.status, ResultStatus::UpToDate);
+        assert!(matches!(&rs.analysis.kind, AnalysisKind::DescriptiveStats(d) if d.normality_only && d.run_normality_battery && d.emit_qq_tabs));
+        assert!(rs.tabs.iter().all(|t| t.id != "desc-summary"), "normality_only must omit desc-summary");
+        let norm_tab = rs.tabs.iter().find(|t| t.id == "normality").expect("normality tab");
+        assert!(
+            norm_tab.row_labels.iter().any(|l| l.to_ascii_lowercase().contains("lognormal")),
+            "expected lognormal rows in normality tab: {:?}",
+            norm_tab.row_labels
+        );
+        assert!(rs.tabs.iter().any(|t| t.id == "normal-qq"), "missing normal-qq tab");
+        assert!(rs.tabs.iter().any(|t| t.id == "lognormal-qq"), "missing lognormal-qq tab");
+        rs.id.clone()
+    };
+
+    // Reopen Edit Parameters: verify normality_only/emit_qq_tabs controls & banner, then toggle both OFF & commit
+    let doc2 = driver.state().app.document().clone();
+    assert!(driver.state_mut().app.canvas_dialogs.open_edit_parameters(&doc2, &rs_id));
+    driver.run_settled();
+    assert!(driver.frame_meta().find_by_widget_id("edit.desc.normality_only").is_some());
+    assert!(driver.frame_meta().find_by_widget_id("edit.desc.emit_qq_tabs").is_some());
+    assert!(!driver.frame_meta().find_by_widget_id("edit.desc.emit_qq_tabs").unwrap().enabled);
+    assert!(!driver.frame_meta().find_by_widget_id("edit.desc.normality").unwrap().enabled);
+    assert!(driver.state().views.stats_modals.last_resolved_banner.contains("Normal & Lognormal Q-Q"));
+
+    driver.click_widget_id("edit.desc.normality_only").unwrap();
+    driver.run_settled();
+    assert!(driver.frame_meta().find_by_widget_id("edit.desc.emit_qq_tabs").unwrap().enabled);
+    driver.click_widget_id("edit.desc.emit_qq_tabs").unwrap();
+    driver.run_settled();
+    driver.click_widget_id("modal.ok").unwrap();
+    driver.run_settled();
+    {
+        let rs = driver.state().app.document().result_sheet(&rs_id).unwrap();
+        assert!(matches!(&rs.analysis.kind, AnalysisKind::DescriptiveStats(d) if !d.normality_only && !d.emit_qq_tabs));
+        assert!(rs.tabs.iter().any(|t| t.id == "desc-summary"));
+        assert!(rs.tabs.iter().all(|t| t.id != "lognormal-qq"));
+    }
+
+    // Change Graph Type exposes Lognormal Q-Q Plot alongside Normal Q-Q Plot and commits it
+    let _ = curvebook_ui_egui::dispatch_gui_action(
+        &mut driver.state_mut().app,
+        "ui.invoke_menu",
+        json!({ "command_id": "ui.changeGraphType.open", "params": { "sheet_id": gid.as_str() } }),
+    )
+    .unwrap();
+    driver.run_settled();
+    assert!(driver.frame_meta().find_by_widget_id("graph_type.card.diag.normal_qq").is_some());
+    assert!(driver.frame_meta().find_by_widget_id("graph_type.card.diag.lognormal_qq").is_some());
+    driver.click_widget_id("graph_type.card.diag.lognormal_qq").unwrap();
+    driver.click_widget_id("modal.ok").unwrap();
+    driver.run_settled();
+    assert_eq!(driver.state().app.document().graph_sheet(&gid).unwrap().spec.kind, GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot));
+}

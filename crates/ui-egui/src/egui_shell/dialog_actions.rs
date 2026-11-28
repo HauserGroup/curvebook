@@ -1173,10 +1173,34 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
             let gg_checked = ep.draft.as_ref().is_none_or(|d| {
                 !matches!(
                     d.kind,
-                    AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })
+                    AnalysisKind::OneWayAnova(ref a)
+                        if matches!(
+                            a.method,
+                            OneWayMethod::RepeatedMeasures { geisser_greenhouse: false }
+                                | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+                        )
                 )
             });
             app.canvas_dialogs.edit_params.set_geisser_greenhouse(!gg_checked).map_err(disabled_err)?;
+        }
+        "edit.anova.lognormal" => {
+            let src = ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
+            let gate = crate::modal_predicates::r2_one_way_lognormal_allowed(ep.assume_gaussian, app.document(), src);
+            if !gate.enabled {
+                return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Lognormal ANOVA is disabled."))));
+            }
+            if let Some(AnalysisKind::OneWayAnova(a)) = ep.draft.as_ref().map(|d| &d.kind) {
+                let next_method = match a.method {
+                    OneWayMethod::OrdinaryAnova => OneWayMethod::LognormalOrdinary,
+                    OneWayMethod::LognormalOrdinary => OneWayMethod::OrdinaryAnova,
+                    OneWayMethod::BrownForsytheAndWelch => OneWayMethod::LognormalWelchBf,
+                    OneWayMethod::LognormalWelchBf => OneWayMethod::BrownForsytheAndWelch,
+                    OneWayMethod::RepeatedMeasures { geisser_greenhouse } => OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse },
+                    OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => OneWayMethod::RepeatedMeasures { geisser_greenhouse },
+                    OneWayMethod::KruskalWallis | OneWayMethod::Friedman => a.method,
+                };
+                app.canvas_dialogs.edit_params.set_one_way_method(next_method);
+            }
         }
         _ => return Ok(None),
     }

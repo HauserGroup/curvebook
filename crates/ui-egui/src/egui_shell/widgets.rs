@@ -1340,7 +1340,11 @@ fn show_dropdown_popup<R>(
     add_contents: impl FnOnce(&mut Ui) -> R,
 ) -> Option<(Response, R)> {
     let screen = ui.ctx().content_rect();
-    let max_popup_h = max_popup_height.min((screen.height() - 24.0).max(80.0)).max(48.0);
+    let space_below = (screen.bottom() - trigger_resp.rect.bottom() - 16.0).max(0.0);
+    let space_above = (trigger_resp.rect.top() - screen.top() - 16.0).max(0.0);
+    let open_above = space_above > space_below;
+    let available_h = if open_above { space_above } else { space_below }.max(80.0);
+    let max_popup_h = max_popup_height.min((screen.height() - 24.0).max(80.0)).min(available_h).max(48.0);
     let max_popup_w = (screen.width() - 24.0).max(button_w);
     let inner_min_w = (button_w - 8.0).max(40.0);
     let inner_max_w = (max_popup_w - 8.0).max(inner_min_w);
@@ -1350,9 +1354,12 @@ fn show_dropdown_popup<R>(
         .corner_radius(CornerRadius::same(t.metrics.radius_md))
         .inner_margin(egui::Margin::same(4));
 
-    egui::Popup::from_toggle_button_response(trigger_resp)
+    let popup = egui::Popup::from_toggle_button_response(trigger_resp)
+        .align(if open_above { egui::RectAlign::TOP_START } else { egui::RectAlign::BOTTOM_START })
         .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-        .frame(popup_frame)
+        .frame(popup_frame);
+
+    popup
         .show(|ui| {
             ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);

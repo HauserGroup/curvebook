@@ -51,6 +51,7 @@ pub(super) fn saved_default_kind_key(kind: &curvebook_doc::AnalysisKind) -> &'st
             TransformAnalysisSpec::Simulate { .. } => "transform.simulate",
             TransformAnalysisSpec::RandomSample { .. } => "transform.random_sample",
         },
+        AnalysisKind::DescriptiveStats(d) if d.normality_only => "stats.normality",
         other => curvebook_doc::descriptor_for_kind(other).slug,
     }
 }

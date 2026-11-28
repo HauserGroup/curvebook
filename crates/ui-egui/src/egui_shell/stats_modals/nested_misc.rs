@@ -2,18 +2,18 @@
 
 use curvebook_doc::{
     AnalysisKind, ContingencyMethod, DemingErrorSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, KappaWeighting,
-    LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument, SheetId, SubcolumnAggregation,
+    LeveneCenter, LognormalRowTestMode, OutlierSpec, PValueStackMethod, ProjectDocument, SheetId, SubcolumnAggregation,
 };
 use egui::{Id, TextEdit, Ui, Vec2};
 
 use crate::UiApp;
 use crate::dialogs_canvas::EditAnalysisParametersState;
 use crate::grid_view::parse_localized_number_input;
-use crate::i18n::{LocalePreset, tr};
+use crate::i18n::{LocalePreset, normalize_locale, tr};
 use crate::inspect::ZLayer;
 use crate::modal_predicates::{
-    ControlEnablement, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector, r8_subcolumn_aggregation,
-    source_table_shape,
+    ControlEnablement, r4_row_t_lognormal_mode, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector,
+    r8_subcolumn_aggregation, source_table_shape,
 };
 
 use crate::egui_shell::stat_anova_modal::{
@@ -216,160 +216,10 @@ pub(super) fn render_misc_stats_design(
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
         AnalysisKind::MultipleRowTTests(m) => {
-            render_section_title(ui, tokens, "Row-Wise Comparison Test");
-            for (wid, lbl, checked, idx) in [
-                ("edit.row_t.paired", "Paired comparisons per row", m.paired, 0u8),
-                ("edit.row_t.nonparam", "Nonparametric rank test (Mann-Whitney / Wilcoxon)", m.nonparametric, 1),
-            ] {
-                if render_modal_checkbox(ui, tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
-                    let mut next = spec.clone();
-                    if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
-                        if idx == 0 {
-                            mr.paired = !m.paired;
-                        } else {
-                            mr.nonparametric = !m.nonparametric;
-                        }
-                    }
-                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-                }
-            }
-            if !m.nonparametric
-                && !m.paired
-                && render_modal_checkbox(
-                    ui,
-                    tokens,
-                    meta,
-                    "edit.row_t.equal_sd",
-                    "Assume equal SD (pooled Student t)",
-                    m.assume_equal_sd,
-                    &ControlEnablement::enabled(),
-                )
-            {
-                let mut next = spec.clone();
-                if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
-                    mr.assume_equal_sd = !m.assume_equal_sd;
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
+            render_row_t_design(ui, app, spec, m, tokens, meta, intents);
         }
         AnalysisKind::DescriptiveStats(d) => {
-            let locale = tokens.locale;
-            let (_, _, max_sub) = source_table_shape(doc, spec.source_sheet_id.as_ref());
-            let sub_en = r8_subcolumn_aggregation(max_sub);
-            render_section_title(ui, tokens, "Replicate Aggregation & Distribution Tests");
-            for (wid, lbl, agg) in [
-                ("edit.desc.row_means", "Collapse subcolumns by row mean", SubcolumnAggregation::RowMeans),
-                ("edit.desc.per_subcol", "Separate summary per subcolumn", SubcolumnAggregation::PerSubcolumn),
-                ("edit.desc.pooled", "Pool all replicate cells", SubcolumnAggregation::PooledGrandSample),
-            ] {
-                if render_modal_radio(ui, tokens, meta, wid, lbl, d.aggregation == agg, &sub_en) {
-                    let mut next = spec.clone();
-                    if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
-                        ds.aggregation = agg;
-                    }
-                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-                }
-            }
-            if render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                "edit.desc.normality",
-                "Run Shapiro-Wilk, D'Agostino-Pearson, AD & KS normality tests",
-                d.run_normality_battery,
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
-                    ds.run_normality_battery = !d.run_normality_battery;
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
-            let custom_pct_enabled = d.custom_upper_percentile.is_some();
-            if render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                "edit.desc.custom_pct_toggle",
-                "Compute custom symmetric percentiles (100 - P, P)",
-                custom_pct_enabled,
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
-                    ds.custom_upper_percentile = if custom_pct_enabled { None } else { Some(90.0) };
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
-            if let Some(p_hi) = d.custom_upper_percentile {
-                let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(new_p) = render_linear_numeric_input(
-                        ui,
-                        state,
-                        &app.locale_preset,
-                        meta,
-                        NumericInputSpec {
-                            salt: ("edit_desc_custom_pct", sid),
-                            widget_id: "edit.desc.custom_pct",
-                            label: "Upper percentile P (50 < P < 100)",
-                            current: p_hi,
-                            bounds: NumericBounds::OpenRange(50.0, 100.0),
-                        },
-                    ) {
-                        let mut next = spec.clone();
-                        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
-                            ds.custom_upper_percentile = Some(new_p);
-                        }
-                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-                    }
-                    let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
-                    ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 6)")).small().color(tokens.text_muted));
-                });
-                render_numeric_field_errors(ui, state, tokens, &["edit.desc.custom_pct"]);
-            } else {
-                state.numeric_field_errors.remove("edit.desc.custom_pct");
-            }
-
-            ui.add_space(6.0);
-            render_section_title(ui, tokens, tr(locale, "desc.displayed_stats"));
-            let vm = d.visible_metrics;
-            type MetricToggle<'a> = (&'static str, &'a str, bool, fn(&mut curvebook_doc::DescriptiveMetricVisibility));
-            let metric_toggles: [MetricToggle<'_>; 12] = [
-                ("edit.desc.metric.min_max_range", tr(locale, "desc.metric.min_max_range"), vm.min_max_range, |v| v.min_max_range = !v.min_max_range),
-                ("edit.desc.metric.quartiles", tr(locale, "desc.metric.quartiles"), vm.quartiles, |v| v.quartiles = !v.quartiles),
-                ("edit.desc.metric.mean_sd_sem", tr(locale, "desc.metric.mean_sd_sem"), vm.mean_sd_sem, |v| v.mean_sd_sem = !v.mean_sd_sem),
-                ("edit.desc.metric.ci_of_mean", tr(locale, "desc.metric.ci_of_mean"), vm.ci_of_mean, |v| v.ci_of_mean = !v.ci_of_mean),
-                ("edit.desc.metric.ci_of_sd", tr(locale, "desc.metric.ci_of_sd"), vm.ci_of_sd, |v| v.ci_of_sd = !v.ci_of_sd),
-                ("edit.desc.metric.ci_of_median", tr(locale, "desc.metric.ci_of_median"), vm.ci_of_median, |v| v.ci_of_median = !v.ci_of_median),
-                ("edit.desc.metric.cv_percent", tr(locale, "desc.metric.cv_percent"), vm.cv_percent, |v| v.cv_percent = !v.cv_percent),
-                ("edit.desc.metric.geometric_mean", tr(locale, "desc.metric.geometric_mean"), vm.geometric_mean, |v| {
-                    v.geometric_mean = !v.geometric_mean
-                }),
-                ("edit.desc.metric.harmonic_mean", tr(locale, "desc.metric.harmonic_mean"), vm.harmonic_mean, |v| v.harmonic_mean = !v.harmonic_mean),
-                ("edit.desc.metric.quadratic_mean", tr(locale, "desc.metric.quadratic_mean"), vm.quadratic_mean, |v| {
-                    v.quadratic_mean = !v.quadratic_mean
-                }),
-                ("edit.desc.metric.skewness_kurtosis", tr(locale, "desc.metric.skewness_kurtosis"), vm.skewness_kurtosis, |v| {
-                    v.skewness_kurtosis = !v.skewness_kurtosis
-                }),
-                ("edit.desc.metric.sum", tr(locale, "desc.metric.sum"), vm.sum, |v| v.sum = !v.sum),
-            ];
-            egui::Grid::new("edit.desc.metrics.grid").num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
-                for (idx, (wid, lbl, checked, toggle_fn)) in metric_toggles.into_iter().enumerate() {
-                    if render_modal_checkbox(grid, tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
-                        let mut next = spec.clone();
-                        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
-                            toggle_fn(&mut ds.visible_metrics);
-                        }
-                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-                    }
-                    if idx % 2 == 1 {
-                        grid.end_row();
-                    }
-                }
-            });
-            render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+            render_descriptive_design(ui, app, state, doc, spec, d, tokens, meta, intents);
         }
         AnalysisKind::OutlierDetection(out) => {
             render_outlier_design(ui, doc, spec, out, tokens, meta, intents);
@@ -2177,5 +2027,256 @@ fn render_frequency_distribution_design(
     }
 
     ui.add_space(4.0);
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_row_t_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    spec: &curvebook_doc::AnalysisSpec,
+    m: &curvebook_doc::MultipleRowTestsSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let locale = normalize_locale(&app.locale);
+    render_section_title(ui, tokens, "Row-Wise Comparison Test");
+    for (wid, lbl, checked, idx) in [
+        ("edit.row_t.paired", "Paired comparisons per row", m.paired, 0u8),
+        ("edit.row_t.nonparam", "Nonparametric rank test (Mann-Whitney / Wilcoxon)", m.nonparametric, 1),
+    ] {
+        if render_modal_checkbox(ui, tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
+                if idx == 0 {
+                    mr.paired = !m.paired;
+                    if !mr.paired && mr.lognormal_mode == LognormalRowTestMode::RatioPaired {
+                        mr.lognormal_mode = LognormalRowTestMode::Lognormal;
+                    }
+                } else {
+                    mr.nonparametric = !m.nonparametric;
+                    if mr.nonparametric {
+                        mr.lognormal_mode = LognormalRowTestMode::None;
+                    }
+                }
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    if !m.nonparametric
+        && !m.paired
+        && render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.row_t.equal_sd",
+            "Assume equal SD (pooled Student t)",
+            m.assume_equal_sd,
+            &ControlEnablement::enabled(),
+        )
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
+            mr.assume_equal_sd = !m.assume_equal_sd;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "row_t.lognormal_section"));
+    let ln_en = r4_row_t_lognormal_mode(m.nonparametric);
+    for (wid, lbl, mode) in [
+        ("edit.row_t.lognormal.none", tr(locale, "row_t.lognormal.none"), LognormalRowTestMode::None),
+        ("edit.row_t.lognormal.lognormal", tr(locale, "row_t.lognormal.lognormal"), LognormalRowTestMode::Lognormal),
+        ("edit.row_t.lognormal.ratio_paired", tr(locale, "row_t.lognormal.ratio_paired"), LognormalRowTestMode::RatioPaired),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, m.lognormal_mode == mode, &ln_en) {
+            let mut next = spec.clone();
+            if let AnalysisKind::MultipleRowTTests(mr) = &mut next.kind {
+                mr.lognormal_mode = mode;
+                if mode == LognormalRowTestMode::RatioPaired {
+                    mr.paired = true;
+                    mr.nonparametric = false;
+                }
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_descriptive_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    d: &curvebook_doc::DescriptiveSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let locale = normalize_locale(&app.locale);
+    let (_, _, max_sub) = source_table_shape(doc, spec.source_sheet_id.as_ref());
+    let sub_en = r8_subcolumn_aggregation(max_sub);
+    render_section_title(ui, tokens, "Replicate Aggregation & Distribution Tests");
+    for (wid, lbl, agg) in [
+        ("edit.desc.row_means", "Collapse subcolumns by row mean", SubcolumnAggregation::RowMeans),
+        ("edit.desc.per_subcol", "Separate summary per subcolumn", SubcolumnAggregation::PerSubcolumn),
+        ("edit.desc.pooled", "Pool all replicate cells", SubcolumnAggregation::PooledGrandSample),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, d.aggregation == agg, &sub_en) {
+            let mut next = spec.clone();
+            if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                ds.aggregation = agg;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.desc.normality_only",
+        tr(locale, "desc.normality_only"),
+        d.normality_only,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+            ds.normality_only = !d.normality_only;
+            if ds.normality_only {
+                ds.run_normality_battery = true;
+                ds.emit_qq_tabs = true;
+            }
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    let norm_en = if d.normality_only {
+        ControlEnablement::disabled("Included automatically in Normality & Lognormality-only mode.")
+    } else {
+        ControlEnablement::enabled()
+    };
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.desc.normality",
+        "Run Shapiro-Wilk, D'Agostino-Pearson, AD & KS normality tests",
+        d.run_normality_battery || d.normality_only,
+        &norm_en,
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+            ds.run_normality_battery = !d.run_normality_battery;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    let qq_en = if d.normality_only {
+        ControlEnablement::disabled("Normal & Lognormal Q-Q tabs are emitted automatically in Normality & Lognormality-only mode.")
+    } else {
+        ControlEnablement::enabled()
+    };
+    if render_modal_checkbox(ui, tokens, meta, "edit.desc.emit_qq_tabs", tr(locale, "desc.emit_qq_tabs"), d.emit_qq_tabs || d.normality_only, &qq_en)
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+            ds.emit_qq_tabs = !d.emit_qq_tabs;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    let custom_pct_enabled = d.custom_upper_percentile.is_some();
+    let custom_pct_gate = if d.normality_only {
+        ControlEnablement::disabled("Custom percentiles apply only when descriptive summary statistics are included.")
+    } else {
+        ControlEnablement::enabled()
+    };
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.desc.custom_pct_toggle",
+        "Compute custom symmetric percentiles (100 - P, P)",
+        custom_pct_enabled && !d.normality_only,
+        &custom_pct_gate,
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+            ds.custom_upper_percentile = if custom_pct_enabled { None } else { Some(90.0) };
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if !d.normality_only
+        && let Some(p_hi) = d.custom_upper_percentile
+    {
+        let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_p) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_desc_custom_pct", sid),
+                    widget_id: "edit.desc.custom_pct",
+                    label: "Upper percentile P (50 < P < 100)",
+                    current: p_hi,
+                    bounds: NumericBounds::OpenRange(50.0, 100.0),
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                    ds.custom_upper_percentile = Some(new_p);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            let p_lo = ((100.0 - p_hi) * 1e6).round() / 1e6;
+            ui.label(egui::RichText::new(format!("({p_lo}% & {p_hi}%, Type 6)")).small().color(tokens.text_muted));
+        });
+        render_numeric_field_errors(ui, state, tokens, &["edit.desc.custom_pct"]);
+    } else {
+        state.numeric_field_errors.remove("edit.desc.custom_pct");
+    }
+
+    if !d.normality_only {
+        ui.add_space(6.0);
+        render_section_title(ui, tokens, tr(locale, "desc.displayed_stats"));
+        let vm = d.visible_metrics;
+        type MetricToggle<'a> = (&'static str, &'a str, bool, fn(&mut curvebook_doc::DescriptiveMetricVisibility));
+        let metric_toggles: [MetricToggle<'_>; 12] = [
+            ("edit.desc.metric.min_max_range", tr(locale, "desc.metric.min_max_range"), vm.min_max_range, |v| v.min_max_range = !v.min_max_range),
+            ("edit.desc.metric.quartiles", tr(locale, "desc.metric.quartiles"), vm.quartiles, |v| v.quartiles = !v.quartiles),
+            ("edit.desc.metric.mean_sd_sem", tr(locale, "desc.metric.mean_sd_sem"), vm.mean_sd_sem, |v| v.mean_sd_sem = !v.mean_sd_sem),
+            ("edit.desc.metric.ci_of_mean", tr(locale, "desc.metric.ci_of_mean"), vm.ci_of_mean, |v| v.ci_of_mean = !v.ci_of_mean),
+            ("edit.desc.metric.ci_of_sd", tr(locale, "desc.metric.ci_of_sd"), vm.ci_of_sd, |v| v.ci_of_sd = !v.ci_of_sd),
+            ("edit.desc.metric.ci_of_median", tr(locale, "desc.metric.ci_of_median"), vm.ci_of_median, |v| v.ci_of_median = !v.ci_of_median),
+            ("edit.desc.metric.cv_percent", tr(locale, "desc.metric.cv_percent"), vm.cv_percent, |v| v.cv_percent = !v.cv_percent),
+            ("edit.desc.metric.geometric_mean", tr(locale, "desc.metric.geometric_mean"), vm.geometric_mean, |v| {
+                v.geometric_mean = !v.geometric_mean
+            }),
+            ("edit.desc.metric.harmonic_mean", tr(locale, "desc.metric.harmonic_mean"), vm.harmonic_mean, |v| v.harmonic_mean = !v.harmonic_mean),
+            ("edit.desc.metric.quadratic_mean", tr(locale, "desc.metric.quadratic_mean"), vm.quadratic_mean, |v| {
+                v.quadratic_mean = !v.quadratic_mean
+            }),
+            ("edit.desc.metric.skewness_kurtosis", tr(locale, "desc.metric.skewness_kurtosis"), vm.skewness_kurtosis, |v| {
+                v.skewness_kurtosis = !v.skewness_kurtosis
+            }),
+            ("edit.desc.metric.sum", tr(locale, "desc.metric.sum"), vm.sum, |v| v.sum = !v.sum),
+        ];
+        egui::Grid::new("edit.desc.metrics.grid").num_columns(2).spacing([8.0, 2.0]).show(ui, |grid| {
+            for (idx, (wid, lbl, checked, toggle_fn)) in metric_toggles.into_iter().enumerate() {
+                if render_modal_checkbox(grid, tokens, meta, wid, lbl, checked, &ControlEnablement::enabled()) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::DescriptiveStats(ds) = &mut next.kind {
+                        toggle_fn(&mut ds.visible_metrics);
+                    }
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                }
+                if idx % 2 == 1 {
+                    grid.end_row();
+                }
+            }
+        });
+    }
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }

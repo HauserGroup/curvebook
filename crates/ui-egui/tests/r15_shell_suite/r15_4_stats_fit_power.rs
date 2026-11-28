@@ -1447,4 +1447,188 @@ mod analyze_picker_and_fit_defer_tests {
         drv.run_settled();
         assert_eq!(drv.state().app.document().result_sheets.len(), 1);
     }
+
+    fn draft_two_group_method(
+        drv: &curvebook_ui_egui::egui_shell::driver::EguiHumanPathDriver<'_, crate::common::ShellTestState>,
+    ) -> curvebook_doc::TwoGroupMethod {
+        match &drv.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind {
+            curvebook_doc::AnalysisKind::TwoGroupComparison(t) => t.method,
+            other => panic!("expected TwoGroupComparison, got {other:?}"),
+        }
+    }
+
+    fn verify_one_sample_ratio_validation_and_commit(
+        drv: &mut curvebook_ui_egui::egui_shell::driver::EguiHumanPathDriver<'_, crate::common::ShellTestState>,
+        tg_res_id: &curvebook_doc::SheetId,
+    ) {
+        use crate::common::set_textbox;
+        use curvebook_doc::{AnalysisKind, ResultStatus, TwoGroupMethod};
+
+        drv.click_widget_id("edit.tg.one_sample_ratio_t").unwrap();
+        drv.run_settled();
+        assert_eq!(draft_two_group_method(drv), TwoGroupMethod::OneSampleRatioT { hypothetical: 1.0 });
+        for bad in ["0", "-2.5"] {
+            set_textbox(drv, "edit.two_group.hypothetical", bad).unwrap();
+            assert!(drv.frame_meta().find_by_widget_id("edit.two_group.hypothetical.error").is_some(), "expected error alert for `{bad}`");
+            assert!(!drv.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled, "modal.ok must disable for `{bad}`");
+        }
+        drv.click_widget_id("edit.two_group.hypothetical.step.dec").unwrap();
+        drv.run_settled();
+        assert!(drv.frame_meta().find_by_widget_id("edit.two_group.hypothetical.error").is_none());
+        let TwoGroupMethod::OneSampleRatioT { hypothetical: stepped } = draft_two_group_method(drv) else {
+            panic!("expected OneSampleRatioT after step");
+        };
+        assert!(stepped > 0.0 && stepped < 1.0);
+        set_textbox(drv, "edit.two_group.hypothetical", "15").unwrap();
+        assert!(drv.frame_meta().find_by_widget_id("modal.ok").unwrap().enabled);
+        drv.click_widget_id("modal.ok").unwrap();
+        drv.run_settled();
+        let rs = drv.state().app.document().result_sheet(tg_res_id).unwrap();
+        assert_eq!(rs.status, ResultStatus::UpToDate);
+        assert_eq!(
+            match &rs.analysis.kind {
+                AnalysisKind::TwoGroupComparison(t) => t.method,
+                other => panic!("unexpected kind {other:?}"),
+            },
+            TwoGroupMethod::OneSampleRatioT { hypothetical: 15.0 }
+        );
+    }
+
+    #[test]
+    fn two_group_lognormal_welch_and_one_sample_ratio_ui_round_trip() {
+        use crate::common::{ShellTestState, make_shell_driver_with_state, seed_column_doc};
+        use curvebook_doc::{AnalysisKind, ColumnDesignHint, ResultStatus, SheetId, TwoGroupMethod, TwoGroupSpec};
+        use curvebook_engine::Session;
+        use curvebook_ui_egui::UiApp;
+        use curvebook_ui_egui::egui_shell::Tokens;
+        use curvebook_ui_egui::interaction::ViewportMetrics;
+        use serde_json::json;
+
+        let (doc, col_id) = seed_column_doc(
+            "Two-Group Lognormal UI",
+            "col-ln-tg",
+            "Assay",
+            ColumnDesignHint::UnpairedReplicates,
+            &[("Ctrl", &[10.0, 14.0, 18.0, 25.0, 32.0]), ("Drug", &[22.0, 35.0, 50.0, 75.0, 110.0])],
+        )
+        .unwrap();
+        let mut session = Session::from_document(doc);
+        let tg_val = serde_json::to_value(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())).unwrap();
+        let _ = session.execute("analysis.run", json!({ "sheet_id": "res-tg-ln", "source_sheet_id": col_id.as_str(), "kind": tg_val })).unwrap();
+        let tg_res_id = SheetId::try_new("res-tg-ln").unwrap();
+
+        let mut app = UiApp::from_session(session);
+        app.sync_views();
+        let snap = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&snap, &tg_res_id));
+        let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+        let mut drv = make_shell_driver_with_state(
+            ShellTestState::new(app).with_commit_all().with_merge_passes(),
+            ViewportMetrics::new(1280.0, 820.0, 1.0),
+            tokens,
+        );
+
+        drv.click_widget_id("edit.tg.lognormal_welch").unwrap();
+        drv.run_settled();
+        assert_eq!(draft_two_group_method(&drv), TwoGroupMethod::LognormalWelchT);
+        assert!(drv.state().app.canvas_dialogs.edit_params.welch_correction);
+        assert!(!drv.frame_meta().find_by_widget_id("edit.tab.diagnostics").unwrap().enabled);
+
+        drv.click_widget_id("edit.two_group.welch").unwrap();
+        drv.run_settled();
+        assert_eq!(draft_two_group_method(&drv), TwoGroupMethod::LognormalUnpairedT);
+        drv.click_widget_id("edit.two_group.welch").unwrap();
+        drv.run_settled();
+        assert_eq!(draft_two_group_method(&drv), TwoGroupMethod::LognormalWelchT);
+
+        drv.click_widget_id("modal.apply").unwrap();
+        drv.run_settled();
+        let rs = drv.state().app.document().result_sheet(&tg_res_id).unwrap();
+        assert_eq!(rs.status, ResultStatus::UpToDate);
+        assert!(matches!(&rs.analysis.kind, AnalysisKind::TwoGroupComparison(t) if t.method == TwoGroupMethod::LognormalWelchT));
+
+        verify_one_sample_ratio_validation_and_commit(&mut drv, &tg_res_id);
+    }
+
+    #[test]
+    fn multiple_row_lognormal_and_ratio_paired_ui_round_trip() {
+        use crate::common::{ShellTestState, make_shell_driver_with_state};
+        use curvebook_doc::{
+            AnalysisKind, GroupedTable, LognormalRowTestMode, MultipleRowTestsSpec, ResultStatus, SheetId, SubcolumnMode, TableArchetype,
+        };
+        use curvebook_engine::Session;
+        use curvebook_ui_egui::UiApp;
+        use curvebook_ui_egui::egui_shell::Tokens;
+        use curvebook_ui_egui::interaction::ViewportMetrics;
+        use serde_json::json;
+
+        // Part B: Multiple Row t-Tests modal (Lognormal & RatioPaired + nonparametric mutual exclusion)
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 3).unwrap();
+        let vals = [([10.0, 12.0, 14.0], [20.0, 25.0, 30.0]), ([5.0, 6.5, 8.0], [15.0, 19.0, 24.0]), ([2.0, 2.5, 3.0], [6.0, 8.0, 10.0])];
+        for (r, (g0, g1)) in vals.iter().enumerate() {
+            for s in 0..3 {
+                grp.data_sets[0].cells[r][s] = curvebook_doc::Cell::number(g0[s]);
+                grp.data_sets[1].cells[r][s] = curvebook_doc::Cell::number(g1[s]);
+            }
+        }
+        let mut gdoc = curvebook_doc::ProjectDocument::new("Row T Lognormal").unwrap();
+        gdoc.add_data_sheet(curvebook_doc::DataSheet::new("grp-rt", "Grouped", TableArchetype::Grouped(grp)).unwrap()).unwrap();
+        let mut gsess = Session::from_document(gdoc);
+        let rt_val = serde_json::to_value(AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())).unwrap();
+        let _ = gsess.execute("analysis.run", json!({ "sheet_id": "res-rt-ln", "source_sheet_id": "grp-rt", "kind": rt_val })).unwrap();
+        let rt_res_id = SheetId::try_new("res-rt-ln").unwrap();
+
+        let mut gapp = UiApp::from_session(gsess);
+        gapp.sync_views();
+        let gsnap = gapp.document().clone();
+        assert!(gapp.canvas_dialogs.open_edit_parameters(&gsnap, &rt_res_id));
+        let gtok = Tokens::from_theme_spec(&gapp.theme, &gapp.locale);
+        let mut gdrv = make_shell_driver_with_state(
+            ShellTestState::new(gapp).with_commit_all().with_merge_passes(),
+            ViewportMetrics::new(1280.0, 820.0, 1.0),
+            gtok,
+        );
+
+        gdrv.click_widget_id("edit.row_t.lognormal.lognormal").unwrap();
+        gdrv.run_settled();
+        assert!(matches!(
+            &gdrv.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind,
+            AnalysisKind::MultipleRowTTests(m) if m.lognormal_mode == LognormalRowTestMode::Lognormal
+        ));
+        assert!(gdrv.state().views.stats_modals.last_resolved_banner.contains("Lognormal"));
+
+        // RatioPaired automatically enables paired
+        gdrv.click_widget_id("edit.row_t.lognormal.ratio_paired").unwrap();
+        gdrv.run_settled();
+        assert!(matches!(
+            &gdrv.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind,
+            AnalysisKind::MultipleRowTTests(m) if m.lognormal_mode == LognormalRowTestMode::RatioPaired && m.paired
+        ));
+
+        // Checking nonparametric clears lognormal_mode and disables lognormal radios
+        gdrv.click_widget_id("edit.row_t.nonparam").unwrap();
+        gdrv.run_settled();
+        assert!(matches!(
+            &gdrv.state().app.canvas_dialogs.edit_params.draft.as_ref().unwrap().kind,
+            AnalysisKind::MultipleRowTTests(m) if m.nonparametric && m.lognormal_mode == LognormalRowTestMode::None
+        ));
+        for wid in ["edit.row_t.lognormal.none", "edit.row_t.lognormal.lognormal", "edit.row_t.lognormal.ratio_paired"] {
+            let n = gdrv.frame_meta().find_by_widget_id(wid).unwrap();
+            assert!(!n.enabled && n.disabled_reason.is_some(), "{wid} must disable under nonparametric");
+        }
+
+        // Uncheck nonparametric, select RatioPaired, and commit
+        gdrv.click_widget_id("edit.row_t.nonparam").unwrap();
+        gdrv.run_settled();
+        gdrv.click_widget_id("edit.row_t.lognormal.ratio_paired").unwrap();
+        gdrv.run_settled();
+        gdrv.click_widget_id("modal.ok").unwrap();
+        gdrv.run_settled();
+        let rs = gdrv.state().app.document().result_sheet(&rt_res_id).unwrap();
+        assert_eq!(rs.status, ResultStatus::UpToDate);
+        assert!(matches!(
+            &rs.analysis.kind,
+            AnalysisKind::MultipleRowTTests(m) if m.lognormal_mode == LognormalRowTestMode::RatioPaired && m.paired && !m.nonparametric
+        ));
+    }
 }

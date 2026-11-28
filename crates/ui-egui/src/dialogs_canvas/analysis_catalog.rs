@@ -336,6 +336,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         keywords: "cmh cochran mantel haenszel stratified 2x2xk common odds ratio breslow day tarone homogeneity",
         summary: "Stratified 2x2xK CMH chi-square test, common Mantel-Haenszel OR CI, and Breslow-Day/Tarone homogeneity.",
     },
+    AnalysisCatalogItem {
+        id: "stats.normality",
+        label: "Normality and Lognormality Tests",
+        category: AnalysisCategory::Column,
+        keywords: "normality lognormality shapiro d'agostino anderson darling kolmogorov smirnov qq plot likelihood",
+        summary: "Run normality & lognormality tests, relative likelihood comparison, and Normal + Lognormal Q-Q plots.",
+    },
 ];
 
 /// Map a static catalog identifier into its default [`AnalysisKind`].
@@ -400,6 +407,12 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "transform.auc" => Some(AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default())),
         "transform.curve_calculus" => Some(AnalysisKind::CurveCalculus(CurveCalculusSpec::default())),
         "stats.descriptive" => Some(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())),
+        "stats.normality" => Some(AnalysisKind::DescriptiveStats(DescriptiveSpec {
+            run_normality_battery: true,
+            normality_only: true,
+            emit_qq_tabs: true,
+            ..DescriptiveSpec::default()
+        })),
         "stats.outliers" => Some(AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 })),
         "stats.two_group" => Some(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())),
         "stats.one_way_anova" => Some(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())),

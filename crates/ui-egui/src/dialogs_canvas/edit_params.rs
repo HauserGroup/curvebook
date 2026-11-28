@@ -38,6 +38,8 @@ pub struct TwoGroupSubmethodMemory {
     pub saved_two_group_nonparam_unpaired: TwoGroupMethod,
     #[serde(default = "default_tg_nonparam_paired")]
     pub saved_two_group_nonparam_paired: TwoGroupMethod,
+    #[serde(default)]
+    pub saved_one_sample_ratio: bool,
 }
 
 impl Default for TwoGroupSubmethodMemory {
@@ -47,6 +49,7 @@ impl Default for TwoGroupSubmethodMemory {
             saved_two_group_param_paired: default_tg_param_paired(),
             saved_two_group_nonparam_unpaired: default_tg_nonparam_unpaired(),
             saved_two_group_nonparam_paired: default_tg_nonparam_paired(),
+            saved_one_sample_ratio: false,
         }
     }
 }
@@ -66,14 +69,45 @@ impl TwoGroupSubmethodMemory {
             TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest => {
                 self.saved_two_group_nonparam_paired = method;
             }
-            TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. } => {}
+            TwoGroupMethod::OneSampleT { .. } => {
+                self.saved_one_sample_ratio = false;
+            }
+            TwoGroupMethod::OneSampleRatioT { .. } => {
+                self.saved_one_sample_ratio = true;
+            }
+            TwoGroupMethod::OneSampleWilcoxon { .. } => {}
         }
     }
 
     #[must_use]
     pub const fn resolve(&self, assume_gaussian: bool, paired: bool, current: Option<TwoGroupMethod>) -> TwoGroupMethod {
-        if let Some(TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical }) = current {
-            return if assume_gaussian { TwoGroupMethod::OneSampleT { hypothetical } } else { TwoGroupMethod::OneSampleWilcoxon { hypothetical } };
+        match current {
+            Some(TwoGroupMethod::OneSampleRatioT { hypothetical }) => {
+                return if assume_gaussian {
+                    TwoGroupMethod::OneSampleRatioT { hypothetical }
+                } else {
+                    TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                };
+            }
+            Some(TwoGroupMethod::OneSampleT { hypothetical }) => {
+                return if assume_gaussian {
+                    TwoGroupMethod::OneSampleT { hypothetical }
+                } else {
+                    TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                };
+            }
+            Some(TwoGroupMethod::OneSampleWilcoxon { hypothetical }) => {
+                return if assume_gaussian {
+                    if self.saved_one_sample_ratio && hypothetical > 0.0 && hypothetical < f64::INFINITY {
+                        TwoGroupMethod::OneSampleRatioT { hypothetical }
+                    } else {
+                        TwoGroupMethod::OneSampleT { hypothetical }
+                    }
+                } else {
+                    TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                };
+            }
+            _ => {}
         }
         match (assume_gaussian, paired) {
             (true, false) => self.saved_two_group_param_unpaired,
@@ -121,7 +155,7 @@ pub(super) fn toggle_sorted_col(cols: &mut Vec<usize>, col: usize) -> bool {
 pub(super) fn draft_forces_reml_mode(spec: &AnalysisSpec) -> bool {
     match &spec.kind {
         AnalysisKind::OneWayAnova(a) => {
-            matches!(a.method, OneWayMethod::RepeatedMeasures { .. })
+            matches!(a.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. })
                 && (a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured)
         }
         AnalysisKind::FactorialAnova(f) => {
@@ -200,6 +234,8 @@ pub struct EditAnalysisParametersState {
     pub saved_one_way_param_unpaired: OneWayMethod,
     #[serde(default = "default_true_flag")]
     pub saved_rm_geisser_greenhouse: bool,
+    #[serde(default)]
+    pub saved_one_way_rm_lognormal: bool,
     #[serde(default = "default_outlier_fdr_q")]
     pub saved_outlier_rout_q: f64,
     #[serde(default = "default_outlier_alpha")]
@@ -272,6 +308,7 @@ impl Default for EditAnalysisParametersState {
             two_group_memory: TwoGroupSubmethodMemory::default(),
             saved_one_way_param_unpaired: default_one_way_param_unpaired(),
             saved_rm_geisser_greenhouse: true,
+            saved_one_way_rm_lognormal: false,
             saved_outlier_rout_q: default_outlier_fdr_q(),
             saved_outlier_grubbs_alpha: default_outlier_alpha(),
             saved_outlier_grubbs_iterative: false,
@@ -402,8 +439,13 @@ impl EditAnalysisParametersState {
                 | OneWayMethod::LognormalWelchBf => {
                     self.saved_one_way_param_unpaired = spec.method;
                 }
-                OneWayMethod::RepeatedMeasures { geisser_greenhouse } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
+                OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
                     self.saved_rm_geisser_greenhouse = geisser_greenhouse;
+                    self.saved_one_way_rm_lognormal = false;
+                }
+                OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse } => {
+                    self.saved_rm_geisser_greenhouse = geisser_greenhouse;
+                    self.saved_one_way_rm_lognormal = true;
                 }
                 OneWayMethod::KruskalWallis | OneWayMethod::Friedman => {}
             },
@@ -428,7 +470,10 @@ impl EditAnalysisParametersState {
         match &kind {
             AnalysisKind::OneWayAnova(spec) => {
                 self.assume_gaussian = !matches!(spec.method, OneWayMethod::KruskalWallis | OneWayMethod::Friedman);
-                self.paired_or_matched = matches!(spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman);
+                self.paired_or_matched = matches!(
+                    spec.method,
+                    OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. } | OneWayMethod::Friedman
+                );
                 self.sync_dunnett_control(spec.multiplicity.method);
             }
             AnalysisKind::FactorialAnova(spec) => {
@@ -439,7 +484,7 @@ impl EditAnalysisParametersState {
             AnalysisKind::TwoGroupComparison(spec) => {
                 self.assume_gaussian = two_group_is_gaussian(spec.method);
                 self.paired_or_matched = two_group_is_paired(spec.method);
-                self.welch_correction = spec.method == TwoGroupMethod::WelchT;
+                self.welch_correction = matches!(spec.method, TwoGroupMethod::WelchT | TwoGroupMethod::LognormalWelchT);
                 if !crate::modal_predicates::r4_two_group_graph_differences(spec.method).enabled {
                     self.graph_differences = false;
                 }
@@ -523,7 +568,11 @@ impl EditAnalysisParametersState {
         match &mut kind {
             AnalysisKind::OneWayAnova(a) if assume_gaussian => {
                 a.method = if matched {
-                    OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                    if self.saved_one_way_rm_lognormal {
+                        OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                    } else {
+                        OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                    }
                 } else {
                     self.saved_one_way_param_unpaired
                 };
@@ -548,9 +597,26 @@ impl EditAnalysisParametersState {
         let mut updated = spec.kind.clone();
         match &mut updated {
             AnalysisKind::OneWayAnova(a) => {
+                let was_lognormal = matches!(
+                    a.method,
+                    OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf | OneWayMethod::LognormalRepeatedMeasures { .. }
+                );
+                let was_linear_rm = matches!(a.method, OneWayMethod::RepeatedMeasures { .. });
                 a.method = match (self.assume_gaussian, matched) {
-                    (true, true) => OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse },
-                    (true, false) => self.saved_one_way_param_unpaired,
+                    (true, true) => {
+                        if was_lognormal {
+                            OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                        } else {
+                            OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                        }
+                    }
+                    (true, false) => match (self.saved_one_way_param_unpaired, was_lognormal, was_linear_rm) {
+                        (OneWayMethod::OrdinaryAnova, true, _) => OneWayMethod::LognormalOrdinary,
+                        (OneWayMethod::BrownForsytheAndWelch, true, _) => OneWayMethod::LognormalWelchBf,
+                        (OneWayMethod::LognormalOrdinary, false, true) => OneWayMethod::OrdinaryAnova,
+                        (OneWayMethod::LognormalWelchBf, false, true) => OneWayMethod::BrownForsytheAndWelch,
+                        (saved, _, _) => saved,
+                    },
                     (false, true) => OneWayMethod::Friedman,
                     (false, false) => OneWayMethod::KruskalWallis,
                 };
@@ -731,7 +797,11 @@ impl EditAnalysisParametersState {
                 if a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured {
                     return Err(String::from("Sphericity corrections are disabled when Mixed-Effects REML is active."));
                 }
-                a.method = OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg };
+                a.method = if matches!(a.method, OneWayMethod::LognormalRepeatedMeasures { .. }) {
+                    OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: gg }
+                } else {
+                    OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg }
+                };
                 Ok(true)
             }
             _ => Ok(false),
@@ -815,11 +885,13 @@ impl EditAnalysisParametersState {
             self.welch_correction = enabled;
             self.update_draft_kind(|k| match k {
                 AnalysisKind::TwoGroupComparison(two) => {
-                    if enabled {
-                        two.method = TwoGroupMethod::WelchT;
-                    } else if matches!(two.method, TwoGroupMethod::WelchT | TwoGroupMethod::UnpairedT) {
-                        two.method = TwoGroupMethod::UnpairedT;
-                    }
+                    two.method = match (two.method, enabled) {
+                        (TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT, true) => TwoGroupMethod::LognormalWelchT,
+                        (TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT, false) => TwoGroupMethod::LognormalUnpairedT,
+                        (_, true) => TwoGroupMethod::WelchT,
+                        (TwoGroupMethod::WelchT | TwoGroupMethod::UnpairedT, false) => TwoGroupMethod::UnpairedT,
+                        (other, false) => other,
+                    };
                     true
                 }
                 _ => false,

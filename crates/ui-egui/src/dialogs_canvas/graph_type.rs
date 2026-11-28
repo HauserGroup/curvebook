@@ -39,6 +39,7 @@ pub enum ThumbnailGlyphKind {
     ForestPlot,
     ResidualPlot,
     NormalQqPlot,
+    LognormalQqPlot,
     Histogram,
     Dendrogram,
     PcaBiplot,
@@ -239,6 +240,14 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         subtitle: "Theoretical normal quantiles vs standardized residuals",
         graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot),
         thumbnail: ThumbnailGlyphKind::NormalQqPlot,
+        compatible_tables: &[TableKind::Xy, TableKind::Column, TableKind::Grouped, TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "diag.lognormal_qq",
+        label: "Lognormal Q-Q Plot",
+        subtitle: "Theoretical lognormal quantiles vs observed positive quantiles",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot),
+        thumbnail: ThumbnailGlyphKind::LognormalQqPlot,
         compatible_tables: &[TableKind::Xy, TableKind::Column, TableKind::Grouped, TableKind::MultipleVariables],
     },
     GraphTypeOption {

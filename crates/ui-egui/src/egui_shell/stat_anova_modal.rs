@@ -20,8 +20,8 @@ use crate::i18n::{normalize_locale, tr};
 use crate::inspect::ZLayer;
 use crate::modal_predicates::{
     ControlEnablement, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1_repeated_measures_tab, r1_sphericity_or_reml_control,
-    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r3_control_column_picker, r9_pvalue_precision_spinner,
-    source_table_shape,
+    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r2_one_way_lognormal_allowed, r3_control_column_picker,
+    r9_pvalue_precision_spinner, source_table_shape,
 };
 
 use super::widgets::{dropdown, paint_icon_button_named};
@@ -175,6 +175,10 @@ pub fn resolve_one_way_anova_banner(app: &UiApp) -> String {
             OneWayMethod::Friedman => "Friedman test",
             OneWayMethod::LognormalOrdinary => "Lognormal ordinary one-way ANOVA",
             OneWayMethod::LognormalWelchBf => "Lognormal Brown-Forsythe and Welch ANOVA",
+            OneWayMethod::LognormalRepeatedMeasures { .. } if reml_active => match a.df_method {
+                MixedModelDfMethod::KenwardRoger => "Lognormal mixed-effects REML (Kenward-Roger)",
+                MixedModelDfMethod::Satterthwaite => "Lognormal mixed-effects REML (Satterthwaite)",
+            },
             OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true } => "Lognormal RM one-way ANOVA + Geisser-Greenhouse",
             OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false } => "Lognormal RM one-way ANOVA (Sphericity assumed)",
         };
@@ -770,6 +774,23 @@ fn render_design_controls_left(
         intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("edit.paired_or_matched") });
     }
 
+    let is_lognormal =
+        matches!(rc.anova.method, OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf | OneWayMethod::LognormalRepeatedMeasures { .. });
+    let src_id = rc.ep.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref());
+    let lognormal_en = r2_one_way_lognormal_allowed(rc.ep.assume_gaussian, rc.doc, src_id);
+    let lognormal_lbl = tr(rc.locale, "anova.lognormal_toggle");
+    if render_modal_checkbox(ui, rc.tokens, meta, "edit.anova.lognormal", lognormal_lbl, is_lognormal, &lognormal_en) {
+        let next_method = match (rc.anova.method, !is_lognormal) {
+            (OneWayMethod::BrownForsytheAndWelch | OneWayMethod::LognormalWelchBf, true) => "lognormal_welch",
+            (OneWayMethod::BrownForsytheAndWelch | OneWayMethod::LognormalWelchBf, false) => "welch",
+            (OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }, true) => "lognormal_rm",
+            (OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }, false) => "rm",
+            (_, true) => "lognormal_ordinary",
+            (_, false) => "ordinary",
+        };
+        intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from(next_method) }));
+    }
+
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         if render_modal_seg_btn(
@@ -778,10 +799,11 @@ fn render_design_controls_left(
             meta,
             "edit.anova.ordinary",
             "Ordinary",
-            rc.anova.method == OneWayMethod::OrdinaryAnova,
+            matches!(rc.anova.method, OneWayMethod::OrdinaryAnova | OneWayMethod::LognormalOrdinary),
             &ControlEnablement::enabled(),
         ) {
-            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("ordinary") }));
+            let slug = if is_lognormal { "lognormal_ordinary" } else { "ordinary" };
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from(slug) }));
         }
         if render_modal_seg_btn(
             ui,
@@ -789,10 +811,11 @@ fn render_design_controls_left(
             meta,
             "edit.anova.welch",
             "Welch",
-            rc.anova.method == OneWayMethod::BrownForsytheAndWelch,
+            matches!(rc.anova.method, OneWayMethod::BrownForsytheAndWelch | OneWayMethod::LognormalWelchBf),
             &ControlEnablement::enabled(),
         ) {
-            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("welch") }));
+            let slug = if is_lognormal { "lognormal_welch" } else { "welch" };
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from(slug) }));
         }
         if render_modal_seg_btn(
             ui,
@@ -800,10 +823,11 @@ fn render_design_controls_left(
             meta,
             "edit.anova.rm",
             "RM ANOVA",
-            matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { .. }),
+            matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. }),
             paired_en,
         ) {
-            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from("rm") }));
+            let slug = if is_lognormal { "lognormal_rm" } else { "rm" };
+            intents.push(UiIntent::StatParams(super::StatParamsIntent::SetOneWayMethod { method: String::from(slug) }));
         }
         if render_modal_seg_btn(
             ui,
@@ -970,7 +994,10 @@ fn render_tab_repeated_measures(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut Fr
     let reml_active = is_reml_mixed_effects_active(rc.ep, rc.doc);
     let sph_en = r1b_sphericity_correction(rc.ep.paired_or_matched, reml_active);
     let reml_en = r1_sphericity_or_reml_control(rc.ep.paired_or_matched);
-    let gg_checked = !matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
+    let gg_checked = !matches!(
+        rc.anova.method,
+        OneWayMethod::RepeatedMeasures { geisser_greenhouse: false } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+    );
 
     render_section_title(ui, rc.tokens, "Repeated-Measures Sphericity & Mixed-Effects REML");
     if render_modal_checkbox(
@@ -1314,7 +1341,10 @@ fn render_tab_options(
         intents.push(UiIntent::StatParams(super::StatParamsIntent::ToggleEffectSizes));
     }
 
-    let gg_checked = !matches!(rc.anova.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
+    let gg_checked = !matches!(
+        rc.anova.method,
+        OneWayMethod::RepeatedMeasures { geisser_greenhouse: false } | OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false }
+    );
     let reml_active = is_reml_mixed_effects_active(rc.ep, rc.doc);
     let sph_en = r1b_sphericity_correction(rc.ep.paired_or_matched, reml_active);
     if render_modal_checkbox(

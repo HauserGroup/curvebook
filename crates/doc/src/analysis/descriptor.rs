@@ -578,7 +578,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         supports_multiplicity: false,
         supports_info_hooks: false,
         auto_selects_mv_numeric_columns: true,
-        ui_catalog_ids: &["stats.descriptive"],
+        ui_catalog_ids: &["stats.descriptive", "stats.normality"],
         docs_anchor: "analysis-descriptive-stats",
         user_creatable: true,
     },

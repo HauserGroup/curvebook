@@ -273,3 +273,67 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
     check_accesskit_scrollbar_non_overlap(out.platform_output.accesskit_update.as_ref().ok_or("expected AccessKit TreeUpdate")?)?;
     Ok(())
 }
+
+fn draft_one_way_method(
+    driver: &curvebook_ui_egui::egui_shell::driver::EguiHumanPathDriver<'_, crate::common::ShellTestState>,
+) -> Result<curvebook_doc::OneWayMethod, Box<dyn std::error::Error>> {
+    match &driver.state().app.canvas_dialogs.edit_params.draft.as_ref().ok_or("draft")?.kind {
+        curvebook_doc::AnalysisKind::OneWayAnova(a) => Ok(a.method),
+        other => Err(format!("expected OneWayAnova, got {other:?}").into()),
+    }
+}
+
+#[test]
+fn one_way_anova_lognormal_toggle_ordinary_welch_rm_and_reml_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_doc::{AnalysisKind, MultiplicityMethod, OneWayMethod, ResultStatus};
+
+    let (mut app, col_id) = seed_column_anova_app(true)?;
+    let _ = app.execute_command(
+        "analysis.run",
+        json!({ "sheet_id": "res-anova-ln", "source_sheet_id": col_id.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
+    )?;
+    let rs_id = SheetId::try_new("res-anova-ln")?;
+    let doc_snap = app.document().clone();
+    assert!(app.canvas_dialogs.open_edit_parameters(&doc_snap, &rs_id));
+    app.sync_views();
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+    assert!(driver.frame_meta().find_by_widget_id("edit.anova.lognormal").ok_or("missing edit.anova.lognormal")?.enabled);
+
+    driver.click_widget_id("edit.anova.lognormal")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::LognormalOrdinary);
+    assert!(resolve_one_way_anova_banner(&driver.state().app).contains("Lognormal ordinary one-way ANOVA"));
+
+    driver.click_widget_id("edit.anova.welch")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::LognormalWelchBf);
+    assert!(resolve_one_way_anova_banner(&driver.state().app).contains("Lognormal Brown-Forsythe and Welch ANOVA"));
+
+    driver.click_widget_id("edit.anova.rm")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true });
+
+    driver.click_widget_id("edit.tab.repeated_measures")?;
+    driver.click_widget_id("edit.sphericity.geisser_greenhouse")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false });
+    driver.click_widget_id("edit.rm.mixed_effects_reml")?;
+    assert!(resolve_one_way_anova_banner(&driver.state().app).contains("Lognormal mixed-effects REML"));
+    if let AnalysisKind::OneWayAnova(a) = &driver.state().app.canvas_dialogs.edit_params.draft.as_ref().ok_or("draft")?.kind {
+        assert!(a.mixed_effects_reml && a.multiplicity.method == MultiplicityMethod::Bonferroni);
+    }
+
+    driver.click_widget_id("edit.tab.experimental_design")?;
+    driver.click_widget_id("edit.assume_gaussian")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::Friedman);
+    let ln_disabled = driver.frame_meta().find_by_widget_id("edit.anova.lognormal").ok_or("missing edit.anova.lognormal")?;
+    assert!(!ln_disabled.enabled && ln_disabled.disabled_reason.is_some());
+
+    driver.click_widget_id("edit.assume_gaussian")?;
+    assert_eq!(draft_one_way_method(&driver)?, OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: false });
+
+    driver.click_widget_id("edit.anova.ordinary")?;
+    driver.click_widget_id("modal.ok")?;
+    let rs = driver.state().app.document().result_sheet(&rs_id).ok_or("missing committed result sheet")?;
+    assert_eq!(rs.status, ResultStatus::UpToDate);
+    assert!(matches!(&rs.analysis.kind, AnalysisKind::OneWayAnova(a) if a.method == OneWayMethod::LognormalOrdinary));
+    assert!(!rs.tabs.is_empty());
+    Ok(())
+}

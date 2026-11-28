@@ -158,7 +158,7 @@ pub fn is_reml_mixed_effects_active(edit: &EditAnalysisParametersState, doc: &Pr
     };
     match &spec.kind {
         AnalysisKind::OneWayAnova(a) => {
-            matches!(a.method, OneWayMethod::RepeatedMeasures { .. })
+            matches!(a.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. })
                 && (a.mixed_effects_reml
                     || a.residual_covariance == ResidualCovariance::Unstructured
                     || table_has_incomplete_rm_blocks(doc, spec.source_sheet_id.as_ref(), &spec.selected_data_sets))
@@ -198,17 +198,27 @@ pub fn r2_post_hoc_option_enabled(assume_gaussian: bool, option_is_parametric: b
 }
 
 /// Apply Rule R2 automatically when toggling `assume_gaussian` on a draft [`AnalysisKind`],
-/// preserving compatible sub-methods (`WelchT`, `RatioPairedT`, `LognormalUnpairedT`, `KolmogorovSmirnov`,
-/// `PairedSignTest`, `BrownForsytheAndWelch`, `RepeatedMeasures { geisser_greenhouse }`) and REML settings (`RV-78`).
+/// preserving compatible sub-methods (`WelchT`, `RatioPairedT`, `LognormalUnpairedT`, `LognormalWelchT`,
+/// `OneSampleRatioT`, `KolmogorovSmirnov`, `PairedSignTest`, `BrownForsytheAndWelch`, `LognormalOrdinary`,
+/// `LognormalWelchBf`, `RepeatedMeasures`, `LognormalRepeatedMeasures`) and REML settings (`RV-78`).
 pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, matched: bool, control_col: usize) {
     match kind {
         AnalysisKind::OneWayAnova(spec) => {
             if assume_gaussian {
                 if matched {
-                    if !matches!(spec.method, curvebook_doc::OneWayMethod::RepeatedMeasures { .. }) {
+                    if !matches!(
+                        spec.method,
+                        curvebook_doc::OneWayMethod::RepeatedMeasures { .. } | curvebook_doc::OneWayMethod::LognormalRepeatedMeasures { .. }
+                    ) {
                         spec.method = curvebook_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: true };
                     }
-                } else if !matches!(spec.method, curvebook_doc::OneWayMethod::OrdinaryAnova | curvebook_doc::OneWayMethod::BrownForsytheAndWelch) {
+                } else if !matches!(
+                    spec.method,
+                    curvebook_doc::OneWayMethod::OrdinaryAnova
+                        | curvebook_doc::OneWayMethod::BrownForsytheAndWelch
+                        | curvebook_doc::OneWayMethod::LognormalOrdinary
+                        | curvebook_doc::OneWayMethod::LognormalWelchBf
+                ) {
                     spec.method = curvebook_doc::OneWayMethod::OrdinaryAnova;
                 }
                 if spec.multiplicity.method == MultiplicityMethod::DunnRankSum {
@@ -222,6 +232,13 @@ pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, 
         }
         AnalysisKind::TwoGroupComparison(spec) => {
             spec.method = match spec.method {
+                TwoGroupMethod::OneSampleRatioT { hypothetical } => {
+                    if assume_gaussian {
+                        TwoGroupMethod::OneSampleRatioT { hypothetical }
+                    } else {
+                        TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                    }
+                }
                 TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
                     if assume_gaussian {
                         TwoGroupMethod::OneSampleT { hypothetical }
@@ -229,7 +246,11 @@ pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, 
                         TwoGroupMethod::OneSampleWilcoxon { hypothetical }
                     }
                 }
-                TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT if assume_gaussian && !matched => spec.method,
+                TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT
+                    if assume_gaussian && !matched =>
+                {
+                    spec.method
+                }
                 TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT if assume_gaussian && matched => spec.method,
                 TwoGroupMethod::MannWhitneyU | TwoGroupMethod::KolmogorovSmirnov if !assume_gaussian && !matched => spec.method,
                 TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest if !assume_gaussian && matched => spec.method,
@@ -292,7 +313,8 @@ pub fn r4_two_group_nonparametric_options(method: TwoGroupMethod) -> ControlEnab
 /// R4c: Two-group test mode -> `Welch's correction` (unpaired parametric tests only).
 #[must_use]
 pub fn r4_two_group_welch_correction(method: TwoGroupMethod) -> ControlEnablement {
-    let allows_welch = matches!(method, TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT);
+    let allows_welch =
+        matches!(method, TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT | TwoGroupMethod::LognormalWelchT);
     if allows_welch {
         ControlEnablement::enabled()
     } else {
@@ -300,11 +322,21 @@ pub fn r4_two_group_welch_correction(method: TwoGroupMethod) -> ControlEnablemen
     }
 }
 
-/// R4d: Two-group test mode -> `Diagnostics / Residuals` disabled under `TwoGroupMethod::WelchT`.
+/// R4d: Two-group test mode -> `Diagnostics / Residuals` disabled under unequal-variance Welch tests (`WelchT` and `LognormalWelchT`).
 #[must_use]
 pub fn r4_two_group_diagnostics(method: TwoGroupMethod) -> ControlEnablement {
-    if method == TwoGroupMethod::WelchT {
+    if matches!(method, TwoGroupMethod::WelchT | TwoGroupMethod::LognormalWelchT) {
         ControlEnablement::disabled("Diagnostics / Residuals are disabled under Welch's unequal-variance t-test.")
+    } else {
+        ControlEnablement::enabled()
+    }
+}
+
+/// R4e: Multiple row t-tests -> lognormal/ratio-paired transform requires parametric mode.
+#[must_use]
+pub fn r4_row_t_lognormal_mode(nonparametric: bool) -> ControlEnablement {
+    if nonparametric {
+        ControlEnablement::disabled("Lognormal and ratio paired modes are disabled when nonparametric rank testing is enabled.")
     } else {
         ControlEnablement::enabled()
     }
@@ -505,6 +537,20 @@ pub fn r2_assume_gaussian_allowed(doc: &ProjectDocument, source_sheet_id: Option
     if is_pre_summarized_column_table(doc, source_sheet_id) {
         ControlEnablement::disabled(
             "Nonparametric rank tests are disabled for pre-summarized (Mean +/- SD/SEM/%CV + n) Column tables; use raw replicates.",
+        )
+    } else {
+        ControlEnablement::enabled()
+    }
+}
+
+/// One-Way ANOVA lognormal (`ln Y`) gate: requires parametric (`assume_gaussian = true`) mode and raw replicates.
+#[must_use]
+pub fn r2_one_way_lognormal_allowed(assume_gaussian: bool, doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> ControlEnablement {
+    if !assume_gaussian {
+        ControlEnablement::disabled("Lognormal transformation requires Assume Gaussian = Yes; disabled for nonparametric tests.")
+    } else if is_pre_summarized_column_table(doc, source_sheet_id) {
+        ControlEnablement::disabled(
+            "Lognormal transformation is disabled for pre-summarized (Mean +/- SD/SEM/%CV + n) Column tables; use raw replicates.",
         )
     } else {
         ControlEnablement::enabled()
@@ -915,6 +961,12 @@ fn evaluate_edit_params_button(
     }
     let shape_id = doc.result_sheet(result_sheet_id).map_or(spec.source_sheet_id.as_ref(), |_| Some(result_sheet_id));
     let (rows, cols, _max_sub) = source_table_shape(doc, shape_id);
+    if let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+        && let TwoGroupMethod::OneSampleRatioT { hypothetical } = two.method
+        && (!hypothetical.is_finite() || hypothetical <= 0.0)
+    {
+        return ControlEnablement::disabled("Hypothetical geometric mean must be strictly greater than 0.");
+    }
     if let AnalysisKind::Contingency(cont) = &spec.kind {
         if cont.method == curvebook_doc::ContingencyMethod::CochranArmitageTrend {
             let trend = r5_contingency_cochran_armitage_trend(rows, cols);
@@ -946,6 +998,14 @@ fn evaluate_edit_params_widget(
     }
     if norm == "editassumegaussian" || norm == "assumegaussian" {
         return r2_assume_gaussian_allowed(doc, edit.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
+    }
+    if norm == "editanovalognormal" {
+        return r2_one_way_lognormal_allowed(edit.assume_gaussian, doc, edit.draft.as_ref().and_then(|d| d.source_sheet_id.as_ref()));
+    }
+    if norm.starts_with("editrowtlognormal")
+        && let Some(AnalysisKind::MultipleRowTTests(m)) = edit.draft.as_ref().map(|s| &s.kind)
+    {
+        return r4_row_t_lognormal_mode(m.nonparametric);
     }
     let reml_active = is_reml_mixed_effects_active(edit, doc);
     if norm.contains("repeatedmeasures") && norm.contains("tab") {
@@ -1279,5 +1339,130 @@ mod tests {
         assert!(!evaluate_edit_params_tab(&ep, "diagnostics").enabled);
         assert!(!evaluate_edit_params_widget(&ep, &doc, 4, 2, 1, "edit.diag.residuals_table").enabled);
         let _fac = FactorialAnovaSpec { df_method: curvebook_doc::MixedModelDfMethod::Satterthwaite, ..FactorialAnovaSpec::default() };
+    }
+
+    #[test]
+    fn lognormal_hypothesis_and_normality_predicates() {
+        use curvebook_doc::{ColumnTable, DataSheet, LognormalRowTestMode, MultipleRowTestsSpec, OneWayAnovaSpec};
+
+        let mut rm_tab = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap();
+        for c in 0..3 {
+            for r in 0..4 {
+                rm_tab.data_sets[c].cells[r][0] = Cell::number((c + r + 2) as f64);
+            }
+        }
+        let mut inc_tab = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap();
+        inc_tab.data_sets[0].cells[0][0] = Cell::number(10.0);
+        inc_tab.data_sets[1].cells[0][0] = Cell::number(12.0);
+        inc_tab.data_sets[0].cells[1][0] = Cell::number(11.0);
+        inc_tab.data_sets[2].cells[1][0] = Cell::number(14.0);
+        let sum_tab = ColumnTable::new(ColumnDesignHint::PrecomputedError, 3, 3).unwrap();
+
+        let mut doc = ProjectDocument::new("Lognormal Predicates").unwrap();
+        doc.add_data_sheet(DataSheet::new("rm-ok", "RM", TableArchetype::Column(rm_tab)).unwrap()).unwrap();
+        doc.add_data_sheet(DataSheet::new("rm-inc", "RM Inc", TableArchetype::Column(inc_tab)).unwrap()).unwrap();
+        doc.add_data_sheet(DataSheet::new("col-sum", "Summary", TableArchetype::Column(sum_tab)).unwrap()).unwrap();
+
+        // Two-group lognormal Welch & one-sample ratio predicates
+        assert!(r4_two_group_welch_correction(TwoGroupMethod::LognormalUnpairedT).enabled);
+        assert!(r4_two_group_welch_correction(TwoGroupMethod::LognormalWelchT).enabled);
+        assert!(!r4_two_group_welch_correction(TwoGroupMethod::OneSampleRatioT { hypothetical: 1.0 }).enabled);
+        assert!(!r4_two_group_diagnostics(TwoGroupMethod::LognormalWelchT).enabled);
+        assert!(r4_two_group_diagnostics(TwoGroupMethod::LognormalUnpairedT).enabled);
+
+        let mut tg_kind = AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::LognormalWelchT, ..Default::default() });
+        apply_r2_gaussian_toggle(&mut tg_kind, false, false, 0);
+        assert!(matches!(tg_kind, AnalysisKind::TwoGroupComparison(ref t) if t.method == TwoGroupMethod::MannWhitneyU));
+
+        let mut ratio_kind =
+            AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::OneSampleRatioT { hypothetical: 2.5 }, ..Default::default() });
+        apply_r2_gaussian_toggle(&mut ratio_kind, false, false, 0);
+        assert!(
+            matches!(ratio_kind, AnalysisKind::TwoGroupComparison(ref t) if matches!(t.method, TwoGroupMethod::OneSampleWilcoxon { hypothetical } if (hypothetical - 2.5).abs() < 1e-12))
+        );
+
+        let bad_ratio_ep = EditAnalysisParametersState {
+            draft: Some(
+                curvebook_doc::AnalysisSpec::new(
+                    "res-r",
+                    "rm-ok",
+                    AnalysisKind::TwoGroupComparison(TwoGroupSpec {
+                        method: TwoGroupMethod::OneSampleRatioT { hypothetical: 0.0 },
+                        ..Default::default()
+                    }),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(!evaluate_edit_params_button(&bad_ratio_ep, &doc, &SheetId::new("res-r"), "ok").enabled);
+        let ok_ratio_ep = EditAnalysisParametersState {
+            draft: Some(
+                curvebook_doc::AnalysisSpec::new(
+                    "res-r",
+                    "rm-ok",
+                    AnalysisKind::TwoGroupComparison(TwoGroupSpec {
+                        method: TwoGroupMethod::OneSampleRatioT { hypothetical: 1.5 },
+                        ..Default::default()
+                    }),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(evaluate_edit_params_button(&ok_ratio_ep, &doc, &SheetId::new("res-r"), "ok").enabled);
+
+        // One-way lognormal predicates & REML detection
+        assert!(r2_one_way_lognormal_allowed(true, &doc, Some(&SheetId::new("rm-ok"))).enabled);
+        assert!(!r2_one_way_lognormal_allowed(false, &doc, Some(&SheetId::new("rm-ok"))).enabled);
+        assert!(!r2_one_way_lognormal_allowed(true, &doc, Some(&SheetId::new("col-sum"))).enabled);
+
+        let mut ln_anova_ep = EditAnalysisParametersState {
+            assume_gaussian: true,
+            paired_or_matched: true,
+            draft: Some(
+                curvebook_doc::AnalysisSpec::new(
+                    "res-ln-rm",
+                    "rm-inc",
+                    AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                        method: OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true },
+                        ..Default::default()
+                    }),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(is_reml_mixed_effects_active(&ln_anova_ep, &doc));
+        assert!(evaluate_edit_params_widget(&ln_anova_ep, &doc, 4, 3, 1, "edit.anova.lognormal").enabled);
+        ln_anova_ep.assume_gaussian = false;
+        assert!(!evaluate_edit_params_widget(&ln_anova_ep, &doc, 4, 3, 1, "edit.anova.lognormal").enabled);
+
+        let mut ln_ow = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            method: OneWayMethod::LognormalRepeatedMeasures { geisser_greenhouse: true },
+            ..Default::default()
+        });
+        apply_r2_gaussian_toggle(&mut ln_ow, false, true, 0);
+        assert!(matches!(ln_ow, AnalysisKind::OneWayAnova(ref a) if a.method == OneWayMethod::Friedman));
+
+        // Multiple-row t-tests lognormal mode gating
+        assert!(r4_row_t_lognormal_mode(false).enabled);
+        assert!(!r4_row_t_lognormal_mode(true).enabled);
+        let row_t_np_ep = EditAnalysisParametersState {
+            draft: Some(
+                curvebook_doc::AnalysisSpec::new(
+                    "res-rt",
+                    "rm-ok",
+                    AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+                        nonparametric: true,
+                        lognormal_mode: LognormalRowTestMode::None,
+                        ..Default::default()
+                    }),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(!evaluate_edit_params_widget(&row_t_np_ep, &doc, 4, 3, 1, "edit.row_t.lognormal.ratio_paired").enabled);
     }
 }
