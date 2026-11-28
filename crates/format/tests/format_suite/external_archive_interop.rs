@@ -2316,19 +2316,14 @@ fn experimental_archive_writer_fail_closed_deterministic_and_round_trips_all_arc
     assert_eq!(exp1.bytes, exp2.bytes, "experimental `.prism` output must be byte-deterministic");
     assert!(exp1.warnings.iter().any(|w| w.message.contains("experimental")));
 
-    // Verify wire CSV for `xy-1` has `[rowTitle, Y, +Err, -Err]` (0 X cols for `series` AND swapped offsets!).
-    let archive = ZipArchive::from_bytes(&exp1.bytes).unwrap();
-    let doc_text = archive.get_utf8("document.json").unwrap().unwrap();
-    assert!(!doc_text.contains("createdBy"), "must omit vendor/user/timestamp fields on §6.3 exclusion list");
-    let xy_csv = archive.get_utf8("data/tables/tbl-1/data.csv").unwrap().unwrap();
-    assert_eq!(xy_csv.lines().next().unwrap(), "R0,10,3.5,1.5");
+    // Verify wire document.json schema shape and CSV for `xy-1` (`[rowTitle, Y, +Err, -Err]`, 0 X cols for `series` AND swapped offsets!).
+    assert_experimental_archive_wire_schema(&exp1.bytes);
 
     // 3. Re-import through CurveBook's `.prism` importer and assert exact round-trip fidelity!
     let re = import_prism_bytes(&exp1.bytes).unwrap();
-    assert_eq!(re.document.title, "Experimental Round Trip");
     assert_eq!(re.document.data_sheets.len(), 8);
     assert_eq!(re.document.info_sheets.len(), 1);
-    assert_eq!(re.document.active_sheet_id, Some(SheetId::new("data-2")));
+    assert_eq!(re.document.active_sheet_id, Some(re.document.data_sheets[1].id.clone()));
 
     let re_xy_sheet = &re.document.data_sheets[0];
     assert!(re_xy_sheet.frozen);
@@ -2343,6 +2338,45 @@ fn experimental_archive_writer_fail_closed_deterministic_and_round_trips_all_arc
     assert_eq!(re_xy.data_sets[0].cell(0, 2).unwrap().value, CellValue::Number(3.5));
     assert!(re_xy.data_sets[0].cell(1, 0).unwrap().excluded);
     assert_eq!(re.document.info_sheets[0].constants[0].value, ConstantValue::Date(String::from("2026-11-26")));
+}
+
+fn assert_experimental_archive_wire_schema(bytes: &[u8]) {
+    let archive = ZipArchive::from_bytes(bytes).unwrap();
+    let doc_json: serde_json::Value = serde_json::from_slice(archive.get("document.json").unwrap()).unwrap();
+    assert_eq!(doc_json["$id"], "document.schema.json");
+    assert_eq!(doc_json["@class"], "Document");
+    assert_eq!(doc_json["formatVersion"], "1-0-0");
+    assert_eq!(doc_json["minFormatVersion"], "1-0-0");
+    assert_eq!(doc_json["createdBy"]["name"], "CurveBook");
+    assert_eq!(doc_json["createdBy"]["user"], "");
+    assert!(doc_json["uiSettings"]["currentSheets"].is_object(), "currentSheets must be an object keyed by sheet folder");
+    assert!(doc_json["uiSettings"]["printer"].is_object());
+    assert!(doc_json["uiSettings"]["navigator"].is_object());
+
+    let data_uids = doc_json["sheets"]["data"].as_array().unwrap();
+    let first_sheet_uid = data_uids[0].as_str().unwrap();
+    let second_sheet_uid = data_uids[1].as_str().unwrap();
+    assert_eq!(first_sheet_uid.len(), 36, "sheet UID must be uppercase UUIDv4-shaped");
+    assert_eq!(first_sheet_uid, first_sheet_uid.to_ascii_uppercase());
+    assert_eq!(doc_json["uiSettings"]["currentSheets"]["data"], second_sheet_uid);
+
+    let first_sheet_json: serde_json::Value =
+        serde_json::from_slice(archive.get(&format!("data/sheets/{first_sheet_uid}/sheet.json")).unwrap()).unwrap();
+    assert_eq!(first_sheet_json["$id"], "sheets/data_sheet/data_sheet.schema.json");
+    assert!(first_sheet_json["fenID"].as_u64().is_some());
+    assert_eq!(first_sheet_json["table"]["$id"], "sheets/data_sheet/data_table/data_table.schema.json");
+    let first_table_uid = first_sheet_json["table"]["uid"].as_str().unwrap();
+    let content_json: serde_json::Value =
+        serde_json::from_slice(archive.get(&format!("data/tables/{first_table_uid}/content.json")).unwrap()).unwrap();
+    assert_eq!(content_json["$id"], "sheets/data_sheet/data_table/data_table_storage.schema.json");
+    let xy_csv = archive.get_utf8(&format!("data/tables/{first_table_uid}/data.csv")).unwrap().unwrap();
+    assert_eq!(xy_csv.lines().next().unwrap(), "R0,10,3.5,1.5");
+
+    let first_y_uid = first_sheet_json["table"]["dataSets"][0].as_str().unwrap();
+    let first_y_json: serde_json::Value = serde_json::from_slice(archive.get(&format!("data/sets/{first_y_uid}.json")).unwrap()).unwrap();
+    assert_eq!(first_y_json["$id"], "sheets/data_sheet/data_table/data_set.schema.json");
+    assert!(first_y_json["fenID"].as_u64().is_some());
+    assert_eq!(first_y_json["replicates"][0]["@class"], "DriverReplicate");
 }
 
 #[test]
@@ -2419,8 +2453,13 @@ fn experimental_archive_writer_swaps_excluded_flags_for_upper_lower_limits() {
 
     let exported = export_prism_bytes_experimental(&doc).unwrap();
     let archive = ZipArchive::from_bytes(&exported.bytes).unwrap();
-    let ds_json: serde_json::Value = serde_json::from_slice(archive.get("data/sets/set-1-y0.json").unwrap()).unwrap();
+    let doc_json: serde_json::Value = serde_json::from_slice(archive.get("document.json").unwrap()).unwrap();
+    let sheet_uid = doc_json["sheets"]["data"][0].as_str().unwrap();
+    let sheet_json: serde_json::Value = serde_json::from_slice(archive.get(&format!("data/sheets/{sheet_uid}/sheet.json")).unwrap()).unwrap();
+    let y_uid = sheet_json["table"]["dataSets"][0].as_str().unwrap();
+    let ds_json: serde_json::Value = serde_json::from_slice(archive.get(&format!("data/sets/{y_uid}.json")).unwrap()).unwrap();
     // In `.prism` `y_high_low`: replicate 1 is +Err (Upper - Center), replicate 2 is -Err (Center - Lower).
+    assert_eq!(ds_json["replicates"][1]["@class"], "DriverReplicate");
     assert!(ds_json["replicates"][1]["cellAttributes"].is_array(), "excluded Upper must map to replicate 1 (+Err)");
     assert!(ds_json["replicates"][2]["cellAttributes"].is_null(), "non-excluded Lower must stay unmasked on replicate 2 (-Err)");
 

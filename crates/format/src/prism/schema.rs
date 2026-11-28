@@ -384,12 +384,22 @@ fn extract_selected_sheet_uid(doc_obj: &serde_json::Map<String, serde_json::Valu
     }
     if let Some(map) = current.as_object() {
         let current_type = ui.get("currentSheetType").and_then(serde_json::Value::as_str);
-        if let Some(key) = current_type
-            && let Some(uid) = map.get(key).and_then(serde_json::Value::as_str).filter(|s| !s.trim().is_empty())
-        {
-            return Some(uid.to_owned());
+        if let Some(raw_key) = current_type {
+            let mapped = match raw_key.to_ascii_lowercase().as_str() {
+                "data" => Some("data"),
+                "info" => Some("info"),
+                "analysis" | "analyses" => Some("analysis"),
+                "graph" | "graphs" => Some("graph"),
+                "layout" | "layouts" => Some("layout"),
+                _ => None,
+            };
+            for candidate in [Some(raw_key), mapped].into_iter().flatten() {
+                if let Some(uid) = map.get(candidate).and_then(serde_json::Value::as_str).filter(|s| !s.trim().is_empty()) {
+                    return Some(uid.to_owned());
+                }
+            }
         }
-        for key in ["data", "analyses", "info", "graphs", "layouts"] {
+        for key in ["data", "analysis", "analyses", "info", "graph", "graphs", "layout", "layouts"] {
             if let Some(uid) = map.get(key).and_then(serde_json::Value::as_str).filter(|s| !s.trim().is_empty()) {
                 return Some(uid.to_owned());
             }

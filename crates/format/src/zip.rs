@@ -261,6 +261,22 @@ impl ZipWriter {
         Self { entries: BTreeMap::new(), total_uncompressed: 0, limits }
     }
 
+    /// Add an explicit empty directory entry (ending with `/`) to the archive.
+    ///
+    /// Adding an already-registered directory entry is a deterministic no-op.
+    pub fn add_dir(&mut self, path: &str) -> Result<(), FormatError> {
+        let with_slash = if path.ends_with('/') { path.to_owned() } else { format!("{path}/") };
+        let clean = sanitize_zip_path(&with_slash)?;
+        if self.entries.contains_key(&clean) {
+            return Ok(());
+        }
+        if self.entries.len() >= self.limits.max_entries {
+            return Err(FormatError::ZipBomb { reason: format!("entry count exceeds limit {}", self.limits.max_entries) });
+        }
+        self.entries.insert(clean, Vec::new());
+        Ok(())
+    }
+
     /// Add a file entry to the archive, rejecting unsafe paths, duplicates, and limit violations.
     pub fn add_file(&mut self, path: &str, data: Vec<u8>) -> Result<(), FormatError> {
         let clean = sanitize_zip_path(path)?;

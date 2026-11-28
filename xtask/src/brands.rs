@@ -39,6 +39,8 @@ const HOMEPAGE_ALLOWED_PHRASES: &[&str] = &[
     "*GraphPad Prism Pro annual pricing as listed in the EU on November 27, 2026.",
     "not affiliated with GraphPad Prism, GraphPad Software, or Dotmatics",
 ];
+const PRISM_EXPORT_ALLOWLIST_FILE: &str = "crates/format/src/prism/export.rs";
+const PRISM_MIN_VERSION_KEY: &str = "minPrismVersion";
 const BINARY_ASSET_EXT: &str =
     "png jpg jpeg gif webp bmp tif tiff ico icns avif svgz pdf eps icc icm cur ani ase aco ttf otf ttc woff woff2 eot pfb mp4 wav mp3";
 const MAX_DIST_FILE_BYTES: usize = 256 * 1024 * 1024;
@@ -559,6 +561,7 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             if is_negative_brand_guard_literal(path, text, &lit)
                 || (rel_path == INTEROP_CORPUS_ALLOWLIST_FILE && lit.text == INTEROP_CORPUS_DEFAULT_DIR)
                 || (rel_path == PZFX_EXPORT_ALLOWLIST_FILE && lit.text == PZFX_VENDOR_ROOT_ELEMENT)
+                || (rel_path == PRISM_EXPORT_ALLOWLIST_FILE && lit.text == PRISM_MIN_VERSION_KEY)
             {
                 continue;
             }
@@ -1616,12 +1619,17 @@ mod tests {
 
         let export_rust = "\
             // Routes project.exportPrism through export_prism_bytes and ExportPrismParams via run_project_export_prism.\n\
+            const MIN_VER_KEY: &str = \"minPrismVersion\";\n\
             pub struct ExportPrismParams;\n\
             pub fn run_project_export_prism() -> &'static str { \"project.exportPrism\" }\n\
             pub fn export_prism_bytes() -> &'static str { exporter_by_format(\"prism\") }\n\
             pub const CMD_KEY: &str = \"cmd.project.exportPrism\";\n\
             pub const TEST_OP: &str = \"export_prism_bytes failed\";\n";
         assert!(scan("crates/format/src/prism/export.rs", export_rust).is_empty(), "canonical exportPrism Rust code must pass");
+        assert!(
+            !scan("crates/format/src/prism/import.rs", "const K: &str = \"minPrismVersion\";\n").is_empty(),
+            "minPrismVersion wire key must be restricted to prism/export.rs"
+        );
 
         let bad_export_rust = "\
             pub struct PrismStyle;\n\
