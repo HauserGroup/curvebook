@@ -66,9 +66,11 @@ if [[ ! -s "$DESKTOP_RAW" || ! -s "$CLI_RAW" ]]; then
 fi
 
 python3 - "$ROOT" "$DESKTOP_RAW" "$CLI_RAW" "$TMP_OUT" <<'PYEOF'
+import hashlib
 import json
 import pathlib
 import sys
+import uuid
 
 ws_root = pathlib.Path(sys.argv[1]).resolve().as_posix().rstrip("/")
 desktop_path = pathlib.Path(sys.argv[2])
@@ -120,7 +122,7 @@ root_ref = desktop["metadata"]["component"]["bom-ref"]
 if isinstance(cli_root, dict) and "bom-ref" in cli_root:
     deps_by_ref.setdefault(root_ref, set()).add(cli_root["bom-ref"])
 
-merged = {
+merged_body = {
     "bomFormat": desktop["bomFormat"],
     "specVersion": desktop["specVersion"],
     "version": desktop.get("version", 1),
@@ -134,6 +136,25 @@ merged = {
         for ref, deps in sorted(deps_by_ref.items())
     ],
 }
+
+# Derive a deterministic RFC 4122 UUIDv5 `urn:uuid:...` serialNumber from the normalized BOM
+# payload so reproducible rebuilds stay byte-identical while satisfying CycloneDX 1.5 and
+# `actions/attest` (`bomFormat` + `serialNumber` + `specVersion`).
+body_digest = hashlib.sha256(
+    json.dumps(merged_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+serial_number = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, f'https://github.com/HauserGroup/curvebook/sbom/{body_digest}')}"
+
+merged = {}
+if isinstance(desktop.get("$schema"), str) and desktop["$schema"].strip():
+    merged["$schema"] = desktop["$schema"]
+merged["bomFormat"] = merged_body["bomFormat"]
+merged["specVersion"] = merged_body["specVersion"]
+merged["serialNumber"] = serial_number
+merged["version"] = merged_body["version"]
+merged["metadata"] = merged_body["metadata"]
+merged["components"] = merged_body["components"]
+merged["dependencies"] = merged_body["dependencies"]
 
 payload = json.dumps(merged, indent=2) + "\n"
 out_path.write_text(payload, encoding="utf-8")

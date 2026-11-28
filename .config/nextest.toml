@@ -39,5 +39,5 @@ threads-required = "num-test-threads"
 # storage (plus undo snapshots). Running them concurrently on a 16 GB CI runner causes heavy swap
 # thrashing (40m timeout) or Linux OOM-killer `SIGKILL` / runner shutdown; serialize them.
 [[profile.ci.overrides]]
-filter = 'package(=curvebook-engine) & (test(=s07_05_doc_constructors_and_create_data_reject_oversized_cell_products_without_oom) | test(=fa_sec11_03_extract_result_tab_enforces_max_project_cells) | test(=fa_sec12_02_project_cell_budget_enforced_across_import_replace_and_generators) | test(=g12_undo_cell_budget_evicts_oldest_and_keeps_oversized_newest))'
+filter = '(package(=curvebook-engine) & (test(=budgets_and_guards::s07_05_doc_constructors_and_create_data_reject_oversized_cell_products_without_oom) | test(=audit_p5_sec11::fa_sec11_03_extract_result_tab_enforces_max_project_cells) | test(=audit_p5_sec12::fa_sec12_02_project_cell_budget_enforced_across_import_replace_and_generators) | test(=undo_and_methods_qol::g12_undo_cell_budget_evicts_oldest_and_keeps_oversized_newest))) | (package(=curvebook-doc) & test(=audit_sec02::fa_sec02_04_project_and_image_asset_deserialize_enforce_budgets))'
 threads-required = "num-test-threads"
