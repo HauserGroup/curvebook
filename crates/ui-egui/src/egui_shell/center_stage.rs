@@ -2177,20 +2177,15 @@ struct FloatingNotesSpec<'a> {
     notes_pane_focused: bool,
 }
 
-const FLOATING_NOTE_BLUE_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xDB, 0xEA, 0xFE);
-const FLOATING_NOTE_GREEN_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xDC, 0xFC, 0xE7);
-const FLOATING_NOTE_RED_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xFE, 0xE2, 0xE2);
-const FLOATING_NOTE_GRAY_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xF1, 0xF5, 0xF9);
-
 fn next_floating_note_color(current: curvebook_palette::Rgba8) -> &'static str {
     let rgb = (current.r, current.g, current.b);
     if current.a == 0 || rgb == (FloatingNote::DEFAULT_FILL.r, FloatingNote::DEFAULT_FILL.g, FloatingNote::DEFAULT_FILL.b) {
         "blue"
-    } else if rgb == (FLOATING_NOTE_BLUE_FILL.r, FLOATING_NOTE_BLUE_FILL.g, FLOATING_NOTE_BLUE_FILL.b) {
+    } else if rgb == (FloatingNote::BLUE_FILL.r, FloatingNote::BLUE_FILL.g, FloatingNote::BLUE_FILL.b) {
         "green"
-    } else if rgb == (FLOATING_NOTE_GREEN_FILL.r, FLOATING_NOTE_GREEN_FILL.g, FLOATING_NOTE_GREEN_FILL.b) {
+    } else if rgb == (FloatingNote::GREEN_FILL.r, FloatingNote::GREEN_FILL.g, FloatingNote::GREEN_FILL.b) {
         "red"
-    } else if rgb == (FLOATING_NOTE_RED_FILL.r, FLOATING_NOTE_RED_FILL.g, FLOATING_NOTE_RED_FILL.b) {
+    } else if rgb == (FloatingNote::RED_FILL.r, FloatingNote::RED_FILL.g, FloatingNote::RED_FILL.b) {
         "gray"
     } else {
         "yellow"
@@ -2199,13 +2194,13 @@ fn next_floating_note_color(current: curvebook_palette::Rgba8) -> &'static str {
 
 const fn floating_note_preset_rgba(color_name: &str) -> curvebook_palette::Rgba8 {
     if color_name.eq_ignore_ascii_case("blue") {
-        FLOATING_NOTE_BLUE_FILL
+        FloatingNote::BLUE_FILL
     } else if color_name.eq_ignore_ascii_case("green") {
-        FLOATING_NOTE_GREEN_FILL
+        FloatingNote::GREEN_FILL
     } else if color_name.eq_ignore_ascii_case("red") {
-        FLOATING_NOTE_RED_FILL
+        FloatingNote::RED_FILL
     } else if color_name.eq_ignore_ascii_case("gray") {
-        FLOATING_NOTE_GRAY_FILL
+        FloatingNote::GRAY_FILL
     } else {
         FloatingNote::DEFAULT_FILL
     }
@@ -3228,10 +3223,10 @@ mod floating_note_authoring_tests {
     #[test]
     fn floating_note_color_cycle_covers_all_presets() {
         assert_eq!(next_floating_note_color(FloatingNote::DEFAULT_FILL), "blue");
-        assert_eq!(next_floating_note_color(FLOATING_NOTE_BLUE_FILL), "green");
-        assert_eq!(next_floating_note_color(FLOATING_NOTE_GREEN_FILL), "red");
-        assert_eq!(next_floating_note_color(FLOATING_NOTE_RED_FILL), "gray");
-        assert_eq!(next_floating_note_color(FLOATING_NOTE_GRAY_FILL), "yellow");
+        assert_eq!(next_floating_note_color(FloatingNote::BLUE_FILL), "green");
+        assert_eq!(next_floating_note_color(FloatingNote::GREEN_FILL), "red");
+        assert_eq!(next_floating_note_color(FloatingNote::RED_FILL), "gray");
+        assert_eq!(next_floating_note_color(FloatingNote::GRAY_FILL), "yellow");
         assert_eq!(next_floating_note_color(curvebook_palette::Rgba8::rgba(0, 0, 0, 0)), "blue");
         assert_eq!(next_floating_note_color(curvebook_palette::Rgba8::rgb(12, 34, 56)), "yellow");
     }

@@ -1094,6 +1094,9 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.canvas.preflight" => Some(dispatch_ui_canvas_preflight),
         "ui.workspacePreset.set" => Some(|app, p| map_ui_err(dispatch_ui_workspace_preset_set(app, p))),
         "ui.grid.excludeWithReason" => Some(dispatch_ui_grid_exclude_with_reason),
+        "ui.table.sortRowsAsc" => Some(|app, p| dispatch_ui_sort_rows(app, "ui.table.sortRowsAsc", p)),
+        "ui.table.sortRowsDesc" => Some(|app, p| dispatch_ui_sort_rows(app, "ui.table.sortRowsDesc", p)),
+        "ui.table.sortByRowTitles" => Some(|app, p| dispatch_ui_sort_rows(app, "ui.table.sortByRowTitles", p)),
         "ui.table.openFormulaBar" => Some(|app, p| map_ui_err(dispatch_ui_open_formula_bar(app, p))),
         "ui.result.appendClusterColumn" => Some(dispatch_ui_append_cluster_column),
         "ui.applyStyleFrom.open" => Some(|app, p| map_ui_err(dispatch_ui_apply_style_from_open(app, p))),
@@ -1115,6 +1118,14 @@ fn lookup_ui_command_handler(command_id: &str) -> Option<UiCommandHandler> {
         "ui.clipboard.copyForSlides" => Some(dispatch_ui_copy_for_slides),
         _ => None,
     }
+}
+
+fn dispatch_ui_sort_rows(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Value, ControlCallError> {
+    let overrides = (!params.is_null()).then_some(params);
+    let sort_params = host_routing::build_sort_rows_params(app, command_id, overrides);
+    let outcome = app.execute_session_ui_cmd("table.sortRows", sort_params)?;
+    app.sync_views();
+    Ok(outcome.payload)
 }
 
 fn dispatch_ui_app_feedback(app: &mut UiApp, _params: &Value) -> Result<Value, ControlCallError> {

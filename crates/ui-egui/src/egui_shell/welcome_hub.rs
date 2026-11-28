@@ -2234,6 +2234,7 @@ fn render_right_pane(
                     label: tr(locale, "welcome.toggle.auto_graph"),
                     checked: state.schema.auto_graph,
                     enabled,
+                    disabled_reason: None,
                     z_layer,
                 },
             ) && enabled
@@ -2249,6 +2250,7 @@ fn render_right_pane(
                     label: tr(locale, "welcome.toggle.auto_info"),
                     checked: state.schema.auto_info,
                     enabled,
+                    disabled_reason: None,
                     z_layer,
                 },
             ) && enabled

@@ -949,11 +949,11 @@ fn aud_09_grid_subranges_german_inline_edit_dup_columns_and_factor_discard() -> 
     Ok(())
 }
 
-#[test]
-fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> TestRes {
+type ColSortSnapshot = (Vec<Option<f64>>, Vec<Option<f64>>, Vec<String>, Vec<CellCoord>);
+
+fn build_r10_32_row_sorting_driver() -> Result<EguiHumanPathDriver<'static, crate::common::ShellTestState>, String> {
     use crate::common::make_shell_driver;
     use curvebook_doc::{XColumnMode, XyTable};
-    use egui::{Key, Modifiers};
 
     let mut doc = ProjectDocument::new("R10.32 Row Sorting").expect("project");
 
@@ -999,98 +999,26 @@ fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> Tes
     .map_err(|e| e.to_string())?;
     app.sync_views();
 
-    let mut driver = make_shell_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+    Ok(make_shell_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0)))
+}
+
+fn col_sort_snapshot(drv: &EguiHumanPathDriver<'_, crate::common::ShellTestState>) -> ColSortSnapshot {
+    let ds = drv.state().app.document().data_sheet(&SheetId::from("ds-sort-col")).unwrap();
+    let TableArchetype::Column(c) = &ds.archetype else { panic!("expected Column") };
+    let col0: Vec<Option<f64>> = (0..4).map(|r| c.data_sets[0].cells[r][0].value.finite_f64()).collect();
+    let col1: Vec<Option<f64>> = (0..4).map(|r| c.data_sets[1].cells[r][0].value.finite_f64()).collect();
+    let notes: Vec<CellCoord> = ds.exclusion_notes.iter().map(|n| n.coord).collect();
+    (col0, col1, c.row_titles.clone(), notes)
+}
+
+fn assert_r10_32_xy_sort_and_guards(driver: &mut EguiHumanPathDriver<'_, crate::common::ShellTestState>) -> TestRes {
+    use egui::{Key, Modifiers};
     let cmd_mod = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
-
-    let col_snapshot =
-        |drv: &EguiHumanPathDriver<'_, crate::common::ShellTestState>| -> (Vec<Option<f64>>, Vec<Option<f64>>, Vec<String>, Vec<CellCoord>) {
-            let ds = drv.state().app.document().data_sheet(&SheetId::from("ds-sort-col")).unwrap();
-            let TableArchetype::Column(c) = &ds.archetype else { panic!("expected Column") };
-            let col0: Vec<Option<f64>> = (0..4).map(|r| c.data_sets[0].cells[r][0].value.finite_f64()).collect();
-            let col1: Vec<Option<f64>> = (0..4).map(|r| c.data_sets[1].cells[r][0].value.finite_f64()).collect();
-            let notes: Vec<CellCoord> = ds.exclusion_notes.iter().map(|n| n.coord).collect();
-            (col0, col1, c.row_titles.clone(), notes)
-        };
-
-    // Part A: Right-click `grid.col_title.0` -> `popup.grid.col_hdr_ctx` -> `grid.col_hdr.sort_asc`.
-    let hdr0 = widget_center(&driver, "grid.col_title.0", false)?;
-    driver.click_at_button(hdr0, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
-    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some(), "expected popup.grid.col_hdr_ctx");
-    assert!(driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_asc").is_some_and(|e| e.enabled));
-    assert!(driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_desc").is_some_and(|e| e.enabled));
-    driver.click_widget_id("grid.col_hdr.sort_asc")?;
-
-    let (col0, col1, titles, notes) = col_snapshot(&driver);
-    assert_eq!(col0, vec![Some(10.0), Some(20.0), Some(30.0), None], "empty cells must sort last");
-    assert_eq!(col1, vec![Some(100.0), Some(200.0), Some(300.0), Some(999.0)]);
-    assert_eq!(titles, vec!["Charlie", "Bravo", "Delta", "Alpha"]);
-    assert_eq!(notes, vec![CellCoord::new(0, 0, 0)], "exclusion_notes coord must follow row 2 -> 0");
-    assert!(
-        driver
-            .state()
-            .app
-            .document()
-            .data_sheet(&SheetId::from("ds-sort-col"))
-            .unwrap()
-            .cell(CellCoord::new(0, 0, 0))
-            .is_some_and(|cell| cell.excluded),
-        "excluded flag must move with row 2 -> 0"
-    );
-
-    // Undo restores exact original row order and exclusion_notes coordinate.
-    driver.press_egui_key(Key::Z, cmd_mod);
-    let (u_col0, u_col1, u_titles, u_notes) = col_snapshot(&driver);
-    assert_eq!(u_col0, vec![Some(30.0), None, Some(10.0), Some(20.0)]);
-    assert_eq!(u_col1, vec![Some(300.0), Some(999.0), Some(100.0), Some(200.0)]);
-    assert_eq!(u_titles, vec!["Delta", "Alpha", "Charlie", "Bravo"]);
-    assert_eq!(u_notes, vec![CellCoord::new(2, 0, 0)]);
-
-    // Part B: Right-click `grid.col_super.0` -> `grid.col_hdr.sort_desc`.
-    let super0 = widget_center(&driver, "grid.col_super.0", false)?;
-    driver.click_at_button(super0, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
-    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some());
-    driver.click_widget_id("grid.col_hdr.sort_desc")?;
-    let (d_col0, d_col1, d_titles, d_notes) = col_snapshot(&driver);
-    assert_eq!(d_col0, vec![Some(30.0), Some(20.0), Some(10.0), None], "desc sort still places empty last");
-    assert_eq!(d_col1, vec![Some(300.0), Some(200.0), Some(100.0), Some(999.0)]);
-    assert_eq!(d_titles, vec!["Delta", "Bravo", "Charlie", "Alpha"]);
-    assert_eq!(d_notes, vec![CellCoord::new(2, 0, 0)]);
-
-    // Part C: Right-click `grid.row_titles.band` -> `grid.col_hdr.sort_asc`.
-    let rt_band = widget_center(&driver, "grid.row_titles.band", false)?;
-    driver.click_at_button(rt_band, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
-    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some());
-    driver.click_widget_id("grid.col_hdr.sort_asc")?;
-    let (rt_col0, rt_col1, rt_titles, rt_notes) = col_snapshot(&driver);
-    assert_eq!(rt_titles, vec!["Alpha", "Bravo", "Charlie", "Delta"]);
-    assert_eq!(rt_col0, vec![None, Some(20.0), Some(10.0), Some(30.0)]);
-    assert_eq!(rt_col1, vec![Some(999.0), Some(200.0), Some(100.0), Some(300.0)]);
-    assert_eq!(rt_notes, vec![CellCoord::new(2, 0, 0)]);
-
-    // Part D: Top menu `Data › Sort Rows` submenu (`menu.data.sort_rows`).
-    driver.click_widget_id("grid.cell.0.1.0")?;
-    driver.click_widget_id("menu.data")?;
-    driver.hover_widget_id("menu.data.sort_rows")?;
-    for wid in ["menu.ui.table.sortRowsAsc", "menu.ui.table.sortRowsDesc", "menu.ui.table.sortByRowTitles"] {
-        assert!(driver.frame_meta().find_by_widget_id(wid).is_some_and(|e| e.enabled), "expected enabled `{wid}`");
-    }
-    driver.click_widget_id("menu.ui.table.sortRowsDesc")?;
-    let (_, m_col1, m_titles, m_notes) = col_snapshot(&driver);
-    assert_eq!(m_col1, vec![Some(999.0), Some(300.0), Some(200.0), Some(100.0)]);
-    assert_eq!(m_titles, vec!["Alpha", "Delta", "Bravo", "Charlie"]);
-    assert_eq!(m_notes, vec![CellCoord::new(3, 0, 0)]);
-
-    driver.click_widget_id("menu.data")?;
-    driver.hover_widget_id("menu.data.sort_rows")?;
-    driver.click_widget_id("menu.ui.table.sortByRowTitles")?;
-    let (_, _, m_rt_titles, m_rt_notes) = col_snapshot(&driver);
-    assert_eq!(m_rt_titles, vec!["Alpha", "Bravo", "Charlie", "Delta"]);
-    assert_eq!(m_rt_notes, vec![CellCoord::new(2, 0, 0)]);
 
     // Part E: XY table right-click on `grid.x_title.0` -> `grid.col_hdr.sort_asc` + Cmd+Z undo.
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "ds-sort-xy" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    let x_hdr = widget_center(&driver, "grid.x_title.0", false)?;
+    let x_hdr = widget_center(driver, "grid.x_title.0", false)?;
     driver.click_at_button(x_hdr, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
     assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some());
     driver.click_widget_id("grid.col_hdr.sort_asc")?;
@@ -1115,7 +1043,7 @@ fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> Tes
     // Part F: Frozen sheet & LinkedDataRegion disabled guards on column-header menu and Data › Sort Rows.
     driver.state_mut().app.execute_command("sheet.freeze", json!({ "sheet_id": "ds-sort-xy" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    let x_hdr_frozen = widget_center(&driver, "grid.x_title.0", false)?;
+    let x_hdr_frozen = widget_center(driver, "grid.x_title.0", false)?;
     driver.click_at_button(x_hdr_frozen, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
     let asc_frozen = driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_asc").ok_or("missing frozen sort_asc")?;
     let desc_frozen = driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_desc").ok_or("missing frozen sort_desc")?;
@@ -1146,7 +1074,7 @@ fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> Tes
         driver.state_mut().app.sync_views();
         driver.run_settled();
     }
-    let x_hdr_linked = widget_center(&driver, "grid.x_title.0", false)?;
+    let x_hdr_linked = widget_center(driver, "grid.x_title.0", false)?;
     driver.click_at_button(x_hdr_linked, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
     let asc_linked = driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_asc").ok_or("missing linked sort_asc")?;
     assert!(!asc_linked.enabled && asc_linked.disabled_reason.as_deref().is_some_and(|r| r.to_lowercase().contains("linked")));
@@ -1156,6 +1084,91 @@ fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> Tes
     driver.hover_widget_id("menu.data.sort_rows")?;
     assert!(!driver.frame_meta().find_by_widget_id("menu.ui.table.sortRowsAsc").ok_or("missing linked menu sortRowsAsc")?.enabled);
     Ok(())
+}
+
+#[test]
+fn r10_32_interactive_row_sorting_col_header_context_menu_and_data_menu() -> TestRes {
+    use egui::{Key, Modifiers};
+
+    let mut driver = build_r10_32_row_sorting_driver()?;
+    let cmd_mod = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
+
+    // Part A: Right-click `grid.col_title.0` -> `popup.grid.col_hdr_ctx` -> `grid.col_hdr.sort_asc`.
+    let hdr0 = widget_center(&driver, "grid.col_title.0", false)?;
+    driver.click_at_button(hdr0, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some(), "expected popup.grid.col_hdr_ctx");
+    assert!(driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_asc").is_some_and(|e| e.enabled));
+    assert!(driver.frame_meta().find_by_widget_id("grid.col_hdr.sort_desc").is_some_and(|e| e.enabled));
+    driver.click_widget_id("grid.col_hdr.sort_asc")?;
+
+    let (col0, col1, titles, notes) = col_sort_snapshot(&driver);
+    assert_eq!(col0, vec![Some(10.0), Some(20.0), Some(30.0), None], "empty cells must sort last");
+    assert_eq!(col1, vec![Some(100.0), Some(200.0), Some(300.0), Some(999.0)]);
+    assert_eq!(titles, vec!["Charlie", "Bravo", "Delta", "Alpha"]);
+    assert_eq!(notes, vec![CellCoord::new(0, 0, 0)], "exclusion_notes coord must follow row 2 -> 0");
+    assert!(
+        driver
+            .state()
+            .app
+            .document()
+            .data_sheet(&SheetId::from("ds-sort-col"))
+            .unwrap()
+            .cell(CellCoord::new(0, 0, 0))
+            .is_some_and(|cell| cell.excluded),
+        "excluded flag must move with row 2 -> 0"
+    );
+
+    // Undo restores exact original row order and exclusion_notes coordinate.
+    driver.press_egui_key(Key::Z, cmd_mod);
+    let (u_col0, u_col1, u_titles, u_notes) = col_sort_snapshot(&driver);
+    assert_eq!(u_col0, vec![Some(30.0), None, Some(10.0), Some(20.0)]);
+    assert_eq!(u_col1, vec![Some(300.0), Some(999.0), Some(100.0), Some(200.0)]);
+    assert_eq!(u_titles, vec!["Delta", "Alpha", "Charlie", "Bravo"]);
+    assert_eq!(u_notes, vec![CellCoord::new(2, 0, 0)]);
+
+    // Part B: Right-click `grid.col_super.0` -> `grid.col_hdr.sort_desc`.
+    let super0 = widget_center(&driver, "grid.col_super.0", false)?;
+    driver.click_at_button(super0, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some());
+    driver.click_widget_id("grid.col_hdr.sort_desc")?;
+    let (d_col0, d_col1, d_titles, d_notes) = col_sort_snapshot(&driver);
+    assert_eq!(d_col0, vec![Some(30.0), Some(20.0), Some(10.0), None], "desc sort still places empty last");
+    assert_eq!(d_col1, vec![Some(300.0), Some(200.0), Some(100.0), Some(999.0)]);
+    assert_eq!(d_titles, vec!["Delta", "Bravo", "Charlie", "Alpha"]);
+    assert_eq!(d_notes, vec![CellCoord::new(2, 0, 0)]);
+
+    // Part C: Right-click `grid.row_titles.band` -> `grid.col_hdr.sort_asc`.
+    let rt_band = widget_center(&driver, "grid.row_titles.band", false)?;
+    driver.click_at_button(rt_band, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("popup.grid.col_hdr_ctx").is_some());
+    driver.click_widget_id("grid.col_hdr.sort_asc")?;
+    let (rt_col0, rt_col1, rt_titles, rt_notes) = col_sort_snapshot(&driver);
+    assert_eq!(rt_titles, vec!["Alpha", "Bravo", "Charlie", "Delta"]);
+    assert_eq!(rt_col0, vec![None, Some(20.0), Some(10.0), Some(30.0)]);
+    assert_eq!(rt_col1, vec![Some(999.0), Some(200.0), Some(100.0), Some(300.0)]);
+    assert_eq!(rt_notes, vec![CellCoord::new(2, 0, 0)]);
+
+    // Part D: Top menu `Data › Sort Rows` submenu (`menu.data.sort_rows`).
+    driver.click_widget_id("grid.cell.0.1.0")?;
+    driver.click_widget_id("menu.data")?;
+    driver.hover_widget_id("menu.data.sort_rows")?;
+    for wid in ["menu.ui.table.sortRowsAsc", "menu.ui.table.sortRowsDesc", "menu.ui.table.sortByRowTitles"] {
+        assert!(driver.frame_meta().find_by_widget_id(wid).is_some_and(|e| e.enabled), "expected enabled `{wid}`");
+    }
+    driver.click_widget_id("menu.ui.table.sortRowsDesc")?;
+    let (_, m_col1, m_titles, m_notes) = col_sort_snapshot(&driver);
+    assert_eq!(m_col1, vec![Some(999.0), Some(300.0), Some(200.0), Some(100.0)]);
+    assert_eq!(m_titles, vec!["Alpha", "Delta", "Bravo", "Charlie"]);
+    assert_eq!(m_notes, vec![CellCoord::new(3, 0, 0)]);
+
+    driver.click_widget_id("menu.data")?;
+    driver.hover_widget_id("menu.data.sort_rows")?;
+    driver.click_widget_id("menu.ui.table.sortByRowTitles")?;
+    let (_, _, m_rt_titles, m_rt_notes) = col_sort_snapshot(&driver);
+    assert_eq!(m_rt_titles, vec!["Alpha", "Bravo", "Charlie", "Delta"]);
+    assert_eq!(m_rt_notes, vec![CellCoord::new(2, 0, 0)]);
+
+    assert_r10_32_xy_sort_and_guards(&mut driver)
 }
 
 #[test]

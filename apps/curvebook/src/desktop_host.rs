@@ -22,10 +22,10 @@ use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
 use curvebook_ui_egui::control_io::host_routing::{
-    active_data_sheet_id, capture_pref_fingerprint, is_read_only_control_method, next_locale_code, next_preview_filter_name, next_theme_mode_name,
-    resolve_any_sheet_id, resolve_data_sheet_id, resolve_graph_sheet_id, resolve_info_sheet_id, resolve_layout_sheet_id, resolve_mv_sheet_id,
-    resolve_renderable_sheet_id, resolve_result_sheet_id, resolve_uninit_or_graph_sheet_id, resolve_xy_or_data_sheet_id, sheet_id_obj_or_empty,
-    split_variant_command,
+    active_data_sheet_id, build_sort_rows_params, capture_pref_fingerprint, is_read_only_control_method, next_locale_code, next_preview_filter_name,
+    next_theme_mode_name, resolve_any_sheet_id, resolve_data_sheet_id, resolve_graph_sheet_id, resolve_info_sheet_id, resolve_layout_sheet_id,
+    resolve_mv_sheet_id, resolve_renderable_sheet_id, resolve_result_sheet_id, resolve_uninit_or_graph_sheet_id, resolve_xy_or_data_sheet_id,
+    sheet_id_obj_or_empty, split_variant_command,
 };
 use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, ViewportMetrics, build_shortcut_candidates};
@@ -3856,6 +3856,7 @@ impl DesktopHostRuntime {
                 "edit.copy" => self.handle_clipboard_copy(window_id),
                 "ui.clipboard.copyForSlides" => self.handle_clipboard_copy_for_slides(window_id, 300),
                 "edit.paste" => self.handle_clipboard_paste(window_id, None),
+                "table.pasteTranspose" => self.handle_clipboard_paste_with_transpose(window_id, None, true),
                 other => Err(format!("unhandled host action `{other}`")),
             },
             DesktopCommandRoute::UiCommand { ui_command_id, params } => {
@@ -4171,7 +4172,16 @@ impl DesktopHostRuntime {
     }
 
     fn handle_clipboard_paste(&mut self, window_id: DesktopWindowId, text_override: Option<String>) -> Result<DesktopEventOutcome, String> {
-        let inline_active = self.window(window_id)?.app.inline_editor.active;
+        self.handle_clipboard_paste_with_transpose(window_id, text_override, false)
+    }
+
+    fn handle_clipboard_paste_with_transpose(
+        &mut self,
+        window_id: DesktopWindowId,
+        text_override: Option<String>,
+        transpose: bool,
+    ) -> Result<DesktopEventOutcome, String> {
+        let inline_active = !transpose && self.window(window_id)?.app.inline_editor.active;
         let (paste_text, os_note) = match text_override {
             Some(explicit) => (explicit, None),
             None => match self.read_paste_text_from_os_or_cache(window_id, inline_active)? {
@@ -4239,16 +4249,17 @@ impl DesktopHostRuntime {
         {
             obj.insert(String::from("delimiter"), json!("\t"));
         }
-        let outcome = win.execute_and_journal("table.paste", params)?;
+        let cmd_id = if transpose { "table.pasteTranspose" } else { "table.paste" };
+        let outcome = win.execute_and_journal(cmd_id, params)?;
         let mut command_result = Some(outcome.payload);
         if let Some(note) = os_note {
             Self::attach_os_clipboard_note(&mut command_result, note);
         }
         Ok(DesktopEventOutcome {
             handled: true,
-            action: String::from("clipboard.pasted_table"),
+            action: String::from(if transpose { "clipboard.pasted_table_transpose" } else { "clipboard.pasted_table" }),
             window_id: Some(window_id),
-            command_id: Some(String::from("table.paste")),
+            command_id: Some(String::from(cmd_id)),
             command_result,
             ..Default::default()
         })
@@ -4362,6 +4373,7 @@ fn resolve_host_or_ui_route(
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
         "ui.clipboard.copyForSlides" => Ok(Some(DesktopCommandRoute::HostAction { action: "ui.clipboard.copyForSlides" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
+        "table.pasteTranspose" => Ok(Some(DesktopCommandRoute::HostAction { action: "table.pasteTranspose" })),
         "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
             ui_command_id: String::from("ui.graph.axes.open"),
             params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
@@ -4480,7 +4492,7 @@ fn resolve_project_or_sheet_route(
         "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::Checkpoints, target_sheet_id: None, query: None }))
         }
-        "sheet.rename" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+        "sheet.rename" | "sheet.updateFloatingNote" | "sheet.deleteFloatingNote" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::CommandPalette,
             target_sheet_id: resolve_any_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: Some(base_cmd.to_owned()),
@@ -4500,7 +4512,14 @@ fn resolve_project_or_sheet_route(
             let params = build_sheet_reorder_params(doc)?;
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: String::from("sheet.reorder"), params }))
         }
-        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" | "sheet.clearOrigin" => {
+        "sheet.delete"
+        | "sheet.duplicate"
+        | "sheet.duplicateFamily"
+        | "sheet.freeze"
+        | "sheet.unfreeze"
+        | "sheet.select"
+        | "sheet.clearOrigin"
+        | "sheet.addFloatingNote" => {
             let id = resolve_any_sheet_id(doc).ok_or_else(|| format!("no active sheet available for `{base_cmd}`"))?;
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
         }
@@ -4578,6 +4597,13 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
             target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
+        "table.sortRows" => {
+            let _ = resolve_data_sheet_id(doc).ok_or_else(|| String::from("no data sheet available for `table.sortRows`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("table.sortRows"),
+                params: build_sort_rows_params(app, "table.sortRows", None),
+            }))
+        }
         "table.pasteLink" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPasteLink,
             target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),

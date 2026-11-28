@@ -2013,9 +2013,6 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     },
                 ));
             }
-            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
-                actions.push(note_act);
-            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2030,6 +2027,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             );
             chain_analyze.rank = ActionRank::Overflow;
             actions.push(chain_analyze);
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
         Tier2SheetContext::GraphSheet => {
             actions.push(make_ui_action(
@@ -2080,9 +2080,6 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
-            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
-                actions.push(note_act);
-            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2097,6 +2094,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             );
             chain_analyze.rank = ActionRank::Overflow;
             actions.push(chain_analyze);
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
         Tier2SheetContext::LayoutSheet => {
             actions.push(make_ui_action(
@@ -2183,9 +2183,6 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                 },
                 can_new_graph,
             ));
-            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
-                actions.push(note_act);
-            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2200,6 +2197,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
             );
             chain_analyze.rank = ActionRank::Overflow;
             actions.push(chain_analyze);
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
     }
 

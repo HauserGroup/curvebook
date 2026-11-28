@@ -168,7 +168,7 @@ fn registry_sweep_routes_every_engine_and_ui_command_without_null_params() -> Re
         let _ = fresh_session.execute("table.setCell", json!({ "sheet_id": "data-xy", "row": 0, "col": 0, "value": 10.5 }));
         let (mut rt, wid) = spawn_window_from_session(fresh_session)?;
         rt.window_mut(wid)?.app_mut().grid.select_single_sync(CellCoord::new(0, 0, 0).into());
-        if cmd_id == "edit.paste" {
+        if cmd_id == "edit.paste" || cmd_id == "table.pasteTranspose" {
             rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("edit.copy") })?;
         }
         let outcome = rt

@@ -234,7 +234,7 @@ fn wf20_human_roc_curve_and_cochran_armitage_trend() -> TestRes {
     // Switch linked GraphSheet to Diagnostic ROC Curve via Change Graph Type modal.
     run.select_sheet(&roc_gs_id)?;
     run.click("toolbar.graph_type")?;
-    run.click("graph_type.show_all")?;
+    run.click("graph_type.family.mv_diag")?;
     run.click("graph_type.card.diag.roc")?;
     run.commit_modal_ok()?;
 
