@@ -11,7 +11,7 @@ use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, OKABE_ITO_SERI
 use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
-use super::helpers::{StudioButtonSpec, StudioChipSpec, studio_chip, studio_full_button};
+use super::helpers::{SCROLL_BAR_RESERVE_PT, SECTION_BTN_H, StudioButtonSpec, StudioChipSpec, studio_chip, studio_full_button};
 use super::{MvOperandHighlight, TrailingStudioContext, TrailingStudioEguiState};
 
 /// Extract colored column operand highlights from an MV formula expression in deterministic palette order.
@@ -73,6 +73,71 @@ const STUDIO_FORMULA_FUNCS: &[FormulaFnEntry] = &[
     FormulaFnEntry { name: "countif", signature: "countif(cond)", insert: "countif(", summary: "Conditional row count" },
     FormulaFnEntry { name: "sumif", signature: "sumif(var, cond)", insert: "sumif(", summary: "Conditional column sum" },
     FormulaFnEntry { name: "meanif", signature: "meanif(var, cond)", insert: "meanif(", summary: "Conditional column mean" },
+    FormulaFnEntry { name: "count", signature: "count(var)", insert: "count(", summary: "Active numeric cell count" },
+    FormulaFnEntry { name: "counta", signature: "counta(var)", insert: "counta(", summary: "Active non-empty numeric or text count" },
+    FormulaFnEntry { name: "sum", signature: "sum(var)", insert: "sum(", summary: "Column or row-wise sum" },
+    FormulaFnEntry { name: "min", signature: "min(var)", insert: "min(", summary: "Column or row-wise minimum" },
+    FormulaFnEntry { name: "max", signature: "max(var)", insert: "max(", summary: "Column or row-wise maximum" },
+    FormulaFnEntry { name: "var", signature: "var(var)", insert: "var(", summary: "Sample variance" },
+    FormulaFnEntry { name: "geo_mean", signature: "geo_mean(var)", insert: "geo_mean(", summary: "Column geometric mean (x > 0)" },
+    FormulaFnEntry { name: "percentile", signature: "percentile(var, p)", insert: "percentile(", summary: "Column p-th percentile (0 to 100)" },
+    FormulaFnEntry { name: "countaif", signature: "countaif(var, cond)", insert: "countaif(", summary: "Conditional non-empty cell count" },
+    FormulaFnEntry { name: "minif", signature: "minif(var, cond)", insert: "minif(", summary: "Conditional column minimum" },
+    FormulaFnEntry { name: "maxif", signature: "maxif(var, cond)", insert: "maxif(", summary: "Conditional column maximum" },
+    FormulaFnEntry { name: "sdif", signature: "sdif(var, cond)", insert: "sdif(", summary: "Conditional sample standard deviation" },
+    FormulaFnEntry { name: "semif", signature: "semif(var, cond)", insert: "semif(", summary: "Conditional standard error of the mean" },
+    FormulaFnEntry { name: "log", signature: "log(x[, base])", insert: "log(", summary: "Base-10 or arbitrary-base logarithm" },
+    FormulaFnEntry { name: "log2", signature: "log2(x)", insert: "log2(", summary: "Base-2 logarithm" },
+    FormulaFnEntry { name: "exp10", signature: "exp10(x)", insert: "exp10(", summary: "Base-10 antilogarithm 10^x" },
+    FormulaFnEntry { name: "pow", signature: "pow(x, y)", insert: "pow(", summary: "Raise x to the power y" },
+    FormulaFnEntry { name: "mod", signature: "mod(x, y)", insert: "mod(", summary: "Remainder of x divided by y" },
+    FormulaFnEntry { name: "fact", signature: "fact(n)", insert: "fact(", summary: "Integer factorial n! (0 <= n <= 170)" },
+    FormulaFnEntry { name: "perc", signature: "perc(x)", insert: "perc(", summary: "Convert percentage x to fraction x / 100" },
+    FormulaFnEntry { name: "pi", signature: "pi([n])", insert: "pi(", summary: "Circle constant pi (or n * pi)" },
+    FormulaFnEntry { name: "null", signature: "null", insert: "null", summary: "Missing or empty cell value literal" },
+    FormulaFnEntry { name: "rad", signature: "rad(deg)", insert: "rad(", summary: "Convert degrees to radians" },
+    FormulaFnEntry { name: "deg", signature: "deg(rad)", insert: "deg(", summary: "Convert radians to degrees" },
+    FormulaFnEntry { name: "asinh", signature: "asinh(x)", insert: "asinh(", summary: "Inverse hyperbolic sine" },
+    FormulaFnEntry { name: "acosh", signature: "acosh(x)", insert: "acosh(", summary: "Inverse hyperbolic cosine (x >= 1)" },
+    FormulaFnEntry { name: "atanh", signature: "atanh(x)", insert: "atanh(", summary: "Inverse hyperbolic tangent (|x| < 1)" },
+    FormulaFnEntry { name: "floor", signature: "floor(x)", insert: "floor(", summary: "Largest integer <= x" },
+    FormulaFnEntry { name: "ceil", signature: "ceil(x)", insert: "ceil(", summary: "Smallest integer >= x" },
+    FormulaFnEntry { name: "round", signature: "round(x[, digits])", insert: "round(", summary: "Round x to nearest integer or digits" },
+    FormulaFnEntry { name: "trunc", signature: "trunc(x)", insert: "trunc(", summary: "Truncate fractional part toward zero" },
+    FormulaFnEntry { name: "clamp", signature: "clamp(x, lo, hi)", insert: "clamp(", summary: "Constrain x to interval [lo, hi]" },
+    FormulaFnEntry { name: "sign", signature: "sign(x)", insert: "sign(", summary: "Sign of x (-1, 0, or 1)" },
+    FormulaFnEntry { name: "gauss", signature: "gauss(mean, sd[, seed])", insert: "gauss(", summary: "Seeded Gaussian random draw" },
+    FormulaFnEntry { name: "rnd", signature: "rnd(lo, hi[, seed])", insert: "rnd(", summary: "Seeded uniform random draw in [lo, hi)" },
+    FormulaFnEntry { name: "concatenate", signature: "concatenate(a, b)", insert: "concatenate(", summary: "Join text and numbers into a string" },
+    FormulaFnEntry { name: "gamma", signature: "gamma(x)", insert: "gamma(", summary: "Euler gamma function Gamma(x)" },
+    FormulaFnEntry { name: "gammaln", signature: "gammaln(x)", insert: "gammaln(", summary: "Natural logarithm of |Gamma(x)|" },
+    FormulaFnEntry { name: "igamma", signature: "igamma(a, x)", insert: "igamma(", summary: "Regularized lower incomplete gamma P(a, x)" },
+    FormulaFnEntry { name: "igammac", signature: "igammac(a, x)", insert: "igammac(", summary: "Regularized upper incomplete gamma Q(a, x)" },
+    FormulaFnEntry { name: "psi", signature: "psi(x)", insert: "psi(", summary: "Digamma function d/dx ln Gamma(x)" },
+    FormulaFnEntry { name: "beta", signature: "beta(a, b)", insert: "beta(", summary: "Euler beta function B(a, b)" },
+    FormulaFnEntry { name: "ibeta", signature: "ibeta(a, b, x)", insert: "ibeta(", summary: "Regularized incomplete beta I_x(a, b)" },
+    FormulaFnEntry { name: "besselj", signature: "besselj(n, x)", insert: "besselj(", summary: "Bessel function of the first kind J_n(x)" },
+    FormulaFnEntry { name: "bessely", signature: "bessely(n, x)", insert: "bessely(", summary: "Bessel function of the second kind Y_n(x)" },
+    FormulaFnEntry { name: "besseli", signature: "besseli(n, x)", insert: "besseli(", summary: "Modified Bessel function of the first kind I_n(x)" },
+    FormulaFnEntry { name: "besselk", signature: "besselk(n, x)", insert: "besselk(", summary: "Modified Bessel function of the second kind K_n(x)" },
+    FormulaFnEntry {
+        name: "hypgeometricm",
+        signature: "hypgeometricm(a, b, z)",
+        insert: "hypgeometricm(",
+        summary: "Confluent hypergeometric function M(a, b, z)",
+    },
+    FormulaFnEntry {
+        name: "hypgeometricu",
+        signature: "hypgeometricu(a, b, z)",
+        insert: "hypgeometricu(",
+        summary: "Confluent hypergeometric function U(a, b, z)",
+    },
+    FormulaFnEntry {
+        name: "hypgeometricf",
+        signature: "hypgeometricf(a, b, c, x)",
+        insert: "hypgeometricf(",
+        summary: "Gauss hypergeometric function 2F1(a, b; c; x)",
+    },
 ];
 
 /// Return the canonical formula signature shown by the trailing Formula Studio (`#14`).
@@ -147,6 +212,7 @@ fn render_mv_variable_selector(
                 state.mv_selected_col = idx;
                 state.mv_synced_sheet = Some(ds.id.clone());
                 state.mv_synced_col = Some(idx);
+                state.mv_synced_source = Some(var.source.clone());
                 state.mv_title_draft = var.title.clone();
                 state.mv_formula_draft = match &var.source {
                     VariableSource::Calculated { formula } => formula.clone(),
@@ -175,11 +241,144 @@ fn render_mv_variable_selector(
             state.mv_selected_col = col_count;
             state.mv_synced_sheet = Some(ds.id.clone());
             state.mv_synced_col = Some(col_count);
+            state.mv_synced_source = None;
             state.mv_title_draft = unique_new_calc_title(mv, "");
             state.mv_formula_draft.clear();
             state.mv_sub_tab = 0;
         }
     });
+}
+
+fn sync_mv_formula_drafts(ds: &DataSheet, mv: &MultipleVariablesTable, active_col: usize, state: &mut TrailingStudioEguiState) {
+    let col_count = mv.variables.len();
+    let current_source = mv.variables.get(active_col).map(|v| &v.source);
+    let sheet_or_col_changed = state.mv_synced_sheet.as_ref() != Some(&ds.id) || state.mv_synced_col != Some(active_col);
+    let source_changed = match (state.mv_synced_source.as_ref(), current_source) {
+        (Some(prev), Some(curr)) => prev != curr,
+        (None, Some(VariableSource::Calculated { .. })) | (Some(_), None) => true,
+        (None, Some(VariableSource::Entered)) | (None, None) => false,
+    };
+    if sheet_or_col_changed || source_changed {
+        state.mv_synced_sheet = Some(ds.id.clone());
+        state.mv_synced_col = Some(active_col);
+        state.mv_synced_source = current_source.cloned();
+        if let Some(var) = mv.variables.get(active_col) {
+            if sheet_or_col_changed || matches!(var.source, VariableSource::Calculated { .. }) {
+                state.mv_title_draft = var.title.clone();
+            }
+            state.mv_formula_draft = match &var.source {
+                VariableSource::Calculated { formula } => formula.clone(),
+                VariableSource::Entered => String::new(),
+            };
+        } else {
+            state.mv_title_draft = format!("Calc {}", col_count + 1);
+            state.mv_formula_draft.clear();
+        }
+    } else if state.mv_synced_source.is_none() && current_source.is_some() {
+        state.mv_synced_source = current_source.cloned();
+    }
+}
+
+fn render_mv_function_reference(
+    ui: &mut egui::Ui,
+    ds: &DataSheet,
+    state: &mut TrailingStudioEguiState,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+) {
+    let tokens = ctx_in.tokens;
+    let locale = &tokens.locale;
+    let editable = ctx_in.enabled && !ds.frozen;
+    let frozen_reason = ds.frozen.then_some("data sheet is frozen (read-only)");
+    ui.add_space(tokens.metrics.space_xs);
+    widgets::subheader(ui, tr(locale, "mv.panel.func_ref"));
+    let filter_hint = tr(locale, "mv.panel.search_funcs");
+    let mut fn_filter_edit = egui::TextEdit::singleline(&mut state.mv_fn_filter).desired_width(ui.available_width()).hint_text(filter_hint);
+    if !ctx_in.enabled {
+        fn_filter_edit = fn_filter_edit.interactive(false);
+    }
+    let fn_filter_resp = ui.add(fn_filter_edit);
+    let fn_filter_ak_label = filter_hint.to_owned();
+    let fn_filter_enabled = ctx_in.enabled;
+    fn_filter_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, fn_filter_enabled, fn_filter_ak_label.clone()));
+    if fn_filter_resp.rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+        meta.record_response(
+            ui,
+            &fn_filter_resp,
+            FrameInspectEntryInput {
+                widget_id: "inspector.mv.fn_filter",
+                role: "textbox",
+                label: filter_hint,
+                command_id: None,
+                value: Some(json!(state.mv_fn_filter)),
+                enabled: ctx_in.enabled,
+                disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+    let filter_lower = state.mv_fn_filter.trim().to_ascii_lowercase();
+    let fn_scroll_h = 4.0 * (SECTION_BTN_H + tokens.metrics.space_xs);
+    let fn_inner_max_w = (ui.available_width() - SCROLL_BAR_RESERVE_PT).max(120.0);
+    let chip_max_w = fn_inner_max_w.min(132.0);
+    ui.add_space(tokens.metrics.space_xs);
+    ui.scope(|ui| {
+        ui.spacing_mut().scroll.floating = false;
+        egui::ScrollArea::vertical().id_salt("egui_shell.mv_fn_ref.scroll").max_height(fn_scroll_h).auto_shrink([false, true]).show(ui, |ui| {
+            ui.set_max_width(fn_inner_max_w);
+            let mut matched_any = false;
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
+                for (idx, func) in STUDIO_FORMULA_FUNCS.iter().enumerate() {
+                    if !filter_lower.is_empty()
+                        && !func.name.to_ascii_lowercase().contains(&filter_lower)
+                        && !func.signature.to_ascii_lowercase().contains(&filter_lower)
+                        && !func.summary.to_ascii_lowercase().contains(&filter_lower)
+                    {
+                        continue;
+                    }
+                    matched_any = true;
+                    let wid = format!("inspector.mv.fn.{idx}");
+                    let r = studio_chip(
+                        ui,
+                        tokens,
+                        meta,
+                        &StudioChipSpec {
+                            label: func.name,
+                            tooltip: func.summary,
+                            max_w: chip_max_w,
+                            selected: state.mv_selected_fn == func.name,
+                            enabled: editable,
+                            border_override: None,
+                            widget_id: &wid,
+                            role: "button",
+                            command_id: None,
+                            disabled_reason: frozen_reason,
+                        },
+                    );
+                    if r {
+                        state.mv_selected_fn = String::from(func.name);
+                        state.mv_formula_draft.push_str(func.insert);
+                    }
+                }
+            });
+            if !matched_any {
+                widgets::dim_label(ui, tr(locale, "mv.panel.no_matching_funcs"));
+            }
+        });
+    });
+
+    if let Some(spec) = STUDIO_FORMULA_FUNCS.iter().find(|f| f.name == state.mv_selected_fn) {
+        egui::Frame::NONE.fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.divider)).corner_radius(4.0).inner_margin(egui::Margin::same(6)).show(
+            ui,
+            |ui| {
+                ui.label(egui::RichText::new(spec.signature).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_strong));
+                ui.label(egui::RichText::new(spec.summary).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
+            },
+        );
+    }
 }
 
 pub(super) fn render_mv_formula_studio(
@@ -202,21 +401,9 @@ pub(super) fn render_mv_formula_studio(
     }
     let active_col = state.mv_selected_col;
 
-    // Sync formula & title drafts cleanly whenever selected sheet or column changes.
-    if state.mv_synced_sheet.as_ref() != Some(&ds.id) || state.mv_synced_col != Some(active_col) {
-        state.mv_synced_sheet = Some(ds.id.clone());
-        state.mv_synced_col = Some(active_col);
-        if let Some(var) = mv.variables.get(active_col) {
-            state.mv_title_draft = var.title.clone();
-            state.mv_formula_draft = match &var.source {
-                VariableSource::Calculated { formula } => formula.clone(),
-                VariableSource::Entered => String::new(),
-            };
-        } else {
-            state.mv_title_draft = format!("Calc {}", col_count + 1);
-            state.mv_formula_draft.clear();
-        }
-    }
+    // Sync formula & title drafts cleanly whenever selected sheet, column, or column source changes
+    // (including unlinking a Calculated column into Entered values or undoing back to Calculated).
+    sync_mv_formula_drafts(ds, mv, active_col, state);
 
     // Keep live colored operand column outline highlights synced with the active formula!
     let effective_formula = if !state.mv_formula_draft.trim().is_empty() {
@@ -331,6 +518,8 @@ pub(super) fn render_mv_formula_studio(
         }
 
         let is_entered_col = mv.variables.get(active_col).is_some_and(|v| matches!(v.source, VariableSource::Entered));
+        let is_calculated_col =
+            !creating_new_col && mv.variables.get(active_col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }));
         let can_apply = editable && !state.mv_formula_draft.trim().is_empty() && formula_status.is_ok();
         let apply_reason = frozen_reason.or_else(|| (!can_apply).then_some("enter a valid non-circular formula"));
         let apply_label = if creating_new_col { "Add Calculated Column" } else { "Apply Formula" };
@@ -373,6 +562,34 @@ pub(super) fn render_mv_formula_studio(
                 obj.insert(String::from("col"), json!(active_col));
             }
             intents.push_engine("table.setCalculatedVariable", params);
+        }
+
+        // Offer one-click unlinking on Calculated columns to freeze computed cells into static Entered data.
+        if is_calculated_col {
+            ui.add_space(tokens.metrics.space_xs);
+            if studio_full_button(
+                ui,
+                tokens,
+                meta,
+                &StudioButtonSpec {
+                    label: tr(locale, "mv.panel.unlink_formula"),
+                    tooltip: tr(locale, "mv.panel.unlink_formula_tooltip"),
+                    selected: false,
+                    enabled: editable,
+                    primary: false,
+                    widget_id: "inspector.mv.unlink_formula",
+                    command_id: Some("table.unlinkCalculatedVariable"),
+                    disabled_reason: frozen_reason,
+                },
+            ) {
+                intents.push_engine(
+                    "table.unlinkCalculatedVariable",
+                    json!({
+                        "sheet_id": ds.id.as_str(),
+                        "col": active_col,
+                    }),
+                );
+            }
         }
 
         // Always provide a safe create-new-column path when an Entered column is focused so users
@@ -443,55 +660,7 @@ pub(super) fn render_mv_formula_studio(
             }
         });
 
-        ui.add_space(4.0);
-        widgets::subheader(ui, tr(locale, "mv.panel.func_ref"));
-        ui.add(egui::TextEdit::singleline(&mut state.mv_fn_filter).desired_width(ui.available_width()).hint_text("Search functions"));
-        let filter_lower = state.mv_fn_filter.trim().to_ascii_lowercase();
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = Vec2::new(tokens.metrics.space_xs, tokens.metrics.space_xs);
-            for (idx, func) in STUDIO_FORMULA_FUNCS.iter().enumerate() {
-                if !filter_lower.is_empty()
-                    && !func.name.to_ascii_lowercase().contains(&filter_lower)
-                    && !func.summary.to_ascii_lowercase().contains(&filter_lower)
-                {
-                    continue;
-                }
-                let wid = format!("inspector.mv.fn.{idx}");
-                let r = studio_chip(
-                    ui,
-                    tokens,
-                    meta,
-                    &StudioChipSpec {
-                        label: func.name,
-                        tooltip: func.summary,
-                        max_w: 84.0,
-                        selected: state.mv_selected_fn == func.name,
-                        enabled: editable,
-                        border_override: None,
-                        widget_id: &wid,
-                        role: "button",
-                        command_id: None,
-                        disabled_reason: frozen_reason,
-                    },
-                );
-                if r {
-                    state.mv_selected_fn = String::from(func.name);
-                    state.mv_formula_draft.push_str(func.insert);
-                }
-            }
-        });
-
-        if let Some(spec) = STUDIO_FORMULA_FUNCS.iter().find(|f| f.name == state.mv_selected_fn) {
-            egui::Frame::NONE
-                .fill(tokens.panel_bg)
-                .stroke(Stroke::new(1.0, tokens.divider))
-                .corner_radius(4.0)
-                .inner_margin(egui::Margin::same(6))
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(spec.signature).size(tokens.metrics.font_ui_small_pt).strong().color(tokens.text_strong));
-                    ui.label(egui::RichText::new(spec.summary).size(tokens.metrics.font_ui_small_pt).color(tokens.text_muted));
-                });
-        }
+        render_mv_function_reference(ui, ds, state, ctx_in, meta);
     } else {
         render_mv_role_and_levels_tab(ui, ds, mv, state, ctx_in, meta, intents);
     }

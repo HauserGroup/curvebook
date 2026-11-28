@@ -19,7 +19,7 @@ mod page_layout;
 mod results_interpret;
 mod table_selection;
 
-use curvebook_doc::{SheetId, TableArchetype};
+use curvebook_doc::{SheetId, TableArchetype, VariableSource};
 use egui::{Color32, Pos2, Sense, Stroke, Vec2};
 use serde_json::json;
 
@@ -175,6 +175,7 @@ pub struct TrailingStudioEguiState {
     pub mv_operand_highlights: Vec<MvOperandHighlight>,
     pub mv_synced_sheet: Option<SheetId>,
     pub mv_synced_col: Option<usize>,
+    pub mv_synced_source: Option<VariableSource>,
     pub table_decimals: Option<u8>,
     pub info_selected_constant: Option<String>,
     pub info_name_draft: String,
@@ -219,6 +220,7 @@ impl Default for TrailingStudioEguiState {
             mv_operand_highlights: Vec::new(),
             mv_synced_sheet: None,
             mv_synced_col: None,
+            mv_synced_source: None,
             table_decimals: None,
             info_selected_constant: None,
             info_name_draft: String::new(),

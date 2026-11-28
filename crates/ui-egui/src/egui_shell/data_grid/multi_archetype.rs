@@ -1177,10 +1177,17 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         None
     };
 
+    let mv_calc_target_col = match &ds.archetype {
+        TableArchetype::MultipleVariables(mv) if !right_clicked_x => {
+            mv.variables.get(target_dup_col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })).then_some(target_dup_col)
+        }
+        _ => None,
+    };
+
     let header_title = format!("Row {} Actions", row + 1);
     let paste_transpose_lbl = tr(mctx.locale, "grid.ctx.paste_transpose");
     type GridCtxItemTuple<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);
-    let items: [GridCtxItemTuple<'_>; 10] = [
+    let mut items: Vec<GridCtxItemTuple<'_>> = vec![
         (
             "grid.ctx.style_points",
             "Style Selected Points on Graph",
@@ -1234,11 +1241,20 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         ),
         ("grid.ctx.duplicate_column", "Duplicate Column", Some("table.paste"), dup_enabled, dup_disabled_reason),
     ];
+    if mv_calc_target_col.is_some() {
+        items.push((
+            "grid.ctx.unlink_calculated",
+            tr(mctx.locale, "cmd.table.unlinkCalculatedVariable"),
+            Some("table.unlinkCalculatedVariable"),
+            !ds.frozen,
+            ds.frozen.then_some("Data sheet is frozen (read-only)."),
+        ));
+    }
 
     let mut entries = Vec::with_capacity(items.len() + 2);
     entries.push(ActionMenuEntry::Header(&header_title));
     entries.push(ActionMenuEntry::Separator);
-    for (wid, label, command_id, enabled, disabled_reason) in items {
+    for &(wid, label, command_id, enabled, disabled_reason) in &items {
         entries.push(ActionMenuEntry::Item(
             ActionMenuItem::menu_item(wid, label).command_id(command_id).enabled(enabled).disabled_reason(disabled_reason),
         ));
@@ -1260,7 +1276,16 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         linked_guard_to_open = dispatch_row_context_menu_click(
             ui,
             wid,
-            &RowCtxDispatch { app, ds, row, cell_ctx, selected_x_bounds, linked_graph, row_override_points: &row_override_points },
+            &RowCtxDispatch {
+                app,
+                ds,
+                row,
+                cell_ctx,
+                selected_x_bounds,
+                linked_graph,
+                row_override_points: &row_override_points,
+                mv_calc_target_col,
+            },
             intents,
         );
         close_menu = true;
@@ -1283,10 +1308,11 @@ struct RowCtxDispatch<'a> {
     selected_x_bounds: Option<(usize, usize, usize, usize)>,
     linked_graph: Option<&'a curvebook_doc::GraphSheet>,
     row_override_points: &'a [serde_json::Value],
+    mv_calc_target_col: Option<usize>,
 }
 
 fn dispatch_row_context_menu_click(ui: &Ui, wid: &str, d: &RowCtxDispatch<'_>, intents: &mut PendingUiIntents) -> Option<LinkedDataRegion> {
-    let &RowCtxDispatch { app, ds, row, cell_ctx, selected_x_bounds, linked_graph, row_override_points } = d;
+    let &RowCtxDispatch { app, ds, row, cell_ctx, selected_x_bounds, linked_graph, row_override_points, mv_calc_target_col } = d;
     match wid {
         "grid.ctx.style_points" => {
             if let Some(g) = linked_graph {
@@ -1388,6 +1414,11 @@ fn dispatch_row_context_menu_click(ui: &Ui, wid: &str, d: &RowCtxDispatch<'_>, i
         "grid.ctx.duplicate_column" => {
             if let Some(intent) = build_duplicate_column_intent(app, ds, cell_ctx) {
                 intents.push(intent);
+            }
+        }
+        "grid.ctx.unlink_calculated" => {
+            if let Some(col) = mv_calc_target_col {
+                intents.push_engine("table.unlinkCalculatedVariable", json!({ "sheet_id": ds.id.as_str(), "col": col }));
             }
         }
         _ => {}

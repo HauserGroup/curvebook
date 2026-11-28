@@ -1089,3 +1089,242 @@ mod methods_tab_studio_tests {
         Ok(())
     }
 }
+
+fn assert_r23_1_formula_signatures() {
+    use curvebook_ui_egui::egui_shell::trailing_studio::studio_formula_signature;
+
+    for (name, expected_sig) in [
+        ("ln", "ln(x)"),
+        ("countif", "countif(cond)"),
+        ("sumif", "sumif(var, cond)"),
+        ("meanif", "meanif(var, cond)"),
+        ("count", "count(var)"),
+        ("counta", "counta(var)"),
+        ("sum", "sum(var)"),
+        ("min", "min(var)"),
+        ("max", "max(var)"),
+        ("var", "var(var)"),
+        ("geo_mean", "geo_mean(var)"),
+        ("percentile", "percentile(var, p)"),
+        ("countaif", "countaif(var, cond)"),
+        ("minif", "minif(var, cond)"),
+        ("maxif", "maxif(var, cond)"),
+        ("sdif", "sdif(var, cond)"),
+        ("semif", "semif(var, cond)"),
+        ("log", "log(x[, base])"),
+        ("log2", "log2(x)"),
+        ("exp10", "exp10(x)"),
+        ("pow", "pow(x, y)"),
+        ("mod", "mod(x, y)"),
+        ("fact", "fact(n)"),
+        ("perc", "perc(x)"),
+        ("pi", "pi([n])"),
+        ("null", "null"),
+        ("rad", "rad(deg)"),
+        ("deg", "deg(rad)"),
+        ("asinh", "asinh(x)"),
+        ("acosh", "acosh(x)"),
+        ("atanh", "atanh(x)"),
+        ("floor", "floor(x)"),
+        ("ceil", "ceil(x)"),
+        ("round", "round(x[, digits])"),
+        ("trunc", "trunc(x)"),
+        ("clamp", "clamp(x, lo, hi)"),
+        ("sign", "sign(x)"),
+        ("gauss", "gauss(mean, sd[, seed])"),
+        ("rnd", "rnd(lo, hi[, seed])"),
+        ("concatenate", "concatenate(a, b)"),
+        ("gamma", "gamma(x)"),
+        ("gammaln", "gammaln(x)"),
+        ("igamma", "igamma(a, x)"),
+        ("igammac", "igammac(a, x)"),
+        ("psi", "psi(x)"),
+        ("beta", "beta(a, b)"),
+        ("ibeta", "ibeta(a, b, x)"),
+        ("besselj", "besselj(n, x)"),
+        ("bessely", "bessely(n, x)"),
+        ("besseli", "besseli(n, x)"),
+        ("besselk", "besselk(n, x)"),
+        ("hypgeometricm", "hypgeometricm(a, b, z)"),
+        ("hypgeometricu", "hypgeometricu(a, b, z)"),
+        ("hypgeometricf", "hypgeometricf(a, b, c, x)"),
+    ] {
+        assert_eq!(studio_formula_signature(name), Some(expected_sig), "missing or mismatched signature for `{name}`");
+    }
+}
+
+fn read_mv_r23_table(driver: &EguiHumanPathDriver<'_, ShellTestState>) -> MultipleVariablesTable {
+    match &driver.state().app.document().data_sheet(&SheetId::new("mv-r23")).expect("mv-r23").archetype {
+        TableArchetype::MultipleVariables(t) => t.clone(),
+        _ => panic!("expected MultipleVariables"),
+    }
+}
+
+fn verify_mv_grid_unlink_frozen_and_locales(driver: &mut EguiHumanPathDriver<'_, ShellTestState>) -> BoxRes {
+    use curvebook_doc::VariableSource;
+    use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
+
+    // 5. Right-clicking calculated `FX=` role badge in grid header exposes Unlink Calculated Variable.
+    let badge_pos = driver.frame_meta().find_by_widget_id("mv_formula.role_badge.2").ok_or("missing role_badge.2")?.clipped_rect.center();
+    driver.click_at_button(badge_pos, PointerButton::Secondary, KeyModifiers::default())?;
+    let role_unlink = driver.frame_meta().find_by_widget_id("mv_formula.role_unlink.2").ok_or("missing mv_formula.role_unlink.2")?;
+    assert!(role_unlink.enabled && !role_unlink.label.ends_with('…') && !role_unlink.label.ends_with("..."));
+    driver.click_widget_id("mv_formula.role_unlink.2")?;
+    assert_eq!(read_mv_r23_table(driver).variables[2].source, VariableSource::Entered);
+    driver.click_widget_id("menu.edit")?;
+    driver.click_widget_id("menu.edit.undo")?;
+    assert_eq!(read_mv_r23_table(driver).variables[2].source, VariableSource::Calculated { formula: String::from("fact([Dose])") });
+
+    // 6. Right-clicking a calculated cell exposes `grid.ctx.unlink_calculated`.
+    let cell_pos = driver.frame_meta().find_by_widget_id("grid.cell.0.2.0").ok_or("missing grid.cell.0.2.0")?.clipped_rect.center();
+    driver.click_at_button(cell_pos, PointerButton::Secondary, KeyModifiers::default())?;
+    let ctx_unlink = driver.frame_meta().find_by_widget_id("grid.ctx.unlink_calculated").ok_or("missing grid.ctx.unlink_calculated")?;
+    assert!(ctx_unlink.enabled);
+    driver.click_widget_id("grid.ctx.unlink_calculated")?;
+    assert_eq!(read_mv_r23_table(driver).variables[2].source, VariableSource::Entered);
+    driver.click_widget_id("menu.edit")?;
+    driver.click_widget_id("menu.edit.undo")?;
+    assert_eq!(read_mv_r23_table(driver).variables[2].source, VariableSource::Calculated { formula: String::from("fact([Dose])") });
+
+    // 7. Frozen data sheet disables `inspector.mv.unlink_formula` with frozen reason.
+    let mut frozen_doc = driver.state().app.document().clone();
+    frozen_doc.data_sheet_mut(&SheetId::new("mv-r23")).ok_or("mv-r23")?.frozen = true;
+    *driver.state_mut().app.session_mut() = Session::from_document(frozen_doc);
+    driver.state_mut().app.sync_views();
+    driver.run_settled();
+    let frozen_unlink = driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").ok_or("missing frozen unlink_formula")?;
+    assert!(!frozen_unlink.enabled, "frozen sheet must disable inspector.mv.unlink_formula");
+    assert!(
+        frozen_unlink.disabled_reason.as_deref().is_some_and(|r| r.to_ascii_lowercase().contains("frozen")),
+        "expected frozen disabled_reason, got {:?}",
+        frozen_unlink.disabled_reason
+    );
+
+    // 8. Verify `inspector.mv.unlink_formula` renders cleanly without ellipsizing across all 14 Beta locales.
+    let mut unfrozen_doc = driver.state().app.document().clone();
+    unfrozen_doc.data_sheet_mut(&SheetId::new("mv-r23")).ok_or("mv-r23")?.frozen = false;
+    *driver.state_mut().app.session_mut() = Session::from_document(unfrozen_doc);
+    driver.state_mut().app.sync_views();
+    for loc in BETA_LOCALE_CODES {
+        let _ = driver.state_mut().app.set_locale(loc);
+        driver.state_mut().app.sync_views();
+        let loc_tokens = Tokens::from_theme_spec(&driver.state().app.theme, loc);
+        driver.set_tokens(loc_tokens);
+        driver.run_settled();
+        let entry = driver
+            .frame_meta()
+            .find_by_widget_id("inspector.mv.unlink_formula")
+            .ok_or_else(|| format!("{loc}: missing inspector.mv.unlink_formula"))?;
+        assert!(!entry.ellipsized, "{loc}: inspector.mv.unlink_formula ellipsized: `{}`", entry.label);
+        assert!(!entry.label.ends_with('…') && !entry.label.ends_with("..."), "{loc}: dot-free violation on `{}`", entry.label);
+    }
+    Ok(())
+}
+
+#[test]
+fn mv_formula_studio_function_reference_unlink_and_undo_human_path() -> BoxRes {
+    use curvebook_doc::VariableSource;
+    use curvebook_ui_egui::egui_shell::driver::{RegionBudgets, check_region_control_budgets};
+    use curvebook_ui_egui::interaction::KeyModifiers;
+
+    assert_r23_1_formula_signatures();
+
+    let mut doc = ProjectDocument::new("Formula Studio R23.1 Human Path")?;
+    let mut mv = MultipleVariablesTable::new(2, 3)?;
+    mv.variables[0].title = String::from("Dose");
+    mv.variables[0].cells = vec![Cell::number(3.0), Cell::number(4.0), Cell::number(5.0)];
+    mv.variables[1].title = String::from("Tag");
+    mv.variables[1].cells = vec![Cell::text("Alpha"), Cell::empty(), Cell::text("Beta")];
+    doc.add_data_sheet(DataSheet::new("mv-r23", "Formula Studio", TableArchetype::MultipleVariables(mv))?)?;
+    doc.active_sheet_id = Some(SheetId::new("mv-r23"));
+
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.host_draws_menu_bar = false;
+    app.nav.welcome.open = false;
+    app.nav.inspector_open = true;
+    app.sync_views();
+    let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+    let mut driver = make_shell_driver_with_state(ShellTestState::new(app).with_merge_passes(), ViewportMetrics::new(1280.0, 800.0, 1.0), tokens);
+
+    assert_clean_parity(&driver, "mv_formula_unfiltered")?;
+    let budget_violations = check_region_control_budgets(driver.frame_meta(), &RegionBudgets::CANONICAL);
+    assert!(budget_violations.is_empty(), "unfiltered formula studio budget violations: {budget_violations:?}");
+    assert!(driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").is_none());
+
+    // Create a new calculated column by searching & clicking `fact` via raw pointer/keyboard input.
+    driver.click_widget_id("inspector.mv.new_calc_col")?;
+    assert!(driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").is_none());
+    driver.click_widget_id("inspector.mv.fn_filter")?;
+    driver.type_text("fact")?;
+    let fact_wid = driver
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("inspector.mv.fn.") && e.label == "fact")
+        .map(|e| e.widget_id.clone())
+        .ok_or("expected filtered `fact` chip in Formula Studio")?;
+    driver.click_widget_id(&fact_wid)?;
+    assert_eq!(driver.state().views.trailing_studio.mv_selected_fn, "fact");
+    assert_eq!(driver.state().views.trailing_studio.mv_formula_draft, "fact(");
+
+    driver.click_widget_id("inspector.mv.insert_var.0")?;
+    driver.click_widget_id("inspector.mv.formula_input")?;
+    driver.press_key("End", KeyModifiers::default())?;
+    driver.type_text(")")?;
+    assert_eq!(driver.state().views.trailing_studio.mv_formula_draft, "fact([Dose])");
+    driver.click_widget_id("inspector.mv.apply_formula")?;
+
+    let mv_after_fact = read_mv_r23_table(&driver);
+    assert_eq!(mv_after_fact.variables.len(), 3);
+    assert_eq!(mv_after_fact.variables[2].source, VariableSource::Calculated { formula: String::from("fact([Dose])") });
+    let fact_nums: Vec<Option<f64>> = mv_after_fact.variables[2].cells.iter().map(Cell::active_number).collect();
+    assert_eq!(fact_nums, vec![Some(6.0), Some(24.0), Some(120.0)]);
+
+    // Verify searching & applying `counta` on a second calculated column.
+    driver.click_widget_id("inspector.mv.new_calc_col")?;
+    driver.click_widget_id("inspector.mv.fn_filter")?;
+    driver.press_key("a", KeyModifiers { ctrl: true, ..Default::default() })?;
+    driver.type_text("counta")?;
+    let counta_wid = driver
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("inspector.mv.fn.") && e.label == "counta")
+        .map(|e| e.widget_id.clone())
+        .ok_or("expected filtered `counta` chip in Formula Studio")?;
+    driver.click_widget_id(&counta_wid)?;
+    driver.click_widget_id("inspector.mv.insert_var.1")?;
+    driver.click_widget_id("inspector.mv.formula_input")?;
+    driver.press_key("End", KeyModifiers::default())?;
+    driver.type_text(")")?;
+    driver.click_widget_id("inspector.mv.apply_formula")?;
+
+    let mv_after_counta = read_mv_r23_table(&driver);
+    assert_eq!(mv_after_counta.variables.len(), 4);
+    assert_eq!(mv_after_counta.variables[3].source, VariableSource::Calculated { formula: String::from("counta([Tag])") });
+    let counta_nums: Vec<Option<f64>> = mv_after_counta.variables[3].cells.iter().map(Cell::active_number).collect();
+    assert_eq!(counta_nums, vec![Some(2.0), Some(2.0), Some(2.0)]);
+
+    // Verify `inspector.mv.unlink_formula` is visible, enabled, passes parity, and unlinks via raw pointer click.
+    assert_clean_parity(&driver, "mv_formula_calculated_with_unlink")?;
+    let unlink_entry = driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").ok_or("missing inspector.mv.unlink_formula")?;
+    assert!(unlink_entry.enabled && !unlink_entry.ellipsized);
+    assert_eq!(unlink_entry.command_id.as_deref(), Some("table.unlinkCalculatedVariable"));
+
+    driver.click_widget_id("inspector.mv.unlink_formula")?;
+    let mv_unlinked = read_mv_r23_table(&driver);
+    assert_eq!(mv_unlinked.variables[3].source, VariableSource::Entered);
+    let static_nums: Vec<Option<f64>> = mv_unlinked.variables[3].cells.iter().map(Cell::active_number).collect();
+    assert_eq!(static_nums, vec![Some(2.0), Some(2.0), Some(2.0)]);
+    assert!(driver.state().views.trailing_studio.mv_formula_draft.is_empty());
+    assert!(driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").is_none());
+
+    // Undo via Edit menu restores VariableSource::Calculated and resyncs mv_formula_draft.
+    driver.click_widget_id("menu.edit")?;
+    driver.click_widget_id("menu.edit.undo")?;
+    assert_eq!(read_mv_r23_table(&driver).variables[3].source, VariableSource::Calculated { formula: String::from("counta([Tag])") });
+    assert_eq!(driver.state().views.trailing_studio.mv_formula_draft, "counta([Tag])");
+    assert!(driver.frame_meta().find_by_widget_id("inspector.mv.unlink_formula").is_some_and(|e| e.enabled));
+
+    verify_mv_grid_unlink_frozen_and_locales(&mut driver)
+}
