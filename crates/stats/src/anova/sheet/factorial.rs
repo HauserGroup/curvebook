@@ -7,8 +7,9 @@
 //! - Searle, S. R. (1987). *Linear Models for Unbalanced Data*. Wiley.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, PValueFormat, RepeatedMeasuresDesign,
-    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, ObservationAccounting, ObservationAccountingKind,
+    PValueFormat, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType,
+    TableArchetype,
 };
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
@@ -29,8 +30,9 @@ use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml_with_policy, emit_random_intercept_reml_with_policy, emit_unstructured_rm_reml,
 };
 use crate::common::{
-    TabBuilder, checklist_item, enforce_summary_mode_matrix, init_result_sheet, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
+    enforce_summary_mode_matrix, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    record_omitted_row_reason, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices, unpaired_observation_accounting,
 };
 use crate::error::StatsError;
 use crate::formula_design::resolve_factorial_formula_subsets;
@@ -44,20 +46,26 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs, post_hoc, aux_tabs, estimator_note, factor_source_indices) = match &sheet.archetype {
-        TableArchetype::Grouped(grouped) => {
-            let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt, confidence.alpha())?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note, outcome.factor_source_indices)
-        }
+    let outcome = match &sheet.archetype {
+        TableArchetype::Grouped(grouped) => run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt, confidence.alpha())?,
         TableArchetype::MultipleVariables(mv) => {
             if !spec.selected_data_sets.is_empty() {
                 let _ = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
             }
-            let outcome = run_multifactor_mv(mv, &mut out, fac_spec, p_fmt, confidence.alpha())?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note, outcome.factor_source_indices)
+            run_multifactor_mv(mv, &mut out, fac_spec, p_fmt, confidence.alpha())?
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
+    let GroupedFactorialOutcome {
+        mut result,
+        observations: obs,
+        post_hoc,
+        aux_tabs,
+        estimator_note,
+        factor_source_indices,
+        accounting,
+        ignored_non_numeric,
+    } = outcome;
 
     if result.terms.iter().any(|t| t.df > 0.0 && t.p_value.is_none()) {
         finalize_term_p_values(&mut result)?;
@@ -173,6 +181,19 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
         },
     ));
 
+    let anova_ctx = if fac_spec.three_way {
+        "Three-way ANOVA"
+    } else if matches!(sheet.archetype, TableArchetype::MultipleVariables(_)) {
+        "Multifactor ANOVA"
+    } else {
+        "Two-way ANOVA"
+    };
+    if accounting.kind == ObservationAccountingKind::ListwiseAnova && accounting.rows_omitted() > 0 {
+        append_listwise_filtered_checklist_and_footnote(&mut out, anova_ctx, accounting.rows_omitted(), accounting.analyzed);
+    }
+    append_ignored_text_checklist_and_footnote(&mut out, anova_ctx, &ignored_non_numeric);
+    out.observation_accounting = Some(accounting);
+
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
@@ -184,6 +205,70 @@ pub(in crate::anova) struct GroupedFactorialOutcome {
     pub(in crate::anova) aux_tabs: Vec<ResultTab>,
     pub(in crate::anova) estimator_note: Option<String>,
     pub(in crate::anova) factor_source_indices: Vec<Option<Vec<usize>>>,
+    pub(in crate::anova) accounting: ObservationAccounting,
+    pub(in crate::anova) ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn scan_grouped_cells_audit(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize]) -> (usize, usize, Vec<(String, usize)>) {
+    let mut excluded_cells = 0_usize;
+    let mut non_numeric_total = 0_usize;
+    let mut ignored = Vec::new();
+    for &c in selected_cols {
+        let Some(ds) = grouped.data_sets.get(c) else {
+            continue;
+        };
+        let mut col_non_num = 0_usize;
+        for row in &ds.cells {
+            for cell in row {
+                if cell.excluded {
+                    excluded_cells += 1;
+                } else if is_ignored_non_numeric_cell(cell) {
+                    col_non_num += 1;
+                }
+            }
+        }
+        if col_non_num > 0 {
+            non_numeric_total += col_non_num;
+            ignored.push((ds.title.clone(), col_non_num));
+        }
+    }
+    (excluded_cells, non_numeric_total, ignored)
+}
+
+fn scan_grouped_rm_cell_accounting(
+    grouped: &curvebook_doc::GroupedTable,
+    active_rows: &[usize],
+    active_cols: &[usize],
+    active_subs: &[usize],
+    selected_cols: &[usize],
+    kind: ObservationAccountingKind,
+    analyzed: usize,
+) -> (ObservationAccounting, Vec<(String, usize)>) {
+    let (all_excluded, all_non_num, ignored) = scan_grouped_cells_audit(grouped, selected_cols);
+    let mut omitted_excluded = 0_usize;
+    let mut omitted_non_numeric = 0_usize;
+    let mut omitted_missing = 0_usize;
+    for &orig_s in active_subs {
+        for &orig_r in active_rows {
+            for &orig_c in active_cols {
+                match grouped.observation(orig_r, orig_c, orig_s) {
+                    Some(cell) if cell.active_number().is_some() => {}
+                    Some(cell) if cell.excluded => omitted_excluded += 1,
+                    Some(cell) if is_ignored_non_numeric_cell(cell) => omitted_non_numeric += 1,
+                    _ => omitted_missing += 1,
+                }
+            }
+        }
+    }
+    let acc = ObservationAccounting {
+        omitted_excluded,
+        omitted_non_numeric,
+        omitted_missing,
+        ignored_non_numeric_cells: all_non_num,
+        excluded_cells: all_excluded,
+        ..ObservationAccounting::new(kind, analyzed)
+    };
+    (acc, ignored)
 }
 
 pub(in crate::anova) fn build_rm_sphericity_tab(
@@ -668,6 +753,15 @@ pub(in crate::anova) fn run_grouped_factorial(
                     Some(estimator_desc.clone()),
                     format!("Fitted classical balanced three-way RM ANOVA with within-subject flags {:?} and {corr_lbl} sphericity.", rm_flags),
                 ));
+                let (accounting, ignored_non_numeric) = scan_grouped_rm_cell_accounting(
+                    grouped,
+                    &active_rows,
+                    &selected_cols,
+                    &active_subs,
+                    &selected_cols,
+                    ObservationAccountingKind::ListwiseAnova,
+                    data.rows.len(),
+                );
                 return Ok(GroupedFactorialOutcome {
                     result: rm3.anova,
                     observations: data,
@@ -675,6 +769,8 @@ pub(in crate::anova) fn run_grouped_factorial(
                     aux_tabs: sph_tab.into_iter().collect(),
                     estimator_note: Some(format!("Estimator: {estimator_desc}.")),
                     factor_source_indices: vec![None, None, None],
+                    accounting,
+                    ignored_non_numeric,
                 });
             }
             return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt, alpha);
@@ -709,6 +805,8 @@ pub(in crate::anova) fn run_grouped_factorial(
         let explicit_subsets = fac_spec.formula.as_ref().map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &[])).transpose()?;
         let (res, model) =
             fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order.clamp(1, 3), explicit_subsets, fac_spec.ss_type)?;
+        let (excluded_cells, non_numeric_total, ignored_non_numeric) = scan_grouped_cells_audit(grouped, &selected_cols);
+        let accounting = unpaired_observation_accounting(data.rows.len(), non_numeric_total, excluded_cells);
         return Ok(GroupedFactorialOutcome {
             result: res,
             observations: data,
@@ -716,6 +814,8 @@ pub(in crate::anova) fn run_grouped_factorial(
             aux_tabs: Vec::new(),
             estimator_note: Some(String::from("Estimator: Ordinary least-squares three-way factorial ANOVA.")),
             factor_source_indices: vec![None, None, None],
+            accounting,
+            ignored_non_numeric,
         });
     }
 
@@ -890,6 +990,12 @@ pub(in crate::anova) fn run_grouped_factorial(
             ],
             rows: obs,
         };
+        let (excluded_cells, non_numeric_total, ignored_non_numeric) = scan_grouped_cells_audit(grouped, &selected_cols);
+        let accounting = ObservationAccounting {
+            ignored_non_numeric_cells: non_numeric_total,
+            excluded_cells,
+            ..ObservationAccounting::new(ObservationAccountingKind::ListwiseAnova, data.rows.len())
+        };
         return Ok(GroupedFactorialOutcome {
             result: rm_res.anova,
             observations: data,
@@ -897,6 +1003,8 @@ pub(in crate::anova) fn run_grouped_factorial(
             aux_tabs: sph_tab.into_iter().collect(),
             estimator_note: Some(format!("Estimator: {estimator_desc}.")),
             factor_source_indices: vec![Some(active_rows), Some(active_cols)],
+            accounting,
+            ignored_non_numeric,
         });
     }
 
@@ -919,6 +1027,8 @@ pub(in crate::anova) fn run_grouped_factorial(
     let explicit_subsets = fac_spec.formula.as_ref().map(|f| resolve_factorial_formula_subsets(f, data.factor_names.len(), &[])).transpose()?;
     let (res, model) =
         fit_factorial_anova_with_model_and_subsets(&data, fac_spec.max_interaction_order.clamp(1, 2), explicit_subsets, fac_spec.ss_type)?;
+    let (excluded_cells, non_numeric_total, ignored_non_numeric) = scan_grouped_cells_audit(grouped, &selected_cols);
+    let accounting = unpaired_observation_accounting(data.rows.len(), non_numeric_total, excluded_cells);
     Ok(GroupedFactorialOutcome {
         result: res,
         observations: data,
@@ -926,6 +1036,8 @@ pub(in crate::anova) fn run_grouped_factorial(
         aux_tabs: Vec::new(),
         estimator_note: Some(String::from("Estimator: Ordinary least-squares two-way factorial ANOVA.")),
         factor_source_indices: vec![Some(active_rows), Some(active_cols)],
+        accounting,
+        ignored_non_numeric,
     })
 }
 
@@ -1350,6 +1462,15 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         observed_cells,
     };
     let factor_source_indices = if is_three_way { vec![None, None, None] } else { vec![Some(active_rows.to_vec()), Some(active_cols.to_vec())] };
+    let (accounting, ignored_non_numeric) = scan_grouped_rm_cell_accounting(
+        grouped,
+        active_rows,
+        active_cols,
+        active_subs,
+        active_cols,
+        ObservationAccountingKind::MixedEffectsAnova,
+        n_obs,
+    );
     Ok(GroupedFactorialOutcome {
         result: res,
         observations: data,
@@ -1357,6 +1478,8 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         aux_tabs: Vec::new(),
         estimator_note: Some(format!("Estimator: {estimator_desc}.")),
         factor_source_indices,
+        accounting,
+        ignored_non_numeric,
     })
 }
 
@@ -1397,41 +1520,74 @@ pub(in crate::anova) fn run_multifactor_mv(
     }
 
     let n_rows = mv.row_count();
+    let cell_has_entry = |c: Option<&curvebook_doc::Cell>| c.is_some_and(|cell| cell.excluded || !cell.is_empty());
+    let active_end = (0..n_rows).rfind(|&r| {
+        cell_has_entry(resp_var.cells.get(r))
+            || fac_spec.multifactor_columns.iter().any(|&c_idx| mv.variables.get(c_idx).is_some_and(|v| cell_has_entry(v.cells.get(r))))
+    });
     let mut obs = Vec::new();
-    for r in 0..n_rows {
-        let Some(y) = resp_var.cells.get(r).and_then(|c| c.active_number()) else {
-            continue;
-        };
-        let mut lvls = Vec::with_capacity(fac_spec.multifactor_columns.len());
-        let mut valid = true;
-        for (f_pos, &c_idx) in fac_spec.multifactor_columns.iter().enumerate() {
-            let factor_var = mv.variables.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
-            let cell = factor_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: n_rows, actual: factor_var.cells.len() })?;
-            if cell.excluded {
-                valid = false;
-                break;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::ListwiseAnova, 0);
+    let mut resp_non_num = 0_usize;
+    if let Some(end_row) = active_end {
+        for r in 0..=end_row {
+            let rc = resp_var.cells.get(r);
+            let any_factor_entry =
+                fac_spec.multifactor_columns.iter().any(|&c_idx| mv.variables.get(c_idx).is_some_and(|v| cell_has_entry(v.cells.get(r))));
+            if !cell_has_entry(rc) && !any_factor_entry {
+                continue;
             }
-            let tok = match &cell.value {
-                curvebook_doc::CellValue::Text(s) => s.trim().to_owned(),
-                curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
-                _ => {
+            let mut row_has_excluded = false;
+            if rc.is_some_and(|c| c.excluded) {
+                row_has_excluded = true;
+                accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+            }
+            let row_resp_non_num = rc.is_some_and(is_ignored_non_numeric_cell);
+            if row_resp_non_num {
+                resp_non_num += 1;
+            }
+            let mut lvls = Vec::with_capacity(fac_spec.multifactor_columns.len());
+            let mut valid = true;
+            for (f_pos, &c_idx) in fac_spec.multifactor_columns.iter().enumerate() {
+                let factor_var = mv.variables.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
+                let cell = factor_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: n_rows, actual: factor_var.cells.len() })?;
+                if cell.excluded {
+                    row_has_excluded = true;
+                    accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
                     valid = false;
-                    break;
+                    continue;
                 }
-            };
-            let Some(pos) = factor_levels[f_pos].iter().position(|l| l == &tok) else {
-                valid = false;
-                break;
-            };
-            lvls.push(pos);
-        }
-        if valid {
-            obs.push((lvls, y));
+                if !valid {
+                    continue;
+                }
+                let tok = match &cell.value {
+                    curvebook_doc::CellValue::Text(s) => s.trim().to_owned(),
+                    curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+                    _ => {
+                        valid = false;
+                        continue;
+                    }
+                };
+                let Some(pos) = factor_levels[f_pos].iter().position(|l| l == &tok) else {
+                    valid = false;
+                    continue;
+                };
+                lvls.push(pos);
+            }
+            if let Some(y) = rc.and_then(|c| c.active_number())
+                && valid
+            {
+                obs.push((lvls, y));
+            } else {
+                record_omitted_row_reason(&mut accounting, row_has_excluded, row_resp_non_num, false);
+            }
         }
     }
     if obs.is_empty() {
         return Err(StatsError::EmptyInput);
     }
+    accounting.analyzed = obs.len();
+    accounting.ignored_non_numeric_cells = resp_non_num;
+    let ignored_non_numeric = if resp_non_num > 0 { vec![(resp_var.title.clone(), resp_non_num)] } else { Vec::new() };
     // Drop unobserved/excluded factor levels after complete-case row filtering before effect coding (#30).
     let n_factors = factor_levels.len();
     let mut remaps = Vec::with_capacity(n_factors);
@@ -1526,6 +1682,8 @@ pub(in crate::anova) fn run_multifactor_mv(
             aux_tabs: sph_tab.into_iter().collect(),
             estimator_note: Some(format!("Estimator: {estimator_desc}.")),
             factor_source_indices: vec![None, None, None],
+            accounting,
+            ignored_non_numeric,
         });
     }
     let explicit_subsets = fac_spec
@@ -1542,5 +1700,7 @@ pub(in crate::anova) fn run_multifactor_mv(
         aux_tabs: Vec::new(),
         estimator_note: None,
         factor_source_indices: vec![None; n_fac],
+        accounting,
+        ignored_non_numeric,
     })
 }

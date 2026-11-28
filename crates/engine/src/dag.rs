@@ -1158,6 +1158,7 @@ pub(crate) fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCod
     target.eliminated_outliers.clear();
     target.checklist.clear();
     target.cell_details.clear();
+    target.observation_accounting = None;
     // Preserve user-authored annotations (`floating_notes`, `color_tag`) across transient recomputation failures.
     target.status = ResultStatus::Failed { code, message };
 }
@@ -1411,6 +1412,7 @@ fn recompute_result_sheet(
                 computed.fitted_curves.clear();
                 computed.analyzable_data = None;
                 computed.eliminated_outliers.clear();
+                computed.observation_accounting = None;
                 computed.status = ResultStatus::Failed { code, message: message.clone() };
                 if validate_result_sheet_finite(&computed, &existing.id).is_ok() {
                     *target = computed;

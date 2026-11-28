@@ -31,8 +31,8 @@
 //!   *Biometrics*, 44(3), 837-845. `doi:10.2307/2531595`.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CellValue, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultCell, ResultSheet,
-    ResultTabKind, SimpleLogisticSpec, TableArchetype,
+    AnalysisKind, AnalysisSpec, CellValue, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, ObservationAccounting,
+    ObservationAccountingKind, ResultCell, ResultSheet, ResultTabKind, SimpleLogisticSpec, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
@@ -40,8 +40,9 @@ use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, ci_cell, enforce_summary_mode_matrix, init_result_sheet,
-    num_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
+    enforce_summary_mode_matrix, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
+    record_omitted_row_reason, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, RocResult, roc_curve_analysis};
@@ -1049,9 +1050,37 @@ struct ExtractedXyBinaryDataset {
     observed: Vec<(usize, f64, f64)>,
     unknown_x: Vec<(usize, f64)>,
     ignored_text_cells: usize,
+    accounting: ObservationAccounting,
 }
 
-fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<Vec<ExtractedXyBinaryDataset>, StatsError> {
+struct ExtractedXyBinaryBatch {
+    datasets: Vec<ExtractedXyBinaryDataset>,
+    x_title: String,
+    x_excluded_cells: usize,
+    x_non_numeric_cells: usize,
+    x_only_omitted: ObservationAccounting,
+}
+
+fn scan_xy_shared_x_audit(xy: &curvebook_doc::XyTable, is_gen_seq: bool) -> (String, usize, usize) {
+    let x_title = if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() };
+    if is_gen_seq {
+        return (x_title, 0, 0);
+    }
+    let mut x_excluded_cells = 0_usize;
+    let mut x_non_numeric_cells = 0_usize;
+    for subs in &xy.x_cells {
+        for c in subs {
+            if c.excluded {
+                x_excluded_cells += 1;
+            } else if is_ignored_non_numeric_cell(c) {
+                x_non_numeric_cells += 1;
+            }
+        }
+    }
+    (x_title, x_excluded_cells, x_non_numeric_cells)
+}
+
+fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ExtractedXyBinaryBatch, StatsError> {
     let TableArchetype::Xy(xy) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "Simple logistic regression", actual: sheet.archetype.kind() });
     };
@@ -1067,22 +1096,39 @@ fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<
     }
 
     let n_rows = xy.row_count();
+    let is_gen_seq = matches!(xy.x_mode, curvebook_doc::XColumnMode::GeneratedSequence { .. });
+    let (x_title, x_excluded_cells, x_non_numeric_cells) = scan_xy_shared_x_audit(xy, is_gen_seq);
+    let mut row_had_any_y_entry = vec![false; n_rows];
     let mut datasets = Vec::with_capacity(selected.len());
     for ds_idx in selected {
         let col = &xy.data_sets[ds_idx];
         let mut observed = Vec::new();
         let mut unknown_x = Vec::new();
         let mut ignored_text_cells = 0_usize;
+        let mut acc = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
 
         for row in 0..n_rows {
             let x_val = xy.x_summary_at(row)?;
+            let x_subs = if is_gen_seq { &[][..] } else { xy.x_cells.get(row).map(Vec::as_slice).unwrap_or(&[]) };
+            let x_excl = x_subs.iter().any(|c| c.excluded);
+            let x_non_num = x_subs.iter().any(is_ignored_non_numeric_cell);
             let y_cell = col.cells.get(row).and_then(|r| r.first());
+            let y_has_entry = y_cell.is_some_and(|c| c.excluded || !c.is_empty());
+            let y_excl = y_cell.is_some_and(|c| c.excluded);
+            if y_has_entry {
+                row_had_any_y_entry[row] = true;
+            }
+            if y_excl {
+                acc.excluded_cells += 1;
+            }
             if let Some(cell) = y_cell
                 && !cell.excluded
             {
                 match &cell.value {
-                    CellValue::Text(_) => {
+                    CellValue::Text(_) if is_ignored_non_numeric_cell(cell) => {
                         ignored_text_cells += 1;
+                        acc.ignored_non_numeric_cells += 1;
+                        record_omitted_row_reason(&mut acc, x_excl, true, false);
                         continue;
                     }
                     CellValue::Number(yv) if !yv.is_finite() => {
@@ -1092,13 +1138,18 @@ fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<
                 }
             }
             let Some(xv) = x_val.filter(|v| v.is_finite()) else {
+                if y_has_entry {
+                    record_omitted_row_reason(&mut acc, x_excl || y_excl, x_non_num, false);
+                }
                 continue;
             };
             match y_cell {
                 None => {
                     unknown_x.push((row, xv));
                 }
-                Some(cell) if cell.excluded => {}
+                Some(cell) if cell.excluded => {
+                    record_omitted_row_reason(&mut acc, true, false, false);
+                }
                 Some(cell) => match &cell.value {
                     CellValue::Empty => {
                         unknown_x.push((row, xv));
@@ -1110,14 +1161,42 @@ fn extract_xy_binary_datasets(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<
                         observed.push((row, xv, *yv));
                     }
                     CellValue::Text(_) => {
-                        ignored_text_cells += 1;
+                        // Whitespace-only text cell behaves as empty unknown X when not ignored non-numeric.
+                        unknown_x.push((row, xv));
                     }
                 },
             }
         }
-        datasets.push(ExtractedXyBinaryDataset { data_set_index: ds_idx, title: col.title.clone(), observed, unknown_x, ignored_text_cells });
+        acc.analyzed = observed.len();
+        datasets.push(ExtractedXyBinaryDataset {
+            data_set_index: ds_idx,
+            title: col.title.clone(),
+            observed,
+            unknown_x,
+            ignored_text_cells,
+            accounting: acc,
+        });
     }
-    Ok(datasets)
+
+    let mut x_only_omitted = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
+    if !is_gen_seq {
+        for (row, &had_y) in row_had_any_y_entry.iter().enumerate() {
+            if had_y {
+                continue;
+            }
+            let x_subs = xy.x_cells.get(row).map(Vec::as_slice).unwrap_or(&[]);
+            if !x_subs.iter().any(|c| c.excluded || !c.is_empty()) {
+                continue;
+            }
+            if xy.x_summary_at(row)?.filter(|v| v.is_finite()).is_none() {
+                let x_excl = x_subs.iter().any(|c| c.excluded);
+                let x_non_num = x_subs.iter().any(is_ignored_non_numeric_cell);
+                record_omitted_row_reason(&mut x_only_omitted, x_excl, x_non_num, false);
+            }
+        }
+    }
+
+    Ok(ExtractedXyBinaryBatch { datasets, x_title, x_excluded_cells, x_non_numeric_cells, x_only_omitted })
 }
 
 fn build_sigmoid_overlay(
@@ -1281,7 +1360,8 @@ fn push_dataset_scalars(out: &mut ResultSheet, data_set_index: usize, res: &Simp
 /// and assemble a complete [`ResultSheet`].
 pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_spec: &SimpleLogisticSpec) -> Result<ResultSheet, StatsError> {
     enforce_summary_mode_matrix(sheet, &AnalysisKind::SimpleLogisticRegression(*sl_spec))?;
-    let datasets = extract_xy_binary_datasets(sheet, spec)?;
+    let batch = extract_xy_binary_datasets(sheet, spec)?;
+    let datasets = &batch.datasets;
     let mut out = init_result_sheet(spec)?;
     let alpha = spec.confidence_level.alpha();
     let multi = datasets.len() > 1;
@@ -1313,10 +1393,13 @@ pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_s
     ]);
 
     let mut ignored_text_details: Vec<(String, usize)> = Vec::new();
+    if batch.x_non_numeric_cells > 0 {
+        ignored_text_details.push((batch.x_title.clone(), batch.x_non_numeric_cells));
+    }
     let mut has_roc_rows = false;
     let mut has_class_rows = false;
 
-    for ds in &datasets {
+    for ds in datasets {
         if ds.ignored_text_cells > 0 {
             ignored_text_details.push((ds.title.clone(), ds.ignored_text_cells));
         }
@@ -1426,6 +1509,20 @@ pub fn run_simple_logistic_analysis(sheet: &DataSheet, spec: &AnalysisSpec, sl_s
     if sl_spec.emit_row_classification && has_class_rows {
         out.tabs.push(class_tab.build());
     }
+    let mut total_acc = batch.x_only_omitted;
+    total_acc.excluded_cells = batch.x_excluded_cells;
+    total_acc.ignored_non_numeric_cells = batch.x_non_numeric_cells;
+    for ds in datasets {
+        total_acc.analyzed = total_acc.analyzed.saturating_add(ds.accounting.analyzed);
+        total_acc.omitted_excluded = total_acc.omitted_excluded.saturating_add(ds.accounting.omitted_excluded);
+        total_acc.omitted_non_numeric = total_acc.omitted_non_numeric.saturating_add(ds.accounting.omitted_non_numeric);
+        total_acc.omitted_invalid = total_acc.omitted_invalid.saturating_add(ds.accounting.omitted_invalid);
+        total_acc.omitted_missing = total_acc.omitted_missing.saturating_add(ds.accounting.omitted_missing);
+        total_acc.ignored_non_numeric_cells = total_acc.ignored_non_numeric_cells.saturating_add(ds.accounting.ignored_non_numeric_cells);
+        total_acc.excluded_cells = total_acc.excluded_cells.saturating_add(ds.accounting.excluded_cells);
+    }
+    out.observation_accounting = Some(total_acc);
+    append_listwise_filtered_checklist_and_footnote(&mut out, "Simple logistic regression", total_acc.rows_omitted(), total_acc.analyzed);
     append_ignored_text_checklist_and_footnote(&mut out, "Simple logistic regression", &ignored_text_details);
 
     sanitize_result_sheet_floats(&mut out)?;

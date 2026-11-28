@@ -60,8 +60,9 @@
 
 use curvebook_doc::{
     AnalysisSpec, Cell, CellValue, ChecklistStatus, CovariateProfile, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, FormulaTerm,
-    ModelFormulaSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, RegressionCiMethod, ResultCell, ResultSheet, ResultTabKind,
-    SurvivalAnalysisSpec, SurvivalObservation, SurvivalOtherValuePolicy, SurvivalStatus, TableArchetype, VariableColumn, VariableRole,
+    ModelFormulaSpec, MultipleVariablesTable, ObservationAccounting, ObservationAccountingKind, PValueFormat, PairwiseComparisonRecord,
+    RegressionCiMethod, ResultCell, ResultSheet, ResultTabKind, SurvivalAnalysisSpec, SurvivalObservation, SurvivalOtherValuePolicy, SurvivalStatus,
+    TableArchetype, VariableColumn, VariableRole,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
@@ -72,7 +73,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
     finite_ci_cell, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    resolve_selected_indices, sanitize_result_sheet_floats, text_cell,
+    record_omitted_row_reason, resolve_selected_indices, sanitize_result_sheet_floats, text_cell,
 };
 use crate::cox_ext::{
     compute_cox_snell_rows, compute_cox_vifs, cox_aic_and_aicc_by_events, cox_profile_likelihood_ci, median_survival_ratio_ci,
@@ -1924,45 +1925,136 @@ fn validate_selected_data_sets(selected: &[usize], total: usize) -> Result<(), S
     Ok(())
 }
 
-fn extract_survival_table_cohort_with_policy(
+struct SurvivalTableExtraction {
+    cohorts: Vec<(usize, String, Vec<SurvivalObservation>)>,
+    accounting: ObservationAccounting,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn extract_survival_table_cohorts_with_accounting(
     table: &curvebook_doc::SurvivalTable,
-    cohort_idx: usize,
+    indices: &[usize],
     event_code: Option<f64>,
     censored_code: Option<f64>,
     treat_other_as: SurvivalOtherValuePolicy,
-) -> Result<Vec<SurvivalObservation>, StatsError> {
-    if event_code.is_none() && censored_code.is_none() && treat_other_as == SurvivalOtherValuePolicy::Exclude {
-        return Ok(table.cohort_observations(cohort_idx)?);
-    }
-    let cohort = table.cohorts.get(cohort_idx).ok_or(StatsError::MissingColumn { index: cohort_idx })?;
-    let mut out = Vec::new();
-    for (row, status_subs) in cohort.cells.iter().enumerate() {
-        let Some(status_cell) = status_subs.first() else {
-            continue;
-        };
-        if status_cell.excluded || status_cell.is_empty() {
-            continue;
-        }
-        let Some(time_cell) = table.times.get(row) else {
-            continue;
-        };
-        if time_cell.excluded || time_cell.is_empty() {
-            continue;
-        }
-        let Some(t) = time_cell.active_number() else {
-            return Err(StatsError::InvalidParameter { name: "survival_time", value: f64::NAN });
-        };
-        if !t.is_finite() || t < 0.0 {
-            return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
-        }
-        let Some(st) = status_cell.active_number() else {
-            return Err(StatsError::InvalidParameter { name: "survival_status", value: f64::NAN });
-        };
-        if let Some(status) = parse_survival_status_with_policy(st, event_code, censored_code, treat_other_as)? {
-            out.push(SurvivalObservation { row, time: t, status });
+) -> Result<SurvivalTableExtraction, StatsError> {
+    let use_default_policy = event_code.is_none() && censored_code.is_none() && treat_other_as == SurvivalOtherValuePolicy::Exclude;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Survival, 0);
+    let mut time_non_num = 0_usize;
+    let mut counted_time_non_num = vec![false; table.row_count()];
+    let mut cohort_non_num = vec![0_usize; indices.len()];
+
+    for tc in &table.times {
+        if tc.excluded {
+            accounting.excluded_cells += 1;
         }
     }
-    Ok(out)
+    for &c_idx in indices {
+        let cohort = table.cohorts.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
+        for row in 0..table.row_count() {
+            if let Some(sc) = cohort.cells.get(row).and_then(|s| s.first())
+                && sc.excluded
+            {
+                accounting.excluded_cells += 1;
+            }
+        }
+    }
+
+    // Track rows where elapsed time has an entry (or exclusion) but no cohort has any status entry.
+    for row in 0..table.row_count() {
+        let tc = table.times.get(row);
+        let any_cohort_entry = table.cohorts.iter().any(|c| cell_has_entry(c.cells.get(row).and_then(|s| s.first())));
+        if !any_cohort_entry && cell_has_entry(tc) {
+            let t_excl = tc.is_some_and(|c| c.excluded);
+            let t_non_num = tc.is_some_and(is_ignored_non_numeric_cell);
+            if t_non_num && !counted_time_non_num[row] {
+                counted_time_non_num[row] = true;
+                time_non_num += 1;
+                accounting.ignored_non_numeric_cells += 1;
+            }
+            record_omitted_row_reason(&mut accounting, t_excl, t_non_num, false);
+        }
+    }
+
+    let mut list = Vec::with_capacity(indices.len());
+    for (pos, &c_idx) in indices.iter().enumerate() {
+        let cohort = table.cohorts.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
+        let obs = if use_default_policy {
+            table.cohort_observations(c_idx)?
+        } else {
+            let mut out = Vec::new();
+            for (row, status_subs) in cohort.cells.iter().enumerate() {
+                let Some(status_cell) = status_subs.first() else {
+                    continue;
+                };
+                if status_cell.excluded || status_cell.is_empty() {
+                    continue;
+                }
+                let Some(time_cell) = table.times.get(row) else {
+                    continue;
+                };
+                if time_cell.excluded || time_cell.is_empty() {
+                    continue;
+                }
+                let Some(t) = time_cell.active_number() else {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: f64::NAN });
+                };
+                if !t.is_finite() || t < 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+                }
+                let Some(st) = status_cell.active_number() else {
+                    return Err(StatsError::InvalidParameter { name: "survival_status", value: f64::NAN });
+                };
+                if let Some(status) = parse_survival_status_with_policy(st, event_code, censored_code, treat_other_as)? {
+                    out.push(SurvivalObservation { row, time: t, status });
+                } else {
+                    record_omitted_row_reason(&mut accounting, false, false, true);
+                }
+            }
+            out
+        };
+
+        // Audit rows in this cohort where status had an entry but was not retained (excluded or missing time/status).
+        for (row, status_subs) in cohort.cells.iter().enumerate() {
+            let sc = status_subs.first();
+            if !cell_has_entry(sc) {
+                continue;
+            }
+            let tc = table.times.get(row);
+            let s_excl = sc.is_some_and(|c| c.excluded);
+            let t_excl = tc.is_some_and(|c| c.excluded);
+            let s_missing = sc.is_none_or(|c| c.excluded || c.is_empty());
+            let t_missing = tc.is_none_or(|c| c.excluded || c.is_empty());
+            if s_missing || t_missing {
+                let s_non_num = sc.is_some_and(is_ignored_non_numeric_cell);
+                let t_non_num = tc.is_some_and(is_ignored_non_numeric_cell);
+                if s_non_num {
+                    cohort_non_num[pos] += 1;
+                    accounting.ignored_non_numeric_cells += 1;
+                }
+                if t_non_num && !counted_time_non_num[row] {
+                    counted_time_non_num[row] = true;
+                    time_non_num += 1;
+                    accounting.ignored_non_numeric_cells += 1;
+                }
+                record_omitted_row_reason(&mut accounting, s_excl || t_excl, s_non_num || t_non_num, false);
+            }
+        }
+
+        list.push((c_idx, cohort.title.clone(), obs));
+    }
+
+    let mut ignored_non_numeric = Vec::new();
+    if time_non_num > 0 {
+        let lbl = if table.time_title.trim().is_empty() { String::from("Time") } else { table.time_title.clone() };
+        ignored_non_numeric.push((lbl, time_non_num));
+    }
+    for (pos, &count) in cohort_non_num.iter().enumerate() {
+        if count > 0 {
+            ignored_non_numeric.push((table.cohorts[indices[pos]].title.clone(), count));
+        }
+    }
+    Ok(SurvivalTableExtraction { cohorts: list, accounting, ignored_non_numeric })
 }
 
 /// Execute a [`SurvivalAnalysisSpec`] against a `Survival` or `MultipleVariables` [`DataSheet`].
@@ -1996,19 +2088,15 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             mv_status_columns,
             mv_group_columns,
         } => {
-            let (mut cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
+            let (mut cohorts, mut accounting, ignored_non_numeric) = match &sheet.archetype {
                 TableArchetype::Survival(table) => {
                     validate_selected_data_sets(&spec.selected_data_sets, table.cohorts.len())?;
                     let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
                     if indices.is_empty() {
                         return Err(StatsError::EmptyInput);
                     }
-                    let mut list = Vec::with_capacity(indices.len());
-                    for c_idx in indices {
-                        let obs = extract_survival_table_cohort_with_policy(table, c_idx, *event_code, *censored_code, *treat_other_as)?;
-                        list.push((c_idx, table.cohorts[c_idx].title.clone(), obs));
-                    }
-                    (list, 0_usize, Vec::new())
+                    let ext = extract_survival_table_cohorts_with_accounting(table, &indices, *event_code, *censored_code, *treat_other_as)?;
+                    (ext.cohorts, ext.accounting, ext.ignored_non_numeric)
                 }
                 TableArchetype::MultipleVariables(mv) => {
                     let mv_ext = extract_mv_km_cohorts(
@@ -2023,7 +2111,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         *censored_code,
                         *treat_other_as,
                     )?;
-                    (mv_ext.cohorts, mv_ext.skipped_rows, mv_ext.ignored_non_numeric)
+                    (mv_ext.cohorts, mv_ext.accounting, mv_ext.ignored_non_numeric)
                 }
                 other => {
                     return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: other.kind() });
@@ -2233,7 +2321,14 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             }
 
             let min_events = km_results.iter().map(|k| k.n_events).min().unwrap_or(0);
-            let total_kept: usize = cohort_obs.iter().map(Vec::len).sum();
+            let total_kept: usize = km_results.iter().map(|k| k.n_total).sum();
+            let total_events: usize = km_results.iter().map(|k| k.n_events).sum();
+            let total_censored: usize = km_results.iter().map(|k| k.n_censored).sum();
+            accounting.analyzed = total_kept;
+            accounting.events = Some(total_events);
+            accounting.censored = Some(total_censored);
+            let omitted_rows = accounting.rows_omitted();
+            out.observation_accounting = Some(accounting);
             out.checklist.push(checklist_item(
                 "Event counts & censoring",
                 if min_events >= 5 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
@@ -2241,7 +2336,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 "Kaplan-Meier assumes non-informative censoring; medians cannot be estimated if survival remains above 0.5.",
             ));
             append_omitted_cohorts_checklist_and_footnote(&mut out, &omitted_cohorts);
-            append_listwise_filtered_checklist_and_footnote(&mut out, "Kaplan-Meier survival", skipped_mv_rows, total_kept);
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Kaplan-Meier survival", omitted_rows, total_kept);
             append_ignored_text_checklist_and_footnote(&mut out, "Kaplan-Meier survival", &ignored_non_numeric);
         }
         SurvivalAnalysisSpec::CoxProportionalHazards {
@@ -2308,7 +2403,13 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 append_cox_snell_and_covariate_tabs(&mut out, &extraction.subjects, &extraction.row_labels, &extraction.pred_names, &beta_hat, &cox)?;
             }
             append_cox_ph_diagnostics(&mut out, &cox);
-            append_listwise_filtered_checklist_and_footnote(&mut out, "Cox proportional hazards", extraction.skipped_rows, extraction.subjects.len());
+            let mut accounting = extraction.accounting;
+            accounting.analyzed = cox.n_subjects;
+            accounting.events = Some(cox.n_events);
+            accounting.censored = Some(cox.n_subjects.saturating_sub(cox.n_events));
+            let omitted_rows = accounting.rows_omitted();
+            out.observation_accounting = Some(accounting);
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Cox proportional hazards", omitted_rows, extraction.subjects.len());
             append_ignored_text_checklist_and_footnote(&mut out, "Cox proportional hazards", &extraction.ignored_non_numeric);
         }
     }
@@ -2683,7 +2784,7 @@ struct CoxDesignExtraction {
     x_means: Vec<f64>,
     nested_subjects: Option<(Vec<String>, Vec<CoxSubject>)>,
     profile_vectors: Vec<(String, Vec<f64>)>,
-    skipped_rows: usize,
+    accounting: ObservationAccounting,
     ignored_non_numeric: Vec<(String, usize)>,
 }
 
@@ -2857,7 +2958,7 @@ fn compile_cox_profiles(
 
 struct CoxCollectedRows {
     retained_rows: Vec<RetainedCoxRow>,
-    skipped_rows: usize,
+    accounting: ObservationAccounting,
     ignored_non_numeric: Vec<(String, usize)>,
 }
 
@@ -2881,7 +2982,7 @@ fn collect_cox_complete_rows(
             || pred_cols.iter().enumerate().any(|(pos, &pc)| required_mask[pos] && cell_has_entry(mv.variables[pc].cells.get(r)))
     });
     let mut retained_rows = Vec::new();
-    let mut skipped_rows = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Survival, 0);
     let mut time_non_num = 0_usize;
     let mut status_non_num = 0_usize;
     let mut pred_non_num = vec![0_usize; pred_cols.len()];
@@ -2896,23 +2997,44 @@ fn collect_cox_complete_rows(
             if !has_entry {
                 continue;
             }
+            let mut row_has_excl = false;
+            let mut row_has_non_num = false;
+            if tc.is_some_and(|c| c.excluded) {
+                accounting.excluded_cells += 1;
+                row_has_excl = true;
+            }
+            if sc.is_some_and(|c| c.excluded) {
+                accounting.excluded_cells += 1;
+                row_has_excl = true;
+            }
             if tc.is_some_and(is_ignored_non_numeric_cell) {
                 time_non_num += 1;
+                row_has_non_num = true;
             }
             if sc.is_some_and(is_ignored_non_numeric_cell) {
                 status_non_num += 1;
+                row_has_non_num = true;
             }
             for (pos, &pc) in pred_cols.iter().enumerate() {
-                if required_mask[pos] && !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+                if !required_mask[pos] {
+                    continue;
+                }
+                let pcell = mv.variables[pc].cells.get(r);
+                if pcell.is_some_and(|c| c.excluded) {
+                    accounting.excluded_cells += 1;
+                    row_has_excl = true;
+                }
+                if !is_cat[pos] && pcell.is_some_and(is_ignored_non_numeric_cell) {
                     pred_non_num[pos] += 1;
+                    row_has_non_num = true;
                 }
             }
             let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
-                skipped_rows += 1;
+                record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
                 continue;
             };
             let Some(status) = parse_survival_status_with_policy(st, event_code, censored_code, treat_other_as)? else {
-                skipped_rows += 1;
+                record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, true);
                 continue;
             };
             let mut row_preds = Vec::with_capacity(pred_cols.len());
@@ -2946,7 +3068,7 @@ fn collect_cox_complete_rows(
             if ok {
                 retained_rows.push(RetainedCoxRow { row_num: r + 1, time: t, event: matches!(status, SurvivalStatus::Event), preds: row_preds });
             } else {
-                skipped_rows += 1;
+                record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
             }
         }
     }
@@ -2963,7 +3085,8 @@ fn collect_cox_complete_rows(
             ignored_non_numeric.push((mv.variables[pred_cols[pos]].title.clone(), count));
         }
     }
-    Ok(CoxCollectedRows { retained_rows, skipped_rows, ignored_non_numeric })
+    accounting.ignored_non_numeric_cells = time_non_num + status_non_num + pred_non_num.iter().sum::<usize>();
+    Ok(CoxCollectedRows { retained_rows, accounting, ignored_non_numeric })
 }
 
 fn assemble_cox_owned_predictors(
@@ -3084,7 +3207,7 @@ fn build_cox_design_subjects(
         }
     }
 
-    let CoxCollectedRows { retained_rows, skipped_rows, ignored_non_numeric } =
+    let CoxCollectedRows { retained_rows, accounting, ignored_non_numeric } =
         collect_cox_complete_rows(mv, time_column, status_column, &pred_cols, &required_mask, &is_cat, event_code, censored_code, treat_other_as)?;
 
     // Derive observed categorical levels and reference levels strictly from complete-case retained rows
@@ -3148,7 +3271,7 @@ fn build_cox_design_subjects(
         x_means,
         nested_subjects,
         profile_vectors,
-        skipped_rows,
+        accounting,
         ignored_non_numeric,
     })
 }
@@ -3257,7 +3380,7 @@ fn title_has_any(title: &str, hints: &[&str]) -> bool {
 
 struct MvKmExtraction {
     cohorts: Vec<(usize, String, Vec<SurvivalObservation>)>,
-    skipped_rows: usize,
+    accounting: ObservationAccounting,
     ignored_non_numeric: Vec<(String, usize)>,
 }
 
@@ -3285,9 +3408,12 @@ fn build_composite_group_levels(mv: &MultipleVariablesTable, group_cols: &[usize
 
 struct SingleStatusKmResult {
     cohorts: Vec<(String, Vec<SurvivalObservation>)>,
-    skipped: usize,
+    accounting: ObservationAccounting,
     time_non_num: usize,
     status_non_num: usize,
+    time_excluded: usize,
+    group_excluded: usize,
+    status_excluded: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3309,9 +3435,12 @@ fn collect_mv_km_for_status(
             || cell_has_entry(status_var.cells.get(r))
             || group_cols.iter().any(|&gc| cell_has_entry(mv.variables[gc].cells.get(r)))
     });
-    let mut skipped = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Survival, 0);
     let mut time_non_num = 0_usize;
     let mut status_non_num = 0_usize;
+    let mut time_excluded = 0_usize;
+    let mut group_excluded = 0_usize;
+    let mut status_excluded = 0_usize;
     let mut cohorts = Vec::new();
 
     if !group_cols.is_empty() {
@@ -3324,17 +3453,27 @@ fn collect_mv_km_for_status(
                 if !(cell_has_entry(tc) || cell_has_entry(sc) || any_g) {
                     continue;
                 }
-                time_non_num += usize::from(tc.is_some_and(is_ignored_non_numeric_cell));
-                status_non_num += usize::from(sc.is_some_and(is_ignored_non_numeric_cell));
+                let t_excl = tc.is_some_and(|c| c.excluded);
+                let s_excl = sc.is_some_and(|c| c.excluded);
+                let g_excl_count = group_cols.iter().filter(|&&gc| mv.variables[gc].cells.get(r).is_some_and(|c| c.excluded)).count();
+                time_excluded += usize::from(t_excl);
+                status_excluded += usize::from(s_excl);
+                group_excluded += g_excl_count;
+                let row_has_excl = t_excl || s_excl || g_excl_count > 0;
+                let t_non_num = tc.is_some_and(is_ignored_non_numeric_cell);
+                let s_non_num = sc.is_some_and(is_ignored_non_numeric_cell);
+                time_non_num += usize::from(t_non_num);
+                status_non_num += usize::from(s_non_num);
+                let row_has_non_num = t_non_num || s_non_num;
                 let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
                     continue;
                 };
                 if !t.is_finite() || t < 0.0 {
                     return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
                 }
                 let Some(status) = parse_survival_status_with_policy(st, event_code, censored_code, treat_other_as)? else {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, true);
                     continue;
                 };
                 let mut toks = Vec::with_capacity(group_cols.len());
@@ -3344,14 +3483,14 @@ fn collect_mv_km_for_status(
                     }
                 }
                 if toks.len() != group_cols.len() {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
                     continue;
                 }
                 let key = if toks.len() == 1 { toks[0].clone() } else { toks.join(" / ") };
                 if let Some(pos) = levels.iter().position(|lvl| lvl == &key) {
                     buckets[pos].push(SurvivalObservation { row: r, time: t, status });
                 } else {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
                 }
             }
         }
@@ -3370,17 +3509,25 @@ fn collect_mv_km_for_status(
                 if !(cell_has_entry(tc) || cell_has_entry(sc)) {
                     continue;
                 }
-                time_non_num += usize::from(tc.is_some_and(is_ignored_non_numeric_cell));
-                status_non_num += usize::from(sc.is_some_and(is_ignored_non_numeric_cell));
+                let t_excl = tc.is_some_and(|c| c.excluded);
+                let s_excl = sc.is_some_and(|c| c.excluded);
+                time_excluded += usize::from(t_excl);
+                status_excluded += usize::from(s_excl);
+                let row_has_excl = t_excl || s_excl;
+                let t_non_num = tc.is_some_and(is_ignored_non_numeric_cell);
+                let s_non_num = sc.is_some_and(is_ignored_non_numeric_cell);
+                time_non_num += usize::from(t_non_num);
+                status_non_num += usize::from(s_non_num);
+                let row_has_non_num = t_non_num || s_non_num;
                 let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, false);
                     continue;
                 };
                 if !t.is_finite() || t < 0.0 {
                     return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
                 }
                 let Some(status) = parse_survival_status_with_policy(st, event_code, censored_code, treat_other_as)? else {
-                    skipped += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excl, row_has_non_num, true);
                     continue;
                 };
                 obs.push(SurvivalObservation { row: r, time: t, status });
@@ -3397,7 +3544,7 @@ fn collect_mv_km_for_status(
             cohorts.push((lbl, obs));
         }
     }
-    Ok(SingleStatusKmResult { cohorts, skipped, time_non_num, status_non_num })
+    Ok(SingleStatusKmResult { cohorts, accounting, time_non_num, status_non_num, time_excluded, group_excluded, status_excluded })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3510,30 +3657,41 @@ fn extract_mv_km_cohorts(
 
     let multi_status = status_cols.len() > 1;
     let mut all_cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> = Vec::new();
-    let mut total_skipped = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Survival, 0);
     let mut time_non_num_counted = false;
+    let mut shared_excluded_counted = false;
     let mut ignored_non_numeric: Vec<(String, usize)> = Vec::new();
 
     for &status_col in &status_cols {
         let res = collect_mv_km_for_status(mv, time_col, status_col, &group_cols, &levels, multi_status, event_code, censored_code, treat_other_as)?;
-        total_skipped += res.skipped;
+        accounting.omitted_excluded += res.accounting.omitted_excluded;
+        accounting.omitted_non_numeric += res.accounting.omitted_non_numeric;
+        accounting.omitted_invalid += res.accounting.omitted_invalid;
+        accounting.omitted_missing += res.accounting.omitted_missing;
+        if !shared_excluded_counted {
+            accounting.excluded_cells += res.time_excluded + res.group_excluded;
+            shared_excluded_counted = true;
+        }
+        accounting.excluded_cells += res.status_excluded;
         for (lbl, obs) in res.cohorts {
             let idx = all_cohorts.len();
             all_cohorts.push((idx, lbl, obs));
         }
         if !time_non_num_counted && res.time_non_num > 0 {
             ignored_non_numeric.push((mv.variables[time_col].title.clone(), res.time_non_num));
+            accounting.ignored_non_numeric_cells += res.time_non_num;
             time_non_num_counted = true;
         }
         if res.status_non_num > 0 {
             ignored_non_numeric.push((mv.variables[status_col].title.clone(), res.status_non_num));
+            accounting.ignored_non_numeric_cells += res.status_non_num;
         }
     }
 
     if all_cohorts.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    Ok(MvKmExtraction { cohorts: all_cohorts, skipped_rows: total_skipped, ignored_non_numeric })
+    Ok(MvKmExtraction { cohorts: all_cohorts, accounting, ignored_non_numeric })
 }
 
 struct SurvivalPairwisePlan {

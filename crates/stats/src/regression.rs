@@ -18,8 +18,8 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, FormulaTerm, GlmDispersionMode, GlmFamily,
-    GlmSpec, GlmWeightSpec, ModelFormulaSpec, PValueFormat, PassingBablokSpec, RegressionCiMethod, ResultCell, ResultSheet, ResultTabKind, SheetId,
-    SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WeightingScheme, XColumnMode,
+    GlmSpec, GlmWeightSpec, ModelFormulaSpec, ObservationAccounting, ObservationAccountingKind, PValueFormat, PassingBablokSpec, RegressionCiMethod,
+    ResultCell, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WeightingScheme, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
     enforce_summary_mode_matrix, finite_ci_cell, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_num_cell, p_cell_at_alpha,
-    push_scalar, sanitize_result_sheet_floats, text_cell, validate_finite_slice,
+    push_scalar, record_omitted_row_reason, sanitize_result_sheet_floats, text_cell, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::formula_design::{
@@ -1552,6 +1552,7 @@ struct GlmDesignMatrix {
     binary_outcome_labels: Option<(String, String)>,
     skipped_rows: usize,
     ignored_non_numeric: Vec<(String, usize)>,
+    accounting: ObservationAccounting,
 }
 
 fn cell_has_entry(cell: Option<&Cell>) -> bool {
@@ -1569,6 +1570,7 @@ struct MvGlmRows {
     binary_outcome_labels: Option<(String, String)>,
     skipped_rows: usize,
     ignored_non_numeric: Vec<(String, usize)>,
+    accounting: ObservationAccounting,
 }
 
 fn extract_mv_glm_pred(var: &VariableColumn, row: usize, n_rows: usize, is_cat: bool) -> Result<Option<RetainedGlmPred>, StatsError> {
@@ -1619,6 +1621,7 @@ fn collect_mv_glm_rows(
             binary_outcome_labels,
             skipped_rows: 0,
             ignored_non_numeric: Vec::new(),
+            accounting: ObservationAccounting::new(ObservationAccountingKind::Regression, 0),
         });
     };
 
@@ -1626,6 +1629,7 @@ fn collect_mv_glm_rows(
     let mut explicit_weights = explicit_weight_col.map(|_| Vec::new());
     let mut oos_rows = Vec::new();
     let mut skipped_rows = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
     let mut resp_non_num = 0_usize;
     let mut weight_non_num = 0_usize;
     let mut pred_non_num = vec![0_usize; pred_cols.len()];
@@ -1639,17 +1643,38 @@ fn collect_mv_glm_rows(
         if !has_entry {
             continue;
         }
+        let mut row_has_excluded = false;
+        let mut row_has_non_numeric = false;
+        if rc.is_some_and(|c| c.excluded) {
+            row_has_excluded = true;
+            accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+        }
         if !resp_is_text_binary && rc.is_some_and(is_ignored_non_numeric_cell) {
             resp_non_num += 1;
+            row_has_non_numeric = true;
         }
-        if let Some(wc) = explicit_weight_col
-            && mv.variables[wc].cells.get(r).is_some_and(is_ignored_non_numeric_cell)
-        {
-            weight_non_num += 1;
+        if let Some(wc) = explicit_weight_col {
+            let wc_cell = mv.variables[wc].cells.get(r);
+            if wc_cell.is_some_and(|c| c.excluded) {
+                row_has_excluded = true;
+                accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+            }
+            if wc_cell.is_some_and(is_ignored_non_numeric_cell) {
+                weight_non_num += 1;
+                row_has_non_numeric = true;
+            }
         }
         for (pos, &pc) in pred_cols.iter().enumerate() {
-            if required_mask[pos] && !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
-                pred_non_num[pos] += 1;
+            if required_mask[pos] {
+                let pc_cell = mv.variables[pc].cells.get(r);
+                if pc_cell.is_some_and(|c| c.excluded) {
+                    row_has_excluded = true;
+                    accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+                }
+                if !is_cat[pos] && pc_cell.is_some_and(is_ignored_non_numeric_cell) {
+                    pred_non_num[pos] += 1;
+                    row_has_non_numeric = true;
+                }
             }
         }
 
@@ -1675,11 +1700,13 @@ fn collect_mv_glm_rows(
         if let Some(yv) = yv_opt {
             if !preds_ok {
                 skipped_rows += 1;
+                record_omitted_row_reason(&mut accounting, row_has_excluded, row_has_non_numeric, false);
                 continue;
             }
             if let (Some(wc), Some(w_buf)) = (explicit_weight_col, explicit_weights.as_mut()) {
                 let Some(wv) = mv.variables[wc].cells.get(r).and_then(Cell::active_number) else {
                     skipped_rows += 1;
+                    record_omitted_row_reason(&mut accounting, row_has_excluded, row_has_non_numeric, false);
                     continue;
                 };
                 w_buf.push(wv);
@@ -1689,24 +1716,31 @@ fn collect_mv_glm_rows(
             oos_rows.push((r + 1, row_preds));
         } else {
             skipped_rows += 1;
+            record_omitted_row_reason(&mut accounting, row_has_excluded, row_has_non_numeric, false);
         }
     }
 
     let mut ignored_non_numeric = Vec::new();
+    let mut ignored_total = 0_usize;
     if resp_non_num > 0 {
         ignored_non_numeric.push((resp_var.title.clone(), resp_non_num));
+        ignored_total += resp_non_num;
     }
     if let Some(wc) = explicit_weight_col
         && weight_non_num > 0
     {
         ignored_non_numeric.push((mv.variables[wc].title.clone(), weight_non_num));
+        ignored_total += weight_non_num;
     }
     for (pos, &pc) in pred_cols.iter().enumerate() {
         if pred_non_num[pos] > 0 {
             ignored_non_numeric.push((mv.variables[pc].title.clone(), pred_non_num[pos]));
+            ignored_total += pred_non_num[pos];
         }
     }
-    Ok(MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric })
+    accounting.analyzed = retained_rows.len();
+    accounting.ignored_non_numeric_cells = ignored_total;
+    Ok(MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric, accounting })
 }
 
 type GlmCatLevel = Option<Vec<String>>;
@@ -1978,7 +2012,7 @@ fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[u
         }
     }
 
-    let MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric } =
+    let MvGlmRows { retained_rows, explicit_weights, oos_rows, binary_outcome_labels, skipped_rows, ignored_non_numeric, accounting } =
         collect_mv_glm_rows(mv, glm_spec, &pred_cols, &required_mask, &is_cat, explicit_weight_col)?;
     let cat_levels = resolve_glm_categorical_levels(mv, glm_spec, &pred_cols, &required_mask, &is_cat, &retained_rows)?;
 
@@ -2039,6 +2073,7 @@ fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[u
         binary_outcome_labels,
         skipped_rows,
         ignored_non_numeric,
+        accounting,
     })
 }
 
@@ -2150,15 +2185,23 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
     let mut oos_xs = Vec::new();
     let mut oos_labels = Vec::new();
     let mut skipped_rows = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
     let mut x_non_num = 0_usize;
     let mut y_non_num = 0_usize;
 
     if let Some(end_row) = active_end {
         for r in 0..=end_row {
             let x_subs = if is_gen_seq { &[][..] } else { xy.x_cells.get(r).map(Vec::as_slice).unwrap_or(&[]) };
+            let mut x_has_excluded = false;
+            let mut x_has_non_num = false;
             for xc in x_subs {
+                if xc.excluded {
+                    x_has_excluded = true;
+                    accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+                }
                 if is_ignored_non_numeric_cell(xc) {
                     x_non_num += 1;
+                    x_has_non_num = true;
                 }
             }
             let x_explicit = !is_gen_seq && x_subs.iter().any(|c| cell_has_entry(Some(c)));
@@ -2175,7 +2218,11 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
             }
             for sub in 0..row_len {
                 let yc = ds.cell(r, sub);
-                if yc.is_some_and(is_ignored_non_numeric_cell) {
+                if yc.is_some_and(|c| c.excluded) {
+                    accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+                }
+                let y_is_non_num = yc.is_some_and(is_ignored_non_numeric_cell);
+                if y_is_non_num {
                     y_non_num += 1;
                 }
                 let y_explicit = cell_has_entry(yc);
@@ -2186,6 +2233,12 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
                     y_vec.push(yv);
                 } else if y_explicit || (sub == 0 && x_explicit) {
                     skipped_rows += 1;
+                    record_omitted_row_reason(
+                        &mut accounting,
+                        x_has_excluded || yc.is_some_and(|c| c.excluded),
+                        x_has_non_num || y_is_non_num,
+                        false,
+                    );
                 }
             }
         }
@@ -2194,6 +2247,8 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
     if n_obs < 3 {
         return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: 3, actual: n_obs });
     }
+    accounting.analyzed = n_obs;
+    accounting.ignored_non_numeric_cells = x_non_num.saturating_add(y_non_num);
     let mut ignored_non_numeric = Vec::new();
     if x_non_num > 0 {
         ignored_non_numeric.push((xy.x_title.clone(), x_non_num));
@@ -2247,6 +2302,7 @@ fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec
         binary_outcome_labels: None,
         skipped_rows,
         ignored_non_numeric,
+        accounting,
     })
 }
 
@@ -2504,6 +2560,7 @@ struct PassingBablokInput {
     y_label: String,
     skipped_rows: usize,
     ignored_non_numeric: Vec<(String, usize)>,
+    accounting: ObservationAccounting,
 }
 
 #[derive(Default)]
@@ -2512,22 +2569,48 @@ struct PbRawAccumulator {
     ys: Vec<f64>,
     row_labels: Vec<String>,
     skipped_rows: usize,
+    omitted_excluded: usize,
+    omitted_non_numeric: usize,
+    omitted_missing: usize,
+    excluded_cells: usize,
     x_non_num: usize,
     y_non_num: usize,
 }
 
 impl PbRawAccumulator {
+    fn record_omitted(&mut self, has_excluded: bool, has_non_numeric: bool) {
+        self.skipped_rows += 1;
+        if has_excluded {
+            self.omitted_excluded += 1;
+        } else if has_non_numeric {
+            self.omitted_non_numeric += 1;
+        } else {
+            self.omitted_missing += 1;
+        }
+    }
+
     fn into_input(self, x_label: String, y_label: String, same_column: bool) -> Result<PassingBablokInput, StatsError> {
         if self.xs.is_empty() {
             return Err(StatsError::EmptyInput);
         }
         let mut ignored_non_numeric = Vec::new();
+        let mut ignored_total = 0_usize;
         if self.x_non_num > 0 {
             ignored_non_numeric.push((x_label.clone(), self.x_non_num));
+            ignored_total += self.x_non_num;
         }
         if self.y_non_num > 0 && !same_column {
             ignored_non_numeric.push((y_label.clone(), self.y_non_num));
+            ignored_total += self.y_non_num;
         }
+        let accounting = ObservationAccounting {
+            omitted_excluded: self.omitted_excluded,
+            omitted_non_numeric: self.omitted_non_numeric,
+            omitted_missing: self.omitted_missing,
+            ignored_non_numeric_cells: ignored_total,
+            excluded_cells: self.excluded_cells,
+            ..ObservationAccounting::new(ObservationAccountingKind::Regression, self.xs.len())
+        };
         Ok(PassingBablokInput {
             xs: self.xs,
             ys: self.ys,
@@ -2536,6 +2619,7 @@ impl PbRawAccumulator {
             y_label,
             skipped_rows: self.skipped_rows,
             ignored_non_numeric,
+            accounting,
         })
     }
 }
@@ -2556,10 +2640,15 @@ fn extract_pb_single_col_pairs<'a>(
             if !cell_has_entry(ca) && !cell_has_entry(cb) {
                 continue;
             }
-            if ca.is_some_and(is_ignored_non_numeric_cell) {
+            let a_excl = ca.is_some_and(|c| c.excluded);
+            let b_excl = cb.is_some_and(|c| c.excluded);
+            acc.excluded_cells += usize::from(a_excl) + usize::from(b_excl && !same_column);
+            let a_non = ca.is_some_and(is_ignored_non_numeric_cell);
+            let b_non = cb.is_some_and(is_ignored_non_numeric_cell);
+            if a_non {
                 acc.x_non_num += 1;
             }
-            if cb.is_some_and(is_ignored_non_numeric_cell) {
+            if b_non {
                 acc.y_non_num += 1;
             }
             if let (Some(xv), Some(yv)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
@@ -2567,7 +2656,7 @@ fn extract_pb_single_col_pairs<'a>(
                 acc.ys.push(yv);
                 acc.row_labels.push(format!("Row {}", r + 1));
             } else {
-                acc.skipped_rows += 1;
+                acc.record_omitted(a_excl || b_excl, a_non || b_non);
             }
         }
     }
@@ -2612,13 +2701,23 @@ fn extract_pb_xy_pairs(t: &curvebook_doc::XyTable, selected: &[usize], x_col: us
     let mut acc = PbRawAccumulator::default();
     if let Some(end_row) = (0..t.row_count()).rfind(|&r| col_has_entry_row(r, x_col) || col_has_entry_row(r, y_col)) {
         for r in 0..=end_row {
-            let shared_x_non_num =
-                x_raw_subs == 1 && !is_gen_seq && t.x_cells.get(r).and_then(|s| s.first()).is_some_and(is_ignored_non_numeric_cell);
+            let shared_x_cell = if x_raw_subs == 1 && !is_gen_seq { t.x_cells.get(r).and_then(|s| s.first()) } else { None };
+            let shared_x_excl = shared_x_cell.is_some_and(|c| c.excluded);
+            let shared_x_non_num = shared_x_cell.is_some_and(is_ignored_non_numeric_cell);
+            if (x_col == 0 || y_col == 0) && shared_x_excl {
+                acc.excluded_cells += 1;
+            }
             acc.x_non_num += usize::from(x_col == 0 && shared_x_non_num);
             acc.y_non_num += usize::from(y_col == 0 && x_col != 0 && shared_x_non_num);
             for sub in 0..n_subs {
                 let cx = cell_for(r, sub, x_col);
                 let cy = cell_for(r, sub, y_col);
+                let x_excl = if x_col == 0 && x_raw_subs == 1 { shared_x_excl } else { cx.is_some_and(|c| c.excluded) };
+                let y_excl = if y_col == 0 && x_raw_subs == 1 { shared_x_excl } else { cy.is_some_and(|c| c.excluded) };
+                acc.excluded_cells +=
+                    usize::from(cx.is_some_and(|c| c.excluded)) + usize::from(cy.is_some_and(|c| c.excluded) && !(x_col == y_col && x_col > 0));
+                let x_non = if x_col == 0 && x_raw_subs == 1 { shared_x_non_num } else { cx.is_some_and(is_ignored_non_numeric_cell) };
+                let y_non = if y_col == 0 && x_raw_subs == 1 { shared_x_non_num } else { cy.is_some_and(is_ignored_non_numeric_cell) };
                 acc.x_non_num += usize::from(cx.is_some_and(is_ignored_non_numeric_cell));
                 acc.y_non_num += usize::from(cy.is_some_and(is_ignored_non_numeric_cell) && !(x_col == y_col && x_col > 0));
                 let xv = if x_col == 0 && x_raw_subs == 1 { t.x_summary_at(r)? } else { cx.and_then(Cell::active_number) };
@@ -2631,7 +2730,9 @@ fn extract_pb_xy_pairs(t: &curvebook_doc::XyTable, selected: &[usize], x_col: us
                     let shared_x_entry = !is_gen_seq && sub == 0 && cell_has_entry(t.x_cells.get(r).and_then(|s| s.first()));
                     let x_entry = if x_col == 0 && x_raw_subs == 1 { shared_x_entry } else { cell_has_entry(cx) };
                     let y_entry = if y_col == 0 && x_raw_subs == 1 { shared_x_entry } else { cell_has_entry(cy) };
-                    acc.skipped_rows += usize::from(x_entry || y_entry);
+                    if x_entry || y_entry {
+                        acc.record_omitted(x_excl || y_excl, x_non || y_non);
+                    }
                 }
             }
         }
@@ -2669,7 +2770,7 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
     let mut out = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let PassingBablokInput { xs, ys, row_labels: resid_labels, x_label, y_label, skipped_rows, ignored_non_numeric } =
+    let PassingBablokInput { xs, ys, row_labels: resid_labels, x_label, y_label, skipped_rows, ignored_non_numeric, accounting } =
         extract_passing_bablok_pairs(sheet, &spec.selected_data_sets, pb_spec.x_column, pb_spec.y_column)?;
     let res = passing_bablok_regression(&xs, &ys, conf)?;
 
@@ -2796,6 +2897,7 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
         ));
     }
 
+    out.observation_accounting = Some(accounting);
     append_listwise_filtered_checklist_and_footnote(&mut out, "Passing-Bablok regression", skipped_rows, xs.len());
     append_ignored_text_checklist_and_footnote(&mut out, "Passing-Bablok regression", &ignored_non_numeric);
     sanitize_result_sheet_floats(&mut out)?;
@@ -3716,6 +3818,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
     let skipped_rows = design.skipped_rows;
     let kept_rows = design.y_vec.len();
     let ignored_non_numeric = std::mem::take(&mut design.ignored_non_numeric);
+    let accounting = design.accounting;
 
     match glm_spec.family {
         GlmFamily::Linear => populate_linear_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
@@ -3723,6 +3826,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
         GlmFamily::Poisson => populate_poisson_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
     }
 
+    out.observation_accounting = Some(accounting);
     append_listwise_filtered_checklist_and_footnote(&mut out, "GLM regression", skipped_rows, kept_rows);
     append_ignored_text_checklist_and_footnote(&mut out, "GLM regression", &ignored_non_numeric);
     sanitize_result_sheet_floats(&mut out)?;

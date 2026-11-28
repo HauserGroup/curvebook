@@ -575,6 +575,10 @@ pub struct ResultSheet {
     /// Optional per-cell diagnostic metadata (such as raw iterates behind `"Unstable"` cells).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cell_details: Vec<ResultCellDetail>,
+    /// Structured observation accounting recorded by the analysis (analyzed units, omitted rows
+    /// by reason, ignored non-numeric cells, and excluded cells in scope); `None` when not recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_accounting: Option<ObservationAccounting>,
     /// Sticky-note callouts attached to this result sheet.
     pub floating_notes: Vec<FloatingNote>,
     /// Optional navigator color swatch; `None` uses no color badge.
@@ -605,6 +609,7 @@ impl ResultSheet {
             eliminated_outliers: Vec::new(),
             checklist: Vec::new(),
             cell_details: Vec::new(),
+            observation_accounting: None,
             floating_notes: Vec::new(),
             color_tag: None,
             origin: None,
@@ -641,6 +646,7 @@ impl ResultSheet {
             eliminated_outliers: Vec::new(),
             checklist: Vec::new(),
             cell_details: Vec::new(),
+            observation_accounting: None,
             floating_notes: Vec::new(),
             color_tag: None,
             origin: None,
@@ -823,6 +829,131 @@ impl ResultSheet {
     pub fn paired_observation_accounting(&self) -> Option<PairedObservationAccounting> {
         PairedObservationAccounting::from_result(self)
     }
+
+    /// Structured observation accounting recorded by this analysis, or `None` when this result is
+    /// not computed and up to date (see [`ObservationAccounting`]).
+    #[must_use]
+    pub fn observation_accounting(&self) -> Option<&ObservationAccounting> {
+        self.observation_accounting.as_ref().filter(|_| self.is_computed_up_to_date())
+    }
+}
+
+/// Analysis category controlling observation-accounting units and methods-report phrasing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationAccountingKind {
+    /// Complete-case pairing across two matched columns/series (paired *t*, ratio paired *t*, Wilcoxon, paired sign, Bland–Altman).
+    Paired,
+    /// Listwise/complete-case repeated-measures or multifactor ANOVA filtering.
+    ListwiseAnova,
+    /// Mixed-effects REML repeated-measures ANOVA retaining all active measurements without listwise subject deletion.
+    MixedEffectsAnova,
+    /// Regression filtering across linear, Deming, nonlinear, GLM, simple logistic, and Passing–Bablok models.
+    Regression,
+    /// Survival analysis subject, event, and censoring accounting (Kaplan–Meier, Cox PH).
+    Survival,
+    /// Unpaired / column-wise analyses (unpaired/Welch/Mann–Whitney/KS, one-way ordinary/Welch/Kruskal–Wallis ANOVA, descriptive, outlier, Levene, nested).
+    Unpaired,
+}
+
+/// Structured observation accounting recorded by a computed analysis so result views, checklists,
+/// and methods reports agree on the exact counts analyzed, omitted, and ignored.
+///
+/// Every omitted row or observation is classified under at most one mutually exclusive reason in
+/// canonical precedence order:
+/// 1. [`Self::omitted_excluded`] — contained a cell masked as excluded,
+/// 2. [`Self::omitted_non_numeric`] — contained a non-numeric or non-finite cell where a number was required,
+/// 3. [`Self::omitted_invalid`] — failed a domain validity rule (e.g. an excluded survival status code),
+/// 4. [`Self::omitted_missing`] — lacked a required value (blank partner, factor, predictor, time, or status),
+/// 5. [`Self::omitted_out_of_range`] — filtered out by an explicit X/Y range filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ObservationAccounting {
+    /// Analysis family determining units and phrasing.
+    pub kind: ObservationAccountingKind,
+    /// Primary count analyzed (complete pairs, complete blocks/rows, fitted observations,
+    /// survival subjects, or active numeric observations across unpaired groups).
+    pub analyzed: usize,
+    /// Number of survival events analyzed (`Some` for Kaplan–Meier and Cox PH; `None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<usize>,
+    /// Number of censored survival subjects analyzed (`Some` for Kaplan–Meier and Cox PH; `None` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub censored: Option<usize>,
+    /// Rows/observations omitted because a required cell was masked as excluded.
+    #[serde(default)]
+    pub omitted_excluded: usize,
+    /// Rows/observations omitted because a required numeric cell held non-numeric text or a non-finite value.
+    #[serde(default)]
+    pub omitted_non_numeric: usize,
+    /// Rows/observations omitted because a value violated an analysis domain rule (e.g. excluded survival status code).
+    #[serde(default)]
+    pub omitted_invalid: usize,
+    /// Rows/observations omitted because one or more required cells were empty/missing.
+    #[serde(default)]
+    pub omitted_missing: usize,
+    /// Observations excluded by an explicit range filter (such as regression X/Y range bounds).
+    #[serde(default)]
+    pub omitted_out_of_range: usize,
+    /// Total unexcluded non-numeric or non-finite cells ignored in examined numeric columns.
+    #[serde(default)]
+    pub ignored_non_numeric_cells: usize,
+    /// Total cells masked as excluded within the analyzed column/table scope.
+    #[serde(default)]
+    pub excluded_cells: usize,
+}
+
+impl ObservationAccounting {
+    /// Construct a zero-omission accounting record for `kind` with `analyzed` primary units.
+    #[must_use]
+    pub const fn new(kind: ObservationAccountingKind, analyzed: usize) -> Self {
+        Self {
+            kind,
+            analyzed,
+            events: None,
+            censored: None,
+            omitted_excluded: 0,
+            omitted_non_numeric: 0,
+            omitted_invalid: 0,
+            omitted_missing: 0,
+            omitted_out_of_range: 0,
+            ignored_non_numeric_cells: 0,
+            excluded_cells: 0,
+        }
+    }
+
+    /// Construct a survival accounting record with exact subject, event, and censoring counts.
+    #[must_use]
+    pub const fn survival(analyzed: usize, events: usize, censored: usize) -> Self {
+        Self { events: Some(events), censored: Some(censored), ..Self::new(ObservationAccountingKind::Survival, analyzed) }
+    }
+
+    /// Total rows/observations omitted for any reason.
+    #[must_use]
+    pub const fn rows_omitted(&self) -> usize {
+        self.omitted_excluded
+            .saturating_add(self.omitted_non_numeric)
+            .saturating_add(self.omitted_invalid)
+            .saturating_add(self.omitted_missing)
+            .saturating_add(self.omitted_out_of_range)
+    }
+
+    /// Convert [`PairedObservationAccounting`] into a full [`ObservationAccounting`] record.
+    #[must_use]
+    pub const fn from_paired(paired: PairedObservationAccounting, ignored_non_numeric_cells: usize, excluded_cells: usize) -> Self {
+        Self {
+            kind: ObservationAccountingKind::Paired,
+            analyzed: paired.pairs_analyzed,
+            events: None,
+            censored: None,
+            omitted_excluded: paired.omitted_excluded,
+            omitted_non_numeric: paired.omitted_non_numeric,
+            omitted_invalid: 0,
+            omitted_missing: paired.omitted_missing_partner,
+            omitted_out_of_range: 0,
+            ignored_non_numeric_cells,
+            excluded_cells,
+        }
+    }
 }
 
 /// Complete-case pairing counts for a paired analysis, stored as whole-table result scalars so the
@@ -908,6 +1039,8 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             checklist: Vec<ChecklistItem>,
             #[serde(default)]
             cell_details: Vec<ResultCellDetail>,
+            #[serde(default)]
+            observation_accounting: Option<ObservationAccounting>,
             floating_notes: Vec<FloatingNote>,
             color_tag: Option<Rgba8>,
             #[serde(default)]
@@ -928,6 +1061,7 @@ impl<'de> serde::Deserialize<'de> for ResultSheet {
             eliminated_outliers: raw.eliminated_outliers,
             checklist: raw.checklist,
             cell_details: raw.cell_details,
+            observation_accounting: raw.observation_accounting,
             floating_notes: raw.floating_notes,
             color_tag: raw.color_tag,
             origin: raw.origin,
@@ -984,5 +1118,39 @@ mod tests {
 
         let open_cell: ResultCell = serde_json::from_str(r#"{"ConfidenceInterval":{"lower":"Open","upper":{"Finite":2.5}}}"#).unwrap();
         assert_eq!(open_cell, ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.5) });
+    }
+
+    #[test]
+    fn observation_accounting_serde_roundtrip_and_backward_compatibility() {
+        let spec = AnalysisSpec::new("res-acc", "ds-1", AnalysisKind::DescriptiveStats(crate::DescriptiveSpec::default())).unwrap();
+        let mut sheet = ResultSheet::new(spec).unwrap();
+        sheet.status = ResultStatus::UpToDate;
+
+        // Omitted field in legacy JSON deserializes cleanly as `None`.
+        let legacy_json = serde_json::to_string(&sheet).unwrap();
+        assert!(!legacy_json.contains("observation_accounting"), "None accounting must be skipped on serialization: {legacy_json}");
+        let decoded_legacy: ResultSheet = serde_json::from_str(&legacy_json).unwrap();
+        assert_eq!(decoded_legacy.observation_accounting(), None);
+
+        // Populated accounting round-trips losslessly and is gated on UpToDate.
+        let mut acc = ObservationAccounting::survival(12, 7, 5);
+        acc.omitted_excluded = 1;
+        acc.omitted_non_numeric = 2;
+        acc.omitted_invalid = 1;
+        acc.omitted_missing = 3;
+        acc.omitted_out_of_range = 0;
+        acc.ignored_non_numeric_cells = 2;
+        acc.excluded_cells = 1;
+        assert_eq!(acc.rows_omitted(), 7);
+        sheet.observation_accounting = Some(acc);
+
+        let encoded = serde_json::to_string(&sheet).unwrap();
+        let mut decoded: ResultSheet = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.observation_accounting(), Some(&acc));
+
+        decoded.status = ResultStatus::Dirty;
+        assert_eq!(decoded.observation_accounting(), None);
+        decoded.status = ResultStatus::Imported;
+        assert_eq!(decoded.observation_accounting(), None);
     }
 }

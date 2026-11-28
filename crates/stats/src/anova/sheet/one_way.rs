@@ -10,8 +10,8 @@ use std::collections::BTreeSet;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CellValue, ChecklistItem, ChecklistStatus, CiBound, DataSheet, MixedModelDfMethod, MultiplicityMethod,
-    MultiplicitySpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, RemlZeroVariancePolicy, ResidualCovariance, ResultCell, ResultSheet, ResultTab,
-    ResultTabKind, SummaryPointError, TableArchetype,
+    MultiplicitySpec, ObservationAccounting, ObservationAccountingKind, OneWayAnovaSpec, OneWayMethod, PValueFormat, RemlZeroVariancePolicy,
+    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SummaryPointError, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
@@ -39,7 +39,8 @@ use crate::column::shapiro_wilk;
 use crate::common::{
     TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item, ci_cell,
     enforce_summary_mode_matrix, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar,
-    rank_with_ties, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices, validate_finite_slice,
+    rank_with_ties, record_omitted_row_reason, sanitize_result_sheet_floats, text_cell, try_resolve_selected_indices,
+    unpaired_observation_accounting, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::lognormal::validate_and_ln_transform;
@@ -60,7 +61,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     }
 
     // Handle pre-summarized ColumnTable (`MeanSdN`, `MeanSemN`, `MeanCvN`) vs raw replicates.
-    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) =
+    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric, excluded_cells) =
         extract_one_way_inputs(sheet, &spec.selected_data_sets, anova_spec.method, confidence)?;
     let is_summary = raw_slices_owned.is_empty();
 
@@ -287,6 +288,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
         OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::LognormalRepeatedMeasures { .. } | OneWayMethod::Friedman => {}
     }
 
+    let analyzed_total: usize = if is_summary {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        group_inputs.iter().map(|g| g.n.max(0.0).round() as usize).sum()
+    } else {
+        raw_slices_owned.iter().map(Vec::len).sum()
+    };
+    let ignored_total: usize = ignored_non_numeric.iter().map(|(_, c)| *c).sum();
+    out.observation_accounting = Some(unpaired_observation_accounting(analyzed_total, ignored_total, excluded_cells));
     append_ignored_text_checklist_and_footnote(&mut out, "one-way ANOVA", &ignored_non_numeric);
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
@@ -295,7 +304,12 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
 pub(in crate::anova) struct RmOneWayScan {
     pub(in crate::anova) blocks: Vec<Vec<f64>>,
     pub(in crate::anova) incomplete_rows: usize,
+    pub(in crate::anova) omitted_excluded: usize,
+    pub(in crate::anova) omitted_non_numeric: usize,
+    pub(in crate::anova) omitted_missing: usize,
     pub(in crate::anova) non_numeric_cells: usize,
+    pub(in crate::anova) excluded_cells: usize,
+    pub(in crate::anova) empty_cells_in_active_rows: usize,
     pub(in crate::anova) y_vec: Vec<f64>,
     pub(in crate::anova) subj_ids: Vec<usize>,
     pub(in crate::anova) cond_ids: Vec<usize>,
@@ -317,7 +331,10 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
 
     let mut blocks = Vec::new();
     let mut incomplete_rows = 0_usize;
+    let mut listwise_acc = ObservationAccounting::new(ObservationAccountingKind::ListwiseAnova, 0);
     let mut non_numeric_cells = 0_usize;
+    let mut excluded_cells = 0_usize;
+    let mut empty_cells_in_active_rows = 0_usize;
     let mut y_vec = Vec::new();
     let mut subj_ids = Vec::new();
     let mut cond_ids = Vec::new();
@@ -328,6 +345,9 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
         let mut row_long: Vec<(usize, f64)> = Vec::with_capacity(indices.len());
         let mut complete = true;
         let mut row_has_entry = false;
+        let mut row_has_excluded = false;
+        let mut row_has_non_numeric = false;
+        let mut row_empty_cells = 0_usize;
 
         for (pos, &c) in indices.iter().enumerate() {
             let cell = col_tab.data_sets.get(c).and_then(|ds| ds.cell(r, 0));
@@ -335,13 +355,27 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
                 if cell.excluded || !cell.value.is_empty() {
                     row_has_entry = true;
                 }
-                if !cell.excluded {
+                if cell.excluded {
+                    row_has_excluded = true;
+                    excluded_cells += 1;
+                } else {
                     match &cell.value {
-                        curvebook_doc::CellValue::Text(s) if !s.trim().is_empty() => non_numeric_cells += 1,
-                        curvebook_doc::CellValue::Number(v) if !v.is_finite() => non_numeric_cells += 1,
+                        curvebook_doc::CellValue::Text(s) if !s.trim().is_empty() => {
+                            non_numeric_cells += 1;
+                            row_has_non_numeric = true;
+                        }
+                        curvebook_doc::CellValue::Number(v) if !v.is_finite() => {
+                            non_numeric_cells += 1;
+                            row_has_non_numeric = true;
+                        }
+                        curvebook_doc::CellValue::Empty => {
+                            row_empty_cells += 1;
+                        }
                         _ => {}
                     }
                 }
+            } else {
+                row_empty_cells += 1;
             }
             if let Some(val) = cell.and_then(curvebook_doc::Cell::active_number) {
                 row_vals.push(val);
@@ -351,10 +385,14 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
             }
         }
 
+        if row_has_entry {
+            empty_cells_in_active_rows += row_empty_cells;
+        }
         if complete && !row_vals.is_empty() {
             blocks.push(row_vals);
         } else if row_has_entry {
             incomplete_rows += 1;
+            record_omitted_row_reason(&mut listwise_acc, row_has_excluded, row_has_non_numeric, false);
         }
         if !row_long.is_empty() {
             for (pos, val) in row_long {
@@ -366,7 +404,20 @@ pub(in crate::anova) fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::Co
         }
     }
 
-    RmOneWayScan { blocks, incomplete_rows, non_numeric_cells, y_vec, subj_ids, cond_ids, cond_counts }
+    RmOneWayScan {
+        blocks,
+        incomplete_rows,
+        omitted_excluded: listwise_acc.omitted_excluded,
+        omitted_non_numeric: listwise_acc.omitted_non_numeric,
+        omitted_missing: listwise_acc.omitted_missing,
+        non_numeric_cells,
+        excluded_cells,
+        empty_cells_in_active_rows,
+        y_vec,
+        subj_ids,
+        cond_ids,
+        cond_counts,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -920,6 +971,14 @@ pub(in crate::anova) fn run_rm_one_way_reml(
             "Geisser-Greenhouse non-sphericity adjustment was not applied under CompoundSymmetry REML because missing data or mixed-effects mode engaged a compound-symmetry covariance structure; Unstructured residual covariance models arbitrary within-subject covariances without assuming sphericity.",
         ));
     }
+    out.observation_accounting = Some(ObservationAccounting {
+        omitted_excluded: scan.excluded_cells,
+        omitted_non_numeric: scan.non_numeric_cells,
+        omitted_missing: scan.empty_cells_in_active_rows,
+        ignored_non_numeric_cells: scan.non_numeric_cells,
+        excluded_cells: scan.excluded_cells,
+        ..ObservationAccounting::new(ObservationAccountingKind::MixedEffectsAnova, n_obs)
+    });
     if scan.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(
             out,
@@ -1144,6 +1203,14 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
         }
         _ => {}
     }
+    out.observation_accounting = Some(ObservationAccounting {
+        omitted_excluded: scan.omitted_excluded,
+        omitted_non_numeric: scan.omitted_non_numeric,
+        omitted_missing: scan.omitted_missing,
+        ignored_non_numeric_cells: scan.non_numeric_cells,
+        excluded_cells: scan.excluded_cells,
+        ..ObservationAccounting::new(ObservationAccountingKind::ListwiseAnova, blocks.len())
+    });
     append_listwise_filtered_checklist_and_footnote(out, rm_analysis_name, scan.incomplete_rows, blocks.len());
     if scan.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(out, rm_analysis_name, &[(String::from("Selected columns"), scan.non_numeric_cells)]);
@@ -1156,7 +1223,7 @@ pub(in crate::anova) fn spec_selected_from_sheet(sheet: &ResultSheet) -> Vec<usi
     sheet.analysis.selected_data_sets.clone()
 }
 
-pub(in crate::anova) type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>, Vec<(String, usize)>);
+pub(in crate::anova) type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>, Vec<(String, usize)>, usize);
 
 pub(in crate::anova) fn extract_one_way_inputs(
     sheet: &DataSheet,
@@ -1181,8 +1248,10 @@ pub(in crate::anova) fn extract_one_way_inputs(
         }
         let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
         let mut inputs = Vec::with_capacity(indices.len());
+        let mut excluded_total = 0_usize;
         for idx in indices {
             let ds = &col_tab.data_sets[idx];
+            excluded_total += ds.cells.iter().flatten().filter(|c| c.excluded).count();
             let mut points = Vec::new();
             for (r, subs) in ds.cells.iter().enumerate() {
                 if let (Some(c0), Some(c1), Some(c2)) = (subs.first(), subs.get(1), subs.get(2))
@@ -1216,7 +1285,7 @@ pub(in crate::anova) fn extract_one_way_inputs(
                 sd: pooled.sd.unwrap_or(0.0),
             });
         }
-        return Ok((inputs, None, Vec::new(), Vec::new()));
+        return Ok((inputs, None, Vec::new(), Vec::new(), excluded_total));
     }
 
     let mut cols = extract_numeric_columns(sheet, selected)?;
@@ -1225,6 +1294,7 @@ pub(in crate::anova) fn extract_one_way_inputs(
         // a blank trailing column); an explicitly selected empty data set still fails below.
         cols.retain(|c| !c.values.is_empty());
     }
+    let excluded_total: usize = cols.iter().map(|c| c.excluded_count).sum();
     let ignored_non_numeric: Vec<(String, usize)> =
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
     let is_lognormal = matches!(method, OneWayMethod::LognormalOrdinary | OneWayMethod::LognormalWelchBf);
@@ -1254,7 +1324,7 @@ pub(in crate::anova) fn extract_one_way_inputs(
                 sd: m.sample_sd().unwrap_or(0.0),
             });
         }
-        return Ok((inputs, None, raw_slices, ignored_non_numeric));
+        return Ok((inputs, None, raw_slices, ignored_non_numeric, excluded_total));
     }
     let res = ordinary_one_way_anova(&paired, confidence)?;
     let inputs = cols
@@ -1268,7 +1338,7 @@ pub(in crate::anova) fn extract_one_way_inputs(
             sd: res.group_sds[i],
         })
         .collect();
-    Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
+    Ok((inputs, Some(res), raw_slices, ignored_non_numeric, excluded_total))
 }
 
 pub(in crate::anova) fn build_lognormal_group_summary_tab(id: &str, title: &str, log_inputs: &[GroupComparisonInput]) -> ResultTab {

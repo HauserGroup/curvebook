@@ -10,9 +10,9 @@
 //!   `doi:10.1080/01621459.1952.10483441`.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PairedObservationAccounting, RemediationKind, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, SummaryModeRefusalReason, SummaryModeSupport,
-    TableArchetype, VariableRole, summary_mode_row_for_spec,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, ObservationAccounting, ObservationAccountingKind,
+    PairedObservationAccounting, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode,
+    SummaryModeRefusalReason, SummaryModeSupport, TableArchetype, VariableRole, summary_mode_row_for_spec,
 };
 pub use curvebook_doc::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,
@@ -296,6 +296,8 @@ pub struct PairedValuesReport {
     pub skipped_incomplete_rows: usize,
     /// Number of non-numeric text cells encountered inside examined pair slots.
     pub non_numeric_cells: usize,
+    /// Number of excluded cells encountered inside examined pair slots.
+    pub excluded_cells: usize,
     /// Pairs analyzed and omitted rows broken down by reason; the omitted counts sum to `skipped_incomplete_rows`.
     pub accounting: PairedObservationAccounting,
 }
@@ -334,10 +336,17 @@ pub fn extract_paired_values_with_report(sheet: &DataSheet, col_a: usize, col_b:
     let mut ys = Vec::new();
     let mut skipped_incomplete_rows = 0_usize;
     let mut non_numeric_cells = 0_usize;
+    let mut excluded_cells = 0_usize;
     let mut accounting = PairedObservationAccounting::default();
     for r in 0..=end_row {
         let ca = get_cell(r, col_a);
         let cb = get_cell(r, col_b);
+        if ca.is_some_and(|c| c.excluded) {
+            excluded_cells += 1;
+        }
+        if cb.is_some_and(|c| c.excluded) {
+            excluded_cells += 1;
+        }
         if ca.is_some_and(is_ignored_non_numeric_cell) {
             non_numeric_cells += 1;
         }
@@ -357,7 +366,28 @@ pub fn extract_paired_values_with_report(sheet: &DataSheet, col_a: usize, col_b:
         return Err(StatsError::EmptyInput);
     }
     accounting.pairs_analyzed = xs.len();
-    Ok(PairedValuesReport { xs, ys, skipped_incomplete_rows, non_numeric_cells, accounting })
+    Ok(PairedValuesReport { xs, ys, skipped_incomplete_rows, non_numeric_cells, excluded_cells, accounting })
+}
+
+/// Classify one omitted row or observation under its canonical mutually exclusive reason:
+/// excluded cell first, then non-numeric cell, then domain-invalid value, then missing value.
+pub fn record_omitted_row_reason(accounting: &mut ObservationAccounting, has_excluded: bool, has_non_numeric: bool, has_invalid: bool) {
+    if has_excluded {
+        accounting.omitted_excluded = accounting.omitted_excluded.saturating_add(1);
+    } else if has_non_numeric {
+        accounting.omitted_non_numeric = accounting.omitted_non_numeric.saturating_add(1);
+    } else if has_invalid {
+        accounting.omitted_invalid = accounting.omitted_invalid.saturating_add(1);
+    } else {
+        accounting.omitted_missing = accounting.omitted_missing.saturating_add(1);
+    }
+}
+
+/// Build an unpaired observation accounting record tracking active observations, ignored
+/// non-numeric cells, and excluded cells across the analyzed column scope.
+#[must_use]
+pub const fn unpaired_observation_accounting(analyzed: usize, ignored_non_numeric_cells: usize, excluded_cells: usize) -> ObservationAccounting {
+    ObservationAccounting { ignored_non_numeric_cells, excluded_cells, ..ObservationAccounting::new(ObservationAccountingKind::Unpaired, analyzed) }
 }
 
 /// Count one omitted row of a pair under its reason, in the order documented on

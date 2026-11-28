@@ -68,8 +68,12 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     let (res, reml_core, reml_converged, reml_at_boundary) =
         nested_one_way_anova_with_reml_status(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
     let mut ignored_non_numeric = Vec::new();
+    let mut analyzed_total = 0_usize;
+    let mut excluded_total = 0_usize;
     for &g_idx in &selected_groups {
         let group = &nested.groups[g_idx];
+        analyzed_total += group.cells.iter().flatten().filter(|cell| cell.active_number().is_some()).count();
+        excluded_total += group.cells.iter().flatten().filter(|cell| cell.excluded).count();
         let count = group.cells.iter().flatten().filter(|cell| is_ignored_non_numeric_cell(cell)).count();
         if count > 0 {
             ignored_non_numeric.push((group.title.clone(), count));
@@ -211,6 +215,8 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
     out.checklist.push(append_reml_boundary_checklist(reml_converged, reml_at_boundary, res.variance_subclusters, res.variance_error));
+    let ignored_total: usize = ignored_non_numeric.iter().map(|(_, c)| *c).sum();
+    out.observation_accounting = Some(crate::common::unpaired_observation_accounting(analyzed_total, ignored_total, excluded_total));
     append_ignored_text_checklist_and_footnote(&mut out, "nested ANOVA", &ignored_non_numeric);
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)

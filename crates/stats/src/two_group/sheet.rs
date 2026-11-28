@@ -21,8 +21,8 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
-    LognormalRowTestMode, MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet,
-    ResultTabKind, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
+    LognormalRowTestMode, MultipleRowTestsSpec, MultipleVariablesTable, ObservationAccounting, ObservationAccountingKind, PValueFormat,
+    PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::sum::SummaryMoments;
@@ -41,7 +41,8 @@ use crate::column::{OneSampleTResult, shapiro_wilk, summarize_pre_summarized_poi
 use crate::common::{
     KvTabBuilder, TabBuilder, append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, checklist_item,
     enforce_summary_mode_matrix, extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell,
-    num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
+    num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, record_omitted_row_reason, sanitize_result_sheet_floats,
+    try_resolve_selected_indices, unpaired_observation_accounting,
 };
 use crate::error::StatsError;
 use crate::lognormal::{OneSampleRatioTResult, lognormal_welch_t_test, one_sample_ratio_t_test, validate_and_ln_transform};
@@ -149,6 +150,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_t_sheet_impl(&mut res, &first.label, Some(&first.values), &out, fmt);
+            res.observation_accounting = Some(unpaired_observation_accounting(first.values.len(), first.non_numeric_count, first.excluded_count));
             if first.non_numeric_count > 0 {
                 append_ignored_text_checklist_and_footnote(&mut res, "one-sample t test", &[(first.label.clone(), first.non_numeric_count)]);
             }
@@ -160,6 +162,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_wilcoxon(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_w_sheet(&mut res, &first.label, &out, fmt);
+            res.observation_accounting = Some(unpaired_observation_accounting(first.values.len(), first.non_numeric_count, first.excluded_count));
             if first.non_numeric_count > 0 {
                 append_ignored_text_checklist_and_footnote(&mut res, "one-sample Wilcoxon test", &[(first.label.clone(), first.non_numeric_count)]);
             }
@@ -171,6 +174,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = one_sample_ratio_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_ratio_t_sheet(&mut res, &first.label, &first.values, &out, fmt);
+            res.observation_accounting = Some(unpaired_observation_accounting(first.values.len(), first.non_numeric_count, first.excluded_count));
             if first.non_numeric_count > 0 {
                 append_ignored_text_checklist_and_footnote(&mut res, "one-sample ratio t test", &[(first.label.clone(), first.non_numeric_count)]);
             }
@@ -180,7 +184,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
     }
 
     if let Some(mv_in) = resolve_mv_two_group_inputs(sheet, spec, tg)? {
-        let MvTwoGroupExtraction { group_a: lvl_a, group_b: lvl_b, skipped_missing, ignored_non_numeric } = mv_in;
+        let MvTwoGroupExtraction { group_a: lvl_a, group_b: lvl_b, skipped_missing, ignored_non_numeric, accounting } = mv_in;
         if matches!(
             tg.method,
             TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
@@ -225,6 +229,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             | TwoGroupMethod::OneSampleWilcoxon { .. }
             | TwoGroupMethod::OneSampleRatioT { .. } => {}
         }
+        res.observation_accounting = Some(accounting);
         append_listwise_filtered_checklist_and_footnote(&mut res, "Two-group comparison", skipped_missing, lvl_a.values.len() + lvl_b.values.len());
         append_ignored_text_checklist_and_footnote(&mut res, "two-group comparison", &ignored_non_numeric);
         return Ok(res);
@@ -236,8 +241,15 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
     }
     let (ca, cb) = (&cols[0], &cols[1]);
     let pair = GroupPairMeta { idx_a: ca.index, idx_b: cb.index, lbl_a: &ca.label, lbl_b: &cb.label };
-    let unpaired_ignored = |cols: &[crate::common::ExtractedColumn]| -> Vec<(String, usize)> {
-        cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect()
+    let unpaired_ignored = || -> Vec<(String, usize)> {
+        [ca, cb].into_iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect()
+    };
+    let unpaired_accounting = || {
+        unpaired_observation_accounting(
+            ca.values.len().saturating_add(cb.values.len()),
+            ca.non_numeric_count.saturating_add(cb.non_numeric_count),
+            ca.excluded_count.saturating_add(cb.excluded_count),
+        )
     };
 
     match tg.method {
@@ -245,19 +257,22 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
             let out = unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
-            append_ignored_text_checklist_and_footnote(&mut res, "unpaired t test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "unpaired t test", &unpaired_ignored());
         }
         TwoGroupMethod::WelchT => {
             let out = welch_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
-            append_ignored_text_checklist_and_footnote(&mut res, "Welch t test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "Welch t test", &unpaired_ignored());
         }
         TwoGroupMethod::LognormalUnpairedT => {
             let out = lognormal_unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, true, conf.alpha());
-            append_ignored_text_checklist_and_footnote(&mut res, "lognormal unpaired t test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "lognormal unpaired t test", &unpaired_ignored());
         }
         TwoGroupMethod::PairedT => {
             let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
@@ -276,7 +291,8 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         TwoGroupMethod::MannWhitneyU => {
             let out = mann_whitney_u(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_mann_whitney_sheet(&mut res, pair, &out, fmt);
-            append_ignored_text_checklist_and_footnote(&mut res, "Mann-Whitney test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "Mann-Whitney test", &unpaired_ignored());
         }
         TwoGroupMethod::WilcoxonSignedRank => {
             let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
@@ -293,13 +309,15 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         TwoGroupMethod::KolmogorovSmirnov => {
             let out = ks_two_sample(&ca.values, &cb.values)?;
             populate_ks_sheet(&mut res, pair, &out, fmt);
-            append_ignored_text_checklist_and_footnote(&mut res, "Kolmogorov-Smirnov test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "Kolmogorov-Smirnov test", &unpaired_ignored());
         }
         TwoGroupMethod::LognormalWelchT => {
             let out = lognormal_welch_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, pair, &out, tg.compute_effect_sizes, fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, true, conf.alpha());
-            append_ignored_text_checklist_and_footnote(&mut res, "lognormal Welch t test", &unpaired_ignored(&cols));
+            res.observation_accounting = Some(unpaired_accounting());
+            append_ignored_text_checklist_and_footnote(&mut res, "lognormal Welch t test", &unpaired_ignored());
         }
         TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } | TwoGroupMethod::OneSampleRatioT { .. } => {}
     }
@@ -308,6 +326,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
 
 fn report_paired_extraction(res: &mut ResultSheet, analysis: &str, lbl_a: &str, lbl_b: &str, report: &crate::common::PairedValuesReport) {
     report.accounting.push_scalars(res);
+    res.observation_accounting = Some(ObservationAccounting::from_paired(report.accounting, report.non_numeric_cells, report.excluded_cells));
     append_listwise_filtered_checklist_and_footnote(res, analysis, report.skipped_incomplete_rows, report.xs.len());
     if report.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(res, analysis, &[(format!("{lbl_a} / {lbl_b}"), report.non_numeric_cells)]);
@@ -382,6 +401,8 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
         "Limits of Agreement assume differences follow an approximately normal distribution with constant variance across the measurement range.",
     ));
     ba_report.accounting.push_scalars(&mut res);
+    res.observation_accounting =
+        Some(ObservationAccounting::from_paired(ba_report.accounting, ba_report.non_numeric_cells, ba_report.excluded_cells));
     append_listwise_filtered_checklist_and_footnote(&mut res, "Bland-Altman agreement", ba_report.skipped_incomplete_rows, out.n);
     if ba_report.non_numeric_cells > 0 {
         append_ignored_text_checklist_and_footnote(
@@ -602,6 +623,7 @@ struct MvTwoGroupExtraction {
     group_b: LabeledGroupSample,
     skipped_missing: usize,
     ignored_non_numeric: Vec<(String, usize)>,
+    accounting: ObservationAccounting,
 }
 
 fn resolve_mv_one_sample_selection(sheet: &DataSheet, selected: &[usize], mv_response: Option<usize>) -> Result<Vec<usize>, StatsError> {
@@ -771,6 +793,7 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
     let mut vals_b = Vec::new();
     let mut skipped_missing = 0_usize;
     let mut non_numeric_response = 0_usize;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Unpaired, 0);
     for r in 0..mv.row_count() {
         let Some(gc) = g_var.cells.get(r) else {
             continue;
@@ -778,7 +801,14 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
         let Some(rc) = r_var.cells.get(r) else {
             continue;
         };
-        if is_ignored_non_numeric_cell(rc) {
+        if gc.excluded {
+            accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+        }
+        if rc.excluded {
+            accounting.excluded_cells = accounting.excluded_cells.saturating_add(1);
+        }
+        let resp_non_num = is_ignored_non_numeric_cell(rc);
+        if resp_non_num {
             non_numeric_response += 1;
         }
         let tok = mv_cell_token(gc);
@@ -789,6 +819,7 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
             _ => {
                 if !gc.is_empty() || !rc.is_empty() || gc.excluded || rc.excluded {
                     skipped_missing += 1;
+                    record_omitted_row_reason(&mut accounting, gc.excluded || rc.excluded, resp_non_num, false);
                 }
             }
         }
@@ -802,12 +833,15 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
         });
     }
 
+    accounting.analyzed = vals_a.len().saturating_add(vals_b.len());
+    accounting.ignored_non_numeric_cells = non_numeric_response;
     let ignored = if non_numeric_response > 0 { vec![(r_var.title.clone(), non_numeric_response)] } else { Vec::new() };
     Ok(Some(MvTwoGroupExtraction {
         group_a: LabeledGroupSample { label: levels[0].clone(), values: vals_a },
         group_b: LabeledGroupSample { label: levels[1].clone(), values: vals_b },
         skipped_missing,
         ignored_non_numeric: ignored,
+        accounting,
     }))
 }
 
@@ -818,6 +852,7 @@ struct BlandAltmanExtractedPairs {
     ys: Vec<f64>,
     skipped_incomplete_rows: usize,
     non_numeric_cells: usize,
+    excluded_cells: usize,
     /// Pairs analyzed and omitted rows by reason.
     accounting: curvebook_doc::PairedObservationAccounting,
 }
@@ -841,6 +876,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 ys: report.ys,
                 skipped_incomplete_rows: report.skipped_incomplete_rows,
                 non_numeric_cells: report.non_numeric_cells,
+                excluded_cells: report.excluded_cells,
                 accounting: report.accounting,
             })
         }
@@ -858,6 +894,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 ys: report.ys,
                 skipped_incomplete_rows: report.skipped_incomplete_rows,
                 non_numeric_cells: report.non_numeric_cells,
+                excluded_cells: report.excluded_cells,
                 accounting: report.accounting,
             })
         }
@@ -893,16 +930,23 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 let mut xs = Vec::new();
                 let mut ys = Vec::new();
                 let mut non_numeric_cells = 0_usize;
+                let mut excluded_cells = 0_usize;
                 let mut skipped_incomplete_rows = 0_usize;
                 let mut accounting = curvebook_doc::PairedObservationAccounting::default();
                 for r in 0..=end_row {
                     let x_cell = xy.materialized_x_cell_at(r);
+                    if !is_gen && x_cell.excluded {
+                        excluded_cells += 1;
+                    }
                     if !is_gen && is_ignored_non_numeric_cell(&x_cell) {
                         non_numeric_cells += 1;
                     }
                     let x_opt = xy.x_summary_at(r)?;
                     let x_has_entry = is_gen || !x_cell.is_empty() || x_cell.excluded;
                     for cy in ds.cells.get(r).map(Vec::as_slice).unwrap_or(&[]) {
+                        if cy.excluded {
+                            excluded_cells += 1;
+                        }
                         if is_ignored_non_numeric_cell(cy) {
                             non_numeric_cells += 1;
                         }
@@ -926,6 +970,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     ys,
                     skipped_incomplete_rows,
                     non_numeric_cells,
+                    excluded_cells,
                 })
             } else {
                 let dsa = xy.data_sets.get(ba.column_a).ok_or(StatsError::MissingColumn { index: ba.column_a })?;
@@ -936,6 +981,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 let mut xs = Vec::new();
                 let mut ys = Vec::new();
                 let mut non_numeric_cells = 0_usize;
+                let mut excluded_cells = 0_usize;
                 let mut skipped_incomplete_rows = 0_usize;
                 let mut accounting = curvebook_doc::PairedObservationAccounting::default();
                 for r in 0..xy.row_count() {
@@ -945,6 +991,12 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                         return Err(StatsError::DimensionMismatch { expected: sa.len(), actual: sb.len() });
                     }
                     for (ca, cb) in sa.iter().zip(sb.iter()) {
+                        if ca.excluded {
+                            excluded_cells += 1;
+                        }
+                        if cb.excluded {
+                            excluded_cells += 1;
+                        }
                         if is_ignored_non_numeric_cell(ca) {
                             non_numeric_cells += 1;
                         }
@@ -972,6 +1024,7 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     ys,
                     skipped_incomplete_rows,
                     non_numeric_cells,
+                    excluded_cells,
                 })
             }
         }

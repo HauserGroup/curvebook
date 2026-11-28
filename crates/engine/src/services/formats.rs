@@ -457,6 +457,7 @@ fn fallback_promoted_result_sheet(rs: &mut ResultSheet, pref: &PromotedAnalysisR
     rs.eliminated_outliers.clear();
     rs.checklist.clear();
     rs.cell_details.clear();
+    rs.observation_accounting = None;
     rs.analyzable_data = None;
     warnings.push(ImportWarning::new(
         ImportWarningKind::AnalysisRecomputeFallback,

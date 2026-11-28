@@ -1363,6 +1363,8 @@ fn remap_result_sheet(
         res.fitted_curves.clear();
         res.eliminated_outliers.clear();
         res.checklist.clear();
+        res.cell_details.clear();
+        res.observation_accounting = None;
     } else if let Some(analyzable) = &mut res.analyzable_data {
         analyzable.id = res.id.clone();
     }

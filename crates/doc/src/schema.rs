@@ -1082,6 +1082,32 @@ fn result_cell_detail_schema() -> SchemaNode {
     .with_title("ResultCellDetail")
 }
 
+fn observation_accounting_kind_schema() -> SchemaNode {
+    enum_schema(&["paired", "listwise_anova", "mixed_effects_anova", "regression", "survival", "unpaired"]).with_title("ObservationAccountingKind")
+}
+
+fn observation_accounting_schema() -> SchemaNode {
+    let non_neg = || integer_schema().with_minimum_i64(0);
+    object_schema(
+        vec![
+            ("kind", ref_schema("ObservationAccountingKind")),
+            ("analyzed", non_neg()),
+            ("events", nullable_schema(non_neg())),
+            ("censored", nullable_schema(non_neg())),
+            ("omitted_excluded", non_neg()),
+            ("omitted_non_numeric", non_neg()),
+            ("omitted_invalid", non_neg()),
+            ("omitted_missing", non_neg()),
+            ("omitted_out_of_range", non_neg()),
+            ("ignored_non_numeric_cells", non_neg()),
+            ("excluded_cells", non_neg()),
+        ],
+        &["kind", "analyzed"],
+        false,
+    )
+    .with_title("ObservationAccounting")
+}
+
 fn result_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
@@ -1097,6 +1123,7 @@ fn result_sheet_schema() -> SchemaNode {
             ("eliminated_outliers", array_schema(ref_schema("SourceCellId"))),
             ("checklist", array_schema(ref_schema(ChecklistItem::schema_name()))),
             ("cell_details", array_schema(ref_schema("ResultCellDetail"))),
+            ("observation_accounting", nullable_schema(ref_schema("ObservationAccounting"))),
             ("floating_notes", array_schema(ref_schema("FloatingNote"))),
             ("color_tag", nullable_schema(ref_schema("Rgba8"))),
             ("origin", nullable_schema(ref_schema(SheetOrigin::schema_name()))),
@@ -1246,6 +1273,8 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def("InfoSheet", info_sheet_schema())
     .with_def("SourceCellId", source_cell_id_schema())
     .with_def("ResultCellDetail", result_cell_detail_schema())
+    .with_def("ObservationAccountingKind", observation_accounting_kind_schema())
+    .with_def("ObservationAccounting", observation_accounting_schema())
     .with_def("ResultSheet", result_sheet_schema())
     .with_def("GraphSheet", graph_sheet_schema())
     .with_def("LayoutSheet", layout_sheet_schema())

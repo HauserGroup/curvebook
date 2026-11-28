@@ -1061,6 +1061,78 @@
       "title": "NamedCheckpoint",
       "type": "object"
     },
+    "ObservationAccounting": {
+      "additionalProperties": false,
+      "properties": {
+        "analyzed": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "censored": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "events": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded_cells": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ignored_non_numeric_cells": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/ObservationAccountingKind"
+        },
+        "omitted_excluded": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted_invalid": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted_missing": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted_non_numeric": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "omitted_out_of_range": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "analyzed"
+      ],
+      "title": "ObservationAccounting",
+      "type": "object"
+    },
+    "ObservationAccountingKind": {
+      "enum": [
+        "paired",
+        "listwise_anova",
+        "mixed_effects_anova",
+        "regression",
+        "survival",
+        "unpaired"
+      ],
+      "title": "ObservationAccountingKind",
+      "type": "string"
+    },
     "PairwiseComparisonRecord": {
       "additionalProperties": false,
       "properties": {
@@ -1796,6 +1868,16 @@
         },
         "id": {
           "$ref": "#/$defs/SheetId"
+        },
+        "observation_accounting": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservationAccounting"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "origin": {
           "anyOf": [

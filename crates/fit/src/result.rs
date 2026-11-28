@@ -17,9 +17,9 @@ use std::collections::{HashMap, HashSet};
 use curvebook_doc::result_builder::{KvTabBuilder, TabBuilder, bool_cell, ci_cell, num_cell, opt_num_cell, p_cell, text_cell};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, CurveSamplePoint, DataSheet,
-    DemingErrorSpec, ErrorCode, FitFlagRules, FittedCurveOverlay, IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, OutlierHandling,
-    ReplicateFitMode, ResultCell, ResultCellDetail, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId, SubcolumnMode,
-    TableArchetype, XColumnMode, XyTable, format_significant_digits,
+    DemingErrorSpec, ErrorCode, FitFlagRules, FittedCurveOverlay, IdentifiabilityMode, LinearRegressionSpec, NonlinearFitSpec, ObservationAccounting,
+    OutlierHandling, ReplicateFitMode, ResultCell, ResultCellDetail, ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SourceCellId,
+    SubcolumnMode, TableArchetype, XColumnMode, XyTable, format_significant_digits,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -38,8 +38,8 @@ use crate::solver::{
     SolverConfig, compare_models_question, compare_vs_horizontal_line, evaluate_fit_flags, fit_nonlinear, ordered_nested_roles,
 };
 use crate::types::{
-    DataPoint, DatasetSeries, HookContext, enforce_summary_mode_matrix, extract_datasets_from_sheet, extract_datasets_from_sheet_multi,
-    extract_from_multivar_multi_with_y_map, filter_datasets_by_range, per_dataset_parameter_key,
+    DataPoint, DatasetSeries, ExtractedFitData, HookContext, collapse_datasets_to_row_means, enforce_summary_mode_matrix, extract_fit_data,
+    filter_datasets_by_range, per_dataset_parameter_key,
 };
 
 fn ci_bounds_cell(lower: CiBound, upper: CiBound) -> ResultCell {
@@ -76,12 +76,55 @@ pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookCont
     }
 }
 
+fn append_regression_observation_checklist(
+    result: &mut ResultSheet,
+    analysis: &str,
+    accounting: &ObservationAccounting,
+    ignored_non_numeric: &[(String, usize)],
+) {
+    let omitted = accounting.rows_omitted();
+    if omitted > 0 {
+        let kept = accounting.analyzed;
+        let msg = format!(
+            "{analysis} uses complete-case observation filtering and omitted {omitted} incomplete, excluded, or out-of-range observation(s) ({kept} retained)."
+        );
+        result.checklist.push(ChecklistItem {
+            assumption: String::from("Complete-case row alignment"),
+            status: ChecklistStatus::Info,
+            diagnostic_metric: Some(format!("{omitted} row(s) omitted; {kept} retained")),
+            explanation: msg.clone(),
+            remediation: None,
+        });
+        if let Some(tab) = result.tabs.first_mut() {
+            tab.footnotes.push(msg);
+        }
+    }
+    let ignored_total: usize = ignored_non_numeric.iter().map(|(_, c)| *c).sum();
+    if ignored_total > 0 {
+        let summary: String =
+            ignored_non_numeric.iter().filter(|(_, c)| *c > 0).take(6).map(|(label, c)| format!("{label}: {c}")).collect::<Vec<_>>().join(", ");
+        let suffix = if ignored_non_numeric.iter().filter(|(_, c)| *c > 0).count() > 6 { ", ..." } else { "" };
+        let msg = format!("Non-numeric values ignored: {ignored_total} in {analysis} ({summary}{suffix}).");
+        result.checklist.push(ChecklistItem {
+            assumption: String::from("Numeric input validation"),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: Some(format!("{ignored_total} non-numeric cell(s) ignored")),
+            explanation: msg.clone(),
+            remediation: None,
+        });
+        if let Some(tab) = result.tabs.first_mut() {
+            tab.footnotes.push(msg);
+        }
+    }
+}
+
 /// Execute linear regression (OLS, origin-forced, ANCOVA line comparison, or Model II Deming)
 /// and populate a [`ResultSheet`].
 pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionSpec, sheet: &DataSheet) -> Result<ResultSheet, FitError> {
     enforce_summary_mode_matrix(sheet, &AnalysisKind::LinearRegression(*lin_spec))?;
     let mut result = ResultSheet::new(spec.clone())?;
-    let mut datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
+    let ExtractedFitData { mut datasets, mut accounting, ignored_non_numeric, .. } =
+        extract_fit_data(sheet, &spec.selected_data_sets, &[], &[], &[], lin_spec.interpolate_unknowns)?;
     let p_fmt = spec.p_value_format;
     let mut excluded = vec![0; datasets.len()];
     let x_filter = lin_spec.x_range_filter.filter(|(min, max)| min.is_some() || max.is_some());
@@ -92,6 +135,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
             *n_excluded = count;
         }
     }
+    accounting.omitted_out_of_range = excluded.iter().sum();
 
     let segments = lin_spec.plot_segments.unwrap_or(LinearRegressionSpec::DEFAULT_PLOT_SEGMENTS);
     if !(1..=LinearRegressionSpec::MAX_PLOT_SEGMENTS).contains(&segments) {
@@ -113,7 +157,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         ..SimpleLinearOptions::default()
     };
     if lin_spec.deming_model_ii {
-        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec);
+        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec, accounting, &ignored_non_numeric);
     }
 
     let mut fits: Vec<(usize, String, SimpleLinearResult)> = Vec::with_capacity(datasets.len());
@@ -295,6 +339,9 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     }
 
     append_auc_scalars_and_tab(&mut result, &datasets, None);
+    accounting.analyzed = fits.iter().map(|(_, _, f)| f.n).sum();
+    append_regression_observation_checklist(&mut result, "Linear regression", &accounting, &ignored_non_numeric);
+    result.observation_accounting = Some(accounting);
     result.status = ResultStatus::UpToDate;
     Ok(result)
 }
@@ -317,6 +364,8 @@ fn build_deming_result_sheet(
     excluded: &[usize],
     options: &SimpleLinearOptions,
     lin_spec: &LinearRegressionSpec,
+    mut accounting: ObservationAccounting,
+    ignored_non_numeric: &[(String, usize)],
 ) -> Result<ResultSheet, FitError> {
     if lin_spec.force_through_origin || lin_spec.fixed_point.is_some() {
         return Err(FitError::InvalidParameter {
@@ -402,6 +451,9 @@ fn build_deming_result_sheet(
     }
     result.tabs.push(tab.build());
     append_auc_scalars_and_tab(&mut result, datasets, None);
+    accounting.analyzed = dems.iter().map(|(_, d, _)| d.n).sum();
+    append_regression_observation_checklist(&mut result, "Deming regression", &accounting, ignored_non_numeric);
+    result.observation_accounting = Some(accounting);
     result.status = ResultStatus::UpToDate;
     Ok(result)
 }
@@ -419,6 +471,8 @@ pub fn resolve_model_from_spec(nl_spec: &NonlinearFitSpec) -> Result<Box<dyn Par
 struct PreparedNonlinearFit {
     datasets: Vec<DatasetSeries>,
     mv_y_col_map: Option<HashMap<usize, usize>>,
+    accounting: Option<ObservationAccounting>,
+    ignored_non_numeric: Vec<(String, usize)>,
     model: Box<dyn ParametricModel>,
     config: SolverConfig,
 }
@@ -437,53 +491,35 @@ fn prepare_nonlinear_fit(spec: &AnalysisSpec, nl_spec: &NonlinearFitSpec, sheet:
         validate_fit_flag_rules(rules)?;
     }
     let effective_y_cols = nl_spec.effective_mv_y_columns();
-    let (datasets, mv_y_col_map) = match &sheet.archetype {
-        TableArchetype::MultipleVariables(mv) => {
-            match extract_from_multivar_multi_with_y_map(
-                mv,
-                &spec.selected_data_sets,
-                &nl_spec.mv_group_columns,
-                &nl_spec.mv_x_columns,
-                &effective_y_cols,
-            ) {
-                Ok((ds, map)) => (ds, Some(map)),
-                Err(FitError::EmptyInput) if nl_spec.plot_function_only => (
-                    vec![DatasetSeries {
-                        data_set_index: 0,
-                        label: nl_spec.equation_id.clone(),
-                        points: Vec::new(),
-                        unknowns_y: Vec::new(),
-                        unknowns_x: Vec::new(),
-                        is_pre_summarized: false,
-                        column_title_value: None,
-                    }],
-                    None,
-                ),
-                Err(err) => return Err(err),
-            }
-        }
-        _ => match extract_datasets_from_sheet_multi(
-            sheet,
-            &spec.selected_data_sets,
-            &nl_spec.mv_group_columns,
-            &nl_spec.mv_x_columns,
-            &effective_y_cols,
-        ) {
-            Ok(ds) => (ds, None),
-            Err(FitError::EmptyInput) if nl_spec.plot_function_only => (
-                vec![DatasetSeries {
-                    data_set_index: 0,
-                    label: nl_spec.equation_id.clone(),
-                    points: Vec::new(),
-                    unknowns_y: Vec::new(),
-                    unknowns_x: Vec::new(),
-                    is_pre_summarized: false,
-                    column_title_value: None,
-                }],
-                None,
-            ),
-            Err(err) => return Err(err),
-        },
+    let (datasets, mv_y_col_map, accounting, ignored_non_numeric) = match extract_fit_data(
+        sheet,
+        &spec.selected_data_sets,
+        &nl_spec.mv_group_columns,
+        &nl_spec.mv_x_columns,
+        &effective_y_cols,
+        nl_spec.interpolate_unknowns,
+    ) {
+        Ok(ext) => (
+            ext.datasets,
+            ext.mv_y_col_map,
+            (!nl_spec.plot_function_only).then_some(ext.accounting),
+            if nl_spec.plot_function_only { Vec::new() } else { ext.ignored_non_numeric },
+        ),
+        Err(FitError::EmptyInput) if nl_spec.plot_function_only => (
+            vec![DatasetSeries {
+                data_set_index: 0,
+                label: nl_spec.equation_id.clone(),
+                points: Vec::new(),
+                unknowns_y: Vec::new(),
+                unknowns_x: Vec::new(),
+                is_pre_summarized: false,
+                column_title_value: None,
+            }],
+            None,
+            None,
+            Vec::new(),
+        ),
+        Err(err) => return Err(err),
     };
     let model = resolve_model_from_spec(nl_spec)?;
 
@@ -518,7 +554,7 @@ fn prepare_nonlinear_fit(spec: &AnalysisSpec, nl_spec: &NonlinearFitSpec, sheet:
         convergence_strictness: nl_spec.convergence_strictness,
     };
 
-    Ok(PreparedNonlinearFit { datasets, mv_y_col_map, model, config })
+    Ok(PreparedNonlinearFit { datasets, mv_y_col_map, accounting, ignored_non_numeric, model, config })
 }
 
 /// Compare an existing [`NonlinearFitSpec`] against a diagnostics-only horizontal line (`Y = Mean`)
@@ -552,7 +588,8 @@ pub fn execute_nonlinear_analysis(
         populate_distribution_plot_result(&mut result, dist_spec, &plot);
         return Ok(result);
     }
-    let PreparedNonlinearFit { datasets, mv_y_col_map, model, config } = prepare_nonlinear_fit(spec, nl_spec, sheet)?;
+    let PreparedNonlinearFit { datasets, mv_y_col_map, accounting, ignored_non_numeric, model, config } =
+        prepare_nonlinear_fit(spec, nl_spec, sheet)?;
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
     if config.method == curvebook_doc::FitMethod::PoissonDeviance
@@ -617,14 +654,42 @@ pub fn execute_nonlinear_analysis(
     }
 
     let mut filtered_datasets: Option<Vec<DatasetSeries>> = None;
+    let mut range_excluded = 0_usize;
     if !config.plot_function_only && (config.x_range_filter.is_some() || config.y_range_filter.is_some()) {
+        let count_obs = |sets: &[DatasetSeries]| -> usize {
+            sets.iter()
+                .flat_map(|ds| ds.points.iter())
+                .map(|pt| {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    if let Some(n) = pt.n.filter(|v| v.is_finite() && *v >= 1.0 && *v <= 1e9) { n.round() as usize } else { 1 }
+                })
+                .sum()
+        };
+        if config.replicate_fit_mode == ReplicateFitMode::RowMeansOnly {
+            let mut collapsed = datasets.to_vec();
+            collapse_datasets_to_row_means(&mut collapsed);
+            let before = count_obs(&collapsed);
+            filter_datasets_by_range(&mut collapsed, config.x_range_filter, config.y_range_filter);
+            range_excluded = before.saturating_sub(count_obs(&collapsed));
+        }
         let mut copy = datasets.to_vec();
+        let before = count_obs(&copy);
         filter_datasets_by_range(&mut copy, config.x_range_filter, config.y_range_filter);
+        if config.replicate_fit_mode != ReplicateFitMode::RowMeansOnly {
+            range_excluded = before.saturating_sub(count_obs(&copy));
+        }
         filtered_datasets = Some(copy);
     }
     let auc_datasets = filtered_datasets.as_deref().unwrap_or(&datasets);
     let has_custom_plot_bounds = nl_spec.plot_x_min.is_some() || nl_spec.plot_x_max.is_some();
     append_auc_scalars_and_tab(&mut result, auc_datasets, Some((model.as_ref(), &fit, has_custom_plot_bounds)));
+
+    if let Some(mut acc) = accounting {
+        acc.omitted_out_of_range = range_excluded;
+        acc.analyzed = fit.datasets.iter().map(|d| d.n_obs).sum();
+        append_regression_observation_checklist(&mut result, "Nonlinear regression", &acc, &ignored_non_numeric);
+        result.observation_accounting = Some(acc);
+    }
 
     result.status = match fit.status {
         FitStatus::Converged | FitStatus::Ambiguous => ResultStatus::UpToDate,

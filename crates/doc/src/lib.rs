@@ -111,9 +111,9 @@ pub use remap::{
     remap_document_sheet_ids, remap_document_sheet_references, remap_graph_spec_references, remap_inline_hook_tokens, remap_layout_spec_references,
 };
 pub use result::{
-    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairedObservationAccounting,
-    PairwiseComparisonRecord, RemediationKind, ResultCell, ResultCellDetail, ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus,
-    ResultTab, ResultTabKind, format_significant_digits,
+    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, ObservationAccounting,
+    ObservationAccountingKind, PairedObservationAccounting, PairwiseComparisonRecord, RemediationKind, ResultCell, ResultCellDetail,
+    ResultProvenance, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, format_significant_digits,
 };
 pub use result_builder::{
     KvTabBuilder, TabBuilder, bool_cell, ci_cell, finite_ci_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, p_cell_at_alpha, text_cell,

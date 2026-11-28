@@ -15,15 +15,15 @@ use curvebook_doc::{
     GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec,
     LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
     ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat,
-    PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule,
-    PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
-    ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy, RepeatedMeasuresDesign,
-    ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RmSphericityCorrection, RocCiMethod,
-    RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise, SplineLowessMethod, SplineLowessSpec,
-    SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype,
-    TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
-    WeightingScheme, WeightingSource,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, ObservationAccounting, ObservationAccountingKind, OneWayAnovaSpec, OneWayMethod,
+    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope,
+    PassingBablokSpec, PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget,
+    PowerTailMode, PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy,
+    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    RmSphericityCorrection, RocCiMethod, RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise,
+    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy,
+    TableArchetype, TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    TwoProportionsMethod, WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -288,20 +288,26 @@ fn build_manuscript_methods_blocks(
 
 fn build_manuscript_sample_size_paragraph(res: &ResultSheet, source_ds: Option<&DataSheet>) -> Option<ReportBlock> {
     let mut sentences = Vec::new();
-    let accounting = res.paired_observation_accounting();
-    if let Some(acc) = &accounting {
+    let paired_accounting = res.paired_observation_accounting();
+    let obs_accounting = res.observation_accounting();
+    if let Some(acc) = &paired_accounting {
         sentences.push(paired_observations_sentence(acc));
-    } else if let Some(ds) = source_ds
-        && let Some(summary) = describe_manuscript_sample_sizes(ds, &res.analysis.selected_data_sets)
-    {
-        sentences.push(summary);
+    } else {
+        if let Some(ds) = source_ds
+            && let Some(summary) = describe_manuscript_sample_sizes(ds, &res.analysis.selected_data_sets)
+        {
+            sentences.push(summary);
+        }
+        if let Some(acc) = obs_accounting {
+            sentences.push(observation_accounting_sentence(acc));
+        }
     }
 
     if let Some(ds) = source_ds {
         let excluded_count = count_excluded_cells(ds);
         let documented_count = count_active_exclusion_notes(ds);
         if excluded_count == 0 {
-            if accounting.is_none() {
+            if paired_accounting.is_none() {
                 sentences.push(String::from("No observations were manually excluded prior to analysis."));
             }
         } else if documented_count > 0 {
@@ -333,6 +339,87 @@ fn paired_observations_sentence(acc: &PairedObservationAccounting) -> String {
         .collect();
         format!("Complete-case pairing analyzed {pairs} complete pair(s); {omitted} row(s) were omitted ({}).", reasons.join(", "))
     }
+}
+
+fn format_observation_omission_reasons(acc: &ObservationAccounting) -> Vec<String> {
+    [
+        (acc.omitted_missing, "missing a required value"),
+        (acc.omitted_excluded, "containing an excluded cell"),
+        (acc.omitted_non_numeric, "containing a non-numeric cell"),
+        (acc.omitted_invalid, "with an excluded or invalid domain value"),
+        (acc.omitted_out_of_range, "outside configured X/Y range bounds"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, why)| format!("{n} {why}"))
+    .collect()
+}
+
+fn observation_accounting_detail(acc: &ObservationAccounting) -> String {
+    let analyzed = acc.analyzed;
+    let omitted = acc.rows_omitted();
+    let reasons = format_observation_omission_reasons(acc);
+    let non_num_suffix =
+        if acc.ignored_non_numeric_cells > 0 { format!(" {} non-numeric cell(s) ignored.", acc.ignored_non_numeric_cells) } else { String::new() };
+    match acc.kind {
+        ObservationAccountingKind::Paired => {
+            if omitted == 0 {
+                format!("{analyzed} complete pair(s) analyzed; no rows omitted.{non_num_suffix}")
+            } else {
+                format!(
+                    "{analyzed} complete pair(s) analyzed; {omitted} row(s) omitted by complete-case pairing ({}).{non_num_suffix}",
+                    reasons.join(", ")
+                )
+            }
+        }
+        ObservationAccountingKind::ListwiseAnova => {
+            if omitted == 0 {
+                format!("{analyzed} complete row(s)/block(s) analyzed; no rows omitted.{non_num_suffix}")
+            } else {
+                format!(
+                    "{analyzed} complete row(s)/block(s) analyzed; {omitted} row(s) omitted by listwise filtering ({}).{non_num_suffix}",
+                    reasons.join(", ")
+                )
+            }
+        }
+        ObservationAccountingKind::MixedEffectsAnova => {
+            format!("{analyzed} active observation(s) analyzed by mixed-effects REML (no listwise subject deletion).{non_num_suffix}")
+        }
+        ObservationAccountingKind::Regression => {
+            if omitted == 0 {
+                format!("{analyzed} observation(s) analyzed; no rows omitted.{non_num_suffix}")
+            } else {
+                format!("{analyzed} observation(s) analyzed; {omitted} row(s)/observation(s) omitted ({}).{non_num_suffix}", reasons.join(", "))
+            }
+        }
+        ObservationAccountingKind::Survival => {
+            let subject_summary = if let (Some(ev), Some(cens)) = (acc.events, acc.censored) {
+                format!("{analyzed} subject(s) analyzed ({ev} event(s), {cens} censored)")
+            } else {
+                format!("{analyzed} subject(s) analyzed")
+            };
+            if omitted == 0 {
+                format!("{subject_summary}; no rows omitted.{non_num_suffix}")
+            } else {
+                format!("{subject_summary}; {omitted} row(s) omitted ({}).{non_num_suffix}", reasons.join(", "))
+            }
+        }
+        ObservationAccountingKind::Unpaired => {
+            if omitted == 0 {
+                if acc.ignored_non_numeric_cells == 0 {
+                    format!("{analyzed} active numeric observation(s) analyzed; 0 non-numeric cells ignored.")
+                } else {
+                    format!("{analyzed} active numeric observation(s) analyzed; {} non-numeric cell(s) ignored.", acc.ignored_non_numeric_cells)
+                }
+            } else {
+                format!("{analyzed} active numeric observation(s) analyzed; {omitted} row(s) omitted ({}).{non_num_suffix}", reasons.join(", "))
+            }
+        }
+    }
+}
+
+fn observation_accounting_sentence(acc: &ObservationAccounting) -> String {
+    format!("Observation accounting: {}", observation_accounting_detail(acc))
 }
 
 fn count_column_observations(col: &DataSetColumn, mode: SubcolumnMode) -> usize {
@@ -611,9 +698,23 @@ fn append_study_context_section(blocks: &mut Vec<ReportBlock>, doc: &ProjectDocu
     }
     if let Some(accounting) = res.paired_observation_accounting() {
         bullets.push(paired_observations_bullet(&accounting));
+    } else if let Some(accounting) = res.observation_accounting() {
+        bullets.push(observation_accounting_bullet(accounting));
     }
 
     blocks.push(ReportBlock::Bullets(bullets));
+}
+
+fn observation_accounting_bullet(acc: &ObservationAccounting) -> Vec<TextRun> {
+    let label = match acc.kind {
+        ObservationAccountingKind::Paired => "Paired observations",
+        ObservationAccountingKind::Survival => "Survival observation accounting",
+        ObservationAccountingKind::ListwiseAnova
+        | ObservationAccountingKind::MixedEffectsAnova
+        | ObservationAccountingKind::Regression
+        | ObservationAccountingKind::Unpaired => "Observation accounting",
+    };
+    bullet_kv(label, [plain(observation_accounting_detail(acc))])
 }
 
 /// Describe complete-case pairing from the counts the analysis recorded, so the report states the

@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, SummaryModeRefusalReason,
-    SummaryModeSupport, TableArchetype, TableKind, VariableColumn, VariableRole, parse_column_title_numeric_hook, summary_mode_row_for_spec,
+    AnalysisKind, Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ObservationAccounting, ObservationAccountingKind, ResultSheet,
+    ResultStatus, SheetId, SummaryModeRefusalReason, SummaryModeSupport, TableArchetype, TableKind, VariableColumn, VariableRole,
+    parse_column_title_numeric_hook, summary_mode_row_for_spec,
 };
 
 use crate::error::FitError;
@@ -332,6 +333,62 @@ pub fn extract_datasets_from_sheet_with_options(
     extract_datasets_from_sheet_multi(sheet, selected_data_sets, mv_spec.group_columns, mv_spec.x_columns, &y_cols)
 }
 
+/// Extracted regression datasets together with structured observation accounting and per-column
+/// ignored non-numeric cell summaries.
+pub(crate) struct ExtractedFitData {
+    pub(crate) datasets: Vec<DatasetSeries>,
+    pub(crate) mv_y_col_map: Option<HashMap<usize, usize>>,
+    pub(crate) accounting: ObservationAccounting,
+    pub(crate) ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn is_ignored_non_numeric_cell(cell: &Cell) -> bool {
+    if cell.excluded {
+        return false;
+    }
+    match &cell.value {
+        CellValue::Empty => false,
+        CellValue::Number(v) => !v.is_finite(),
+        CellValue::Text(s) => !s.trim().is_empty(),
+    }
+}
+
+fn cell_has_entry(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|c| c.excluded || !c.is_empty())
+}
+
+fn record_omitted_row_reason(accounting: &mut ObservationAccounting, has_excluded: bool, has_non_numeric: bool, has_invalid: bool) {
+    if has_excluded {
+        accounting.omitted_excluded = accounting.omitted_excluded.saturating_add(1);
+    } else if has_non_numeric {
+        accounting.omitted_non_numeric = accounting.omitted_non_numeric.saturating_add(1);
+    } else if has_invalid {
+        accounting.omitted_invalid = accounting.omitted_invalid.saturating_add(1);
+    } else {
+        accounting.omitted_missing = accounting.omitted_missing.saturating_add(1);
+    }
+}
+
+/// Extract regression datasets from a [`DataSheet`] (`Xy`, `Grouped`, or `MultipleVariables`)
+/// together with structured [`ObservationAccounting`].
+pub(crate) fn extract_fit_data(
+    sheet: &DataSheet,
+    selected_data_sets: &[usize],
+    group_columns: &[usize],
+    x_columns: &[usize],
+    y_columns: &[usize],
+    interpolate_unknowns: bool,
+) -> Result<ExtractedFitData, FitError> {
+    match &sheet.archetype {
+        TableArchetype::Xy(xy) => extract_from_xy_with_accounting(xy, selected_data_sets, interpolate_unknowns),
+        TableArchetype::Grouped(g) => extract_from_grouped_with_accounting(g, selected_data_sets),
+        TableArchetype::MultipleVariables(mv) => {
+            extract_from_multivar_multi_with_accounting(mv, selected_data_sets, group_columns, x_columns, y_columns, interpolate_unknowns)
+        }
+        other => Err(FitError::IncompatibleTable { kind: other.kind() }),
+    }
+}
+
 /// Extract regression datasets from a [`DataSheet`] supporting multi-response `MultipleVariables`
 /// assignments (`M` continuous response columns x `G` categorical grouping combinations).
 ///
@@ -346,12 +403,7 @@ pub fn extract_datasets_from_sheet_multi(
     x_columns: &[usize],
     y_columns: &[usize],
 ) -> Result<Vec<DatasetSeries>, FitError> {
-    match &sheet.archetype {
-        TableArchetype::Xy(xy) => extract_from_xy(xy, selected_data_sets),
-        TableArchetype::Grouped(g) => extract_from_grouped(g, selected_data_sets),
-        TableArchetype::MultipleVariables(mv) => extract_from_multivar_multi(mv, selected_data_sets, group_columns, x_columns, y_columns),
-        other => Err(FitError::IncompatibleTable { kind: other.kind() }),
-    }
+    extract_fit_data(sheet, selected_data_sets, group_columns, x_columns, y_columns, true).map(|d| d.datasets)
 }
 
 /// Collapse each dataset's observations within identical table rows to their unweighted sample
@@ -471,8 +523,35 @@ pub fn enforce_summary_mode_matrix(sheet: &DataSheet, kind: &AnalysisKind) -> Re
     }
 }
 
-fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
+fn extract_from_xy_with_accounting(
+    xy: &curvebook_doc::XyTable,
+    selected_data_sets: &[usize],
+    interpolate_unknowns: bool,
+) -> Result<ExtractedFitData, FitError> {
     let indices = resolve_selected_indices(xy.data_sets.len(), selected_data_sets)?;
+    let is_gen_seq = matches!(xy.x_mode, curvebook_doc::XColumnMode::GeneratedSequence { .. });
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
+    let mut ignored_non_numeric = Vec::new();
+    let mut x_non_num_total = 0_usize;
+    if !is_gen_seq {
+        for subs in &xy.x_cells {
+            for c in subs {
+                if c.excluded {
+                    accounting.excluded_cells += 1;
+                } else if is_ignored_non_numeric_cell(c) {
+                    x_non_num_total += 1;
+                }
+            }
+        }
+        accounting.ignored_non_numeric_cells += x_non_num_total;
+        if x_non_num_total > 0 {
+            let x_lbl = if xy.x_title.trim().is_empty() { String::from("X") } else { xy.x_title.clone() };
+            ignored_non_numeric.push((x_lbl, x_non_num_total));
+        }
+    }
+
+    let n_rows = xy.row_count();
+    let mut row_had_any_y_entry = vec![false; n_rows];
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
         let Some(ds) = xy.data_sets.get(ds_idx) else {
@@ -487,15 +566,37 @@ fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) ->
             is_pre_summarized: xy.y_subcolumn_mode.is_pre_summarized(),
             column_title_value: parse_leading_number(&ds.title),
         };
-        populate_xy_column(xy, ds, ds_idx, &mut series)?;
+        let mut ds_non_num = 0_usize;
+        populate_xy_column(xy, ds, ds_idx, &mut series, &mut accounting, &mut ds_non_num, &mut row_had_any_y_entry, interpolate_unknowns)?;
+        if ds_non_num > 0 {
+            ignored_non_numeric.push((ds.title.clone(), ds_non_num));
+        }
         if !series.points.is_empty() {
             series_list.push(series);
         }
     }
+
+    if !is_gen_seq {
+        for (row, &had_y) in row_had_any_y_entry.iter().enumerate() {
+            if had_y {
+                continue;
+            }
+            let x_subs = xy.x_cells.get(row).map(Vec::as_slice).unwrap_or(&[]);
+            if !x_subs.iter().any(|c| c.excluded || !c.is_empty()) {
+                continue;
+            }
+            let x_excl = x_subs.iter().any(|c| c.excluded);
+            let x_non_num = x_subs.iter().any(is_ignored_non_numeric_cell);
+            if x_excl || x_non_num || !interpolate_unknowns {
+                record_omitted_row_reason(&mut accounting, x_excl, x_non_num, false);
+            }
+        }
+    }
+
     if series_list.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    Ok(series_list)
+    Ok(ExtractedFitData { datasets: series_list, mv_y_col_map: None, accounting, ignored_non_numeric })
 }
 
 fn x_row_is_blank_unknown(xy: &curvebook_doc::XyTable, row: usize) -> bool {
@@ -511,41 +612,156 @@ fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
     !subcells.is_empty() && subcells.iter().all(|cell| !cell.excluded && cell.is_empty())
 }
 
-fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
+struct XyRowContext<'a> {
+    row: usize,
+    ds_idx: usize,
+    x_opt: Option<f64>,
+    x_blank: bool,
+    x_excl: bool,
+    x_non_num: bool,
+    subcells: &'a [Cell],
+    y_excl_count: usize,
+    y_non_num_count: usize,
+    y_has_entry: bool,
+    interpolate_unknowns: bool,
+}
+
+fn populate_xy_parametric_row(
+    xy: &curvebook_doc::XyTable,
+    ctx: &XyRowContext<'_>,
+    series: &mut DatasetSeries,
+    accounting: &mut ObservationAccounting,
+) -> Result<(), FitError> {
+    // Excluded (or non-blank non-numeric) X rows must be dropped outright rather than
+    // masquerading as blank X cells queued for inverse interpolation.
+    if ctx.x_opt.is_none() && !ctx.x_blank {
+        if ctx.y_has_entry {
+            record_omitted_row_reason(accounting, ctx.x_excl || ctx.y_excl_count > 0, ctx.x_non_num || ctx.y_non_num_count > 0, false);
+        }
+        return Ok(());
+    }
+    if ctx.x_blank {
+        if let Some(y) = ctx.subcells.first().and_then(Cell::active_number) {
+            series.unknowns_y.push((ctx.row, y).into());
+            if !ctx.interpolate_unknowns {
+                accounting.omitted_missing += 1;
+            }
+        } else if ctx.y_has_entry {
+            record_omitted_row_reason(accounting, ctx.y_excl_count > 0, ctx.y_non_num_count > 0, false);
+        }
+        return Ok(());
+    }
+    let pt_opt =
+        xy.summarized_y_point(ctx.row, ctx.ds_idx).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
+    match (ctx.x_opt, pt_opt) {
+        (Some(x), Some(pt)) => {
+            series.points.push(DataPoint {
+                x: vec![x],
+                y: pt.mean,
+                sd: Some(pt.sd),
+                n: Some(pt.n),
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: ctx.ds_idx,
+                row: ctx.row,
+            });
+        }
+        (Some(x), None) if y_cells_are_blank_unknown(ctx.subcells) => series.unknowns_x.push((ctx.row, x)),
+        _ => {
+            if ctx.y_has_entry {
+                record_omitted_row_reason(accounting, ctx.x_excl || ctx.y_excl_count > 0, ctx.x_non_num || ctx.y_non_num_count > 0, false);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn populate_xy_raw_row(xy: &curvebook_doc::XyTable, ctx: &XyRowContext<'_>, series: &mut DatasetSeries, accounting: &mut ObservationAccounting) {
+    let mut had_y = false;
+    let multiple_replicates = matches!(xy.y_subcolumn_mode, curvebook_doc::SubcolumnMode::RawReplicates(k) if k > 1);
+    for (subcol, cell) in ctx.subcells.iter().enumerate() {
+        if cell.excluded {
+            record_omitted_row_reason(accounting, true, false, false);
+        } else if is_ignored_non_numeric_cell(cell) {
+            record_omitted_row_reason(accounting, ctx.x_excl, true, false);
+        } else if let Some(y) = cell.active_number() {
+            had_y = true;
+            if let Some(x) = ctx.x_opt {
+                series.points.push(DataPoint {
+                    x: vec![x],
+                    y,
+                    sd: None,
+                    n: None,
+                    explicit_weight: None,
+                    source_subcolumn: subcol,
+                    data_set_index: ctx.ds_idx,
+                    row: ctx.row,
+                });
+            } else if ctx.x_blank {
+                let response = if multiple_replicates {
+                    UnknownResponse::Replicate { row: ctx.row, subcol, value: y }
+                } else {
+                    UnknownResponse::Single((ctx.row, y))
+                };
+                series.unknowns_y.push(response);
+                if !ctx.interpolate_unknowns {
+                    accounting.omitted_missing += 1;
+                }
+            } else {
+                record_omitted_row_reason(accounting, ctx.x_excl, ctx.x_non_num, false);
+            }
+        }
+    }
+    if !had_y
+        && let Some(x) = ctx.x_opt
+        && y_cells_are_blank_unknown(ctx.subcells)
+    {
+        series.unknowns_x.push((ctx.row, x));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_xy_column(
+    xy: &curvebook_doc::XyTable,
+    ds: &DataSetColumn,
+    ds_idx: usize,
+    series: &mut DatasetSeries,
+    accounting: &mut ObservationAccounting,
+    ds_non_num: &mut usize,
+    row_had_any_y_entry: &mut [bool],
+    interpolate_unknowns: bool,
+) -> Result<(), FitError> {
+    let is_gen_seq = matches!(xy.x_mode, curvebook_doc::XColumnMode::GeneratedSequence { .. });
     for (row, subcells) in ds.cells.iter().enumerate() {
         let x_opt = xy.x_summary_at(row).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_x", reason: e.to_string() })?;
         let x_blank = x_opt.is_none() && x_row_is_blank_unknown(xy, row);
-        // Excluded (or non-blank non-numeric) X rows must be dropped outright rather than
-        // masquerading as blank X cells queued for inverse interpolation.
-        if x_opt.is_none() && !x_blank {
-            continue;
+        let x_subs = if is_gen_seq { &[][..] } else { xy.x_cells.get(row).map(Vec::as_slice).unwrap_or(&[]) };
+        let y_excl_count = subcells.iter().filter(|c| c.excluded).count();
+        let y_non_num_count = subcells.iter().filter(|c| is_ignored_non_numeric_cell(c)).count();
+        let y_has_entry = subcells.iter().any(|c| c.excluded || !c.is_empty());
+        if y_has_entry && let Some(flag) = row_had_any_y_entry.get_mut(row) {
+            *flag = true;
         }
+        accounting.excluded_cells += y_excl_count;
+        accounting.ignored_non_numeric_cells += y_non_num_count;
+        *ds_non_num += y_non_num_count;
+
+        let ctx = XyRowContext {
+            row,
+            ds_idx,
+            x_opt,
+            x_blank,
+            x_excl: x_subs.iter().any(|c| c.excluded),
+            x_non_num: x_subs.iter().any(is_ignored_non_numeric_cell),
+            subcells,
+            y_excl_count,
+            y_non_num_count,
+            y_has_entry,
+            interpolate_unknowns,
+        };
 
         if xy.y_subcolumn_mode.supports_parametric_moments() {
-            if x_blank {
-                if let Some(y) = subcells.first().and_then(Cell::active_number) {
-                    series.unknowns_y.push((row, y).into());
-                }
-                continue;
-            }
-            let pt_opt =
-                xy.summarized_y_point(row, ds_idx).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
-            match (x_opt, pt_opt) {
-                (Some(x), Some(pt)) => {
-                    series.points.push(DataPoint {
-                        x: vec![x],
-                        y: pt.mean,
-                        sd: Some(pt.sd),
-                        n: Some(pt.n),
-                        explicit_weight: None,
-                        source_subcolumn: 0,
-                        data_set_index: ds_idx,
-                        row,
-                    });
-                }
-                (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
-                _ => {}
-            }
+            populate_xy_parametric_row(xy, &ctx, series, accounting)?;
         } else if matches!(xy.y_subcolumn_mode, curvebook_doc::SubcolumnMode::MeanSd | curvebook_doc::SubcolumnMode::MeanSem) {
             return Err(FitError::UnsupportedSubcolumnMode {
                 analysis: "Regression fitting",
@@ -554,7 +770,13 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                 reason: SummaryModeRefusalReason::MissingSampleSizeOrVariance.message(),
             });
         } else if xy.y_subcolumn_mode.is_pre_summarized() {
-            match (x_opt, subcells.first().and_then(Cell::active_number)) {
+            if ctx.x_opt.is_none() && !ctx.x_blank {
+                if ctx.y_has_entry {
+                    record_omitted_row_reason(accounting, ctx.x_excl || ctx.y_excl_count > 0, ctx.x_non_num || ctx.y_non_num_count > 0, false);
+                }
+                continue;
+            }
+            match (ctx.x_opt, subcells.first().and_then(Cell::active_number)) {
                 (Some(x), Some(y)) => {
                     series.points.push(DataPoint {
                         x: vec![x],
@@ -567,56 +789,37 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                         row,
                     });
                 }
-                (None, Some(y)) if x_blank => series.unknowns_y.push((row, y).into()),
+                (None, Some(y)) if ctx.x_blank => {
+                    series.unknowns_y.push((row, y).into());
+                    if !interpolate_unknowns {
+                        accounting.omitted_missing += 1;
+                    }
+                }
                 (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
-                _ => {}
-            }
-        } else {
-            let mut had_y = false;
-            let multiple_replicates = matches!(xy.y_subcolumn_mode, curvebook_doc::SubcolumnMode::RawReplicates(k) if k > 1);
-            for (subcol, cell) in subcells.iter().enumerate() {
-                if let Some(y) = cell.active_number() {
-                    had_y = true;
-                    if let Some(x) = x_opt {
-                        series.points.push(DataPoint {
-                            x: vec![x],
-                            y,
-                            sd: None,
-                            n: None,
-                            explicit_weight: None,
-                            source_subcolumn: subcol,
-                            data_set_index: ds_idx,
-                            row,
-                        });
-                    } else if x_blank {
-                        let response = if multiple_replicates {
-                            UnknownResponse::Replicate { row, subcol, value: y }
-                        } else {
-                            UnknownResponse::Single((row, y))
-                        };
-                        series.unknowns_y.push(response);
+                _ => {
+                    if ctx.y_has_entry {
+                        record_omitted_row_reason(accounting, ctx.x_excl || ctx.y_excl_count > 0, ctx.x_non_num || ctx.y_non_num_count > 0, false);
                     }
                 }
             }
-            if !had_y
-                && let Some(x) = x_opt
-                && y_cells_are_blank_unknown(subcells)
-            {
-                series.unknowns_x.push((row, x));
-            }
+        } else {
+            populate_xy_raw_row(xy, &ctx, series, accounting);
         }
     }
     Ok(())
 }
 
-fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
+fn extract_from_grouped_with_accounting(g: &curvebook_doc::GroupedTable, selected_data_sets: &[usize]) -> Result<ExtractedFitData, FitError> {
     let indices = resolve_selected_indices(g.data_sets.len(), selected_data_sets)?;
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
+    let mut ignored_non_numeric = Vec::new();
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
         let Some(ds) = g.data_sets.get(ds_idx) else {
             continue;
         };
         let mut points = Vec::new();
+        let mut ds_non_num = 0_usize;
         for (row, subcells) in ds.cells.iter().enumerate() {
             let x_val = g
                 .row_numeric_spacing
@@ -624,6 +827,12 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                 .and_then(|v| v.get(row).copied().flatten())
                 .or_else(|| g.row_titles.get(row).and_then(|t| parse_leading_number(t)))
                 .unwrap_or(row as f64);
+            let y_excl_count = subcells.iter().filter(|c| c.excluded).count();
+            let y_non_num_count = subcells.iter().filter(|c| is_ignored_non_numeric_cell(c)).count();
+            let y_has_entry = subcells.iter().any(|c| c.excluded || !c.is_empty());
+            accounting.excluded_cells += y_excl_count;
+            accounting.ignored_non_numeric_cells += y_non_num_count;
+            ds_non_num += y_non_num_count;
             if g.subcolumn_mode.supports_parametric_moments() {
                 let pt_opt = curvebook_doc::SummarizedPoint::reconstruct(g.subcolumn_mode, subcells)
                     .map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
@@ -638,6 +847,8 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                         data_set_index: ds_idx,
                         row,
                     });
+                } else if y_has_entry {
+                    record_omitted_row_reason(&mut accounting, y_excl_count > 0, y_non_num_count > 0, false);
                 }
             } else if matches!(g.subcolumn_mode, curvebook_doc::SubcolumnMode::MeanSd | curvebook_doc::SubcolumnMode::MeanSem) {
                 return Err(FitError::UnsupportedSubcolumnMode {
@@ -658,10 +869,16 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                         data_set_index: ds_idx,
                         row,
                     });
+                } else if y_has_entry {
+                    record_omitted_row_reason(&mut accounting, y_excl_count > 0, y_non_num_count > 0, false);
                 }
             } else {
                 for (subcol, cell) in subcells.iter().enumerate() {
-                    if let Some(y) = cell.active_number() {
+                    if cell.excluded {
+                        record_omitted_row_reason(&mut accounting, true, false, false);
+                    } else if is_ignored_non_numeric_cell(cell) {
+                        record_omitted_row_reason(&mut accounting, false, true, false);
+                    } else if let Some(y) = cell.active_number() {
                         points.push(DataPoint {
                             x: vec![x_val],
                             y,
@@ -675,6 +892,9 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                     }
                 }
             }
+        }
+        if ds_non_num > 0 {
+            ignored_non_numeric.push((ds.title.clone(), ds_non_num));
         }
         if !points.is_empty() {
             series_list.push(DatasetSeries {
@@ -691,7 +911,7 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
     if series_list.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    Ok(series_list)
+    Ok(ExtractedFitData { datasets: series_list, mv_y_col_map: None, accounting, ignored_non_numeric })
 }
 
 fn mv_group_token(cell: &Cell) -> Option<String> {
@@ -896,19 +1116,145 @@ struct MvGroupBucket {
     unknowns_x: Vec<(usize, f64)>,
 }
 
-pub(crate) fn extract_from_multivar_multi_with_y_map(
+fn scan_mv_fit_column_audit(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    group_cols: &[usize],
+    x_cols: &[usize],
+    y_cols: &[usize],
+    accounting: &mut ObservationAccounting,
+) -> Vec<(String, usize)> {
+    let mut ignored_non_numeric = Vec::new();
+    for &gc in group_cols {
+        if let Some(v) = mv.variables.get(gc) {
+            accounting.excluded_cells += v.cells.iter().filter(|c| c.excluded).count();
+        }
+    }
+    for &col in x_cols.iter().chain(y_cols.iter()) {
+        if let Some(v) = mv.variables.get(col) {
+            accounting.excluded_cells += v.cells.iter().filter(|c| c.excluded).count();
+            let non_num = v.cells.iter().filter(|c| is_ignored_non_numeric_cell(c)).count();
+            if non_num > 0 {
+                accounting.ignored_non_numeric_cells += non_num;
+                ignored_non_numeric.push((v.title.clone(), non_num));
+            }
+        }
+    }
+    ignored_non_numeric
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_mv_y_column_buckets(
+    mv: &curvebook_doc::MultipleVariablesTable,
+    y_var: &VariableColumn,
+    x_cols: &[usize],
+    group_cols: &[usize],
+    n_rows: usize,
+    interpolate_unknowns: bool,
+    accounting: &mut ObservationAccounting,
+) -> BTreeMap<Vec<String>, MvGroupBucket> {
+    let mut grouped: BTreeMap<Vec<String>, MvGroupBucket> = BTreeMap::new();
+    for row in 0..n_rows {
+        let y_cell = y_var.cells.get(row);
+        let any_entry = cell_has_entry(y_cell)
+            || group_cols.iter().any(|&gc| cell_has_entry(mv.variables.get(gc).and_then(|v| v.cells.get(row))))
+            || x_cols.iter().any(|&xc| cell_has_entry(mv.variables.get(xc).and_then(|v| v.cells.get(row))));
+        if !any_entry {
+            continue;
+        }
+        let row_has_excl = y_cell.is_some_and(|c| c.excluded)
+            || group_cols.iter().any(|&gc| mv.variables.get(gc).and_then(|v| v.cells.get(row)).is_some_and(|c| c.excluded))
+            || x_cols.iter().any(|&xc| mv.variables.get(xc).and_then(|v| v.cells.get(row)).is_some_and(|c| c.excluded));
+        let row_has_non_num = y_cell.is_some_and(is_ignored_non_numeric_cell)
+            || x_cols.iter().any(|&xc| mv.variables.get(xc).and_then(|v| v.cells.get(row)).is_some_and(is_ignored_non_numeric_cell));
+
+        let Some(key_tokens) = group_cols
+            .iter()
+            .map(|&gc| mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token))
+            .collect::<Option<Vec<String>>>()
+        else {
+            record_omitted_row_reason(accounting, row_has_excl, row_has_non_num, false);
+            continue;
+        };
+
+        let y_opt = y_cell.and_then(Cell::active_number);
+        let y_blank = y_cell.is_none_or(|c| !c.excluded && c.is_empty());
+
+        if x_cols.len() == 1 {
+            let x_cell = mv.variables.get(x_cols[0]).and_then(|v| v.cells.get(row));
+            let x_opt = x_cell.and_then(Cell::active_number);
+            let x_blank = x_cell.is_none_or(|c| !c.excluded && c.is_empty());
+            match (x_opt, y_opt) {
+                (Some(xv), Some(yv)) => {
+                    grouped.entry(key_tokens).or_default().points.push(DataPoint {
+                        x: vec![xv],
+                        y: yv,
+                        sd: None,
+                        n: None,
+                        explicit_weight: None,
+                        source_subcolumn: 0,
+                        data_set_index: 0,
+                        row,
+                    });
+                }
+                (None, Some(yv)) if x_blank => {
+                    grouped.entry(key_tokens).or_default().unknowns_y.push(UnknownResponse::Single((row, yv)));
+                    if !interpolate_unknowns {
+                        accounting.omitted_missing += 1;
+                    }
+                }
+                (Some(xv), None) if y_blank => {
+                    grouped.entry(key_tokens).or_default().unknowns_x.push((row, xv));
+                    if !interpolate_unknowns {
+                        accounting.omitted_missing += 1;
+                    }
+                }
+                _ => {
+                    record_omitted_row_reason(accounting, row_has_excl, row_has_non_num, false);
+                }
+            }
+            continue;
+        }
+
+        let Some(y_val) = y_opt else {
+            record_omitted_row_reason(accounting, row_has_excl, row_has_non_num, false);
+            continue;
+        };
+        let Some(xs) =
+            x_cols.iter().map(|&xc| mv.variables.get(xc).and_then(|v| v.cells.get(row)).and_then(Cell::active_number)).collect::<Option<Vec<f64>>>()
+        else {
+            record_omitted_row_reason(accounting, row_has_excl, row_has_non_num, false);
+            continue;
+        };
+        grouped.entry(key_tokens).or_default().points.push(DataPoint {
+            x: xs,
+            y: y_val,
+            sd: None,
+            n: None,
+            explicit_weight: None,
+            source_subcolumn: 0,
+            data_set_index: 0,
+            row,
+        });
+    }
+    grouped
+}
+
+pub(crate) fn extract_from_multivar_multi_with_accounting(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
     group_columns: &[usize],
     x_columns: &[usize],
     y_columns: &[usize],
-) -> Result<(Vec<DatasetSeries>, HashMap<usize, usize>), FitError> {
+    interpolate_unknowns: bool,
+) -> Result<ExtractedFitData, FitError> {
     if mv.variables.len() < 2 {
         return Err(FitError::InsufficientData { required: 2, actual: mv.variables.len() });
     }
     let MvResolvedColumns { x_cols, y_cols, group_cols } = resolve_mv_columns_multi(mv, selected_data_sets, group_columns, x_columns, y_columns)?;
     let multi_y = y_cols.len() > 1;
     let n_rows = mv.row_count();
+    let mut accounting = ObservationAccounting::new(ObservationAccountingKind::Regression, 0);
+    let ignored_non_numeric = scan_mv_fit_column_audit(mv, &group_cols, &x_cols, &y_cols, &mut accounting);
 
     let level_ranks: Vec<HashMap<String, usize>> = group_cols
         .iter()
@@ -921,81 +1267,7 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
         let Some(y_var) = mv.variables.get(y_col) else {
             continue;
         };
-        let mut grouped: BTreeMap<Vec<String>, MvGroupBucket> = BTreeMap::new();
-        for row in 0..n_rows {
-            let mut key_tokens = Vec::with_capacity(group_cols.len());
-            let mut all_groups = true;
-            for &gc in &group_cols {
-                if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
-                    key_tokens.push(tok);
-                } else {
-                    all_groups = false;
-                    break;
-                }
-            }
-            if !all_groups {
-                continue;
-            }
-
-            let y_cell = y_var.cells.get(row);
-            let y_opt = y_cell.and_then(Cell::active_number);
-            let y_blank = y_cell.is_none_or(|c| !c.excluded && c.is_empty());
-
-            if x_cols.len() == 1 {
-                let x_cell = mv.variables.get(x_cols[0]).and_then(|v| v.cells.get(row));
-                let x_opt = x_cell.and_then(Cell::active_number);
-                let x_blank = x_cell.is_none_or(|c| !c.excluded && c.is_empty());
-                match (x_opt, y_opt) {
-                    (Some(xv), Some(yv)) => {
-                        grouped.entry(key_tokens).or_default().points.push(DataPoint {
-                            x: vec![xv],
-                            y: yv,
-                            sd: None,
-                            n: None,
-                            explicit_weight: None,
-                            source_subcolumn: 0,
-                            data_set_index: 0,
-                            row,
-                        });
-                    }
-                    (None, Some(yv)) if x_blank => {
-                        grouped.entry(key_tokens).or_default().unknowns_y.push(UnknownResponse::Single((row, yv)));
-                    }
-                    (Some(xv), None) if y_blank => {
-                        grouped.entry(key_tokens).or_default().unknowns_x.push((row, xv));
-                    }
-                    _ => {}
-                }
-                continue;
-            }
-
-            let Some(y_val) = y_opt else {
-                continue;
-            };
-            let mut xs = Vec::with_capacity(x_cols.len());
-            let mut all_x = true;
-            for &xc in &x_cols {
-                if let Some(xv) = mv.variables.get(xc).and_then(|v| v.cells.get(row)).and_then(Cell::active_number) {
-                    xs.push(xv);
-                } else {
-                    all_x = false;
-                    break;
-                }
-            }
-            if !all_x {
-                continue;
-            }
-            grouped.entry(key_tokens).or_default().points.push(DataPoint {
-                x: xs,
-                y: y_val,
-                sd: None,
-                n: None,
-                explicit_weight: None,
-                source_subcolumn: 0,
-                data_set_index: 0,
-                row,
-            });
-        }
+        let grouped = collect_mv_y_column_buckets(mv, y_var, &x_cols, &group_cols, n_rows, interpolate_unknowns, &mut accounting);
 
         let mut entries: Vec<(Vec<String>, MvGroupBucket)> = grouped.into_iter().filter(|(_, b)| !b.points.is_empty()).collect();
         if !group_cols.is_empty() {
@@ -1059,17 +1331,7 @@ pub(crate) fn extract_from_multivar_multi_with_y_map(
     if out.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    Ok((out, y_col_map))
-}
-
-fn extract_from_multivar_multi(
-    mv: &curvebook_doc::MultipleVariablesTable,
-    selected_data_sets: &[usize],
-    group_columns: &[usize],
-    x_columns: &[usize],
-    y_columns: &[usize],
-) -> Result<Vec<DatasetSeries>, FitError> {
-    extract_from_multivar_multi_with_y_map(mv, selected_data_sets, group_columns, x_columns, y_columns).map(|(out, _)| out)
+    Ok(ExtractedFitData { datasets: out, mv_y_col_map: Some(y_col_map), accounting, ignored_non_numeric })
 }
 
 #[cfg(test)]

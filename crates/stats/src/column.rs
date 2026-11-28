@@ -63,7 +63,7 @@ use crate::common::{
     TabBuilder, append_ignored_text_checklist_and_footnote, checklist_item, enforce_summary_mode_matrix, init_result_sheet,
     is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted,
     quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, text_cell,
-    try_resolve_selected_indices, validate_finite_slice,
+    try_resolve_selected_indices, unpaired_observation_accounting, validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -1951,6 +1951,10 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         ));
     }
 
+    let analyzed_total: usize = raw_series.iter().map(|s| s.values.len()).sum();
+    let excluded_total: usize = raw_series.iter().map(|s| s.excluded_count).sum();
+    let ignored_total: usize = extracted.ignored_non_numeric.iter().map(|(_, c)| *c).sum();
+    res.observation_accounting = Some(unpaired_observation_accounting(analyzed_total, ignored_total, excluded_total));
     append_ignored_text_checklist_and_footnote(&mut res, "descriptive statistics", &extracted.ignored_non_numeric);
     sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
@@ -2798,6 +2802,10 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
             "No observations exceeded the configured outlier threshold."
         },
     ));
+    let analyzed_total: usize = raw_series.iter().map(|s| s.values.len()).sum();
+    let excluded_total: usize = raw_series.iter().map(|s| s.excluded_count).sum();
+    let ignored_total: usize = extracted.ignored_non_numeric.iter().map(|(_, c)| *c).sum();
+    res.observation_accounting = Some(unpaired_observation_accounting(analyzed_total, ignored_total, excluded_total));
     append_ignored_text_checklist_and_footnote(&mut res, "outlier analysis", &extracted.ignored_non_numeric);
     sanitize_result_sheet_floats(&mut res)?;
     Ok(res)

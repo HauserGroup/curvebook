@@ -3421,6 +3421,8 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         res.fitted_curves.clear();
         res.eliminated_outliers.clear();
         res.checklist.clear();
+        res.cell_details.clear();
+        res.observation_accounting = None;
         res.origin = None;
     }
     let mut dropped_graph_ids: HashSet<SheetId> = HashSet::new();

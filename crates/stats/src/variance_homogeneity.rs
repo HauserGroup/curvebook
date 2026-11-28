@@ -200,6 +200,8 @@ pub fn run_levene_analysis(sheet: &DataSheet, spec: &AnalysisSpec, lt: &LeveneTe
             "Excluded cells were left out of every group.",
         ));
     }
+    let ignored_total: usize = ignored.iter().map(|(_, c)| *c).sum();
+    res.observation_accounting = Some(crate::common::unpaired_observation_accounting(total_n, ignored_total, excluded_total));
     append_ignored_text_checklist_and_footnote(&mut res, "Levene / Brown-Forsythe test", &ignored);
     sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
