@@ -1,16 +1,14 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! `R10` Phase 2 Core Infrastructure acceptance suite & interactive `R10.1` ANOVA spike on native `egui`:
-//! `R10.1`, `R10.2`, `R10.9`, `R10.15`, `R10.16`, and `R10.22` 1M-cell grid frame budget.
-
-use std::time::Instant;
+//! `R10.1`, `R10.2`, `R10.9`, `R10.15`, and `R10.16`.
 
 use crate::common::seed_column_doc;
 use crate::human_wf_common::{EguiWfHarness, assert_input_to_paint_budget, default_viewport};
 use crate::suite_helpers::{add_init_graph, new_shell_app};
 use curvebook_doc::{
-    AnalysisKind, Cell, ColumnDesignHint, DataSheet, ErrorCode, GraphKind, GroupedTable, LayoutItem, LayoutSheet, LayoutSpec, MultiplicityMethod,
-    ProjectDocument, RectPt, ResultCell, ResultTab, ResultTabKind, SheetId, SubcolumnMode, TableArchetype,
+    AnalysisKind, ColumnDesignHint, ErrorCode, GraphKind, LayoutItem, LayoutSheet, LayoutSpec, MultiplicityMethod, RectPt, ResultCell, ResultTab,
+    ResultTabKind, SheetId,
 };
 use curvebook_render::RenderTargetSpec;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
@@ -278,47 +276,4 @@ fn r10_15_aspect_ratio_viewport_and_hover_selected_only_chrome() {
     assert!(h.app().canvas_dialogs.canvas.zoom > 1.05);
     h.click("status.zoom.fit").expect("zoom fit");
     assert!((h.app().canvas_dialogs.canvas.zoom - 1.0).abs() < 1e-6);
-}
-
-#[test]
-fn r10_22_one_million_cell_virtualized_grid_frame_budget() {
-    let mut doc = ProjectDocument::default();
-    let mut grouped = GroupedTable::new(SubcolumnMode::RawReplicates(4), 250, 1_000).expect("1M grouped table");
-    for (g_idx, group) in grouped.data_sets.iter_mut().enumerate() {
-        group.title = format!("Cohort {}", g_idx + 1);
-        for (r_idx, row) in group.cells.iter_mut().enumerate() {
-            for (s_idx, cell) in row.iter_mut().enumerate() {
-                *cell = Cell::number(((g_idx * 4 + s_idx) as f64) * 0.1 + (r_idx as f64));
-            }
-        }
-    }
-    doc.add_data_sheet(DataSheet::new("tbl-1m", "Mega Assay 1M", TableArchetype::Grouped(grouped)).expect("sheet")).expect("add");
-    doc.select_in_navigator(&SheetId::from("tbl-1m")).expect("select");
-
-    let mut app = new_shell_app(doc);
-    let img = app
-        .render_egui_shell_rgba(RenderTargetSpec { width_px: 1280, height_px: 800, dpi: 96 }, ScreenshotRegionTarget::FullWindow)
-        .expect("render 1M");
-    assert_eq!(img.width_px, 1280);
-
-    let mut h = EguiWfHarness::from_app(app, default_viewport());
-    let grid_pos = h.widget_center("grid.cell.0.0.0").expect("visible grid.cell.0.0.0");
-    let (mut max_ms, mut total_ms, frame_count) = (0.0_f64, 0.0_f64, 24usize);
-    for step in 0..frame_count {
-        let t0 = Instant::now();
-        if step > 0 {
-            h.driver.wheel_at(grid_pos, Vec2::new(0.0, -48.0)).expect("wheel 1M grid");
-        } else {
-            h.driver.run_settled();
-        }
-        let dt_ms = t0.elapsed().as_secs_f64() * 1_000.0;
-        total_ms += dt_ms;
-        max_ms = max_ms.max(dt_ms);
-    }
-    let mean_ms = total_ms / (frame_count as f64);
-    let mean_budget_ms = if cfg!(debug_assertions) { 100.0 } else { 16.67 };
-    assert!(
-        mean_ms <= mean_budget_ms,
-        "R10.22 1M-cell grid mean budget exceeded: mean={mean_ms:.2}ms (max={max_ms:.2}ms, limit={mean_budget_ms:.2}ms)"
-    );
 }

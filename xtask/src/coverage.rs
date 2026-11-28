@@ -86,15 +86,9 @@ fn plan(opts: &Options, nextest: bool, out: &Outputs) -> Vec<Vec<String>> {
         test_run.push(s("--workspace"));
         EXCLUDED_PACKAGES.iter().for_each(|e| test_run.extend([s("--exclude"), s(e)]));
         if nextest && opts.runner_args.is_empty() {
-            // Skip wall-clock performance micro-benchmarks whose millisecond budgets cannot hold
-            // under LLVM coverage instrumentation (`-C instrument-coverage`).
-            test_run.extend([
-                s("-E"),
-                format!(
-                    "not ({} | test(=grid_view::tests::rv50_one_million_row_range_selection_and_brushing_completes_under_5ms_without_giant_alloc))",
-                    crate::ci::PERFORMANCE_FILTER
-                ),
-            ]);
+            // Skip serialized wall-clock benchmark/complexity suites under LLVM coverage
+            // instrumentation (`-C instrument-coverage`).
+            test_run.extend([s("-E"), format!("not ({})", crate::ci::PERFORMANCE_FILTER)]);
         }
     } else {
         opts.packages.iter().for_each(|p| test_run.extend([s("-p"), p.clone()]));

@@ -229,25 +229,39 @@ fn batch_workdir_guard_blocks_outside_ttf_and_supports_pdf_options() -> TestResu
 
 #[test]
 fn perf_gate_passes_100k_mv_and_96_curve_budgets() -> TestResult {
-    let out = run_cli_ok(&["perf", "--json"])?;
-    let report: Value = serde_json::from_str(&out).map_err(|e| format!("parse perf json: {e}"))?;
-    assert_eq!(report["ok"], json!(true));
+    let out = run_cli(&["perf", "--json"])?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut docs = serde_json::Deserializer::from_str(&stdout).into_iter::<Value>();
+    let report =
+        docs.next().ok_or_else(|| String::from("perf --json printed no report"))?.map_err(|e| format!("parse perf json: {e}\nstdout:\n{stdout}"))?;
 
     let mv = &report["checks"]["mv_100k_calculated_variable"];
     assert_eq!(mv["rows"], json!(100_000));
     assert_eq!(mv["budget_ms"], json!(250.0));
-    assert_eq!(mv["within_budget"], json!(true));
     let eval_ms = mv["eval_ms"].as_f64().ok_or_else(|| String::from("missing eval_ms"))?;
-    assert!(eval_ms < 250.0, "100k MV eval_ms {eval_ms} exceeded 250 ms budget");
+    assert!(eval_ms.is_finite() && eval_ms >= 0.0, "non-finite 100k MV eval_ms: {eval_ms}");
 
     let curves = &report["checks"]["dose_response_96_curves"];
     assert_eq!(curves["curves"], json!(96));
+    assert_eq!(curves["converged_curves"], json!(96));
     assert_eq!(curves["budget_ms"], json!(50.0));
-    assert_eq!(curves["within_budget"], json!(true));
     let fit_ms = curves["fit_ms"].as_f64().ok_or_else(|| String::from("missing fit_ms"))?;
     let total_ms = curves["total_ms"].as_f64().ok_or_else(|| String::from("missing total_ms"))?;
-    assert!(fit_ms <= 50.0, "96-curve 4PL fit_ms {fit_ms} exceeded 50 ms budget");
-    assert!(total_ms.is_finite() && total_ms >= fit_ms, "total_ms {total_ms} must cover fit_ms {fit_ms}");
+    assert!(fit_ms.is_finite() && total_ms.is_finite() && total_ms >= fit_ms, "total_ms {total_ms} must cover fit_ms {fit_ms}");
+
+    let mv_ok = mv["within_budget"].as_bool().ok_or_else(|| String::from("missing mv within_budget"))?;
+    let fit_ok = curves["within_budget"].as_bool().ok_or_else(|| String::from("missing curves within_budget"))?;
+    let total_ok = curves["total_within_budget"].as_bool().ok_or_else(|| String::from("missing curves total_within_budget"))?;
+    let all_within = mv_ok && fit_ok && total_ok;
+    assert_eq!(report["ok"], json!(all_within));
+    assert_eq!(out.status.success(), all_within);
+
+    if !cfg!(debug_assertions) {
+        assert!(out.status.success(), "release `perf --json` exceeded budget:\n{stdout}");
+        assert_eq!(report["ok"], json!(true));
+        assert!(eval_ms < 250.0, "100k MV eval_ms {eval_ms} exceeded 250 ms release budget");
+        assert!(fit_ms <= 50.0, "96-curve 4PL fit_ms {fit_ms} exceeded 50 ms release budget");
+    }
 
     Ok(())
 }

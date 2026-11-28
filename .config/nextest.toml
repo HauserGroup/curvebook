@@ -29,11 +29,10 @@ threads-required = "num-test-threads"
 filter = 'package(=curvebook) & binary(=desktop_host_loop)'
 threads-required = "num-test-threads"
 
-# 1,000,000-row selection/brushing micro-budget (< 5ms / 25ms wall-clock) and backgrounded `sh`
-# pasteboard drain (< 2s wall-clock) live in the `curvebook-ui-egui` unit-test binary rather than
-# a `*perf*` binary; reserve slots so parallel scheduler/fork preemption never trips them.
+# Backgrounded `sh` pasteboard drain (< 2s wall-clock) lives in the `curvebook-ui-egui`
+# unit-test binary; reserve slots so parallel fork/exec storms never trip it.
 [[profile.ci.overrides]]
-filter = 'package(=curvebook-ui-egui) & (test(=grid_view::tests::rv50_one_million_row_range_selection_and_brushing_completes_under_5ms_without_giant_alloc) | test(=os_integration::tests::r1_s11_08_write_os_pasteboard_with_does_not_wait_on_backgrounded_child_stdio))'
+filter = 'package(=curvebook-ui-egui) & test(=os_integration::tests::r1_s11_08_write_os_pasteboard_with_does_not_wait_on_backgrounded_child_stdio)'
 threads-required = "num-test-threads"
 
 # Max-project-cell (26M–50M cell) budget guard tests each allocate several gigabytes of `Cell`
