@@ -997,8 +997,8 @@ fn s10_6_human_file_merge_project_oracle_badges_and_live_edit() -> TestRes {
     run.assert_shell_health("S10.6-MERGE-PROJECT")
 }
 
-/// Build a hand-authored external ID-indexed `.prism` archive with a 3-hop analysis snapshot
-/// (`analyses/an-1/sheet.json` -> `result_sheets/rs-main.json` -> `data/sheets/view-1/sheet.json` -> `data.csv`).
+/// Build a hand-authored external ID-indexed `.prism` archive with an unpromoted 3-hop analysis
+/// snapshot (`analyses/an-1/sheet.json` -> `result_sheets/rs-main.json` -> `data/sheets/view-1/sheet.json` -> `data.csv`).
 fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
     let entries: Vec<(&str, Vec<u8>)> = vec![
         (
@@ -1008,7 +1008,7 @@ fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
                 "sheets": { "data": ["d-src"], "analyses": ["an-1"] },
                 "sheetAttributesMap": {
                     "d-src": { "title": "Groups" },
-                    "an-1": { "title": "Unpaired t test of Groups" }
+                    "an-1": { "title": "External snapshot of Groups" }
                 }
             }))
             .map_err(|e| e.to_string())?,
@@ -1031,8 +1031,8 @@ fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
             "analyses/an-1/sheet.json",
             serde_json::to_vec(&json!({
                 "uid": "an-1",
-                "title": "Unpaired t test of Groups",
-                "analysisClass": "T_TESTS_AND_NONPARAMETRIC",
+                "title": "External snapshot of Groups",
+                "analysisClass": "UNSUPPORTED_EXTERNAL_ANALYSIS",
                 "preferredResultSheet": "rs-main",
                 "inputSheets": [{ "uid": "d-src", "title": "Groups" }],
                 "resultSheets": [{ "uid": "rs-main", "title": "Tabular results" }]
@@ -1042,7 +1042,7 @@ fn build_external_3hop_archive_fixture_bytes() -> Result<Vec<u8>, String> {
         (
             "analyses/an-1/parameters.json",
             serde_json::to_vec(&json!({
-                "content": { "experimentalDesign": "UNPAIRED_T_TEST", "options": { "pValueTailType": "P_VALUE_TWO_TAILED" } }
+                "content": { "experimentalDesign": "UNSUPPORTED_CUSTOM_TEST" }
             }))
             .map_err(|e| e.to_string())?,
         ),
