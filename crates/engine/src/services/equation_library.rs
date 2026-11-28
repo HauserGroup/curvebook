@@ -237,7 +237,7 @@ impl UserEquationLibrary {
 
     #[cfg(target_arch = "wasm32")]
     fn persist_store(&self, _store: &mut UserEquationStoreFile) -> Result<(), EngineError> {
-        Err(EngineError::with_code(ErrorCode::Unsupported, "host user equation library persistence is unsupported on wasm32"))
+        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, "host user equation library persistence is unsupported on wasm32"))
     }
 
     /// List all saved user equations in deterministic `id` order.
