@@ -23,4 +23,5 @@ mod r17_5_cli_warnings;
 mod r23_wave3a_cli;
 mod r45_robust_cli;
 mod r73_mcp_surface_and_headless;
+mod release_compatibility;
 mod slice0_vertical_gate;

@@ -1,0 +1,23 @@
+{
+  "schema": "curvebook.batch.v1",
+  "commands": [
+    {"cmd": "sheet.createData", "params": {"sheet_id": "measurements", "title": "Calibration measurements", "kind": "xy", "cols": 1, "rows": 6}},
+    {"cmd": "table.setXCells", "params": {"sheet_id": "measurements", "values": [0, 1, 2, 3, 4, 5]}},
+    {"cmd": "table.setCells", "params": {"sheet_id": "measurements", "edits": [
+      {"row": 0, "col": 0, "value": 1},
+      {"row": 1, "col": 0, "value": 4},
+      {"row": 2, "col": 0, "value": 5},
+      {"row": 3, "col": 0, "value": 100},
+      {"row": 4, "col": 0, "value": 10},
+      {"row": 5, "col": 0, "value": 11}
+    ]}},
+    {"cmd": "table.excludeCellsWithReason", "params": {"sheet_id": "measurements", "row": 3, "col": 0, "reason_tag": "instrument_fault", "note": "Instrument saturated during this measurement.", "timestamp_utc": "2026-11-28T00:00:00Z"}},
+    {"cmd": "fit.run", "params": {"sheet_id": "calibration-fit", "source_sheet_id": "measurements", "kind": "linear"}},
+    {"cmd": "graph.create", "params": {"sheet_id": "calibration-graph", "data_sheet_id": "measurements", "kind": "xy", "title": "Calibration fit"}},
+    {"cmd": "graph.setRegressionOverlay", "params": {"sheet_id": "calibration-graph", "result_sheet_id": "calibration-fit", "show_confidence_band": true}},
+    {"cmd": "layout.create", "params": {"sheet_id": "figure", "title": "Calibration figure", "width": 480, "height": 360, "unit": "pt"}},
+    {"cmd": "layout.addPanel", "params": {"sheet_id": "figure", "kind": "graph", "graph_sheet_id": "calibration-graph", "bounds_pt": [20, 20, 440, 210]}},
+    {"cmd": "layout.addPanel", "params": {"sheet_id": "figure", "kind": "table", "source_sheet_id": "calibration-fit", "bounds_pt": [20, 250, 440, 90]}},
+    {"cmd": "project.save", "params": {"path": "release-compatibility.curvebook"}}
+  ]
+}

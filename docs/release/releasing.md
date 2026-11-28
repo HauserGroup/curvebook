@@ -98,6 +98,12 @@ Before tagging or publishing a release, verify both source invariants and packag
 
 ---
 
+## Capturing the Beta compatibility baseline
+
+The macOS release job runs the [compatibility batch](../../apps/curvebook-cli/tests/fixtures/release_compatibility/batch.json) with the CLI inside the mounted DMG. It retains the archive, batch recipe, and `writer.txt` with the CLI version and DMG digest in the workflow artifact **compatibility-baseline-macos**. The archive contains synthetic measurements, an audited exclusion, a linked fit, and a live layout.
+
+When selecting the first Beta candidate, take both `release-compatibility.curvebook` and `batch.json` from that candidate's workflow artifact and replace the rehearsal files in `apps/curvebook-cli/tests/fixtures/release_compatibility/`. Record the writer version and release run in [ASSETS.md](../../ASSETS.md). Run `cargo test --locked -p curvebook-cli --test cli_suite release_compatibility` to check the frozen archive and batch against the current CLI. Keep the resulting Beta files as the baseline for later releases.
+
 ## 2. Shipped Beta Release Artefacts (`R0.28`)
 
 Beta releases ship one installer format per OS and one file per architecture (desktop installers bundle both `curvebook` and `curvebook-cli`; FreeBSD ships a Tier 2 CLI-only archive), plus compliance notices and checksums:

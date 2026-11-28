@@ -328,6 +328,7 @@ jobs:
           ./packaging/macos/package.sh --arch universal --build-only
       - name: Sign, package, and verify macOS universal DMG
         env:
+          CURVEBOOK_COMPATIBILITY_FIXTURE_DIR: dist/release-compatibility
           ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
@@ -410,6 +411,12 @@ jobs:
               -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
               ./packaging/macos/verify.sh --arch universal --require-notarized
           fi
+      - name: Retain compatibility fixture from the bundled CLI
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: compatibility-baseline-macos
+          path: dist/release-compatibility/
+          if-no-files-found: error
       - name: Scan macOS release assets
         run: cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-macos-universal.json dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

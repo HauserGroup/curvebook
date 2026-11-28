@@ -7,6 +7,7 @@
 # Environment overrides:
 #   CURVEBOOK_VERIFY_RETRIES           Bounded retry attempts for network-backed notarization checks (default: 5)
 #   CURVEBOOK_VERIFY_RETRY_DELAY_SECS  Fixed delay in seconds between failed retry attempts (default: 10)
+#   CURVEBOOK_COMPATIBILITY_FIXTURE_DIR  Optional new directory for a compatibility capture from the mounted DMG
 #
 # Usage: packaging/macos/verify.sh [--arch universal|aarch64|x86_64] [--require-notarized] [artifact...]
 set -euo pipefail
@@ -180,6 +181,23 @@ verify_app() {
   verify_bundled_cli "$app"
 }
 
+capture_compatibility_fixture() {
+  local bin="$1" dmg="$2" destination="$3"
+  local fixture="$WORK/compatibility-fixture" writer installer_digest
+  if [[ -e "$destination" || -L "$destination" ]]; then
+    echo "error: compatibility fixture destination already exists: $destination" >&2
+    exit 1
+  fi
+  mkdir "$fixture"
+  cp "$ROOT/apps/curvebook-cli/tests/fixtures/release_compatibility/batch.json" "$fixture/batch.json"
+  "$bin" batch "$fixture/batch.json" --workdir "$fixture"
+  "$bin" info "$fixture/release-compatibility.curvebook" >/dev/null
+  writer="$("$bin" --version)"
+  installer_digest="$(shasum -a 256 < "$dmg")"
+  printf '%s\nDMG SHA-256: %s\n' "$writer" "${installer_digest%% *}" > "$fixture/writer.txt"
+  mv "$fixture" "$destination"
+}
+
 verify_dmg() {
   local dmg="$1" mp app_in_dmg
   [[ -f "$dmg" ]] || { echo "error: DMG not found: $dmg" >&2; exit 1; }
@@ -205,6 +223,9 @@ verify_dmg() {
     exit 1
   fi
   verify_app "$app_in_dmg"
+  if [[ -n "${CURVEBOOK_COMPATIBILITY_FIXTURE_DIR:-}" ]]; then
+    capture_compatibility_fixture "$app_in_dmg/Contents/MacOS/curvebook-cli" "$dmg" "$CURVEBOOK_COMPATIBILITY_FIXTURE_DIR"
+  fi
   hdiutil detach "$mp" -quiet
 }
 
