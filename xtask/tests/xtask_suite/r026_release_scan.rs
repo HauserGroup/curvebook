@@ -76,7 +76,7 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     fs::write(
         rel_dir.join("curvebook-0.1.0.cdx.json"),
         serde_json::to_vec_pretty(&serde_json::json!({
-            "bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1,
+            "bomFormat": "CycloneDX", "specVersion": "1.5", "serialNumber": "urn:uuid:01234567-89ab-5cde-8f01-23456789abcd", "version": 1,
             "metadata": {"component": {"type": "application", "name": "curvebook", "version": "0.1.0"}},
             "components": [{"type": "application", "name": "curvebook-cli", "version": "0.1.0"}, {"type": "library", "name": "serde", "version": "1.0.219", "purl": "pkg:cargo/serde@1.0.219"}]
         })).unwrap(),
@@ -159,7 +159,7 @@ fn r026_planted_brand_cleanroom_and_asset_violations_fail_closed_naming_containe
     ])?);
     fs::write(dir.join("curvebook-0.1.0-freebsd-x86_64.tar.gz"), tgz).unwrap();
     fs::write(dir.join("THIRD-PARTY-LICENSES.html"), format!("<html><title>{brand_gp}</title></html>\n")).unwrap();
-    fs::write(dir.join("curvebook-0.1.0.cdx.json"), serde_json::to_vec(&serde_json::json!({"bomFormat": "CycloneDX", "specVersion": "1.5", "components": [{"name": "helper", "description": format!("Imports {brand_gp} files")}]})).unwrap()).unwrap();
+    fs::write(dir.join("curvebook-0.1.0.cdx.json"), serde_json::to_vec(&serde_json::json!({"bomFormat": "CycloneDX", "specVersion": "1.5", "serialNumber": "urn:uuid:01234567-89ab-5cde-8f01-23456789abcd", "components": [{"name": "helper", "description": format!("Imports {brand_gp} files")}]})).unwrap()).unwrap();
 
     write_sha256sums_for_dir(&dir)?;
     assert_scan_fails_with(
@@ -337,13 +337,18 @@ fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Resul
     for (label, body, expected) in [
         ("invalid-json", "{not valid json\n", "invalid CycloneDX JSON"),
         ("wrong-format", "{\"bomFormat\":\"SPDX\",\"specVersion\":\"2.3\",\"components\":[{\"name\":\"serde\"}]}\n", "bomFormat"),
-        ("empty-components", "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[]}\n", "empty `components`"),
+        ("missing-serial", "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"components\":[{\"name\":\"serde\"}]}\n", "serialNumber"),
+        (
+            "empty-components",
+            "{\"bomFormat\":\"CycloneDX\",\"specVersion\":\"1.5\",\"serialNumber\":\"urn:uuid:01234567-89ab-5cde-8f01-23456789abcd\",\"components\":[]}\n",
+            "empty `components`",
+        ),
     ] {
         seed_single_and_fail(&fx, label, sbom_name, body.as_bytes(), &[sbom_name, expected])?;
     }
     let make_sbom = |extra_comp: serde_json::Value| {
         serde_json::to_vec(&serde_json::json!({
-            "bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1,
+            "bomFormat": "CycloneDX", "specVersion": "1.5", "serialNumber": "urn:uuid:01234567-89ab-5cde-8f01-23456789abcd", "version": 1,
             "metadata": {"component": {"type": "application", "name": "curvebook", "version": "0.1.0-beta.1"}},
             "components": [{"type": "application", "name": "curvebook-cli", "version": "0.1.0-beta.1"}, extra_comp]
         }))
@@ -378,6 +383,7 @@ fn r14_2_cyclonedx_sbom_schema_cleanroom_and_secret_scans_fail_closed() -> Resul
         let sbom = serde_json::to_vec_pretty(&serde_json::json!({
             "bomFormat": "CycloneDX",
             "specVersion": "1.5",
+            "serialNumber": "urn:uuid:01234567-89ab-5cde-8f01-23456789abcd",
             "version": 1,
             "metadata": { "component": { "type": "application", "name": "curvebook", "version": "0.1.0-beta.1" } },
             "components": components

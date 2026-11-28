@@ -170,7 +170,7 @@ fn r028_r026_r810_r811_release_workflow_gates_enforced() {
         "./packaging/sbom.sh sbom",
         "release-scan --no-checksums sbom",
         "name: cyclonedx-sbom",
-        "uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e",
+        "uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
         "--predicate-type https://cyclonedx.org/bom",
     ] {
         assert!(release_yml.contains(required), "release.yml missing `{required}`");
@@ -249,8 +249,25 @@ fn r14_2_sbom_script_merges_desktop_and_cli_normalizes_paths_and_passes_release_
         (&parsed["bomFormat"], &parsed["specVersion"], &parsed["metadata"]["component"]["bom-ref"]),
         (&serde_json::json!("CycloneDX"), &serde_json::json!("1.5"), &serde_json::json!("workspace:apps/curvebook#0.1.0-beta.1"))
     );
+    let serial = parsed["serialNumber"].as_str().ok_or("SBOM missing string serialNumber")?;
+    assert!(serial.starts_with("urn:uuid:") && serial.len() == 45, "unexpected CycloneDX serialNumber: {serial}");
     let comp_names: Vec<&str> = parsed["components"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).collect();
     assert_eq!(comp_names, vec!["curvebook-cli", "curvebook-math", "curvebook-mcp", "serde"]);
+
+    // Second invocation on identical inputs must produce a byte-for-byte identical SBOM (including serialNumber).
+    let out_dir_2 = fx.path.join("sbom-out-2");
+    fs::create_dir_all(&out_dir_2).map_err(|e| e.to_string())?;
+    let run2 = Command::new("bash")
+        .args([staged_sbom_sh.to_str().unwrap(), out_dir_2.to_str().unwrap()])
+        .current_dir(&fake_repo)
+        .env("PATH", &path_env)
+        .env("CURVEBOOK_VERSION", "0.1.0-beta.1")
+        .env("SOURCE_DATE_EPOCH", "1764076800")
+        .output()
+        .map_err(|e| format!("rerun packaging/sbom.sh: {e}"))?;
+    assert!(run2.status.success(), "sbom.sh rerun failed:\n{}\n{}", String::from_utf8_lossy(&run2.stdout), String::from_utf8_lossy(&run2.stderr));
+    let raw2 = fs::read_to_string(out_dir_2.join("curvebook-0.1.0-beta.1.cdx.json")).map_err(|e| e.to_string())?;
+    assert_eq!(raw, raw2, "sbom.sh output (including serialNumber) must be deterministic");
 
     let scan = run_release_scan(&["--no-checksums", out_dir.to_str().unwrap()])?;
     assert!(scan.status.success(), "release-scan rejected generated SBOM:\n{}", String::from_utf8_lossy(&scan.stderr));
