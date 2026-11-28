@@ -2,8 +2,8 @@
 
 use curvebook_doc::{
     ColumnDesignHint, ConnectingLineStyle, DataSheet, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, GraphKind, GraphSheet, GraphSpec,
-    GraphicalDataObject, GroupedArrangement, LineConnectionKind, PartsOfWholeLayout, ProjectDocument, ReplicateLineMode, ReplicateOverlayStyle,
-    SheetId, SummaryMeasure, SurvivalDisplayMetric, TableArchetype, TableKind, WhiskerMethod,
+    GraphicalDataObject, GroupedArrangement, HistogramDisplayStyle, LineConnectionKind, PartsOfWholeLayout, ProjectDocument, ReplicateLineMode,
+    ReplicateOverlayStyle, SheetId, SummaryMeasure, SurvivalDisplayMetric, TableArchetype, TableKind, WhiskerMethod,
 };
 use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
@@ -39,6 +39,7 @@ pub enum ThumbnailGlyphKind {
     ForestPlot,
     ResidualPlot,
     NormalQqPlot,
+    Histogram,
 }
 
 /// Entry in the `Change Graph Type` schematic thumbnail chooser.
@@ -116,6 +117,22 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         graph_kind: GraphKind::Column,
         thumbnail: ThumbnailGlyphKind::AlignedDot,
         compatible_tables: &[TableKind::Column, TableKind::Nested],
+    },
+    GraphTypeOption {
+        id: "hist.bars",
+        label: "Histogram (Frequency Bars)",
+        subtitle: "Contiguous frequency bars with optional Gaussian density overlay",
+        graph_kind: GraphKind::Histogram,
+        thumbnail: ThumbnailGlyphKind::Histogram,
+        compatible_tables: &[TableKind::Column, TableKind::Xy, TableKind::Grouped, TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "hist.cumulative",
+        label: "Cumulative Frequency Curve",
+        subtitle: "Empirical cumulative distribution curve across uniform bins",
+        graph_kind: GraphKind::Histogram,
+        thumbnail: ThumbnailGlyphKind::ScatterLine,
+        compatible_tables: &[TableKind::Column, TableKind::Xy, TableKind::Grouped, TableKind::MultipleVariables],
     },
     GraphTypeOption {
         id: "grouped.interleaved",
@@ -281,8 +298,9 @@ impl ChangeGraphTypeState {
             _ => None,
         });
 
-        let recommended = self.recommended_options();
-        if let Some(first) = recommended.first() {
+        if graph.spec.kind == GraphKind::Histogram {
+            self.selected_option_id = String::from(if graph.spec.histogram.cumulative { "hist.cumulative" } else { "hist.bars" });
+        } else if let Some(first) = self.recommended_options().first() {
             self.selected_option_id = String::from(first.id);
         }
         if let Some((metric, staircase, err_disp)) = graph.spec.series.iter().find_map(|s| match s.gdo {
@@ -310,7 +328,9 @@ impl ChangeGraphTypeState {
             Some(kind) => GRAPH_TYPE_OPTIONS.iter().filter(|opt| opt.compatible_tables.contains(&kind)).collect(),
             None => GRAPH_TYPE_OPTIONS.iter().collect(),
         };
-        if self.column_design_hint == Some(ColumnDesignHint::PairedRepeatedMeasures) {
+        if self.selected_option_id.starts_with("hist.") {
+            out.sort_by_key(|opt| usize::from(opt.graph_kind != GraphKind::Histogram));
+        } else if self.column_design_hint == Some(ColumnDesignHint::PairedRepeatedMeasures) {
             out.sort_by_key(|opt| usize::from(opt.id != "col.before_after"));
         }
         out
@@ -328,6 +348,12 @@ impl ChangeGraphTypeState {
             spec.grouped_arrangement = GroupedArrangement::Superimposed;
         } else if opt.id == "grouped.interleaved" {
             spec.grouped_arrangement = GroupedArrangement::Interleaved;
+        } else if opt.id == "hist.bars" {
+            spec.histogram.display_style = HistogramDisplayStyle::Bars;
+            spec.histogram.cumulative = false;
+        } else if opt.id == "hist.cumulative" {
+            spec.histogram.display_style = HistogramDisplayStyle::XyCurve;
+            spec.histogram.cumulative = true;
         }
         for (idx, series) in spec.series.iter_mut().enumerate() {
             let color = spec.palette.color_at(idx);
@@ -346,7 +372,7 @@ impl ChangeGraphTypeState {
                 *error_display = self.survival_error_display;
                 *show_greenwood_ci = self.survival_error_display.is_some();
             }
-            if opt.id == "grouped.stacked" {
+            if opt.id == "grouped.stacked" || spec.kind == GraphKind::Histogram {
                 series.y_error_bars = None;
             } else if matches!(series.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::ScatterAndLine { .. }) {
                 series.y_error_bars = Some(ErrorBarSpec { metric: self.error_bar_metric, ..ErrorBarSpec::default() });
@@ -499,6 +525,13 @@ pub(super) fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: Marker
             border_color: color,
             border_width_pt: 1.0,
             replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
+        },
+        "hist.bars" | "hist.cumulative" => GraphicalDataObject::BarWithReplicates {
+            summary,
+            fill_color: color.with_alpha(190),
+            border_color: color,
+            border_width_pt: 0.9,
+            replicate_overlay: None,
         },
         "survival.km" => GraphicalDataObject::KaplanMeierStep {
             line_color: color,

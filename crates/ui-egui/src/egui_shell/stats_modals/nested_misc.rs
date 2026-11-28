@@ -1,8 +1,8 @@
 //! Nested, Multiple Row t-Tests, Contingency, Descriptive, Outlier, and Linear Regression design controls.
 
 use curvebook_doc::{
-    AnalysisKind, ContingencyMethod, DemingErrorSpec, KappaWeighting, LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument, SheetId,
-    SubcolumnAggregation,
+    AnalysisKind, ContingencyMethod, DemingErrorSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, KappaWeighting,
+    LeveneCenter, OutlierSpec, PValueStackMethod, ProjectDocument, SheetId, SubcolumnAggregation,
 };
 use egui::{Id, TextEdit, Ui, Vec2};
 
@@ -366,6 +366,9 @@ pub(super) fn render_misc_stats_design(
                 }
             }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+        }
+        AnalysisKind::FrequencyDistribution(fd) => {
+            render_frequency_distribution_design(ui, app, state, spec, fd, tokens, meta, intents);
         }
         AnalysisKind::LinearRegression(lin) => {
             render_linear_regression_design(ui, app, state, spec, lin, tokens, meta, intents);
@@ -1527,6 +1530,175 @@ fn render_area_under_curve_design(
             intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
         }
     });
+
+    ui.add_space(4.0);
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frequency_distribution_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
+    spec: &curvebook_doc::AnalysisSpec,
+    fd: &FrequencyDistributionSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let doc = app.document();
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
+
+    render_section_title(ui, tokens, tr(locale, "freq.section.binning"));
+    let is_fd = matches!(fd.binning_rule, FrequencyBinningRule::AutoFreedmanDiaconis);
+    let is_scott = matches!(fd.binning_rule, FrequencyBinningRule::AutoScott);
+    let is_sturges = matches!(fd.binning_rule, FrequencyBinningRule::AutoSturges);
+    let is_explicit = matches!(fd.binning_rule, FrequencyBinningRule::ExplicitWidth { .. });
+    for (wid, key, active, rule) in [
+        ("edit.freq.binning.fd", "freq.binning.fd", is_fd, FrequencyBinningRule::AutoFreedmanDiaconis),
+        ("edit.freq.binning.scott", "freq.binning.scott", is_scott, FrequencyBinningRule::AutoScott),
+        ("edit.freq.binning.sturges", "freq.binning.sturges", is_sturges, FrequencyBinningRule::AutoSturges),
+        ("edit.freq.binning.explicit", "freq.binning.explicit", is_explicit, FrequencyBinningRule::ExplicitWidth { width: 1.0 }),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, tr(locale, key), active, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind
+                && !matches!((f.binning_rule, rule), (FrequencyBinningRule::ExplicitWidth { .. }, FrequencyBinningRule::ExplicitWidth { .. }))
+            {
+                f.binning_rule = rule;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    if let FrequencyBinningRule::ExplicitWidth { width } = fd.binning_rule {
+        ui.horizontal_wrapped(|ui| {
+            if let Some(new_w) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_freq_bin_width", sid),
+                    widget_id: "edit.freq.bin_width",
+                    label: tr(locale, "freq.bin_width"),
+                    current: width,
+                    bounds: NumericBounds::Positive,
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+                    f.binning_rule = FrequencyBinningRule::ExplicitWidth { width: new_w };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        if let Some(new_first) = render_optional_numeric_input(
+            ui,
+            meta,
+            ("edit_freq_first_center", sid),
+            "edit.freq.first_bin_center",
+            tr(locale, "freq.first_bin_center"),
+            "auto",
+            fd.first_bin_center,
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+                f.first_bin_center = new_first;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+        if let Some(new_last) = render_optional_numeric_input(
+            ui,
+            meta,
+            ("edit_freq_last_center", sid),
+            "edit.freq.last_bin_center",
+            tr(locale, "freq.last_bin_center"),
+            "auto",
+            fd.last_bin_center,
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+                f.last_bin_center = new_last;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "freq.section.output"));
+    ui.horizontal_wrapped(|ui| {
+        for (wid, key, mode) in [
+            ("edit.freq.output.counts", "freq.output.counts", FrequencyOutputMode::Counts),
+            ("edit.freq.output.rel_freq", "freq.output.rel_freq", FrequencyOutputMode::RelativeFrequency),
+            ("edit.freq.output.pct", "freq.output.pct", FrequencyOutputMode::Percentages),
+            ("edit.freq.output.density", "freq.output.density", FrequencyOutputMode::Density),
+            ("edit.freq.output.cum_counts", "freq.output.cum_counts", FrequencyOutputMode::CumulativeCounts),
+            ("edit.freq.output.cum_freq", "freq.output.cum_freq", FrequencyOutputMode::CumulativeFrequency),
+            ("edit.freq.output.cum_pct", "freq.output.cum_pct", FrequencyOutputMode::CumulativePercentages),
+        ] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, tr(locale, key), fd.output_mode == mode, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+                    f.output_mode = mode;
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, tr(locale, "freq.section.options"));
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.freq.overlay_gaussian",
+        tr(locale, "freq.overlay_gaussian"),
+        fd.overlay_gaussian,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+            f.overlay_gaussian = !fd.overlay_gaussian;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.freq.create_histogram_graph",
+        tr(locale, "freq.create_histogram_graph"),
+        fd.create_histogram_graph,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+            f.create_histogram_graph = !fd.create_histogram_graph;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+
+    let (_, _, subcols) = source_table_shape(doc, spec.source_sheet_id.as_ref());
+    let agg_en = r8_subcolumn_aggregation(subcols);
+    ui.add_space(4.0);
+    render_section_title(ui, tokens, tr(locale, "freq.section.aggregation"));
+    for (wid, lbl, agg) in [
+        ("edit.freq.agg.pooled", "Pool all replicate subcolumns into one sample", SubcolumnAggregation::PooledGrandSample),
+        ("edit.freq.agg.row_means", "Average replicate subcolumns per row first", SubcolumnAggregation::RowMeans),
+        ("edit.freq.agg.per_sub", "Bin each replicate subcolumn separately", SubcolumnAggregation::PerSubcolumn),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, fd.aggregation == agg, &agg_en) {
+            let mut next = spec.clone();
+            if let AnalysisKind::FrequencyDistribution(f) = &mut next.kind {
+                f.aggregation = agg;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
 
     ui.add_space(4.0);
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);

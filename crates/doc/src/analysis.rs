@@ -1311,6 +1311,136 @@ impl Default for AreaUnderCurveSpec {
     }
 }
 
+/// Bin-width selection rule for standalone [`FrequencyDistributionSpec`] and [`crate::HistogramSpec`].
+///
+/// Automatic rules follow Sturges (1926), Scott (1979), and Freedman & Diaconis (1981).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FrequencyBinningRule {
+    /// Sturges' rule (`k = ceil(log2(n)) + 1`; Sturges 1926).
+    #[serde(alias = "sturges", alias = "auto_sturges")]
+    AutoSturges,
+    /// Scott's normal-reference rule (`h = 3.5 * s * n^(-1/3)`; Scott 1979).
+    #[serde(alias = "scott", alias = "auto_scott")]
+    AutoScott,
+    /// Freedman–Diaconis interquartile-range rule (`h = 2 * IQR * n^(-1/3)`; Freedman & Diaconis 1981; default).
+    #[default]
+    #[serde(alias = "fd", alias = "freedman_diaconis", alias = "auto_fd", alias = "auto_freedman_diaconis")]
+    AutoFreedmanDiaconis,
+    /// Explicit positive uniform bin width (`width > 0`).
+    #[serde(alias = "explicit", alias = "explicit_width", alias = "fixed_width")]
+    ExplicitWidth {
+        /// Strict positive width of every uniform bin in data units.
+        width: f64,
+    },
+}
+
+/// Output scale reported by [`FrequencyDistributionSpec`] and plotted by [`crate::HistogramSpec`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum FrequencyOutputMode {
+    /// Raw observation counts per bin (`c_j`; default).
+    #[default]
+    #[serde(alias = "counts", alias = "count", alias = "frequency")]
+    Counts,
+    /// Relative frequency per bin (`c_j / N`, summing to `1.0`).
+    #[serde(alias = "relative_frequency", alias = "relative", alias = "fraction", alias = "proportions")]
+    RelativeFrequency,
+    /// Percentage per bin (`100 * c_j / N`, summing to `100.0`).
+    #[serde(alias = "percentages", alias = "percentage", alias = "percent")]
+    Percentages,
+    /// Probability density per bin (`c_j / (N * w_j)`, integrating to `1.0`).
+    #[serde(alias = "density", alias = "probability_density")]
+    Density,
+    /// Cumulative observation counts up to each bin upper edge (`<= e_{j+1}`).
+    #[serde(alias = "cumulative_counts", alias = "cumulative_count")]
+    CumulativeCounts,
+    /// Cumulative relative frequency up to each bin upper edge (`ecdf(e_{j+1})` in `[0, 1]`).
+    #[serde(alias = "cumulative_frequency", alias = "cumulative_relative", alias = "cumulative_fraction", alias = "ecdf")]
+    CumulativeFrequency,
+    /// Cumulative percentage up to each bin upper edge (`100 * ecdf(e_{j+1})` in `[0, 100]`).
+    #[serde(alias = "cumulative_percentages", alias = "cumulative_percentage", alias = "cumulative_percent")]
+    CumulativePercentages,
+}
+
+impl FrequencyOutputMode {
+    /// Return `true` when this output mode reports cumulative values.
+    #[must_use]
+    pub const fn is_cumulative(self) -> bool {
+        matches!(self, Self::CumulativeCounts | Self::CumulativeFrequency | Self::CumulativePercentages)
+    }
+
+    /// Map a non-cumulative mode to its cumulative counterpart (leaving cumulative modes unchanged).
+    #[must_use]
+    pub const fn to_cumulative(self) -> Self {
+        match self {
+            Self::Counts | Self::CumulativeCounts => Self::CumulativeCounts,
+            Self::RelativeFrequency | Self::Density | Self::CumulativeFrequency => Self::CumulativeFrequency,
+            Self::Percentages | Self::CumulativePercentages => Self::CumulativePercentages,
+        }
+    }
+
+    /// Human-readable axis and column label for this output mode.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Counts => "Number of values",
+            Self::RelativeFrequency => "Relative frequency",
+            Self::Percentages => "Percentage (%)",
+            Self::Density => "Density",
+            Self::CumulativeCounts => "Cumulative count",
+            Self::CumulativeFrequency => "Cumulative frequency",
+            Self::CumulativePercentages => "Cumulative percentage (%)",
+        }
+    }
+}
+
+fn default_frequency_aggregation() -> SubcolumnAggregation {
+    SubcolumnAggregation::PooledGrandSample
+}
+
+fn default_true_flag() -> bool {
+    true
+}
+
+/// Standalone frequency distribution & histogram binning specification.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct FrequencyDistributionSpec {
+    /// Bin-width selection rule (Sturges, Scott, Freedman–Diaconis, or explicit bin width).
+    #[serde(default)]
+    pub binning_rule: FrequencyBinningRule,
+    /// Optional explicit center of the first bin (`None` derives bin range automatically from data).
+    #[serde(default)]
+    pub first_bin_center: Option<f64>,
+    /// Optional explicit center of the last bin (`None` derives bin range automatically from data).
+    #[serde(default)]
+    pub last_bin_center: Option<f64>,
+    /// Output scale reported in the primary frequency table and analyzable XY dataset.
+    #[serde(default)]
+    pub output_mode: FrequencyOutputMode,
+    /// When `true`, evaluates a fitted Gaussian density or CDF overlay curve from each series' sample mean and SD.
+    #[serde(default)]
+    pub overlay_gaussian: bool,
+    /// How multi-subcolumn replicates on `XY` / `Grouped` tables are collapsed prior to binning.
+    #[serde(default = "default_frequency_aggregation")]
+    pub aggregation: SubcolumnAggregation,
+    /// When `true`, automatically creates a linked [`crate::GraphKind::Histogram`] sheet when run via engine commands.
+    #[serde(default = "default_true_flag")]
+    pub create_histogram_graph: bool,
+}
+
+impl Default for FrequencyDistributionSpec {
+    fn default() -> Self {
+        Self {
+            binning_rule: FrequencyBinningRule::AutoFreedmanDiaconis,
+            first_bin_center: None,
+            last_bin_center: None,
+            output_mode: FrequencyOutputMode::Counts,
+            overlay_gaussian: false,
+            aggregation: SubcolumnAggregation::PooledGrandSample,
+            create_histogram_graph: true,
+        }
+    }
+}
+
 /// Standalone Levene / Brown–Forsythe homogeneity-of-variance test over the selected columns of a
 /// raw-replicate `Column` or `MultipleVariables` table (`R19.2`).
 ///
@@ -3986,6 +4116,8 @@ pub enum AnalysisKind {
     CurveCalculus(CurveCalculusSpec),
     /// Chained deterministic Monte Carlo simulation over a downstream analysis ([`MonteCarloSpec`]).
     MonteCarloSimulation(MonteCarloSpec),
+    /// Standalone empirical frequency distribution & histogram binning ([`FrequencyDistributionSpec`]).
+    FrequencyDistribution(FrequencyDistributionSpec),
 }
 
 impl AnalysisKind {
@@ -4118,6 +4250,7 @@ impl AnalysisKind {
                 CurveCalculusOp::SmoothLowess { .. } => String::from("Smooth curve (LOWESS)"),
             },
             Self::MonteCarloSimulation(_) => String::from("Monte Carlo simulation"),
+            Self::FrequencyDistribution(_) => String::from("Frequency distribution"),
         }
     }
 

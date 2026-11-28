@@ -6,14 +6,14 @@ use curvebook_doc::{
     AnalysisDomainKind, AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineOperation, BlandAltmanSpec,
     CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusOp,
     CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod,
-    FractionOfTotalSpec, GlmFamily, GlmSpec, GraphSheet, HookSource, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec,
-    LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
-    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule,
-    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode, ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign,
-    ResultSheet, ResultStatus, RocCiMethod, RocSpec, RowStatisticsSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod,
-    SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TableKind, TransformAnalysisSpec,
-    TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, GlmFamily, GlmSpec, GraphKind, GraphSheet, HistogramSpec, HookSource,
+    KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset,
+    ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec,
+    ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode,
+    ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, RowStatisticsSpec, SheetId,
+    SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy,
+    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -600,7 +600,7 @@ fn schema_transform_run() -> Value {
 
 fn schema_stats_run() -> Value {
     schema_analysis_base(
-        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `rout`, `grubbs`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
+        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `frequency_distribution`, `rout`, `grubbs`, `levene`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
         false,
         true,
     )
@@ -1117,6 +1117,58 @@ fn create_summary_graph_for_result(
     Ok(graph_id)
 }
 
+fn create_histogram_graph_for_result(
+    doc: &mut ProjectDocument,
+    result_id: &SheetId,
+    eff_title: &str,
+    fd: &FrequencyDistributionSpec,
+) -> Result<SheetId, EngineError> {
+    let graph_id = next_unique_sheet_id(doc, "graph")?;
+    let (ds, _) = super::graph::resolve_graph_create_source_sheet(doc, result_id)?;
+    let mut graph = GraphSheet::new_uninitialized_for_data(graph_id.clone(), &ds)?;
+    let hist_title = format!("{eff_title} — Histogram");
+    graph.title.clone_from(&hist_title);
+    graph.spec.title = hist_title;
+    graph.initialized = true;
+    graph.spec.kind = GraphKind::Histogram;
+    graph.spec.primary_source_sheet_id = result_id.clone();
+    graph.spec.x_axis.title = String::from("Bin center");
+    graph.spec.y_axis.title = fd.output_mode.label().to_owned();
+    graph.spec.histogram = HistogramSpec {
+        cumulative: fd.output_mode.is_cumulative(),
+        show_gaussian_overlay: fd.overlay_gaussian,
+        binning_rule: fd.binning_rule,
+        output_mode: fd.output_mode,
+        ..HistogramSpec::default()
+    };
+    for s in &mut graph.spec.series {
+        s.source_sheet_id = result_id.clone();
+    }
+    super::graph::validate_graph_spec_in_doc(doc, &graph_id, &graph.spec)?;
+    doc.add_graph_sheet(graph)?;
+    Ok(graph_id)
+}
+
+fn maybe_create_histogram_graph_for_result(
+    doc: &mut ProjectDocument,
+    result_id: &SheetId,
+    eff_title: &str,
+    fd_opt: Option<&FrequencyDistributionSpec>,
+    payload: &mut Value,
+) -> Result<(), EngineError> {
+    let Some(fd) = fd_opt else {
+        return Ok(());
+    };
+    let has_existing_hist = doc.graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *result_id && g.spec.kind == GraphKind::Histogram);
+    if !has_existing_hist && doc.total_sheet_count() < MAX_SHEETS_PER_PROJECT {
+        let graph_id = create_histogram_graph_for_result(doc, result_id, eff_title, fd)?;
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(String::from("histogram_graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
+        }
+    }
+    Ok(())
+}
+
 fn maybe_create_summary_graph_for_update(
     doc: &mut ProjectDocument,
     result_id: &SheetId,
@@ -1206,6 +1258,10 @@ fn run_analysis_with_domain(
         AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && has_param_summary_analyzable_data(res) => nl.summary_parameter.clone(),
         _ => None,
     };
+    let freq_hist_spec = match &res.analysis.kind {
+        AnalysisKind::FrequencyDistribution(fd) if fd.create_histogram_graph => Some(fd.clone()),
+        _ => None,
+    };
 
     if wants_create_graph {
         let graph_id = match explicit_graph_id {
@@ -1234,6 +1290,8 @@ fn run_analysis_with_domain(
             obj.insert(String::from("summary_graph_sheet_id"), Value::String(graph_id.as_str().to_owned()));
         }
     }
+
+    maybe_create_histogram_graph_for_result(doc, &sheet_id, &eff_title, freq_hist_spec.as_ref(), &mut payload)?;
 
     let mut outcome = CommandOutcome::mutated(command_id, format!("ran {eff_title}"), payload);
     outcome.warnings = warnings;
@@ -1381,7 +1439,12 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         AnalysisKind::NonlinearRegression(nl) if nl.create_summary_graph && has_param_summary_analyzable_data(res) => nl.summary_parameter.clone(),
         _ => None,
     };
+    let freq_hist_spec = match &res.analysis.kind {
+        AnalysisKind::FrequencyDistribution(fd) if fd.create_histogram_graph => Some(fd.clone()),
+        _ => None,
+    };
     maybe_create_summary_graph_for_update(doc, &id, &eff_title, summary_graph_param, prev_create_summary_graph, &mut payload)?;
+    maybe_create_histogram_graph_for_result(doc, &id, &eff_title, freq_hist_spec.as_ref(), &mut payload)?;
 
     let mut outcome = CommandOutcome::mutated("analysis.updateParams", format!("updated analysis parameters on `{id}`"), payload);
     outcome.warnings = warnings;
@@ -2357,6 +2420,31 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
                 }
             }
         }
+        AnalysisKind::FrequencyDistribution(fd) => {
+            if let FrequencyBinningRule::ExplicitWidth { width } = fd.binning_rule
+                && (!width.is_finite() || width <= 0.0)
+            {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("FrequencyDistribution `binning_rule.width` ({width}) must be finite and > 0"),
+                ));
+            }
+            if let Some(c0) = fd.first_bin_center
+                && !c0.is_finite()
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`first_bin_center` must be finite"));
+            }
+            if let Some(c1) = fd.last_bin_center
+                && !c1.is_finite()
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`last_bin_center` must be finite"));
+            }
+            if let (Some(c0), Some(c1)) = (fd.first_bin_center, fd.last_bin_center)
+                && c0 > c1
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`first_bin_center` ({c0}) must be <= `last_bin_center` ({c1})")));
+            }
+        }
         AnalysisKind::NonlinearRegression(nl) => validate_nonlinear_spec_semantics(nl)?,
         AnalysisKind::SimpleLogisticRegression(sl) => {
             if !sl.classification_cutoff.is_finite() || sl.classification_cutoff <= 0.0 || sl.classification_cutoff >= 1.0 {
@@ -2617,6 +2705,7 @@ fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec, ex
         | AnalysisKind::RocCurve(_)
         | AnalysisKind::PValueStack(_)
         | AnalysisKind::LeveneTest(_)
+        | AnalysisKind::FrequencyDistribution(_)
             if spec.selected_data_sets.is_empty() =>
         {
             let numeric_cols: Vec<usize> = mv.variables.iter().enumerate().filter(|(_, v)| is_mv_numeric_var(v)).map(|(i, _)| i).collect();
@@ -3258,6 +3347,19 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
             matches!(key, "emit_row_classification" | "confidence_bands" | "classification_cutoff" | "plot_x_min" | "plot_x_max" | "plot_segments")
         }
         AnalysisKind::LeveneTest(_) => key == "center",
+        AnalysisKind::FrequencyDistribution(_) => matches!(
+            key,
+            "binning_rule"
+                | "binning"
+                | "bin_width"
+                | "first_bin_center"
+                | "last_bin_center"
+                | "output_mode"
+                | "output"
+                | "overlay_gaussian"
+                | "aggregation"
+                | "create_histogram_graph"
+        ),
         AnalysisKind::Transform(_)
         | AnalysisKind::FitSplineLowess(_)
         | AnalysisKind::AreaUnderCurve(_)
@@ -3671,6 +3773,9 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
         | "brown_forsythe_levene"
         | "variance_homogeneity"
         | "equal_variance_test" => AnalysisKind::LeveneTest(LeveneTestSpec { center: LeveneCenter::Median }),
+        "frequency_distribution" | "frequency" | "histogram" | "freq_dist" | "stats.frequency_distribution" => {
+            AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())
+        }
         "pca" | "stats.pca" | "principal_components" | "pcr" | "stats.pcr" | "principal_component_regression" => {
             AnalysisKind::Multivariate(default_pca())
         }
@@ -4020,6 +4125,8 @@ const NULLABLE_KIND_FIELDS: &[&str] = &[
     "three_way_rm_factors",
     "control_factor",
     "selected_pairs",
+    "first_bin_center",
+    "last_bin_center",
 ];
 
 const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
@@ -4269,6 +4376,26 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
         }
         AnalysisKind::Multivariate(spec) => apply_multivariate_custom_overrides(spec, norm)?,
         AnalysisKind::NonlinearRegression(spec) => apply_nonlinear_custom_overrides(spec, norm)?,
+        AnalysisKind::FrequencyDistribution(spec) => {
+            if let Some(br_val) = norm.get("binning_rule").or_else(|| norm.get("binning"))
+                && !br_val.is_null()
+            {
+                spec.binning_rule = if br_val.is_object() {
+                    deserialize_strict(br_val, "/binning_rule")?
+                } else {
+                    parse_serde_enum(br_val, "FrequencyDistribution `binning_rule`")?
+                };
+            }
+            if let Some(w) = opt_f64_checked(norm, "bin_width")? {
+                spec.binning_rule = FrequencyBinningRule::ExplicitWidth { width: w };
+            }
+            if let Some(om_val) = norm.get("output_mode").or_else(|| norm.get("output"))
+                && !om_val.is_null()
+            {
+                spec.output_mode = parse_serde_enum(om_val, "FrequencyDistribution `output_mode`")?;
+            }
+            apply_enum_field(norm, "aggregation", &mut spec.aggregation, "FrequencyDistribution `aggregation`")?;
+        }
         _ => {}
     }
     Ok(())

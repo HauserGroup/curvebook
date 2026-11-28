@@ -2,10 +2,11 @@
 
 use curvebook_chart::preflight_check_scene;
 use curvebook_doc::{
-    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, CanvasResizeMode,
+    AdditionalTick, AnalysisKind, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, CanvasResizeMode,
     CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind, DocError,
-    EquationDisplayMode, ErrorBarSpec, ErrorCode, FigureCanvasPreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec,
-    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, LevelOrderSpec, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding,
+    EquationDisplayMode, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FrequencyBinningRule, FrequencyOutputMode, GraphAnnotation, GraphAxisScale,
+    GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, HistogramBinAlignment, HistogramDisplayStyle,
+    HistogramMultiSeriesMode, HistogramSpec, LevelOrderSpec, LineConnectionKind, MAX_SHEETS_PER_PROJECT, MultivariateGraphEncoding,
     MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride,
     ProjectDocument, RectPt, RegressionOverlaySpec, ReplicateLineMode, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure,
     SurvivalDisplayMetric, TickLabelFormat, WhiskerMethod,
@@ -509,6 +510,12 @@ fn schema_graph_set_spec() -> Value {
             ("orientation", nullable_schema(enum_str_schema("Cartesian plot orientation", &["vertical", "horizontal"]))),
             ("forest_show_pooled_diamond", nullable_schema(bool_schema("Show pooled summary diamond row on diagnostic forest plots"))),
             ("heatmap_labels", nullable_schema(json!({ "type": "object", "description": "Heatmap row/column label mode and rotation spec" }))),
+            (
+                "histogram",
+                nullable_schema(
+                    json!({ "type": "object", "description": "Histogram display style, bin alignment, cumulative curve, Gaussian overlay, and binning options" }),
+                ),
+            ),
             ("multivariate", nullable_schema(json!({ "type": "object", "description": "5-channel multivariate encoding specification" }))),
         ],
         &["sheet_id"],
@@ -1158,8 +1165,37 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
         graph.title = title.clone();
         graph.spec.title = title.clone();
     }
+    let freq_source_spec = doc.result_sheet(&data_id).and_then(|res| match &res.analysis.kind {
+        AnalysisKind::FrequencyDistribution(fd) => Some(fd.clone()),
+        _ => None,
+    });
     if let Some(kind) = parsed_kind {
         apply_graph_kind(&mut graph.spec, kind, true);
+        if kind == GraphKind::Histogram
+            && let Some(ref fd) = freq_source_spec
+        {
+            graph.spec.x_axis.title = String::from("Bin center");
+            graph.spec.y_axis.title = fd.output_mode.label().to_owned();
+            graph.spec.histogram = HistogramSpec {
+                cumulative: fd.output_mode.is_cumulative(),
+                show_gaussian_overlay: fd.overlay_gaussian,
+                binning_rule: fd.binning_rule,
+                output_mode: fd.output_mode,
+                ..HistogramSpec::default()
+            };
+        }
+        graph.initialized = params.initialized.unwrap_or(true);
+    } else if let Some(ref fd) = freq_source_spec {
+        apply_graph_kind(&mut graph.spec, GraphKind::Histogram, true);
+        graph.spec.x_axis.title = String::from("Bin center");
+        graph.spec.y_axis.title = fd.output_mode.label().to_owned();
+        graph.spec.histogram = HistogramSpec {
+            cumulative: fd.output_mode.is_cumulative(),
+            show_gaussian_overlay: fd.overlay_gaussian,
+            binning_rule: fd.binning_rule,
+            output_mode: fd.output_mode,
+            ..HistogramSpec::default()
+        };
         graph.initialized = params.initialized.unwrap_or(true);
     } else if let Some(init) = params.initialized {
         graph.initialized = init;
@@ -1568,7 +1604,7 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let base_ptr = if params.spec.is_some() { "/spec" } else { "" };
     let patch =
         params.spec.clone().unwrap_or_else(|| strip_keys(&Value::Object(params.patch_fields.clone()), &["sheet_id", "id", "title", "initialized"]));
-    let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels"]);
+    let patch_clean = strip_keys(&patch, &["multivariate", "paper_fill", "orientation", "forest_show_pooled_diamond", "heatmap_labels", "histogram"]);
 
     let (kind, series_count) = mutate_graph_sheet(&mut ctx.session.doc, &id, false, true, |doc, current_spec| {
         let mut merged = merge_json_struct(current_spec, &patch_clean)?;
@@ -1605,6 +1641,9 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         }
         if let Some(hm_val) = patch.get("heatmap_labels").or_else(|| params.patch_fields.get("heatmap_labels")) {
             new_spec.heatmap_labels = parse_heatmap_label_spec(hm_val, current_spec.heatmap_labels)?;
+        }
+        if let Some(hist_val) = patch.get("histogram").or_else(|| params.patch_fields.get("histogram")) {
+            new_spec.histogram = parse_histogram_spec(hist_val, current_spec.histogram.clone())?;
         }
         apply_opt!(params.survival_number_at_risk => new_spec.survival_number_at_risk);
         if let Some(ref title) = params.title
@@ -2457,6 +2496,10 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
         "parts.pie" => Some((GraphKind::PartsOfWhole, None, Some("parts.pie"))),
         "parts.waffle" => Some((GraphKind::PartsOfWhole, None, Some("parts.waffle"))),
         "mv.bubble" => Some((GraphKind::MultipleVariables, None, Some("mv.bubble"))),
+        "hist.bars" | "histogram" | "hist.histogram" => Some((GraphKind::Histogram, None, Some("hist.bars"))),
+        "hist.curve" | "hist.xy_curve" => Some((GraphKind::Histogram, None, Some("hist.curve"))),
+        "hist.step" | "hist.step_outline" => Some((GraphKind::Histogram, None, Some("hist.step"))),
+        "hist.cumulative" => Some((GraphKind::Histogram, None, Some("hist.cumulative"))),
         _ => None,
     }
 }
@@ -2510,6 +2553,7 @@ fn default_gdo_for_option(preset: &str, color: Rgba8) -> GraphicalDataObject {
         "parts.donut" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
         "parts.pie" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Pie, show_center_total: false },
         "parts.waffle" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Waffle10x10, show_center_total: true },
+        "hist.bars" | "hist.curve" | "hist.step" | "hist.cumulative" => default_gdo_for_kind(GraphKind::Histogram, color),
         _ => default_gdo_for_kind(GraphKind::Xy, color),
     }
 }
@@ -2524,6 +2568,25 @@ fn apply_graph_kind_with_option(
     spec.kind = kind;
     if let Some(arr) = opt_arrangement {
         spec.grouped_arrangement = arr;
+    }
+    match gdo_preset {
+        Some("hist.bars") => {
+            spec.histogram.display_style = HistogramDisplayStyle::Bars;
+            spec.histogram.cumulative = false;
+        }
+        Some("hist.curve") => {
+            spec.histogram.display_style = HistogramDisplayStyle::XyCurve;
+            spec.histogram.cumulative = false;
+        }
+        Some("hist.step") => {
+            spec.histogram.display_style = HistogramDisplayStyle::StepOutline;
+            spec.histogram.cumulative = false;
+        }
+        Some("hist.cumulative") => {
+            spec.histogram.display_style = HistogramDisplayStyle::XyCurve;
+            spec.histogram.cumulative = true;
+        }
+        _ => {}
     }
     if !reset_series {
         return;
@@ -2550,7 +2613,7 @@ fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
             area_fill: None,
             replicate_lines: curvebook_doc::ReplicateLineMode::SummaryCenter,
         },
-        GraphKind::Column | GraphKind::Grouped | GraphKind::Contingency => GraphicalDataObject::BarWithReplicates {
+        GraphKind::Column | GraphKind::Grouped | GraphKind::Contingency | GraphKind::Histogram => GraphicalDataObject::BarWithReplicates {
             summary: SummaryMeasure::Mean,
             fill_color: color,
             border_color: Rgba8::BLACK,
@@ -3495,6 +3558,61 @@ fn parse_heatmap_label_spec(val: &Value, mut out: HeatmapLabelSpec) -> Result<He
     }
     if let Some(ref av) = patch.column_angle {
         out.column_angle = parse_serde_enum(av, "heatmap `column_angle`")?;
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HistogramSpecPatch {
+    #[serde(default, deserialize_with = "de_some")]
+    display_style: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    bin_alignment: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    cumulative: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    show_gaussian_overlay: Option<bool>,
+    #[serde(default, deserialize_with = "de_some")]
+    multi_series_mode: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    bar_alpha: Option<f64>,
+    #[serde(default, deserialize_with = "de_some")]
+    binning_rule: Option<Value>,
+    #[serde(default, deserialize_with = "de_some")]
+    output_mode: Option<Value>,
+}
+
+fn parse_histogram_spec(val: &Value, mut out: HistogramSpec) -> Result<HistogramSpec, EngineError> {
+    let patch: HistogramSpecPatch = deserialize_patch(val, "`histogram`")?;
+    if let Some(ref v) = patch.display_style {
+        out.display_style = parse_serde_enum::<HistogramDisplayStyle>(v, "histogram `display_style`")?;
+    }
+    if let Some(ref v) = patch.bin_alignment {
+        out.bin_alignment = parse_serde_enum::<HistogramBinAlignment>(v, "histogram `bin_alignment`")?;
+    }
+    apply_opt!(
+        patch.cumulative => out.cumulative,
+        patch.show_gaussian_overlay => out.show_gaussian_overlay,
+    );
+    if let Some(ref v) = patch.multi_series_mode {
+        out.multi_series_mode = parse_serde_enum::<HistogramMultiSeriesMode>(v, "histogram `multi_series_mode`")?;
+    }
+    if let Some(alpha) = patch.bar_alpha {
+        if !alpha.is_finite() || !(0.05..=1.0).contains(&alpha) {
+            return Err(bad_input("histogram `bar_alpha` must be finite and in [0.05, 1.0]"));
+        }
+        out.bar_alpha = alpha as f32;
+    }
+    if let Some(ref v) = patch.binning_rule {
+        out.binning_rule = if v.is_object() {
+            deserialize_strict(v, "/histogram/binning_rule")?
+        } else {
+            parse_serde_enum::<FrequencyBinningRule>(v, "histogram `binning_rule`")?
+        };
+    }
+    if let Some(ref v) = patch.output_mode {
+        out.output_mode = parse_serde_enum::<FrequencyOutputMode>(v, "histogram `output_mode`")?;
     }
     Ok(out)
 }

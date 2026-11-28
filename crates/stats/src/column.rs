@@ -301,23 +301,23 @@ type OptionalCiPair = (Option<(f64, f64)>, Option<(f64, f64)>);
 type OptionalMeanCi = (Option<f64>, Option<(f64, f64)>);
 type ExtractedSeriesPair = (Vec<(String, Vec<f64>, usize)>, Vec<(String, Vec<SummarizedPoint>)>);
 
-struct IndexedRawSeries {
-    data_set_index: usize,
-    label: String,
-    values: Vec<f64>,
-    excluded_count: usize,
-    non_numeric_count: usize,
+pub(crate) struct IndexedRawSeries {
+    pub(crate) data_set_index: usize,
+    pub(crate) label: String,
+    pub(crate) values: Vec<f64>,
+    pub(crate) excluded_count: usize,
+    pub(crate) non_numeric_count: usize,
     /// Original 0-based table row index for each active observation in `values`.
-    row_indices: Vec<usize>,
+    pub(crate) row_indices: Vec<usize>,
 }
 
-struct IndexedPooledSeries {
+pub(crate) struct IndexedPooledSeries {
     data_set_index: usize,
     label: String,
     points: Vec<SummarizedPoint>,
 }
 
-struct IndexedSpreadOnlySeries {
+pub(crate) struct IndexedSpreadOnlySeries {
     data_set_index: usize,
     label: String,
     mode: SubcolumnMode,
@@ -325,7 +325,7 @@ struct IndexedSpreadOnlySeries {
     rows: Vec<(f64, Option<f64>)>,
 }
 
-struct IndexedIntervalSummarySeries {
+pub(crate) struct IndexedIntervalSummarySeries {
     data_set_index: usize,
     label: String,
     mode: SubcolumnMode,
@@ -334,12 +334,12 @@ struct IndexedIntervalSummarySeries {
     rows: Vec<(f64, Option<f64>, Option<f64>)>,
 }
 
-struct DescriptiveSeriesExtraction {
-    raw: Vec<IndexedRawSeries>,
-    pooled: Vec<IndexedPooledSeries>,
-    no_n_summary: Vec<IndexedSpreadOnlySeries>,
-    interval_summary: Vec<IndexedIntervalSummarySeries>,
-    ignored_non_numeric: Vec<(String, usize)>,
+pub(crate) struct DescriptiveSeriesExtraction {
+    pub(crate) raw: Vec<IndexedRawSeries>,
+    pub(crate) pooled: Vec<IndexedPooledSeries>,
+    pub(crate) no_n_summary: Vec<IndexedSpreadOnlySeries>,
+    pub(crate) interval_summary: Vec<IndexedIntervalSummarySeries>,
+    pub(crate) ignored_non_numeric: Vec<(String, usize)>,
 }
 
 fn extract_spread_only_series(
@@ -642,7 +642,7 @@ fn collect_ignored_non_numeric(raw: &[IndexedRawSeries]) -> Vec<(String, usize)>
     raw.iter().filter(|s| s.non_numeric_count > 0).map(|s| (s.label.clone(), s.non_numeric_count)).collect()
 }
 
-fn extract_indexed_series_for_descriptive(
+pub(crate) fn extract_indexed_series_for_descriptive(
     sheet: &DataSheet,
     selected: &[usize],
     aggregation: SubcolumnAggregation,

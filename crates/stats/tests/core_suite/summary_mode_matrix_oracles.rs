@@ -22,11 +22,11 @@
 
 use curvebook_doc::{
     AnalysisDomainKind, AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable,
-    ContingencyMethod, ContingencySpec, DataSheet, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable, LeveneTestSpec,
-    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec,
-    PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, ResultStatus, RocSpec, SUMMARY_SUBCOLUMN_MODES,
-    SimpleLogisticSpec, SubcolumnMode, SummaryModeProcedure, SummaryModeRefusalReason, SummaryModeSupport, SummaryPointError, TableArchetype,
-    TableKind, TwoGroupMethod, TwoGroupSpec, XyTable, summary_mode_matrix_rows,
+    ContingencyMethod, ContingencySpec, DataSheet, DescriptiveSpec, FactorialAnovaSpec, FrequencyDistributionSpec, GlmFamily, GlmSpec, GroupedTable,
+    LeveneTestSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueStackSpec, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, ResultStatus, RocSpec,
+    SUMMARY_SUBCOLUMN_MODES, SimpleLogisticSpec, SubcolumnMode, SummaryModeProcedure, SummaryModeRefusalReason, SummaryModeSupport,
+    SummaryPointError, TableArchetype, TableKind, TwoGroupMethod, TwoGroupSpec, XyTable, summary_mode_matrix_rows,
 };
 use curvebook_math::dist::{f_sf, student_t_two_sided_p};
 use curvebook_math::sum::SummaryMoments;
@@ -196,6 +196,7 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
         })],
         SummaryModeProcedure::SimpleLogisticRegression => vec![AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())],
         SummaryModeProcedure::LeveneTest => vec![AnalysisKind::LeveneTest(LeveneTestSpec::default())],
+        SummaryModeProcedure::FrequencyDistribution => vec![AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())],
         other => panic!("unexpected non-stats procedure {other:?}"),
     }
 }

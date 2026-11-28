@@ -38,6 +38,7 @@ pub mod common;
 pub mod cox_ext;
 pub mod error;
 pub mod formula_design;
+pub mod frequency;
 pub mod glm_ext;
 pub mod lognormal;
 pub mod multiplicity;
@@ -139,6 +140,7 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::PowerAnalysis(p) => power::run_power_analysis(sheet, spec, p),
         AnalysisKind::SimpleLogisticRegression(sl) => simple_logistic::run_simple_logistic_analysis(sheet, spec, sl),
         AnalysisKind::LeveneTest(lt) => variance_homogeneity::run_levene_analysis(sheet, spec, lt),
+        AnalysisKind::FrequencyDistribution(fd) => frequency::run_frequency_distribution_analysis(sheet, spec, fd),
         AnalysisKind::ImportedSnapshot(_) => {
             Err(StatsError::IncompatibleAnalysisSpec { expected: "computed statistical analysis (imported snapshot)" })
         }

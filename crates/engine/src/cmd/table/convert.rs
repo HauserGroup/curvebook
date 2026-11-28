@@ -1042,7 +1042,8 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
         | AnalysisKind::RowStatistics(_)
         | AnalysisKind::FractionOfTotal(_)
         | AnalysisKind::CurveCalculus(_)
-        | AnalysisKind::MonteCarloSimulation(_) => {}
+        | AnalysisKind::MonteCarloSimulation(_)
+        | AnalysisKind::FrequencyDistribution(_) => {}
     }
 }
 

@@ -70,11 +70,13 @@ pub enum AnalysisKindId {
     CurveCalculus = 26,
     /// Chained deterministic Monte Carlo simulation ([`AnalysisKind::MonteCarloSimulation`]).
     MonteCarloSimulation = 27,
+    /// Standalone empirical frequency distribution & histogram binning ([`AnalysisKind::FrequencyDistribution`]).
+    FrequencyDistribution = 28,
 }
 
 impl AnalysisKindId {
     /// Complete ordered list of every [`AnalysisKindId`] discriminant.
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 29] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -103,6 +105,7 @@ impl AnalysisKindId {
         Self::FractionOfTotal,
         Self::CurveCalculus,
         Self::MonteCarloSimulation,
+        Self::FrequencyDistribution,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -143,6 +146,7 @@ impl AnalysisKindId {
             AnalysisKind::FractionOfTotal(_) => Self::FractionOfTotal,
             AnalysisKind::CurveCalculus(_) => Self::CurveCalculus,
             AnalysisKind::MonteCarloSimulation(_) => Self::MonteCarloSimulation,
+            AnalysisKind::FrequencyDistribution(_) => Self::FrequencyDistribution,
         }
     }
 
@@ -181,6 +185,7 @@ impl AnalysisKindId {
             Self::FractionOfTotal => &ALL_ANALYSIS_DESCRIPTORS[25],
             Self::CurveCalculus => &ALL_ANALYSIS_DESCRIPTORS[26],
             Self::MonteCarloSimulation => &ALL_ANALYSIS_DESCRIPTORS[27],
+            Self::FrequencyDistribution => &ALL_ANALYSIS_DESCRIPTORS[28],
         }
     }
 
@@ -1465,6 +1470,37 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: false,
         ui_catalog_ids: &[],
         docs_anchor: "analysis-monte-carlo-simulation",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::FrequencyDistribution,
+        slug: "frequency-distribution",
+        serde_variant: "FrequencyDistribution",
+        title: "Frequency Distribution & Histogram",
+        short_label: "Frequency Distribution",
+        description: "Empirical histogram binning (Sturges, Scott, Freedman–Diaconis, or explicit bin width), counts, relative/cumulative frequencies, and optional Gaussian density overlay.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Column,
+        compatible_table_kinds: COL_XY_GROUPED_MV,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "frequency_distribution",
+        shorthands: &["frequency_distribution", "frequency", "histogram", "freq_dist", "stats.frequency_distribution"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &[
+            "binning_rule",
+            "first_bin_center",
+            "last_bin_center",
+            "output_mode",
+            "overlay_gaussian",
+            "aggregation",
+            "create_histogram_graph",
+        ],
+        supports_multiplicity: false,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: true,
+        ui_catalog_ids: &["stats.frequency_distribution"],
+        docs_anchor: "analysis-frequency-distribution",
         user_creatable: true,
     },
 ];

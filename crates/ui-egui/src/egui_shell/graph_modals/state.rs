@@ -188,7 +188,9 @@ impl GraphTypeFamily {
         match self {
             Self::Recommended | Self::All => true,
             Self::Xy => matches!(opt.graph_kind, GraphKind::Xy),
-            Self::ColumnAndGrouped => matches!(opt.graph_kind, GraphKind::Column | GraphKind::Grouped | GraphKind::Contingency),
+            Self::ColumnAndGrouped => {
+                matches!(opt.graph_kind, GraphKind::Column | GraphKind::Grouped | GraphKind::Contingency | GraphKind::Histogram)
+            }
             Self::SurvivalAndParts => matches!(opt.graph_kind, GraphKind::Survival | GraphKind::PartsOfWhole),
             Self::MultivariateAndDiag => matches!(opt.graph_kind, GraphKind::MultipleVariables | GraphKind::Diagnostic(_)),
         }

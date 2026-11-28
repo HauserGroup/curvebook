@@ -799,7 +799,7 @@ Registered commands: 116
 - **Menu:** `Format/Graph`
 - **Summary:** Patch a graph's full GraphSpec, palette, frame, legend, title, survival options, or multivariate encoding.
 - **Beginner note:** Updates visual graph settings such as palette, frame style, legend, or multivariate channels.
-- **Parameters:** `forest_show_pooled_diamond` (any), `heatmap_labels` (any), `initialized` (any), `multivariate` (any), `orientation` (any), `paper_fill` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
+- **Parameters:** `forest_show_pooled_diamond` (any), `heatmap_labels` (any), `histogram` (any), `initialized` (any), `multivariate` (any), `orientation` (any), `paper_fill` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
 
 ### `graph.updateImage` — Format Embedded Graph Image
 

@@ -545,6 +545,9 @@ pub(super) fn method_reference_text(spec: &curvebook_doc::AnalysisSpec) -> &'sta
         AnalysisKind::AreaUnderCurve(_) => {
             "Trapezoidal partial-AUC with linear boundary interpolation (Yeh & Kwan 1978) and exact knot-weighted independent-cohort SE (Bailer 1988)."
         }
+        AnalysisKind::FrequencyDistribution(_) => {
+            "Sturges (1926), Scott (1979), and Freedman & Diaconis (1981) histogram binning with Hyndman & Fan (1996) Type-7 IQR and exact empirical CDF."
+        }
         _ => "Exact peer-reviewed CurveBook statistical reference equations and confidence limits evaluated at the active alpha level.",
     }
 }

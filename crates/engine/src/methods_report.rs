@@ -11,18 +11,19 @@ use curvebook_doc::{
     CURVEBOOK_CITATION, Cell, ChecklistItem, ChecklistStatus, CiBound, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod,
     ContingencySimDesign, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec,
     DataSetColumn, DataSheet, DescriptiveSpec, DistributionTailShade, ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode,
-    FitMethod, FractionDenominator, FractionOfTotalSpec, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode,
-    KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset,
-    MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierHandling, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope,
-    PassingBablokSpec, PcaRetentionRule, PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget,
-    PowerTailMode, PowerTestFamily, ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy,
-    RepeatedMeasuresDesign, ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
-    RmSphericityCorrection, RocCiMethod, RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise,
-    SplineLowessMethod, SplineLowessSpec, SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy,
-    TableArchetype, TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    TwoProportionsMethod, WeightingScheme, WeightingSource,
+    FitMethod, FractionDenominator, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmDispersionMode,
+    GlmFamily, GlmSpec, GlmWeightSpec, HookSource, IdentifiabilityMode, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec,
+    LinearRegressionSpec, LognormalRowTestMode, MathTransformPreset, MixedModelDfMethod, ModelComparisonMethod, ModelComparisonQuestion,
+    ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierHandling, OutlierSpec, PValueFormat,
+    PValueStackMethod, PValueStackSpec, PairedObservationAccounting, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule,
+    PharmacologyTransformPreset, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily,
+    ProjectDocument, ProportionCiMethod, RegressionCiMethod, RelationalConstraintOp, RemlZeroVariancePolicy, RepeatedMeasuresDesign,
+    ReplicateFitMode, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RmSphericityCorrection, RocCiMethod,
+    RocSpec, RowStatisticsSpec, RowSummaryKind, SheetId, SimpleLogisticSpec, SimulationMode, SimulationNoise, SplineLowessMethod, SplineLowessSpec,
+    SubcolumnAggregation, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype,
+    TheoreticalDistributionFamily, TheoreticalDistributionSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
+    WeightingScheme, WeightingSource,
 };
 use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 
@@ -790,7 +791,49 @@ fn describe_analysis_kind(doc: &ProjectDocument, spec: &AnalysisSpec, res: &Resu
         AnalysisKind::FractionOfTotal(s) => describe_fraction_of_total(s, spec.confidence_level.percent()),
         AnalysisKind::CurveCalculus(s) => describe_curve_calculus(s),
         AnalysisKind::MonteCarloSimulation(s) => describe_monte_carlo(s),
+        AnalysisKind::FrequencyDistribution(s) => describe_frequency_distribution(s),
     }
+}
+
+fn describe_frequency_distribution(s: &FrequencyDistributionSpec) -> Vec<ReportBlock> {
+    let rule_desc = match s.binning_rule {
+        FrequencyBinningRule::AutoSturges => String::from("Sturges' rule (Sturges, 1926)"),
+        FrequencyBinningRule::AutoScott => String::from("Scott's normal-reference rule (Scott, 1979)"),
+        FrequencyBinningRule::AutoFreedmanDiaconis => String::from("the Freedman-Diaconis interquartile-range rule (Freedman & Diaconis, 1981)"),
+        FrequencyBinningRule::ExplicitWidth { width } => format!("an explicit uniform bin width of {}", format_exact_float(width)),
+    };
+    let bounds_desc = match (s.first_bin_center, s.last_bin_center) {
+        (Some(lo), Some(hi)) => format!(" spanning bin centers from {} to {}", format_exact_float(lo), format_exact_float(hi)),
+        (Some(lo), None) => format!(" anchored at first bin center {}", format_exact_float(lo)),
+        (None, Some(hi)) => format!(" anchored at last bin center {}", format_exact_float(hi)),
+        (None, None) => String::new(),
+    };
+    let mode_desc = match s.output_mode {
+        FrequencyOutputMode::Counts => "raw counts per bin",
+        FrequencyOutputMode::RelativeFrequency => "relative frequencies per bin",
+        FrequencyOutputMode::Percentages => "percentages per bin",
+        FrequencyOutputMode::Density => "probability density per bin",
+        FrequencyOutputMode::CumulativeCounts => "cumulative counts up to each upper bin edge",
+        FrequencyOutputMode::CumulativeFrequency => "cumulative relative frequencies (empirical CDF at upper bin edges)",
+        FrequencyOutputMode::CumulativePercentages => "cumulative percentages up to each upper bin edge",
+    };
+    let agg_desc = match s.aggregation {
+        SubcolumnAggregation::PooledGrandSample => "pooling all active replicate observations within each data set",
+        SubcolumnAggregation::RowMeans => "averaging active replicates per row before binning",
+        SubcolumnAggregation::PerSubcolumn => "tabulating each replicate subcolumn separately",
+    };
+    let gauss_desc = if s.overlay_gaussian {
+        if s.output_mode.is_cumulative() {
+            " A Gaussian cumulative distribution curve parameterized by each series' sample mean and SD was overlaid."
+        } else {
+            " A Gaussian density curve parameterized by each series' sample mean and SD was overlaid."
+        }
+    } else {
+        ""
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Frequency distributions were tabulated into uniform right-closed bins using {rule_desc}{bounds_desc}, {agg_desc}, and reported as {mode_desc}.{gauss_desc}"
+    ))])]
 }
 
 fn describe_row_statistics(s: &RowStatisticsSpec, conf_percent: f64) -> Vec<ReportBlock> {

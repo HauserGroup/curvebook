@@ -26,6 +26,7 @@ mod dag_reactivity;
 mod data_qol_workflows;
 mod e2e_workflows;
 mod engine_v9_provenance_dag;
+mod frequency_histogram_engine;
 mod parity_wave3_workflows;
 mod path_policy_regression;
 mod project_merge_and_origins;

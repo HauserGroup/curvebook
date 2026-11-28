@@ -295,11 +295,13 @@ pub enum SummaryModeProcedure {
     CurveCalculus = 37,
     /// Chained deterministic Monte Carlo simulation (`AnalysisKind::MonteCarloSimulation`).
     MonteCarloSimulation = 38,
+    /// Standalone frequency distribution & histogram binning (`AnalysisKind::FrequencyDistribution`).
+    FrequencyDistribution = 39,
 }
 
 impl SummaryModeProcedure {
-    /// Complete ordered list of all 39 canonical summary-mode matrix procedures.
-    pub const ALL: [Self; 39] = [
+    /// Complete ordered list of all canonical summary-mode matrix procedures.
+    pub const ALL: [Self; 40] = [
         Self::DescriptiveStats,
         Self::OutlierDetection,
         Self::TwoGroupParametricSummary,
@@ -339,6 +341,7 @@ impl SummaryModeProcedure {
         Self::FractionOfTotal,
         Self::CurveCalculus,
         Self::MonteCarloSimulation,
+        Self::FrequencyDistribution,
     ];
 
     /// Total number of procedure rows in [`SUMMARY_MODE_MATRIX`].
@@ -387,6 +390,7 @@ impl SummaryModeProcedure {
             Self::FractionOfTotal => &SUMMARY_MODE_MATRIX[36],
             Self::CurveCalculus => &SUMMARY_MODE_MATRIX[37],
             Self::MonteCarloSimulation => &SUMMARY_MODE_MATRIX[38],
+            Self::FrequencyDistribution => &SUMMARY_MODE_MATRIX[39],
         }
     }
 
@@ -504,6 +508,7 @@ impl SummaryModeProcedure {
             AnalysisKind::FractionOfTotal(_) => Some(Self::FractionOfTotal),
             AnalysisKind::CurveCalculus(_) => Self::when(is_xy, Self::CurveCalculus),
             AnalysisKind::MonteCarloSimulation(_) => Some(Self::MonteCarloSimulation),
+            AnalysisKind::FrequencyDistribution(_) => Some(Self::FrequencyDistribution),
             AnalysisKind::NestedComparison(_) | AnalysisKind::Survival(_) | AnalysisKind::ImportedSnapshot(_) => None,
         }
     }
@@ -923,6 +928,14 @@ pub const SUMMARY_MODE_MATRIX: [SummaryModeMatrixRow; SummaryModeProcedure::COUN
         table_kinds: COL_XY_GROUPED,
         reference_citation: "Metropolis & Ulam (1949) (chained seeded simulation independent of source subcolumn mode)",
         cells: SummaryModeRowCells::all(SummaryModeSupport::Supported(SummaryModeSemantics::TableIndependent)),
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::FrequencyDistribution,
+        analysis_kind_id: AnalysisKindId::FrequencyDistribution,
+        label: "Frequency distribution & histogram",
+        table_kinds: COL_XY_GROUPED,
+        reference_citation: "Sturges (1926); Scott (1979); Freedman & Diaconis (1981) (binning requires raw observations)",
+        cells: SummaryModeRowCells::all(SummaryModeSupport::Refused(SummaryModeRefusalReason::RequiresRawReplicates)),
     },
 ];
 

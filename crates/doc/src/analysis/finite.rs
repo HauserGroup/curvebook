@@ -5,8 +5,8 @@
 //! `curvebook-format` can reject a document with a precise location.
 
 use super::{
-    AnalysisKind, AnalysisSpec, AucBaseline, BaselineKind, CurveCalculusOp, DemingErrorSpec, DistributionTailShade, FitMethod, GlmWeightSpec,
-    MathTransformPreset, MultivariateSpec, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope, PcaRetentionRule,
+    AnalysisKind, AnalysisSpec, AucBaseline, BaselineKind, CurveCalculusOp, DemingErrorSpec, DistributionTailShade, FitMethod, FrequencyBinningRule,
+    GlmWeightSpec, MathTransformPreset, MultivariateSpec, NonlinearFitSpec, NormalizeAnchor, OutlierSpec, ParameterScope, PcaRetentionRule,
     PharmacologyTransformPreset, SimulationMode, SimulationNoise, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, WeightingScheme,
 };
 
@@ -155,6 +155,15 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
             non_finite(rule.threshold, || format!("analysis.monte_carlo.hit_rules[{idx}].threshold"))
                 .or_else(|| non_finite_opt(rule.upper_threshold, || format!("analysis.monte_carlo.hit_rules[{idx}].upper_threshold")))
         }),
+        AnalysisKind::FrequencyDistribution(fd) => {
+            let rule_err = match fd.binning_rule {
+                FrequencyBinningRule::ExplicitWidth { width } => non_finite(width, at("binning_rule.width")),
+                FrequencyBinningRule::AutoSturges | FrequencyBinningRule::AutoScott | FrequencyBinningRule::AutoFreedmanDiaconis => None,
+            };
+            rule_err
+                .or_else(|| non_finite_opt(fd.first_bin_center, at("first_bin_center")))
+                .or_else(|| non_finite_opt(fd.last_bin_center, at("last_bin_center")))
+        }
     }
 }
 

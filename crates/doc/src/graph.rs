@@ -80,8 +80,98 @@ pub enum GraphKind {
     /// Five-channel multivariate bubble scatter or categorical × continuous summary figure.
     #[serde(alias = "multiple_variables", alias = "multivariate", alias = "bubble")]
     MultipleVariables,
+    /// Frequency distribution histogram (contiguous bars, XY frequency polygon, cumulative curve, and optional Gaussian overlay).
+    #[serde(alias = "histogram", alias = "hist", alias = "frequency_histogram")]
+    Histogram,
     /// Specialized statistical or regression diagnostic plot ([`DiagnosticPlotKind`]).
     Diagnostic(DiagnosticPlotKind),
+}
+
+/// Visual representation for histogram bins on [`GraphKind::Histogram`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HistogramDisplayStyle {
+    /// Contiguous rectangular histogram bars spanning each bin `[edge_lo, edge_hi]` (default).
+    #[default]
+    #[serde(alias = "bars", alias = "bar", alias = "histogram_bars")]
+    Bars,
+    /// Continuous XY frequency polygon connecting `(bin_center, value)` vertices.
+    #[serde(alias = "xy_curve", alias = "curve", alias = "polygon", alias = "frequency_polygon")]
+    XyCurve,
+    /// Unfilled stepped outline tracing bin edges (`step` / skyline histogram).
+    #[serde(alias = "step_outline", alias = "step", alias = "outline")]
+    StepOutline,
+}
+
+/// Horizontal *X*-axis tick alignment policy on [`GraphKind::Histogram`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HistogramBinAlignment {
+    /// Align major *X* tick positions with bin centers (default).
+    #[default]
+    #[serde(alias = "bin_centers", alias = "centers", alias = "center")]
+    BinCenters,
+    /// Align major *X* tick positions with bin boundary edges.
+    #[serde(alias = "bin_edges", alias = "edges", alias = "edge")]
+    BinEdges,
+}
+
+/// Multi-dataset layout when plotting two or more histograms on [`GraphKind::Histogram`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum HistogramMultiSeriesMode {
+    /// Superimpose translucent series over shared bin edges (default).
+    #[default]
+    #[serde(alias = "overlay", alias = "superimposed")]
+    Overlay,
+    /// Partition each bin horizontally into side-by-side dodged bars per dataset.
+    #[serde(alias = "side_by_side", alias = "dodged", alias = "grouped")]
+    SideBySide,
+}
+
+fn default_histogram_bar_alpha() -> f32 {
+    0.75
+}
+
+/// Configuration for [`GraphKind::Histogram`] display, alignment, cumulative curve, Gaussian overlay, and raw-table binning.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HistogramSpec {
+    /// Visual bin representation (bars, XY frequency polygon curve, or step outline).
+    #[serde(default)]
+    pub display_style: HistogramDisplayStyle,
+    /// *X*-axis tick alignment (bin centers vs. bin boundary edges).
+    #[serde(default)]
+    pub bin_alignment: HistogramBinAlignment,
+    /// When `true`, renders the cumulative distribution (cumulative counts, frequency, or percentages).
+    #[serde(default)]
+    pub cumulative: bool,
+    /// When `true`, draws a smooth fitted Gaussian density or CDF overlay curve over each series.
+    #[serde(default)]
+    pub show_gaussian_overlay: bool,
+    /// Multi-dataset layout policy (`Overlay` vs. `SideBySide`).
+    #[serde(default)]
+    pub multi_series_mode: HistogramMultiSeriesMode,
+    /// Fill opacity in `[0.05, 1.0]` used for histogram bars (default `0.75`).
+    #[serde(default = "default_histogram_bar_alpha")]
+    pub bar_alpha: f32,
+    /// Bin-width rule used when [`GraphKind::Histogram`] is bound directly to a raw [`DataSheet`].
+    #[serde(default)]
+    pub binning_rule: crate::analysis::FrequencyBinningRule,
+    /// Output scale used when [`GraphKind::Histogram`] is bound directly to a raw [`DataSheet`].
+    #[serde(default)]
+    pub output_mode: crate::analysis::FrequencyOutputMode,
+}
+
+impl Default for HistogramSpec {
+    fn default() -> Self {
+        Self {
+            display_style: HistogramDisplayStyle::Bars,
+            bin_alignment: HistogramBinAlignment::BinCenters,
+            cumulative: false,
+            show_gaussian_overlay: false,
+            multi_series_mode: HistogramMultiSeriesMode::Overlay,
+            bar_alpha: default_histogram_bar_alpha(),
+            binning_rule: crate::analysis::FrequencyBinningRule::default(),
+            output_mode: crate::analysis::FrequencyOutputMode::default(),
+        }
+    }
 }
 
 /// Axis frame geometry preset (`docs/implementation/graphing-and-layouts.md` §3.3).
@@ -1421,6 +1511,9 @@ pub struct GraphSpec {
     /// Row/column header display and rotation settings on [`DiagnosticPlotKind::Heatmap`].
     #[serde(default)]
     pub heatmap_labels: HeatmapLabelSpec,
+    /// Display, alignment, cumulative, Gaussian overlay, and raw-table binning configuration on [`GraphKind::Histogram`].
+    #[serde(default)]
+    pub histogram: HistogramSpec,
 }
 
 /// Return `true` only when `archetype` is a `MultipleVariables` study-level meta-analysis table
@@ -1569,6 +1662,7 @@ impl GraphSpec {
             orientation: CartesianOrientation::Vertical,
             forest_show_pooled_diamond: is_meta_analysis_forest_table(&sheet.archetype),
             heatmap_labels: HeatmapLabelSpec::default(),
+            histogram: HistogramSpec::default(),
         }
     }
 
@@ -1737,6 +1831,14 @@ impl GraphSpec {
         if !self.heatmap_labels.cell_gap_pt.is_finite() {
             return Some("spec.heatmap_labels.cell_gap_pt");
         }
+        if !self.histogram.bar_alpha.is_finite() {
+            return Some("spec.histogram.bar_alpha");
+        }
+        if let crate::analysis::FrequencyBinningRule::ExplicitWidth { width } = self.histogram.binning_rule
+            && !width.is_finite()
+        {
+            return Some("spec.histogram.binning_rule.width");
+        }
         None
     }
 
@@ -1758,6 +1860,14 @@ impl GraphSpec {
         }
         if !(0.0..=12.0).contains(&self.heatmap_labels.cell_gap_pt) {
             return Err(geom_err("spec.heatmap_labels.cell_gap_pt must lie in [0, 12]"));
+        }
+        if !(0.05..=1.0).contains(&self.histogram.bar_alpha) {
+            return Err(geom_err("spec.histogram.bar_alpha must lie in [0.05, 1.0]"));
+        }
+        if let crate::analysis::FrequencyBinningRule::ExplicitWidth { width } = self.histogram.binning_rule
+            && width <= 0.0
+        {
+            return Err(geom_err("spec.histogram.binning_rule.width must be > 0"));
         }
         if self.annotations.len() > MAX_GRAPH_ANNOTATIONS {
             return Err(geom_err("spec.annotations count exceeds maximum allowed MAX_GRAPH_ANNOTATIONS"));
@@ -2012,6 +2122,8 @@ impl<'de> serde::Deserialize<'de> for GraphSpec {
             forest_show_pooled_diamond: bool,
             #[serde(default)]
             heatmap_labels: HeatmapLabelSpec,
+            #[serde(default)]
+            histogram: HistogramSpec,
         }
 
         let raw = RawGraphSpec::deserialize(deserializer)?;
@@ -2039,6 +2151,7 @@ impl<'de> serde::Deserialize<'de> for GraphSpec {
             orientation: raw.orientation,
             forest_show_pooled_diamond: raw.forest_show_pooled_diamond,
             heatmap_labels: raw.heatmap_labels,
+            histogram: raw.histogram,
         };
         spec.validate_geometry_and_bounds().map_err(serde::de::Error::custom)?;
         Ok(spec)

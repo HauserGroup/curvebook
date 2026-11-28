@@ -9,6 +9,7 @@
 pub mod column_grouped;
 pub mod equation_box;
 pub mod fit_summary;
+pub mod histogram;
 pub mod image_decode;
 pub mod markers;
 pub mod multivariate_layout;
@@ -239,6 +240,7 @@ pub fn compile_graph_with_options(graph: &GraphSheet, doc: &ProjectDocument, opt
         GraphKind::Survival | GraphKind::Contingency | GraphKind::PartsOfWhole => {
             survival_cat::compile_survival_or_categorical_graph(graph, doc, &mut scene)?;
         }
+        GraphKind::Histogram => histogram::compile_histogram_graph(graph, doc, &mut scene)?,
         GraphKind::MultipleVariables | GraphKind::Diagnostic(_) => {
             multivariate_layout::compile_multivariate_or_diagnostic_graph(graph, doc, &mut scene)?;
         }

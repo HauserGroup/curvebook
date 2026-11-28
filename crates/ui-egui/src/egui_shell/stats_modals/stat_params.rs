@@ -317,6 +317,16 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
         AnalysisKind::LeveneTest(lt) => {
             (String::from("Parameters: Levene / Brown-Forsythe Variance Test"), format!("{} (α={alpha:.3})", lt.center.method_label()))
         }
+        AnalysisKind::FrequencyDistribution(fd) => {
+            let rule = match fd.binning_rule {
+                curvebook_doc::FrequencyBinningRule::AutoFreedmanDiaconis => String::from("Freedman-Diaconis"),
+                curvebook_doc::FrequencyBinningRule::AutoScott => String::from("Scott"),
+                curvebook_doc::FrequencyBinningRule::AutoSturges => String::from("Sturges"),
+                curvebook_doc::FrequencyBinningRule::ExplicitWidth { width } => format!("Width = {width}"),
+            };
+            let gauss = if fd.overlay_gaussian { ", Gaussian overlay" } else { "" };
+            (String::from("Parameters: Frequency Distribution"), format!("{rule}, {}{gauss}", fd.output_mode.label()))
+        }
         _ => (String::from("Parameters: Analysis"), format!("{} (α={alpha:.3})", spec.effective_title())),
     }
 }

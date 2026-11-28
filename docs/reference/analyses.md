@@ -751,3 +751,37 @@ Fits that are flagged or did not converge can be excluded. The results are summa
 - **References and verification:**
   - References: Robert & Casella (2004) *Monte Carlo Statistical Methods*; Motulsky & Christopoulos (2004).
   - Verified against: engine integration tests that confirm reproducible results, correct partitioning into `Hits`, `Not Hits`, and `All`, and correct filtering by `fit_flag_rules.exclude_flagged_from_summary` ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Frequency distribution {#analysis-frequency-distribution}
+
+This analysis partitions numeric observations into uniform right-closed intervals $[e_0, e_1], (e_1, e_2], \dots, (e_{k-1}, e_k]$ and tabulates bin counts, relative frequencies, percentages, probability densities, and cumulative distributions. It can overlay a fitted Gaussian density or cumulative curve parameterized by each series' sample mean and standard deviation, and it can automatically create a linked histogram graph. It works with Column, XY, Grouped, and Multiple Variables tables (see [Analysis Registry: `frequency-distribution`](registry/tables.html#analysis-kind-frequency-distribution)).
+
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `frequency_distribution` (the preferred name), `frequency`, `histogram`, `freq_dist`, or `stats.frequency_distribution`.
+- **Options and defaults:**
+  - `binning_rule` (or shorthand `binning` / `bin_width`):
+    - `AutoFreedmanDiaconis` (default): sets $h = 2\,\text{IQR}\,n^{-1/3}$ using Hyndman–Fan Type-7 quartiles, with $k = \lceil (\max - \min) / h \rceil$.
+    - `AutoScott`: sets $h = 3.5\,s\,n^{-1/3}$ using the sample standard deviation $s$.
+    - `AutoSturges`: sets $k = \lceil \log_2 n \rceil + 1$.
+    - `ExplicitWidth` (`width > 0`, or shorthand `bin_width`): uses a fixed positive bin width.
+  - `first_bin_center` and `last_bin_center`: optional finite bin centers that anchor or bound the uniform bin grid (unset by default so the grid spans the observed data range).
+  - `output_mode` (or shorthand `output`): `Counts` (default), `RelativeFrequency` ($c_j / N$), `Percentages` ($100\,c_j / N$), `Density` ($c_j / (N\,w_j)$), `CumulativeCounts`, `CumulativeFrequency` ($\text{ECDF}(e_{j+1})$), or `CumulativePercentages`.
+  - `overlay_gaussian`: boolean (default `false`). Evaluates a smooth 201-point Gaussian density or cumulative distribution curve across the bin range from each series' sample mean and SD.
+  - `aggregation`: `PooledGrandSample` (default), `RowMeans`, or `PerSubcolumn` for tables with replicate subcolumns.
+  - `create_histogram_graph`: boolean (default `true`). Automatically creates a linked histogram graph sheet when run through engine commands.
+- **Reported outputs:**
+  - **Frequency distribution** (`freq-distribution`): lower edge, upper edge, bin center, and the selected output value for every series.
+  - **Bin counts, densities & cumulative distribution** (`freq-detail`): complete table of counts, relative frequencies, percentages, probability densities, cumulative counts, cumulative frequencies, and cumulative percentages per bin.
+  - **Distribution summary** (`freq-summary`): per-series $N$, excluded cell count, below-first-bin and above-last-bin counts, bin count, bin width, sample mean, SD, and IQR.
+  - **Analyzable Data:** an XY table with bin centers on $X$ and the selected frequency scale on $Y$, ready for downstream nonlinear curve fitting or histogram plotting.
+  - **Scalars:** `Bin count`, `Bin width`, `First bin center`, `Last bin center`, `First bin edge`, `Last bin edge`, plus per-series `N`, `Mean`, `SD`, `IQR`, `Underflow`, and `Overflow`.
+- **Diagnostic checks:** The checklist records the active binning rule and bin width, warns when constant data or zero IQR triggers an automatic fallback, warns when explicit bin boundaries leave active observations in underflow or overflow tails, warns if a Gaussian overlay cannot be drawn ($n < 2$ or zero variance), and lists any ignored non-numeric cells.
+- **Edge cases and limits:**
+  - Pre-summarized subcolumn modes require individual raw observations and are refused with a typed error.
+  - Constant data ($\min = \max = c$) or a single observation ($n = 1$) uses one unit-width bin $[c - 0.5, c + 0.5]$ centered on $c$.
+  - Bin configurations exceeding `10,000` bins or non-positive widths return a typed invalid-parameter error.
+  - When explicit bounds omit lower-tail values, cumulative counts still include observations strictly below the first bin edge so cumulative frequency matches the exact empirical CDF at every upper bin edge.
+- **References and verification:**
+  - References: Sturges (1926); Scott (1979); Freedman & Diaconis (1981); Hyndman & Fan (1996).
+  - Verified against: `R 4.5.2` (`hist`, `nclass.Sturges`, `nclass.scott`, `nclass.FD`, `ecdf`, `dnorm`, `pnorm`) ([statistics evidence](../evidence/statistics.md)).

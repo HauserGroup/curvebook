@@ -1483,6 +1483,7 @@ fn graph_kind_label(spec: &GraphSpec) -> &'static str {
         GraphKind::PartsOfWhole => "Parts of Whole",
         GraphKind::Survival => "Survival",
         GraphKind::MultipleVariables => "Multivariate",
+        GraphKind::Histogram => "Histogram",
         GraphKind::Diagnostic(diag) => match diag {
             DiagnosticPlotKind::Heatmap => "Heatmap",
             DiagnosticPlotKind::Volcano => "Volcano",

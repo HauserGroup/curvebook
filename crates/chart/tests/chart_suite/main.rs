@@ -14,6 +14,7 @@ mod chart_v9_provenance_and_no_n;
 mod column_summary_modes;
 mod gap_chart_core_fixes;
 mod gap_chart_sci_fixes;
+mod histogram_chart;
 mod point_brushing_preflight;
 mod r1019_format_determinism;
 mod r1019_typeset_equations;

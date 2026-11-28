@@ -10,11 +10,12 @@ use curvebook_doc::analysis::{
 use curvebook_doc::{
     AnalysisKind, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, BlandAltmanSpec, ClusterDirection, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FractionOfTotalSpec, GlmFamily, GlmSpec, ImportedSnapshotSpec, KMeansAlgorithm, KappaWeighting, LeveneTestSpec,
-    LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec,
-    RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec,
-    SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    FactorialAnovaSpec, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmFamily, GlmSpec, GraphKind,
+    GraphSpec, HistogramBinAlignment, HistogramDisplayStyle, HistogramMultiSeriesMode, HistogramSpec, ImportedSnapshotSpec, KMeansAlgorithm,
+    KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec,
+    PcaRetentionRule, PowerAnalysisSpec, RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessSpec,
+    SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -75,6 +76,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::FractionOfTotal, AnalysisKind::FractionOfTotal(FractionOfTotalSpec::default())),
         (AnalysisKindId::CurveCalculus, AnalysisKind::CurveCalculus(CurveCalculusSpec::default())),
         (AnalysisKindId::MonteCarloSimulation, AnalysisKind::MonteCarloSimulation(MonteCarloSpec::default())),
+        (AnalysisKindId::FrequencyDistribution, AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())),
     ]
 }
 
@@ -554,4 +556,93 @@ fn r23_additive_extensions_preserve_v8_deserialization_and_round_trip() {
         let parsed: DiagnosticPlotKind = serde_json::from_str(&json).expect("deserialize DiagnosticPlotKind");
         assert_eq!(parsed, plot);
     }
+}
+
+#[test]
+fn frequency_distribution_and_histogram_spec_serde_and_finiteness_guards() {
+    use curvebook_doc::{AnalysisSpec, ColumnDesignHint, ColumnTable, DataSheet, SubcolumnAggregation, TableArchetype};
+
+    // Minimal empty JSON object deserializes cleanly with defaults.
+    let fd_default: FrequencyDistributionSpec = serde_json::from_str("{}").expect("empty FrequencyDistributionSpec");
+    assert_eq!(fd_default, FrequencyDistributionSpec::default());
+    assert_eq!(fd_default.binning_rule, FrequencyBinningRule::AutoFreedmanDiaconis);
+    assert_eq!(fd_default.output_mode, FrequencyOutputMode::Counts);
+    assert_eq!(fd_default.aggregation, SubcolumnAggregation::PooledGrandSample);
+    assert!(fd_default.create_histogram_graph);
+    assert!(!fd_default.overlay_gaussian);
+
+    let fd_custom = FrequencyDistributionSpec {
+        binning_rule: FrequencyBinningRule::ExplicitWidth { width: 2.5 },
+        first_bin_center: Some(0.0),
+        last_bin_center: Some(25.0),
+        output_mode: FrequencyOutputMode::CumulativePercentages,
+        overlay_gaussian: true,
+        aggregation: SubcolumnAggregation::RowMeans,
+        create_histogram_graph: false,
+    };
+    let kind = AnalysisKind::FrequencyDistribution(fd_custom.clone());
+    assert_eq!(kind.derive_auto_title(), "Frequency distribution");
+    assert!(kind.is_compatible_with(TableKind::Column));
+    assert!(kind.is_compatible_with(TableKind::Xy));
+    assert!(kind.is_compatible_with(TableKind::Grouped));
+    assert!(kind.is_compatible_with(TableKind::MultipleVariables));
+    assert!(!kind.is_compatible_with(TableKind::Contingency));
+    assert!(!kind.is_compatible_with(TableKind::Survival));
+
+    let rt: AnalysisKind = serde_json::from_str(&serde_json::to_string(&kind).unwrap()).unwrap();
+    assert_eq!(rt, kind);
+
+    // Non-finite floats in FrequencyDistributionSpec must be rejected by AnalysisSpec::new.
+    let bad_width = AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec {
+        binning_rule: FrequencyBinningRule::ExplicitWidth { width: f64::NAN },
+        ..FrequencyDistributionSpec::default()
+    });
+    assert!(AnalysisSpec::new("res-bad-w", "d1", bad_width).is_err());
+
+    let bad_first = AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec {
+        first_bin_center: Some(f64::INFINITY),
+        ..FrequencyDistributionSpec::default()
+    });
+    assert!(AnalysisSpec::new("res-bad-f", "d1", bad_first).is_err());
+
+    let bad_last = AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec {
+        last_bin_center: Some(f64::NEG_INFINITY),
+        ..FrequencyDistributionSpec::default()
+    });
+    assert!(AnalysisSpec::new("res-bad-l", "d1", bad_last).is_err());
+
+    // GraphKind::Histogram and HistogramSpec backward compatibility + validation.
+    let hist_kind: GraphKind = serde_json::from_str(r#""histogram""#).expect("alias deserialize");
+    assert_eq!(hist_kind, GraphKind::Histogram);
+
+    let col = ColumnTable::new(ColumnDesignHint::default(), 1, 3).unwrap();
+    let ds = DataSheet::new("d1", "Data", TableArchetype::Column(col)).unwrap();
+    let mut gs = GraphSpec::default_for_data_sheet(&ds);
+    gs.kind = GraphKind::Histogram;
+    gs.histogram = HistogramSpec {
+        display_style: HistogramDisplayStyle::XyCurve,
+        bin_alignment: HistogramBinAlignment::BinEdges,
+        cumulative: true,
+        show_gaussian_overlay: true,
+        multi_series_mode: HistogramMultiSeriesMode::SideBySide,
+        bar_alpha: 0.6,
+        binning_rule: FrequencyBinningRule::AutoScott,
+        output_mode: FrequencyOutputMode::Density,
+    };
+    let mut val = serde_json::to_value(&gs).unwrap();
+    let gs_rt: GraphSpec = serde_json::from_value(val.clone()).unwrap();
+    assert_eq!(gs_rt, gs);
+
+    // Legacy GraphSpec JSON lacking `histogram` must deserialize to HistogramSpec::default().
+    val.as_object_mut().unwrap().remove("histogram");
+    let gs_legacy: GraphSpec = serde_json::from_value(val).unwrap();
+    assert_eq!(gs_legacy.histogram, HistogramSpec::default());
+
+    // Invalid bar_alpha or explicit width <= 0 rejected on deserialize / validate.
+    let mut gs_bad = gs.clone();
+    gs_bad.histogram.bar_alpha = 1.5;
+    assert!(gs_bad.validate().is_err());
+    let mut gs_bad_w = gs;
+    gs_bad_w.histogram.binning_rule = FrequencyBinningRule::ExplicitWidth { width: -1.0 };
+    assert!(gs_bad_w.validate().is_err());
 }

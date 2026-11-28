@@ -425,6 +425,16 @@ fn paint_thumbnail_glyph(painter: &egui::Painter, rect: Rect, kind: ThumbnailGly
                 }
             }
         }
+        ThumbnailGlyphKind::Histogram => {
+            let heights = [0.25_f32, 0.55, 0.88, 0.62, 0.30];
+            let bw = (inner.width() - 4.0) / (heights.len() as f32);
+            for (idx, h) in heights.iter().enumerate() {
+                let x0 = inner.left() + 2.0 + (idx as f32) * bw;
+                let top = inner.bottom() - inner.height() * *h;
+                let bar = Rect::from_min_max(Pos2::new(x0, top), Pos2::new(x0 + bw, inner.bottom()));
+                painter.rect(bar, CornerRadius::ZERO, c0.gamma_multiply(0.75), Stroke::new(1.0, c1), StrokeKind::Inside);
+            }
+        }
     }
 }
 
