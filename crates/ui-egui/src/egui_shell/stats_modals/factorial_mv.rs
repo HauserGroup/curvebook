@@ -150,6 +150,87 @@ pub(super) struct MultivariateDesignCtx<'a> {
     pub mv: &'a MultivariateSpec,
 }
 
+fn render_pca_design_controls(
+    ui: &mut Ui,
+    mvx: MultivariateDesignCtx<'_>,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let MultivariateDesignCtx { doc, ep, spec, mv } = mvx;
+    let MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, .. } = *mv else {
+        return;
+    };
+    render_section_title(ui, tokens, "PCA Matrix & Component Retention");
+    if render_modal_radio(ui, tokens, meta, "edit.pca.corr", "Standardize variables (Correlation matrix)", standardize, &ControlEnablement::enabled())
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
+            *s = true;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_radio(ui, tokens, meta, "edit.pca.cov", "Center only (Covariance matrix)", !standardize, &ControlEnablement::enabled()) {
+        let mut next = spec.clone();
+        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
+            *s = false;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.pca.parallel",
+        "Horn's Monte Carlo parallel analysis",
+        parallel_analysis_seed.is_some(),
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::Multivariate(MultivariateSpec::Pca { parallel_analysis_seed: seed, .. }) = &mut next.kind {
+            *seed = if seed.is_some() { None } else { Some(42) };
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.pca.biplot",
+        crate::i18n::tr(tokens.locale, "pca.generate_biplot"),
+        ep.pca_biplot,
+        &ControlEnablement::enabled(),
+    ) {
+        intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::TogglePcaBiplot));
+    }
+    if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src))
+        && let TableArchetype::MultipleVariables(mv_tbl) = &ds.archetype
+    {
+        let selected_outcome = pcr_outcome_column.or(ep.pcr_outcome_column);
+        ui.add_space(4.0);
+        render_section_title(ui, tokens, "Optional PCR Outcome Variable (Supervised Mode)");
+        ui.horizontal_wrapped(|ui| {
+            for (idx, var) in mv_tbl.variables.iter().enumerate() {
+                if matches!(var.role, curvebook_doc::VariableRole::Label | curvebook_doc::VariableRole::Categorical) {
+                    continue;
+                }
+                let en = crate::modal_predicates::r10_pcr_outcome_column(idx, &spec.selected_data_sets);
+                if render_modal_seg_btn(ui, tokens, meta, &format!("edit.pcr.outcome.{idx}"), &var.title, selected_outcome == Some(idx), &en) {
+                    let mut next = spec.clone();
+                    let next_outcome = if selected_outcome == Some(idx) { None } else { Some(idx) };
+                    if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: out_col, .. }) = &mut next.kind {
+                        *out_col = next_outcome;
+                    }
+                    if let Some(y_col) = next_outcome {
+                        next.selected_data_sets.retain(|&c| c != y_col);
+                    }
+                    intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                }
+            }
+        });
+    }
+}
+
 pub(super) fn render_multivariate_design_controls(
     ui: &mut Ui,
     mvx: MultivariateDesignCtx<'_>,
@@ -159,74 +240,11 @@ pub(super) fn render_multivariate_design_controls(
 ) {
     let MultivariateDesignCtx { doc, ep, spec, mv } = mvx;
     match mv {
-        MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, .. } => {
-            render_section_title(ui, tokens, "PCA Matrix & Component Retention");
-            if render_modal_radio(
-                ui,
-                tokens,
-                meta,
-                "edit.pca.corr",
-                "Standardize variables (Correlation matrix)",
-                *standardize,
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
-                    *s = true;
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
-            if render_modal_radio(ui, tokens, meta, "edit.pca.cov", "Center only (Covariance matrix)", !*standardize, &ControlEnablement::enabled()) {
-                let mut next = spec.clone();
-                if let AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: s, .. }) = &mut next.kind {
-                    *s = false;
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
-            if render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                "edit.pca.parallel",
-                "Horn's Monte Carlo parallel analysis",
-                parallel_analysis_seed.is_some(),
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::Multivariate(MultivariateSpec::Pca { parallel_analysis_seed: seed, .. }) = &mut next.kind {
-                    *seed = if seed.is_some() { None } else { Some(42) };
-                }
-                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-            }
-            if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| resolve_source_data_sheet(doc, src))
-                && let TableArchetype::MultipleVariables(mv_tbl) = &ds.archetype
-            {
-                let selected_outcome = (*pcr_outcome_column).or(ep.pcr_outcome_column);
-                ui.add_space(4.0);
-                render_section_title(ui, tokens, "Optional PCR Outcome Variable (Supervised Mode)");
-                ui.horizontal_wrapped(|ui| {
-                    for (idx, var) in mv_tbl.variables.iter().enumerate() {
-                        if matches!(var.role, curvebook_doc::VariableRole::Label | curvebook_doc::VariableRole::Categorical) {
-                            continue;
-                        }
-                        let en = crate::modal_predicates::r10_pcr_outcome_column(idx, &spec.selected_data_sets);
-                        if render_modal_seg_btn(ui, tokens, meta, &format!("edit.pcr.outcome.{idx}"), &var.title, selected_outcome == Some(idx), &en)
-                        {
-                            let mut next = spec.clone();
-                            let next_outcome = if selected_outcome == Some(idx) { None } else { Some(idx) };
-                            if let AnalysisKind::Multivariate(MultivariateSpec::Pca { pcr_outcome_column: out_col, .. }) = &mut next.kind {
-                                *out_col = next_outcome;
-                            }
-                            if let Some(y_col) = next_outcome {
-                                next.selected_data_sets.retain(|&c| c != y_col);
-                            }
-                            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
-                        }
-                    }
-                });
-            }
+        MultivariateSpec::Pca { .. } => {
+            render_pca_design_controls(ui, MultivariateDesignCtx { doc, ep, spec, mv }, tokens, meta, intents);
         }
-        MultivariateSpec::CorrelationMatrix { spearman_rank } => {
+        MultivariateSpec::CorrelationMatrix { spearman_rank, method } => {
+            let resolved = curvebook_doc::CorrelationMethod::resolve(*spearman_rank, *method);
             render_section_title(ui, tokens, "Correlation Coefficient");
             if render_modal_radio(
                 ui,
@@ -234,12 +252,13 @@ pub(super) fn render_multivariate_design_controls(
                 meta,
                 "edit.corr.pearson",
                 "Pearson r (linear correlation)",
-                !*spearman_rank,
+                resolved == curvebook_doc::CorrelationMethod::Pearson,
                 &ControlEnablement::enabled(),
             ) {
                 let mut next = spec.clone();
-                if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr }) = &mut next.kind {
+                if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr, method: m }) = &mut next.kind {
                     *sr = false;
+                    *m = Some(curvebook_doc::CorrelationMethod::Pearson);
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
@@ -249,12 +268,29 @@ pub(super) fn render_multivariate_design_controls(
                 meta,
                 "edit.corr.spearman",
                 "Spearman r_s (monotonic rank)",
-                *spearman_rank,
+                resolved == curvebook_doc::CorrelationMethod::Spearman,
                 &ControlEnablement::enabled(),
             ) {
                 let mut next = spec.clone();
-                if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr }) = &mut next.kind {
+                if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr, method: m }) = &mut next.kind {
                     *sr = true;
+                    *m = Some(curvebook_doc::CorrelationMethod::Spearman);
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            if render_modal_radio(
+                ui,
+                tokens,
+                meta,
+                "edit.corr.kendall",
+                crate::i18n::tr(tokens.locale, "corr.method.kendall"),
+                resolved == curvebook_doc::CorrelationMethod::KendallTauB,
+                &ControlEnablement::enabled(),
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: sr, method: m }) = &mut next.kind {
+                    *sr = false;
+                    *m = Some(curvebook_doc::CorrelationMethod::KendallTauB);
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
             }
@@ -374,6 +410,17 @@ pub(super) fn render_multivariate_design_controls(
                     *ks = Some(next_sweep);
                 }
                 intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.cluster.dendrogram",
+                crate::i18n::tr(tokens.locale, "cluster.generate_dendrogram"),
+                ep.clustering_dendrogram,
+                &ControlEnablement::enabled(),
+            ) {
+                intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleClusteringDendrogram));
             }
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, .. } => {

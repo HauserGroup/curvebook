@@ -39,6 +39,9 @@
             {
               "additionalProperties": false,
               "properties": {
+                "Ancova": {
+                  "type": "object"
+                },
                 "AreaUnderCurve": {
                   "type": "object"
                 },

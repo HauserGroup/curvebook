@@ -161,6 +161,15 @@ pub(super) fn apply_stat_params_intent(app: &mut UiApp, intent: StatParamsIntent
             let next = !app.canvas_dialogs.edit_params.correlation_heatmap;
             app.canvas_dialogs.edit_params.set_correlation_heatmap(next).map_err(conflict)?;
         }
+        StatParamsIntent::TogglePcaBiplot => {
+            app.canvas_dialogs.edit_params.pca_biplot = !app.canvas_dialogs.edit_params.pca_biplot;
+        }
+        StatParamsIntent::ToggleClusteringDendrogram => {
+            app.canvas_dialogs.edit_params.clustering_dendrogram = !app.canvas_dialogs.edit_params.clustering_dendrogram;
+        }
+        StatParamsIntent::ToggleCurveCalculusGraph => {
+            app.canvas_dialogs.edit_params.curve_calculus_create_graph = !app.canvas_dialogs.edit_params.curve_calculus_create_graph;
+        }
         StatParamsIntent::ToggleDiag { flag } => toggle_diag_flag(app, flag)?,
     }
     Ok(UiIntentOutcome::ShellUpdated)
@@ -333,6 +342,10 @@ fn step_multiplicity_threshold(app: &mut UiApp, delta: f64) {
             a.multiplicity.threshold = (a.multiplicity.threshold + delta).clamp(0.001, 0.50);
             changed = true;
         }
+        AnalysisKind::Ancova(a) => {
+            a.multiplicity.threshold = (a.multiplicity.threshold + delta).clamp(0.001, 0.50);
+            changed = true;
+        }
         AnalysisKind::FactorialAnova(f) => {
             f.multiplicity.threshold = (f.multiplicity.threshold + delta).clamp(0.001, 0.50);
             changed = true;
@@ -382,6 +395,10 @@ fn handle_toggle_mult_ci(app: &mut UiApp) {
             a.multiplicity.report_confidence_intervals = !a.multiplicity.report_confidence_intervals;
             true
         }
+        AnalysisKind::Ancova(a) => {
+            a.multiplicity.report_confidence_intervals = !a.multiplicity.report_confidence_intervals;
+            true
+        }
         AnalysisKind::FactorialAnova(f) => {
             f.multiplicity.report_confidence_intervals = !f.multiplicity.report_confidence_intervals;
             true
@@ -412,6 +429,10 @@ fn handle_toggle_effect_sizes(app: &mut UiApp) {
     let mut updated = spec.kind.clone();
     let changed = match &mut updated {
         AnalysisKind::OneWayAnova(a) => {
+            a.compute_effect_sizes = !a.compute_effect_sizes;
+            true
+        }
+        AnalysisKind::Ancova(a) => {
             a.compute_effect_sizes = !a.compute_effect_sizes;
             true
         }
@@ -541,6 +562,7 @@ fn parse_mult_method(raw: &str, ctrl: usize) -> Result<MultiplicityMethod, Engin
         "dunnett" => Ok(MultiplicityMethod::Dunnett { control_column: ctrl }),
         "sidak" => Ok(MultiplicityMethod::Sidak),
         "bonferroni" => Ok(MultiplicityMethod::Bonferroni),
+        "holm" | "holm_bonferroni" => Ok(MultiplicityMethod::HolmBonferroni),
         "holm_sidak" => Ok(MultiplicityMethod::HolmSidak),
         "dunnett_t3" => Ok(MultiplicityMethod::DunnettT3),
         "games_howell" => Ok(MultiplicityMethod::GamesHowell),
@@ -551,6 +573,7 @@ fn parse_mult_method(raw: &str, ctrl: usize) -> Result<MultiplicityMethod, Engin
         "by" => Ok(MultiplicityMethod::BenjaminiYekutieliFdr),
         "bky" => Ok(MultiplicityMethod::TwoStageBkyFdr),
         "newman_keuls" => Ok(MultiplicityMethod::NewmanKeuls),
+        "duncan" => Ok(MultiplicityMethod::Duncan),
         "fisher_lsd" => Ok(MultiplicityMethod::FisherLsd),
         _ => Err(conflict(format!("unknown multiplicity `{raw}`"))),
     }
@@ -566,6 +589,7 @@ fn current_multiplicity(ep: &EditAnalysisParametersState) -> Option<curvebook_do
     let spec = ep.draft.as_ref()?;
     match &spec.kind {
         AnalysisKind::OneWayAnova(a) => Some(a.multiplicity.clone()),
+        AnalysisKind::Ancova(a) => Some(a.multiplicity.clone()),
         AnalysisKind::FactorialAnova(f) => Some(f.multiplicity.clone()),
         AnalysisKind::NestedComparison(n) => Some(n.multiplicity.clone()),
         AnalysisKind::MultipleRowTTests(m) => Some(m.multiplicity.clone()),

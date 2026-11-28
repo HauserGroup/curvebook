@@ -161,6 +161,12 @@ pub struct EditAnalysisParametersState {
     #[serde(default)]
     pub correlation_heatmap: bool,
     #[serde(default)]
+    pub pca_biplot: bool,
+    #[serde(default)]
+    pub clustering_dendrogram: bool,
+    #[serde(default)]
+    pub curve_calculus_create_graph: bool,
+    #[serde(default)]
     pub contingency_odds_ratio_checked: bool,
     #[serde(default)]
     pub contingency_relative_risk_checked: bool,
@@ -246,6 +252,9 @@ impl Default for EditAnalysisParametersState {
             control_column: 0,
             correlation_all_pairs: true,
             correlation_heatmap: false,
+            pca_biplot: false,
+            clustering_dendrogram: false,
+            curve_calculus_create_graph: false,
             contingency_odds_ratio_checked: false,
             contingency_relative_risk_checked: false,
             contingency_attributable_risk_checked: false,
@@ -588,6 +597,7 @@ impl EditAnalysisParametersState {
         self.update_draft_kind(|updated| {
             let mult = match updated {
                 AnalysisKind::OneWayAnova(a) => &mut a.multiplicity,
+                AnalysisKind::Ancova(a) => &mut a.multiplicity,
                 AnalysisKind::FactorialAnova(f) => &mut f.multiplicity,
                 AnalysisKind::NestedComparison(n) => &mut n.multiplicity,
                 AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity,
@@ -678,6 +688,7 @@ impl EditAnalysisParametersState {
         self.update_draft_kind(|updated| {
             let mult = match updated {
                 AnalysisKind::OneWayAnova(a) => &mut a.multiplicity,
+                AnalysisKind::Ancova(a) => &mut a.multiplicity,
                 AnalysisKind::FactorialAnova(f) => &mut f.multiplicity,
                 AnalysisKind::NestedComparison(n) => &mut n.multiplicity,
                 AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity,
@@ -992,6 +1003,66 @@ impl EditAnalysisParametersState {
                     json!({
                         "data_sheet_id": id.as_str(),
                         "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap),
+                        "initialized": true,
+                    }),
+                ));
+            }
+        }
+        if !self.pending_create
+            && let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
+            && self.pca_biplot
+            && matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }))
+        {
+            let already_has_biplot = doc.is_some_and(|d| {
+                d.graph_sheets
+                    .iter()
+                    .any(|g| g.spec.primary_source_sheet_id == *id && g.spec.kind == GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot))
+            });
+            if !already_has_biplot {
+                intents.push(ToolCommandIntent::new(
+                    "graph.create",
+                    json!({
+                        "data_sheet_id": id.as_str(),
+                        "kind": GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot),
+                        "initialized": true,
+                    }),
+                ));
+            }
+        }
+        if !self.pending_create
+            && let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
+            && self.clustering_dendrogram
+            && matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
+        {
+            let already_has_dendrogram = doc.is_some_and(|d| {
+                d.graph_sheets
+                    .iter()
+                    .any(|g| g.spec.primary_source_sheet_id == *id && g.spec.kind == GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram))
+            });
+            if !already_has_dendrogram {
+                intents.push(ToolCommandIntent::new(
+                    "graph.create",
+                    json!({
+                        "data_sheet_id": id.as_str(),
+                        "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram),
+                        "initialized": true,
+                    }),
+                ));
+            }
+        }
+        if !self.pending_create
+            && let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
+            && self.curve_calculus_create_graph
+            && matches!(spec.kind, AnalysisKind::CurveCalculus(_))
+        {
+            let already_has_xy =
+                doc.is_some_and(|d| d.graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *id && g.spec.kind == GraphKind::Xy));
+            if !already_has_xy {
+                intents.push(ToolCommandIntent::new(
+                    "graph.create",
+                    json!({
+                        "data_sheet_id": id.as_str(),
+                        "kind": GraphKind::Xy,
                         "initialized": true,
                     }),
                 ));

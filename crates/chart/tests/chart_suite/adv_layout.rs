@@ -346,7 +346,7 @@ fn all_seven_diagnostic_plot_kinds_compile_rich_geometry() -> TestResult {
         }
     }
     let hm_ds = DataSheet::new(SheetId::new("hm-ds"), "Expr", TableArchetype::MultipleVariables(hm_mv))?;
-    let mv_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false };
+    let mv_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None };
     let corr_spec = AnalysisSpec::new(SheetId::new("hm-corr"), hm_ds.id.clone(), AnalysisKind::Multivariate(mv_spec.clone()))?;
     let corr_res = run_multivariate_analysis(&hm_ds, &corr_spec, &mv_spec)?;
     doc.add_data_sheet(hm_ds.clone())?;

@@ -42,10 +42,10 @@ pub mod schema;
 
 pub use analysis::{
     ALL_ANALYSIS_DESCRIPTORS, AnalysisDomainKind, AnalysisKind, AnalysisKindDescriptor, AnalysisKindId, AnalysisRecomputeStrategy, AnalysisSpec,
-    AnalysisUiCategory, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation, BlandAltmanSpec,
+    AnalysisUiCategory, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineKind, BaselineOperation, BlandAltmanSpec,
     ClusterDirection, ClusterDistance, ClusterLinkage, ColumnSimulationSpec, ColumnTitleHookError, ContingencyMethod, ContingencySimDesign,
-    ContingencySimulationSpec, ContingencySpec, ConvergenceStrictness, CorrelationPowerMethod, CovariateProfile, CoxTieMethod, CurveCalculusOp,
-    CurveCalculusSpec, DemingErrorSpec, DerivedColumnFormula, DescriptiveMetricVisibility, DescriptiveSpec, DistributionTailShade,
+    ContingencySimulationSpec, ContingencySpec, ConvergenceStrictness, CorrelationMethod, CorrelationPowerMethod, CovariateProfile, CoxTieMethod,
+    CurveCalculusOp, CurveCalculusSpec, DemingErrorSpec, DerivedColumnFormula, DescriptiveMetricVisibility, DescriptiveSpec, DistributionTailShade,
     ErrorPropagationMode, FactorialAnovaSpec, FactorialComparisonFamilyMode, FitFlagRules, FitMethod, FormulaTerm, FractionDenominator,
     FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmDispersionMode, GlmFamily, GlmSpec, GlmWeightSpec,
     IdentifiabilityMode, ImportedSnapshotSpec, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,

@@ -50,7 +50,7 @@ pub use clustering::{
     cut_dendrogram_at_height, hierarchical_clustering, hierarchical_clustering_pairwise_complete, hierarchical_clustering_with_metrics, kmeans_pp,
     kmeans_pp_with_distance, pairwise_distance_matrix, pairwise_distance_value,
 };
-pub use correlation::{correlation_matrix, kendall_tau_b, pearson_correlation, spearman_correlation};
+pub use correlation::{correlation_matrix, correlation_matrix_with_method, kendall_tau_b, pearson_correlation, spearman_correlation};
 pub use curvebook_doc::{ClusterDirection, ClusterDistance, ClusterLinkage, KMeansAlgorithm, PcaRetentionRule};
 pub use kmeans_consensus::{
     ConsensusIndexVote, ConsensusOptimalKResult, GapCurvePoint, KMeansFeatureAnovaRow, KMeansValidityIndices, compute_gap_statistic,

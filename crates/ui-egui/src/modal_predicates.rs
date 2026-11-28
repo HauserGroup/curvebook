@@ -72,7 +72,7 @@ pub fn r1b_sphericity_correction(paired_or_matched: bool, reml_active: bool) -> 
 }
 
 /// Whether a multiplicity adjustment is supported under Mixed-Effects REML (`KenwardRoger` / `Satterthwaite`):
-/// Bonferroni, Sidak, Holm-Sidak, FDR (BH/BKY/BY), Fisher's LSD, or None.
+/// Bonferroni, Sidak, Holm-Bonferroni, Holm-Sidak, FDR (BH/BKY/BY), Fisher's LSD, or None.
 #[must_use]
 pub fn r1b_is_reml_allowed_post_hoc(method: MultiplicityMethod) -> bool {
     matches!(
@@ -80,6 +80,7 @@ pub fn r1b_is_reml_allowed_post_hoc(method: MultiplicityMethod) -> bool {
         MultiplicityMethod::None
             | MultiplicityMethod::Bonferroni
             | MultiplicityMethod::Sidak
+            | MultiplicityMethod::HolmBonferroni
             | MultiplicityMethod::HolmSidak
             | MultiplicityMethod::BenjaminiHochbergFdr
             | MultiplicityMethod::TwoStageBkyFdr
@@ -968,8 +969,14 @@ fn evaluate_edit_params_widget(
     if norm.contains("gameshowell") {
         return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::GamesHowell);
     }
+    if norm.contains("holmbonferroni") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::HolmBonferroni);
+    }
     if norm.contains("bonferroni") {
         return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Bonferroni);
+    }
+    if norm.contains("duncan") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Duncan);
     }
     if norm.contains("holmsidak") {
         return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::HolmSidak);

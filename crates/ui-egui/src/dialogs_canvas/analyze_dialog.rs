@@ -1,10 +1,11 @@
 //! `Analyze...` dialog state machine, variable role filters, duplicate prompts, and candidate collection.
 
 use curvebook_doc::{
-    AnalysisKind, BaselineOperation, ClusterDistance, ClusterLinkage, ContingencyMethod, CoxTieMethod, DataSheet, ErrorPropagationMode, FitMethod,
-    GlmFamily, MathTransformPreset, MultiplicityMethod, MultivariateSpec, NonlinearFitSpec, OneWayMethod, OutlierSpec, PValueStackMethod,
-    ParameterRule, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet, ResultTab, SheetId, SubcolumnAggregation,
-    SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, VariableRole, WeightingScheme,
+    AnalysisKind, BaselineOperation, ClusterDistance, ClusterLinkage, ContingencyMethod, CorrelationMethod, CoxTieMethod, DataSheet,
+    ErrorPropagationMode, FitMethod, GlmFamily, MathTransformPreset, MultiplicityMethod, MultivariateSpec, NonlinearFitSpec, OneWayMethod,
+    OutlierSpec, PValueStackMethod, ParameterRule, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet, ResultTab,
+    SheetId, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod,
+    VariableRole, WeightingScheme,
 };
 use curvebook_palette::Rgba8;
 
@@ -147,6 +148,12 @@ pub struct AnalyzeDialogState {
     #[serde(default)]
     pub correlation_heatmap: bool,
     #[serde(default)]
+    pub pca_biplot: bool,
+    #[serde(default)]
+    pub clustering_dendrogram: bool,
+    #[serde(default)]
+    pub curve_calculus_create_graph: bool,
+    #[serde(default)]
     pub transform_x: Option<MathTransformPreset>,
     #[serde(default = "default_transform_y")]
     pub transform_y: Option<MathTransformPreset>,
@@ -196,6 +203,8 @@ pub struct AnalyzeDialogState {
     pub pca_standardize: bool,
     #[serde(default)]
     pub corr_spearman_rank: bool,
+    #[serde(default)]
+    pub corr_method: Option<CorrelationMethod>,
     #[serde(default = "default_imputation_m")]
     pub imputation_m: usize,
     #[serde(default)]
@@ -355,6 +364,9 @@ impl Default for AnalyzeDialogState {
             pcr_outcome_column: None,
             correlation_all_pairs: true,
             correlation_heatmap: false,
+            pca_biplot: false,
+            clustering_dendrogram: false,
+            curve_calculus_create_graph: false,
             transform_x: None,
             transform_y: default_transform_y(),
             transform_error_propagation: ErrorPropagationMode::ReplicateEndpoints,
@@ -380,6 +392,7 @@ impl Default for AnalyzeDialogState {
             cluster_k_sweep_max: None,
             pca_standardize: true,
             corr_spearman_rank: false,
+            corr_method: None,
             imputation_m: default_imputation_m(),
             glm_family: GlmFamily::Linear,
             glm_reference_levels: Vec::new(),
@@ -741,6 +754,31 @@ impl AnalyzeDialogState {
                     anova.compute_effect_sizes = ces;
                 }
             }
+            AnalysisKind::Ancova(anc) => {
+                if let Some(ces) = self.compute_effect_sizes {
+                    anc.compute_effect_sizes = ces;
+                }
+                if self.source_table_kind == Some(TableKind::MultipleVariables) {
+                    let cat_col = self.variable_candidates.iter().find(|v| v.role == VariableRole::Categorical).map(|v| v.col_index);
+                    let num_cols: Vec<usize> = self
+                        .variable_candidates
+                        .iter()
+                        .filter(|v| !matches!(v.role, VariableRole::Categorical | VariableRole::Label))
+                        .map(|v| v.col_index)
+                        .collect();
+                    let chosen_group = cat_col.or(self.mv_group_column).unwrap_or(anc.group_column);
+                    anc.group_column = chosen_group;
+                    let chosen_resp = response_col
+                        .filter(|&c| c != chosen_group)
+                        .or_else(|| num_cols.iter().copied().find(|&c| c != chosen_group))
+                        .unwrap_or(anc.response_column);
+                    anc.response_column = chosen_resp;
+                    let covs: Vec<usize> = num_cols.into_iter().filter(|&c| c != chosen_group && c != chosen_resp).collect();
+                    if !covs.is_empty() {
+                        anc.covariate_columns = covs;
+                    }
+                }
+            }
             AnalysisKind::Contingency(cont) => {
                 if let Some(m) = self.contingency_method {
                     cont.method = m;
@@ -792,8 +830,9 @@ impl AnalyzeDialogState {
                 *standardize = self.pca_standardize;
                 *pcr_outcome_column = self.pcr_outcome_column;
             }
-            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank }) => {
-                *spearman_rank = self.corr_spearman_rank;
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank, method }) => {
+                *method = self.corr_method;
+                *spearman_rank = self.corr_spearman_rank || self.corr_method == Some(CorrelationMethod::Spearman);
             }
             AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, response_column, predictor_columns, .. }) => {
                 *imputations_m = self.imputation_m.max(1);

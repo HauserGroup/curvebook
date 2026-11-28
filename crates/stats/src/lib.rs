@@ -141,6 +141,7 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::SimpleLogisticRegression(sl) => simple_logistic::run_simple_logistic_analysis(sheet, spec, sl),
         AnalysisKind::LeveneTest(lt) => variance_homogeneity::run_levene_analysis(sheet, spec, lt),
         AnalysisKind::FrequencyDistribution(fd) => frequency::run_frequency_distribution_analysis(sheet, spec, fd),
+        AnalysisKind::Ancova(anc) => anova::run_ancova_analysis(sheet, spec, anc),
         AnalysisKind::ImportedSnapshot(_) => {
             Err(StatsError::IncompatibleAnalysisSpec { expected: "computed statistical analysis (imported snapshot)" })
         }

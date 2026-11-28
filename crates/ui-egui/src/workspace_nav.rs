@@ -1498,6 +1498,8 @@ fn graph_kind_label(spec: &GraphSpec) -> &'static str {
             DiagnosticPlotKind::GapStatisticPlot => "Gap Statistic",
             DiagnosticPlotKind::ParameterCorrelationHeatmap => "Parameter Correlation",
             DiagnosticPlotKind::LognormalQqPlot => "Lognormal Q\u{2013}Q",
+            DiagnosticPlotKind::Dendrogram => "Dendrogram",
+            DiagnosticPlotKind::PcaBiplot => "PCA Biplot",
         },
     }
 }

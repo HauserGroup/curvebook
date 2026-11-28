@@ -95,6 +95,7 @@
 //! `reml_unstructured`), nested designs (`nested`), post-hoc contrasts (`posthoc`), and the
 //! `ResultSheet` builders (`sheet`). Every public item is re-exported here.
 
+mod ancova;
 mod effect_sizes;
 mod factorial;
 mod nested;
@@ -107,6 +108,10 @@ mod results;
 mod rm_two_way;
 mod sheet;
 
+pub use ancova::{
+    AncovaAdjustedMean, AncovaCovariateSlope, AncovaHomogeneityTest, AncovaObservations, AncovaResult, AncovaTermRow, fit_general_ancova,
+    run_ancova_analysis,
+};
 pub use effect_sizes::{compute_anova_effect_sizes, compute_anova_effect_sizes_for_n, variance_homogeneity_tests};
 pub use factorial::{FactorialObservations, fit_factorial_anova};
 pub use nested::{nested_one_way_anova, nested_one_way_anova_with_df_method};

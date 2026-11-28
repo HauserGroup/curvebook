@@ -496,6 +496,7 @@ pub(super) fn multiplicity_short_label(m: MultiplicityMethod) -> &'static str {
         MultiplicityMethod::Dunnett { .. } => "Dunnett",
         MultiplicityMethod::Sidak => "Sidak",
         MultiplicityMethod::Bonferroni => "Bonferroni",
+        MultiplicityMethod::HolmBonferroni => "Holm-Bonferroni",
         MultiplicityMethod::HolmSidak => "Holm-Sidak",
         MultiplicityMethod::DunnettT3 => "Dunnett T3",
         MultiplicityMethod::GamesHowell => "Games-Howell",
@@ -506,6 +507,7 @@ pub(super) fn multiplicity_short_label(m: MultiplicityMethod) -> &'static str {
         MultiplicityMethod::BenjaminiYekutieliFdr => "BY FDR",
         MultiplicityMethod::TwoStageBkyFdr => "BKY FDR",
         MultiplicityMethod::NewmanKeuls => "Newman-Keuls",
+        MultiplicityMethod::Duncan => "Duncan",
         MultiplicityMethod::FisherLsd => "Fisher LSD",
     }
 }
@@ -547,6 +549,12 @@ pub(super) fn method_reference_text(spec: &curvebook_doc::AnalysisSpec) -> &'sta
         }
         AnalysisKind::FrequencyDistribution(_) => {
             "Sturges (1926), Scott (1979), and Freedman & Diaconis (1981) histogram binning with Hyndman & Fan (1996) Type-7 IQR and exact empirical CDF."
+        }
+        AnalysisKind::Ancova(_) => {
+            "One-way k-group ANCOVA with Type III/I SS, grand-mean-centered adjusted means (EMMs), and group-by-covariate slope homogeneity F-test (Maxwell & Delaney 2004; Kutner et al. 2005)."
+        }
+        AnalysisKind::CurveCalculus(_) => {
+            "Savitzky-Golay (1964) local polynomial smoothing, Cleveland (1979) LOWESS, centered finite-difference derivatives, and cumulative trapezoidal integration."
         }
         _ => "Exact peer-reviewed CurveBook statistical reference equations and confidence limits evaluated at the active alpha level.",
     }

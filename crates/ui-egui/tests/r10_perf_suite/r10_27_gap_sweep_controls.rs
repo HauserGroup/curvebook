@@ -229,7 +229,7 @@ fn gwf_20_stats_modal_r7_correlation_sphericity_and_two_group_diagnostics() -> T
     let corr_rs_id = run_sheet_cmd(
         &mut driver.state_mut().app,
         "stats.run",
-        json!({ "source_sheet_id": col_id.as_str(), "kind": AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }) }),
+        json!({ "source_sheet_id": col_id.as_str(), "kind": AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }) }),
     )?;
     open_edit_params(&mut driver, &corr_rs_id)?;
     assert_modal_parity(&driver, "EditParams CorrelationMatrix")?;

@@ -3,6 +3,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod ancova_multivariate_workflows;
 mod audit_da02_engine_fixes;
 mod audit_engine_analysis_fixes;
 mod audit_engine_core_fixes;

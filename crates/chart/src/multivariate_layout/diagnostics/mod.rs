@@ -1,10 +1,12 @@
 //! Shared diagnostic-plot result resolution, cell-source extraction, and subtype dispatch.
 
 mod actual_vs_predicted;
+mod dendrogram;
 mod gap_statistic;
 mod heatmap;
 mod homoscedasticity;
 mod param_corr_heatmap;
+mod pca_biplot;
 mod residual_vs_row;
 mod residuals_qq;
 mod roc_forest;
@@ -15,10 +17,12 @@ use curvebook_doc::{
 };
 
 pub(super) use actual_vs_predicted::compile_actual_vs_predicted_plot;
+pub(super) use dendrogram::compile_dendrogram_plot;
 pub(super) use gap_statistic::compile_gap_statistic_plot;
 pub(super) use heatmap::compile_heatmap;
 pub(super) use homoscedasticity::compile_homoscedasticity_plot;
 pub(super) use param_corr_heatmap::compile_parameter_correlation_heatmap;
+pub(super) use pca_biplot::compile_pca_biplot;
 pub(super) use residual_vs_row::compile_residual_vs_row_plot;
 use residuals_qq::selected_dataset_label_in_tab;
 pub(super) use residuals_qq::{compile_lognormal_qq_plot, compile_normal_qq_plot, compile_residual_plot};

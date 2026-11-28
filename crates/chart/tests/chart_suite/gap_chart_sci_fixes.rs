@@ -1306,7 +1306,7 @@ fn gap_06_03_dirty_results_omitted_with_pending_warning() -> TestResult {
     let an_cl = AnalysisSpec::new(SheetId::new("res-cl-dirty"), ds_hm.id.clone(), AnalysisKind::Multivariate(cl_spec.clone()))?;
     let mut res_cl = run_multivariate_analysis(&ds_hm, &an_cl, &cl_spec)?;
     res_cl.status = ResultStatus::Dirty;
-    let corr_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false };
+    let corr_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None };
     let an_corr = AnalysisSpec::new(SheetId::new("res-corr-dirty"), ds_hm.id.clone(), AnalysisKind::Multivariate(corr_spec.clone()))?;
     let mut res_corr = run_multivariate_analysis(&ds_hm, &an_corr, &corr_spec)?;
     res_corr.status = ResultStatus::Dirty;
@@ -1557,7 +1557,7 @@ fn delta_correlation_heatmap_keeps_symmetric_axes_and_square_cap() -> TestResult
         }
     }
     let ds = DataSheet::new(SheetId::new("corr-4"), "Corr4", TableArchetype::MultipleVariables(mv))?;
-    let corr_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false };
+    let corr_spec = MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None };
     let an = AnalysisSpec::new(SheetId::new("res-corr-4"), ds.id.clone(), AnalysisKind::Multivariate(corr_spec.clone()))?;
     let res = run_multivariate_analysis(&ds, &an, &corr_spec)?;
     let mut doc = ProjectDocument::default();

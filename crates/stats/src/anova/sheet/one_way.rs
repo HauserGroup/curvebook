@@ -174,6 +174,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             let (dunn_title, dunn_footnote) = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
                 MultiplicityProcedure::TukeyKramer
                 | MultiplicityProcedure::NewmanKeuls
+                | MultiplicityProcedure::Duncan
                 | MultiplicityProcedure::GamesHowell
                 | MultiplicityProcedure::DunnettT3 => (
                     "Dunn's multiple comparisons (Bonferroni fallback)",
@@ -1136,7 +1137,10 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     MultiplicityMethod::LinearTrend => {
                         append_rm_subject_linear_trend(out, blocks, rm.ss_total, p_fmt, confidence.alpha())?;
                     }
-                    MultiplicityMethod::TukeyHsd | MultiplicityMethod::Dunnett { .. } | MultiplicityMethod::NewmanKeuls => {
+                    MultiplicityMethod::TukeyHsd
+                    | MultiplicityMethod::Dunnett { .. }
+                    | MultiplicityMethod::NewmanKeuls
+                    | MultiplicityMethod::Duncan => {
                         append_rm_non_sphericity_family_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
                     }
                     _ => {
@@ -1682,7 +1686,7 @@ fn append_welch_multiplicity(
             push_pairwise_outputs(out, &details, title, p_fmt, confidence);
             Ok(())
         }
-        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls => {
+        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::Duncan => {
             let details = compare_groups_with_confidence(
                 inputs,
                 base.ms_within,
@@ -2006,6 +2010,7 @@ fn append_friedman_multiplicity(
         MultiplicityProcedure::None => return Ok(()),
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Duncan
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::TamhaneT2

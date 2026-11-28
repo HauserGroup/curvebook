@@ -1,11 +1,11 @@
 //! Static searchable `Analyze...` catalog, categories, and default [`AnalysisKind`] mapping.
 
 use curvebook_doc::{
-    AnalysisKind, AreaUnderCurveSpec, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FrequencyDistributionSpec, GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset,
-    MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec,
-    PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec,
-    TwoGroupSpec,
+    AnalysisKind, AncovaSpec, AreaUnderCurveSpec, BaselineOperation, BlandAltmanSpec, ContingencySpec, CoxTieMethod, CurveCalculusSpec,
+    DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FrequencyDistributionSpec, GlmFamily, GlmSpec, LeveneTestSpec, LinearRegressionSpec,
+    MathTransformPreset, MultipleRowTestsSpec, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec, RocSpec, SimpleLogisticSpec, SplineLowessSpec, SurvivalAnalysisSpec, TableKind,
+    TransformAnalysisSpec, TwoGroupSpec,
 };
 
 use serde::{Deserialize, Serialize};
@@ -58,10 +58,10 @@ pub struct AnalysisCatalogItem {
 pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
     AnalysisCatalogItem {
         id: "transform.math",
-        label: "Transform Math (Log / Exp / Scale)",
+        label: "Transform Math (Log / Exp / Scale / Lineweaver-Burk)",
         category: AnalysisCategory::Transform,
-        keywords: "transform log ln log10 log2 concentration logit probit",
-        summary: "Create a linked derived table via scalar mathematical functions.",
+        keywords: "transform log ln log10 log2 concentration logit probit lineweaver burk double reciprocal 1/x 1/y enzyme kinetics",
+        summary: "Create a linked derived table via scalar mathematical or enzyme-kinetics reciprocal functions.",
     },
     AnalysisCatalogItem {
         id: "transform.normalize",
@@ -118,6 +118,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         category: AnalysisCategory::Transform,
         keywords: "auc area under curve trapezoid baseline peak kinetic partial bailer integral",
         summary: "Trapezoidal positive, negative, net, and total area under XY curves with peak detection.",
+    },
+    AnalysisCatalogItem {
+        id: "transform.curve_calculus",
+        label: "Smooth, Differentiate, or Integrate Curve",
+        category: AnalysisCategory::XyAndRegression,
+        keywords: "smooth savitzky golay moving average lowess derivative first second cumulative integral curve calculus dy/dx",
+        summary: "Savitzky-Golay, moving-average, or LOWESS smoothing, numerical derivatives (dY/dX, d2Y/dX2), and cumulative integration.",
     },
     AnalysisCatalogItem {
         id: "stats.descriptive",
@@ -211,6 +218,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         summary: "Exact and asymptotic contingency tests plus diagnostic accuracy metrics.",
     },
     AnalysisCatalogItem {
+        id: "stats.ancova",
+        label: "Analysis of Covariance (ANCOVA)",
+        category: AnalysisCategory::Multivariate,
+        keywords: "ancova covariance adjusted means covariate homogeneity slopes type iii group",
+        summary: "One-way k-group ANCOVA with continuous covariates, slope-homogeneity test, and adjusted pairwise comparisons.",
+    },
+    AnalysisCatalogItem {
         id: "stats.glm",
         label: "Multiple Regression (Linear / Logistic / Poisson)",
         category: AnalysisCategory::Multivariate,
@@ -233,10 +247,10 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
     },
     AnalysisCatalogItem {
         id: "stats.corr_matrix",
-        label: "Correlation Matrix (Pearson / Spearman)",
+        label: "Correlation Matrix (Pearson / Spearman / Kendall)",
         category: AnalysisCategory::Multivariate,
-        keywords: "correlation matrix pearson spearman heatmap",
-        summary: "All-pairs correlation coefficients with adjusted p-values.",
+        keywords: "correlation matrix pearson spearman kendall tau tau_b rank heatmap",
+        summary: "All-pairs correlation coefficients (Pearson r, Spearman rho, Kendall tau-b) with adjusted p-values.",
     },
     AnalysisCatalogItem {
         id: "stats.clustering",
@@ -363,10 +377,12 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             proportional_allocation: true,
         })),
         "transform.auc" => Some(AnalysisKind::AreaUnderCurve(AreaUnderCurveSpec::default())),
+        "transform.curve_calculus" => Some(AnalysisKind::CurveCalculus(CurveCalculusSpec::default())),
         "stats.descriptive" => Some(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())),
         "stats.outliers" => Some(AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 })),
         "stats.two_group" => Some(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())),
         "stats.one_way_anova" => Some(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())),
+        "stats.ancova" => Some(AnalysisKind::Ancova(AncovaSpec::default())),
         "stats.nested" => Some(AnalysisKind::NestedComparison(NestedAnalysisSpec::default())),
         "stats.roc" => Some(AnalysisKind::RocCurve(RocSpec::default())),
         "stats.factorial_anova" => Some(AnalysisKind::FactorialAnova(FactorialAnovaSpec::default())),
@@ -420,7 +436,9 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             retention_rule: Default::default(),
             emit_extra_matrices: false,
         })),
-        "stats.corr_matrix" | "stats.correlation" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
+        "stats.corr_matrix" | "stats.correlation" => {
+            Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }))
+        }
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
             distance: curvebook_doc::ClusterDistance::default(),

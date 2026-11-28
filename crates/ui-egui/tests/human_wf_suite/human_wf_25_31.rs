@@ -328,7 +328,7 @@ fn wf26_human_bubble_volcano_heatmap_and_r7_to_r10() -> TestRes {
 
     run.verify_reference(
         ReferenceSpec::for_result(corr_id.clone(), move |sess| {
-            let k = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }))
+            let k = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }))
                 .map_err(|e| e.to_string())?;
             let res_out = sess.execute("analysis.run", json!({ "source_sheet_id": ref_mv_id.as_str(), "kind": k })).map_err(|e| e.to_string())?;
             let corr_sid = res_out.payload["sheet_id"].as_str().ok_or("missing ref corr sheet_id")?;

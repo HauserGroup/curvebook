@@ -99,6 +99,12 @@ pub enum MultiplicityMethod {
     /// Sequential step-down Holm–Šídák FWER procedure (`1 - (1 - p_(i))^(m - i + 1)` with monotonicity enforcement; Holm 1979; Šídák 1967).
     #[serde(alias = "holm_sidak")]
     HolmSidak,
+    /// Sequential step-down Holm–Bonferroni FWER procedure (`min(1, max_{j<=i} (m - j + 1) * p_(j))`; Holm 1979).
+    #[serde(alias = "holm_bonferroni", alias = "holm")]
+    HolmBonferroni,
+    /// Duncan's new multiple range test using Studentized range critical values with protection levels `alpha_p = 1 - (1 - alpha)^(p - 1)` (Duncan 1955; omits simultaneous CIs and does not strongly control FWER for `> 2` groups).
+    #[serde(alias = "duncan", alias = "duncan_mrt", alias = "duncan_multiple_range")]
+    Duncan,
     /// Dunnett's T3 all-pairwise Studentized maximum modulus test for unequal variances and small sample sizes using Welch–Satterthwaite *df* (Dunnett 1980).
     #[serde(alias = "dunnett_t3")]
     DunnettT3,
@@ -179,6 +185,7 @@ impl MultiplicitySpec {
                 | MultiplicityMethod::Bonferroni
                 | MultiplicityMethod::Sidak
                 | MultiplicityMethod::HolmSidak
+                | MultiplicityMethod::HolmBonferroni
                 | MultiplicityMethod::DunnRankSum
                 | MultiplicityMethod::FisherLsd
                 | MultiplicityMethod::DunnettT3
@@ -198,6 +205,7 @@ impl MultiplicitySpec {
             MultiplicityMethod::Bonferroni
                 | MultiplicityMethod::Sidak
                 | MultiplicityMethod::HolmSidak
+                | MultiplicityMethod::HolmBonferroni
                 | MultiplicityMethod::DunnRankSum
                 | MultiplicityMethod::FisherLsd
                 | MultiplicityMethod::DunnettT3
@@ -1852,6 +1860,46 @@ pub struct NestedAnalysisSpec {
     pub multiplicity: MultiplicitySpec,
 }
 
+/// General one-way / *k*-group Analysis of Covariance (ANCOVA) specification (`crates/stats::ancova`).
+///
+/// Adjusts a categorical grouping factor (`k >= 2` levels) for one or more continuous covariates,
+/// reporting Type III (marginal) or Type I (sequential) sums of squares, an optional
+/// homogeneity-of-regression-slopes interaction test (`Group × Covariates`), covariate-adjusted
+/// group means (estimated marginal means at grand covariate means), and optional covariate-adjusted
+/// pairwise post-hoc comparisons (Maxwell & Delaney 2004; Kutner et al. 2005).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct AncovaSpec {
+    /// Zero-based continuous outcome (response) variable column index (`MultipleVariables` tables).
+    pub response_column: usize,
+    /// Zero-based categorical grouping factor column index (`MultipleVariables` tables).
+    pub group_column: usize,
+    /// Zero-based continuous covariate column indices (`>= 1` covariate for `MultipleVariables` tables).
+    pub covariate_columns: Vec<usize>,
+    /// Sum-of-squares decomposition convention (`TypeIII` marginal default; `TypeI` sequential).
+    pub ss_type: SumOfSquaresType,
+    /// When `true` (default), fits an auxiliary interaction model (`Y ~ Group + Covariates + Group:Covariates`) to test homogeneity of regression slopes.
+    pub test_homogeneity_of_slopes: bool,
+    /// Optional post-hoc multiplicity procedure comparing covariate-adjusted group means (EMMs).
+    pub multiplicity: MultiplicitySpec,
+    /// When `true` (default), reports partial eta-squared (`eta_p^2`) and partial omega-squared (`omega_p^2`) effect sizes.
+    pub compute_effect_sizes: bool,
+}
+
+impl Default for AncovaSpec {
+    fn default() -> Self {
+        Self {
+            response_column: 0,
+            group_column: 1,
+            covariate_columns: vec![2],
+            ss_type: SumOfSquaresType::TypeIII,
+            test_homogeneity_of_slopes: true,
+            multiplicity: MultiplicitySpec::default(),
+            compute_effect_sizes: true,
+        }
+    }
+}
+
 /// Weighting scheme for Cohen's kappa (`Unweighted`, `Linear`, or `Quadratic`; Cohen 1960, 1968; Fleiss, Cohen, & Everitt 1969).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum KappaWeighting {
@@ -2271,6 +2319,39 @@ pub enum PcaRetentionRule {
     SelectAll,
 }
 
+/// Correlation coefficient family for [`MultivariateSpec::CorrelationMatrix`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum CorrelationMethod {
+    /// Pearson product-moment linear correlation *r* with Fisher-*z* confidence intervals (Pearson 1896).
+    #[default]
+    #[serde(alias = "pearson")]
+    Pearson,
+    /// Spearman rank-order correlation *rho* with mid-rank tie handling (Spearman 1904).
+    #[serde(alias = "spearman", alias = "spearman_rank")]
+    Spearman,
+    /// Kendall's *tau_b* rank correlation with tie-adjusted asymptotic normal *p*-value (Kendall 1938, 1945).
+    #[serde(alias = "kendall", alias = "kendall_tau_b", alias = "tau_b")]
+    KendallTauB,
+}
+
+impl CorrelationMethod {
+    /// Resolve the active correlation coefficient from the optional [`CorrelationMethod`] override
+    /// and the legacy `spearman_rank` boolean (`Some(m)` takes precedence over `spearman_rank`).
+    #[must_use]
+    pub const fn resolve(spearman_rank: bool, method: Option<Self>) -> Self {
+        match method {
+            Some(m) => m,
+            None => {
+                if spearman_rank {
+                    Self::Spearman
+                } else {
+                    Self::Pearson
+                }
+            }
+        }
+    }
+}
+
 /// Exploratory multivariate analysis or Rubin multiple-imputation specification (`crates/stats::multivariate`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
@@ -2291,10 +2372,14 @@ pub enum MultivariateSpec {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         emit_extra_matrices: bool,
     },
-    /// Pairwise correlation matrix across continuous columns with two-sided *p*-values and Fisher-*z* confidence intervals.
+    /// Pairwise correlation matrix across continuous columns (Pearson *r*, Spearman *rho*, or Kendall's *tau_b*) with two-sided *p*-values and BH FDR adjustment.
     CorrelationMatrix {
-        /// When `true`, computes Spearman rank-order correlations `r_s` (Spearman 1904); when `false`, computes Pearson product-moment correlations `r`.
+        /// Legacy flag selecting Spearman rank-order correlation when `method` is `None`.
+        #[serde(default)]
         spearman_rank: bool,
+        /// Correlation coefficient family (`Pearson`, `Spearman`, or `KendallTauB`); when `None`, falls back to `spearman_rank` for backward compatibility.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        method: Option<CorrelationMethod>,
     },
     /// Agglomerative hierarchical clustering and optional *k*-means++ partitioning with silhouette diagnostics (Arthur & Vassilvitskii 2007; Rousseeuw 1987).
     Clustering {
@@ -4255,6 +4340,8 @@ pub enum AnalysisKind {
     MonteCarloSimulation(MonteCarloSpec),
     /// Standalone empirical frequency distribution & histogram binning ([`FrequencyDistributionSpec`]).
     FrequencyDistribution(FrequencyDistributionSpec),
+    /// General *k*-group one-way Analysis of Covariance adjusting for continuous covariates ([`AncovaSpec`]).
+    Ancova(AncovaSpec),
 }
 
 impl AnalysisKind {
@@ -4275,6 +4362,9 @@ impl AnalysisKind {
     pub fn derive_auto_title(&self) -> String {
         match self {
             Self::Transform(t) => match t {
+                TransformAnalysisSpec::Math { pharmacology_preset: Some(PharmacologyTransformPreset::LineweaverBurk), .. } => {
+                    String::from("Lineweaver-Burk transform")
+                }
                 TransformAnalysisSpec::Math { .. } => String::from("Transform"),
                 TransformAnalysisSpec::Normalize { .. } => String::from("Normalize"),
                 TransformAnalysisSpec::RemoveBaseline { .. } => String::from("Remove baseline"),
@@ -4399,6 +4489,7 @@ impl AnalysisKind {
             },
             Self::MonteCarloSimulation(_) => String::from("Monte Carlo simulation"),
             Self::FrequencyDistribution(_) => String::from("Frequency distribution"),
+            Self::Ancova(_) => String::from("ANCOVA"),
         }
     }
 

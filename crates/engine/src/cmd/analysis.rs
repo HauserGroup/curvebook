@@ -3,17 +3,18 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisDomainKind, AnalysisKind, AnalysisSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineOperation, BlandAltmanSpec,
-    CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusOp,
-    CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod,
-    FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, GlmFamily, GlmSpec, GraphKind, GraphSheet, HistogramSpec, HookSource,
-    KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec, MAX_SHEETS_PER_PROJECT, MathTransformPreset,
-    ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerTailMode,
-    ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, RowStatisticsSpec, SheetId,
-    SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalOtherValuePolicy,
-    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole, XyTable,
+    AnalysisDomainKind, AnalysisKind, AnalysisSpec, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, AucBaseline, BaselineOperation,
+    BlandAltmanSpec, CellValue, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
+    CorrelationMethod, CoxTieMethod, CurveCalculusOp, CurveCalculusSpec, DataSheet, DerivedColumnFormula, DescriptiveSpec, DocError, ErrorCode,
+    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, GlmFamily, GlmSpec,
+    GraphKind, GraphSheet, HistogramSpec, HookSource, KMeansAlgorithm, KappaWeighting, LeveneCenter, LeveneTestSpec, LinearRegressionSpec,
+    MAX_SHEETS_PER_PROJECT, MathTransformPreset, ModelComparisonSpec, MonteCarloHitOp, MonteCarloSpec, MultipleRowTestsSpec, MultipleVariablesTable,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierSpec, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, PowerEffectSpec,
+    PowerOneSidedDirection, PowerTailMode, ProjectDocument, RegressionCiMethod, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod,
+    RocSpec, RowStatisticsSpec, SheetId, SimpleLogisticSpec, SimulationNoise, SplineLowessMethod, SplineLowessSpec, SumOfSquaresType,
+    SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn,
+    VariableRole, XyTable,
 };
 use curvebook_fit::{get_builtin_model, list_builtin_equations, resolve_model_from_spec, suggested_default_dose_response_equation};
 use curvebook_format::{CsvOptions, export_result_sheet_json, try_export_result_sheet_tidy_csv, try_export_result_tab_csv};
@@ -457,6 +458,20 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
             "exclude_flagged_fits",
             nullable_schema(bool_schema("Exclude flagged, ambiguous, or non-converged fits from Monte Carlo summaries")),
         ));
+        props.push(("group_column", nullable_schema(int_schema("Zero-based categorical grouping factor column index for ANCOVA", Some(0), None))));
+        props.push((
+            "covariate_columns",
+            nullable_schema(array_schema(
+                "Zero-based continuous covariate column indices for ANCOVA",
+                int_schema("Covariate column index", Some(0), None),
+                None,
+                None,
+            )),
+        ));
+        props.push((
+            "test_homogeneity_of_slopes",
+            nullable_schema(bool_schema("Run group-by-covariate interaction test for homogeneity of regression slopes in ANCOVA")),
+        ));
     }
     if include_fit_extras {
         props.push(("equation_id", nullable_schema(non_empty_str_schema(
@@ -612,7 +627,7 @@ fn schema_transform_run() -> Value {
 
 fn schema_stats_run() -> Value {
     schema_analysis_base(
-        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `frequency_distribution`, `rout`, `grubbs`, `levene`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `clustering`) or typed AnalysisKind object",
+        "Statistical test shorthand (e.g. `unpaired_t`, `welch_t`, `paired_t`, `ratio_paired_t`, `one_sample_ratio_t`, `lognormal_t`, `lognormal_welch_t`, `mann_whitney`, `wilcoxon`, `one_sample_t`, `one_way_anova`, `welch_anova`, `rm_one_way_anova`, `lognormal_one_way_anova`, `lognormal_welch_anova`, `lognormal_rm_anova`, `kruskal_wallis`, `friedman`, `ancova`, `two_way_anova`, `three_way_anova`, `nested_t`, `nested_anova`, `descriptive`, `normality`, `frequency_distribution`, `rout`, `grubbs`, `levene`, `multiple_row_t_tests`, `contingency`, `fisher_exact`, `barnard_exact`, `kaplan_meier`, `cox_ph`, `roc`, `bland_altman`, `passing_bablok`, `pvalue_stack`, `power`, `monte_carlo`, `pca`, `correlation`, `kendall`, `clustering`) or typed AnalysisKind object",
         false,
         true,
     )
@@ -2489,6 +2504,7 @@ fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineErr
         AnalysisKind::FitSplineLowess(sp) => validate_spline_lowess_spec_semantics(sp)?,
         AnalysisKind::AreaUnderCurve(auc) => validate_area_under_curve_spec_semantics(auc)?,
         AnalysisKind::OneWayAnova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
+        AnalysisKind::Ancova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
         AnalysisKind::FactorialAnova(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
         AnalysisKind::NestedComparison(spec) => validate_multiplicity_spec_semantics(&spec.multiplicity, true)?,
         AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => validate_multiplicity_spec_semantics(multiplicity, true)?,
@@ -2525,7 +2541,7 @@ fn validate_multiplicity_spec_semantics(mult: &MultiplicitySpec, allow_selected_
         if !MultiplicitySpec::supports_selected_pairs(mult.method) {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
         validate_selected_pairs_list(pairs)?;
@@ -2539,7 +2555,7 @@ fn validate_multiplicity_spec_semantics(mult: &MultiplicitySpec, allow_selected_
     } else if mult.control_column.is_some() && !MultiplicitySpec::supports_control_column(mult.method) {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
-            "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+            "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
         ));
     }
     Ok(())
@@ -3249,6 +3265,12 @@ fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str, allow_ui_update_comp
                     && key == "geisser_greenhouse")
                 || is_key_allowed_for_multiplicity(&spec.multiplicity, key, true)
         }
+        AnalysisKind::Ancova(spec) => {
+            matches!(
+                key,
+                "response_column" | "group_column" | "covariate_columns" | "ss_type" | "test_homogeneity_of_slopes" | "compute_effect_sizes"
+            ) || is_key_allowed_for_multiplicity(&spec.multiplicity, key, true)
+        }
         AnalysisKind::FactorialAnova(spec) => {
             matches!(
                 key,
@@ -3406,7 +3428,8 @@ fn is_key_allowed_for_multivariate(mv: &MultivariateSpec, key: &str, allow_ui_up
             matches!(key, "standardize" | "parallel_analysis_seed" | "pcr_outcome_column" | "retention_rule" | "emit_extra_matrices")
         }
         MultivariateSpec::CorrelationMatrix { .. } => {
-            matches!(key, "spearman" | "spearman_rank") || (allow_ui_update_compat && matches!(key, "correlation_all_pairs" | "correlation_heatmap"))
+            matches!(key, "spearman" | "spearman_rank" | "method")
+                || (allow_ui_update_compat && matches!(key, "correlation_all_pairs" | "correlation_heatmap"))
         }
         MultivariateSpec::Clustering { .. } => matches!(
             key,
@@ -3583,7 +3606,13 @@ fn resolve_kind_shorthand(
     source_ds: Option<&DataSheet>,
     path_policy: &ExternalPathPolicy,
 ) -> Result<AnalysisKind, EngineError> {
-    if let Some(kind) = resolve_transform_shorthand(name) {
+    if let Some(mut kind) = resolve_transform_shorthand(name) {
+        if let AnalysisKind::Transform(TransformAnalysisSpec::Math { ref mut y_transform, .. }) = kind
+            && params.get("pharmacology_preset").is_some_and(|v| !v.is_null())
+            && params.get("y_transform").is_none()
+        {
+            *y_transform = None;
+        }
         return Ok(kind);
     }
     if let Some(kind) = resolve_two_group_or_anova_shorthand(name, params)? {
@@ -3803,10 +3832,16 @@ fn resolve_other_stats_shorthand(name: &str) -> Option<AnalysisKind> {
         "frequency_distribution" | "frequency" | "histogram" | "freq_dist" | "stats.frequency_distribution" => {
             AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())
         }
+        "ancova" | "stats.ancova" | "general_ancova" | "one_way_ancova" | "analysis_of_covariance" => AnalysisKind::Ancova(AncovaSpec::default()),
         "pca" | "stats.pca" | "principal_components" | "pcr" | "stats.pcr" | "principal_component_regression" => {
             AnalysisKind::Multivariate(default_pca())
         }
-        "correlation" | "correlation_matrix" => AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+        "correlation" | "correlation_matrix" => {
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None })
+        }
+        "kendall" | "kendall_tau_b" | "kendall_correlation" => {
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: Some(CorrelationMethod::KendallTauB) })
+        }
         "clustering" | "kmeans" => AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: (name == "kmeans").then_some(3),
             distance: ClusterDistance::default(),
@@ -3940,6 +3975,9 @@ fn suggest_analysis_kinds(raw: &str) -> Vec<String> {
         "poisson_glm",
         "pca",
         "correlation",
+        "kendall",
+        "kendall_tau_b",
+        "ancova",
         "clustering",
         "multiple_imputation",
         "linear",
@@ -4056,6 +4094,7 @@ fn is_omitted_optional_field(kind: &AnalysisKind, key: &str) -> bool {
         AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }) => {
             matches!(key, "pcr_outcome_column" | "retention_rule" | "emit_extra_matrices")
         }
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }) => key == "method",
         AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }) => {
             matches!(key, "k_sweep_max" | "consensus_optimal_k" | "kmeans_algorithm" | "cluster_direction" | "cut_height" | "emit_anova_tab")
         }
@@ -4172,6 +4211,7 @@ const STRICT_NON_NULL_USIZE_FIELDS: &[&str] = &[
     "time_column",
     "status_column",
     "response_column",
+    "group_column",
     "imputations_m",
     "max_iters",
     "segment_count",
@@ -4206,6 +4246,8 @@ const INTEGER_OR_INT_VEC_FIELDS: &[&str] = &[
     "time_column",
     "status_column",
     "response_column",
+    "group_column",
+    "covariate_columns",
     "parallel_analysis_seed",
     "pcr_outcome_column",
     "k_means_k",
@@ -4320,11 +4362,16 @@ fn apply_custom_kind_overrides(kind: &mut AnalysisKind, norm: &Value) -> Result<
             apply_enum_field(norm, "residual_covariance", &mut spec.residual_covariance, "`residual_covariance`")?;
             apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
         }
+        AnalysisKind::Ancova(spec) => {
+            apply_enum_field(norm, "ss_type", &mut spec.ss_type, "ANCOVA `ss_type`")?;
+            apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
+        }
         AnalysisKind::NestedComparison(spec) => {
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
             apply_multiplicity_override(&mut spec.multiplicity, norm, true)?;
         }
         AnalysisKind::FactorialAnova(spec) => {
+            apply_enum_field(norm, "ss_type", &mut spec.ss_type, "`ss_type`")?;
             apply_enum_field(norm, "repeated_measures", &mut spec.repeated_measures, "`repeated_measures`")?;
             apply_enum_field(norm, "df_method", &mut spec.df_method, "`df_method`")?;
             apply_enum_field(norm, "residual_covariance", &mut spec.residual_covariance, "`residual_covariance`")?;
@@ -4576,6 +4623,18 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allo
             mult.method = MultiplicityMethod::Dunnett { control_column: 0 };
             mult.control_column = None;
             mult.selected_pairs = None;
+        } else if m_val.as_str().is_some_and(|s| {
+            let k: String = s.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+            matches!(k.as_str(), "holm" | "holmbonferroni")
+        }) {
+            mult.method = MultiplicityMethod::HolmBonferroni;
+        } else if m_val.as_str().is_some_and(|s| {
+            let k: String = s.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+            matches!(k.as_str(), "duncan" | "duncanmrt" | "duncanmultiplerange")
+        }) {
+            mult.method = MultiplicityMethod::Duncan;
+            mult.control_column = None;
+            mult.selected_pairs = None;
         } else {
             mult.method = parse_serde_enum(m_val, "`multiplicity`")?;
             if !MultiplicitySpec::supports_control_column(mult.method) {
@@ -4603,7 +4662,7 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allo
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`control_column` is only supported for Dunnett, Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
     }
@@ -4619,7 +4678,7 @@ fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value, allo
         } else {
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
+                "`selected_pairs` is only supported for Bonferroni, Sidak, HolmBonferroni, HolmSidak, DunnRankSum, FisherLsd, DunnettT3, TamhaneT2, or FDR multiplicity methods",
             ));
         }
     }
@@ -4659,7 +4718,27 @@ fn apply_multivariate_custom_overrides(spec: &mut MultivariateSpec, norm: &Value
         MultivariateSpec::Pca { retention_rule, .. } => {
             apply_enum_field(norm, "retention_rule", retention_rule, "PCA `retention_rule`")?;
         }
-        MultivariateSpec::CorrelationMatrix { .. } => {}
+        MultivariateSpec::CorrelationMatrix { spearman_rank, method } => {
+            if let Some(m_val) = norm.get("method") {
+                if m_val.is_null() {
+                    *method = None;
+                } else if let Some(raw) = m_val.as_str() {
+                    let norm_str: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+                    let parsed = match norm_str.as_str() {
+                        "pearson" | "r" => CorrelationMethod::Pearson,
+                        "spearman" | "spearmanrank" | "rho" => CorrelationMethod::Spearman,
+                        "kendall" | "kendalltaub" | "taub" => CorrelationMethod::KendallTauB,
+                        _ => parse_serde_enum(m_val, "correlation `method`")?,
+                    };
+                    *method = Some(parsed);
+                    *spearman_rank = parsed == CorrelationMethod::Spearman;
+                } else {
+                    let parsed: CorrelationMethod = parse_serde_enum(m_val, "correlation `method`")?;
+                    *method = Some(parsed);
+                    *spearman_rank = parsed == CorrelationMethod::Spearman;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -4766,6 +4845,7 @@ const CUSTOM_HANDLED_PATCH_KEYS: &[&str] = &[
     "pharmacology_preset",
     "asymmetric_ci_policy",
     "baseline_kind",
+    "ss_type",
 ];
 
 fn parse_auc_baseline_value(val: &Value) -> Result<AucBaseline, EngineError> {
@@ -4929,7 +5009,7 @@ fn patch_analysis_kind_fields(kind: &mut AnalysisKind, patch: &Value) -> Result<
             }
             let is_nullable = NULLABLE_KIND_FIELDS.contains(&ks)
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { .. }) if ks == "sample_size")
-                && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) if ks == "response_column")
+                && !matches!(kind, AnalysisKind::GeneralizedLinearModel(_) | AnalysisKind::Ancova(_) if ks == "response_column")
                 && !matches!(kind, AnalysisKind::Transform(TransformAnalysisSpec::Simulate { .. }) if matches!(ks, "x_min" | "x_max"));
             if v.is_null() {
                 if !is_nullable {

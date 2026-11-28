@@ -14,7 +14,7 @@ Use the sidebar to jump to a specific test. Compact summaries of table compatibi
   - An empty `selected_data_sets` selects every compatible column, unless the analysis requires explicit indices.
   - Excluded cells are always removed before any computation ([Cell exclusions](concepts.md#cell-exclusions)).
 - **Running analyses:** Run an analysis with [`analysis.run`](../commands.md) (or `transform.run`, `stats.run`, `fit.run`), change it with [`analysis.updateParams`](../commands.md), or point it at different data with [`analysis.retargetData`](../commands.md). [`analyze.run`](../commands.md) recalculates every pending sheet in the project. An unknown option key returns `bad_input` ([Engine error codes](registry/tables.html#error-codes)).
-- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_sidak`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Supplying `selected_pairs` (`[[a, b], ...]`, mutually exclusive with `control_column` and `dunnett`) restricts comparisons to $m$ planned pairs for `bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
+- **Multiple-comparison methods (`multiplicity`):** The accepted values are `none` (the default; unadjusted or omnibus results only), `tukey_hsd`, `dunnett` (with `control_column`), `sidak`, `bonferroni`, `holm_bonferroni` (alias `holm`), `holm_sidak`, `dunnett_t3`, `games_howell`, `tamhane_t2`, `dunn_rank_sum`, `linear_trend`, `benjamini_hochberg_fdr`, `benjamini_yekutieli_fdr`, `two_stage_bky_fdr`, `newman_keuls`, `duncan` (alias `duncan_mrt`), and `fisher_lsd`. Supplying `control_column` restricts comparisons to the $k - 1$ treatment-versus-control family for `dunnett`, `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. Supplying `selected_pairs` (`[[a, b], ...]`, mutually exclusive with `control_column` and `dunnett`) restricts comparisons to $m$ planned pairs for `bonferroni`, `holm_bonferroni`, `sidak`, `holm_sidak`, `dunn_rank_sum`, `fisher_lsd`, `dunnett_t3`, `tamhane_t2`, and the three FDR procedures. FDR methods read `threshold` as the false discovery rate $Q$. FWER methods read it as the family-wise $\alpha$ (default `0.05`; see [Number formatting](concepts.md#number-and-pvalue-formatting)).
 
 ---
 
@@ -24,7 +24,7 @@ Transforms apply math functions, normalization, baseline removal, transposition,
 
 - **Commands and aliases:** Run [`analysis.run`](../commands.md) or `transform.run` with `kind` set to `math` (the preferred name), `transform`, `normalize`, `remove_baseline`, `baseline`, `transpose`, `prune`, `prune_rows`, `select`, `select_and_transform`, `simulate`, or `random_sample`.
 - **Options and defaults:**
-  - `math`: `x_transform` and `y_transform` take `none` or a preset such as `log10`, `ln`, `log2`, `exp10`, `exp`, `reciprocal`, `square`, `sqrt`, `logit`, `probit`, or `arcsin_sqrt`. `error_propagation` is `replicate_endpoints` (the default) or `first_order_delta` / `delta_method`.
+  - `math`: `x_transform` and `y_transform` take `none` or a preset such as `log10`, `ln`, `log2`, `exp10`, `exp`, `reciprocal`, `square`, `sqrt`, `logit`, `probit`, or `arcsin_sqrt`. `pharmacology_preset` applies classic enzyme-kinetics and radioligand transforms including `lineweaver_burk` ($1/X$ vs. $1/Y$ with zero-value guarding, double-reciprocal OLS diagnostics for apparent $V_{\max}$ and $K_m$, and an explicit reciprocal error-distortion checklist warning recommending nonlinear Michaelis–Menten regression for parameter estimation), `eadie_hofstee`, `hanes_woolf`, and `scatchard`. `error_propagation` is `replicate_endpoints` (the default) or `first_order_delta` / `delta_method`.
   - `normalize`: `zero_anchor` and `hundred_anchor` each take `column_min`, `column_max`, `column_sum`, `first_row`, `last_row`, a fixed constant, a control-column mean, or a scalar linked from another result. `output_percent` and `per_data_set` are booleans.
   - `remove_baseline`: `baseline_columns`; `baseline_kind` (`ColumnsRowWise`, `ColumnsMean`, `Constant`, `RowRangeMean`, `FirstAndLastLinear`, `OlsLinearWithX`, or `PairedEveryOtherColumn`); and `operation` (`difference`/`subtract`, `ratio`/`divide`, `percent_change`, or `fractional_change`).
   - `transpose`: `swap_row_and_column_titles` (boolean).
@@ -208,15 +208,41 @@ This analysis compares $k \ge 2$ groups. Groups in independent columns are compa
   - **ANOVA Table** (`anova-table`, `unequal-var-anova`, `rm-one-way-anova`, `kruskal-wallis`, `friedman`): treatment, residual, and total SS, df, and MS; the test statistic ($F$, Welch's $W$, Brown–Forsythe $F^*$, Kruskal–Wallis $H$, or Friedman's $\chi^2_F$); and the *P* value.
   - **Diagnostics:** for unpaired ANOVA, Bartlett's test and the Brown–Forsythe (median-centered Levene) test of equal variances; for repeated-measures ANOVA, Mauchly's $W$ and the Greenhouse–Geisser $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ sphericity estimates.
   - **Parameters and CIs** and **Covariance Matrix**: the REML variance components or the estimated unstructured covariance matrix.
-  - **Multiple Comparisons:** pairwise differences of means or of ranks, SEs, raw and adjusted *P* or *q* values, simultaneous CIs (omitted for `newman_keuls`, for which CIs are not defined), and Piepho (2004) CLD letter groups.
+  - **Multiple Comparisons:** pairwise differences of means or of ranks, SEs, raw and adjusted *P* or *q* values, simultaneous CIs (omitted for step-down procedures such as `holm_bonferroni`, `holm_sidak`, `newman_keuls`, and `duncan`, for which simultaneous CIs are not defined; Duncan's multiple range test uses protection levels $\alpha_p = 1 - (1 - \alpha)^{p - 1}$ and does not guarantee strong FWER control for $k > 2$), and Piepho (2004) CLD letter groups.
 - **Diagnostic checks:** The checklist reports Shapiro–Wilk normality for each group, homogeneity of variance, and sphericity (with a warning when $\hat{\varepsilon} < 0.75$). It also flags REML variance estimates at the zero boundary or the upper search limit, and rows dropped listwise in repeated-measures analyses without REML and in Friedman's test.
 - **Edge cases and limits:**
   - `ordinary_anova` and `brown_forsythe_and_welch` accept [pre-summarized subcolumns](tables.md#subcolumn-modes) (Mean/SD/N, Mean/SEM/N, Mean/%CV/N). The normality and Levene checks, which need raw values, are then omitted.
   - REML handles unbalanced designs with missing cells automatically. When timepoints are collinear or degenerate, it falls back to `compound_symmetry` and records the reason. Friedman's test drops incomplete rows listwise.
   - Kruskal–Wallis evaluates exact conditional permutation *P* values for small samples ($k = 2$ up to $N \le 250$; $k = 3$ up to $N \le 25$; $k \ge 4$ within bounded meet-in-the-middle splits, covering designs such as $(5,5,5,5)$ and $(3,3,3,3,3)$ with or without ties). Above that budget, it falls back to the tie-corrected $\chi^2(k - 1)$ approximation.
 - **References and verification:**
-  - References: Zar (2010); Welch (1951); Levene (1960) & Brown & Forsythe (1974a,b); Steiger (2004); Mauchly (1940); Greenhouse & Geisser (1959); Huynh & Feldt (1976); Patterson & Thompson (1971); Pinheiro & Bates (1996); Kenward & Roger (1997); Fai & Cornelius (1996); Kruskal & Wallis (1952); Iman, Quade & Alexander (1975); Streitberg & Röhmel (1986); Baglivo, Olivier & Pagano (1992); Meyer & Seaman (2013); Friedman (1937); Tukey (1949/1953) & Kramer (1956); Newman (1939) & Keuls (1952); Dunnett (1955, 1980); Games & Howell (1976); Tamhane (1979); Dunn (1964); Piepho (2004).
-  - Verified against: NIST StRD ANOVA benchmarks and `R 4.5.2` (`stats`, `nlme`, `oneway.test`, `kruskal.test`, `friedman.test`) ([statistics evidence](../evidence/statistics.md)).
+  - References: Zar (2010); Welch (1951); Levene (1960) & Brown & Forsythe (1974a,b); Steiger (2004); Mauchly (1940); Greenhouse & Geisser (1959); Huynh & Feldt (1976); Patterson & Thompson (1971); Pinheiro & Bates (1996); Kenward & Roger (1997); Fai & Cornelius (1996); Kruskal & Wallis (1952); Iman, Quade & Alexander (1975); Streitberg & Röhmel (1986); Baglivo, Olivier & Pagano (1992); Meyer & Seaman (2013); Friedman (1937); Holm (1979); Duncan (1955); Tukey (1949/1953) & Kramer (1956); Newman (1939) & Keuls (1952); Dunnett (1955, 1980); Games & Howell (1976); Tamhane (1979); Dunn (1964); Piepho (2004).
+  - Verified against: NIST StRD ANOVA benchmarks and `R 4.5.2` (`stats`, `nlme`, `oneway.test`, `kruskal.test`, `friedman.test`, `p.adjust`, `ptukey`) ([statistics evidence](../evidence/statistics.md)).
+
+---
+
+## Analysis of covariance (ANCOVA) {#analysis-ancova}
+
+One-way / *k*-group analysis of covariance (ANCOVA) compares group means on a continuous outcome while linearly adjusting for one or more continuous covariates. It reports Type III (marginal) or Type I (sequential) sums of squares, grand-mean-centered adjusted group means (estimated marginal means, EMMs) with standard errors and confidence intervals, common covariate slopes, an optional group-by-covariate interaction *F*-test for homogeneity of regression slopes, partial $\eta^2$ and $\omega^2$ effect sizes, and optional covariate-adjusted pairwise group comparisons. It works with Multiple Variables tables (explicit response, categorical grouping factor, and one or more covariate columns) and XY tables (using *X* as the covariate and each *Y* dataset as a group) (see [Analysis Registry: `ancova`](registry/tables.html#analysis-kind-ancova)).
+
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `ancova` (the preferred name), `general_ancova`, `one_way_ancova`, `analysis_of_covariance`, or `stats.ancova`.
+- **Options and defaults:**
+  - `response_column`, `group_column`, and `covariate_columns`: zero-based column indices on Multiple Variables tables.
+  - `ss_type`: `type_iii` (default; marginal SS for unbalanced designs) or `type_i` (sequential SS with covariates entered prior to group).
+  - `test_homogeneity_of_slopes`: boolean (default `true`). Fits the separate-slope interaction model ($Y \sim \text{Group} + \mathbf{X} + \text{Group}:\mathbf{X}$) and evaluates the omnibus (and per-covariate, when $q > 1$) extra-sum-of-squares *F*-test against the common-slope additive model.
+  - `compute_effect_sizes`: boolean (default `true`). Reports partial $\eta^2$ and partial $\omega^2$ for the group factor and every covariate.
+  - `multiplicity`, `threshold` (default `0.05`), `report_confidence_intervals`, `control_column`, and `selected_pairs`: covariate-adjusted pairwise contrasts between estimated marginal means using exact covariance $\text{SE}(\hat{\mu}_a^* - \hat{\mu}_b^*) = \sqrt{\text{MS}_{\text{error}} (\mathbf{c}^\top (Z^\top Z)^{-1} \mathbf{c})}$.
+- **Reported outputs:**
+  - **ANCOVA Table** (`ancova-table`): group, covariate, residual, and total SS, df, MS, *F*, *P*, partial $\eta^2$, and partial $\omega^2$, plus model $R^2$ and adjusted $R^2$.
+  - **Adjusted Group Means** (`ancova-adjusted-means`): unadjusted mean, grand-mean-centered adjusted mean (EMM), SE, and confidence interval for each group level.
+  - **Covariate Slopes** (`ancova-covariate-slopes`): common slope estimate, SE, *t*, *P*, and confidence interval for each covariate.
+  - **Homogeneity of Slopes** (`ancova-homogeneity`): omnibus and per-covariate group-by-covariate interaction *F*-tests.
+  - **Multiple Comparisons** (`ancova-posthoc`): covariate-adjusted pairwise contrasts with multiplicity-adjusted *P*/*q* values and CIs (where defined).
+  - **Residuals** (`ancova-residuals`): observed *Y*, additive fitted $\hat{Y}$, and residual values for diagnostic plotting.
+- **Diagnostic checks:** The assumption checklist warns when the homogeneity-of-slopes interaction test is significant ($p < \alpha$), reports residual Shapiro–Wilk normality, and flags omitted incomplete rows.
+- **Edge cases and limits:** Requires at least two non-empty groups, at least one continuous covariate, full rank of the additive design matrix, and residual degrees of freedom $n - k - q \ge 1$. Collinear covariates or zero residual degrees of freedom return a structured error rather than invalid estimates. Pre-summarized XY subcolumns are rejected because ANCOVA requires raw observations.
+- **References and verification:**
+  - References: Maxwell & Delaney (2004); Kutner, Nachtsheim, Neter, & Li (2005); Searle, Speed, & Milliken (1980).
+  - Verified against: `R 4.5.2` (`lm`, `drop1(..., test = "F")`, `anova`, `predict(..., se.fit = TRUE)`, `p.adjust`) for unbalanced 1-covariate and 2-covariate designs ([statistics evidence](../evidence/statistics.md)).
 
 ---
 
@@ -424,13 +450,13 @@ This analysis fits multivariable generalized linear models from three families: 
 
 This analysis groups several multivariate methods: exploratory principal component analysis (PCA), correlation matrices, clustering, supervised principal component regression (PCR), and multiple imputation. It works with Multiple Variables, XY, and Column tables (see [Analysis Registry: `multivariate`](registry/tables.html#analysis-kind-multivariate)).
 
-- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `pca` (the preferred name), `principal_components`, `correlation`, `correlation_matrix`, `clustering`, `kmeans`, `multiple_imputation`, `stats.multiple_imputation`, or `mice`.
+- **Commands and aliases:** Run [`analysis.run`](../commands.md) or `stats.run` with `pca` (the preferred name), `principal_components`, `correlation`, `correlation_matrix`, `kendall`, `kendall_tau_b`, `kendall_correlation`, `clustering`, `kmeans`, `multiple_imputation`, `stats.multiple_imputation`, or `mice`.
 - **Options and defaults:**
   - PCA and PCR:
     - `standardize`: `true` for PCA on the correlation matrix, `false` for PCA on the covariance matrix.
     - `retention_rule`: the Kaiser criterion ($\lambda > 1$), Horn (1965) parallel analysis (seeded by `parallel_analysis_seed`), a cumulative-variance threshold, or a fixed number of components.
     - Provide `pcr_outcome_column` to run supervised PCR.
-  - Correlation matrix: `spearman_rank` is `false` for Pearson $r$ and `true` for Spearman $\rho$.
+  - Correlation matrix: `method` selects `pearson` (default; Pearson $r$), `spearman` (Spearman rank $\rho$), or `kendall_tau_b` (alias `kendall`; tie-adjusted Kendall's $\tau_b$ with tie-corrected normal-approximation *P* values). The legacy boolean `spearman_rank` remains supported for backward compatibility.
   - Clustering:
     - `distance`: `euclidean`, `manhattan`, `cosine`, or `pearson_correlation_dissimilarity`.
     - `linkage`: `single`, `complete`, `average` (UPGMA), `weighted` (WPGMA), `centroid` (UPGMC), `median` (WPGMC), or `ward_d2` (the Murtagh–Legendre Ward criterion).

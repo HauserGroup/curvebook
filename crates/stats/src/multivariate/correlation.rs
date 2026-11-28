@@ -17,6 +17,7 @@
 //!   powerful approach to multiple testing. *Journal of the Royal Statistical Society B*, 57(1),
 //!   289-300.
 
+use curvebook_doc::CorrelationMethod;
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_p};
 use curvebook_math::sum::pearson_r;
@@ -120,7 +121,10 @@ pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, Stat
     let nf = n as f64;
     let n0 = 0.5 * nf * (nf - 1.0);
     let denom = ((n0 - ties_x) * (n0 - ties_y)).sqrt();
-    let tau = if denom > 0.0 { ((conc - disc) / denom).clamp(-1.0, 1.0) } else { 0.0 };
+    if !(denom.is_finite() && denom > 0.0) {
+        return Err(StatsError::ZeroVariance { context: "Kendall tau-b correlation" });
+    }
+    let tau = ((conc - disc) / denom).clamp(-1.0, 1.0);
 
     // Tie-corrected variance for S = C - D (Kendall 1970).
     let rx = rank_with_ties(x)?;
@@ -153,6 +157,14 @@ pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, Stat
 /// Pairwise correlation matrix across columns (using pairwise complete finite observations)
 /// with Benjamini–Hochberg FDR *q*-values across the upper triangle.
 pub fn correlation_matrix(columns: &[(&str, &[Option<f64>])], spearman: bool) -> Result<CorrelationMatrixResult, StatsError> {
+    let method = if spearman { CorrelationMethod::Spearman } else { CorrelationMethod::Pearson };
+    correlation_matrix_with_method(columns, method)
+}
+
+/// Pairwise correlation matrix across columns using the requested [`CorrelationMethod`]
+/// (`Pearson`, `Spearman`, or `KendallTauB`) with Benjamini–Hochberg FDR *q*-values across the
+/// upper triangle.
+pub fn correlation_matrix_with_method(columns: &[(&str, &[Option<f64>])], method: CorrelationMethod) -> Result<CorrelationMatrixResult, StatsError> {
     let p = columns.len();
     if p < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "correlation matrix variables", required: 2, actual: p });
@@ -182,7 +194,11 @@ pub fn correlation_matrix(columns: &[(&str, &[Option<f64>])], spearman: bool) ->
             n_mat[i][j] = xs.len();
             n_mat[j][i] = xs.len();
             let res = if xs.len() >= 3 {
-                if spearman { spearman_correlation(&xs, &ys) } else { pearson_correlation(&xs, &ys, ConfidenceLevel::DEFAULT_95) }
+                match method {
+                    CorrelationMethod::Pearson => pearson_correlation(&xs, &ys, ConfidenceLevel::DEFAULT_95),
+                    CorrelationMethod::Spearman => spearman_correlation(&xs, &ys),
+                    CorrelationMethod::KendallTauB => kendall_tau_b(&xs, &ys),
+                }
             } else {
                 Err(StatsError::InsufficientSampleSize { context: "pairwise correlation", required: 3, actual: xs.len() })
             };
@@ -211,6 +227,47 @@ pub fn correlation_matrix(columns: &[(&str, &[Option<f64>])], spearman: bool) ->
         p_matrix: p_mat,
         fdr_q_matrix: q_mat,
         n_matrix: n_mat,
-        spearman,
+        spearman: method == CorrelationMethod::Spearman,
+        method,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::CorrelationMethod;
+
+    use super::{correlation_matrix_with_method, kendall_tau_b};
+    use crate::error::StatsError;
+
+    /// Cross-validated against R 4.5.2 `cor.test(x, y, method = "kendall", exact = FALSE)`.
+    #[test]
+    fn d1_oracle_kendall_tau_b_and_matrix_match_r_4_5_2() -> Result<(), Box<dyn std::error::Error>> {
+        let kx = [1.0, 2.0, 2.0, 3.0, 4.0, 5.0, 5.0, 6.0, 7.0, 8.0];
+        let ky = [1.5, 2.0, 3.0, 2.0, 5.0, 4.5, 6.0, 6.0, 8.0, 7.5];
+        let res = kendall_tau_b(&kx, &ky)?;
+        assert!((res.r - 0.813_953_488_372_093).abs() < 1e-12, "tau_b mismatch: {}", res.r);
+        assert!((res.statistic - 3.180_650_113_430_14).abs() < 1e-10, "z mismatch: {}", res.statistic);
+        assert!((res.p_value - 0.001_469_449_864_818_37).abs() < 1e-10, "p mismatch: {}", res.p_value);
+
+        let kx2 = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0];
+        let ky2 = [12.0, 18.0, 35.0, 33.0, 55.0, 52.0, 71.0, 88.0];
+        let res2 = kendall_tau_b(&kx2, &ky2)?;
+        assert!((res2.r - 0.857_142_857_142_857).abs() < 1e-12);
+        assert!((res2.statistic - 2.969_229_955_832_36).abs() < 1e-10);
+        assert!((res2.p_value - 0.002_985_470_891_268_82).abs() < 1e-10);
+
+        // Constant vector -> ZeroVariance error (and NaN excluded from BH FDR in matrix).
+        assert!(matches!(kendall_tau_b(&[3.0, 3.0, 3.0, 3.0], &[1.0, 2.0, 3.0, 4.0]), Err(StatsError::ZeroVariance { .. })));
+
+        let c1: Vec<Option<f64>> = kx.iter().copied().map(Some).collect();
+        let c2: Vec<Option<f64>> = ky.iter().copied().map(Some).collect();
+        let c3: Vec<Option<f64>> = vec![Some(5.0); kx.len()];
+        let mat = correlation_matrix_with_method(&[("X", &c1), ("Y", &c2), ("Const", &c3)], CorrelationMethod::KendallTauB)?;
+        assert_eq!(mat.method, CorrelationMethod::KendallTauB);
+        assert!(!mat.spearman);
+        assert!((mat.r_matrix[0][1] - res.r).abs() < 1e-12);
+        assert!(mat.r_matrix[0][2].is_nan());
+        assert!(mat.fdr_q_matrix[0][2].is_nan());
+        Ok(())
+    }
 }

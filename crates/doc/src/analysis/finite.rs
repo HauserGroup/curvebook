@@ -164,6 +164,7 @@ fn kind_first_non_finite_float(kind: &AnalysisKind) -> Option<String> {
                 .or_else(|| non_finite_opt(fd.first_bin_center, at("first_bin_center")))
                 .or_else(|| non_finite_opt(fd.last_bin_center, at("last_bin_center")))
         }
+        AnalysisKind::Ancova(s) => non_finite(s.multiplicity.threshold, at("multiplicity.threshold")),
     }
 }
 

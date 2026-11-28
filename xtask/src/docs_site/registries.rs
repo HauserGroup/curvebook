@@ -695,6 +695,8 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot),
         GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap),
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot),
+        GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram),
+        GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot),
     ]
     .into_iter()
     .map(|k| match k {
@@ -719,6 +721,8 @@ fn build_graphs_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
         GraphKind::Diagnostic(DiagnosticPlotKind::GapStatisticPlot) => ("diagnostic-gap-statistic-plot", "Diagnostic: Gap Statistic Plot", "Gap statistic with Monte Carlo reference error bars across candidate cluster counts."),
         GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap) => ("diagnostic-parameter-correlation-heatmap", "Diagnostic: Parameter Correlation Heatmap", "Symmetric heatmap of fitted parameter correlations from regression models."),
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => ("diagnostic-lognormal-qq-plot", "Diagnostic: Lognormal Q–Q Plot", "Theoretical lognormal quantiles versus observed positive-value quantiles."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram) => ("diagnostic-dendrogram", "Diagnostic: Hierarchical Dendrogram", "Standalone hierarchical clustering merge tree ordered by leaf cluster topology with optional cut-height line."),
+        GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot) => ("diagnostic-pca-biplot", "Diagnostic: PCA Biplot", "PC1 versus PC2 observation scores overlaid with scaled variable loading vectors and variance-explained axes."),
     })
     .collect();
     let _ = writeln!(

@@ -22,6 +22,7 @@
 //! - Barnard, J., & Rubin, D. B. (1999). Small-sample degrees of freedom with multiple imputation.
 //!   *Biometrika*, 86(4), 948-955.
 
+use curvebook_doc::CorrelationMethod;
 use curvebook_math::ConfidenceLevel;
 use serde::{Deserialize, Serialize};
 
@@ -57,8 +58,11 @@ pub struct CorrelationMatrixResult {
     pub fdr_q_matrix: Vec<Vec<f64>>,
     /// Symmetric `p x p` matrix of pairwise complete-case sample sizes `n_{ij}`.
     pub n_matrix: Vec<Vec<usize>>,
-    /// True when Spearman rank correlation was computed; false for Pearson product-moment correlation.
+    /// True when Spearman rank correlation was computed; false for Pearson or Kendall correlation.
     pub spearman: bool,
+    /// Correlation coefficient method computed across all pairs (`Pearson`, `Spearman`, or `KendallTauB`).
+    #[serde(default)]
+    pub method: CorrelationMethod,
 }
 
 /// Complete Principal Component Analysis result (Hotelling 1933; Horn 1965 parallel analysis).

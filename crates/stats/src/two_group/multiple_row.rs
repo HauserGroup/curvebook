@@ -46,6 +46,7 @@ pub(super) fn validate_raw_p_multiplicity_procedure(procedure: MultiplicityProce
     match procedure {
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Duncan
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell

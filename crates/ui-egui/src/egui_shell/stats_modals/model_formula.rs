@@ -71,6 +71,20 @@ pub(super) fn build_live_symbolic_formula(spec: &curvebook_doc::AnalysisSpec, do
                 Some(format!("{y} ~ {rhs}"))
             }
         }
+        AnalysisKind::Ancova(anc) => {
+            let y = name(anc.response_column);
+            let grp = name(anc.group_column);
+            let covs = if anc.covariate_columns.is_empty() {
+                String::from("X")
+            } else {
+                anc.covariate_columns.iter().map(|&c| name(c)).collect::<Vec<_>>().join(" + ")
+            };
+            if anc.test_homogeneity_of_slopes {
+                Some(format!("{y} ~ {grp} + {covs}  [+ {grp}:covariate slope check]"))
+            } else {
+                Some(format!("{y} ~ {grp} + {covs}"))
+            }
+        }
         AnalysisKind::GeneralizedLinearModel(glm) => {
             let y = name(glm.response_column);
             let lhs = match glm.family {
@@ -115,6 +129,82 @@ pub(super) fn render_stat_mv_data_tab(
 
     render_section_title(ui, tokens, "Multivariate Variable Role Binding");
     match &spec.kind {
+        AnalysisKind::Ancova(anc) => {
+            render_section_title(ui, tokens, crate::i18n::tr(tokens.locale, "ancova.section.variables"));
+            for (idx, var) in mv.variables.iter().enumerate() {
+                ui.horizontal_wrapped(|ui| {
+                    render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
+                    ui.label(&var.title);
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.ancova.resp.{idx}"),
+                        "Response (Y)",
+                        anc.response_column == idx,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::Ancova(a) = &mut next.kind {
+                            let prev = a.response_column;
+                            a.response_column = idx;
+                            if a.group_column == idx {
+                                a.group_column = if prev != idx { prev } else { (0..mv.variables.len()).find(|&c| c != idx).unwrap_or(idx) };
+                            }
+                            let cur_grp = a.group_column;
+                            a.covariate_columns.retain(|&c| c != idx && c != cur_grp);
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.ancova.group.{idx}"),
+                        "Group",
+                        anc.group_column == idx,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::Ancova(a) = &mut next.kind {
+                            let prev = a.group_column;
+                            a.group_column = idx;
+                            if a.response_column == idx {
+                                a.response_column = if prev != idx { prev } else { (0..mv.variables.len()).find(|&c| c != idx).unwrap_or(idx) };
+                            }
+                            let cur_resp = a.response_column;
+                            a.covariate_columns.retain(|&c| c != idx && c != cur_resp);
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                    let cov_en = if anc.response_column == idx || anc.group_column == idx {
+                        ControlEnablement::disabled("Response or grouping variable cannot also be a covariate.")
+                    } else {
+                        ControlEnablement::enabled()
+                    };
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.ancova.cov.{idx}"),
+                        "Covariate",
+                        anc.covariate_columns.contains(&idx),
+                        &cov_en,
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::Ancova(a) = &mut next.kind {
+                            if let Some(pos) = a.covariate_columns.iter().position(|&c| c == idx) {
+                                a.covariate_columns.remove(pos);
+                            } else {
+                                a.covariate_columns.push(idx);
+                                a.covariate_columns.sort_unstable();
+                            }
+                        }
+                        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+                    }
+                });
+            }
+        }
         AnalysisKind::GeneralizedLinearModel(glm) => {
             render_section_title(ui, tokens, "Response (Y) Variable");
             for (idx, var) in mv.variables.iter().enumerate() {

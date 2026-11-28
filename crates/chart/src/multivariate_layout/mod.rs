@@ -38,6 +38,8 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
             diagnostics::compile_parameter_correlation_heatmap(graph, doc, scene)
         }
         GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot) => diagnostics::compile_lognormal_qq_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram) => diagnostics::compile_dendrogram_plot(graph, doc, scene),
+        GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot) => diagnostics::compile_pca_biplot(graph, doc, scene),
         _ => {
             scene.warnings.push(ChartWarning::new("unexpected_graph_kind", "non-multivariate graph kind dispatched"));
             draw_empty_open_frame(scene);
@@ -283,5 +285,206 @@ mod tests {
         assert_eq!(eval(&extreme, 0.0), f64::MIN);
         assert_eq!(eval(&extreme, 1.0), f64::MAX);
         assert_eq!(eval(&extreme, 0.5), 0.0);
+    }
+
+    #[test]
+    fn standalone_dendrogram_compiles_from_clustering_result_and_raw_table() {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, ClusterDirection, ClusterDistance, ClusterLinkage, MultivariateSpec, ResultCell, ResultSheet, ResultStatus,
+            ResultTab, ResultTabKind,
+        };
+
+        let mut mv = MultipleVariablesTable::new(3, 5).expect("mv");
+        mv.variables[0].title = String::from("Sample");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[1].title = String::from("X1");
+        mv.variables[2].title = String::from("X2");
+        let rows = [("S1", 1.0, 1.1), ("S2", 1.2, 0.9), ("S3", 5.0, 5.1), ("S4", 5.2, 4.9), ("S5", 5.1, 5.0)];
+        for (r, (lbl, x1, x2)) in rows.into_iter().enumerate() {
+            mv.variables[0].cells[r] = curvebook_doc::Cell::text(lbl);
+            mv.variables[1].cells[r] = curvebook_doc::Cell::number(x1);
+            mv.variables[2].cells[r] = curvebook_doc::Cell::number(x2);
+        }
+        let ds = DataSheet::new(SheetId::new("mv-dend"), "Cluster Data", TableArchetype::MultipleVariables(mv)).expect("ds");
+
+        // 1. From a Clustering ResultSheet containing `dendrogram-merges` and `cluster-assignments`.
+        let spec = AnalysisSpec::new(
+            SheetId::new("res-dend"),
+            SheetId::new("mv-dend"),
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+                k_means_k: None,
+                distance: ClusterDistance::Euclidean,
+                linkage: ClusterLinkage::Upgma,
+                k_sweep_max: None,
+                consensus_optimal_k: false,
+                kmeans_algorithm: Default::default(),
+                cluster_direction: ClusterDirection::Rows,
+                cut_height: Some(2.0),
+                emit_anova_tab: false,
+            }),
+        )
+        .expect("spec");
+        let mut res = ResultSheet::new(spec).expect("res");
+        res.status = ResultStatus::UpToDate;
+        let num = |v: f64| ResultCell::Number { value: v, prefix: None, units: None };
+        res.tabs.push(ResultTab {
+            id: String::from("hierarchical-height-cut"),
+            title: String::from("Cluster assignments"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Cluster")],
+            row_labels: vec!["S1".into(), "S2".into(), "S3".into(), "S4".into(), "S5".into()],
+            rows: vec![vec![num(1.0)], vec![num(1.0)], vec![num(2.0)], vec![num(2.0)], vec![num(2.0)]],
+            footnotes: Vec::new(),
+        });
+        res.tabs.push(ResultTab {
+            id: String::from("hierarchical-dendrogram"),
+            title: String::from("Dendrogram merges"),
+            kind: ResultTabKind::Diagnostics,
+            column_headers: vec![String::from("Left"), String::from("Right"), String::from("Distance"), String::from("Size")],
+            row_labels: vec!["Step 1".into(), "Step 2".into(), "Step 3".into(), "Step 4".into()],
+            rows: vec![
+                vec![num(-1.0), num(-2.0), num(0.28), num(2.0)],
+                vec![num(-3.0), num(-5.0), num(0.14), num(2.0)],
+                vec![num(1.0), num(-4.0), num(0.22), num(3.0)],
+                vec![num(0.0), num(2.0), num(5.60), num(5.0)],
+            ],
+            footnotes: Vec::new(),
+        });
+
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-dend"), &ds).expect("gs");
+        gs.spec.primary_source_sheet_id = SheetId::new("res-dend");
+        gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram);
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds.clone()).expect("add ds");
+        doc.add_result_sheet(res).expect("add res");
+
+        let mut scene = ChartScene::new("g-dend", "Dendrogram", 420.0, 300.0, None);
+        compile_multivariate_or_diagnostic_graph(&gs, &doc, &mut scene).expect("compile result dendrogram");
+        assert!(scene.warnings.is_empty(), "warnings: {:?}", scene.warnings);
+        assert!(scene.primitives.len() > 15);
+        assert!(
+            scene
+                .primitives
+                .iter()
+                .any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(stroke), .. } if stroke.dash == curvebook_palette::LineDashStyle::Dashed)),
+            "expected dashed cut-height reference line"
+        );
+
+        // 2. Directly from raw MultipleVariables DataSheet (fallback hierarchical clustering).
+        let mut gs_raw = GraphSheet::new_uninitialized_for_data(SheetId::new("g-dend-raw"), &ds).expect("gs_raw");
+        gs_raw.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram);
+        let mut scene_raw = ChartScene::new("g-dend-raw", "Raw Dendrogram", 420.0, 300.0, None);
+        compile_multivariate_or_diagnostic_graph(&gs_raw, &doc, &mut scene_raw).expect("compile raw dendrogram");
+        assert!(scene_raw.warnings.is_empty(), "raw warnings: {:?}", scene_raw.warnings);
+        assert!(scene_raw.primitives.len() > 15);
+    }
+
+    #[test]
+    fn pca_biplot_compiles_scores_and_loading_vectors_from_result_and_raw_table() {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, MultivariateSpec, PcaRetentionRule, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+        };
+
+        let mut mv = MultipleVariablesTable::new(4, 6).expect("mv");
+        mv.variables[0].title = String::from("Group");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[1].title = String::from("GeneA");
+        mv.variables[2].title = String::from("GeneB");
+        mv.variables[3].title = String::from("GeneC");
+        let rows = [
+            ("Ctrl", 1.0, 2.0, 1.5),
+            ("Ctrl", 1.2, 2.3, 1.3),
+            ("Ctrl", 0.9, 1.8, 1.7),
+            ("Drug", 5.0, 6.2, 0.4),
+            ("Drug", 5.4, 5.8, 0.2),
+            ("Drug", 4.8, 6.5, 0.5),
+        ];
+        for (r, (g, a, b, c)) in rows.into_iter().enumerate() {
+            mv.variables[0].cells[r] = curvebook_doc::Cell::text(g);
+            mv.variables[1].cells[r] = curvebook_doc::Cell::number(a);
+            mv.variables[2].cells[r] = curvebook_doc::Cell::number(b);
+            mv.variables[3].cells[r] = curvebook_doc::Cell::number(c);
+        }
+        let ds = DataSheet::new(SheetId::new("mv-pca"), "PCA Data", TableArchetype::MultipleVariables(mv)).expect("ds");
+
+        // 1. From PCA ResultSheet with `pca-summary`, `pca-loadings`, and `pca-scores`.
+        let spec = AnalysisSpec::new(
+            SheetId::new("res-pca"),
+            SheetId::new("mv-pca"),
+            AnalysisKind::Multivariate(MultivariateSpec::Pca {
+                standardize: true,
+                parallel_analysis_seed: None,
+                pcr_outcome_column: None,
+                retention_rule: PcaRetentionRule::FixedCount(2),
+                emit_extra_matrices: false,
+            }),
+        )
+        .expect("spec");
+        let mut res = ResultSheet::new(spec).expect("res");
+        res.status = ResultStatus::UpToDate;
+        let num = |v: f64| ResultCell::Number { value: v, prefix: None, units: None };
+        res.tabs.push(ResultTab {
+            id: String::from("pca-eigenvalues"),
+            title: String::from("PCA eigenvalues"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("Eigenvalue"), String::from("Proportion (%)"), String::from("Cumulative (%)")],
+            row_labels: vec!["PC1".into(), "PC2".into()],
+            rows: vec![vec![num(2.7), num(90.0), num(90.0)], vec![num(0.25), num(8.3), num(98.3)]],
+            footnotes: Vec::new(),
+        });
+        res.tabs.push(ResultTab {
+            id: String::from("pca-loadings"),
+            title: String::from("PCA loadings"),
+            kind: ResultTabKind::Diagnostics,
+            column_headers: vec![String::from("PC1"), String::from("PC2")],
+            row_labels: vec!["GeneA".into(), "GeneB".into(), "GeneC".into()],
+            rows: vec![vec![num(0.62), num(0.15)], vec![num(0.58), num(-0.42)], vec![num(-0.52), num(0.89)]],
+            footnotes: Vec::new(),
+        });
+        res.tabs.push(ResultTab {
+            id: String::from("pca-scores"),
+            title: String::from("PCA scores"),
+            kind: ResultTabKind::Diagnostics,
+            column_headers: vec![String::from("PC1"), String::from("PC2")],
+            row_labels: vec!["Row 1".into(), "Row 2".into(), "Row 3".into(), "Row 4".into(), "Row 5".into(), "Row 6".into()],
+            rows: vec![
+                vec![num(-1.5), num(0.2)],
+                vec![num(-1.2), num(-0.1)],
+                vec![num(-1.6), num(0.3)],
+                vec![num(1.4), num(-0.2)],
+                vec![num(1.7), num(0.1)],
+                vec![num(1.2), num(-0.3)],
+            ],
+            footnotes: Vec::new(),
+        });
+
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-biplot"), &ds).expect("gs");
+        gs.spec.primary_source_sheet_id = SheetId::new("res-pca");
+        gs.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot);
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds.clone()).expect("add ds");
+        doc.add_result_sheet(res).expect("add res");
+
+        let mut scene = ChartScene::new("g-biplot", "PCA Biplot", 420.0, 300.0, None);
+        compile_multivariate_or_diagnostic_graph(&gs, &doc, &mut scene).expect("compile pca biplot");
+        assert!(scene.warnings.is_empty(), "biplot warnings: {:?}", scene.warnings);
+        let texts: Vec<String> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t.contains("PC1 (90.0%)")), "missing PC1 variance label in {texts:?}");
+        assert!(texts.iter().any(|t| t.contains("GeneA")), "missing loading label GeneA in {texts:?}");
+
+        // 2. Directly from raw MultipleVariables DataSheet (fallback PCA).
+        let mut gs_raw = GraphSheet::new_uninitialized_for_data(SheetId::new("g-biplot-raw"), &ds).expect("gs_raw");
+        gs_raw.spec.kind = GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot);
+        let mut scene_raw = ChartScene::new("g-biplot-raw", "Raw PCA Biplot", 420.0, 300.0, None);
+        compile_multivariate_or_diagnostic_graph(&gs_raw, &doc, &mut scene_raw).expect("compile raw biplot");
+        assert!(scene_raw.warnings.is_empty(), "raw biplot warnings: {:?}", scene_raw.warnings);
+        assert!(scene_raw.primitives.len() > 20);
     }
 }

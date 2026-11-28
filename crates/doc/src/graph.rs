@@ -54,6 +54,12 @@ pub enum DiagnosticPlotKind {
     /// Theoretical lognormal quantiles vs observed positive-data quantiles Q–Q plot with reference line.
     #[serde(alias = "lognormal_qq", alias = "lognormal_qq_plot")]
     LognormalQqPlot,
+    /// Standalone hierarchical clustering dendrogram tree with distance axis and optional cut-height line.
+    #[serde(alias = "dendrogram", alias = "hierarchical_dendrogram")]
+    Dendrogram,
+    /// Principal Component Analysis biplot combining observation scores `(PC1, PC2)` and scaled variable loading vectors (Gabriel 1971).
+    #[serde(alias = "pca_biplot", alias = "biplot")]
+    PcaBiplot,
 }
 
 /// Primary visual family of a [`GraphSpec`].

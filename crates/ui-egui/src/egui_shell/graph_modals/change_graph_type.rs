@@ -435,6 +435,38 @@ fn paint_thumbnail_glyph(painter: &egui::Painter, rect: Rect, kind: ThumbnailGly
                 painter.rect(bar, CornerRadius::ZERO, c0.gamma_multiply(0.75), Stroke::new(1.0, c1), StrokeKind::Inside);
             }
         }
+        ThumbnailGlyphKind::Dendrogram => {
+            let p_l1 = lerp_rect(inner, 0.20, 0.90);
+            let p_l2 = lerp_rect(inner, 0.42, 0.90);
+            let p_l3 = lerp_rect(inner, 0.64, 0.90);
+            let p_l4 = lerp_rect(inner, 0.86, 0.90);
+            let y1 = lerp_rect(inner, 0.0, 0.62).y;
+            let y2 = lerp_rect(inner, 0.0, 0.48).y;
+            let y3 = lerp_rect(inner, 0.0, 0.22).y;
+            painter.line_segment([p_l1, Pos2::new(p_l1.x, y1)], st);
+            painter.line_segment([p_l2, Pos2::new(p_l2.x, y1)], st);
+            painter.line_segment([Pos2::new(p_l1.x, y1), Pos2::new(p_l2.x, y1)], st);
+            painter.line_segment([p_l3, Pos2::new(p_l3.x, y2)], st);
+            painter.line_segment([p_l4, Pos2::new(p_l4.x, y2)], st);
+            painter.line_segment([Pos2::new(p_l3.x, y2), Pos2::new(p_l4.x, y2)], st);
+            let m12 = 0.5 * (p_l1.x + p_l2.x);
+            let m34 = 0.5 * (p_l3.x + p_l4.x);
+            painter.line_segment([Pos2::new(m12, y1), Pos2::new(m12, y3)], st);
+            painter.line_segment([Pos2::new(m34, y2), Pos2::new(m34, y3)], st);
+            painter.line_segment([Pos2::new(m12, y3), Pos2::new(m34, y3)], st);
+        }
+        ThumbnailGlyphKind::PcaBiplot => {
+            let c = inner.center();
+            painter.line_segment([Pos2::new(inner.left(), c.y), Pos2::new(inner.right(), c.y)], Stroke::new(0.8, tokens.text_muted));
+            painter.line_segment([Pos2::new(c.x, inner.top()), Pos2::new(c.x, inner.bottom())], Stroke::new(0.8, tokens.text_muted));
+            for (fx, fy) in [(0.25, 0.35), (0.34, 0.68), (0.72, 0.28), (0.78, 0.64)] {
+                painter.circle_filled(lerp_rect(inner, fx, fy), 2.1, c0);
+            }
+            let arrow_st = Stroke::new(1.5, c1);
+            for (fx, fy) in [(0.84, 0.22), (0.22, 0.26), (0.75, 0.78)] {
+                painter.line_segment([c, lerp_rect(inner, fx, fy)], arrow_st);
+            }
+        }
     }
 }
 

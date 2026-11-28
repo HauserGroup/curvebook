@@ -72,11 +72,13 @@ pub enum AnalysisKindId {
     MonteCarloSimulation = 27,
     /// Standalone empirical frequency distribution & histogram binning ([`AnalysisKind::FrequencyDistribution`]).
     FrequencyDistribution = 28,
+    /// General *k*-group one-way Analysis of Covariance ([`AnalysisKind::Ancova`]).
+    Ancova = 29,
 }
 
 impl AnalysisKindId {
     /// Complete ordered list of every [`AnalysisKindId`] discriminant.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::Transform,
         Self::DescriptiveStats,
         Self::OutlierDetection,
@@ -106,6 +108,7 @@ impl AnalysisKindId {
         Self::CurveCalculus,
         Self::MonteCarloSimulation,
         Self::FrequencyDistribution,
+        Self::Ancova,
     ];
 
     /// Total number of [`AnalysisKind`] variants registered in [`ALL_ANALYSIS_DESCRIPTORS`].
@@ -147,6 +150,7 @@ impl AnalysisKindId {
             AnalysisKind::CurveCalculus(_) => Self::CurveCalculus,
             AnalysisKind::MonteCarloSimulation(_) => Self::MonteCarloSimulation,
             AnalysisKind::FrequencyDistribution(_) => Self::FrequencyDistribution,
+            AnalysisKind::Ancova(_) => Self::Ancova,
         }
     }
 
@@ -186,6 +190,7 @@ impl AnalysisKindId {
             Self::CurveCalculus => &ALL_ANALYSIS_DESCRIPTORS[26],
             Self::MonteCarloSimulation => &ALL_ANALYSIS_DESCRIPTORS[27],
             Self::FrequencyDistribution => &ALL_ANALYSIS_DESCRIPTORS[28],
+            Self::Ancova => &ALL_ANALYSIS_DESCRIPTORS[29],
         }
     }
 
@@ -422,6 +427,7 @@ const COL_XY_GROUPED_MV: &[TableKind] = &[TableKind::Column, TableKind::Xy, Tabl
 const GROUPED_XY_COL_MV: &[TableKind] = &[TableKind::Grouped, TableKind::Xy, TableKind::Column, TableKind::MultipleVariables];
 const COL_XY_MV: &[TableKind] = &[TableKind::Column, TableKind::Xy, TableKind::MultipleVariables];
 const MV_XY_COL: &[TableKind] = &[TableKind::MultipleVariables, TableKind::Xy, TableKind::Column];
+const MV_XY: &[TableKind] = &[TableKind::MultipleVariables, TableKind::Xy];
 const COL_MV: &[TableKind] = &[TableKind::Column, TableKind::MultipleVariables];
 const GROUPED_MV: &[TableKind] = &[TableKind::Grouped, TableKind::MultipleVariables];
 const SURVIVAL_MV: &[TableKind] = &[TableKind::Survival, TableKind::MultipleVariables];
@@ -997,7 +1003,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         serde_variant: "Multivariate",
         title: "Multivariate Analysis (PCA, Correlation, Clustering, MI)",
         short_label: "Multivariate Analysis",
-        description: "Principal component analysis, Pearson/Spearman correlation matrices, k-means/hierarchical clustering, and Rubin multiple imputation.",
+        description: "Principal component analysis, Pearson/Spearman/Kendall correlation matrices, k-means/hierarchical clustering, and Rubin multiple imputation.",
         domain: AnalysisDomainKind::Stats,
         recompute_strategy: AnalysisRecomputeStrategy::Stats,
         ui_category: AnalysisUiCategory::Multivariate,
@@ -1009,6 +1015,9 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
             "principal_components",
             "correlation",
             "correlation_matrix",
+            "kendall",
+            "kendall_tau_b",
+            "kendall_correlation",
             "clustering",
             "kmeans",
             "multiple_imputation",
@@ -1023,6 +1032,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
             "retention_rule",
             "emit_extra_matrices",
             "spearman_rank",
+            "method",
             "k_means_k",
             "distance",
             "linkage",
@@ -1448,7 +1458,7 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         supports_multiplicity: false,
         supports_info_hooks: false,
         auto_selects_mv_numeric_columns: false,
-        ui_catalog_ids: &[],
+        ui_catalog_ids: &["transform.curve_calculus"],
         docs_anchor: "analysis-curve-calculus",
         user_creatable: true,
     },
@@ -1504,6 +1514,37 @@ pub const ALL_ANALYSIS_DESCRIPTORS: [AnalysisKindDescriptor; AnalysisKindId::COU
         auto_selects_mv_numeric_columns: true,
         ui_catalog_ids: &["stats.frequency_distribution"],
         docs_anchor: "analysis-frequency-distribution",
+        user_creatable: true,
+    },
+    AnalysisKindDescriptor {
+        id: AnalysisKindId::Ancova,
+        slug: "ancova",
+        serde_variant: "Ancova",
+        title: "Analysis of Covariance (ANCOVA)",
+        short_label: "ANCOVA",
+        description: "General k-group one-way ANCOVA adjusting for continuous covariates with Type I/III SS, homogeneity-of-slopes test, adjusted means, and pairwise contrasts.",
+        domain: AnalysisDomainKind::Stats,
+        recompute_strategy: AnalysisRecomputeStrategy::Stats,
+        ui_category: AnalysisUiCategory::Multivariate,
+        compatible_table_kinds: MV_XY,
+        has_method_specific_table_rules: false,
+        canonical_shorthand: "ancova",
+        shorthands: &["ancova", "general_ancova", "one_way_ancova", "analysis_of_covariance", "stats.ancova"],
+        accepts_equation_id_shorthand: false,
+        canonical_param_keys: &[
+            "response_column",
+            "group_column",
+            "covariate_columns",
+            "ss_type",
+            "test_homogeneity_of_slopes",
+            "multiplicity",
+            "compute_effect_sizes",
+        ],
+        supports_multiplicity: true,
+        supports_info_hooks: false,
+        auto_selects_mv_numeric_columns: false,
+        ui_catalog_ids: &["stats.ancova"],
+        docs_anchor: "analysis-ancova",
         user_creatable: true,
     },
 ];

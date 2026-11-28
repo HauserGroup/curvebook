@@ -635,8 +635,8 @@ fn wf17_human_dose_response_4pl_5pl_interp_and_heatmap_r7() -> TestRes {
             ref_mv_sheet.set_cell(CellCoord::new(r, c, 0), Cell::number(v)).map_err(|e| e.to_string())?;
         }
     }
-    let corr_val =
-        serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true })).map_err(|e| e.to_string())?;
+    let corr_val = serde_json::to_value(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true, method: None }))
+        .map_err(|e| e.to_string())?;
     run.verify_reference(
         ReferenceSpec::for_result(corr_rs_id.clone(), move |sess| {
             let out = sess.execute("analysis.run", json!({ "source_sheet_id": "ref-mv-corr", "kind": corr_val })).map_err(|e| e.to_string())?;

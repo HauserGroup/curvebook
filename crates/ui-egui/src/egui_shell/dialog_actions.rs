@@ -666,11 +666,43 @@ fn execute_result_tab_extract_for_fit(app: &mut UiApp, src_id: &SheetId, tab_id:
     SheetId::try_new(extracted_id).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct AnalyzeAutoGraphFlags {
+    corr_heatmap: bool,
+    pca_biplot: bool,
+    clustering_dendrogram: bool,
+    curve_calculus_xy: bool,
+}
+
+fn collect_analyze_auto_graph_flags(app: &UiApp) -> AnalyzeAutoGraphFlags {
+    let az = &app.canvas_dialogs.analyze;
+    AnalyzeAutoGraphFlags {
+        corr_heatmap: az.correlation_all_pairs && az.correlation_heatmap,
+        pca_biplot: az.pca_biplot,
+        clustering_dendrogram: az.clustering_dendrogram,
+        curve_calculus_xy: az.curve_calculus_create_graph,
+    }
+}
+
+fn spawn_auto_graph_if_missing(app: &mut UiApp, res_id: &SheetId, kind: GraphKind) -> Result<(), EngineError> {
+    if !app.document().graph_sheets.iter().any(|g| g.spec.primary_source_sheet_id == *res_id && g.spec.kind == kind) {
+        let _ = app.execute_command(
+            "graph.create",
+            json!({
+                "data_sheet_id": res_id.as_str(),
+                "kind": kind,
+                "initialized": true,
+            }),
+        )?;
+    }
+    Ok(())
+}
+
 fn execute_analyze_intent_atomically(
     app: &mut UiApp,
     mut intent: curvebook_tools::ToolCommandIntent,
     pending_extract: Option<(SheetId, String)>,
-    spawn_corr_heatmap: bool,
+    auto_graphs: AnalyzeAutoGraphFlags,
 ) -> Result<curvebook_engine::CommandOutcome, EngineError> {
     app.execute_atomic_group(|app| {
         if let Some((src_id, tab_id)) = pending_extract
@@ -683,27 +715,24 @@ fn execute_analyze_intent_atomically(
         }
         apply_ext01_default_nonlinear_equation(app.document(), &app.canvas_dialogs.analyze, &mut intent);
         let out = app.execute_command(&intent.command_id, intent.params)?;
-        if spawn_corr_heatmap
-            && let Some(res_id_str) = out.payload.get("sheet_id").and_then(Value::as_str)
+        if let Some(res_id_str) = out.payload.get("sheet_id").and_then(Value::as_str)
             && let Ok(res_id) = SheetId::try_new(res_id_str)
-            && app
-                .document()
-                .result_sheet(&res_id)
-                .is_some_and(|rs| matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })))
-            && !app
-                .document()
-                .graph_sheets
-                .iter()
-                .any(|g| g.spec.primary_source_sheet_id == res_id && g.spec.kind == GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap))
         {
-            let _ = app.execute_command(
-                "graph.create",
-                json!({
-                    "data_sheet_id": res_id.as_str(),
-                    "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap),
-                    "initialized": true,
-                }),
-            )?;
+            let kind_opt = app.document().result_sheet(&res_id).map(|rs| rs.analysis.kind.clone());
+            if let Some(kind) = kind_opt {
+                if auto_graphs.corr_heatmap && matches!(kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })) {
+                    spawn_auto_graph_if_missing(app, &res_id, GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap))?;
+                }
+                if auto_graphs.pca_biplot && matches!(kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
+                    spawn_auto_graph_if_missing(app, &res_id, GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot))?;
+                }
+                if auto_graphs.clustering_dendrogram && matches!(kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })) {
+                    spawn_auto_graph_if_missing(app, &res_id, GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram))?;
+                }
+                if auto_graphs.curve_calculus_xy && matches!(kind, AnalysisKind::CurveCalculus(_)) {
+                    spawn_auto_graph_if_missing(app, &res_id, GraphKind::Xy)?;
+                }
+            }
         }
         Ok(out)
     })
@@ -717,7 +746,7 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
         .clone()
         .zip(app.canvas_dialogs.analyze.extracted_result_tab_id.clone())
         .filter(|(src_id, _)| app.document().result_sheet(src_id).is_some_and(|rs| rs.analyzable_data.is_none()));
-    let spawn_corr_heatmap = app.canvas_dialogs.analyze.correlation_all_pairs && app.canvas_dialogs.analyze.correlation_heatmap;
+    let auto_graphs = collect_analyze_auto_graph_flags(app);
 
     let from_physical_gui = params.is_null();
     let transient_force = std::mem::take(&mut app.canvas_dialogs.analyze.force_create_new_once);
@@ -737,7 +766,7 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
     }
 
     if !force_new && let Some(intent) = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document()) {
-        let out = match execute_analyze_intent_atomically(app, intent, pending_extract, spawn_corr_heatmap) {
+        let out = match execute_analyze_intent_atomically(app, intent, pending_extract, auto_graphs) {
             Ok(o) => o,
             Err(err) => {
                 app.canvas_dialogs.active_dialog = prev_dialog;
@@ -755,7 +784,7 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
         return Ok(json!({ "action": "ok", "dialog": "duplicate_analysis_prompt", "pending_confirmation": true }));
     }
     let intent = app.canvas_dialogs.analyze.build_create_new_intent().ok_or_else(|| bad_input("Analyze selection incomplete"))?;
-    let out = execute_analyze_intent_atomically(app, intent, pending_extract, spawn_corr_heatmap)?;
+    let out = execute_analyze_intent_atomically(app, intent, pending_extract, auto_graphs)?;
     app.canvas_dialogs.analyze.extracted_result_tab_id = None;
     app.canvas_dialogs.close_dialog();
     if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
@@ -774,7 +803,7 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
         .clone()
         .zip(app.canvas_dialogs.analyze.extracted_result_tab_id.clone())
         .filter(|(src_id, _)| app.document().result_sheet(src_id).is_some_and(|rs| rs.analyzable_data.is_none()));
-    let spawn_corr_heatmap = app.canvas_dialogs.analyze.correlation_all_pairs && app.canvas_dialogs.analyze.correlation_heatmap;
+    let auto_graphs = collect_analyze_auto_graph_flags(app);
     let raw_choice = match params.get("choice") {
         Some(v) => Some(v),
         None => params.get("fields").and_then(Value::as_object).and_then(|f| f.get("choice")),
@@ -808,7 +837,7 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
         }
     }
     let cmd_id = intent.command_id.clone();
-    let outcome = execute_analyze_intent_atomically(app, intent, is_create_new.then_some(pending_extract).flatten(), spawn_corr_heatmap)?;
+    let outcome = execute_analyze_intent_atomically(app, intent, is_create_new.then_some(pending_extract).flatten(), auto_graphs)?;
     app.canvas_dialogs.analyze.extracted_result_tab_id = None;
     app.canvas_dialogs.close_dialog();
     if let Some(new_id) = outcome.payload.get("sheet_id").and_then(Value::as_str) {
@@ -1030,8 +1059,23 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
         ActiveDialog::AnalyzeSheet { .. } => {
             let az = &mut app.canvas_dialogs.analyze;
             match wid {
+                "analyze.corr.pearson" => {
+                    az.corr_spearman_rank = false;
+                    az.corr_method = Some(curvebook_doc::CorrelationMethod::Pearson);
+                }
+                "analyze.corr.spearman" => {
+                    az.corr_spearman_rank = true;
+                    az.corr_method = Some(curvebook_doc::CorrelationMethod::Spearman);
+                }
+                "analyze.corr.kendall" => {
+                    az.corr_spearman_rank = false;
+                    az.corr_method = Some(curvebook_doc::CorrelationMethod::KendallTauB);
+                }
                 "analyze.correlation_all_pairs" => az.set_correlation_all_pairs(!az.correlation_all_pairs),
                 "analyze.correlation.heatmap" => az.set_correlation_heatmap(!az.correlation_heatmap).map_err(disabled_err)?,
+                "analyze.pca.biplot" => az.pca_biplot = !az.pca_biplot,
+                "analyze.cluster.dendrogram" => az.clustering_dendrogram = !az.clustering_dendrogram,
+                "analyze.curve_calculus.create_graph" => az.curve_calculus_create_graph = !az.curve_calculus_create_graph,
                 "analyze.factorial.residual_covariance" => {
                     az.factorial_residual_covariance = if az.factorial_residual_covariance == ResidualCovariance::Unstructured {
                         ResidualCovariance::CompoundSymmetry

@@ -165,7 +165,7 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
                 retention_rule: Default::default(),
                 emit_extra_matrices: false,
             }),
-            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }),
             AnalysisKind::Multivariate(MultivariateSpec::Clustering {
                 k_means_k: Some(2),
                 distance: ClusterDistance::Euclidean,
@@ -197,6 +197,7 @@ fn representative_stats_kinds(proc_id: SummaryModeProcedure) -> Vec<AnalysisKind
         SummaryModeProcedure::SimpleLogisticRegression => vec![AnalysisKind::SimpleLogisticRegression(SimpleLogisticSpec::default())],
         SummaryModeProcedure::LeveneTest => vec![AnalysisKind::LeveneTest(LeveneTestSpec::default())],
         SummaryModeProcedure::FrequencyDistribution => vec![AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())],
+        SummaryModeProcedure::Ancova => vec![AnalysisKind::Ancova(curvebook_doc::AncovaSpec::default())],
         other => panic!("unexpected non-stats procedure {other:?}"),
     }
 }

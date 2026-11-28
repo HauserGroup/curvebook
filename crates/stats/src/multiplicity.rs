@@ -16,6 +16,8 @@
 //!   control the false discovery rate. *Biometrika*, 93(3), 491-507.
 //! - Benjamini, Y., & Yekutieli, D. (2001). The control of the false discovery rate in multiple
 //!   testing under dependency. *Annals of Statistics*, 29(4), 1165-1188.
+//! - Duncan, D. B. (1955). Multiple range and multiple F tests. *Biometrics*, 11(1), 1-42.
+//!   doi:10.2307/3001478.
 //! - Dunn, O. J. (1961). Multiple comparisons among means. *Journal of the American Statistical
 //!   Association*, 56(293), 52-64.
 //! - Dunn, O. J. (1964). Multiple comparisons using rank sums. *Technometrics*, 6(3), 241-252.
@@ -96,6 +98,8 @@ pub enum MultiplicityProcedure {
     FisherLsd,
     /// Student–Newman–Keuls step-down studentized range comparison (FWER stepwise; Newman 1939 / Keuls 1952).
     NewmanKeuls,
+    /// Duncan's new multiple range test using Studentized range critical values with protection levels `alpha_p = 1 - (1 - alpha)^(p - 1)` (Duncan 1955; Kramer 1956 for unequal `n`).
+    Duncan,
     /// Benjamini–Hochberg linear step-up FDR procedure producing monotonic *q* values (Benjamini & Hochberg 1995).
     BenjaminiHochbergFdr,
     /// Benjamini–Yekutieli FDR procedure valid under arbitrary dependence via $c(m) = \sum_{i=1}^m 1/i$ (Benjamini & Yekutieli 2001).
@@ -118,10 +122,12 @@ impl From<MultiplicityMethod> for MultiplicityProcedure {
             MultiplicityMethod::None => Self::None,
             MultiplicityMethod::TukeyHsd => Self::TukeyKramer,
             MultiplicityMethod::NewmanKeuls => Self::NewmanKeuls,
+            MultiplicityMethod::Duncan => Self::Duncan,
             MultiplicityMethod::Dunnett { control_column } => Self::Dunnett { control_column },
             MultiplicityMethod::Sidak => Self::Sidak,
             MultiplicityMethod::Bonferroni => Self::Bonferroni,
             MultiplicityMethod::HolmSidak => Self::HolmSidak,
+            MultiplicityMethod::HolmBonferroni => Self::HolmBonferroni,
             MultiplicityMethod::FisherLsd => Self::FisherLsd,
             MultiplicityMethod::DunnettT3 => Self::DunnettT3,
             MultiplicityMethod::GamesHowell => Self::GamesHowell,
@@ -482,6 +488,7 @@ pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshol
         MultiplicityProcedure::Bonferroni
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Duncan
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell
@@ -498,14 +505,15 @@ pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshol
 
 /// Fallibly adjust a family of raw *p*-values, rejecting ANOVA-only comparison procedures.
 ///
-/// Rejects `TukeyKramer`, `NewmanKeuls`, `Dunnett`, `DunnettT3`, `GamesHowell`, `DunnRankSum`,
-/// `LinearTrend`, and `TamhaneT2` with [`StatsError::IncompatibleAnalysisSpec`] because those
-/// procedures depend on group means, sample sizes, variance estimates, or rank sums rather than a
-/// standalone family of *p*-values (Hsu 1996; Benjamini, Krieger & Yekutieli 2006).
+/// Rejects `TukeyKramer`, `NewmanKeuls`, `Duncan`, `Dunnett`, `DunnettT3`, `GamesHowell`,
+/// `DunnRankSum`, `LinearTrend`, and `TamhaneT2` with [`StatsError::IncompatibleAnalysisSpec`]
+/// because those procedures depend on group means, sample sizes, variance estimates, or rank sums
+/// rather than a standalone family of *p*-values (Hsu 1996; Benjamini, Krieger & Yekutieli 2006).
 pub fn try_adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshold: f64) -> Result<(Vec<f64>, bool), StatsError> {
     match procedure {
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Duncan
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell
@@ -773,6 +781,14 @@ fn compare_groups_impl(
             }
             compare_newman_keuls(groups, mse, df_error, threshold)
         }
+        MultiplicityProcedure::Duncan => {
+            if !matches!(family, MultiplicityFamilySelection::AllPairs) {
+                return Err(StatsError::IncompatibleAnalysisSpec {
+                    expected: "all-pairs Duncan multiple range procedure without control_column or selected_pairs",
+                });
+            }
+            compare_duncan(groups, mse, df_error, threshold)
+        }
         MultiplicityProcedure::GamesHowell => {
             if !matches!(family, MultiplicityFamilySelection::AllPairs) {
                 return Err(StatsError::IncompatibleAnalysisSpec {
@@ -986,6 +1002,117 @@ fn compare_newman_keuls(
         let batched_p = cache.sf_batch(&qs, span, df_error)?;
         for (&lo, &p_val) in active_lo.iter().zip(batched_p.iter()) {
             row_raw_p[lo] = p_val;
+        }
+        for lo in 0..count {
+            let hi = lo + span - 1;
+            let mut adj = row_raw_p[lo];
+            if lo > 0 {
+                adj = adj.max(p_mat[lo - 1][hi]);
+            }
+            if hi + 1 < k {
+                adj = adj.max(p_mat[lo][hi + 1]);
+            }
+            p_mat[lo][hi] = adj.clamp(0.0, 1.0);
+        }
+    }
+
+    let mut pos_of = vec![0_usize; k];
+    for (pos, &orig) in sorted_idx.iter().enumerate() {
+        pos_of[orig] = pos;
+    }
+
+    let mut out = Vec::with_capacity(k * (k - 1) / 2);
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let ga = &groups[i];
+            let gb = &groups[j];
+            let diff = ga.mean - gb.mean;
+            let se_q = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
+            let (q_stat, raw_p) = if se_q > 0.0 {
+                let q = diff.abs() / se_q;
+                (q, studentized_range_sf(q, 2, df_error)?)
+            } else {
+                zero_se_stat_p(diff, false)
+            };
+            let (p_lo, p_hi) = if pos_of[i] < pos_of[j] { (pos_of[i], pos_of[j]) } else { (pos_of[j], pos_of[i]) };
+            let adj_p = p_mat[p_lo][p_hi];
+            out.push(PairwiseComparisonDetail {
+                group_a: ga.index,
+                group_b: gb.index,
+                label_a: ga.label.clone(),
+                label_b: gb.label.clone(),
+                mean_diff: diff,
+                se_diff: se_q * std::f64::consts::SQRT_2,
+                statistic: q_stat,
+                df: df_error,
+                raw_p,
+                adjusted_p_or_q: adj_p,
+                is_fdr_q: false,
+                ci: None,
+                significant: adj_p.is_finite() && adj_p <= threshold,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Transform a Studentized range upper-tail probability `p_range = P(Q_{span, df} >= q)` into
+/// Duncan's (1955) nominal significance level corresponding to protection level
+/// `alpha_p = 1 - (1 - alpha)^(span - 1)`:
+/// `p_duncan = 1 - (1 - p_range)^(1 / (span - 1))`.
+///
+/// Satisfies `p_duncan <= alpha` if and only if `p_range <= 1 - (1 - alpha)^(span - 1)` for every
+/// `alpha in (0, 1)` and `span >= 2`.
+#[must_use]
+pub(crate) fn duncan_range_adjusted_p(p_range: f64, span: usize) -> f64 {
+    if !p_range.is_finite() {
+        return f64::NAN;
+    }
+    let clamped = p_range.clamp(0.0, 1.0);
+    if span <= 2 || clamped == 0.0 || clamped == 1.0 {
+        return clamped;
+    }
+    let exp = 1.0 / ((span - 1) as f64);
+    (-((-clamped).ln_1p() * exp).exp_m1()).clamp(0.0, 1.0)
+}
+
+/// Duncan's (1955) new multiple range test with Kramer (1956) unequal-`n` standard errors.
+///
+/// Each pair of means spanning `p = hi - lo + 1` ordered means is referred to the Studentized
+/// range distribution with `p` means and `df_error` df under Duncan's protection level
+/// `alpha_p = 1 - (1 - alpha)^(p - 1)` (yielding nominal adjusted *p*-value
+/// `1 - (1 - P(Q_{p, df} >= q))^(1 / (p - 1))`), with step-down superset monotonicity enforced so
+/// no sub-range of a non-significant range is declared significant. Like Newman–Keuls, Duncan's
+/// procedure omits simultaneous confidence intervals and does not strongly control FWER for
+/// `k > 2` groups (Duncan 1955; Hsu 1996).
+fn compare_duncan(groups: &[GroupComparisonInput], mse: f64, df_error: f64, threshold: f64) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let k = groups.len();
+    let mut sorted_idx: Vec<usize> = (0..k).collect();
+    sorted_idx.sort_by(|&a, &b| groups[a].mean.total_cmp(&groups[b].mean));
+
+    let mut cache = StudentizedRangeCache::new();
+    let mut p_mat = vec![vec![1.0_f64; k]; k];
+    for span in (2..=k).rev() {
+        let count = k - span + 1;
+        let mut row_raw_p = vec![0.0_f64; count];
+        let mut active_lo = Vec::with_capacity(count);
+        let mut qs = Vec::with_capacity(count);
+        for lo in 0..count {
+            let hi = lo + span - 1;
+            let ga = &groups[sorted_idx[lo]];
+            let gb = &groups[sorted_idx[hi]];
+            let diff_span = gb.mean - ga.mean;
+            let se_q = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
+            if se_q > 0.0 {
+                active_lo.push(lo);
+                qs.push(diff_span.abs() / se_q);
+            } else {
+                row_raw_p[lo] = zero_se_stat_p(diff_span, false).1;
+            }
+        }
+        let batched_p = cache.sf_batch(&qs, span, df_error)?;
+        for (&lo, &p_val) in active_lo.iter().zip(batched_p.iter()) {
+            row_raw_p[lo] = duncan_range_adjusted_p(p_val, span);
         }
         for lo in 0..count {
             let hi = lo + span - 1;
@@ -1415,6 +1542,7 @@ pub fn compare_dunn_ranks(
         | MultiplicityProcedure::LinearTrend
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Duncan
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::Dunnett { .. } => MultiplicityProcedure::Bonferroni,
@@ -1501,4 +1629,112 @@ pub fn build_multiplicity_tab(
         tab.footnotes.push(String::from("Only m = 1 comparison in family; multiplicity adjustment leaves the unadjusted P value unchanged."));
     }
     tab
+}
+
+#[cfg(test)]
+mod holm_duncan_tests {
+    use curvebook_doc::{MultiplicityMethod, MultiplicitySpec};
+
+    use super::{GroupComparisonInput, compare_groups_pairwise};
+
+    /// Cross-validated against R 4.5.2 (`p.adjust(..., "holm")` and exact Duncan Studentized range
+    /// `1 - (1 - ptukey(q, span, df, lower.tail = FALSE))^(1 / (span - 1))` with step-down monotonicity).
+    #[test]
+    fn d1_oracle_holm_bonferroni_and_duncan_match_r_4_5_2() -> Result<(), Box<dyn std::error::Error>> {
+        let groups = vec![
+            GroupComparisonInput { index: 0, label: String::from("A"), n: 5.0, mean: 10.4, sd: 0.45 },
+            GroupComparisonInput { index: 1, label: String::from("B"), n: 5.0, mean: 12.2, sd: 0.32 },
+            GroupComparisonInput { index: 2, label: String::from("C"), n: 6.0, mean: 14.0, sd: 0.37 },
+            GroupComparisonInput { index: 3, label: String::from("D"), n: 4.0, mean: 18.0, sd: 0.39 },
+        ];
+        let mse = 0.15125;
+        let df = 16.0;
+
+        let holm_spec = MultiplicitySpec { method: MultiplicityMethod::HolmBonferroni, threshold: 0.05, ..MultiplicitySpec::default() };
+        let holm = compare_groups_pairwise(&groups, mse, df, &holm_spec)?;
+        let exp_holm = [
+            1.993_563_243_895_59e-6,
+            1.724_754_649_722_71e-10,
+            1.633_662_364_985_96e-14,
+            1.993_563_243_895_59e-6,
+            9.308_797_610_613_57e-13,
+            1.231_570_961_043_71e-10,
+        ];
+        for (idx, (det, &exp)) in holm.iter().zip(&exp_holm).enumerate() {
+            assert!(
+                (det.adjusted_p_or_q - exp).abs() <= exp.abs() * 1e-7 + 1e-15,
+                "Holm pair {idx}: expected {exp:.12e}, got {:.12e}",
+                det.adjusted_p_or_q
+            );
+            assert!(det.ci.is_none());
+        }
+
+        let dunc_spec = MultiplicitySpec { method: MultiplicityMethod::Duncan, threshold: 0.05, ..MultiplicitySpec::default() };
+        let dunc = compare_groups_pairwise(&groups, mse, df, &dunc_spec)?;
+        let exp_dunc = [
+            1.727_031_745_391e-6,  // A-B (span 2)
+            8.226_852_532_883e-11, // A-C (span 3)
+            1.032_507_412_901e-14, // A-D (span 4)
+            9.967_831_628_988e-7,  // B-C (span 2)
+            3.467_226_505_905e-13, // B-D (span 3)
+            2.989_153_369_271e-11, // C-D (span 2)
+        ];
+        let snk_spec = MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, ..MultiplicitySpec::default() };
+        let snk = compare_groups_pairwise(&groups, mse, df, &snk_spec)?;
+        let tuk_spec = MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, ..MultiplicitySpec::default() };
+        let tuk = compare_groups_pairwise(&groups, mse, df, &tuk_spec)?;
+        for (idx, ((d, s), t)) in dunc.iter().zip(&snk).zip(&tuk).enumerate() {
+            let exp = exp_dunc[idx];
+            assert!(
+                (d.adjusted_p_or_q - exp).abs() <= exp.abs() * 1e-4 + 1e-11,
+                "Duncan pair {idx}: expected {exp:.12e}, got {:.12e}",
+                d.adjusted_p_or_q
+            );
+            assert!(d.adjusted_p_or_q <= s.adjusted_p_or_q + 1e-15, "Duncan <= SNK violated at {idx}");
+            assert!(s.adjusted_p_or_q <= t.adjusted_p_or_q + 1e-15, "SNK <= Tukey violated at {idx}");
+            assert!(d.ci.is_none());
+        }
+
+        // Moderate-separation unbalanced dataset (p in [1e-4, 0.2]): verifies exact Studentized-range
+        // protection-level inversion against R 4.5.2 to 6+ significant digits.
+        let mod_groups = vec![
+            GroupComparisonInput { index: 0, label: String::from("A"), n: 5.0, mean: 10.0, sd: 0.6 },
+            GroupComparisonInput { index: 1, label: String::from("B"), n: 5.0, mean: 10.6, sd: 0.6 },
+            GroupComparisonInput { index: 2, label: String::from("C"), n: 6.0, mean: 11.4, sd: 0.6 },
+            GroupComparisonInput { index: 3, label: String::from("D"), n: 4.0, mean: 12.1, sd: 0.6 },
+        ];
+        let mod_holm = compare_groups_pairwise(&mod_groups, 0.36, 16.0, &holm_spec)?;
+        let exp_mod_holm = [
+            1.790_782_948_579_836e-1,
+            7.026_474_368_244_311e-3,
+            5.077_734_600_436_457e-4,
+            1.280_595_568_850_623e-1,
+            7.342_298_492_359e-3,
+            1.790_782_948_579_836e-1,
+        ];
+        for (idx, (det, &exp)) in mod_holm.iter().zip(&exp_mod_holm).enumerate() {
+            assert!(
+                (det.adjusted_p_or_q - exp).abs() <= exp.abs() * 1e-9 + 1e-15,
+                "Moderate Holm pair {idx}: expected {exp:.12e}, got {:.12e}",
+                det.adjusted_p_or_q
+            );
+        }
+        let mod_dunc = compare_groups_pairwise(&mod_groups, 0.36, 16.0, &dunc_spec)?;
+        let exp_mod_dunc = [
+            1.334_103_457_552_309e-1,
+            1.898_139_963_199_097e-3,
+            1.480_130_456_178_452e-4,
+            4.268_651_896_189_612e-2,
+            2.467_285_078_554_426e-3,
+            8.953_914_742_914_382e-2,
+        ];
+        for (idx, (det, &exp)) in mod_dunc.iter().zip(&exp_mod_dunc).enumerate() {
+            assert!(
+                (det.adjusted_p_or_q - exp).abs() <= exp.abs() * 1e-6 + 1e-12,
+                "Moderate Duncan pair {idx}: expected {exp:.12e}, got {:.12e}",
+                det.adjusted_p_or_q
+            );
+        }
+        Ok(())
+    }
 }

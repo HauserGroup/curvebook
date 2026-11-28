@@ -21,7 +21,7 @@ CurveBook provides eight graph families. Each family accepts specific kinds of d
 | **Parts of Whole** (`PartsOfWhole`) | Parts of Whole | Pie, donut (with an optional total in the center), 100% horizontal stacked bar, and 10×10 waffle grid. |
 | **Survival** (`Survival`) | Survival table or results | Kaplan–Meier curves drawn as steps or polylines, censor ticks, error bands or SEM, median crosshairs, Number at Risk tables, and Cox survival overlays for covariate profiles. |
 | **Multiple Variables** (`MultipleVariables`) | Multiple Variables | Bubble and scatter plots that map columns to X, Y, colour, size, marker symbol, or split panels. |
-| **Diagnostic** (`Diagnostic`) | Results sheets and specialized inputs | Heatmaps, parameter correlation heatmaps, volcano plots, Bland–Altman, ROC curves, forest plots, residual plots, homoscedasticity, actual vs. predicted (calibration), residual vs. row, gap statistic, and normal and lognormal Q–Q plots. |
+| **Diagnostic** (`Diagnostic`) | Results sheets and specialized inputs | Heatmaps, parameter correlation heatmaps, volcano plots, Bland–Altman, ROC curves, forest plots, residual plots, homoscedasticity, actual vs. predicted (calibration), residual vs. row, gap statistic, normal and lognormal Q–Q plots, standalone hierarchical dendrograms, and PCA biplots. |
 
 Notable representation options across the families:
 
@@ -33,7 +33,7 @@ Notable representation options across the families:
 - **Statistical diagnostic plots:**
   - **Volcano and Bland–Altman:** Volcano plots map $-\log_{10} P$ or adjusted $q$ against the fold change of the effect. Bland–Altman plots show the mean bias and the limits of agreement.
   - **ROC and calibration:** ROC plots show sensitivity against $1 - \text{specificity}$, with a diagonal reference line and an AUC label. The curve can come from a standalone ROC analysis or from a multivariable logistic GLM. Actual vs. predicted plots include a $y = x$ identity line and logistic Hosmer–Lemeshow calibration bins.
-  - **Residuals, Q–Q and clustering:** Homoscedasticity plots show the spread of residuals against fitted values, including Spearman badges for ANOVA. Residual vs. row plots trace GLM or Cox–Snell residuals in row order. Normal and lognormal Q–Q plots compare sample values with Blom quantiles. Gap statistic plots draw consensus K-means Gap curves with 1-SE bars and a marker at the optimal $k^*$.
+  - **Residuals, Q–Q and clustering:** Homoscedasticity plots show the spread of residuals against fitted values, including Spearman badges for ANOVA. Residual vs. row plots trace GLM or Cox–Snell residuals in row order. Normal and lognormal Q–Q plots compare sample values with Blom quantiles. Gap statistic plots draw consensus K-means Gap curves with 1-SE bars and a marker at the optimal $k^*$. Standalone **hierarchical dendrograms** render agglomerative merge trees with leaf labels and an optional dashed cut-height threshold, and **PCA biplots** overlay PC1 vs. PC2 observation scores (coloured by any categorical grouping column) with scaled variable loading vectors.
 
 ---
 

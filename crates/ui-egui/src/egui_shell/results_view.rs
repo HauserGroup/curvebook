@@ -488,9 +488,27 @@ pub(super) fn render_results_view_for_sheet_with_options(
     };
     let edit_w = measure_action_w(ui.ctx(), edit_lbl);
     let copy_w = measure_action_w(ui.ctx(), copy_lbl);
+    let diag_graph_btn: Option<(&'static str, &str, curvebook_doc::DiagnosticPlotKind)> = if matches!(rs.status, ResultStatus::UpToDate) {
+        match &rs.analysis.kind {
+            AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Pca { .. }) => Some((
+                "result.create_pca_biplot",
+                tr_or_fallback(&app.locale, "results.create_pca_biplot", "PCA Biplot"),
+                curvebook_doc::DiagnosticPlotKind::PcaBiplot,
+            )),
+            AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Clustering { .. }) => Some((
+                "result.create_dendrogram",
+                tr_or_fallback(&app.locale, "results.create_dendrogram", "Dendrogram"),
+                curvebook_doc::DiagnosticPlotKind::Dendrogram,
+            )),
+            _ => None,
+        }
+    } else {
+        None
+    };
     let gap = tokens.metrics.space_xs;
+    let diag_w = diag_graph_btn.map_or(0.0, |(_, lbl, _)| measure_action_w(ui.ctx(), lbl) + gap);
     let divider_pad = 10.0_f32;
-    let right_group_w = (edit_w + gap + copy_w).min((hdr_inner.width() * 0.55).max(120.0));
+    let right_group_w = (edit_w + gap + copy_w + diag_w).min((hdr_inner.width() * 0.62).max(120.0));
     let right_rect = Rect::from_min_max(pos2((hdr_inner.right() - right_group_w).max(hdr_inner.left()), hdr_inner.top()), hdr_inner.max);
     let divider_x = (right_rect.left() - divider_pad * 0.5).max(hdr_inner.left());
     let tabs_area_rect = Rect::from_min_max(hdr_inner.min, pos2((divider_x - divider_pad * 0.5).max(hdr_inner.left()), hdr_inner.bottom()));
@@ -544,6 +562,24 @@ pub(super) fn render_results_view_for_sheet_with_options(
         let _ = edit_resp;
         if edit_clicked && edit_enabled {
             intents.push_ui("ui.editParams.open", json!({ "sheet_id": rs.id.as_str() }));
+        }
+        if let Some((wid, lbl, diag_kind)) = diag_graph_btn {
+            let (diag_resp, diag_clicked) = ghost_action_button(ui, tokens, meta, wid, lbl, Some("graph.create"), false, enabled, ZLayer::Workspace);
+            let _ = show_tooltip(
+                &diag_resp,
+                tokens,
+                TooltipSpec { title: lbl, shortcut: None, summary: Some(lbl), disabled_reason: (!enabled).then_some("modal dialog is active") },
+            );
+            if diag_clicked && enabled {
+                intents.push(UiIntent::EngineCommand {
+                    command_id: String::from("graph.create"),
+                    params: json!({
+                        "data_sheet_id": rs.id.as_str(),
+                        "kind": curvebook_doc::GraphKind::Diagnostic(diag_kind),
+                        "initialized": true,
+                    }),
+                });
+            }
         }
     });
 

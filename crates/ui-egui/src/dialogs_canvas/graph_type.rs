@@ -40,6 +40,8 @@ pub enum ThumbnailGlyphKind {
     ResidualPlot,
     NormalQqPlot,
     Histogram,
+    Dendrogram,
+    PcaBiplot,
 }
 
 /// Entry in the `Change Graph Type` schematic thumbnail chooser.
@@ -237,6 +239,22 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot),
         thumbnail: ThumbnailGlyphKind::NormalQqPlot,
         compatible_tables: &[TableKind::Xy, TableKind::Column, TableKind::Grouped, TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "diag.dendrogram",
+        label: "Hierarchical Dendrogram",
+        subtitle: "Standalone hierarchical clustering merge tree with optional cut-height line",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram),
+        thumbnail: ThumbnailGlyphKind::Dendrogram,
+        compatible_tables: &[TableKind::MultipleVariables, TableKind::Grouped],
+    },
+    GraphTypeOption {
+        id: "diag.pca_biplot",
+        label: "PCA Biplot (Scores + Loadings)",
+        subtitle: "PC1 vs PC2 observation scores overlaid with scaled variable loading vectors",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot),
+        thumbnail: ThumbnailGlyphKind::PcaBiplot,
+        compatible_tables: &[TableKind::MultipleVariables],
     },
 ];
 

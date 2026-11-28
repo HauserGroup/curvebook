@@ -64,6 +64,21 @@ fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec, locale: &str) 
             v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") });
             v
         }
+        AnalysisKind::Ancova(_) => {
+            let mut v = Vec::new();
+            if is_mv {
+                v.push(StatTabDef { slug: "data", label: tr(locale, "stat_params.tab.data") });
+            }
+            v.push(StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.design_model") });
+            v.push(StatTabDef { slug: "multiple_comparisons", label: tr(locale, "stat_params.tab.comparisons") });
+            v.push(StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") });
+            v.push(StatTabDef { slug: "diagnostics", label: tr(locale, "stat_params.tab.diagnostics") });
+            v
+        }
+        AnalysisKind::CurveCalculus(_) => vec![
+            StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.parameters") },
+            StatTabDef { slug: "options", label: tr(locale, "stat_params.tab.options") },
+        ],
         AnalysisKind::NestedComparison(_) | AnalysisKind::MultipleRowTTests(_) => vec![
             StatTabDef { slug: "experimental_design", label: tr(locale, "stat_params.tab.design_data") },
             StatTabDef { slug: "multiple_comparisons", label: tr(locale, "stat_params.tab.multiple_comparisons") },
@@ -146,10 +161,14 @@ fn resolve_multivariate_banner(mv: &MultivariateSpec, alpha: f64) -> (String, St
             let outcome = pcr_outcome_column.map_or(String::new(), |col| format!(" | Outcome: col {}", col + 1));
             (title, format!("{matrix}{pa}{outcome}"))
         }
-        MultivariateSpec::CorrelationMatrix { spearman_rank } => (
-            String::from("Parameters: Correlation Matrix"),
-            format!("{} pairwise matrix (α={alpha:.3})", if *spearman_rank { "Spearman rank r_s" } else { "Pearson product-moment r" }),
-        ),
+        MultivariateSpec::CorrelationMatrix { spearman_rank, method } => {
+            let label = match curvebook_doc::CorrelationMethod::resolve(*spearman_rank, *method) {
+                curvebook_doc::CorrelationMethod::Pearson => "Pearson product-moment r",
+                curvebook_doc::CorrelationMethod::Spearman => "Spearman rank r_s",
+                curvebook_doc::CorrelationMethod::KendallTauB => "Kendall's tau-b rank correlation",
+            };
+            (String::from("Parameters: Correlation Matrix"), format!("{label} pairwise matrix (α={alpha:.3})"))
+        }
         MultivariateSpec::Clustering { k_means_k, distance, linkage, .. } => (
             String::from("Parameters: Clustering & Dendrogram"),
             format!("{:?} / {:?}{}", distance, linkage, k_means_k.map_or_else(String::new, |k| format!(" + k-means (k={k})"))),
@@ -159,6 +178,31 @@ fn resolve_multivariate_banner(mv: &MultivariateSpec, alpha: f64) -> (String, St
             format!("m={imputations_m} imputations{}", if response_column.is_some() { " + pooled GLM" } else { "" }),
         ),
     }
+}
+
+fn resolve_factorial_anova_banner(app: &UiApp, f: &curvebook_doc::FactorialAnovaSpec) -> (String, String) {
+    let kind = if f.three_way {
+        "Three-way"
+    } else if f.multifactor_columns.len() >= 2 {
+        "Multifactor N-way"
+    } else {
+        "Two-way"
+    };
+    let ss = match f.ss_type {
+        SumOfSquaresType::TypeI => "Type I SS",
+        SumOfSquaresType::TypeIII => "Type III SS",
+    };
+    let rm = if f.mixed_effects_reml || is_reml_mixed_effects_active(&app.canvas_dialogs.edit_params, app.document()) {
+        "REML mixed-effects"
+    } else {
+        match f.repeated_measures {
+            RepeatedMeasuresDesign::None => "Between-subjects",
+            RepeatedMeasuresDesign::RowFactorMatched => "Row-matched RM",
+            RepeatedMeasuresDesign::ColumnFactorMatched => "Col-matched RM",
+            RepeatedMeasuresDesign::BothFactorsMatched => "Doubly RM",
+        }
+    };
+    (String::from("Parameters: Factorial / Multifactor ANOVA"), format!("{kind} ANOVA ({rm}, {ss})"))
 }
 
 /// Resolve the live dynamic header title and test banner for any `AnalysisSpec`.
@@ -186,30 +230,7 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
             };
             (String::from("Parameters: Two-Group / One-Sample Test"), format!("{m} ({tail}, α={alpha:.3})"))
         }
-        AnalysisKind::FactorialAnova(f) => {
-            let kind = if f.three_way {
-                "Three-way"
-            } else if f.multifactor_columns.len() >= 2 {
-                "Multifactor N-way"
-            } else {
-                "Two-way"
-            };
-            let ss = match f.ss_type {
-                SumOfSquaresType::TypeI => "Type I SS",
-                SumOfSquaresType::TypeIII => "Type III SS",
-            };
-            let rm = if f.mixed_effects_reml || is_reml_mixed_effects_active(&app.canvas_dialogs.edit_params, app.document()) {
-                "REML mixed-effects"
-            } else {
-                match f.repeated_measures {
-                    RepeatedMeasuresDesign::None => "Between-subjects",
-                    RepeatedMeasuresDesign::RowFactorMatched => "Row-matched RM",
-                    RepeatedMeasuresDesign::ColumnFactorMatched => "Col-matched RM",
-                    RepeatedMeasuresDesign::BothFactorsMatched => "Doubly RM",
-                }
-            };
-            (String::from("Parameters: Factorial / Multifactor ANOVA"), format!("{kind} ANOVA ({rm}, {ss})"))
-        }
+        AnalysisKind::FactorialAnova(f) => resolve_factorial_anova_banner(app, f),
         AnalysisKind::NestedComparison(n) => (
             String::from("Parameters: Nested Comparison"),
             format!("{} ({})", if n.two_group_t_test { "Nested t-test" } else { "Nested 1-way ANOVA" }, df_method_label(n.df_method)),
@@ -326,6 +347,36 @@ pub fn resolve_stat_params_banner(app: &UiApp, spec: &curvebook_doc::AnalysisSpe
             };
             let gauss = if fd.overlay_gaussian { ", Gaussian overlay" } else { "" };
             (String::from("Parameters: Frequency Distribution"), format!("{rule}, {}{gauss}", fd.output_mode.label()))
+        }
+        AnalysisKind::Ancova(anc) => {
+            let ss = match anc.ss_type {
+                SumOfSquaresType::TypeI => "Type I SS",
+                SumOfSquaresType::TypeIII => "Type III SS",
+            };
+            let slopes = if anc.test_homogeneity_of_slopes { " + slope homogeneity check" } else { "" };
+            (
+                String::from("Parameters: Analysis of Covariance (ANCOVA)"),
+                format!("{} covariate(s), {ss}{slopes} (α={alpha:.3})", anc.covariate_columns.len().max(1)),
+            )
+        }
+        AnalysisKind::CurveCalculus(cc) => {
+            let desc = match cc.operation {
+                curvebook_doc::CurveCalculusOp::FirstDerivative => String::from("First derivative (dY/dX)"),
+                curvebook_doc::CurveCalculusOp::SecondDerivative => String::from("Second derivative (d²Y/dX²)"),
+                curvebook_doc::CurveCalculusOp::CumulativeIntegral { baseline } => {
+                    format!("Cumulative integral (baseline = {baseline})")
+                }
+                curvebook_doc::CurveCalculusOp::SmoothSavitzkyGolay { window, order } => {
+                    format!("Savitzky-Golay smoothing (window = {window}, order = {order})")
+                }
+                curvebook_doc::CurveCalculusOp::SmoothMovingAverage { window } => {
+                    format!("Moving average smoothing (window = {window})")
+                }
+                curvebook_doc::CurveCalculusOp::SmoothLowess { span, robustness_iters } => {
+                    format!("LOWESS smoothing (span = {span:.2}, iters = {robustness_iters})")
+                }
+            };
+            (String::from("Parameters: Smooth, Differentiate, or Integrate"), desc)
         }
         _ => (String::from("Parameters: Analysis"), format!("{} (α={alpha:.3})", spec.effective_title())),
     }
@@ -942,6 +993,7 @@ fn render_stat_multiplicity_tab(
 ) {
     let reml_active = is_reml_mixed_effects_active(ep, app.document());
     let cur = match &spec.kind {
+        AnalysisKind::Ancova(a) => a.multiplicity.method,
         AnalysisKind::FactorialAnova(f) => f.multiplicity.method,
         AnalysisKind::NestedComparison(n) => n.multiplicity.method,
         AnalysisKind::MultipleRowTTests(m) => m.multiplicity.method,
@@ -957,15 +1009,17 @@ fn render_stat_multiplicity_tab(
     for (slug, lbl, m) in [
         ("tukey", "Tukey HSD (all-pairs)", MultiplicityMethod::TukeyHsd),
         ("bonferroni", "Bonferroni (FWER)", MultiplicityMethod::Bonferroni),
+        ("holm_bonferroni", tr(tokens.locale, "stat_params.post_hoc.holm_bonferroni_desc"), MultiplicityMethod::HolmBonferroni),
         ("sidak", "Sidak (FWER)", MultiplicityMethod::Sidak),
         ("holm_sidak", "Holm-Sidak (step-down FWER)", MultiplicityMethod::HolmSidak),
+        ("duncan", tr(tokens.locale, "stat_params.post_hoc.duncan_desc"), MultiplicityMethod::Duncan),
         ("dunnett", "Dunnett (compare vs. control)", MultiplicityMethod::Dunnett { control_column: default_ctrl_col }),
         ("bh", "Benjamini-Hochberg (FDR)", MultiplicityMethod::BenjaminiHochbergFdr),
         ("bky", "Two-Stage BKY (adaptive FDR)", MultiplicityMethod::TwoStageBkyFdr),
         ("none", "None (uncorrected)", MultiplicityMethod::None),
     ] {
-        let en = if is_row_t && matches!(m, MultiplicityMethod::TukeyHsd | MultiplicityMethod::Dunnett { .. }) {
-            ControlEnablement::disabled("Multiple Row t-Tests support Bonferroni, Sidak, Holm-Sidak, BH/BKY FDR, or None.")
+        let en = if is_row_t && matches!(m, MultiplicityMethod::TukeyHsd | MultiplicityMethod::Duncan | MultiplicityMethod::Dunnett { .. }) {
+            ControlEnablement::disabled("Multiple Row t-Tests support Bonferroni, Holm-Bonferroni, Sidak, Holm-Sidak, BH/BKY FDR, or None.")
         } else {
             r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, m)
         };
@@ -978,6 +1032,7 @@ fn render_stat_multiplicity_tab(
             let clear_pairs = !curvebook_doc::MultiplicitySpec::supports_selected_pairs(m);
             let clear_ctrl = matches!(m, MultiplicityMethod::Dunnett { .. }) || !curvebook_doc::MultiplicitySpec::supports_control_column(m);
             let mult_opt = match &mut next.kind {
+                AnalysisKind::Ancova(a) => Some(&mut a.multiplicity),
                 AnalysisKind::FactorialAnova(f) => Some(&mut f.multiplicity),
                 AnalysisKind::NestedComparison(n) => Some(&mut n.multiplicity),
                 AnalysisKind::MultipleRowTTests(mr) => Some(&mut mr.multiplicity),
@@ -1015,6 +1070,7 @@ fn render_stat_multiplicity_tab(
                         let mut next = spec.clone();
                         let updated = MultiplicityMethod::Dunnett { control_column: ci };
                         match &mut next.kind {
+                            AnalysisKind::Ancova(a) => a.multiplicity.method = updated,
                             AnalysisKind::FactorialAnova(f) => f.multiplicity.method = updated,
                             AnalysisKind::NestedComparison(n) => n.multiplicity.method = updated,
                             AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = updated,

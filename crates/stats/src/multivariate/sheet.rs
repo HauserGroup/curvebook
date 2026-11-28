@@ -20,8 +20,9 @@
 //!   *Biometrika*, 86(4), 948-955.
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, DataSheet, KMeansAlgorithm, MultivariateSpec,
-    PValueFormat, PcaRetentionRule, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole, XColumnMode,
+    AnalysisKind, AnalysisSpec, ChecklistStatus, ClusterDirection, ClusterDistance, ClusterLinkage, CorrelationMethod, DataSheet, KMeansAlgorithm,
+    MultivariateSpec, PValueFormat, PcaRetentionRule, ResultCell, ResultSheet, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
+    XColumnMode,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::student_t_two_sided_p;
@@ -33,7 +34,7 @@ use super::clustering::{
     cophenetic_distance_matrix, count_distinct_by_dist, count_distinct_rows, cut_dendrogram, cut_dendrogram_at_height,
     hierarchical_clustering_from_dist, pairwise_distance_matrix, pairwise_distance_unchecked,
 };
-use super::correlation::correlation_matrix;
+use super::correlation::correlation_matrix_with_method;
 use super::kmeans_consensus::{ConsensusOptimalKResult, consensus_optimal_k, kmeans_feature_anova, kmeans_with_algorithm};
 use super::mice::mice_predictive_mean_matching;
 use super::pca::{compute_pca_extra_matrices, pca_analysis, select_pca_retained_components};
@@ -49,16 +50,21 @@ fn run_correlation_matrix_branch(
     out: &mut ResultSheet,
     sheet: &DataSheet,
     spec: &AnalysisSpec,
-    spearman_rank: bool,
+    method: CorrelationMethod,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
     let (labels, opt_cols) = extract_optional_columns(sheet, &spec.selected_data_sets)?;
     let refs: Vec<(&str, &[Option<f64>])> = labels.iter().zip(opt_cols.iter()).map(|(l, v)| (l.as_str(), v.as_slice())).collect();
-    let res = correlation_matrix(&refs, spearman_rank)?;
+    let res = correlation_matrix_with_method(&refs, method)?;
 
+    let tab_title = match method {
+        CorrelationMethod::Pearson => "Pearson correlation matrix (r)",
+        CorrelationMethod::Spearman => "Spearman correlation matrix (rho)",
+        CorrelationMethod::KendallTauB => "Kendall's tau-b correlation matrix",
+    };
     let mut tab_r = build_tab(
         "corr-matrix-r",
-        if spearman_rank { "Spearman correlation matrix (rho)" } else { "Pearson correlation matrix (r)" },
+        tab_title,
         ResultTabKind::MainSummary,
         res.labels.clone(),
         res.labels.clone(),
@@ -130,9 +136,10 @@ fn run_unsupervised_pca_branch(
     let pca = pca_analysis(&mat, &labels, standardize, parallel_analysis_seed)?;
     let retained = select_pca_retained_components(&pca, retention_rule)?;
     append_pca_outputs(out, &pca, labels.clone(), retained, retention_rule);
+    let pc_labels_all: Vec<String> = (1..=pca.eigenvalues.len()).map(|i| format!("PC{i}")).collect();
+    let score_rows_all: Vec<Vec<ResultCell>> = pca.scores.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
     if emit_extra_matrices {
         let extra = compute_pca_extra_matrices(&mat, &pca)?;
-        let pc_labels: Vec<String> = (1..=pca.eigenvalues.len()).map(|i| format!("PC{i}")).collect();
         let scaled_rows: Vec<Vec<ResultCell>> = extra.scaled_data.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
         out.tabs.push(build_tab(
             "pca-standardized-data",
@@ -156,7 +163,7 @@ fn run_unsupervised_pca_branch(
             "pca-squared-cosines",
             "PCA variable squared cosines (cos^2)",
             ResultTabKind::Diagnostics,
-            pc_labels.clone(),
+            pc_labels_all.clone(),
             labels.clone(),
             cos2_rows,
         ));
@@ -165,13 +172,12 @@ fn run_unsupervised_pca_branch(
             "pca-variable-contributions",
             "PCA variable contributions (%)",
             ResultTabKind::Diagnostics,
-            pc_labels.clone(),
+            pc_labels_all.clone(),
             labels,
             contrib_rows,
         ));
-        let score_rows: Vec<Vec<ResultCell>> = pca.scores.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-        out.tabs.push(build_tab("pca-scores", "PCA observation component scores", ResultTabKind::Residuals, pc_labels, obs_labels, score_rows));
     }
+    out.tabs.push(build_tab("pca-scores", "PCA observation component scores", ResultTabKind::Residuals, pc_labels_all, obs_labels, score_rows_all));
     Ok(())
 }
 
@@ -324,8 +330,8 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
     let p_fmt = spec.p_value_format;
 
     match mv_spec {
-        MultivariateSpec::CorrelationMatrix { spearman_rank } => {
-            run_correlation_matrix_branch(&mut out, sheet, spec, *spearman_rank, p_fmt)?;
+        MultivariateSpec::CorrelationMatrix { spearman_rank, method } => {
+            run_correlation_matrix_branch(&mut out, sheet, spec, CorrelationMethod::resolve(*spearman_rank, *method), p_fmt)?;
         }
         MultivariateSpec::Pca { standardize, parallel_analysis_seed, pcr_outcome_column, retention_rule, emit_extra_matrices } => {
             if let Some(outcome_col) = *pcr_outcome_column {

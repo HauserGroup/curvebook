@@ -980,6 +980,12 @@ fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan
     match kind {
         AnalysisKind::Transform(spec) => remap_transform_kind_columns(spec, plan, err),
         AnalysisKind::OneWayAnova(spec) => remap_multiplicity_columns(&mut spec.multiplicity, "OneWayAnova multiplicity columns", plan, err),
+        AnalysisKind::Ancova(spec) => {
+            plan.map_one_or_oob(&mut spec.response_column, "Ancova response_column", err);
+            plan.map_one_or_oob(&mut spec.group_column, "Ancova group_column", err);
+            spec.covariate_columns = plan.map_col_list_or_oob(&spec.covariate_columns, "Ancova covariate_columns", err);
+            remap_multiplicity_columns(&mut spec.multiplicity, "Ancova multiplicity columns", plan, err);
+        }
         AnalysisKind::MultipleRowTTests(spec) => {
             remap_multiplicity_columns(&mut spec.multiplicity, "MultipleRowTTests multiplicity columns", plan, err);
         }

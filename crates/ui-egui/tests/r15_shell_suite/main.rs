@@ -6,6 +6,7 @@ mod common;
 #[path = "../human_wf_common/mod.rs"]
 mod human_wf_common;
 
+mod ancova_multivariate_ui;
 mod audit_da_06_hosts;
 mod audit_p6_atomic_undo;
 mod audit_p6_sec13;

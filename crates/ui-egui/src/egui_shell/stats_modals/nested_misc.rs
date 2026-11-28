@@ -476,8 +476,294 @@ pub(super) fn render_misc_stats_design(
             }
             render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
         }
+        AnalysisKind::Ancova(anc) => render_ancova_design(ui, app, spec, anc, tokens, meta, intents),
+        AnalysisKind::CurveCalculus(cc) => render_curve_calculus_design(ui, app, state, spec, cc, tokens, meta, intents),
         _ => render_dataset_checklist(ui, doc, spec, tokens, meta, intents),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_ancova_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    spec: &curvebook_doc::AnalysisSpec,
+    anc: &curvebook_doc::AncovaSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let doc = app.document();
+    let locale = tokens.locale;
+    render_section_title(ui, tokens, tr(locale, "ancova.section.model"));
+    for (wid, lbl, ss) in [
+        ("edit.ancova.ss.type3", tr(locale, "ancova.ss.type3"), curvebook_doc::SumOfSquaresType::TypeIII),
+        ("edit.ancova.ss.type1", tr(locale, "ancova.ss.type1"), curvebook_doc::SumOfSquaresType::TypeI),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, anc.ss_type == ss, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::Ancova(a) = &mut next.kind {
+                a.ss_type = ss;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+    ui.add_space(4.0);
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.ancova.homogeneity_of_slopes",
+        tr(locale, "ancova.homogeneity_of_slopes"),
+        anc.test_homogeneity_of_slopes,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::Ancova(a) = &mut next.kind {
+            a.test_homogeneity_of_slopes = !anc.test_homogeneity_of_slopes;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.ancova.effect_sizes",
+        tr(locale, "ancova.effect_sizes"),
+        anc.compute_effect_sizes,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::Ancova(a) = &mut next.kind {
+            a.compute_effect_sizes = !anc.compute_effect_sizes;
+        }
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+    }
+    if let Some(ds) = spec.source_sheet_id.as_ref().and_then(|src| super::helpers::resolve_source_data_sheet(doc, src)) {
+        match &ds.archetype {
+            curvebook_doc::TableArchetype::Xy(_) => {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(tr(locale, "ancova.xy_mapping_hint")).small().color(tokens.text_muted));
+                render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
+            }
+            curvebook_doc::TableArchetype::MultipleVariables(_) => {
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new(tr(locale, "ancova.mv_mapping_hint")).small().color(tokens.text_muted));
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_curve_calculus_design(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut StatsModalsEguiState,
+    spec: &curvebook_doc::AnalysisSpec,
+    cc: &curvebook_doc::CurveCalculusSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    use curvebook_doc::CurveCalculusOp;
+
+    let doc = app.document();
+    let locale = tokens.locale;
+    let sid = spec.source_sheet_id.as_ref().map_or("", SheetId::as_str);
+
+    render_section_title(ui, tokens, tr(locale, "curve_calc.section.operation"));
+    let choices: [(&str, &str, CurveCalculusOp, bool); 6] = [
+        (
+            "edit.curve_calc.op.savitzky_golay",
+            tr(locale, "curve_calc.op.savitzky_golay"),
+            CurveCalculusOp::SmoothSavitzkyGolay { window: 5, order: 2 },
+            matches!(cc.operation, CurveCalculusOp::SmoothSavitzkyGolay { .. }),
+        ),
+        (
+            "edit.curve_calc.op.moving_avg",
+            tr(locale, "curve_calc.op.moving_avg"),
+            CurveCalculusOp::SmoothMovingAverage { window: 5 },
+            matches!(cc.operation, CurveCalculusOp::SmoothMovingAverage { .. }),
+        ),
+        (
+            "edit.curve_calc.op.lowess",
+            tr(locale, "curve_calc.op.lowess"),
+            CurveCalculusOp::SmoothLowess { span: 0.3, robustness_iters: 2 },
+            matches!(cc.operation, CurveCalculusOp::SmoothLowess { .. }),
+        ),
+        (
+            "edit.curve_calc.op.first_deriv",
+            tr(locale, "curve_calc.op.first_deriv"),
+            CurveCalculusOp::FirstDerivative,
+            matches!(cc.operation, CurveCalculusOp::FirstDerivative),
+        ),
+        (
+            "edit.curve_calc.op.second_deriv",
+            tr(locale, "curve_calc.op.second_deriv"),
+            CurveCalculusOp::SecondDerivative,
+            matches!(cc.operation, CurveCalculusOp::SecondDerivative),
+        ),
+        (
+            "edit.curve_calc.op.integral",
+            tr(locale, "curve_calc.op.integral"),
+            CurveCalculusOp::CumulativeIntegral { baseline: 0.0 },
+            matches!(cc.operation, CurveCalculusOp::CumulativeIntegral { .. }),
+        ),
+    ];
+    for (wid, lbl, default_op, is_selected) in choices {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, is_selected, &ControlEnablement::enabled()) && !is_selected {
+            let mut next = spec.clone();
+            if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                c.operation = default_op;
+            }
+            intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+        }
+    }
+
+    ui.add_space(6.0);
+    match cc.operation {
+        CurveCalculusOp::SmoothSavitzkyGolay { window, order } => {
+            let w_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.curve_calc.sg_window",
+                    label: tr(locale, "curve_calc.sg_window"),
+                    value_text: &window.to_string(),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if w_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    let next_w = if w_step > 0 { window.saturating_add(2).min(51) } else { window.saturating_sub(2).max(3) };
+                    let clamped_order = order.min(next_w - 1);
+                    c.operation = CurveCalculusOp::SmoothSavitzkyGolay { window: next_w, order: clamped_order };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            let o_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.curve_calc.sg_order",
+                    label: tr(locale, "curve_calc.sg_order"),
+                    value_text: &order.to_string(),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if o_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    let max_ord = window.saturating_sub(1).min(6);
+                    let next_o = if o_step > 0 { order.saturating_add(1).min(max_ord) } else { order.saturating_sub(1) };
+                    c.operation = CurveCalculusOp::SmoothSavitzkyGolay { window, order: next_o };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+        CurveCalculusOp::SmoothMovingAverage { window } => {
+            let w_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.curve_calc.ma_window",
+                    label: tr(locale, "curve_calc.ma_window"),
+                    value_text: &window.to_string(),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if w_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    let next_w = if w_step > 0 { window.saturating_add(1).min(51) } else { window.saturating_sub(1).max(2) };
+                    c.operation = CurveCalculusOp::SmoothMovingAverage { window: next_w };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+        CurveCalculusOp::SmoothLowess { span, robustness_iters } => {
+            if let Some(new_span) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_cc_lowess_span", sid),
+                    widget_id: "edit.curve_calc.lowess_span",
+                    label: tr(locale, "curve_calc.lowess_span"),
+                    current: span,
+                    bounds: NumericBounds::ClosedRange(0.05, 1.0),
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    c.operation = CurveCalculusOp::SmoothLowess { span: new_span, robustness_iters };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+            let r_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.curve_calc.lowess_iters",
+                    label: tr(locale, "curve_calc.lowess_iters"),
+                    value_text: &robustness_iters.to_string(),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if r_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    let next_r = if r_step > 0 { robustness_iters.saturating_add(1).min(10) } else { robustness_iters.saturating_sub(1) };
+                    c.operation = CurveCalculusOp::SmoothLowess { span, robustness_iters: next_r };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+        CurveCalculusOp::CumulativeIntegral { baseline } => {
+            if let Some(new_base) = render_linear_numeric_input(
+                ui,
+                state,
+                &app.locale_preset,
+                meta,
+                NumericInputSpec {
+                    salt: ("edit_cc_baseline", sid),
+                    widget_id: "edit.curve_calc.baseline",
+                    label: tr(locale, "auc.baseline.value"),
+                    current: baseline,
+                    bounds: NumericBounds::AnyFinite,
+                },
+            ) {
+                let mut next = spec.clone();
+                if let AnalysisKind::CurveCalculus(c) = &mut next.kind {
+                    c.operation = CurveCalculusOp::CumulativeIntegral { baseline: new_base };
+                }
+                intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(next) });
+            }
+        }
+        CurveCalculusOp::FirstDerivative | CurveCalculusOp::SecondDerivative => {}
+    }
+
+    ui.add_space(4.0);
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.curve_calc.create_graph",
+        tr(locale, "curve_calc.create_graph"),
+        app.canvas_dialogs.edit_params.curve_calculus_create_graph,
+        &ControlEnablement::enabled(),
+    ) {
+        intents.push(UiIntent::StatParams(crate::egui_shell::StatParamsIntent::ToggleCurveCalculusGraph));
+    }
+
+    ui.add_space(4.0);
+    render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
 fn render_pvalue_stack_design(

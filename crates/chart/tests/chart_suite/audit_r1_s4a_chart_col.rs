@@ -433,7 +433,7 @@ fn r1_x2_07_heatmap_pairwise_complete_clustering_and_grouped_and_correlation_mis
         let corr_spec = AnalysisSpec::new(
             SheetId::new("res_corr"),
             SheetId::new("src"),
-            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }),
         )?;
         let mut res = ResultSheet::new(corr_spec)?;
         res.status = ResultStatus::UpToDate;

@@ -3812,6 +3812,7 @@ fn resolve_survival_pairwise_plan(
             let name = match other {
                 MultiplicityProcedure::TukeyKramer => "Tukey-Kramer",
                 MultiplicityProcedure::NewmanKeuls => "Student-Newman-Keuls",
+                MultiplicityProcedure::Duncan => "Duncan's multiple range",
                 MultiplicityProcedure::GamesHowell => "Games-Howell",
                 MultiplicityProcedure::TamhaneT2 => "Tamhane's T2",
                 MultiplicityProcedure::DunnettT3 => "Dunnett's T3",

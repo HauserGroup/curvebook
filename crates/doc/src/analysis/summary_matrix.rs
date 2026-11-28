@@ -297,11 +297,13 @@ pub enum SummaryModeProcedure {
     MonteCarloSimulation = 38,
     /// Standalone frequency distribution & histogram binning (`AnalysisKind::FrequencyDistribution`).
     FrequencyDistribution = 39,
+    /// General one-way Analysis of Covariance (`AnalysisKind::Ancova` on `Xy` tables).
+    Ancova = 40,
 }
 
 impl SummaryModeProcedure {
-    /// Complete ordered list of all canonical summary-mode matrix procedures.
-    pub const ALL: [Self; 40] = [
+    /// Complete ordered list of all 41 canonical summary-mode matrix procedures.
+    pub const ALL: [Self; 41] = [
         Self::DescriptiveStats,
         Self::OutlierDetection,
         Self::TwoGroupParametricSummary,
@@ -342,6 +344,7 @@ impl SummaryModeProcedure {
         Self::CurveCalculus,
         Self::MonteCarloSimulation,
         Self::FrequencyDistribution,
+        Self::Ancova,
     ];
 
     /// Total number of procedure rows in [`SUMMARY_MODE_MATRIX`].
@@ -391,6 +394,7 @@ impl SummaryModeProcedure {
             Self::CurveCalculus => &SUMMARY_MODE_MATRIX[37],
             Self::MonteCarloSimulation => &SUMMARY_MODE_MATRIX[38],
             Self::FrequencyDistribution => &SUMMARY_MODE_MATRIX[39],
+            Self::Ancova => &SUMMARY_MODE_MATRIX[40],
         }
     }
 
@@ -509,6 +513,7 @@ impl SummaryModeProcedure {
             AnalysisKind::CurveCalculus(_) => Self::when(is_xy, Self::CurveCalculus),
             AnalysisKind::MonteCarloSimulation(_) => Some(Self::MonteCarloSimulation),
             AnalysisKind::FrequencyDistribution(_) => Some(Self::FrequencyDistribution),
+            AnalysisKind::Ancova(_) => Self::when(is_xy, Self::Ancova),
             AnalysisKind::NestedComparison(_) | AnalysisKind::Survival(_) | AnalysisKind::ImportedSnapshot(_) => None,
         }
     }
@@ -935,6 +940,14 @@ pub const SUMMARY_MODE_MATRIX: [SummaryModeMatrixRow; SummaryModeProcedure::COUN
         label: "Frequency distribution & histogram",
         table_kinds: COL_XY_GROUPED,
         reference_citation: "Sturges (1926); Scott (1979); Freedman & Diaconis (1981) (binning requires raw observations)",
+        cells: SummaryModeRowCells::all(SummaryModeSupport::Refused(SummaryModeRefusalReason::RequiresRawReplicates)),
+    },
+    SummaryModeMatrixRow {
+        procedure: SummaryModeProcedure::Ancova,
+        analysis_kind_id: AnalysisKindId::Ancova,
+        label: "Analysis of covariance (ANCOVA)",
+        table_kinds: XY_ONLY,
+        reference_citation: "Maxwell & Delaney (2004); Kutner et al. (2005) (requires observation-level covariate-response pairs)",
         cells: SummaryModeRowCells::all(SummaryModeSupport::Refused(SummaryModeRefusalReason::RequiresRawReplicates)),
     },
 ];

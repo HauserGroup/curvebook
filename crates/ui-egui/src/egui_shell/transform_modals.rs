@@ -4,7 +4,7 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MAX_ROWS, MAX_SUBCOLUMNS,
-    MathTransformPreset, NormalizeAnchor, SheetId, SimulationNoise, TableArchetype, TableKind, TransformAnalysisSpec,
+    MathTransformPreset, NormalizeAnchor, PharmacologyTransformPreset, SheetId, SimulationNoise, TableArchetype, TableKind, TransformAnalysisSpec,
 };
 use curvebook_transform::formula::parser::parse_formula;
 use egui::{Align, Context, Key, Layout, Modifiers, Rect, RichText, Stroke, Ui, vec2};
@@ -80,7 +80,7 @@ impl ConstantKOp {
 }
 
 /// Persistent transient UI state for `render_transform_modal` and `render_exclude_with_reason_modal`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TransformModalsEguiState {
     pub open_kind: Option<TransformModalKind>,
     pub target_sheet_id: Option<SheetId>,
@@ -99,6 +99,7 @@ pub struct TransformModalsEguiState {
     pub standalone_y_preset: Option<String>,
     pub standalone_error_propagation: ErrorPropagationMode,
     pub pharmacology_mode: bool,
+    pub standalone_pharmacology_preset: Option<PharmacologyTransformPreset>,
     pub baseline_cols: Vec<usize>,
     pub baseline_op: usize,
     pub derived_title_draft: String,
@@ -156,6 +157,7 @@ impl Default for TransformModalsEguiState {
             standalone_y_preset: None,
             standalone_error_propagation: ErrorPropagationMode::default(),
             pharmacology_mode: false,
+            standalone_pharmacology_preset: None,
             baseline_cols: Vec::new(),
             baseline_op: 0,
             derived_title_draft: String::new(),
@@ -426,6 +428,7 @@ fn sync_standalone_transform_state(kind: TransformModalKind, state: &mut Transfo
     state.standalone_y_preset = None;
     state.standalone_error_propagation = ErrorPropagationMode::default();
     state.pharmacology_mode = false;
+    state.standalone_pharmacology_preset = None;
     state.baseline_cols = vec![0];
     state.baseline_op = 0;
     state.derived_title_draft.clear();
@@ -475,7 +478,12 @@ fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) 
     state.selected_k_op = None;
     state.constant_k_draft.clear();
     state.hook_picker_open = false;
-    state.pharmacology_mode = false;
+    let synced_pharm = spec.and_then(|s| match &s.kind {
+        AnalysisKind::Transform(TransformAnalysisSpec::Math { pharmacology_preset, .. }) => *pharmacology_preset,
+        _ => None,
+    });
+    state.pharmacology_mode = synced_pharm.is_some();
+    state.standalone_pharmacology_preset = synced_pharm;
     state.baseline_cols = vec![0];
     state.baseline_op = 0;
     state.derived_title_draft.clear();
@@ -650,22 +658,29 @@ fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
         state.selected_k_op = state.standalone_y_preset.as_deref().and_then(ConstantKOp::from_slug);
     }
     let active_k_op = state.selected_k_op;
-    let (cur_x, cur_y, cur_ep) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, .. })) if from_edit => {
+    let (cur_x, cur_y, cur_ep, cur_pharm) = match draft_spec.as_ref().map(|s| &s.kind) {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation, pharmacology_preset, .. }))
+            if from_edit =>
+        {
             let eff_y = active_k_op.map(|op| build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok()).unwrap_or(*y_transform);
-            (*x_transform, eff_y, *error_propagation)
+            (*x_transform, eff_y, *error_propagation, *pharmacology_preset)
         }
         _ => {
             let eff_y = match active_k_op {
                 Some(op) => build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok(),
                 None => state.standalone_y_preset.as_deref().and_then(parse_math_slug),
             };
-            (state.standalone_x_preset.as_deref().and_then(parse_math_slug), eff_y, state.standalone_error_propagation)
+            (
+                state.standalone_x_preset.as_deref().and_then(parse_math_slug),
+                eff_y,
+                state.standalone_error_propagation,
+                state.standalone_pharmacology_preset,
+            )
         }
     };
 
     ui.horizontal_wrapped(|row| {
-        let std_r = choice_pill(row, tokens, "Standard Functions", !state.pharmacology_mode, true);
+        let std_r = choice_pill(row, tokens, "Standard Functions", !state.pharmacology_mode && cur_pharm.is_none(), true);
         meta.record_modal_response(
             row,
             &std_r,
@@ -673,8 +688,12 @@ fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
         );
         if std_r.clicked() {
             state.pharmacology_mode = false;
+            state.standalone_pharmacology_preset = None;
+            if from_edit {
+                apply_math_pharmacology_patch(draft_spec.as_mut(), None, intents);
+            }
         }
-        let pharm_r = choice_pill(row, tokens, "Pharmacology (-log10[M])", state.pharmacology_mode, true);
+        let pharm_r = choice_pill(row, tokens, "Pharmacology & Kinetics", state.pharmacology_mode || cur_pharm.is_some(), true);
         meta.record_modal_response(
             row,
             &pharm_r,
@@ -682,19 +701,56 @@ fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
         );
         if pharm_r.clicked() {
             state.pharmacology_mode = true;
-            if from_edit {
-                apply_math_patch(
-                    draft_spec.as_mut(),
-                    Some(Some(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-6 })),
-                    None,
-                    None,
-                    intents,
-                );
-            } else {
-                state.standalone_x_preset = Some(String::from("neg_log_m_um"));
+            if cur_pharm.is_none() {
+                if from_edit {
+                    apply_math_patch(
+                        draft_spec.as_mut(),
+                        Some(Some(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-6 })),
+                        None,
+                        None,
+                        intents,
+                    );
+                } else {
+                    state.standalone_x_preset = Some(String::from("neg_log_m_um"));
+                }
             }
         }
     });
+
+    if state.pharmacology_mode || cur_pharm.is_some() {
+        ui.add_space(4.0);
+        ui.label(RichText::new(tr(tokens.locale, "transform.pharmacology.kinetics_heading")).strong().color(tokens.text_primary));
+        ui.horizontal_wrapped(|row| {
+            let pharm_choices: [(&str, &str, Option<PharmacologyTransformPreset>); 5] = [
+                ("none", "None (use X/Y above)", None),
+                ("lineweaver_burk", tr(tokens.locale, "transform.pharmacology.lineweaver_burk"), Some(PharmacologyTransformPreset::LineweaverBurk)),
+                ("eadie_hofstee", "Eadie-Hofstee (Y/X vs Y)", Some(PharmacologyTransformPreset::EadieHofstee)),
+                ("hanes_woolf", "Hanes-Woolf (X vs X/Y)", Some(PharmacologyTransformPreset::HanesWoolf)),
+                ("scatchard", "Scatchard (Y vs Y/X)", Some(PharmacologyTransformPreset::Scatchard)),
+            ];
+            for (slug, lbl, preset) in pharm_choices {
+                let active = cur_pharm == preset;
+                let r = choice_pill(row, tokens, lbl, active, true);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("edit.transform.pharmacology.{slug}"), "radio", lbl, Some(active.to_string()), true),
+                );
+                if r.clicked() {
+                    state.standalone_pharmacology_preset = preset;
+                    if preset == Some(PharmacologyTransformPreset::LineweaverBurk) && !from_edit {
+                        state.create_new_graph = true;
+                    }
+                    if from_edit {
+                        apply_math_pharmacology_patch(draft_spec.as_mut(), preset, intents);
+                    }
+                }
+            }
+        });
+        if cur_pharm == Some(PharmacologyTransformPreset::LineweaverBurk) {
+            ui.label(RichText::new(tr(tokens.locale, "transform.pharmacology.lineweaver_burk_warn")).small().color(tokens.warning));
+        }
+    }
 
     ui.add_space(4.0);
     // Transform X choices (`edit.transform.x_transform`).
@@ -2391,6 +2447,14 @@ fn apply_math_patch(
     }
 }
 
+fn apply_math_pharmacology_patch(draft: Option<&mut AnalysisSpec>, preset: Option<PharmacologyTransformPreset>, intents: &mut PendingUiIntents) {
+    let Some(spec) = draft else { return };
+    if let AnalysisKind::Transform(TransformAnalysisSpec::Math { pharmacology_preset, .. }) = &mut spec.kind {
+        *pharmacology_preset = preset;
+        intents.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec.clone()) });
+    }
+}
+
 fn build_standalone_transform_params(
     app: &UiApp,
     ds: &DataSheet,
@@ -2416,7 +2480,7 @@ fn build_standalone_transform_params(
                     x_transform,
                     y_transform,
                     error_propagation: state.standalone_error_propagation,
-                    pharmacology_preset: None,
+                    pharmacology_preset: state.standalone_pharmacology_preset,
                     interchange_xy: false,
                     zero_x_substitute: None,
                     asymmetric_ci_policy: Default::default(),

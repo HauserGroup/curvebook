@@ -358,6 +358,7 @@ pub fn multiple_row_lognormal_t_tests(
         procedure,
         MultiplicityProcedure::TukeyKramer
             | MultiplicityProcedure::NewmanKeuls
+            | MultiplicityProcedure::Duncan
             | MultiplicityProcedure::Dunnett { .. }
             | MultiplicityProcedure::DunnettT3
             | MultiplicityProcedure::GamesHowell

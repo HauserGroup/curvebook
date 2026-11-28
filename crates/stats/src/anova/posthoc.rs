@@ -847,6 +847,7 @@ pub(in crate::anova) fn compare_independent_newman_keuls(
     raw_p: &[f64],
     threshold: f64,
     crit_memo: &mut CriticalValueMemo,
+    use_duncan: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let m = entries.len();
     let mut order: Vec<usize> = (0..m).collect();
@@ -859,7 +860,13 @@ pub(in crate::anova) fn compare_independent_newman_keuls(
         let m_rem = m - rank;
         let cand = if e.se > 0.0 {
             let t_abs = (e.diff / e.se).abs();
-            crit_memo.max_sf(std::f64::consts::SQRT_2 * t_abs, m_rem, 2, e.df)?
+            if use_duncan {
+                let span = m_rem + 1;
+                let p_rng = crit_memo.max_sf(std::f64::consts::SQRT_2 * t_abs, 1, span, e.df)?;
+                crate::multiplicity::duncan_range_adjusted_p(p_rng, span)
+            } else {
+                crit_memo.max_sf(std::f64::consts::SQRT_2 * t_abs, m_rem, 2, e.df)?
+            }
         } else {
             raw_p[orig_idx]
         };
@@ -924,8 +931,10 @@ pub(in crate::anova) fn compare_independent_contrast_family_with_memo(
     if report_ci && (!ci_alpha.is_finite() || ci_alpha <= 0.0 || ci_alpha >= 1.0) {
         return Err(StatsError::InvalidParameter { name: "ci_alpha", value: ci_alpha });
     }
-    let uses_q_stat =
-        matches!(proc_req, MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::GamesHowell);
+    let uses_q_stat = matches!(
+        proc_req,
+        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::Duncan | MultiplicityProcedure::GamesHowell
+    );
     let mut raw_p = Vec::with_capacity(m);
     let mut stats = Vec::with_capacity(m);
     for e in entries {
@@ -950,7 +959,7 @@ pub(in crate::anova) fn compare_independent_contrast_family_with_memo(
     if m == 1 || matches!(proc_req, MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd) {
         let mut out = Vec::with_capacity(m);
         for (idx, e) in entries.iter().enumerate() {
-            let ci = if report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls) {
+            let ci = if report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::Duncan) {
                 let tc = student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), e.df)?;
                 Some((e.diff - tc * e.se, e.diff + tc * e.se))
             } else {
@@ -979,7 +988,8 @@ pub(in crate::anova) fn compare_independent_contrast_family_with_memo(
     }
 
     match proc_req {
-        MultiplicityProcedure::NewmanKeuls => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold, crit_memo),
+        MultiplicityProcedure::NewmanKeuls => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold, crit_memo, false),
+        MultiplicityProcedure::Duncan => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold, crit_memo, true),
         MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
@@ -1238,7 +1248,8 @@ pub(in crate::anova) fn compare_contrast_family_with_memo(
             }
             Ok((out, None))
         }
-        MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo)?, None)),
+        MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo, false)?, None)),
+        MultiplicityProcedure::Duncan => Ok((compare_contrast_newman_keuls(&eval, threshold, crit_memo, true)?, None)),
         _ => {
             let entries: Vec<NamedSliceContrast<'_>> = eval
                 .pairs
@@ -1505,6 +1516,7 @@ pub(in crate::anova) fn compare_contrast_newman_keuls(
     eval: &ContrastFamilyEval<'_>,
     threshold: f64,
     crit_memo: &mut CriticalValueMemo,
+    use_duncan: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k_total = eval.levels.len();
     let n_slices = eval.n_slices.max(1);
@@ -1540,7 +1552,7 @@ pub(in crate::anova) fn compare_contrast_newman_keuls(
         }
         let batched_p = crit_memo.batch_max_sf(n_slices, span, &queries)?;
         for (&lo, &p_val) in active_lo.iter().zip(batched_p.iter()) {
-            row_raw_p[lo] = p_val;
+            row_raw_p[lo] = if use_duncan { crate::multiplicity::duncan_range_adjusted_p(p_val, span) } else { p_val };
         }
         for lo in 0..count {
             let hi = lo + span - 1;
@@ -1726,6 +1738,7 @@ pub(in crate::anova) fn is_contrast_count_multiplicity_method(method: Multiplici
             | MultiplicityMethod::Bonferroni
             | MultiplicityMethod::Sidak
             | MultiplicityMethod::HolmSidak
+            | MultiplicityMethod::HolmBonferroni
             | MultiplicityMethod::TamhaneT2
             | MultiplicityMethod::DunnettT3
             | MultiplicityMethod::BenjaminiHochbergFdr
@@ -1967,7 +1980,10 @@ fn unflatten_cell_index(radices: &[usize], mut flat: usize) -> Option<Vec<usize>
 }
 
 fn apply_swap_direction(details: &mut [PairwiseComparisonDetail], method: MultiplicityMethod) {
-    let is_unsigned_q = matches!(method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::GamesHowell);
+    let is_unsigned_q = matches!(
+        method,
+        MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::Duncan | MultiplicityMethod::GamesHowell
+    );
     for d in details {
         std::mem::swap(&mut d.group_a, &mut d.group_b);
         std::mem::swap(&mut d.label_a, &mut d.label_b);
@@ -2094,7 +2110,9 @@ fn evaluate_cell_pair_family(
             })
             .collect();
         let proc_eff = match MultiplicityProcedure::from(mult_spec.method) {
-            MultiplicityProcedure::Dunnett { .. } | MultiplicityProcedure::NewmanKeuls => MultiplicityProcedure::Sidak,
+            MultiplicityProcedure::Dunnett { .. } | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::Duncan => {
+                MultiplicityProcedure::Sidak
+            }
             other => other,
         };
         compare_independent_contrast_family_with_memo(
@@ -2140,7 +2158,10 @@ fn collect_one_factor_diff_pairs_by_factor(obs: &FactorialObservations, varying_
 }
 
 fn swap_standard_multiplicity_outputs(out: &mut ResultSheet, start_tabs: usize, start_pairs: usize, method: MultiplicityMethod) {
-    let is_unsigned_q = matches!(method, MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::GamesHowell);
+    let is_unsigned_q = matches!(
+        method,
+        MultiplicityMethod::TukeyHsd | MultiplicityMethod::NewmanKeuls | MultiplicityMethod::Duncan | MultiplicityMethod::GamesHowell
+    );
     for rec in &mut out.pairwise_comparisons[start_pairs..] {
         std::mem::swap(&mut rec.group_a, &mut rec.group_b);
         std::mem::swap(&mut rec.label_a, &mut rec.label_b);
@@ -2688,8 +2709,14 @@ fn run_factorial_multiplicity_standard(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::CriticalValueMemo;
-    use crate::StatsError;
+    use curvebook_doc::{
+        AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, DataSheet, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec,
+        OneWayMethod, SheetId, TableArchetype,
+    };
+    use curvebook_math::dist::student_t_two_sided_p;
+
+    use super::{CriticalValueMemo, NamedSliceContrast, compare_independent_newman_keuls};
+    use crate::{StatsError, run_analysis};
 
     #[test]
     fn critical_value_is_computed_once_per_distinct_df_and_errors_are_not_cached() {
@@ -2719,5 +2746,70 @@ mod tests {
         assert_eq!(memo.get(6, 3, 4.0, |d| Ok(d * 2.0)).unwrap(), 8.0);
         // Different family sizes at the same df are separate entries.
         assert_eq!(memo.get(7, 3, 37.0, |d| Ok(d + 1.0)).unwrap(), 38.0);
+    }
+
+    #[test]
+    fn rm_nonsphericity_duncan_exceeds_raw_p_and_matches_studentized_range() -> Result<(), Box<dyn std::error::Error>> {
+        // 1. Direct verification against R 4.5.2 Studentized range formula:
+        //    df = 12, t = 2.5 -> raw_p = 0.0279153, span 3 -> 0.034091, span 4 -> 0.038261.
+        let df = 12.0;
+        let entries = [
+            NamedSliceContrast { id_a: 0, id_b: 3, label_a: "A", label_b: "D", diff: 3.0, se: 1.0, df },
+            NamedSliceContrast { id_a: 0, id_b: 2, label_a: "A", label_b: "C", diff: 2.5, se: 1.0, df },
+            NamedSliceContrast { id_a: 0, id_b: 1, label_a: "A", label_b: "B", diff: 2.0, se: 1.0, df },
+        ];
+        let stats: Vec<f64> = entries.iter().map(|e| e.diff / e.se).collect();
+        let raw_p: Vec<f64> = stats.iter().map(|&t| student_t_two_sided_p(t, df)).collect::<Result<_, _>>()?;
+        let mut memo = CriticalValueMemo::new();
+        let duncan = compare_independent_newman_keuls(&entries, &stats, &raw_p, 0.05, &mut memo, true)?;
+        let snk = compare_independent_newman_keuls(&entries, &stats, &raw_p, 0.05, &mut memo, false)?;
+        // Rank 0 (m_rem = 3, span = 4, t = 3.0) and rank 1 (m_rem = 2, span = 3, t = 2.5) must strictly exceed raw_p and match R 4.5.2.
+        assert!(duncan[0].adjusted_p_or_q > raw_p[0] + 1e-4, "span 4 Duncan must exceed raw_p");
+        assert!((duncan[0].adjusted_p_or_q - 0.016_051).abs() < 1e-4, "span 4 Duncan vs R 4.5.2: got {}", duncan[0].adjusted_p_or_q);
+        assert!(duncan[1].adjusted_p_or_q > raw_p[1] + 1e-4, "span 3 Duncan must exceed raw_p");
+        assert!((duncan[1].adjusted_p_or_q - 0.034_091).abs() < 1e-4, "span 3 Duncan vs R 4.5.2: got {}", duncan[1].adjusted_p_or_q);
+        assert!((duncan[2].adjusted_p_or_q - raw_p[2]).abs() < 1e-12, "span 2 Duncan equals raw_p");
+        for i in 0..3 {
+            assert!(duncan[i].adjusted_p_or_q <= snk[i].adjusted_p_or_q + 1e-12, "Duncan <= SNK violated at {i}");
+        }
+
+        // 2. End-to-end non-sphericity RM one-way ANOVA (Geisser-Greenhouse) with Duncan vs Fisher LSD vs SNK.
+        let mut tbl = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 4, 6)?;
+        let data = [
+            ("T0", [10.0, 11.2, 9.8, 10.5, 10.9, 10.1]),
+            ("T1", [10.7, 11.8, 10.9, 11.1, 11.5, 10.9]),
+            ("T2", [11.6, 12.9, 11.4, 12.2, 12.8, 12.0]),
+            ("T3", [13.2, 15.1, 12.6, 14.0, 14.9, 13.7]),
+        ];
+        for (c, (title, vals)) in data.into_iter().enumerate() {
+            tbl.data_sets[c].title = String::from(title);
+            for (r, v) in vals.into_iter().enumerate() {
+                tbl.data_sets[c].cells[r][0] = Cell::number(v);
+            }
+        }
+        let ds = DataSheet::new(SheetId::new("rm-duncan"), "RM Non-Sphericity", TableArchetype::Column(tbl))?;
+        let run_rm = |method: MultiplicityMethod| -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+            let spec = AnalysisSpec::new(
+                SheetId::new("res-rm"),
+                SheetId::new("rm-duncan"),
+                AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                    method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
+                    multiplicity: MultiplicitySpec { method, ..MultiplicitySpec::default() },
+                    ..OneWayAnovaSpec::default()
+                }),
+            )?;
+            let rs = run_analysis(&ds, &spec)?;
+            Ok(rs.pairwise_comparisons.iter().map(|p| p.raw_p_or_q).collect())
+        };
+        let p_lsd = run_rm(MultiplicityMethod::FisherLsd)?;
+        let p_dunc = run_rm(MultiplicityMethod::Duncan)?;
+        let p_snk = run_rm(MultiplicityMethod::NewmanKeuls)?;
+        assert_eq!(p_dunc.len(), 6);
+        let strictly_adjusted = p_dunc.iter().zip(&p_lsd).filter(|&(&d, &raw)| d > raw * 1.05 && d > raw + 1e-12).count();
+        assert!(strictly_adjusted >= 3, "expected RM non-sphericity Duncan to adjust multi-span contrasts above raw_p: {p_dunc:?} vs {p_lsd:?}");
+        for i in 0..6 {
+            assert!(p_dunc[i] >= p_lsd[i] - 1e-12 && p_dunc[i] <= p_snk[i] + 1e-12, "pair {i}: lsd={} dunc={} snk={}", p_lsd[i], p_dunc[i], p_snk[i]);
+        }
+        Ok(())
     }
 }

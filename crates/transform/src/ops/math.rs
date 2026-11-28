@@ -21,6 +21,9 @@
 //! - Joint Committee for Guides in Metrology (2008). *Evaluation of measurement data — Guide to
 //!   the expression of uncertainty in measurement* (JCGM 100:2008 / GUM §5.1.2).
 //!   `doi:10.59161/JCGM100-2008E`.
+//! - Lineweaver, H., & Burk, D. (1934). The determination of enzyme dissociation constants.
+//!   *Journal of the American Chemical Society*, 56(3), 658–666. `doi:10.1021/ja01318a036`.
+//! - Cornish-Bowden, A. (2012). *Fundamentals of Enzyme Kinetics* (4th ed.). Wiley-Blackwell.
 //! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Prentice Hall (logit, probit, and
 //!   angular arcsine square-root transformations).
 
@@ -574,6 +577,9 @@ fn apply_pharmacology_preset(
         PharmacologyTransformPreset::LineweaverBurk => {
             let recip = CompiledOp::Preset(MathTransformPreset::Reciprocal);
             transform_xy_x_axis(xy, &recip, err_mode, ci_policy, info, count, warnings);
+            let orig_x = xy.x_title.trim();
+            let recip_x = if orig_x.is_empty() { String::from("1 / X") } else { format!("1 / {orig_x}") };
+            xy.x_title = crate::ops::bounded_suffixed_str("", &recip_x, curvebook_doc::MAX_TITLE_BYTES);
             let swapped = transform_archetype_y(&mut out.archetype, selected, &recip, err_mode, ci_policy, &x_before, info, count, warnings)?;
             remap_swapped_error_notes_batch(&mut out.exclusion_notes, &swapped);
             for &(row, col) in &swapped {

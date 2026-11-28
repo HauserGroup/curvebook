@@ -274,8 +274,9 @@ fn w6_heatmap_commit_intents_and_grouped_superimposed() -> Result<(), String> {
     assert_eq!(spec.grouped_arrangement, GroupedArrangement::Superimposed);
 
     let mut ep = EditAnalysisParametersState::default();
-    let analysis = AnalysisSpec::new("res-corr", "mv-1", AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }))
-        .map_err(|e| e.to_string())?;
+    let analysis =
+        AnalysisSpec::new("res-corr", "mv-1", AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }))
+            .map_err(|e| e.to_string())?;
     ep.result_sheet_id = Some(SheetId::from("res-corr"));
     ep.draft = Some(analysis);
     ep.correlation_all_pairs = true;

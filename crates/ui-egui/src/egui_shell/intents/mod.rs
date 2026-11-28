@@ -86,6 +86,9 @@ pub enum StatParamsIntent {
     CycleContingencyCi { which: ContingencyCiTarget },
     ToggleCorrAllPairs,
     ToggleCorrHeatmap,
+    TogglePcaBiplot,
+    ToggleClusteringDendrogram,
+    ToggleCurveCalculusGraph,
     ToggleDiag { flag: DiagToggleFlag },
 }
 

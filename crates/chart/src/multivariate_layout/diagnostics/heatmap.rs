@@ -647,7 +647,7 @@ fn parse_dendro_node_id(raw: f64, step: usize, n_leaves: usize) -> Option<isize>
     ((id as f64) == raw && id >= min_leaf_id && id < step_i).then_some(id)
 }
 
-fn decode_dendro_leaf(id: isize, n_leaves: usize) -> Option<usize> {
+pub(super) fn decode_dendro_leaf(id: isize, n_leaves: usize) -> Option<usize> {
     if id >= 0 {
         return None;
     }
@@ -657,7 +657,7 @@ fn decode_dendro_leaf(id: isize, n_leaves: usize) -> Option<usize> {
     (idx < n_leaves).then_some(idx)
 }
 
-fn extract_dendro_merges_from_tab(tab: &ResultTab, n_leaves: usize) -> Vec<DendrogramMerge> {
+pub(super) fn extract_dendro_merges_from_tab(tab: &ResultTab, n_leaves: usize) -> Vec<DendrogramMerge> {
     if n_leaves < 2 || tab.rows.len() + 1 != n_leaves {
         return Vec::new();
     }
@@ -719,7 +719,7 @@ fn cluster_heatmap_rows(
     Vec::new()
 }
 
-fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usize> {
+pub(super) fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usize> {
     if merges.is_empty() || n_leaves == 0 {
         return (0..n_leaves).collect();
     }
@@ -763,7 +763,7 @@ fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usi
     order
 }
 
-fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[DendrogramMerge], leaf_order: &[usize], cell_h: f64) {
+pub(super) fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[DendrogramMerge], leaf_order: &[usize], cell_h: f64) {
     let max_dist =
         merges.iter().filter_map(|m| (m.distance.is_finite() && m.distance >= 0.0).then_some(m.distance)).fold(0.0_f64, f64::max).max(1e-9);
     let n_leaves = leaf_order.len();

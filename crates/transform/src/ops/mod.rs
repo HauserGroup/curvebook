@@ -21,9 +21,10 @@ use std::collections::HashSet;
 
 use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, DocError, HookSource, InfoSheet, MAX_TITLE_BYTES, PartsOfWholeTable, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SimulationMode, SummaryModeSupport, TableArchetype, TableKind,
-    TransformAnalysisSpec, VariableRole, VariableSource, parse_column_title_numeric_hook, summary_mode_row_for_spec,
+    AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, ChecklistItem, ChecklistStatus, DataSheet, DocError, HookSource, InfoSheet, MAX_TITLE_BYTES,
+    PartsOfWholeTable, PharmacologyTransformPreset, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    SimulationMode, SummaryModeSupport, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole, VariableSource,
+    parse_column_title_numeric_hook, summary_mode_row_for_spec,
 };
 
 use crate::error::TransformError;
@@ -398,7 +399,11 @@ pub fn execute_analysis_transform(source: &DataSheet, analysis: &AnalysisSpec, c
                 local_ctx.selected_data_sets = analysis.selected_data_sets.clone();
             }
             let output = execute_transform(source, spec, &local_ctx)?;
-            output.into_result_sheet(analysis.clone())
+            let mut sheet = output.into_result_sheet(analysis.clone())?;
+            if let TransformAnalysisSpec::Math { pharmacology_preset: Some(PharmacologyTransformPreset::LineweaverBurk), .. } = spec {
+                append_lineweaver_burk_diagnostics(&mut sheet, &local_ctx.selected_data_sets);
+            }
+            Ok(sheet)
         }
         AnalysisKind::FitSplineLowess(spec) => crate::spline::execute_spline_lowess(source, analysis, spec),
         AnalysisKind::AreaUnderCurve(spec) => crate::curve::execute_area_under_curve(source, analysis, spec),
@@ -427,6 +432,140 @@ pub(crate) fn build_summary_tab(title: &str, entries: Vec<(&str, ResultCell)>, f
         rows,
         footnotes,
     }
+}
+
+/// Append unweighted double-reciprocal OLS diagnostics and a prominent error-distortion caution to a
+/// Lineweaver–Burk transform `ResultSheet` (Lineweaver & Burk 1934; Cornish-Bowden 2012).
+fn append_lineweaver_burk_diagnostics(sheet: &mut ResultSheet, selected_data_sets: &[usize]) {
+    let Some(TableArchetype::Xy(xy)) = sheet.analyzable_data.as_ref().map(|d| &d.archetype) else {
+        return;
+    };
+    let active_cols: Vec<usize> = if selected_data_sets.is_empty() {
+        (0..xy.data_sets.len()).collect()
+    } else {
+        selected_data_sets.iter().copied().filter(|&c| c < xy.data_sets.len()).collect()
+    };
+
+    let mut row_labels = Vec::with_capacity(active_cols.len());
+    let mut rows = Vec::with_capacity(active_cols.len());
+    for &c in &active_cols {
+        let ds = &xy.data_sets[c];
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for r in 0..xy.row_count() {
+            let Some(xv) = xy.x_summary_at(r).ok().flatten().filter(|v| v.is_finite()) else {
+                continue;
+            };
+            let Some(subs) = ds.cells.get(r) else {
+                continue;
+            };
+            if xy.y_subcolumn_mode.is_pre_summarized() || xy.y_subcolumn_mode == curvebook_doc::SubcolumnMode::Single {
+                if let Some(yv) = subs.first().and_then(Cell::active_number).filter(|v| v.is_finite()) {
+                    xs.push(xv);
+                    ys.push(yv);
+                }
+            } else {
+                for cell in subs {
+                    if let Some(yv) = cell.active_number().filter(|v| v.is_finite()) {
+                        xs.push(xv);
+                        ys.push(yv);
+                    }
+                }
+            }
+        }
+        let n = xs.len();
+        let (slope, intercept, r_sq, app_vmax, app_km) = if n >= 2 {
+            let nf = n as f64;
+            let mx = curvebook_math::sum::sum(&xs) / nf;
+            let my = curvebook_math::sum::sum(&ys) / nf;
+            let mut sxx = curvebook_math::sum::NeumaierSum::new();
+            let mut sxy = curvebook_math::sum::NeumaierSum::new();
+            let mut syy = curvebook_math::sum::NeumaierSum::new();
+            for (&x, &y) in xs.iter().zip(ys.iter()) {
+                let dx = x - mx;
+                let dy = y - my;
+                sxx.add(dx * dx);
+                sxy.add(dx * dy);
+                syy.add(dy * dy);
+            }
+            let sxx_v = sxx.total();
+            let sxy_v = sxy.total();
+            let syy_v = syy.total();
+            if sxx_v > 0.0 && sxx_v.is_finite() {
+                let b = sxy_v / sxx_v;
+                let a = my - b * mx;
+                let r2 = if syy_v > 0.0 { ((sxy_v * sxy_v) / (sxx_v * syy_v)).clamp(0.0, 1.0) } else { 1.0 };
+                let vmax = if a.is_finite() && a.abs() > 1e-15 { Some(1.0 / a) } else { None };
+                let km = if a.is_finite() && a.abs() > 1e-15 && b.is_finite() { Some(b / a) } else { None };
+                (Some(b), Some(a), Some(r2), vmax, km)
+            } else {
+                (None, None, None, None, None)
+            }
+        } else {
+            (None, None, None, None, None)
+        };
+        let opt_cell = |v: Option<f64>| match v.filter(|x| x.is_finite()) {
+            Some(val) => ResultCell::Number { value: val, prefix: None, units: None },
+            None => ResultCell::Empty,
+        };
+        row_labels.push(ds.title.clone());
+        rows.push(vec![
+            ResultCell::Number { value: n as f64, prefix: None, units: None },
+            opt_cell(slope),
+            opt_cell(intercept),
+            opt_cell(r_sq),
+            opt_cell(app_vmax),
+            opt_cell(app_km),
+        ]);
+        if let Some(b) = slope.filter(|v| v.is_finite()) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("Lineweaver-Burk slope"), data_set_index: Some(c), value: b, units: None });
+        }
+        if let Some(a) = intercept.filter(|v| v.is_finite()) {
+            sheet.scalars.push(ResultScalarEntry {
+                key: String::from("Lineweaver-Burk Y-intercept"),
+                data_set_index: Some(c),
+                value: a,
+                units: None,
+            });
+        }
+        if let Some(r2) = r_sq.filter(|v| v.is_finite()) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("Lineweaver-Burk R squared"), data_set_index: Some(c), value: r2, units: None });
+        }
+        if let Some(vmax) = app_vmax.filter(|v| v.is_finite()) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("Apparent Vmax"), data_set_index: Some(c), value: vmax, units: None });
+        }
+        if let Some(km) = app_km.filter(|v| v.is_finite()) {
+            sheet.scalars.push(ResultScalarEntry { key: String::from("Apparent Km"), data_set_index: Some(c), value: km, units: None });
+        }
+    }
+
+    sheet.tabs.push(ResultTab {
+        id: String::from("lineweaver-burk-summary"),
+        title: String::from("Lineweaver-Burk double-reciprocal linear diagnostics (1/Y vs 1/X)"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![
+            String::from("Finite pairs (n)"),
+            String::from("Slope (Km / Vmax)"),
+            String::from("Y-intercept (1 / Vmax)"),
+            String::from("R squared"),
+            String::from("Apparent Vmax"),
+            String::from("Apparent Km"),
+        ],
+        row_labels,
+        rows,
+        footnotes: vec![String::from(
+            "Warning (Lineweaver & Burk 1934; Cornish-Bowden 2012): Taking reciprocals (1/X, 1/Y) distorts experimental error structure and disproportionately weights small-concentration observations. Use nonlinear Michaelis-Menten regression on untransformed (X, Y) data for parameter estimation; use Lineweaver-Burk plots for visual inspection only.",
+        )],
+    });
+    sheet.checklist.push(ChecklistItem {
+        assumption: String::from("Lineweaver-Burk reciprocal error distortion"),
+        status: ChecklistStatus::Warn,
+        diagnostic_metric: Some(String::from("Unweighted double-reciprocal (1/X, 1/Y) transform")),
+        explanation: String::from(
+            "Unweighted linear regression on (1/X, 1/Y) severely amplifies measurement noise at small substrate concentrations and yields biased Vmax/Km estimates. Fit nonlinear Michaelis-Menten regression to the raw (X, Y) data for parameter estimation, and reserve the Lineweaver-Burk plot for visual diagnostics.",
+        ),
+        remediation: None,
+    });
 }
 
 pub(crate) fn swap_error_bound_cells(row_cells: &mut [Cell]) -> bool {
@@ -582,5 +721,54 @@ mod tests {
         assert!(title.len() <= MAX_TITLE_BYTES && title.ends_with(" (Normalized)"));
         let tiny = bounded_suffixed_str("abc", "µµµ", 3);
         assert!(tiny.len() <= 3 && tiny == "µ");
+    }
+
+    #[test]
+    fn lineweaver_burk_guards_zeros_labels_axes_and_emits_distortion_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
+        use curvebook_doc::{
+            AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ErrorPropagationMode, PharmacologyTransformPreset, SheetId, SubcolumnMode,
+            TransformAnalysisSpec, XyTable,
+        };
+
+        // Exact Michaelis-Menten curve: Vmax = 100, Km = 2 => v = 100 * S / (2 + S), plus S = 0 row.
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 5)?;
+        xy.x_title = String::from("[S]");
+        xy.data_sets[0].title = String::from("Velocity");
+        let s_vals = [0.0, 1.0, 2.0, 4.0, 8.0];
+        for (r, &s) in s_vals.iter().enumerate() {
+            xy.set_x_cell(r, Cell::number(s))?;
+            let v = if s == 0.0 { 0.0 } else { 100.0 * s / (2.0 + s) };
+            xy.data_sets[0].cells[r][0] = Cell::number(v);
+        }
+        let sheet = DataSheet::new(SheetId::new("xy-lb"), "Enzyme Kinetics", TableArchetype::Xy(xy))?;
+        let spec = AnalysisSpec::new(
+            SheetId::new("res-lb"),
+            SheetId::new("xy-lb"),
+            AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                x_transform: None,
+                y_transform: None,
+                error_propagation: ErrorPropagationMode::FirstOrderDeltaMethod,
+                pharmacology_preset: Some(PharmacologyTransformPreset::LineweaverBurk),
+                interchange_xy: false,
+                zero_x_substitute: None,
+                asymmetric_ci_policy: Default::default(),
+            }),
+        )?;
+        let rs = super::execute_analysis_transform(&sheet, &spec, &TransformContext::default())?;
+        let derived = rs.analyzable_data.as_ref().ok_or("missing derived XY table")?;
+        let TableArchetype::Xy(out_xy) = &derived.archetype else {
+            return Err("expected XY".into());
+        };
+        assert_eq!(out_xy.x_title, "1 / [S]");
+        // Row 0 (S=0, v=0) must be blanked cleanly (never Inf/NaN).
+        assert!(out_xy.x_summary_at(0)?.is_none());
+        assert!(out_xy.data_sets[0].cells[0][0].active_number().is_none());
+        // Exact apparent Vmax = 100, Km = 2 on noiseless Michaelis-Menten data.
+        assert!((rs.lookup_scalar("Apparent Vmax", Some(0)).ok_or("vmax")? - 100.0).abs() < 1e-10);
+        assert!((rs.lookup_scalar("Apparent Km", Some(0)).ok_or("km")? - 2.0).abs() < 1e-10);
+        assert!((rs.lookup_scalar("Lineweaver-Burk R squared", Some(0)).ok_or("r2")? - 1.0).abs() < 1e-12);
+        assert!(rs.tabs.iter().any(|t| t.id == "lineweaver-burk-summary"));
+        assert!(rs.checklist.iter().any(|c| c.status == ChecklistStatus::Warn && c.assumption.contains("distortion")));
+        Ok(())
     }
 }

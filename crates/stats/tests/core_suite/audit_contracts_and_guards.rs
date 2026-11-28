@@ -142,7 +142,7 @@ fn audit_32_unified_selected_data_sets_validation_matrix() {
                 ..Default::default()
             }),
             AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 1, y_column: 0 }),
-            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }),
             AnalysisKind::Multivariate(MultivariateSpec::Pca {
                 standardize: true,
                 parallel_analysis_seed: None,
@@ -519,7 +519,8 @@ fn audit_82_alpha_aware_pvalue_stars_across_all_families() {
     assert_p_stars_ns(&tab_by_id(&r_glm, "glm-linear-params").rows[1][3], "GLM param 99%");
     assert_p_stars_ns(&tab_by_id(&r_glm, "glm-linear-anova").rows[0][4], "GLM ANOVA 99%");
     assert_p_stars_ns(&tab_by_id(&r_glm, "glm-linear-type-iii").rows[0][4], "GLM T3 99%");
-    let r_corr = run_kind_conf(&sh_glm, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }), 99.0).unwrap();
+    let r_corr =
+        run_kind_conf(&sh_glm, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }), 99.0).unwrap();
     assert_p_stars_ns(&tab_by_id(&r_corr, "corr-matrix-p").rows[0][1], "Corr P 99%");
     assert_p_stars_ns(&tab_by_id(&r_corr, "corr-matrix-fdr").rows[0][1], "Corr q 99%");
 

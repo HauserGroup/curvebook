@@ -2475,6 +2475,8 @@ fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> O
             Some((GraphKind::Diagnostic(DiagnosticPlotKind::ParameterCorrelationHeatmap), None, None))
         }
         "diag.lognormal_qq" | "lognormal_qq" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::LognormalQqPlot), None, None)),
+        "diag.dendrogram" | "dendrogram" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::Dendrogram), None, None)),
+        "diag.pca_biplot" | "pca_biplot" | "biplot" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::PcaBiplot), None, None)),
         "xy.scatter" => Some((GraphKind::Xy, None, Some("xy.scatter"))),
         "xy.scatter_line" | "xy_points_connecting" => Some((GraphKind::Xy, None, Some("xy.scatter_line"))),
         "col.bar_replicates" | "col.scatter_bar" => Some((GraphKind::Column, None, Some("col.bar_replicates"))),

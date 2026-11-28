@@ -266,7 +266,7 @@ fn r1_s08_11_malformed_dendrogram_tabs_do_not_panic_under_compile_graph() {
     let corr_spec = AnalysisSpec::new(
         SheetId::new("res-corr"),
         SheetId::new("d-corr"),
-        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }),
     )
     .unwrap();
     let mut corr_res = ResultSheet::new(corr_spec).unwrap();

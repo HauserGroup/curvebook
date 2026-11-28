@@ -802,7 +802,7 @@ fn audit_39_87_91_92_113_multivariate_corr_pca_clustering_and_mi() {
     }
     let r_cm = run_kind(
         &mv_opt_sheet("cm", &[("A", &a), ("B", &b), ("C", &k), ("D", &d)]),
-        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }),
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None }),
     )
     .unwrap();
     assert!(matches!(tab_by_id(&r_cm, "corr-matrix-r").rows[0][2], ResultCell::Empty));
@@ -879,7 +879,7 @@ fn audit_39_87_91_92_113_multivariate_corr_pca_clustering_and_mi() {
 fn audit_fa_sec06_02_multivariate_presummarized_xy_parity_and_horn_pa() {
     // 3. Multivariate pre-summarized guards & XY RawReplicates parity (FA-SEC06-02).
     let mv_specs = [
-        MultivariateSpec::CorrelationMatrix { spearman_rank: false },
+        MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None },
         MultivariateSpec::Pca {
             standardize: true,
             parallel_analysis_seed: None,

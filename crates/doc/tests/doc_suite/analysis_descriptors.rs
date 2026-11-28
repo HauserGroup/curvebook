@@ -8,14 +8,14 @@ use curvebook_doc::analysis::{
     resolve_analysis_descriptor,
 };
 use curvebook_doc::{
-    AnalysisKind, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, BlandAltmanSpec, ClusterDirection, ClusterDistance, ClusterLinkage,
-    ContingencyMethod, ContingencySpec, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmFamily, GlmSpec, GraphKind,
-    GraphSpec, HistogramBinAlignment, HistogramDisplayStyle, HistogramMultiSeriesMode, HistogramSpec, ImportedSnapshotSpec, KMeansAlgorithm,
-    KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec, MultiplicitySpec,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueStackSpec, PassingBablokSpec,
-    PcaRetentionRule, PowerAnalysisSpec, RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec, SimulationNoise, SplineLowessSpec,
-    SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    AnalysisKind, AncovaSpec, AreaUnderCurveSpec, AsymmetricCiTransformPolicy, BlandAltmanSpec, ClusterDirection, ClusterDistance, ClusterLinkage,
+    ContingencyMethod, ContingencySpec, CorrelationMethod, CoxTieMethod, CurveCalculusSpec, DerivedColumnFormula, DescriptiveSpec,
+    ErrorPropagationMode, FactorialAnovaSpec, FractionOfTotalSpec, FrequencyBinningRule, FrequencyDistributionSpec, FrequencyOutputMode, GlmFamily,
+    GlmSpec, GraphKind, GraphSpec, HistogramBinAlignment, HistogramDisplayStyle, HistogramMultiSeriesMode, HistogramSpec, ImportedSnapshotSpec,
+    KMeansAlgorithm, KappaWeighting, LeveneTestSpec, LinearRegressionSpec, MathTransformPreset, MonteCarloSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OutlierSpec,
+    PValueStackSpec, PassingBablokSpec, PcaRetentionRule, PowerAnalysisSpec, RegressionCiMethod, RocSpec, RowStatisticsSpec, SimpleLogisticSpec,
+    SimulationNoise, SplineLowessSpec, SurvivalAnalysisSpec, SurvivalOtherValuePolicy, TableKind, TransformAnalysisSpec, TwoGroupSpec,
 };
 
 fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
@@ -59,7 +59,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
                 ..GlmSpec::default()
             }),
         ),
-        (AnalysisKindId::Multivariate, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
+        (AnalysisKindId::Multivariate, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: None })),
         (AnalysisKindId::LinearRegression, AnalysisKind::LinearRegression(LinearRegressionSpec::default())),
         (AnalysisKindId::NonlinearRegression, AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))),
         (AnalysisKindId::PValueStack, AnalysisKind::PValueStack(PValueStackSpec::default())),
@@ -77,6 +77,7 @@ fn representative_variants() -> Vec<(AnalysisKindId, AnalysisKind)> {
         (AnalysisKindId::CurveCalculus, AnalysisKind::CurveCalculus(CurveCalculusSpec::default())),
         (AnalysisKindId::MonteCarloSimulation, AnalysisKind::MonteCarloSimulation(MonteCarloSpec::default())),
         (AnalysisKindId::FrequencyDistribution, AnalysisKind::FrequencyDistribution(FrequencyDistributionSpec::default())),
+        (AnalysisKindId::Ancova, AnalysisKind::Ancova(AncovaSpec::default())),
     ]
 }
 
@@ -298,7 +299,7 @@ fn sub_enum_variant_keys_are_all_registered_including_pcr_outcome_column() {
             retention_rule: PcaRetentionRule::default(),
             emit_extra_matrices: false,
         }),
-        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true }),
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true, method: Some(CorrelationMethod::KendallTauB) }),
         AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
             distance: ClusterDistance::Euclidean,
@@ -537,12 +538,28 @@ fn r23_additive_extensions_preserve_v8_deserialization_and_round_trip() {
             retain_unselected_columns: true,
         }),
         AnalysisKind::NonlinearRegression(fit),
+        AnalysisKind::Ancova(AncovaSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::HolmBonferroni, ..MultiplicitySpec::default() },
+            ..AncovaSpec::default()
+        }),
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::Duncan, ..MultiplicitySpec::default() },
+            ..OneWayAnovaSpec::default()
+        }),
+        AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false, method: Some(CorrelationMethod::KendallTauB) }),
     ];
     for kind in kinds {
         let json = serde_json::to_string(&kind).expect("serialize R23 AnalysisKind");
         let parsed: AnalysisKind = serde_json::from_str(&json).expect("deserialize R23 AnalysisKind");
         assert_eq!(parsed, kind);
     }
+
+    // Legacy CorrelationMatrix JSON without `method` must still deserialize cleanly.
+    let legacy_corr: AnalysisKind = serde_json::from_str(r#"{"Multivariate":{"CorrelationMatrix":{"spearman_rank":true}}}"#).expect("legacy corr");
+    assert_eq!(legacy_corr, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true, method: None }));
+    assert_eq!(CorrelationMethod::resolve(true, None), CorrelationMethod::Spearman);
+    assert_eq!(CorrelationMethod::resolve(false, None), CorrelationMethod::Pearson);
+    assert_eq!(CorrelationMethod::resolve(false, Some(CorrelationMethod::KendallTauB)), CorrelationMethod::KendallTauB);
 
     for plot in [
         DiagnosticPlotKind::HomoscedasticityPlot,
@@ -551,6 +568,8 @@ fn r23_additive_extensions_preserve_v8_deserialization_and_round_trip() {
         DiagnosticPlotKind::GapStatisticPlot,
         DiagnosticPlotKind::ParameterCorrelationHeatmap,
         DiagnosticPlotKind::LognormalQqPlot,
+        DiagnosticPlotKind::Dendrogram,
+        DiagnosticPlotKind::PcaBiplot,
     ] {
         let json = serde_json::to_string(&plot).expect("serialize DiagnosticPlotKind");
         let parsed: DiagnosticPlotKind = serde_json::from_str(&json).expect("deserialize DiagnosticPlotKind");

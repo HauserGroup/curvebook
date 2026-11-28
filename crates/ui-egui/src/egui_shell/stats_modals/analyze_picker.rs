@@ -483,6 +483,91 @@ fn render_analyze_log_x_scale_warning(
         });
 }
 
+fn render_analyze_outlier_options(
+    ui: &mut Ui,
+    az: &AnalyzeDialogState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Outlier Identification Mode");
+    let is_grubbs = az.outlier_method == "grubbs";
+    if render_modal_radio(ui, tokens, meta, "analyze.outlier.rout", "ROUT (Robust regression + FDR Q%)", !is_grubbs, &ControlEnablement::enabled()) {
+        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("rout") }));
+    }
+    if render_modal_radio(ui, tokens, meta, "analyze.outlier.grubbs", "Grubbs' test (Alpha threshold)", is_grubbs, &ControlEnablement::enabled()) {
+        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("grubbs") }));
+    }
+    let step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "analyze.outlier.param",
+            label: if is_grubbs { "Significance Alpha" } else { "Max Desired FDR Q (%)" },
+            value_text: &if is_grubbs { format!("{:.3}", az.outlier_alpha) } else { format!("{:.1}%", az.outlier_fdr_q_percent) },
+            enablement: &ControlEnablement::enabled(),
+        },
+    );
+    if step < 0 {
+        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { -0.01 } else { -1.0 } }));
+    } else if step > 0 {
+        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { 0.01 } else { 1.0 } }));
+    }
+    if is_grubbs
+        && render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "analyze.outlier.iterative",
+            "Iterative Grubbs (until no outlier)",
+            az.outlier_iterative,
+            &ControlEnablement::enabled(),
+        )
+    {
+        intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleOutlierIterative));
+    }
+}
+
+fn render_analyze_corr_options(ui: &mut Ui, az: &AnalyzeDialogState, tokens: &Tokens, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let resolved_corr = curvebook_doc::CorrelationMethod::resolve(az.corr_spearman_rank, az.corr_method);
+    ui.add_space(6.0);
+    crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "Correlation Options");
+    for (wid, lbl, active) in [
+        ("analyze.corr.pearson", "Pearson r", resolved_corr == curvebook_doc::CorrelationMethod::Pearson),
+        ("analyze.corr.spearman", "Spearman r_s", resolved_corr == curvebook_doc::CorrelationMethod::Spearman),
+        ("analyze.corr.kendall", tr(tokens.locale, "corr.method.kendall"), resolved_corr == curvebook_doc::CorrelationMethod::KendallTauB),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from(wid) });
+        }
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "analyze.correlation_all_pairs",
+        "All pairwise matrix (enables correlation heatmap)",
+        az.correlation_all_pairs,
+        &ControlEnablement::enabled(),
+    ) {
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation_all_pairs") });
+    }
+    if !az.correlation_all_pairs {
+        ui.label(
+            egui::RichText::new("Engine computes all selected column pairs; unchecking disables heatmap graph creation.")
+                .small()
+                .color(tokens.text_muted),
+        );
+    }
+    let heat_en = r7_correlation_heatmap_toggle(az.correlation_all_pairs);
+    if render_modal_checkbox(ui, tokens, meta, "analyze.correlation.heatmap", "Generate correlation heatmap graph", az.correlation_heatmap, &heat_en)
+    {
+        intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation.heatmap") });
+    }
+}
+
 fn render_analyze_entry_specific_options(
     ui: &mut Ui,
     app: &UiApp,
@@ -493,86 +578,51 @@ fn render_analyze_entry_specific_options(
 ) {
     render_analyze_log_x_scale_warning(ui, app, az, tokens, meta, intents);
     if matches!(az.selected_entry_id.as_deref(), Some("stats.outliers" | "outliers")) {
-        ui.add_space(6.0);
-        render_section_title(ui, tokens, "Outlier Identification Mode");
-        let is_grubbs = az.outlier_method == "grubbs";
-        if render_modal_radio(
-            ui,
-            tokens,
-            meta,
-            "analyze.outlier.rout",
-            "ROUT (Robust regression + FDR Q%)",
-            !is_grubbs,
-            &ControlEnablement::enabled(),
-        ) {
-            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("rout") }));
-        }
-        if render_modal_radio(ui, tokens, meta, "analyze.outlier.grubbs", "Grubbs' test (Alpha threshold)", is_grubbs, &ControlEnablement::enabled())
-        {
-            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::SetOutlierMethod { method: String::from("grubbs") }));
-        }
-        let step = render_stepper_row(
-            ui,
-            tokens,
-            meta,
-            StepperSpec {
-                id_prefix: "analyze.outlier.param",
-                label: if is_grubbs { "Significance Alpha" } else { "Max Desired FDR Q (%)" },
-                value_text: &if is_grubbs { format!("{:.3}", az.outlier_alpha) } else { format!("{:.1}%", az.outlier_fdr_q_percent) },
-                enablement: &ControlEnablement::enabled(),
-            },
-        );
-        if step < 0 {
-            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { -0.01 } else { -1.0 } }));
-        } else if step > 0 {
-            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::StepOutlierParam { delta: if is_grubbs { 0.01 } else { 1.0 } }));
-        }
-        if is_grubbs
-            && render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                "analyze.outlier.iterative",
-                "Iterative Grubbs (until no outlier)",
-                az.outlier_iterative,
-                &ControlEnablement::enabled(),
-            )
-        {
-            intents.push(UiIntent::AnalyzePicker(AnalyzePickerIntent::ToggleOutlierIterative));
-        }
+        render_analyze_outlier_options(ui, az, tokens, meta, intents);
     }
     if matches!(az.selected_entry_id.as_deref(), Some("stats.corr_matrix" | "correlation" | "correlation_matrix")) {
-        ui.add_space(6.0);
-        crate::egui_shell::stat_anova_modal::render_section_title(ui, tokens, "Correlation Options");
+        render_analyze_corr_options(ui, az, tokens, meta, intents);
+    }
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.pca" | "pca")) {
+        ui.add_space(4.0);
         if render_modal_checkbox(
             ui,
             tokens,
             meta,
-            "analyze.correlation_all_pairs",
-            "All pairwise matrix (enables correlation heatmap)",
-            az.correlation_all_pairs,
+            "analyze.pca.biplot",
+            tr(tokens.locale, "pca.generate_biplot"),
+            az.pca_biplot,
             &ControlEnablement::enabled(),
         ) {
-            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation_all_pairs") });
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.pca.biplot") });
         }
-        if !az.correlation_all_pairs {
-            ui.label(
-                egui::RichText::new("Engine computes all selected column pairs; unchecking disables heatmap graph creation.")
-                    .small()
-                    .color(tokens.text_muted),
-            );
-        }
-        let heat_en = r7_correlation_heatmap_toggle(az.correlation_all_pairs);
+    }
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.clustering" | "clustering")) {
+        ui.add_space(4.0);
         if render_modal_checkbox(
             ui,
             tokens,
             meta,
-            "analyze.correlation.heatmap",
-            "Generate correlation heatmap graph",
-            az.correlation_heatmap,
-            &heat_en,
+            "analyze.cluster.dendrogram",
+            tr(tokens.locale, "cluster.generate_dendrogram"),
+            az.clustering_dendrogram,
+            &ControlEnablement::enabled(),
         ) {
-            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.correlation.heatmap") });
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.cluster.dendrogram") });
+        }
+    }
+    if matches!(az.selected_entry_id.as_deref(), Some("transform.curve_calculus" | "curve_calculus")) {
+        ui.add_space(4.0);
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "analyze.curve_calculus.create_graph",
+            tr(tokens.locale, "curve_calc.create_graph"),
+            az.curve_calculus_create_graph,
+            &ControlEnablement::enabled(),
+        ) {
+            intents.push(UiIntent::DialogWidgetClick { widget_id: String::from("analyze.curve_calculus.create_graph") });
         }
     }
     if az.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
