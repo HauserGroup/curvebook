@@ -2,23 +2,26 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use curvebook_doc::ids::{MAX_FLOATING_NOTE_BODY_BYTES, MAX_FLOATING_NOTES_PER_SHEET};
 use curvebook_doc::{
-    AnalysisKind, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode, GraphAnnotation,
-    GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem,
-    LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, PartsOfWholeTable, PlacementMode, ProjectDocument, ResultCell, ResultSheet,
-    ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
-    VariableRole, XColumnMode, XyTable, extract_template_hooks, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
-    validate_sheet_cells, validate_subcolumns, validate_title,
+    AnalysisKind, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode, FloatingNote,
+    GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
+    LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, NoteId, PartsOfWholeTable, PlacementMode, ProjectDocument, RectPt,
+    ResultCell, ResultSheet, ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
+    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, extract_template_hooks, validate_cell_grid, validate_data_sets,
+    validate_project_cells, validate_rows, validate_sheet_cells, validate_subcolumns, validate_title,
 };
+use curvebook_palette::Rgba8;
 use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::cmd::graph::parse_rgba8;
 use crate::cmd::helpers::{
     always_enabled, apply_result_tab_metadata_to_sheet, bad_input, bad_input_ptr, clip_safe_title, ensure_sheet_not_frozen, has_result_sheet,
-    link_data_sheet_to_info, parse_sheet_id, remap_analysis_hooks, remap_graph_spec_references, remap_layout_spec_references, require_data_sheet_mut,
-    require_result_sheet, sanitize_title_controls, select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
+    link_data_sheet_to_info, parse_color_string, parse_sheet_id, remap_analysis_hooks, remap_graph_spec_references, remap_layout_spec_references,
+    require_data_sheet_mut, require_result_sheet, sanitize_title_controls, select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{NonEmptyStrSchema, command_schema, command_schema_with_aliases, parse_params};
 use crate::cmd::project::{RecalcSummary, recalculate_dirty_with_links};
@@ -2032,6 +2035,306 @@ fn run_sheet_clear_origin(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOut
     }
 }
 
+// ---------------------------------------------------------------------------
+// Floating Note Commands (`sheet.addFloatingNote`, `sheet.updateFloatingNote`, `sheet.deleteFloatingNote`)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct RectPtInput {
+    /// Left origin coordinate in typographic points.
+    x: f64,
+    /// Top origin coordinate in typographic points.
+    y: f64,
+    /// Horizontal width in typographic points (>= 0).
+    #[schemars(range(min = 0.0))]
+    width: f64,
+    /// Vertical height in typographic points (>= 0).
+    #[schemars(range(min = 0.0))]
+    height: f64,
+}
+
+impl RectPtInput {
+    fn into_rect_pt(self) -> Result<RectPt, EngineError> {
+        if !self.x.is_finite() || !self.y.is_finite() || !self.width.is_finite() || !self.height.is_finite() {
+            return Err(bad_input_ptr("/bounds_pt", "floating note `bounds_pt` coordinates and dimensions must be finite"));
+        }
+        if self.width < 0.0 || self.height < 0.0 {
+            return Err(bad_input_ptr("/bounds_pt", "floating note `bounds_pt` width and height must be >= 0"));
+        }
+        Ok(RectPt { x: self.x, y: self.y, width: self.width, height: self.height })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct AddFloatingNoteParams {
+    /// Target sheet ID in Data, Info, Analyses, Graphs, or Layouts.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Optional explicit note identifier unique within the sheet (auto-generates `note-N` when omitted).
+    #[schemars(length(min = 1))]
+    note_id: Option<String>,
+    /// Markdown body text of the floating note (defaults to empty string).
+    body_markdown: Option<String>,
+    /// Optional explicit placement rectangle `{ x, y, width, height }` in typographic points.
+    bounds_pt: Option<RectPtInput>,
+    /// Fill color preset (`"yellow"`, `"blue"`, `"green"`, `"red"`, `"gray"`), `#RRGGBB` hex, or `Rgba8` object/array.
+    fill_color: Option<Value>,
+    /// Start collapsed as a compact badge when true (defaults to false).
+    minimized: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct UpdateFloatingNoteParams {
+    /// Target sheet ID in Data, Info, Analyses, Graphs, or Layouts.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Identifier of the floating note to update.
+    #[schemars(length(min = 1))]
+    note_id: String,
+    /// Updated Markdown body text.
+    body_markdown: Option<String>,
+    /// Updated placement rectangle `{ x, y, width, height }` in typographic points.
+    bounds_pt: Option<RectPtInput>,
+    /// Updated fill color preset (`"yellow"`, `"blue"`, `"green"`, `"red"`, `"gray"`), `#RRGGBB` hex, or `Rgba8` object/array.
+    fill_color: Option<Value>,
+    /// Updated collapsed state.
+    minimized: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeleteFloatingNoteParams {
+    /// Target sheet ID in Data, Info, Analyses, Graphs, or Layouts.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Identifier of the floating note to delete.
+    #[schemars(length(min = 1))]
+    note_id: String,
+}
+
+fn parse_floating_note_fill(val: &Value) -> Result<Rgba8, EngineError> {
+    if let Some(raw) = val.as_str() {
+        let trimmed = raw.trim();
+        return match trimmed.to_ascii_lowercase().as_str() {
+            "yellow" | "default" => Ok(FloatingNote::DEFAULT_FILL),
+            "blue" => Ok(FloatingNote::BLUE_FILL),
+            "green" => Ok(FloatingNote::GREEN_FILL),
+            "red" => Ok(FloatingNote::RED_FILL),
+            "gray" | "grey" => Ok(FloatingNote::GRAY_FILL),
+            _ if trimmed.starts_with('#') => parse_color_string(trimmed).map_err(|err| {
+                bad_input_ptr("/fill_color", err.message())
+                    .with_remediation("Use `yellow`, `blue`, `green`, `red`, `gray`, `#RRGGBB`, or `{ r, g, b, a }`.")
+            }),
+            _ => Err(bad_input_ptr("/fill_color", format!("unsupported floating note `fill_color` `{raw}`"))
+                .with_remediation("Use `yellow`, `blue`, `green`, `red`, `gray`, `#RRGGBB`, or `{ r, g, b, a }`.")),
+        };
+    }
+    parse_rgba8(val).map_err(|err| {
+        bad_input_ptr("/fill_color", err.message()).with_remediation("Use `yellow`, `blue`, `green`, `red`, `gray`, `#RRGGBB`, or `{ r, g, b, a }`.")
+    })
+}
+
+fn validate_floating_note_body(body: &str) -> Result<(), EngineError> {
+    if body.len() > MAX_FLOATING_NOTE_BODY_BYTES {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("floating note `body_markdown` length {} bytes exceeds maximum {MAX_FLOATING_NOTE_BODY_BYTES} bytes", body.len()),
+        )
+        .with_details(json!({ "pointer": "/body_markdown", "byte_len": body.len(), "max": MAX_FLOATING_NOTE_BODY_BYTES })));
+    }
+    Ok(())
+}
+
+fn next_unique_floating_note_id(notes: &[FloatingNote]) -> Result<NoteId, EngineError> {
+    for n in 1..=10_000_usize {
+        let candidate = format!("note-{n}");
+        if !notes.iter().any(|existing| existing.id.as_str() == candidate) {
+            return Ok(NoteId::new(candidate));
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::ResourceLimit, "unable to allocate unique floating note identifier"))
+}
+
+fn sheet_floating_notes_mut<'a>(doc: &'a mut ProjectDocument, id: &SheetId) -> Result<(SheetSection, &'a mut Vec<FloatingNote>), EngineError> {
+    let section = doc.sheet_section(id).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", id.as_str())))?;
+    match section {
+        SheetSection::Data => {
+            let ds = require_data_sheet_mut(doc, id)?;
+            ensure_sheet_not_frozen(ds)?;
+            Ok((section, &mut ds.floating_notes))
+        }
+        SheetSection::Info => {
+            let info = doc
+                .info_sheet_mut(id)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("info sheet `{}` not found", id.as_str())))?;
+            Ok((section, &mut info.floating_notes))
+        }
+        SheetSection::Analyses => {
+            let rs = doc
+                .result_sheet_mut(id)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", id.as_str())))?;
+            Ok((section, &mut rs.floating_notes))
+        }
+        SheetSection::Graphs => {
+            let gs = doc
+                .graph_sheet_mut(id)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("graph sheet `{}` not found", id.as_str())))?;
+            Ok((section, &mut gs.floating_notes))
+        }
+        SheetSection::Layouts => {
+            let ls = doc
+                .layout_sheet_mut(id)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("layout sheet `{}` not found", id.as_str())))?;
+            Ok((section, &mut ls.floating_notes))
+        }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn default_floating_note_bounds(existing_count: usize) -> RectPt {
+    let offset = 24.0 + 20.0 * (existing_count as f64);
+    RectPt::new(offset, offset, 240.0, 120.0)
+}
+
+fn run_sheet_add_floating_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: AddFloatingNoteParams = parse_params(&command_schema::<AddFloatingNoteParams>(), params)?;
+    let sheet_id = parse_sheet_id(&parsed.sheet_id)?;
+    let body_markdown = parsed.body_markdown.unwrap_or_default();
+    validate_floating_note_body(&body_markdown)?;
+    let fill_color = match parsed.fill_color.as_ref() {
+        Some(v) => parse_floating_note_fill(v)?,
+        None => FloatingNote::DEFAULT_FILL,
+    };
+    let explicit_bounds = parsed.bounds_pt.map(RectPtInput::into_rect_pt).transpose()?;
+    let minimized = parsed.minimized.unwrap_or(false);
+
+    let (section, notes) = sheet_floating_notes_mut(&mut ctx.session.doc, &sheet_id)?;
+    if notes.len() >= MAX_FLOATING_NOTES_PER_SHEET {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("sheet `{}` already has the maximum of {MAX_FLOATING_NOTES_PER_SHEET} floating notes", sheet_id.as_str()),
+        )
+        .with_details(json!({ "sheet_id": sheet_id.as_str(), "count": notes.len(), "max": MAX_FLOATING_NOTES_PER_SHEET })));
+    }
+
+    let note_id = match parsed.note_id {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(bad_input_ptr("/note_id", "floating note `note_id` must not be empty"));
+            }
+            if notes.iter().any(|existing| existing.id.as_str() == raw) {
+                return Err(EngineError::with_code(
+                    ErrorCode::AlreadyExists,
+                    format!("floating note `{raw}` already exists on sheet `{}`", sheet_id.as_str()),
+                )
+                .with_details(json!({ "sheet_id": sheet_id.as_str(), "note_id": raw })));
+            }
+            NoteId::new(raw)
+        }
+        None => next_unique_floating_note_id(notes)?,
+    };
+
+    let bounds_pt = explicit_bounds.unwrap_or_else(|| default_floating_note_bounds(notes.len()));
+    let note = FloatingNote { id: note_id, fill_color, bounds_pt, minimized, body_markdown };
+    note.validate()?;
+
+    let out_id = note.id.as_str().to_owned();
+    let out_bounds = note.bounds_pt;
+    let out_fill = note.fill_color;
+    let out_min = note.minimized;
+    notes.push(note);
+    let note_count = notes.len();
+
+    Ok(CommandOutcome::mutated(
+        "sheet.addFloatingNote",
+        "added floating note",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "section": format!("{section:?}"),
+            "note_id": out_id,
+            "bounds_pt": out_bounds,
+            "fill_color": out_fill,
+            "minimized": out_min,
+            "note_count": note_count,
+        }),
+    ))
+}
+
+fn run_sheet_update_floating_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: UpdateFloatingNoteParams = parse_params(&command_schema::<UpdateFloatingNoteParams>(), params)?;
+    let sheet_id = parse_sheet_id(&parsed.sheet_id)?;
+    if parsed.body_markdown.is_none() && parsed.bounds_pt.is_none() && parsed.fill_color.is_none() && parsed.minimized.is_none() {
+        return Err(bad_input("sheet.updateFloatingNote requires at least one of `body_markdown`, `bounds_pt`, `fill_color`, or `minimized`")
+            .with_remediation("Provide at least one floating note field to update."));
+    }
+    if let Some(ref body) = parsed.body_markdown {
+        validate_floating_note_body(body)?;
+    }
+    let next_bounds = parsed.bounds_pt.map(RectPtInput::into_rect_pt).transpose()?;
+    let next_fill = parsed.fill_color.as_ref().map(parse_floating_note_fill).transpose()?;
+
+    let (section, notes) = sheet_floating_notes_mut(&mut ctx.session.doc, &sheet_id)?;
+    let note = notes.iter_mut().find(|n| n.id.as_str() == parsed.note_id).ok_or_else(|| {
+        EngineError::with_code(ErrorCode::NotFound, format!("floating note `{}` not found on sheet `{}`", parsed.note_id, sheet_id.as_str()))
+            .with_details(json!({ "sheet_id": sheet_id.as_str(), "note_id": parsed.note_id }))
+    })?;
+
+    if let Some(body) = parsed.body_markdown {
+        note.body_markdown = body;
+    }
+    if let Some(bounds) = next_bounds {
+        note.bounds_pt = bounds;
+    }
+    if let Some(fill) = next_fill {
+        note.fill_color = fill;
+    }
+    if let Some(minimized) = parsed.minimized {
+        note.minimized = minimized;
+    }
+    note.validate()?;
+
+    Ok(CommandOutcome::mutated(
+        "sheet.updateFloatingNote",
+        "updated floating note",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "section": format!("{section:?}"),
+            "note_id": note.id.as_str(),
+            "bounds_pt": note.bounds_pt,
+            "fill_color": note.fill_color,
+            "minimized": note.minimized,
+        }),
+    ))
+}
+
+fn run_sheet_delete_floating_note(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: DeleteFloatingNoteParams = parse_params(&command_schema::<DeleteFloatingNoteParams>(), params)?;
+    let sheet_id = parse_sheet_id(&parsed.sheet_id)?;
+
+    let (section, notes) = sheet_floating_notes_mut(&mut ctx.session.doc, &sheet_id)?;
+    let pos = notes.iter().position(|n| n.id.as_str() == parsed.note_id).ok_or_else(|| {
+        EngineError::with_code(ErrorCode::NotFound, format!("floating note `{}` not found on sheet `{}`", parsed.note_id, sheet_id.as_str()))
+            .with_details(json!({ "sheet_id": sheet_id.as_str(), "note_id": parsed.note_id }))
+    })?;
+    let _ = notes.remove(pos);
+    let remaining_notes = notes.len();
+
+    Ok(CommandOutcome::mutated(
+        "sheet.deleteFloatingNote",
+        "deleted floating note",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "section": format!("{section:?}"),
+            "note_id": parsed.note_id,
+            "remaining_notes": remaining_notes,
+        }),
+    ))
+}
+
 static SPECS: &[CommandSpec] = &command_specs!(
     CommandGroup::Sheet;
     {
@@ -2166,6 +2469,39 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: command_schema::<ClearOriginParams>,
         enabled: always_enabled,
         run: run_sheet_clear_origin,
+    },
+    {
+        id: "sheet.addFloatingNote",
+        label: "Add Floating Note",
+        menu_path: "Insert/Floating Note",
+        summary: "Attach a collapsible Markdown floating note callout to any Data, Info, Analysis, Graph, or Layout sheet.",
+        beginner: "Adds a movable sticky note with Markdown text and color presets to the active sheet.",
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: command_schema::<AddFloatingNoteParams>,
+        enabled: always_enabled,
+        run: run_sheet_add_floating_note,
+    },
+    {
+        id: "sheet.updateFloatingNote",
+        label: "Update Floating Note",
+        menu_path: "Format/Floating Note",
+        summary: "Update the Markdown text, bounds, fill color, or minimized state of an existing floating note on a sheet.",
+        beginner: "Edits an existing sticky note's text, position, size, background color, or collapsed state.",
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::IDEMPOTENT),
+        input_schema: command_schema::<UpdateFloatingNoteParams>,
+        enabled: always_enabled,
+        run: run_sheet_update_floating_note,
+    },
+    {
+        id: "sheet.deleteFloatingNote",
+        label: "Delete Floating Note",
+        menu_path: "Edit/Delete Floating Note",
+        summary: "Delete a floating note callout from a Data, Info, Analysis, Graph, or Layout sheet.",
+        beginner: "Removes a sticky note from its owning sheet.",
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
+        input_schema: command_schema::<DeleteFloatingNoteParams>,
+        enabled: always_enabled,
+        run: run_sheet_delete_floating_note,
     },
 );
 

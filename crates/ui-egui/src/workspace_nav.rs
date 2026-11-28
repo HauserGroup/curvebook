@@ -396,6 +396,41 @@ pub const SAMPLE_FIXTURES: &[SampleFixtureDescriptor] = &[
     },
 ];
 
+/// Return concise, original clean-room scientific usage guidance for built-in tutorial sample `fixture_id`.
+#[must_use]
+pub fn sample_fixture_instructional_note(fixture_id: &str) -> Option<&'static str> {
+    match fixture_id {
+        "dose-response-4pl" => Some(
+            "Log[Inhibitor] (M) vs. normalized response in triplicate.\nSuggested next step: Run Analyze > Nonlinear Regression (4PL inhibition) to estimate LogIC50 and Hill slope for Control vs. Mutant.",
+        ),
+        "unpaired-treatment-groups" => Some(
+            "Three independent treatment arms with unpaired replicates.\nSuggested next step: Run Analyze > One-Way ANOVA with Dunnett or Tukey multiple comparisons to test arm differences.",
+        ),
+        "paired-baseline-treatment" => Some(
+            "Matched subject measurements recorded before and after dosing.\nSuggested next step: Run Analyze > Paired t-test or Wilcoxon matched-pairs test to evaluate within-subject change.",
+        ),
+        "two-way-time-treatment" => Some(
+            "Two-factor design crossing Time (h) with Genotype in triplicate.\nSuggested next step: Run Analyze > Two-Way ANOVA to test main effects and the Time x Genotype interaction.",
+        ),
+        "contingency-2x2" => Some(
+            "2x2 integer outcome counts comparing Placebo and Active cohorts.\nSuggested next step: Run Analyze > Contingency (Fisher's exact or chi-square) to compute odds ratio and risk difference.",
+        ),
+        "kaplan-meier-cohorts" => Some(
+            "Elapsed follow-up times coded 1 = event and 0 = censored across two cohorts.\nSuggested next step: Run Analyze > Survival (Kaplan-Meier) with log-rank testing to compare cohort survival curves.",
+        ),
+        "cell-cycle-fractions" => Some(
+            "Single-series phase percentages summing to 100% of the measured population.\nSuggested next step: Inspect proportions in the linked graph or compare observed shares against expected fractions.",
+        ),
+        "clinical-biomarker-cohort" => Some(
+            "Tidy cohort table mixing categorical, continuous, and formula-derived BMI columns.\nSuggested next step: Edit Body Mass or Height_m to watch BMI recalculate, or run Analyze > Multiple Regression.",
+        ),
+        "nested-animal-replicates" => Some(
+            "Subcolumns represent biological subjects and stacked rows hold technical reads.\nSuggested next step: Run Analyze > Nested t-test to partition biological variance from technical variability.",
+        ),
+        _ => None,
+    }
+}
+
 /// Instantiate one of [`SAMPLE_FIXTURES`] as a populated clean-room [`DataSheet`].
 pub fn instantiate_sample_fixture(fixture_id: &str, sheet_id: impl Into<SheetId>) -> Result<DataSheet, DocError> {
     let sheet_id = sheet_id.into();
@@ -2249,5 +2284,17 @@ mod tests {
         assert!(d2.has_duplicate_title);
         assert_ne!(d1.subtitle, d2.subtitle);
         assert_eq!(map[&SheetId::from("g_same")].subtitle.as_deref(), Some("XY"));
+    }
+
+    #[test]
+    fn sample_fixture_instructional_notes_cover_all_nine_fixtures() {
+        assert_eq!(SAMPLE_FIXTURES.len(), 9);
+        for fixture in SAMPLE_FIXTURES {
+            let note =
+                sample_fixture_instructional_note(fixture.id).unwrap_or_else(|| panic!("missing instructional note for fixture `{}`", fixture.id));
+            assert!(!note.trim().is_empty(), "empty instructional note for `{}`", fixture.id);
+            assert!(note.contains("Suggested next step:"), "guidance for `{}` should include actionable next step", fixture.id);
+        }
+        assert_eq!(sample_fixture_instructional_note("nonexistent-fixture"), None);
     }
 }

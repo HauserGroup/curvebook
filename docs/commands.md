@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 116
+Registered commands: 121
 
 ## Project & Files (`project`)
 
@@ -165,6 +165,14 @@ Registered commands: 116
 
 ## Sheets & Pipelines (`sheet`)
 
+### `sheet.addFloatingNote` — Add Floating Note
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Insert/Floating Note`
+- **Summary:** Attach a collapsible Markdown floating note callout to any Data, Info, Analysis, Graph, or Layout sheet.
+- **Beginner note:** Adds a movable sticky note with Markdown text and color presets to the active sheet.
+- **Parameters:** `body_markdown` (string|null), `bounds_pt` (any), `fill_color` (any), `minimized` (boolean|null), `note_id` (string|null), `sheet_id*` (string)
+
 ### `sheet.clearOrigin` — Clear Origin Badge
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
@@ -197,6 +205,14 @@ Registered commands: 116
 - **Summary:** Delete a sheet and optionally cascade to its dependent family.
 - **Beginner note:** Removes a sheet from the project, blocking deletion on frozen sheets or when `cascade: false` with active dependents.
 - **Parameters:** `cascade` (boolean|null), `sheet_id*` (string)
+
+### `sheet.deleteFloatingNote` — Delete Floating Note
+
+- **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA`
+- **Menu:** `Edit/Delete Floating Note`
+- **Summary:** Delete a floating note callout from a Data, Info, Analysis, Graph, or Layout sheet.
+- **Beginner note:** Removes a sticky note from its owning sheet.
+- **Parameters:** `note_id*` (string), `sheet_id*` (string)
 
 ### `sheet.duplicate` — Duplicate Sheet
 
@@ -261,6 +277,14 @@ Registered commands: 116
 - **Summary:** Unlock a frozen DataSheet and recalculate linked dependents.
 - **Beginner note:** Restores mutability to a frozen DataSheet and triggers immediate link/DAG recalculation.
 - **Parameters:** `sheet_id*` (string)
+
+### `sheet.updateFloatingNote` — Update Floating Note
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Floating Note`
+- **Summary:** Update the Markdown text, bounds, fill color, or minimized state of an existing floating note on a sheet.
+- **Beginner note:** Edits an existing sticky note's text, position, size, background color, or collapsed state.
+- **Parameters:** `body_markdown` (string|null), `bounds_pt` (any), `fill_color` (any), `minimized` (boolean|null), `note_id*` (string), `sheet_id*` (string)
 
 ## Data Tables (`table`)
 
@@ -377,6 +401,14 @@ Registered commands: 116
 - **Summary:** Attach a live linked region from an internal sheet or external delimited file and sync immediately.
 - **Beginner note:** Link a range from another sheet or CSV/TSV file so updates flow through automatically.
 - **Parameters:** `anchor` (any), `baseline` (any), `decimal_separator` (string|null), `delimiter` (string|null), `exclude_row_predicate` (string|null), `filter` (any), `link_id` (string|null), `link_spec` (object|null), `mode` (string|null), `normalize_decimal` (boolean|null), `propagate_title_header` (boolean|null), `provenance` (string|null), `skip_contiguous_blanks` (boolean|null), `source_kind` (string|null), `source_path` (string|null), `source_range` (any), `source_sheet_id` (string|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `tab_id` (string|null), `target_sheet_id*` (string), `transpose` (boolean|null)
+
+### `table.pasteTranspose` — Paste Transpose
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Edit/Paste Transpose`
+- **Summary:** Paste delimited clipboard text or a 2D cell grid transposed (swapping rows and columns) into a table.
+- **Beginner note:** Paste tabular data into a table with rows and columns swapped while preserving exclusions and filter options.
+- **Parameters:** `anchor` (any), `decimal_separator` (string|null), `delimiter` (string|null), `filter` (any), `mode` (string|null), `normalize_decimal` (boolean|null), `propagate_title_header` (boolean|null), `rows` (array|null), `sheet_id*` (string), `skip_contiguous_blanks` (boolean|null), `start_col` (integer|null), `start_row` (integer|null), `start_subcol` (integer|null), `text` (string|null)
 
 ### `table.randomSampleRows` — Random Sample Rows
 
@@ -497,6 +529,14 @@ Registered commands: 116
 - **Summary:** Generate a synthetic XY data sheet from a built-in equation, parameter map, and noise model.
 - **Beginner note:** Create synthetic XY curves with optional Gaussian, relative CV, or Poisson noise.
 - **Parameters:** `auto_info` (boolean|null), `cv_percent` (number|null), `equation_id` (string|null), `graph_sheet_id` (string|null), `noise_kind` (string|null), `noise_sd` (number|null), `parameters` (any), `replicates` (integer|null), `row_count` (integer|null), `seed` (integer|null), `sheet_id` (string|null), `title` (string|null), `x_max` (number|null), `x_min` (number|null)
+
+### `table.sortRows` — Sort Rows
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Data/Sort Rows`
+- **Summary:** Stably sort rows of a data table ascending or descending by a column, X/time column, or row titles.
+- **Beginner note:** Reorder rows in a data table by a column, X/time values, or row titles while keeping exclusions, well origins, and graph overrides aligned.
+- **Parameters:** `by` (string|null), `col` (integer|null), `direction` (string|null), `empty_placement` (string|null), `row_end` (integer|null), `row_start` (integer|null), `sheet_id*` (string), `subcol` (integer|null)
 
 ### `table.unlinkCalculatedVariable` — Unlink Calculated Variable
 

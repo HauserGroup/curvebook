@@ -928,6 +928,31 @@ pub(super) fn shift_point_overrides_on_insert_rows(doc: &mut ProjectDocument, sh
     }
 }
 
+/// Remap `PointStyleOverride::point_index` on all graphs targeting `sheet_id`
+/// after permuting rows via `inv_perm[old_row] = new_row`.
+pub(super) fn remap_point_overrides_on_permute_rows(doc: &mut ProjectDocument, sheet_id: &SheetId, inv_perm: &[usize]) {
+    if inv_perm.is_empty() {
+        return;
+    }
+    for gs in &mut doc.graph_sheets {
+        if gs.spec.point_overrides.is_empty() {
+            continue;
+        }
+        let series_list = gs.spec.series.clone();
+        let primary_is_sheet = &gs.spec.primary_source_sheet_id == sheet_id;
+        for ov in &mut gs.spec.point_overrides {
+            let targets_sheet = if !series_list.is_empty() {
+                series_list.get(ov.series_index).is_some_and(|s| s.source_sheet_id == *sheet_id)
+            } else {
+                primary_is_sheet
+            };
+            if targets_sheet && let Some(&new_row) = inv_perm.get(ov.point_index) {
+                ov.point_index = new_row;
+            }
+        }
+    }
+}
+
 fn to_pascal_case(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut new_word = true;

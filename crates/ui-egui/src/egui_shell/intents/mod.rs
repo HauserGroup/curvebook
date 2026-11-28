@@ -337,6 +337,9 @@ pub enum UiIntent {
     GridPasteFromClipboard {
         start_coord: Option<curvebook_tools::GridCellCoord>,
     },
+    GridPasteTransposeFromClipboard {
+        start_coord: Option<curvebook_tools::GridCellCoord>,
+    },
     PasteXCellText {
         sheet_id: SheetId,
         x_row: usize,

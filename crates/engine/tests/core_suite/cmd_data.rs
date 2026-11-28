@@ -776,3 +776,378 @@ fn aud_02_01_02_03_07_11_16_20_data_bounds_frozen_links_simulate_and_rename() {
     let regions = &ds(&s, "lnk").linked_regions;
     assert!(regions.len() == 2 && regions[0].id != regions[1].id);
 }
+
+#[test]
+fn table_paste_transpose_swaps_grid_rejects_transpose_field_and_honors_guards() {
+    let mut session = Session::new();
+    run_cmds(
+        &mut session,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "col-1", "archetype": "column", "cols": 3, "rows": 4 })),
+            ("sheet.createData", json!({ "sheet_id": "src-1", "archetype": "column", "cols": 1, "rows": 2 })),
+            ("table.setCells", json!({ "sheet_id": "src-1", "edits": [{ "row": 0, "col": 0, "value": 7.0 }, { "row": 1, "col": 0, "value": 8.0 }] })),
+        ],
+    );
+
+    let out = ok_cmd(
+        &mut session,
+        "table.pasteTranspose",
+        json!({
+            "sheet_id": "col-1",
+            "text": "1,5;2,75*\n3,25;4,5",
+            "delimiter": ";",
+            "decimal_separator": ",",
+            "anchor": { "row": 0, "col": 0, "subcol": 0 }
+        }),
+    );
+    assert!(out.mutated);
+    assert_eq!(out.payload["transposed"], json!(true));
+    assert_eq!(out.payload["rows_placed"], json!(2));
+    assert_eq!(out.payload["cols_placed"], json!(2));
+    assert_eq!(cell_num(&session, "col-1", 0, 0, 0), Some(1.5));
+    assert_eq!(cell_num(&session, "col-1", 0, 1, 0), Some(3.25));
+    let excl = cell_val(&session, "col-1", 1, 0, 0).expect("transposed excluded");
+    assert_eq!(excl.value, CellValue::Number(2.75));
+    assert!(excl.excluded);
+    assert_eq!(cell_num(&session, "col-1", 1, 1, 0), Some(4.5));
+
+    // Explicit `transpose` parameter is not accepted on `table.pasteTranspose`.
+    assert_bad_input(&mut session, "table.pasteTranspose", json!({ "sheet_id": "col-1", "rows": [[1.0, 2.0]], "transpose": false }));
+
+    // Undo / redo round-trip.
+    assert!(session.undo().expect("undo pasteTranspose"));
+    assert_eq!(cell_num(&session, "col-1", 0, 0, 0), None);
+    assert!(session.redo().expect("redo pasteTranspose"));
+    assert_eq!(cell_num(&session, "col-1", 0, 0, 0), Some(1.5));
+
+    // Overlapping live linked region returns Conflict; frozen sheet returns FrozenSheet.
+    ok_cmd(&mut session, "table.pasteLink", json!({ "target_sheet_id": "col-1", "source_sheet_id": "src-1", "anchor": { "row": 2, "col": 0 } }));
+    assert_err_code(
+        &mut session,
+        "table.pasteTranspose",
+        json!({ "sheet_id": "col-1", "rows": [[9.0, 10.0]], "start_row": 2, "start_col": 0 }),
+        ErrorCode::Conflict,
+    );
+    ok_cmd(&mut session, "sheet.freeze", json!({ "sheet_id": "col-1" }));
+    assert_err_code(&mut session, "table.pasteTranspose", json!({ "sheet_id": "col-1", "rows": [[1.0, 2.0]] }), ErrorCode::FrozenSheet);
+}
+
+#[test]
+fn table_sort_rows_column_ties_exclusions_overrides_and_partial_range() {
+    use curvebook_doc::PlateCellOrigin;
+
+    let mut session = Session::new();
+    run_cmds(
+        &mut session,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "col-1", "kind": "column", "cols": 2, "rows": 5 })),
+            ("table.setRowTitles", json!({ "sheet_id": "col-1", "titles": ["T0", "T1", "T2", "T3", "T4"] })),
+            (
+                "table.setCells",
+                json!({
+                    "sheet_id": "col-1",
+                    "edits": [
+                        { "row": 0, "col": 0, "value": 20.0 },
+                        { "row": 1, "col": 0, "value": null },
+                        { "row": 2, "col": 0, "value": 10.0 },
+                        { "row": 3, "col": 0, "value": 20.0 },
+                        { "row": 4, "col": 0, "value": 5.0 },
+                        { "row": 0, "col": 1, "value": 100.0 },
+                        { "row": 1, "col": 1, "value": 101.0 },
+                        { "row": 2, "col": 1, "value": 102.0 },
+                        { "row": 3, "col": 1, "value": 103.0 },
+                        { "row": 4, "col": 1, "value": 104.0 },
+                    ]
+                }),
+            ),
+            (
+                "table.excludeCellsWithReason",
+                json!({ "sheet_id": "col-1", "coords": [{ "row": 4, "col": 0 }], "reason_tag": "outlier", "note": "low 5", "timestamp_utc": "unix:10" }),
+            ),
+            ("graph.create", json!({ "sheet_id": "gr-1", "data_sheet_id": "col-1", "kind": "column" })),
+            (
+                "graph.formatSelectedPoints",
+                json!({ "sheet_id": "gr-1", "points": [{ "series_index": 0, "point_index": 2 }], "color": "#D55E00", "symbol": "diamond" }),
+            ),
+            ("stats.run", json!({ "sheet_id": "res-desc", "source_sheet_id": "col-1", "kind": "descriptive_stats" })),
+        ],
+    );
+    let mut doc = session.document().clone();
+    doc.data_sheet_mut(&SheetId::new("col-1")).expect("col-1").plate_well_origins = vec![
+        PlateCellOrigin { coord: CellCoord::new(2, 0, 0), well: String::from("B02") },
+        PlateCellOrigin { coord: CellCoord::new(4, 0, 0), well: String::from("E05") },
+    ];
+    let mut session = Session::from_document(doc);
+
+    let sorted = ok_cmd(&mut session, "table.sortRows", json!({ "sheet_id": "col-1", "col": 0 }));
+    assert!(sorted.mutated && sorted.payload["rows_sorted"] == 5 && sorted.payload["changed"] == true && sorted.payload["direction"] == "asc");
+    assert!(sorted.payload["recalculated_sheets"].as_u64().unwrap_or(0) >= 1);
+
+    let TableArchetype::Column(ct) = &ds(&session, "col-1").archetype else { panic!("expected Column") };
+    assert_eq!(ct.row_titles, vec!["T4", "T2", "T0", "T3", "T1"]);
+    assert_eq!(cell_val(&session, "col-1", 0, 0, 0), Some(Cell::excluded_number(5.0)));
+    assert_eq!((cell_num(&session, "col-1", 2, 1, 0), cell_num(&session, "col-1", 3, 1, 0)), (Some(100.0), Some(103.0)));
+    assert!(cell_val(&session, "col-1", 4, 0, 0).is_some_and(|c| c.is_empty()));
+
+    let d_col = ds(&session, "col-1");
+    assert_eq!(d_col.exclusion_notes.len(), 1);
+    assert_eq!((d_col.exclusion_notes[0].coord, d_col.exclusion_notes[0].note.as_str()), (CellCoord::new(0, 0, 0), "low 5"));
+    assert_eq!(
+        d_col.plate_well_origins,
+        vec![
+            PlateCellOrigin { coord: CellCoord::new(0, 0, 0), well: String::from("E05") },
+            PlateCellOrigin { coord: CellCoord::new(1, 0, 0), well: String::from("B02") },
+        ]
+    );
+    assert_eq!(gs(&session, "gr-1").spec.point_overrides[0].point_index, 1);
+
+    let noop = ok_cmd(&mut session, "table.sortRows", json!({ "sheet_id": "col-1", "col": 0 }));
+    assert!(!noop.mutated && noop.payload["changed"] == false);
+
+    ok_cmd(&mut session, "table.sortRows", json!({ "sheet_id": "col-1", "col": 0, "direction": "desc", "empty_placement": "first" }));
+    let TableArchetype::Column(ct_desc) = &ds(&session, "col-1").archetype else { panic!("expected Column") };
+    assert_eq!(ct_desc.row_titles, vec!["T1", "T0", "T3", "T2", "T4"]);
+    assert_eq!(gs(&session, "gr-1").spec.point_overrides[0].point_index, 3);
+
+    assert!(session.undo().expect("undo desc sort"));
+    assert_eq!(gs(&session, "gr-1").spec.point_overrides[0].point_index, 1);
+
+    ok_cmd(&mut session, "table.sortRows", json!({ "sheet_id": "col-1", "by": "row_title", "direction": "desc", "row_start": 1, "row_end": 3 }));
+    let TableArchetype::Column(ct_partial) = &ds(&session, "col-1").archetype else { panic!("expected Column") };
+    assert_eq!(ct_partial.row_titles, vec!["T4", "T3", "T2", "T0", "T1"]);
+}
+
+#[test]
+fn table_sort_rows_replicates_and_presummarized_modes() {
+    let mut s_rep = Session::new();
+    run_cmds(
+        &mut s_rep,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "grp-rep", "kind": "grouped", "cols": 1, "rows": 3, "replicates": 2 })),
+            ("table.setRowTitles", json!({ "sheet_id": "grp-rep", "titles": ["HighMean", "LowMean", "MidMean"] })),
+            (
+                "table.setCells",
+                json!({
+                    "sheet_id": "grp-rep",
+                    "edits": [
+                        { "row": 0, "col": 0, "subcol": 0, "value": 10.0 }, { "row": 0, "col": 0, "subcol": 1, "value": 30.0 },
+                        { "row": 1, "col": 0, "subcol": 0, "value": 12.0 }, { "row": 1, "col": 0, "subcol": 1, "value": 2.0 },
+                        { "row": 2, "col": 0, "subcol": 0, "value": 15.0 }, { "row": 2, "col": 0, "subcol": 1, "value": 15.0 },
+                    ]
+                }),
+            ),
+            ("sheet.createData", json!({ "sheet_id": "grp-sum", "kind": "grouped", "cols": 1, "rows": 2, "subcolumn_mode": "mean_sd_n" })),
+            ("table.setRowTitles", json!({ "sheet_id": "grp-sum", "titles": ["BigMean", "SmallMean"] })),
+            (
+                "table.setCells",
+                json!({
+                    "sheet_id": "grp-sum",
+                    "edits": [
+                        { "row": 0, "col": 0, "subcol": 0, "value": 50.0 }, { "row": 0, "col": 0, "subcol": 1, "value": 1.0 }, { "row": 0, "col": 0, "subcol": 2, "value": 3.0 },
+                        { "row": 1, "col": 0, "subcol": 0, "value": 10.0 }, { "row": 1, "col": 0, "subcol": 1, "value": 99.0 }, { "row": 1, "col": 0, "subcol": 2, "value": 3.0 },
+                    ]
+                }),
+            ),
+        ],
+    );
+    ok_cmd(&mut s_rep, "table.sortRows", json!({ "sheet_id": "grp-rep", "col": 0 }));
+    let TableArchetype::Grouped(gt) = &ds(&s_rep, "grp-rep").archetype else { panic!("expected Grouped") };
+    assert_eq!(gt.row_titles, vec!["LowMean", "MidMean", "HighMean"]);
+
+    ok_cmd(&mut s_rep, "table.sortRows", json!({ "sheet_id": "grp-rep", "col": 0, "subcol": 0 }));
+    let TableArchetype::Grouped(gt2) = &ds(&s_rep, "grp-rep").archetype else { panic!("expected Grouped") };
+    assert_eq!(gt2.row_titles, vec!["HighMean", "LowMean", "MidMean"]);
+
+    ok_cmd(&mut s_rep, "table.sortRows", json!({ "sheet_id": "grp-sum", "col": 0 }));
+    let TableArchetype::Grouped(gs_t) = &ds(&s_rep, "grp-sum").archetype else { panic!("expected Grouped") };
+    assert_eq!(gs_t.row_titles, vec!["SmallMean", "BigMean"]);
+}
+
+#[test]
+fn table_sort_rows_generated_x_calculated_mv_parts_and_link_guards() {
+    use curvebook_doc::{SequenceProgression, SubcolumnMode, XColumnMode, XyTable};
+
+    let mut gen_xy = XyTable::new_with_x_mode(
+        XColumnMode::GeneratedSequence { start: 10.0, step: 5.0, progression: SequenceProgression::Arithmetic },
+        SubcolumnMode::Single,
+        1,
+        3,
+    )
+    .expect("gen xy");
+    gen_xy.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+    let mut gen_doc = ProjectDocument::new("Sort Archetypes").expect("doc");
+    gen_doc.add_data_sheet(curvebook_doc::DataSheet::new("xy-gen", "Gen XY", TableArchetype::Xy(gen_xy)).expect("ds")).expect("add");
+    let mut s_arch = Session::from_document(gen_doc);
+
+    let gen_asc = ok_cmd(&mut s_arch, "table.sortRows", json!({ "sheet_id": "xy-gen", "by": "x", "direction": "asc" }));
+    assert_eq!(gen_asc.payload["changed"], json!(false));
+    assert!(matches!(&ds(&s_arch, "xy-gen").archetype, TableArchetype::Xy(t) if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. })));
+
+    let gen_desc = ok_cmd(&mut s_arch, "table.sortRows", json!({ "sheet_id": "xy-gen", "by": "x", "direction": "desc" }));
+    assert_eq!(gen_desc.payload["changed"], json!(true));
+    let TableArchetype::Xy(xy_after) = &ds(&s_arch, "xy-gen").archetype else { panic!("expected Xy") };
+    assert_eq!(xy_after.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single });
+    assert_eq!((xy_after.x_value_at(0), cell_num(&s_arch, "xy-gen", 0, 0, 0)), (Some(20.0), Some(3.0)));
+    assert_eq!((xy_after.x_value_at(2), cell_num(&s_arch, "xy-gen", 2, 0, 0)), (Some(10.0), Some(1.0)));
+
+    run_cmds(
+        &mut s_arch,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "cols": 2, "rows": 3, "variables": ["Val", "Doubled"] })),
+            (
+                "table.setCells",
+                json!({ "sheet_id": "mv-1", "edits": [{ "row": 0, "col": 0, "value": 30.0 }, { "row": 1, "col": 0, "value": 10.0 }, { "row": 2, "col": 0, "value": 20.0 }] }),
+            ),
+            ("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 1, "formula": "= [Val] * 2" })),
+            ("table.sortRows", json!({ "sheet_id": "mv-1", "col": 0 })),
+            ("sheet.createData", json!({ "sheet_id": "pow-1", "kind": "parts_of_whole", "cols": 1, "rows": 3 })),
+            ("table.setRowTitles", json!({ "sheet_id": "pow-1", "titles": ["Item 10", "Item 2", "Item 1"] })),
+            ("table.sortRows", json!({ "sheet_id": "pow-1", "by": "row_title" })),
+            ("sheet.createData", json!({ "sheet_id": "src-lnk", "kind": "column", "cols": 1, "rows": 2 })),
+            (
+                "table.setCells",
+                json!({ "sheet_id": "src-lnk", "edits": [{ "row": 0, "col": 0, "value": 9.0 }, { "row": 1, "col": 0, "value": 1.0 }] }),
+            ),
+            ("sheet.createData", json!({ "sheet_id": "dst-lnk", "kind": "column", "cols": 1, "rows": 4 })),
+            ("table.pasteLink", json!({ "target_sheet_id": "dst-lnk", "source_sheet_id": "src-lnk", "anchor": { "row": 0, "col": 0 } })),
+            (
+                "table.setCells",
+                json!({ "sheet_id": "dst-lnk", "edits": [{ "row": 2, "col": 0, "value": 40.0 }, { "row": 3, "col": 0, "value": 10.0 }] }),
+            ),
+        ],
+    );
+    assert_eq!((cell_num(&s_arch, "mv-1", 0, 1, 0), cell_num(&s_arch, "mv-1", 2, 1, 0)), (Some(20.0), Some(60.0)));
+    let TableArchetype::PartsOfWhole(pow_t) = &ds(&s_arch, "pow-1").archetype else { panic!("expected PartsOfWhole") };
+    assert_eq!(pow_t.slice_labels, vec!["Item 1", "Item 2", "Item 10"]);
+
+    assert_err_code(&mut s_arch, "table.sortRows", json!({ "sheet_id": "dst-lnk" }), ErrorCode::Conflict);
+    ok_cmd(&mut s_arch, "table.sortRows", json!({ "sheet_id": "dst-lnk", "row_start": 2, "row_end": 3 }));
+    assert_eq!((cell_num(&s_arch, "dst-lnk", 2, 0, 0), cell_num(&s_arch, "dst-lnk", 3, 0, 0)), (Some(10.0), Some(40.0)));
+    ok_cmd(&mut s_arch, "sheet.freeze", json!({ "sheet_id": "dst-lnk" }));
+    assert_err_code(&mut s_arch, "table.sortRows", json!({ "sheet_id": "dst-lnk", "row_start": 2, "row_end": 3 }), ErrorCode::FrozenSheet);
+}
+
+#[test]
+fn sheet_floating_notes_crud_across_all_five_sections_and_presets() {
+    use curvebook_doc::FloatingNote;
+    use curvebook_palette::Rgba8;
+
+    let mut session = Session::new();
+    run_cmds(
+        &mut session,
+        &[
+            (
+                "sheet.createData",
+                json!({ "sheet_id": "d1", "kind": "column", "cols": 2, "rows": 3, "auto_info": true, "info_sheet_id": "i1", "auto_graph": true, "graph_sheet_id": "g1" }),
+            ),
+            ("table.setCells", json!({ "sheet_id": "d1", "edits": [{ "row": 0, "col": 0, "value": 10.0 }, { "row": 1, "col": 0, "value": 20.0 }] })),
+            ("stats.run", json!({ "sheet_id": "r1", "source_sheet_id": "d1", "kind": "descriptive_stats" })),
+            ("layout.create", json!({ "sheet_id": "l1", "title": "Figure 1" })),
+        ],
+    );
+
+    for (sid, color_in, expected_fill) in [
+        ("d1", "yellow", FloatingNote::DEFAULT_FILL),
+        ("i1", "blue", FloatingNote::BLUE_FILL),
+        ("r1", "green", FloatingNote::GREEN_FILL),
+        ("g1", "red", FloatingNote::RED_FILL),
+        ("l1", "gray", FloatingNote::GRAY_FILL),
+    ] {
+        let added = ok_cmd(
+            &mut session,
+            "sheet.addFloatingNote",
+            json!({ "sheet_id": sid, "body_markdown": format!("Note on {sid}"), "fill_color": color_in }),
+        );
+        assert!(added.mutated && added.payload["note_id"] == "note-1");
+        assert_eq!(added.payload["bounds_pt"], json!({ "x": 24.0, "y": 24.0, "width": 240.0, "height": 120.0 }));
+        assert_eq!(serde_json::from_value::<Rgba8>(added.payload["fill_color"].clone()).expect("rgba8"), expected_fill);
+    }
+
+    let n2 = ok_cmd(
+        &mut session,
+        "sheet.addFloatingNote",
+        json!({ "sheet_id": "d1", "body_markdown": "Second note", "fill_color": "#112233", "minimized": true }),
+    );
+    assert_eq!(n2.payload["note_id"], json!("note-2"));
+    assert_eq!(n2.payload["bounds_pt"], json!({ "x": 44.0, "y": 44.0, "width": 240.0, "height": 120.0 }));
+    assert_eq!(ds(&session, "d1").floating_notes[1].fill_color, Rgba8::rgb(0x11, 0x22, 0x33));
+
+    assert_err_code(
+        &mut session,
+        "sheet.addFloatingNote",
+        json!({ "sheet_id": "d1", "note_id": "note-1", "body_markdown": "dup" }),
+        ErrorCode::AlreadyExists,
+    );
+    assert_bad_input(&mut session, "sheet.updateFloatingNote", json!({ "sheet_id": "d1", "note_id": "note-1" }));
+    assert_err_code(
+        &mut session,
+        "sheet.updateFloatingNote",
+        json!({ "sheet_id": "d1", "note_id": "missing", "minimized": true }),
+        ErrorCode::NotFound,
+    );
+    ok_cmd(
+        &mut session,
+        "sheet.updateFloatingNote",
+        json!({
+            "sheet_id": "d1",
+            "note_id": "note-1",
+            "body_markdown": "Updated body",
+            "bounds_pt": { "x": 100.0, "y": 80.0, "width": 300.0, "height": 150.0 },
+            "fill_color": { "r": 220, "g": 252, "b": 231, "a": 255 },
+            "minimized": true
+        }),
+    );
+    let updated = &ds(&session, "d1").floating_notes[0];
+    assert_eq!(
+        (updated.body_markdown.as_str(), updated.bounds_pt, updated.fill_color, updated.minimized),
+        ("Updated body", RectPt::new(100.0, 80.0, 300.0, 150.0), FloatingNote::GREEN_FILL, true)
+    );
+
+    assert_err_code(&mut session, "sheet.deleteFloatingNote", json!({ "sheet_id": "d1", "note_id": "missing" }), ErrorCode::NotFound);
+    let del = ok_cmd(&mut session, "sheet.deleteFloatingNote", json!({ "sheet_id": "d1", "note_id": "note-2" }));
+    assert_eq!(del.payload["remaining_notes"], json!(1));
+    assert!(session.undo().expect("undo delete"));
+    assert_eq!(ds(&session, "d1").floating_notes.len(), 2);
+}
+
+#[test]
+fn sheet_floating_notes_frozen_and_resource_limits() {
+    use curvebook_doc::ids::{MAX_FLOATING_NOTE_BODY_BYTES, MAX_FLOATING_NOTES_PER_SHEET};
+
+    let mut session = Session::new();
+    run_cmds(
+        &mut session,
+        &[
+            ("sheet.createData", json!({ "sheet_id": "d1", "kind": "column", "cols": 1, "rows": 2, "auto_info": true, "info_sheet_id": "i1" })),
+            ("sheet.addFloatingNote", json!({ "sheet_id": "d1", "body_markdown": "initial" })),
+            ("sheet.freeze", json!({ "sheet_id": "d1" })),
+        ],
+    );
+    assert_err_code(&mut session, "sheet.addFloatingNote", json!({ "sheet_id": "d1", "body_markdown": "blocked" }), ErrorCode::FrozenSheet);
+    assert_err_code(
+        &mut session,
+        "sheet.updateFloatingNote",
+        json!({ "sheet_id": "d1", "note_id": "note-1", "minimized": true }),
+        ErrorCode::FrozenSheet,
+    );
+    assert_err_code(&mut session, "sheet.deleteFloatingNote", json!({ "sheet_id": "d1", "note_id": "note-1" }), ErrorCode::FrozenSheet);
+
+    assert_err_code(
+        &mut session,
+        "sheet.addFloatingNote",
+        json!({ "sheet_id": "i1", "body_markdown": "x".repeat(MAX_FLOATING_NOTE_BODY_BYTES + 1) }),
+        ErrorCode::ResourceLimit,
+    );
+    ok_cmd(&mut session, "sheet.addFloatingNote", json!({ "sheet_id": "i1", "body_markdown": "x".repeat(MAX_FLOATING_NOTE_BODY_BYTES) }));
+    assert_err_code(
+        &mut session,
+        "sheet.updateFloatingNote",
+        json!({ "sheet_id": "i1", "note_id": "note-1", "body_markdown": "x".repeat(MAX_FLOATING_NOTE_BODY_BYTES + 1) }),
+        ErrorCode::ResourceLimit,
+    );
+    for _ in 1..MAX_FLOATING_NOTES_PER_SHEET {
+        ok_cmd(&mut session, "sheet.addFloatingNote", json!({ "sheet_id": "i1" }));
+    }
+    assert_eq!(info(&session, "i1").floating_notes.len(), MAX_FLOATING_NOTES_PER_SHEET);
+    assert_err_code(&mut session, "sheet.addFloatingNote", json!({ "sheet_id": "i1" }), ErrorCode::ResourceLimit);
+}

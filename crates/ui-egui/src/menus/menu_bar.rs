@@ -285,6 +285,7 @@ fn build_edit_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "edit.copy", Some("menu.edit.copy"));
     push_action(&mut nodes, app, "ui.clipboard.copyForSlides", None);
     push_action(&mut nodes, app, "edit.paste", Some("menu.edit.paste"));
+    push_action(&mut nodes, app, "table.pasteTranspose", Some("menu.edit.paste_transpose"));
     push_action(&mut nodes, app, "table.pasteLink", Some("menu.edit.paste_link"));
     push_action(&mut nodes, app, "edit.pasteResultTable", None);
     push_action(&mut nodes, app, "edit.pasteImage", None);
@@ -335,6 +336,7 @@ fn build_insert_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "ui.graph.insertModelEquation", None);
     push_action(&mut nodes, app, "graph.insertImage", None);
     push_action(&mut nodes, app, "layout.insertImage", None);
+    push_action(&mut nodes, app, "sheet.addFloatingNote", Some("menu.insert.floating_note"));
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "ui.table.simulateDistributions", Some("menu.insert.simulate_distributions"));
     CuratedMenuSection { menu_key: "menu.insert", title: app.tr("menu.insert"), nodes }
@@ -346,6 +348,11 @@ fn build_data_menu(app: &UiApp) -> CuratedMenuSection {
     push_action(&mut nodes, app, "ui.table.openFormulaBar", None);
     push_action(&mut nodes, app, "ui.table.randomizeGroups", Some("menu.data.randomize_groups"));
     push_action(&mut nodes, app, "ui.table.randomSampleRows", Some("menu.data.random_sample"));
+    let mut sort_children = Vec::new();
+    push_action(&mut sort_children, app, "ui.table.sortRowsAsc", None);
+    push_action(&mut sort_children, app, "ui.table.sortRowsDesc", None);
+    push_action(&mut sort_children, app, "ui.table.sortByRowTitles", None);
+    nodes.push(submenu_node("menu.data.sort_rows", "menu.data.sort_rows", app, sort_children));
     nodes.push(CuratedMenuNode::Separator);
     push_action(&mut nodes, app, "sheet.duplicate", None);
     push_action(&mut nodes, app, "sheet.duplicateFamily", None);

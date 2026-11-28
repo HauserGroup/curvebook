@@ -2274,7 +2274,11 @@ fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, En
     if HybridCoexistenceArbiter::evaluate(app, false).modal_backdrop_active {
         return Err(EngineError::with_code(ErrorCode::Conflict, format!("cannot invoke menu command `{command_id}` while a modal dialog is open")));
     }
-    if let Some(tip) = command_tooltip(app, command_id)
+    let is_sort_ui_cmd = matches!(command_id, "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles");
+    let sort_has_explicit_scope =
+        (is_sort_ui_cmd || command_id == "table.sortRows") && crate::control_io::host_routing::sort_rows_has_explicit_scope(explicit_params);
+    if !sort_has_explicit_scope
+        && let Some(tip) = command_tooltip(app, command_id)
         && !tip.enabled
     {
         return Err(EngineError::with_code(ErrorCode::Conflict, format!("menu command `{command_id}` is currently disabled")));
@@ -2283,7 +2287,22 @@ fn dispatch_gui_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, En
     let (is_ui, result, mutated) = match dispatch_ui_command_as_ui(app, command_id, &cmd_params)? {
         Some(res) => (true, res, false),
         None => {
-            if cmd::registry().get(command_id).is_some() {
+            if is_sort_ui_cmd {
+                if !sort_has_explicit_scope && let Some(reason) = crate::menus::tooltips::sort_rows_disabled_reason(app.session.document()) {
+                    return Err(EngineError::with_code(ErrorCode::Conflict, reason));
+                }
+                let sort_params = crate::control_io::host_routing::build_sort_rows_params(app, command_id, explicit_params);
+                let out = app.execute_session_ui_cmd("table.sortRows", sort_params)?;
+                (false, out.payload, out.mutated)
+            } else if command_id == "table.pasteTranspose" && explicit_params.is_none() {
+                let mut intents = PendingUiIntents::new();
+                intents.push(UiIntent::GridPasteTransposeFromClipboard { start_coord: None });
+                let outcomes = intents.commit_if_settled(app, false)?;
+                match outcomes.into_iter().next() {
+                    Some(crate::egui_shell::UiIntentOutcome::Engine { outcome, .. }) => (false, outcome.payload, outcome.mutated),
+                    _ => (false, json!({}), false),
+                }
+            } else if cmd::registry().get(command_id).is_some() {
                 let out = app.execute_session_ui_cmd(command_id, cmd_params)?;
                 (false, out.payload, out.mutated)
             } else {
@@ -3650,7 +3669,7 @@ fn handle_shell_global_shortcuts(
             return false;
         }
         if app.host_draws_menu_bar
-            && !matches!(cmd, "edit.copy" | "edit.paste" | "edit.pasteImage" | "table.paste" | "ui.clipboard.copyForSlides")
+            && !matches!(cmd, "edit.copy" | "edit.paste" | "edit.pasteImage" | "table.paste" | "table.pasteTranspose" | "ui.clipboard.copyForSlides")
             && (is_desktop_host_routed_command(cmd) || cmd == "app.preferences")
         {
             return false;
@@ -3660,6 +3679,9 @@ fn handle_shell_global_shortcuts(
             "ui.sheet.find" => on_searchable_sheet,
             "ui.clipboard.copyForSlides" => has_renderable_figure,
             "edit.paste" | "edit.pasteImage" | "table.paste" => active_canvas_target.is_some(),
+            "table.pasteTranspose" => {
+                app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)).is_some_and(|ds| !ds.frozen)
+            }
             // Let LeadingDock / TrailingStudio / DataGrid own pane toggles, inline rename, and cell exclude/clear.
             "ui.navigator.toggle"
             | "ui.inspector.toggle"
@@ -3719,6 +3741,10 @@ fn handle_shell_global_shortcuts(
                 if let Some(ref target_id) = active_canvas_target {
                     intents.push(UiIntent::CanvasPaste { target_sheet_id: target_id.clone(), anchor_pt: None });
                 }
+            }
+            "table.pasteTranspose" => {
+                paste_handled = true;
+                intents.push(UiIntent::GridPasteTransposeFromClipboard { start_coord: None });
             }
             "ui.split.toggle" => intents.push_ui("ui.split.toggle", json!({})),
             "ui.pane.cycle" => intents.push_ui("ui.pane.cycle", m.params),

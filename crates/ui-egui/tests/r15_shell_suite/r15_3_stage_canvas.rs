@@ -445,6 +445,122 @@ fn center_stage_floating_note_clamped_reposition_resize_pin_collapse() -> BoxRes
 }
 
 #[test]
+fn floating_note_human_path_create_edit_color_drag_collapse_undo_and_delete() -> BoxRes {
+    let mut app = make_full_project_app()?;
+    app.execute_command("sheet.select", json!({ "sheet_id": "col-1" }))?;
+    app.sync_views();
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1440.0, 760.0, 1.0));
+
+    let col_id = SheetId::new("col-1");
+    assert!(driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.is_empty());
+
+    // 1. Create a Floating Note via Insert > Floating Note menu.
+    driver.click_widget_id("menu.insert")?;
+    driver.click_widget_id("menu.sheet.addFloatingNote")?;
+    let note_id = driver
+        .state()
+        .app
+        .document()
+        .data_sheet(&col_id)
+        .ok_or("missing col-1")?
+        .floating_notes
+        .first()
+        .ok_or("Insert > Floating Note did not attach a note")?
+        .id
+        .as_str()
+        .to_owned();
+    let card_wid = format!("floating_note.col-1.{note_id}.card");
+    let drag_wid = format!("floating_note.col-1.{note_id}.drag_handle");
+    let edit_wid = format!("floating_note.col-1.{note_id}.edit");
+    let editor_wid = format!("floating_note.col-1.{note_id}.editor");
+    let save_wid = format!("floating_note.col-1.{note_id}.save");
+    let color_wid = format!("floating_note.col-1.{note_id}.color");
+    let collapse_wid = format!("floating_note.col-1.{note_id}.collapse");
+    let delete_wid = format!("floating_note.col-1.{note_id}.delete");
+    assert!(driver.frame_meta().find_by_widget_id(&card_wid).is_some(), "floating note card not rendered");
+    assert_clean_parity(&driver, "floating note created via Insert menu")?;
+
+    // 2. Edit inline: click Edit, select-all + type new text in .editor, click Save.
+    driver.click_widget_id(&edit_wid)?;
+    assert!(driver.frame_meta().find_by_widget_id(&editor_wid).is_some(), "inline editor did not open");
+    driver.click_widget_id(&editor_wid)?;
+    driver.press_egui_key(Key::A, Modifiers::COMMAND);
+    driver.type_text("Verified dose-response baseline")?;
+    driver.click_widget_id(&save_wid)?;
+    assert!(driver.state().views.center_stage.editing_floating_note.is_none());
+    let saved_note = driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing saved note")?;
+    assert_eq!(saved_note.body_markdown, "Verified dose-response baseline");
+    assert_eq!(saved_note.fill_color, FloatingNote::DEFAULT_FILL);
+
+    // 3. Cycle note fill color via .color button (yellow -> blue -> green).
+    driver.click_widget_id(&color_wid)?;
+    let blue_fill =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.fill_color;
+    assert_eq!(blue_fill, FloatingNote::BLUE_FILL);
+    driver.click_widget_id(&color_wid)?;
+    let green_fill =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.fill_color;
+    assert_eq!(green_fill, FloatingNote::GREEN_FILL);
+
+    // 4. Drag header and verify bounds_pt persists on ProjectDocument.
+    let before_bounds =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.bounds_pt;
+    let drag_pt = widget_center(&driver, &drag_wid)?;
+    driver.drag(drag_pt, pos2(drag_pt.x + 96.0, drag_pt.y + 64.0))?;
+    let after_drag_bounds =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.bounds_pt;
+    assert!(
+        (after_drag_bounds.x - before_bounds.x).abs() > 20.0 && (after_drag_bounds.y - before_bounds.y).abs() > 20.0,
+        "drag must persist bounds_pt: before={before_bounds:?} after={after_drag_bounds:?}"
+    );
+
+    // 5. Collapse note and verify minimized persists on ProjectDocument.
+    driver.click_widget_id(&collapse_wid)?;
+    let collapsed_note = driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?;
+    assert!(collapsed_note.minimized, "collapse must persist minimized=true");
+    assert!(driver.frame_meta().find_by_widget_id(&card_wid).ok_or("collapsed card")?.clipped_rect.height() <= 28.0);
+
+    // 6. Undo / Redo round-trip for collapse and drag persistence.
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    let after_undo_col = driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?;
+    assert!(!after_undo_col.minimized, "Cmd+Z must undo minimized state");
+    assert!(driver.frame_meta().find_by_widget_id(&card_wid).ok_or("expanded card")?.clipped_rect.height() >= 70.0);
+
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    let after_undo_drag =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.bounds_pt;
+    assert!(
+        (after_undo_drag.x - before_bounds.x).abs() <= 1.0 && (after_undo_drag.y - before_bounds.y).abs() <= 1.0,
+        "Cmd+Z must restore pre-drag bounds_pt: expected={before_bounds:?} got={after_undo_drag:?}"
+    );
+
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    let after_redo_drag =
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.bounds_pt;
+    assert!(
+        (after_redo_drag.x - after_drag_bounds.x).abs() <= 1.0 && (after_redo_drag.y - after_drag_bounds.y).abs() <= 1.0,
+        "Cmd+Shift+Z must redo drag bounds_pt: expected={after_drag_bounds:?} got={after_redo_drag:?}"
+    );
+
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert!(
+        driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.first().ok_or("missing note")?.minimized,
+        "Cmd+Shift+Z must redo minimized state"
+    );
+
+    // 7. Delete via .delete button (and verify Undo restores it).
+    driver.click_widget_id(&delete_wid)?;
+    assert!(driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.is_empty());
+    assert!(driver.frame_meta().find_by_widget_id(&card_wid).is_none());
+
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.len(), 1);
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert!(driver.state().app.document().data_sheet(&col_id).ok_or("missing col-1")?.floating_notes.is_empty());
+    Ok(())
+}
+
+#[test]
 fn center_stage_qol7_bottom_banners_diagnostic_clipping_and_linked() -> BoxRes {
     let mut app = make_full_project_app()?;
     app.execute_command("sheet.select", json!({ "sheet_id": "res-1" }))?;

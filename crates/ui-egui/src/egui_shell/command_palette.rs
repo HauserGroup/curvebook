@@ -670,6 +670,27 @@ fn disabled_reason_for_item(app: &UiApp, item: &UnifiedSearchItem) -> String {
             }
             "edit.undo" => String::from("Nothing to undo"),
             "edit.redo" => String::from("Nothing to redo"),
+            "table.pasteTranspose" => {
+                if doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| ds.frozen) {
+                    String::from("Data sheet is frozen (read-only).")
+                } else {
+                    String::from("Select an unfrozen DataSheet first")
+                }
+            }
+            "sheet.addFloatingNote" => {
+                if doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| ds.frozen) {
+                    String::from("Data sheet is frozen (read-only).")
+                } else {
+                    String::from("Open or select a sheet first")
+                }
+            }
+            "table.sortRows" | "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles" => {
+                if doc.active_sheet_id.is_none() {
+                    String::from("Select a DataSheet first")
+                } else {
+                    crate::menus::tooltips::sort_rows_disabled_reason(doc).unwrap_or("Requires an unfrozen DataSheet with at least 2 rows").to_owned()
+                }
+            }
             _ if doc.data_sheets.is_empty() => String::from("Requires a DataSheet in the active project"),
             _ => String::from("Preconditions not met for active sheet"),
         },
@@ -844,6 +865,10 @@ fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteComm
         "ui.analyze.open" | "ui.grid.excludeWithReason" | "ui.table.convertArchetype.open" | "ui.graph.create.open" | "ui.export.tableCsv.open" => {
             Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_data_sheet_id(doc)) })
         }
+        "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles" => Some(PaletteCommandRoute::UiCommand {
+            command_id: command_id.to_owned(),
+            params: crate::control_io::host_routing::build_sort_rows_params(app, command_id, None),
+        }),
         "ui.table.openFormulaBar" => Some(PaletteCommandRoute::UiCommand {
             command_id: command_id.to_owned(),
             params: sheet_id_param(resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
@@ -938,6 +963,8 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
             is_live_link: false,
             target_sheet_id: resolve_data_sheet_id(doc),
         })),
+        "table.pasteTranspose" => Some(PaletteCommandRoute::DirectIntent(UiIntent::GridPasteTransposeFromClipboard { start_coord: None })),
+        "table.sortRows" => Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.table.sortRowsAsc"), params: json!({}) }),
         "table.pasteLink" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
             origin: ImportOriginKind::Clipboard,
             is_live_link: true,
@@ -960,9 +987,14 @@ fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) 
 fn resolve_palette_sheet_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {
     let eng = |params: Value| Some(PaletteCommandRoute::EngineCommand { command_id: command_id.to_owned(), params });
     match command_id {
-        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" | "sheet.clearOrigin" => {
-            eng(sheet_id_param(resolve_any_sheet_id(doc)))
-        }
+        "sheet.delete"
+        | "sheet.duplicate"
+        | "sheet.duplicateFamily"
+        | "sheet.freeze"
+        | "sheet.unfreeze"
+        | "sheet.select"
+        | "sheet.clearOrigin"
+        | "sheet.addFloatingNote" => eng(sheet_id_param(resolve_any_sheet_id(doc))),
         "graph.create" => {
             let params = match resolve_data_sheet_id(doc) {
                 Some(id) => json!({ "data_sheet_id": id.as_str() }),

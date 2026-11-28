@@ -48,8 +48,9 @@ const DATA_RESULTS_PADDING_PT: f32 = 16.0;
 const SPLITTER_VISUAL_PT: f32 = 4.0;
 const BOTTOM_BANNER_HEIGHT_PT: f32 = 32.0;
 const FLOATING_NOTE_HEADER_H_PT: f32 = 26.0;
-const FLOATING_NOTE_MIN_W_PT: f32 = 160.0;
+const FLOATING_NOTE_MIN_W_PT: f32 = 228.0;
 const FLOATING_NOTE_MIN_H_PT: f32 = 76.0;
+const FLOATING_NOTE_EDIT_MIN_H_PT: f32 = 140.0;
 const FLOATING_NOTE_MARGIN_PT: f32 = 6.0;
 /// Resolved presentation mode for the primary `CenterStage` pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -97,6 +98,14 @@ pub struct ProgressModalState {
     pub cancel_requested: bool,
 }
 
+/// Inline markdown edit draft for an active [`FloatingNote`] card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingNoteEditDraft {
+    pub sheet_id: SheetId,
+    pub note_id: String,
+    pub draft_text: String,
+}
+
 /// Persistent `egui_shell` workspace state owned by `CenterStage` (`R15.3`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CenterStageEguiState {
@@ -130,6 +139,12 @@ pub struct CenterStageEguiState {
     pub note_pinned: BTreeMap<(SheetId, String), bool>,
     /// Active resize corner gesture for a `FloatingNote` card.
     pub active_floating_note_resize: Option<(SheetId, usize)>,
+    /// Active inline markdown edit draft for a `FloatingNote` card.
+    pub editing_floating_note: Option<FloatingNoteEditDraft>,
+    /// Pending initial keyboard focus request when a `FloatingNote` card enters inline edit mode.
+    pub pending_floating_note_edit_focus: Option<(SheetId, String)>,
+    /// Last `app.mutation_seq()` reconciled against local `FloatingNote` drag/resize/collapse caches.
+    pub last_note_sync_mutation_seq: Option<u64>,
     /// Independent `DataGrid` view state when the secondary split pane displays a `DataSheet` (`R20.3`).
     pub secondary_column_grid: ColumnGridEguiState,
     /// Independent `InfoSheet` view state when the secondary split pane displays an `InfoSheet`.
@@ -186,6 +201,9 @@ impl Default for CenterStageEguiState {
             note_collapsed: BTreeMap::new(),
             note_pinned: BTreeMap::new(),
             active_floating_note_resize: None,
+            editing_floating_note: None,
+            pending_floating_note_edit_focus: None,
+            last_note_sync_mutation_seq: None,
             secondary_column_grid: ColumnGridEguiState::default(),
             secondary_info_view: InfoViewEguiState::default(),
             secondary_results_view: ResultsViewEguiState::default(),
@@ -2159,6 +2177,675 @@ struct FloatingNotesSpec<'a> {
     notes_pane_focused: bool,
 }
 
+const FLOATING_NOTE_BLUE_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xDB, 0xEA, 0xFE);
+const FLOATING_NOTE_GREEN_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xDC, 0xFC, 0xE7);
+const FLOATING_NOTE_RED_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xFE, 0xE2, 0xE2);
+const FLOATING_NOTE_GRAY_FILL: curvebook_palette::Rgba8 = curvebook_palette::Rgba8::rgb(0xF1, 0xF5, 0xF9);
+
+fn next_floating_note_color(current: curvebook_palette::Rgba8) -> &'static str {
+    let rgb = (current.r, current.g, current.b);
+    if current.a == 0 || rgb == (FloatingNote::DEFAULT_FILL.r, FloatingNote::DEFAULT_FILL.g, FloatingNote::DEFAULT_FILL.b) {
+        "blue"
+    } else if rgb == (FLOATING_NOTE_BLUE_FILL.r, FLOATING_NOTE_BLUE_FILL.g, FLOATING_NOTE_BLUE_FILL.b) {
+        "green"
+    } else if rgb == (FLOATING_NOTE_GREEN_FILL.r, FLOATING_NOTE_GREEN_FILL.g, FLOATING_NOTE_GREEN_FILL.b) {
+        "red"
+    } else if rgb == (FLOATING_NOTE_RED_FILL.r, FLOATING_NOTE_RED_FILL.g, FLOATING_NOTE_RED_FILL.b) {
+        "gray"
+    } else {
+        "yellow"
+    }
+}
+
+const fn floating_note_preset_rgba(color_name: &str) -> curvebook_palette::Rgba8 {
+    if color_name.eq_ignore_ascii_case("blue") {
+        FLOATING_NOTE_BLUE_FILL
+    } else if color_name.eq_ignore_ascii_case("green") {
+        FLOATING_NOTE_GREEN_FILL
+    } else if color_name.eq_ignore_ascii_case("red") {
+        FLOATING_NOTE_RED_FILL
+    } else if color_name.eq_ignore_ascii_case("gray") {
+        FLOATING_NOTE_GRAY_FILL
+    } else {
+        FloatingNote::DEFAULT_FILL
+    }
+}
+
+fn attach_note_button_tooltip(resp: &egui::Response, tokens: &Tokens, title: &str, enabled: bool, disabled_reason: Option<&str>) {
+    let mut spec = super::ui_kit::TooltipSpec::new(title);
+    if !enabled && let Some(reason) = disabled_reason {
+        spec = spec.with_disabled_reason(reason);
+    }
+    let _ = super::ui_kit::show_tooltip(resp, tokens, spec);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_floating_note_inline_editor(
+    area_ui: &mut egui::Ui,
+    views: &mut EguiShellViewState,
+    sheet_id: &SheetId,
+    note_id: &str,
+    body_rect: Rect,
+    locale: &str,
+    tokens: &Tokens,
+    enabled: bool,
+    can_mutate: bool,
+    mutate_disabled_reason: Option<&str>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let edit_label = tr_or_fallback(locale, "floating_note.edit", "Edit Note");
+    let save_label = tr_or_fallback(locale, "floating_note.save", "Save");
+    let cancel_label = tr_or_fallback(locale, "floating_note.cancel", "Cancel");
+
+    let actions_h = tokens.metrics.min_hit_target_pt;
+    let gap = 4.0_f32;
+    let actions_rect = Rect::from_min_max(pos2(body_rect.left(), (body_rect.bottom() - actions_h).max(body_rect.top())), body_rect.max);
+    let editor_rect = Rect::from_min_max(body_rect.min, pos2(body_rect.right(), (actions_rect.top() - gap).max(body_rect.top() + 24.0)));
+
+    let editor_id = Id::unique(("floating_note_editor", sheet_id.as_str(), note_id));
+    let editor_focused = area_ui.ctx().memory(|m| m.focused() == Some(editor_id));
+    let save_shortcut = can_mutate
+        && editor_focused
+        && area_ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, Key::Enter) || i.consume_key(egui::Modifiers::CTRL, Key::Enter));
+    let cancel_shortcut = enabled && area_ui.ctx().input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape));
+
+    let mut draft_text = views
+        .center_stage
+        .editing_floating_note
+        .as_ref()
+        .filter(|e| &e.sheet_id == sheet_id && e.note_id == note_id)
+        .map(|e| e.draft_text.clone())
+        .unwrap_or_default();
+
+    let mut editor_ui = area_ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("floating_note_editor_wrap", sheet_id.as_str(), note_id))
+            .max_rect(editor_rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    editor_ui.set_clip_rect(editor_rect);
+    let scroll_out = egui::ScrollArea::vertical()
+        .id_salt(("floating_note_editor_scroll", sheet_id.as_str(), note_id))
+        .max_height(editor_rect.height())
+        .auto_shrink([false, false])
+        .show(&mut editor_ui, |scroll_ui| {
+            let te_w = (editor_rect.width() - 12.0).max(40.0);
+            let te_h = (editor_rect.height() - 4.0).max(28.0);
+            let mut te = egui::TextEdit::multiline(&mut draft_text).id(editor_id).desired_width(te_w).desired_rows(3).lock_focus(true);
+            if !can_mutate {
+                te = te.interactive(false);
+            }
+            scroll_ui.add_sized(vec2(te_w, te_h), te)
+        });
+    let editor_resp = scroll_out.inner;
+    let editor_ak = edit_label.to_owned();
+    editor_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::MultilineTextInput, can_mutate, editor_ak.clone()));
+    if views.center_stage.pending_floating_note_edit_focus.as_ref().is_some_and(|(sid, nid)| sid == sheet_id && nid == note_id) {
+        if can_mutate {
+            editor_resp.request_focus();
+        }
+        views.center_stage.pending_floating_note_edit_focus = None;
+    }
+    let editor_wid = format!("floating_note.{}.{}.editor", sheet_id.as_str(), note_id);
+    meta.record_response(
+        &editor_ui,
+        &editor_resp,
+        FrameInspectEntryInput {
+            widget_id: &editor_wid,
+            role: "textbox",
+            label: edit_label,
+            command_id: None,
+            value: Some(json!(draft_text)),
+            enabled: can_mutate,
+            disabled_reason: mutate_disabled_reason,
+            z_layer: ZLayer::FloatingOverlay,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+
+    let mut actions_ui = area_ui.new_child(
+        egui::UiBuilder::new()
+            .id_salt(("floating_note_actions", sheet_id.as_str(), note_id))
+            .max_rect(actions_rect)
+            .layout(egui::Layout::right_to_left(egui::Align::Center)),
+    );
+    actions_ui.set_clip_rect(actions_rect);
+    actions_ui.spacing_mut().item_spacing.x = tokens.metrics.space_sm;
+
+    let save_wid = format!("floating_note.{}.{}.save", sheet_id.as_str(), note_id);
+    let (_, save_clicked) = super::ui_kit::styled_button(
+        &mut actions_ui,
+        tokens,
+        meta,
+        super::ui_kit::StyledButtonSpec {
+            widget_id: &save_wid,
+            role: "button",
+            a11y_role: egui::Role::Button,
+            a11y_selectable: false,
+            label: save_label,
+            tooltip: None,
+            command_id: Some("sheet.updateFloatingNote"),
+            width: super::ui_kit::ButtonWidth::FitText { min_w: 52.0, max_w: 98.0, pad_x: 12.0 },
+            height: tokens.metrics.min_hit_target_pt,
+            font_size: tokens.metrics.font_ui_small_pt,
+            radius: tokens.metrics.radius_sm,
+            text_align: super::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary: true,
+            selected: false,
+            enabled: can_mutate,
+            accent_text_when_selected: false,
+            border_override: None,
+            value: None,
+            disabled_reason: mutate_disabled_reason,
+            z_layer: ZLayer::FloatingOverlay,
+            skip_offscreen: false,
+            clip_interact_to_viewport: false,
+            tooltip_mode: super::ui_kit::TooltipMode::Standard,
+        },
+    );
+
+    let cancel_wid = format!("floating_note.{}.{}.cancel", sheet_id.as_str(), note_id);
+    let (_, cancel_clicked) = super::ui_kit::styled_button(
+        &mut actions_ui,
+        tokens,
+        meta,
+        super::ui_kit::StyledButtonSpec {
+            widget_id: &cancel_wid,
+            role: "button",
+            a11y_role: egui::Role::Button,
+            a11y_selectable: false,
+            label: cancel_label,
+            tooltip: None,
+            command_id: None,
+            width: super::ui_kit::ButtonWidth::FitText { min_w: 56.0, max_w: 98.0, pad_x: 12.0 },
+            height: tokens.metrics.min_hit_target_pt,
+            font_size: tokens.metrics.font_ui_small_pt,
+            radius: tokens.metrics.radius_sm,
+            text_align: super::ui_kit::ButtonTextAlign::Center,
+            break_anywhere: false,
+            primary: false,
+            selected: false,
+            enabled,
+            accent_text_when_selected: false,
+            border_override: None,
+            value: None,
+            disabled_reason: (!enabled).then_some("Blocked by modal"),
+            z_layer: ZLayer::FloatingOverlay,
+            skip_offscreen: false,
+            clip_interact_to_viewport: false,
+            tooltip_mode: super::ui_kit::TooltipMode::Standard,
+        },
+    );
+
+    if (save_clicked || save_shortcut) && can_mutate {
+        intents.push_engine(
+            "sheet.updateFloatingNote",
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "note_id": note_id,
+                "body_markdown": draft_text,
+            }),
+        );
+        views.center_stage.editing_floating_note = None;
+        views.center_stage.pending_floating_note_edit_focus = None;
+        area_ui.ctx().request_repaint();
+    } else if (cancel_clicked || cancel_shortcut) && enabled {
+        views.center_stage.editing_floating_note = None;
+        views.center_stage.pending_floating_note_edit_focus = None;
+        area_ui.ctx().request_repaint();
+    } else if let Some(edit) = views.center_stage.editing_floating_note.as_mut()
+        && &edit.sheet_id == sheet_id
+        && edit.note_id == note_id
+    {
+        edit.draft_text = draft_text;
+    }
+}
+
+struct FloatingNoteCardCtx<'a> {
+    doc: &'a ProjectDocument,
+    sheet_id: &'a SheetId,
+    note: &'a FloatingNote,
+    note_id: &'a str,
+    idx: usize,
+    key: &'a (SheetId, String),
+    sheet_frozen: bool,
+    locale: &'a str,
+    tokens: &'a Tokens,
+    enabled: bool,
+    can_mutate: bool,
+    mutate_disabled_reason: Option<&'a str>,
+    is_editing: bool,
+    collapsed: bool,
+    pinned: bool,
+    pos: egui::Pos2,
+    card_w: f32,
+    card_h: f32,
+    expanded_h: f32,
+    min_h: f32,
+    min_x: f32,
+    max_x: f32,
+    min_y: f32,
+    max_y: f32,
+    stage_bounds: Rect,
+    note_ink: Color32,
+}
+
+fn render_floating_note_drag_header(
+    area_ui: &mut egui::Ui,
+    views: &mut EguiShellViewState,
+    cx: &FloatingNoteCardCtx<'_>,
+    drag_rect: Rect,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let drag_resp = area_ui.interact(
+        drag_rect,
+        Id::unique(("floating_note_drag", cx.sheet_id.as_str(), cx.note_id)),
+        if cx.enabled { Sense::click_and_drag() } else { Sense::hover() },
+    );
+    let enabled = cx.enabled;
+    drag_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Move Floating Note"));
+    if drag_resp.clicked() && cx.enabled {
+        views.center_stage.focused_floating_note_id = Some(cx.note_id.to_owned());
+        intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
+    }
+    if drag_resp.drag_started() && cx.enabled {
+        views.center_stage.active_floating_note_drag = Some((cx.sheet_id.clone(), cx.idx));
+    }
+    if drag_resp.dragged() && cx.enabled {
+        let delta = drag_resp.drag_delta();
+        let next_x = (cx.pos.x + delta.x).clamp(cx.min_x, cx.max_x) - cx.stage_bounds.left();
+        let next_y = (cx.pos.y + delta.y).clamp(cx.min_y, cx.max_y) - cx.stage_bounds.top();
+        views.center_stage.note_positions_pt.insert(cx.key.clone(), [next_x, next_y]);
+    }
+    if drag_resp.drag_stopped() {
+        views.center_stage.active_floating_note_drag = None;
+        if cx.enabled
+            && let Some([nx, ny]) = views.center_stage.note_positions_pt.get(cx.key).copied()
+        {
+            if cx.sheet_frozen {
+                intents.push(UiIntent::SetFloatingNotePosition {
+                    sheet_id: cx.sheet_id.clone(),
+                    note_id: cx.note_id.to_owned(),
+                    pos_pt: [f64::from(nx), f64::from(ny)],
+                });
+            } else {
+                intents.push_engine(
+                    "sheet.updateFloatingNote",
+                    json!({
+                        "sheet_id": cx.sheet_id.as_str(),
+                        "note_id": cx.note_id,
+                        "bounds_pt": {
+                            "x": f64::from(nx),
+                            "y": f64::from(ny),
+                            "width": f64::from(cx.card_w),
+                            "height": f64::from(cx.expanded_h),
+                        },
+                    }),
+                );
+            }
+        }
+    }
+
+    let title_text = format!("Note · {}", cx.note_id);
+    let title_max_w = (drag_rect.width() - cx.tokens.metrics.space_sm - 2.0).max(12.0);
+    let (title_galley, _) = super::ui_kit::elided_galley(
+        area_ui.painter(),
+        &title_text,
+        FontId::proportional(cx.tokens.metrics.font_ui_small_pt),
+        cx.note_ink,
+        title_max_w,
+        false,
+    );
+    let title_pos = pos2(drag_rect.left() + cx.tokens.metrics.space_sm, drag_rect.center().y - title_galley.size().y * 0.5);
+    area_ui.painter().with_clip_rect(drag_rect).galley(title_pos, title_galley, cx.note_ink);
+
+    let drag_wid = format!("floating_note.{}.{}.drag_handle", cx.sheet_id.as_str(), cx.note_id);
+    meta.record_response(
+        area_ui,
+        &drag_resp,
+        inspect_input(&drag_wid, "button", "Move Floating Note", None, None, cx.enabled, ZLayer::FloatingOverlay),
+    );
+}
+
+struct NoteHeaderBtnSpec<'a> {
+    salt: &'static str,
+    rect: Rect,
+    widget_suffix: &'static str,
+    label: &'a str,
+    glyph: Option<&'a str>,
+    swatch_fill: Option<Color32>,
+    command_id: Option<&'a str>,
+    value: Option<serde_json::Value>,
+    active: bool,
+    enabled: bool,
+    disabled_reason: Option<&'a str>,
+    ink: Color32,
+}
+
+fn render_note_header_button(area_ui: &mut egui::Ui, cx: &FloatingNoteCardCtx<'_>, spec: NoteHeaderBtnSpec<'_>, meta: &mut FrameInspectMeta) -> bool {
+    let resp = area_ui.interact(
+        spec.rect,
+        Id::unique((spec.salt, cx.sheet_id.as_str(), cx.note_id)),
+        if spec.enabled { Sense::click() } else { Sense::hover() },
+    );
+    let ak_label = spec.label.to_owned();
+    let enabled = spec.enabled;
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
+
+    let bg = if spec.active {
+        cx.tokens.active_bg
+    } else if resp.hovered() && spec.enabled {
+        cx.tokens.hover_bg
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        area_ui.painter().rect_filled(spec.rect, CornerRadius::same(cx.tokens.metrics.radius_sm), bg);
+    }
+    if let Some(swatch) = spec.swatch_fill {
+        let swatch_rect = Rect::from_center_size(spec.rect.center(), Vec2::splat(10.0));
+        area_ui.painter().rect(swatch_rect, CornerRadius::same(2), swatch, Stroke::new(1.2, spec.ink), StrokeKind::Inside);
+    } else if let Some(glyph) = spec.glyph {
+        area_ui.painter().text(
+            spec.rect.center(),
+            egui::Align2::CENTER_CENTER,
+            glyph,
+            FontId::proportional(cx.tokens.metrics.font_ui_small_pt),
+            spec.ink,
+        );
+    }
+    attach_note_button_tooltip(&resp, cx.tokens, spec.label, spec.enabled, spec.disabled_reason);
+
+    let wid = format!("floating_note.{}.{}.{}", cx.sheet_id.as_str(), cx.note_id, spec.widget_suffix);
+    meta.record_response(
+        area_ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id: &wid,
+            role: "button",
+            label: spec.label,
+            command_id: spec.command_id,
+            value: spec.value,
+            enabled: spec.enabled,
+            disabled_reason: (!spec.enabled).then_some(spec.disabled_reason).flatten(),
+            z_layer: ZLayer::FloatingOverlay,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    resp.clicked() && spec.enabled
+}
+
+fn render_floating_note_header(
+    area_ui: &mut egui::Ui,
+    views: &mut EguiShellViewState,
+    cx: &FloatingNoteCardCtx<'_>,
+    hdr_rect: Rect,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let btn_side = cx.tokens.metrics.min_hit_target_pt;
+    let btn_gap = 2.0_f32;
+    let right_pad = 2.0_f32;
+    let btn_top = hdr_rect.top() + ((FLOATING_NOTE_HEADER_H_PT - btn_side) * 0.5).max(0.0);
+
+    let delete_rect = Rect::from_min_size(pos2(hdr_rect.right() - right_pad - btn_side, btn_top), Vec2::splat(btn_side));
+    let col_rect = Rect::from_min_size(pos2(delete_rect.left() - btn_gap - btn_side, btn_top), Vec2::splat(btn_side));
+    let pin_rect = Rect::from_min_size(pos2(col_rect.left() - btn_gap - btn_side, btn_top), Vec2::splat(btn_side));
+    let color_rect = Rect::from_min_size(pos2(pin_rect.left() - btn_gap - btn_side, btn_top), Vec2::splat(btn_side));
+    let edit_rect = Rect::from_min_size(pos2(color_rect.left() - btn_gap - btn_side, btn_top), Vec2::splat(btn_side));
+    let drag_rect = Rect::from_min_max(hdr_rect.min, pos2((edit_rect.left() - btn_gap).max(hdr_rect.left() + 24.0), hdr_rect.bottom()));
+
+    render_floating_note_drag_header(area_ui, views, cx, drag_rect, meta, intents);
+
+    let btn_ink = if cx.can_mutate { cx.note_ink } else { cx.tokens.text_disabled };
+    let modal_reason = (!cx.enabled).then_some("Blocked by modal");
+
+    let edit_label = tr_or_fallback(cx.locale, "floating_note.edit", "Edit Note");
+    if render_note_header_button(
+        area_ui,
+        cx,
+        NoteHeaderBtnSpec {
+            salt: "floating_note_edit",
+            rect: edit_rect,
+            widget_suffix: "edit",
+            label: edit_label,
+            glyph: Some("E"),
+            swatch_fill: None,
+            command_id: Some("sheet.updateFloatingNote"),
+            value: Some(json!({ "editing": cx.is_editing })),
+            active: cx.is_editing,
+            enabled: cx.can_mutate,
+            disabled_reason: cx.mutate_disabled_reason,
+            ink: btn_ink,
+        },
+        meta,
+    ) {
+        views.center_stage.editing_floating_note =
+            Some(FloatingNoteEditDraft { sheet_id: cx.sheet_id.clone(), note_id: cx.note_id.to_owned(), draft_text: cx.note.body_markdown.clone() });
+        views.center_stage.pending_floating_note_edit_focus = Some(cx.key.clone());
+        views.center_stage.note_collapsed.insert(cx.key.clone(), false);
+        views.center_stage.focused_floating_note_id = Some(cx.note_id.to_owned());
+        area_ui.ctx().request_repaint();
+    }
+
+    let color_label = tr_or_fallback(cx.locale, "floating_note.color", "Cycle Note Color");
+    let next_color = next_floating_note_color(cx.note.fill_color);
+    let swatch_fill = if cx.can_mutate { rgba8_to_color32(floating_note_preset_rgba(next_color)) } else { cx.tokens.panel_bg };
+    if render_note_header_button(
+        area_ui,
+        cx,
+        NoteHeaderBtnSpec {
+            salt: "floating_note_color",
+            rect: color_rect,
+            widget_suffix: "color",
+            label: color_label,
+            glyph: None,
+            swatch_fill: Some(swatch_fill),
+            command_id: Some("sheet.updateFloatingNote"),
+            value: Some(json!({ "next_color": next_color })),
+            active: false,
+            enabled: cx.can_mutate,
+            disabled_reason: cx.mutate_disabled_reason,
+            ink: btn_ink,
+        },
+        meta,
+    ) {
+        intents.push_engine(
+            "sheet.updateFloatingNote",
+            json!({
+                "sheet_id": cx.sheet_id.as_str(),
+                "note_id": cx.note_id,
+                "fill_color": next_color,
+            }),
+        );
+    }
+
+    if render_note_header_button(
+        area_ui,
+        cx,
+        NoteHeaderBtnSpec {
+            salt: "floating_note_pin",
+            rect: pin_rect,
+            widget_suffix: "pin",
+            label: "Pin Floating Note",
+            glyph: Some(if cx.pinned { "P*" } else { "P" }),
+            swatch_fill: None,
+            command_id: None,
+            value: None,
+            active: cx.pinned,
+            enabled: cx.enabled,
+            disabled_reason: modal_reason,
+            ink: cx.note_ink,
+        },
+        meta,
+    ) {
+        views.center_stage.note_pinned.insert(cx.key.clone(), !cx.pinned);
+    }
+
+    let col_label = if cx.collapsed { "Expand Note" } else { "Collapse Note" };
+    if render_note_header_button(
+        area_ui,
+        cx,
+        NoteHeaderBtnSpec {
+            salt: "floating_note_col",
+            rect: col_rect,
+            widget_suffix: "collapse",
+            label: col_label,
+            glyph: Some(if cx.collapsed { "+" } else { "−" }),
+            swatch_fill: None,
+            command_id: (!cx.sheet_frozen).then_some("sheet.updateFloatingNote"),
+            value: None,
+            active: false,
+            enabled: cx.enabled,
+            disabled_reason: modal_reason,
+            ink: cx.note_ink,
+        },
+        meta,
+    ) {
+        let next_collapsed = !cx.collapsed;
+        views.center_stage.note_collapsed.insert(cx.key.clone(), next_collapsed);
+        if next_collapsed && cx.is_editing {
+            views.center_stage.editing_floating_note = None;
+            views.center_stage.pending_floating_note_edit_focus = None;
+        }
+        if cx.sheet_frozen {
+            intents.push(UiIntent::ToggleFloatingNoteCollapsed { sheet_id: cx.sheet_id.clone(), note_id: cx.note_id.to_owned() });
+        } else {
+            intents.push_engine(
+                "sheet.updateFloatingNote",
+                json!({
+                    "sheet_id": cx.sheet_id.as_str(),
+                    "note_id": cx.note_id,
+                    "minimized": next_collapsed,
+                }),
+            );
+        }
+    }
+
+    let delete_label = tr_or_fallback(cx.locale, "floating_note.delete", "Delete Note");
+    if render_note_header_button(
+        area_ui,
+        cx,
+        NoteHeaderBtnSpec {
+            salt: "floating_note_delete",
+            rect: delete_rect,
+            widget_suffix: "delete",
+            label: delete_label,
+            glyph: Some("×"),
+            swatch_fill: None,
+            command_id: Some("sheet.deleteFloatingNote"),
+            value: None,
+            active: false,
+            enabled: cx.can_mutate,
+            disabled_reason: cx.mutate_disabled_reason,
+            ink: btn_ink,
+        },
+        meta,
+    ) {
+        if cx.is_editing {
+            views.center_stage.editing_floating_note = None;
+            views.center_stage.pending_floating_note_edit_focus = None;
+        }
+        intents.push_engine(
+            "sheet.deleteFloatingNote",
+            json!({
+                "sheet_id": cx.sheet_id.as_str(),
+                "note_id": cx.note_id,
+            }),
+        );
+    }
+}
+
+fn render_floating_note_body_and_resize(
+    area_ui: &mut egui::Ui,
+    views: &mut EguiShellViewState,
+    cx: &FloatingNoteCardCtx<'_>,
+    frame_rect: Rect,
+    hdr_rect: Rect,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let body_rect = Rect::from_min_max(
+        pos2(frame_rect.left() + cx.tokens.metrics.space_md, hdr_rect.bottom() + cx.tokens.metrics.space_xs),
+        pos2(frame_rect.right() - cx.tokens.metrics.space_md, frame_rect.bottom() - 14.0),
+    );
+    if cx.is_editing {
+        render_floating_note_inline_editor(
+            area_ui,
+            views,
+            cx.sheet_id,
+            cx.note_id,
+            body_rect,
+            cx.locale,
+            cx.tokens,
+            cx.enabled,
+            cx.can_mutate,
+            cx.mutate_disabled_reason,
+            meta,
+            intents,
+        );
+    } else {
+        let expanded = expand_template_hooks(&cx.note.body_markdown, |tok| resolve_stage_hook(cx.doc, tok));
+        let body_galley =
+            area_ui.painter().layout(expanded, FontId::proportional(cx.tokens.metrics.font_ui_small_pt), cx.note_ink, body_rect.width().max(40.0));
+        area_ui.painter().with_clip_rect(body_rect).galley(body_rect.min, body_galley, cx.note_ink);
+    }
+
+    let resize_rect = Rect::from_min_max(pos2(frame_rect.right() - 14.0, frame_rect.bottom() - 14.0), frame_rect.max);
+    let resize_resp = area_ui.interact(
+        resize_rect,
+        Id::unique(("floating_note_resize", cx.sheet_id.as_str(), cx.note_id)),
+        if cx.enabled { Sense::drag() } else { Sense::hover() },
+    );
+    let enabled = cx.enabled;
+    resize_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Resize Note"));
+    area_ui.painter().line_segment(
+        [pos2(resize_rect.left() + 3.0, resize_rect.bottom() - 3.0), pos2(resize_rect.right() - 3.0, resize_rect.top() + 3.0)],
+        Stroke::new(1.2, cx.tokens.text_muted),
+    );
+    if resize_resp.dragged() && cx.enabled {
+        let d = resize_resp.drag_delta();
+        let avail_max_w = (cx.stage_bounds.right() - cx.pos.x - FLOATING_NOTE_MARGIN_PT).max(FLOATING_NOTE_MIN_W_PT);
+        let avail_max_h = (cx.stage_bounds.bottom() - cx.pos.y - FLOATING_NOTE_MARGIN_PT).max(cx.min_h);
+        let next_w = (cx.card_w + d.x).clamp(FLOATING_NOTE_MIN_W_PT.min(avail_max_w), avail_max_w);
+        let next_h = (cx.card_h + d.y).clamp(cx.min_h.min(avail_max_h), avail_max_h);
+        views.center_stage.note_sizes_pt.insert(cx.key.clone(), [next_w, next_h]);
+        views.center_stage.active_floating_note_resize = Some((cx.sheet_id.clone(), cx.idx));
+    }
+    if resize_resp.drag_stopped() {
+        views.center_stage.active_floating_note_resize = None;
+        if cx.enabled && !cx.sheet_frozen {
+            let [nx, ny] = views
+                .center_stage
+                .note_positions_pt
+                .get(cx.key)
+                .copied()
+                .unwrap_or([cx.pos.x - cx.stage_bounds.left(), cx.pos.y - cx.stage_bounds.top()]);
+            let [nw, nh] = views.center_stage.note_sizes_pt.get(cx.key).copied().unwrap_or([cx.card_w, cx.card_h]);
+            intents.push_engine(
+                "sheet.updateFloatingNote",
+                json!({
+                    "sheet_id": cx.sheet_id.as_str(),
+                    "note_id": cx.note_id,
+                    "bounds_pt": {
+                        "x": f64::from(nx),
+                        "y": f64::from(ny),
+                        "width": f64::from(nw),
+                        "height": f64::from(nh),
+                    },
+                }),
+            );
+        }
+    }
+    let resize_wid = format!("floating_note.{}.{}.resize_handle", cx.sheet_id.as_str(), cx.note_id);
+    meta.record_response(area_ui, &resize_resp, inspect_input(&resize_wid, "button", "Resize Note", None, None, cx.enabled, ZLayer::FloatingOverlay));
+}
+
 fn render_floating_notes_overlay(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -2172,33 +2859,78 @@ fn render_floating_notes_overlay(
         return;
     }
     let doc = app.document();
+    let locale = app.locale.as_str();
+
+    let mutation_seq = app.mutation_seq();
+    if let Some(prev_seq) = views.center_stage.last_note_sync_mutation_seq {
+        if prev_seq != mutation_seq {
+            views.center_stage.last_note_sync_mutation_seq = Some(mutation_seq);
+            if views.center_stage.active_floating_note_drag.is_none() {
+                views.center_stage.note_positions_pt.retain(|(sid, _), _| doc.data_sheet(sid).is_some_and(|ds| ds.frozen));
+            }
+            if views.center_stage.active_floating_note_resize.is_none() {
+                views.center_stage.note_sizes_pt.retain(|(sid, _), _| doc.data_sheet(sid).is_some_and(|ds| ds.frozen));
+            }
+            views.center_stage.note_collapsed.retain(|(sid, _), _| doc.data_sheet(sid).is_some_and(|ds| ds.frozen));
+        }
+    } else {
+        views.center_stage.last_note_sync_mutation_seq = Some(mutation_seq);
+    }
+
+    if let Some(edit) = views.center_stage.editing_floating_note.as_ref() {
+        let edit_sheet_frozen = doc.data_sheet(&edit.sheet_id).is_some_and(|ds| ds.frozen);
+        let edit_still_visible = notes.iter().any(|item| item.sheet_id == edit.sheet_id && item.note.id.as_str() == edit.note_id);
+        if edit_sheet_frozen || !edit_still_visible {
+            views.center_stage.editing_floating_note = None;
+            views.center_stage.pending_floating_note_edit_focus = None;
+        }
+    }
+
     let first_id = notes.first().map(|n| n.note.id.as_str().to_owned());
     if views.center_stage.focused_floating_note_id.is_none() {
         views.center_stage.focused_floating_note_id = first_id;
     }
 
+    let note_ink = rgba8_to_color32(crate::theme::UiThemeSpec::light().text_primary);
     for (idx, item) in notes.iter().enumerate() {
         let sheet_id = &item.sheet_id;
         let note = item.note;
         let note_id = note.id.as_str().to_owned();
         let key = (sheet_id.clone(), note_id.clone());
+        let sheet_frozen = doc.data_sheet(sheet_id).is_some_and(|ds| ds.frozen);
+        let can_mutate = enabled && !sheet_frozen;
+        let mutate_disabled_reason = if !enabled {
+            Some("Blocked by modal")
+        } else if sheet_frozen {
+            Some("Data sheet is frozen (read-only)")
+        } else {
+            None
+        };
 
-        let collapsed = views
-            .center_stage
-            .note_collapsed
-            .get(&key)
-            .copied()
-            .or_else(|| app.nav.floating_notes_collapsed.get(&note_id).copied())
-            .unwrap_or(note.minimized);
+        let is_editing = views.center_stage.editing_floating_note.as_ref().is_some_and(|e| &e.sheet_id == sheet_id && e.note_id == note_id);
+        let collapsed = if is_editing {
+            false
+        } else if sheet_frozen {
+            views
+                .center_stage
+                .note_collapsed
+                .get(&key)
+                .copied()
+                .or_else(|| app.nav.floating_notes_collapsed.get(&note_id).copied())
+                .unwrap_or(note.minimized)
+        } else {
+            views.center_stage.note_collapsed.get(&key).copied().unwrap_or(note.minimized)
+        };
         let pinned = item.pinned;
 
         let [raw_w, raw_h] =
             views.center_stage.note_sizes_pt.get(&key).copied().unwrap_or([note.bounds_pt.width as f32, note.bounds_pt.height as f32]);
+        let min_h = if is_editing { FLOATING_NOTE_EDIT_MIN_H_PT } else { FLOATING_NOTE_MIN_H_PT };
         let max_w = (stage_bounds.width() - FLOATING_NOTE_MARGIN_PT * 2.0).max(FLOATING_NOTE_MIN_W_PT);
-        let max_h = (stage_bounds.height() - FLOATING_NOTE_MARGIN_PT * 2.0).max(FLOATING_NOTE_MIN_H_PT);
+        let max_h = (stage_bounds.height() - FLOATING_NOTE_MARGIN_PT * 2.0).max(min_h);
         let card_w = raw_w.clamp(FLOATING_NOTE_MIN_W_PT.min(max_w), max_w);
-        let card_h =
-            if collapsed { FLOATING_NOTE_HEADER_H_PT } else { (raw_h.max(FLOATING_NOTE_MIN_H_PT)).clamp(FLOATING_NOTE_MIN_H_PT.min(max_h), max_h) };
+        let expanded_h = raw_h.max(FLOATING_NOTE_MIN_H_PT).clamp(FLOATING_NOTE_MIN_H_PT.min(max_h), max_h);
+        let card_h = if collapsed { FLOATING_NOTE_HEADER_H_PT } else { raw_h.max(min_h).clamp(min_h.min(max_h), max_h) };
 
         let [rel_x, rel_y] = views.center_stage.note_positions_pt.get(&key).copied().unwrap_or([note.bounds_pt.x as f32, note.bounds_pt.y as f32]);
 
@@ -2213,6 +2945,35 @@ fn render_floating_notes_overlay(
         let card_rect = Rect::from_min_size(pos, vec2(card_w, card_h));
         let fill = if note.fill_color.a == 0 { rgba8_to_color32(FloatingNote::DEFAULT_FILL) } else { rgba8_to_color32(note.fill_color) };
         let is_focused = notes_pane_focused && views.center_stage.focused_floating_note_id.as_deref() == Some(note_id.as_str());
+
+        let cx = FloatingNoteCardCtx {
+            doc,
+            sheet_id,
+            note,
+            note_id: &note_id,
+            idx,
+            key: &key,
+            sheet_frozen,
+            locale,
+            tokens,
+            enabled,
+            can_mutate,
+            mutate_disabled_reason,
+            is_editing,
+            collapsed,
+            pinned,
+            pos,
+            card_w,
+            card_h,
+            expanded_h,
+            min_h,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+            stage_bounds,
+            note_ink,
+        };
 
         let order = if enabled { Order::Middle } else { Order::Background };
         let area_resp = egui::Area::new(Id::unique(("center_stage_floating_note", sheet_id.as_str(), note_id.as_str())))
@@ -2236,134 +2997,9 @@ fn render_floating_notes_overlay(
                 );
 
                 let hdr_rect = Rect::from_min_max(frame_rect.min, pos2(frame_rect.right(), frame_rect.top() + FLOATING_NOTE_HEADER_H_PT));
-                let drag_rect = Rect::from_min_max(hdr_rect.min, pos2((hdr_rect.right() - 56.0).max(hdr_rect.left() + 40.0), hdr_rect.bottom()));
-                let drag_resp = area_ui.interact(
-                    drag_rect,
-                    Id::unique(("floating_note_drag", sheet_id.as_str(), note_id.as_str())),
-                    if enabled { Sense::click_and_drag() } else { Sense::hover() },
-                );
-                drag_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Move Floating Note"));
-                if drag_resp.clicked() && enabled {
-                    views.center_stage.focused_floating_note_id = Some(note_id.clone());
-                    intents.push(UiIntent::SetFocusPane { pane: ActiveWorkspacePane::FloatingNotes });
-                }
-                if drag_resp.drag_started() && enabled {
-                    views.center_stage.active_floating_note_drag = Some((sheet_id.clone(), idx));
-                }
-                if drag_resp.dragged() && enabled {
-                    let delta = drag_resp.drag_delta();
-                    let next_x = (pos.x + delta.x).clamp(min_x, max_x) - stage_bounds.left();
-                    let next_y = (pos.y + delta.y).clamp(min_y, max_y) - stage_bounds.top();
-                    views.center_stage.note_positions_pt.insert(key.clone(), [next_x, next_y]);
-                }
-                if drag_resp.drag_stopped() && enabled {
-                    views.center_stage.active_floating_note_drag = None;
-                    if let Some([nx, ny]) = views.center_stage.note_positions_pt.get(&key).copied() {
-                        intents.push(UiIntent::SetFloatingNotePosition {
-                            sheet_id: sheet_id.clone(),
-                            note_id: note_id.clone(),
-                            pos_pt: [f64::from(nx), f64::from(ny)],
-                        });
-                    }
-                }
-
-                let note_ink = rgba8_to_color32(crate::theme::UiThemeSpec::light().text_primary);
-                area_ui.painter().text(
-                    drag_rect.left_center() + vec2(tokens.metrics.space_sm, 0.0),
-                    egui::Align2::LEFT_CENTER,
-                    format!("Note · {note_id}"),
-                    FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    note_ink,
-                );
-
-                let btn_side = tokens.metrics.min_hit_target_pt;
-                let pin_rect = Rect::from_min_size(pos2(hdr_rect.right() - 54.0, hdr_rect.top() + 1.0), Vec2::splat(btn_side));
-                let col_rect = Rect::from_min_size(pos2(hdr_rect.right() - 26.0, hdr_rect.top() + 1.0), Vec2::splat(btn_side));
-
-                let pin_resp = area_ui.interact(
-                    pin_rect,
-                    Id::unique(("floating_note_pin", sheet_id.as_str(), note_id.as_str())),
-                    if enabled { Sense::click() } else { Sense::hover() },
-                );
-                pin_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Pin Floating Note"));
-                area_ui.painter().rect_filled(
-                    pin_rect,
-                    CornerRadius::same(tokens.metrics.radius_sm),
-                    if pinned { tokens.active_bg } else { Color32::TRANSPARENT },
-                );
-                area_ui.painter().text(
-                    pin_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if pinned { "P*" } else { "P" },
-                    FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    note_ink,
-                );
-                if pin_resp.clicked() && enabled {
-                    views.center_stage.note_pinned.insert(key.clone(), !pinned);
-                }
-
-                let col_resp = area_ui.interact(
-                    col_rect,
-                    Id::unique(("floating_note_col", sheet_id.as_str(), note_id.as_str())),
-                    if enabled { Sense::click() } else { Sense::hover() },
-                );
-                col_resp.widget_info(move || {
-                    egui::WidgetInfo::labeled(egui::Role::Button, enabled, if collapsed { "Expand Note" } else { "Collapse Note" })
-                });
-                area_ui.painter().text(
-                    col_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    if collapsed { "+" } else { "−" },
-                    FontId::proportional(tokens.metrics.font_ui_small_pt),
-                    note_ink,
-                );
-                if col_resp.clicked() && enabled {
-                    views.center_stage.note_collapsed.insert(key.clone(), !collapsed);
-                    intents.push(UiIntent::ToggleFloatingNoteCollapsed { sheet_id: sheet_id.clone(), note_id: note_id.clone() });
-                }
-
+                render_floating_note_header(area_ui, views, &cx, hdr_rect, meta, intents);
                 if !collapsed {
-                    let body_rect = Rect::from_min_max(
-                        pos2(frame_rect.left() + tokens.metrics.space_md, hdr_rect.bottom() + tokens.metrics.space_xs),
-                        pos2(frame_rect.right() - tokens.metrics.space_md, frame_rect.bottom() - 14.0),
-                    );
-                    let expanded = expand_template_hooks(&note.body_markdown, |tok| resolve_stage_hook(doc, tok));
-                    let body_galley = area_ui.painter().layout(
-                        expanded,
-                        FontId::proportional(tokens.metrics.font_ui_small_pt),
-                        note_ink,
-                        body_rect.width().max(40.0),
-                    );
-                    area_ui.painter().with_clip_rect(body_rect).galley(body_rect.min, body_galley, note_ink);
-
-                    let resize_rect = Rect::from_min_max(pos2(frame_rect.right() - 14.0, frame_rect.bottom() - 14.0), frame_rect.max);
-                    let resize_resp = area_ui.interact(
-                        resize_rect,
-                        Id::unique(("floating_note_resize", sheet_id.as_str(), note_id.as_str())),
-                        if enabled { Sense::drag() } else { Sense::hover() },
-                    );
-                    resize_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, "Resize Note"));
-                    area_ui.painter().line_segment(
-                        [pos2(resize_rect.left() + 3.0, resize_rect.bottom() - 3.0), pos2(resize_rect.right() - 3.0, resize_rect.top() + 3.0)],
-                        Stroke::new(1.2, tokens.text_muted),
-                    );
-                    if resize_resp.dragged() && enabled {
-                        let d = resize_resp.drag_delta();
-                        let avail_max_w = (stage_bounds.right() - pos.x - FLOATING_NOTE_MARGIN_PT).max(FLOATING_NOTE_MIN_W_PT);
-                        let avail_max_h = (stage_bounds.bottom() - pos.y - FLOATING_NOTE_MARGIN_PT).max(FLOATING_NOTE_MIN_H_PT);
-                        let next_w = (card_w + d.x).clamp(FLOATING_NOTE_MIN_W_PT.min(avail_max_w), avail_max_w);
-                        let next_h = (card_h + d.y).clamp(FLOATING_NOTE_MIN_H_PT.min(avail_max_h), avail_max_h);
-                        views.center_stage.note_sizes_pt.insert(key.clone(), [next_w, next_h]);
-                        views.center_stage.active_floating_note_resize = Some((sheet_id.clone(), idx));
-                    } else if resize_resp.drag_stopped() {
-                        views.center_stage.active_floating_note_resize = None;
-                    }
-                    let resize_wid = format!("floating_note.{}.{}.resize_handle", sheet_id.as_str(), note_id);
-                    meta.record_response(
-                        area_ui,
-                        &resize_resp,
-                        inspect_input(&resize_wid, "button", "Resize Note", None, None, enabled, ZLayer::FloatingOverlay),
-                    );
+                    render_floating_note_body_and_resize(area_ui, views, &cx, frame_rect, hdr_rect, meta, intents);
                 }
 
                 let card_wid = format!("floating_note.{}.{}.card", sheet_id.as_str(), note_id);
@@ -2372,32 +3008,6 @@ fn render_floating_notes_overlay(
                     area_ui,
                     &frame_resp,
                     inspect_input(&card_wid, "region", &note_id, None, None, enabled, ZLayer::FloatingOverlay),
-                );
-                let drag_wid = format!("floating_note.{}.{}.drag_handle", sheet_id.as_str(), note_id);
-                meta.record_response(
-                    area_ui,
-                    &drag_resp,
-                    inspect_input(&drag_wid, "button", "Move Floating Note", None, None, enabled, ZLayer::FloatingOverlay),
-                );
-                let col_wid = format!("floating_note.{}.{}.collapse", sheet_id.as_str(), note_id);
-                meta.record_response(
-                    area_ui,
-                    &col_resp,
-                    inspect_input(
-                        &col_wid,
-                        "button",
-                        if collapsed { "Expand Note" } else { "Collapse Note" },
-                        None,
-                        None,
-                        enabled,
-                        ZLayer::FloatingOverlay,
-                    ),
-                );
-                let pin_wid = format!("floating_note.{}.{}.pin", sheet_id.as_str(), note_id);
-                meta.record_response(
-                    area_ui,
-                    &pin_resp,
-                    inspect_input(&pin_wid, "button", "Pin Floating Note", None, None, enabled, ZLayer::FloatingOverlay),
                 );
             });
         if enabled && pinned {
@@ -2548,3 +3158,273 @@ const _: fn(&GraphSheet) -> usize = |g| g.spec.series.len();
 const _: fn(&InfoSheet) -> usize = |i| i.constants.len();
 const _: fn(&LayoutSheet) -> usize = |l| l.spec.items.len();
 const _: fn(&ResultSheet) -> usize = |r| r.tabs.len();
+
+#[cfg(test)]
+mod floating_note_authoring_tests {
+    use super::*;
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, RectPt};
+    use curvebook_engine::Session;
+
+    fn make_app_with_note(frozen: bool) -> UiApp {
+        let mut doc = ProjectDocument::new("Notes Test").unwrap();
+        let mut ds =
+            DataSheet::new("data-1", "Test Sheet", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4).unwrap()))
+                .unwrap();
+        ds.frozen = frozen;
+        ds.floating_notes.push(FloatingNote::new("n1", RectPt::new(20.0, 24.0, 180.0, 90.0), "Initial note text"));
+        doc.data_sheets.push(ds);
+        doc.active_sheet_id = Some(SheetId::new("data-1"));
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        app.sync_views();
+        app
+    }
+
+    fn run_overlay_pass(
+        ctx: &egui::Context,
+        app: &UiApp,
+        views: &mut EguiShellViewState,
+        raw_input: egui::RawInput,
+    ) -> (FrameInspectMeta, PendingUiIntents) {
+        let tokens = Tokens::default();
+        let mut meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::new();
+        let stage_bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 600.0));
+        let mut input = raw_input;
+        input.screen_rect = Some(stage_bounds);
+        let mut out = ctx.run_ui(input, |ui| {
+            let notes = collect_visible_floating_notes(app.document(), app.document().active_sheet_id.as_ref(), &views.center_stage.note_pinned);
+            render_floating_notes_overlay(
+                ui,
+                app,
+                views,
+                FloatingNotesSpec { notes, stage_bounds, tokens: &tokens, enabled: true, notes_pane_focused: true },
+                &mut meta,
+                &mut intents,
+            );
+        });
+        out.textures_delta.clear();
+        (meta, intents)
+    }
+
+    fn click_raw(pos: egui::Pos2) -> [egui::RawInput; 2] {
+        let mut down = egui::RawInput::default();
+        down.events.push(egui::Event::PointerMoved(pos));
+        down.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        let mut up = egui::RawInput::default();
+        up.events.push(egui::Event::PointerMoved(pos));
+        up.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        [down, up]
+    }
+
+    fn click_widget(ctx: &egui::Context, app: &UiApp, views: &mut EguiShellViewState, widget_id: &str) -> (FrameInspectMeta, PendingUiIntents) {
+        let _ = run_overlay_pass(ctx, app, views, egui::RawInput::default());
+        let (meta0, _) = run_overlay_pass(ctx, app, views, egui::RawInput::default());
+        let rect = meta0.find_by_widget_id(widget_id).unwrap_or_else(|| panic!("missing widget {widget_id}")).clipped_rect;
+        let [down, up] = click_raw(rect.center());
+        let _ = run_overlay_pass(ctx, app, views, down);
+        run_overlay_pass(ctx, app, views, up)
+    }
+
+    #[test]
+    fn floating_note_color_cycle_covers_all_presets() {
+        assert_eq!(next_floating_note_color(FloatingNote::DEFAULT_FILL), "blue");
+        assert_eq!(next_floating_note_color(FLOATING_NOTE_BLUE_FILL), "green");
+        assert_eq!(next_floating_note_color(FLOATING_NOTE_GREEN_FILL), "red");
+        assert_eq!(next_floating_note_color(FLOATING_NOTE_RED_FILL), "gray");
+        assert_eq!(next_floating_note_color(FLOATING_NOTE_GRAY_FILL), "yellow");
+        assert_eq!(next_floating_note_color(curvebook_palette::Rgba8::rgba(0, 0, 0, 0)), "blue");
+        assert_eq!(next_floating_note_color(curvebook_palette::Rgba8::rgb(12, 34, 56)), "yellow");
+    }
+
+    #[test]
+    fn floating_note_header_buttons_do_not_overlap_and_emit_authoring_commands() {
+        let app = make_app_with_note(false);
+        let mut views = EguiShellViewState::default();
+        let ctx = egui::Context::default();
+
+        let (meta, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        let card = meta.find_by_widget_id("floating_note.data-1.n1.card").expect("card");
+        assert!(card.clipped_rect.width() >= 220.0, "card width={}", card.clipped_rect.width());
+
+        let header_ids = [
+            "floating_note.data-1.n1.drag_handle",
+            "floating_note.data-1.n1.edit",
+            "floating_note.data-1.n1.color",
+            "floating_note.data-1.n1.pin",
+            "floating_note.data-1.n1.collapse",
+            "floating_note.data-1.n1.delete",
+        ];
+        let rects: Vec<Rect> = header_ids
+            .iter()
+            .map(|id| {
+                let node = meta.find_by_widget_id(id).unwrap_or_else(|| panic!("missing {id}"));
+                assert_eq!(node.z_layer, ZLayer::FloatingOverlay);
+                assert!(node.enabled, "{id} should be enabled");
+                if !id.ends_with(".drag_handle") {
+                    assert!(node.clipped_rect.width() >= 24.0 && node.clipped_rect.height() >= 24.0, "{id} hitbox too small");
+                }
+                node.clipped_rect
+            })
+            .collect();
+        for i in 0..rects.len() {
+            for j in (i + 1)..rects.len() {
+                let inter = rects[i].intersect(rects[j]);
+                assert!(!inter.is_positive(), "header controls {} and {} overlap: {:?}", header_ids[i], header_ids[j], inter);
+            }
+        }
+
+        // Cycle color emits sheet.updateFloatingNote with fill_color: "blue".
+        let (_, color_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.color");
+        assert!(color_intents.intents().iter().any(|i| matches!(
+            i,
+            UiIntent::EngineCommand { command_id, params }
+                if command_id == "sheet.updateFloatingNote"
+                    && params["sheet_id"] == json!("data-1")
+                    && params["note_id"] == json!("n1")
+                    && params["fill_color"] == json!("blue")
+        )));
+
+        // Delete emits sheet.deleteFloatingNote.
+        let (_, del_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.delete");
+        assert!(del_intents.intents().iter().any(|i| matches!(
+            i,
+            UiIntent::EngineCommand { command_id, params }
+                if command_id == "sheet.deleteFloatingNote"
+                    && params["sheet_id"] == json!("data-1")
+                    && params["note_id"] == json!("n1")
+        )));
+
+        // Edit opens inline editor with Save & Cancel; Save emits sheet.updateFloatingNote.
+        let _ = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.edit");
+        assert!(views.center_stage.editing_floating_note.is_some());
+        if let Some(edit) = views.center_stage.editing_floating_note.as_mut() {
+            edit.draft_text = String::from("Updated observation");
+        }
+        let (edit_meta, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        let ed_rect = edit_meta.find_by_widget_id("floating_note.data-1.n1.editor").expect("editor").clipped_rect;
+        let save_rect = edit_meta.find_by_widget_id("floating_note.data-1.n1.save").expect("save").clipped_rect;
+        let cancel_rect = edit_meta.find_by_widget_id("floating_note.data-1.n1.cancel").expect("cancel").clipped_rect;
+        let resize_rect = edit_meta.find_by_widget_id("floating_note.data-1.n1.resize_handle").expect("resize").clipped_rect;
+        assert!(!ed_rect.intersect(save_rect).is_positive());
+        assert!(!save_rect.intersect(cancel_rect).is_positive());
+        assert!(!save_rect.intersect(resize_rect).is_positive());
+
+        let (_, save_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.save");
+        assert!(views.center_stage.editing_floating_note.is_none());
+        assert!(save_intents.intents().iter().any(|i| matches!(
+            i,
+            UiIntent::EngineCommand { command_id, params }
+                if command_id == "sheet.updateFloatingNote"
+                    && params["sheet_id"] == json!("data-1")
+                    && params["note_id"] == json!("n1")
+                    && params["body_markdown"] == json!("Updated observation")
+        )));
+
+        // Cancel exits edit mode without emitting an engine mutation.
+        let _ = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.edit");
+        assert!(views.center_stage.editing_floating_note.is_some());
+        let (_, cancel_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.cancel");
+        assert!(views.center_stage.editing_floating_note.is_none());
+        assert!(cancel_intents.is_empty());
+
+        // Collapse on unfrozen sheet persists via sheet.updateFloatingNote.
+        let (_, col_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.collapse");
+        assert!(col_intents.intents().iter().any(|i| matches!(
+            i,
+            UiIntent::EngineCommand { command_id, params }
+                if command_id == "sheet.updateFloatingNote"
+                    && params["sheet_id"] == json!("data-1")
+                    && params["note_id"] == json!("n1")
+                    && params["minimized"] == json!(true)
+        )));
+    }
+
+    #[test]
+    fn floating_note_frozen_sheet_disables_mutating_actions_and_uses_ephemeral_collapse() {
+        let app = make_app_with_note(true);
+        let mut views = EguiShellViewState::default();
+        let ctx = egui::Context::default();
+
+        let (meta, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        for id in ["floating_note.data-1.n1.edit", "floating_note.data-1.n1.color", "floating_note.data-1.n1.delete"] {
+            let node = meta.find_by_widget_id(id).unwrap_or_else(|| panic!("missing {id}"));
+            assert!(!node.enabled, "{id} must be disabled on frozen sheet");
+            assert!(node.disabled_reason.as_deref().is_some_and(|r| !r.is_empty()), "{id} must explain frozen disabled reason");
+        }
+        assert!(meta.find_by_widget_id("floating_note.data-1.n1.pin").expect("pin").enabled);
+        assert!(meta.find_by_widget_id("floating_note.data-1.n1.collapse").expect("collapse").enabled);
+
+        let (_, col_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-1.n1.collapse");
+        assert!(col_intents.intents().iter().any(|i| matches!(
+            i,
+            UiIntent::ToggleFloatingNoteCollapsed { sheet_id, note_id }
+                if sheet_id.as_str() == "data-1" && note_id == "n1"
+        )));
+        assert!(!col_intents.intents().iter().any(|i| matches!(i, UiIntent::EngineCommand { .. })));
+    }
+
+    #[test]
+    fn floating_note_frozen_nav_collapse_does_not_trap_unfrozen_note_1_collapsed() {
+        let mut doc = ProjectDocument::new("Frozen Collapse Isolation").unwrap();
+        let mut frozen_ds = DataSheet::new(
+            "data-frozen",
+            "Frozen Sheet",
+            TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap()),
+        )
+        .unwrap();
+        frozen_ds.floating_notes.push(FloatingNote::new("note-1", RectPt::new(20.0, 24.0, 240.0, 110.0), "Frozen note"));
+        frozen_ds.frozen = true;
+
+        let mut live_ds =
+            DataSheet::new("data-live", "Live Sheet", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap()))
+                .unwrap();
+        live_ds.floating_notes.push(FloatingNote::new("note-1", RectPt::new(20.0, 24.0, 240.0, 110.0), "Live note"));
+
+        doc.data_sheets.extend([frozen_ds, live_ds]);
+        doc.active_sheet_id = Some(SheetId::new("data-frozen"));
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        app.sync_views();
+
+        let mut views = EguiShellViewState::default();
+        let ctx = egui::Context::default();
+
+        // 1. Collapse "note-1" on the frozen sheet (writes ("note-1", true) into app.nav.floating_notes_collapsed).
+        let (_, mut frozen_col_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-frozen.note-1.collapse");
+        assert!(frozen_col_intents.commit_if_settled(&mut app, false).is_ok());
+        assert_eq!(app.nav.floating_notes_collapsed.get("note-1").copied(), Some(true));
+
+        // 2. Switch to unfrozen "data-live" which also has auto-generated "note-1": it must render expanded.
+        app.execute_command("sheet.select", json!({ "sheet_id": "data-live" })).unwrap();
+        app.sync_views();
+        let (meta_live, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        let live_card = meta_live.find_by_widget_id("floating_note.data-live.note-1.card").expect("live card");
+        assert!(live_card.clipped_rect.height() >= FLOATING_NOTE_MIN_H_PT, "stale frozen nav collapse trapped unfrozen note-1");
+
+        // 3. Collapse then expand "note-1" on "data-live" via persisted engine updates; expand must stay expanded after mutation_seq sync.
+        let (_, mut live_col_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-live.note-1.collapse");
+        assert!(live_col_intents.commit_if_settled(&mut app, false).is_ok());
+        assert!(app.document().data_sheet(&SheetId::new("data-live")).unwrap().floating_notes[0].minimized);
+        let (meta_min, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        assert!(meta_min.find_by_widget_id("floating_note.data-live.note-1.card").expect("collapsed live").clipped_rect.height() <= 28.0);
+
+        let (_, mut live_exp_intents) = click_widget(&ctx, &app, &mut views, "floating_note.data-live.note-1.collapse");
+        assert!(live_exp_intents.commit_if_settled(&mut app, false).is_ok());
+        assert!(!app.document().data_sheet(&SheetId::new("data-live")).unwrap().floating_notes[0].minimized);
+        let (meta_exp, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        assert!(
+            meta_exp.find_by_widget_id("floating_note.data-live.note-1.card").expect("expanded live").clipped_rect.height() >= FLOATING_NOTE_MIN_H_PT,
+            "expanded unfrozen note-1 snapped back to collapsed via app.nav.floating_notes_collapsed"
+        );
+
+        // 4. Unfreezing "data-frozen" itself also restores authoritative persisted minimized=false state.
+        app.execute_command("sheet.select", json!({ "sheet_id": "data-frozen" })).unwrap();
+        app.execute_command("sheet.unfreeze", json!({ "sheet_id": "data-frozen" })).unwrap();
+        app.sync_views();
+        let (meta_unfrozen, _) = run_overlay_pass(&ctx, &app, &mut views, egui::RawInput::default());
+        assert!(
+            meta_unfrozen.find_by_widget_id("floating_note.data-frozen.note-1.card").expect("unfrozen card").clipped_rect.height()
+                >= FLOATING_NOTE_MIN_H_PT,
+            "unfrozen sheet note-1 must follow persisted minimized=false"
+        );
+    }
+}

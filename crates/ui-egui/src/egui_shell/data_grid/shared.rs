@@ -188,11 +188,28 @@ pub(in crate::egui_shell) struct ContextCellTarget {
     pub(super) subcol: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::egui_shell) enum ColHeaderSortTarget {
+    X { subcol: Option<usize> },
+    RowTitle,
+    Column { col: usize, subcol: Option<usize> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::egui_shell) enum GridContextMenuKind {
+    RowCell { row: usize, cell: Option<ContextCellTarget> },
+    ColumnHeader { target: ColHeaderSortTarget, header_label: String },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::egui_shell) struct ContextMenuState {
     pub(super) pos: Pos2,
-    pub(super) row: usize,
-    pub(super) cell: Option<ContextCellTarget>,
+    pub(super) kind: GridContextMenuKind,
+}
+
+pub(super) fn open_col_header_context_menu(fstate: &mut MultiGridFrameState<'_>, pos: Pos2, target: ColHeaderSortTarget, header_label: String) {
+    fstate.aux.active_role_menu_col = None;
+    fstate.state.context_menu = Some(ContextMenuState { pos, kind: GridContextMenuKind::ColumnHeader { target, header_label } });
 }
 
 #[derive(Debug, Clone, Default)]

@@ -646,3 +646,145 @@ fn r20_12_disambiguation_two_line_rows_kind_dropdown_and_multi_select() -> BoxRe
     assert_clean_parity(&driver, "r20_12 multi-select duplicate")?;
     Ok(())
 }
+
+#[test]
+fn welcome_hub_sample_notes_and_clone_override_replicates_human_path() -> BoxRes {
+    use curvebook_doc::{ColumnTable, DataSheet, GroupedTable, NestedTable, ProjectDocument, XyTable};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::workspace_nav::sample_fixture_instructional_note;
+
+    // (a) Tutorial sample optional instructional FloatingNote via welcome.toggle.sample_notes.
+    let mut driver = make_driver(UiApp::new(), 1440.0, 720.0);
+
+    // Unchecked (default) creates 0 floating notes.
+    driver.click_widget_id("welcome.arch.xy")?;
+    driver.click_widget_id("welcome.entry_mode.sample")?;
+    assert!(driver.frame_meta().find_by_widget_id("welcome.toggle.sample_notes").is_some());
+    assert!(!driver.state().views.welcome_hub.schema.include_sample_notes);
+    driver.click_widget_id("welcome.btn.create")?;
+    let ds_plain = driver.state().app.document().data_sheets.last().ok_or("missing sample without notes")?;
+    assert!(ds_plain.floating_notes.is_empty(), "unchecked sample_notes must attach 0 notes");
+
+    // Checked attaches the clean-room instructional FloatingNote and undoes atomically.
+    driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.arch.xy")?;
+    driver.click_widget_id("welcome.entry_mode.sample")?;
+    driver.click_widget_id("welcome.toggle.sample_notes")?;
+    assert!(driver.state().views.welcome_hub.schema.include_sample_notes);
+    let sheets_before_noted = driver.state().app.document().data_sheets.len();
+    driver.click_widget_id("welcome.btn.create")?;
+    let ds_noted = driver.state().app.document().data_sheets.last().ok_or("missing sample with notes")?;
+    assert_eq!(ds_noted.floating_notes.len(), 1, "checked sample_notes must attach 1 instructional FloatingNote");
+    let expected_note = sample_fixture_instructional_note("dose-response-4pl").ok_or("missing fixture note")?;
+    assert_eq!(ds_noted.floating_notes[0].body_markdown, expected_note);
+    let note_card_wid = format!("floating_note.{}.{}.card", ds_noted.id.as_str(), ds_noted.floating_notes[0].id.as_str());
+    assert!(driver.frame_meta().find_by_widget_id(&note_card_wid).is_some(), "instructional FloatingNote card must render");
+
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(driver.state().app.document().data_sheets.len(), sheets_before_noted);
+    drop(driver);
+
+    // (b) Clone Pipeline override_replicates across Xy, Grouped, Nested, Column (disabled), and pre-summarized Grouped.
+    let mut doc = ProjectDocument::new("Clone Replicates Human Path")?;
+    doc.data_sheets.extend([
+        DataSheet::new("xy-src", "XY Source", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(2), 2, 4)?))?,
+        DataSheet::new("grp-src", "Grouped Source", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3)?))?,
+        DataSheet::new("nest-src", "Nested Source", TableArchetype::Nested(NestedTable::new(2, 3, 4)?))?,
+        DataSheet::new("col-src", "Column Source", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4)?))?,
+        DataSheet::new("grp-sum", "Grouped Summary", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::MeanSdN, 2, 3)?))?,
+    ]);
+    doc.active_sheet_id = Some(SheetId::new("xy-src"));
+    let mut clone_app = UiApp::from_session(Session::from_document(doc));
+    clone_app.sync_views();
+    let mut driver = make_driver(clone_app, 1440.0, 720.0);
+
+    // 1. XY source: initial replicates = 2, enable override, step to 4, apply & clone.
+    driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.clone")?;
+    driver.click_widget_id("welcome.clone.source.xy-src")?;
+    driver.click_widget_id("welcome.btn.clone_options")?;
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 2);
+    assert!(driver.frame_meta().find_by_widget_id("welcome.clone.override_replicates").ok_or("override cb")?.enabled);
+    driver.click_widget_id("welcome.clone.override_replicates")?;
+    driver.click_widget_id("welcome.clone.override_replicates_count.inc")?;
+    driver.click_widget_id("welcome.clone.override_replicates_count.inc")?;
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 4);
+    assert_clean_parity(&driver, "clone options submodal with override replicates")?;
+    driver.click_widget_id("welcome.clone_modal.apply")?;
+    driver.click_widget_id("welcome.btn.create")?;
+    match &driver.state().app.document().data_sheets.last().ok_or("cloned xy")?.archetype {
+        TableArchetype::Xy(t) => assert_eq!(t.y_subcolumn_mode, SubcolumnMode::RawReplicates(4)),
+        other => return Err(format!("expected cloned XY, got {:?}", other.kind()).into()),
+    }
+
+    // 2. Grouped source: switches initial replicates to 2, step to 5, apply & clone.
+    driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.clone")?;
+    driver.click_widget_id("welcome.clone.source.grp-src")?;
+    driver.click_widget_id("welcome.btn.clone_options")?;
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 2);
+    if !driver.state().views.welcome_hub.schema.clone_override_replicates {
+        driver.click_widget_id("welcome.clone.override_replicates")?;
+    }
+    for _ in 0..3 {
+        driver.click_widget_id("welcome.clone.override_replicates_count.inc")?;
+    }
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 5);
+    driver.click_widget_id("welcome.clone_modal.apply")?;
+    driver.click_widget_id("welcome.btn.create")?;
+    match &driver.state().app.document().data_sheets.last().ok_or("cloned grouped")?.archetype {
+        TableArchetype::Grouped(t) => assert_eq!(t.subcolumn_mode, SubcolumnMode::RawReplicates(5)),
+        other => return Err(format!("expected cloned Grouped, got {:?}", other.kind()).into()),
+    }
+
+    // 3. Nested source: switches initial biological units to 3, step to 4, apply & clone.
+    driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.clone")?;
+    driver.click_widget_id("welcome.clone.source.nest-src")?;
+    driver.click_widget_id("welcome.btn.clone_options")?;
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 3);
+    if !driver.state().views.welcome_hub.schema.clone_override_replicates {
+        driver.click_widget_id("welcome.clone.override_replicates")?;
+    }
+    driver.click_widget_id("welcome.clone.override_replicates_count.inc")?;
+    assert_eq!(driver.state().views.welcome_hub.schema.clone_override_replicates_count, 4);
+    driver.click_widget_id("welcome.clone_modal.apply")?;
+    driver.click_widget_id("welcome.btn.create")?;
+    match &driver.state().app.document().data_sheets.last().ok_or("cloned nested")?.archetype {
+        TableArchetype::Nested(t) => assert_eq!(t.groups[0].biological_unit_count(), 4),
+        other => return Err(format!("expected cloned Nested, got {:?}", other.kind()).into()),
+    }
+
+    // 4. Column source: override_replicates is disabled with clear disabled_reason and forced false.
+    driver.click_widget_id("toolbar.home")?;
+    driver.click_widget_id("welcome.mode.clone")?;
+    driver.click_widget_id("welcome.clone.source.col-src")?;
+    driver.click_widget_id("welcome.btn.clone_options")?;
+    let col_ov = driver.frame_meta().find_by_widget_id("welcome.clone.override_replicates").ok_or("col override cb")?;
+    assert!(!col_ov.enabled, "Column source must disable override_replicates");
+    assert!(col_ov.disabled_reason.as_deref().is_some_and(|r| !r.is_empty()), "Column disabled_reason must be non-empty");
+    assert!(!driver.state().views.welcome_hub.schema.clone_override_replicates);
+    driver.click_widget_id("welcome.clone_modal.close")?;
+
+    // 5. Pre-summarized Grouped (MeanSdN): disabled in Copy mode with disabled_reason, enabled in Clear mode.
+    driver.click_widget_id("welcome.clone.source.grp-sum")?;
+    driver.click_widget_id("welcome.btn.clone_options")?;
+    driver.click_widget_id("welcome.clone.copy_data")?;
+    let sum_copy_ov = driver.frame_meta().find_by_widget_id("welcome.clone.override_replicates").ok_or("sum copy override cb")?;
+    assert!(!sum_copy_ov.enabled, "pre-summarized table in Copy mode must disable override_replicates");
+    assert!(sum_copy_ov.disabled_reason.as_deref().is_some_and(|r| !r.is_empty()), "pre-summarized Copy disabled_reason must be non-empty");
+    assert!(!driver.state().views.welcome_hub.schema.clone_override_replicates);
+
+    driver.click_widget_id("welcome.clone.clear_data")?;
+    let sum_clear_ov = driver.frame_meta().find_by_widget_id("welcome.clone.override_replicates").ok_or("sum clear override cb")?;
+    assert!(sum_clear_ov.enabled, "pre-summarized table in Clear mode must enable override_replicates");
+    driver.click_widget_id("welcome.clone.override_replicates")?;
+    driver.click_widget_id("welcome.clone.override_replicates_count.inc")?;
+    driver.click_widget_id("welcome.clone_modal.apply")?;
+    driver.click_widget_id("welcome.btn.create")?;
+    match &driver.state().app.document().data_sheets.last().ok_or("cloned pre-summarized")?.archetype {
+        TableArchetype::Grouped(t) => assert_eq!(t.subcolumn_mode, SubcolumnMode::RawReplicates(4)),
+        other => return Err(format!("expected cloned Grouped, got {:?}", other.kind()).into()),
+    }
+    Ok(())
+}

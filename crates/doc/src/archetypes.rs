@@ -2198,6 +2198,130 @@ impl TableArchetype {
             }
         }
     }
+
+    /// Permute all row-indexed storage across this table according to `perm`, where
+    /// `new_row` receives the contents previously stored at `old_row = perm[new_row]`.
+    ///
+    /// Validates that `perm` is a bijection of `0..self.row_count()` prior to mutating any buffer.
+    /// When an [`XyTable`] uses [`XColumnMode::GeneratedSequence`] and `perm` is non-identity,
+    /// `x_cells` are auto-materialized (preserving exclusion flags) and `x_mode` is converted to
+    /// `XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }` so `(X, Y)` pairs remain
+    /// paired after reordering.
+    ///
+    /// Note: callers holding a [`crate::DataSheet`] should call [`crate::DataSheet::permute_rows`]
+    /// so `frozen` guards, `exclusion_notes`, and `plate_well_origins` stay aligned.
+    pub fn permute_rows(&mut self, perm: &[usize]) -> Result<(), DocError> {
+        let row_count = self.row_count();
+        validate_row_permutation(self.kind(), perm, row_count)?;
+        let is_identity = perm.iter().enumerate().all(|(new_row, &old_row)| new_row == old_row);
+        if is_identity {
+            return Ok(());
+        }
+        match self {
+            Self::Xy(t) => {
+                if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
+                    validate_cell_grid(row_count, t.data_sets.len(), t.y_subcolumn_mode.subcolumn_count(), 1)?;
+                    let materialized: Vec<Vec<Cell>> = (0..row_count).map(|r| vec![t.materialized_x_cell_at(r)]).collect();
+                    t.x_cells = materialized;
+                    t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+                }
+                permute_vec_by(&mut t.x_cells, perm);
+                permute_vec_by(&mut t.row_titles, perm);
+                for ds in &mut t.data_sets {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::Column(t) => {
+                permute_vec_by(&mut t.row_titles, perm);
+                for ds in &mut t.data_sets {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::Grouped(t) => {
+                permute_vec_by(&mut t.row_titles, perm);
+                if let Some(spacing) = &mut t.row_numeric_spacing {
+                    permute_vec_by(spacing, perm);
+                }
+                for ds in &mut t.data_sets {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::Contingency(t) => {
+                permute_vec_by(&mut t.row_titles, perm);
+                for ds in &mut t.data_sets {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::Survival(t) => {
+                permute_vec_by(&mut t.times, perm);
+                permute_vec_by(&mut t.row_titles, perm);
+                for ds in &mut t.cohorts {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::PartsOfWhole(t) => {
+                permute_vec_by(&mut t.slice_labels, perm);
+                for ds in &mut t.data_sets {
+                    permute_vec_by(&mut ds.cells, perm);
+                }
+            }
+            Self::MultipleVariables(mv) => {
+                permute_vec_by(&mut mv.row_titles, perm);
+                for var in &mut mv.variables {
+                    permute_vec_by(&mut var.cells, perm);
+                }
+            }
+            Self::Nested(t) => {
+                permute_vec_by(&mut t.row_titles, perm);
+                for grp in &mut t.groups {
+                    permute_vec_by(&mut grp.cells, perm);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_row_permutation(archetype: TableKind, perm: &[usize], row_count: usize) -> Result<(), DocError> {
+    if perm.len() != row_count {
+        return Err(DocError::InvalidCellValue {
+            archetype,
+            row: perm.len(),
+            col: 0,
+            reason: "row permutation length does not match table row count",
+        });
+    }
+    let mut seen = vec![false; row_count];
+    for (new_row, &old_row) in perm.iter().enumerate() {
+        let Some(slot) = seen.get_mut(old_row) else {
+            return Err(DocError::InvalidCellValue {
+                archetype,
+                row: new_row,
+                col: 0,
+                reason: "row permutation contains an out-of-bounds row index",
+            });
+        };
+        if *slot {
+            return Err(DocError::InvalidCellValue { archetype, row: new_row, col: 0, reason: "row permutation contains a duplicate row index" });
+        }
+        *slot = true;
+    }
+    Ok(())
+}
+
+fn permute_vec_by<T>(rows: &mut Vec<T>, perm: &[usize]) {
+    if rows.len() != perm.len() || rows.len() <= 1 {
+        return;
+    }
+    let mut slots: Vec<Option<T>> = rows.drain(..).map(Some).collect();
+    rows.reserve(perm.len());
+    for &old_idx in perm {
+        if let Some(slot) = slots.get_mut(old_idx)
+            && let Some(item) = slot.take()
+        {
+            rows.push(item);
+        }
+    }
 }
 
 fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
@@ -2333,5 +2457,170 @@ mod shift_rows_tests {
         if let TableArchetype::Column(t) = arch {
             assert_eq!(t.row_titles, vec!["r0", "r1"]);
         }
+    }
+
+    #[test]
+    fn permute_rows_reorders_xy_column_grouped_and_contingency() {
+        let perm = [2, 0, 1];
+
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
+        xy.x_cells = vec![vec![Cell::number(10.0)], vec![Cell::number(20.0)], vec![Cell::number(30.0)]];
+        xy.row_titles = vec!["r0".into(), "r1".into(), "r2".into()];
+        xy.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+        let mut arch = TableArchetype::Xy(xy);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Xy(t) = arch {
+            assert_eq!(t.x_cells, vec![vec![Cell::number(30.0)], vec![Cell::number(10.0)], vec![Cell::number(20.0)]]);
+            assert_eq!(t.row_titles, vec!["r2", "r0", "r1"]);
+            assert_eq!(t.data_sets[0].cells, vec![vec![Cell::number(3.0)], vec![Cell::number(1.0)], vec![Cell::number(2.0)]]);
+        }
+
+        let mut col = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 1, 3).unwrap();
+        col.row_titles = vec!["s0".into(), "s1".into(), "s2".into()];
+        col.data_sets[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+        let mut arch = TableArchetype::Column(col);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Column(t) = arch {
+            assert_eq!(t.row_titles, vec!["s2", "s0", "s1"]);
+            assert_eq!(t.data_sets[0].cells[0][0], Cell::number(3.0));
+        }
+
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 3).unwrap();
+        grp.row_titles = vec!["g0".into(), "g1".into(), "g2".into()];
+        grp.row_numeric_spacing = Some(vec![Some(0.0), Some(15.0), Some(60.0)]);
+        grp.data_sets[0].cells =
+            vec![vec![Cell::number(1.0), Cell::number(1.5)], vec![Cell::number(2.0), Cell::number(2.5)], vec![Cell::number(3.0), Cell::number(3.5)]];
+        let mut arch = TableArchetype::Grouped(grp);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Grouped(t) = arch {
+            assert_eq!(t.row_titles, vec!["g2", "g0", "g1"]);
+            assert_eq!(t.row_numeric_spacing, Some(vec![Some(60.0), Some(0.0), Some(15.0)]));
+            assert_eq!(t.data_sets[0].cells[0], vec![Cell::number(3.0), Cell::number(3.5)]);
+        }
+
+        let mut cont = ContingencyTable::new(1, 3).unwrap();
+        cont.row_titles = vec!["c0".into(), "c1".into(), "c2".into()];
+        cont.data_sets[0].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(10.0)], vec![Cell::number(15.0)]];
+        let mut arch = TableArchetype::Contingency(cont);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Contingency(t) = arch {
+            assert_eq!(t.row_titles, vec!["c2", "c0", "c1"]);
+            assert_eq!(t.data_sets[0].cells[0][0], Cell::number(15.0));
+        }
+    }
+
+    #[test]
+    fn permute_rows_reorders_survival_parts_mv_and_nested() {
+        let perm = [2, 0, 1];
+
+        let mut surv = SurvivalTable::new(1, 3).unwrap();
+        surv.times = vec![Cell::number(4.0), Cell::number(8.0), Cell::number(12.0)];
+        surv.row_titles = vec!["p0".into(), "p1".into(), "p2".into()];
+        surv.cohorts[0].cells = vec![vec![Cell::number(1.0)], vec![Cell::number(0.0)], vec![Cell::number(1.0)]];
+        let mut arch = TableArchetype::Survival(surv);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Survival(t) = arch {
+            assert_eq!(t.times, vec![Cell::number(12.0), Cell::number(4.0), Cell::number(8.0)]);
+            assert_eq!(t.row_titles, vec!["p2", "p0", "p1"]);
+            assert_eq!(t.cohorts[0].cells[2][0], Cell::number(0.0));
+        }
+
+        let mut pow = PartsOfWholeTable::new(1, 3).unwrap();
+        pow.slice_labels = vec!["A".into(), "B".into(), "C".into()];
+        pow.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(20.0)], vec![Cell::number(70.0)]];
+        let mut arch = TableArchetype::PartsOfWhole(pow);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::PartsOfWhole(t) = arch {
+            assert_eq!(t.slice_labels, vec!["C", "A", "B"]);
+            assert_eq!(t.data_sets[0].cells[0][0], Cell::number(70.0));
+        }
+
+        let mut mv = MultipleVariablesTable::new(2, 3).unwrap();
+        mv.row_titles = vec!["u0".into(), "u1".into(), "u2".into()];
+        mv.variables[0].cells = vec![Cell::text("low"), Cell::text("mid"), Cell::text("high")];
+        mv.variables[1].cells = vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)];
+        let mut arch = TableArchetype::MultipleVariables(mv);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::MultipleVariables(t) = arch {
+            assert_eq!(t.row_titles, vec!["u2", "u0", "u1"]);
+            assert_eq!(t.variables[0].cells[0], Cell::text("high"));
+            assert_eq!(t.variables[1].cells[1], Cell::number(1.0));
+        }
+
+        let mut nested = NestedTable::new(1, 2, 3).unwrap();
+        nested.row_titles = vec!["n0".into(), "n1".into(), "n2".into()];
+        nested.groups[0].cells = vec![
+            vec![Cell::number(1.0), Cell::number(10.0)],
+            vec![Cell::number(2.0), Cell::number(20.0)],
+            vec![Cell::number(3.0), Cell::number(30.0)],
+        ];
+        let mut arch = TableArchetype::Nested(nested);
+        arch.permute_rows(&perm).unwrap();
+        if let TableArchetype::Nested(t) = arch {
+            assert_eq!(t.row_titles, vec!["n2", "n0", "n1"]);
+            assert_eq!(t.groups[0].cells[0], vec![Cell::number(3.0), Cell::number(30.0)]);
+        }
+    }
+
+    #[test]
+    fn permute_rows_materializes_generated_x_validates_bijection_and_remaps_metadata() {
+        use super::{CellCoord, SequenceProgression, XColumnMode};
+        use crate::links::{DataSheet, PlateCellOrigin};
+
+        let perm = [2, 0, 1];
+        let mut xy_gen = XyTable::new_with_x_mode(
+            XColumnMode::GeneratedSequence { start: 5.0, step: 10.0, progression: SequenceProgression::Arithmetic },
+            SubcolumnMode::Single,
+            1,
+            3,
+        )
+        .unwrap();
+        xy_gen.data_sets[0].cells = vec![vec![Cell::number(100.0)], vec![Cell::number(200.0)], vec![Cell::number(300.0)]];
+        let mut gen_sheet = DataSheet::new("xy-gen", "Generated", TableArchetype::Xy(xy_gen)).unwrap();
+        gen_sheet.set_x_or_time_excluded(1, 0, true).unwrap();
+        gen_sheet.permute_rows(&[0, 1, 2]).unwrap();
+        assert!(matches!(&gen_sheet.archetype, TableArchetype::Xy(t) if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. })));
+
+        gen_sheet.permute_rows(&perm).unwrap();
+        let TableArchetype::Xy(t) = &gen_sheet.archetype else { panic!("expected Xy") };
+        assert_eq!(t.x_mode, XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single });
+        assert_eq!(t.x_cells, vec![vec![Cell::number(25.0)], vec![Cell::number(5.0)], vec![Cell::excluded_number(15.0)]]);
+        assert_eq!(t.data_sets[0].cells, vec![vec![Cell::number(300.0)], vec![Cell::number(100.0)], vec![Cell::number(200.0)]]);
+        t.validate().unwrap();
+
+        let mut col_err = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3).unwrap();
+        col_err.row_titles = vec!["a".into(), "b".into(), "c".into()];
+        let mut arch_err = TableArchetype::Column(col_err);
+        assert!(arch_err.permute_rows(&[0, 1]).is_err());
+        assert!(arch_err.permute_rows(&[0, 1, 3]).is_err());
+        assert!(arch_err.permute_rows(&[0, 1, 1]).is_err());
+        if let TableArchetype::Column(c) = arch_err {
+            assert_eq!(c.row_titles, vec!["a", "b", "c"]);
+        }
+
+        let mut col_ds = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3).unwrap();
+        col_ds.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(20.0)], vec![Cell::number(30.0)]];
+        let mut ds = DataSheet::new("ds-perm", "Permute Metadata", TableArchetype::Column(col_ds)).unwrap();
+        ds.set_excluded_with_reason(CellCoord::new(0, 0, 0), "outlier", "row 0 note", "unix:1").unwrap();
+        ds.set_excluded_with_reason(CellCoord::new(2, 0, 0), "fault", "row 2 note", "unix:2").unwrap();
+        ds.plate_well_origins = vec![
+            PlateCellOrigin { coord: CellCoord::new(0, 0, 0), well: String::from("A01") },
+            PlateCellOrigin { coord: CellCoord::new(2, 0, 0), well: String::from("C01") },
+        ];
+        ds.frozen = true;
+        assert!(matches!(ds.permute_rows(&perm), Err(crate::error::DocError::SheetFrozen { .. })));
+        ds.frozen = false;
+        ds.permute_rows(&perm).unwrap();
+        assert_eq!(
+            ds.exclusion_notes.iter().map(|n| (n.coord, n.note.as_str())).collect::<Vec<_>>(),
+            vec![(CellCoord::new(0, 0, 0), "row 2 note"), (CellCoord::new(1, 0, 0), "row 0 note")]
+        );
+        assert_eq!(
+            ds.plate_well_origins,
+            vec![
+                PlateCellOrigin { coord: CellCoord::new(0, 0, 0), well: String::from("C01") },
+                PlateCellOrigin { coord: CellCoord::new(1, 0, 0), well: String::from("A01") },
+            ]
+        );
     }
 }

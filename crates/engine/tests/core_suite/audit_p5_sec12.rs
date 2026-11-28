@@ -327,7 +327,7 @@ fn fa_sec12_06_set_spec_rejects_shorthand_conflict_and_unknown_nested_keys() -> 
 #[test]
 fn fa_sec12_07_all_30_table_schemas_closed_and_flatten_commands_reject_unknown_keys() -> TestResult {
     let specs = table::specs();
-    assert_eq!(specs.len(), 30);
+    assert_eq!(specs.len(), 32);
     let ids: BTreeSet<&str> = specs
         .iter()
         .map(|s| {
@@ -335,7 +335,7 @@ fn fa_sec12_07_all_30_table_schemas_closed_and_flatten_commands_reject_unknown_k
             s.id
         })
         .collect();
-    assert_eq!(ids.len(), 30);
+    assert_eq!(ids.len(), 32);
 
     let mut session = session_with(
         "SEC12-07",
@@ -364,6 +364,8 @@ fn fa_sec12_07_all_30_table_schemas_closed_and_flatten_commands_reject_unknown_k
         ("table.exclusionAuditReport", json!({ "sheet_id": "col1", "bogus": 1 })),
         ("table.clearCells", json!({ "sheet_id": "col1", "all": true, "bogus": 1 })),
         ("table.paste", json!({ "sheet_id": "col1", "text": "1\n2\n", "bogus": 1 })),
+        ("table.pasteTranspose", json!({ "sheet_id": "col1", "text": "1\n2\n", "bogus": 1 })),
+        ("table.sortRows", json!({ "sheet_id": "col1", "bogus": 1 })),
         ("table.pasteLink", json!({ "target_sheet_id": "col1", "source_sheet_id": "xy1", "bogus": 1 })),
         ("table.importCsv", json!({ "csv": "1,2\n3,4\n", "bogus": 1 })),
         ("table.exportCsv", json!({ "sheet_id": "col1", "bogus": 1 })),

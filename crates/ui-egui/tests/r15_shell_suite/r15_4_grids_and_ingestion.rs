@@ -895,3 +895,105 @@ fn aud_10_import_wizard_policy_atomicity_unstack_and_transform_modals() -> TestR
     let _ = Value::Null;
     Ok(())
 }
+
+#[test]
+fn r10_32_paste_transpose_via_edit_menu_and_grid_context_menu_with_undo() -> TestRes {
+    use std::sync::Arc;
+
+    use crate::common::make_shell_driver;
+    use curvebook_doc::CellValue;
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::UiApp;
+    use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
+
+    let mut doc = ProjectDocument::new("R10.32 Paste Transpose").expect("project");
+    let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 4, 5).expect("col");
+    doc.add_data_sheet(DataSheet::new("ds-pt", "Paste Transpose Target", TableArchetype::Column(col)).unwrap()).unwrap();
+    doc.select_in_navigator(&SheetId::from("ds-pt")).unwrap();
+
+    let clip = Arc::new(StubPlatformClipboardAdapter::new());
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.host_draws_menu_bar = false;
+    app.nav.welcome.open = false;
+    app.egui_views.launcher_open = false;
+    app.set_clipboard_adapter(clip.clone());
+
+    let mut driver = make_shell_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+    let cmd_mod = Modifiers { command: true, mac_cmd: true, ..Modifiers::NONE };
+
+    // 1. Top menu `Edit › Paste Transpose` pastes 2x3 TSV transposed as 3x2 at anchor (row=1, col=1).
+    clip.seed_text("1\t2\t3\n4\t5\t6");
+    driver.click_widget_id("grid.cell.1.1.0")?;
+    driver.click_widget_id("menu.edit")?;
+    let pt_menu = driver.frame_meta().find_by_widget_id("menu.table.pasteTranspose").ok_or("missing menu.table.pasteTranspose")?;
+    assert!(pt_menu.enabled, "Edit › Paste Transpose should be enabled on unfrozen DataSheet");
+    driver.click_widget_id("menu.table.pasteTranspose")?;
+
+    let expected_menu_vals = [(1, 1, 1.0), (1, 2, 4.0), (2, 1, 2.0), (2, 2, 5.0), (3, 1, 3.0), (3, 2, 6.0)];
+    {
+        let ds = driver.state().app.document().data_sheet(&SheetId::from("ds-pt")).ok_or("ds-pt")?;
+        for (r, c, val) in expected_menu_vals {
+            assert_eq!(ds.cell(CellCoord::new(r, c, 0)).and_then(Cell::active_number), Some(val), "Edit › Paste Transpose mismatch at ({r},{c})");
+        }
+        assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).map(|c| &c.value), Some(&CellValue::Empty));
+        assert_eq!(ds.cell(CellCoord::new(1, 3, 0)).map(|c| &c.value), Some(&CellValue::Empty));
+    }
+
+    // Undo cleanly with Cmd+Z.
+    driver.press_egui_key(Key::Z, cmd_mod);
+    {
+        let ds = driver.state().app.document().data_sheet(&SheetId::from("ds-pt")).ok_or("ds-pt")?;
+        for (r, c, _) in expected_menu_vals {
+            assert_eq!(
+                ds.cell(CellCoord::new(r, c, 0)).map(|cell| &cell.value),
+                Some(&CellValue::Empty),
+                "Cmd+Z should revert pasted cell ({r},{c})"
+            );
+        }
+    }
+
+    // 2. Grid right-click context menu `grid.ctx.paste_transpose` pastes 2x3 TSV transposed as 3x2 at (0, 1).
+    clip.seed_text("10\t20\t30\n40\t50\t60");
+    let cell_01 = widget_center(&driver, "grid.cell.0.1.0")?;
+    driver.click_at_button(cell_01, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    assert!(driver.frame_meta().find_by_widget_id("popup.grid.ctx").is_some(), "expected row/cell context menu");
+    let pt_ctx = driver.frame_meta().find_by_widget_id("grid.ctx.paste_transpose").ok_or("missing grid.ctx.paste_transpose")?;
+    assert!(pt_ctx.enabled, "grid.ctx.paste_transpose should be enabled on unfrozen DataSheet");
+    assert_eq!(pt_ctx.command_id.as_deref(), Some("table.pasteTranspose"));
+    driver.click_widget_id("grid.ctx.paste_transpose")?;
+
+    let expected_ctx_vals = [(0, 1, 10.0), (0, 2, 40.0), (1, 1, 20.0), (1, 2, 50.0), (2, 1, 30.0), (2, 2, 60.0)];
+    {
+        let ds = driver.state().app.document().data_sheet(&SheetId::from("ds-pt")).ok_or("ds-pt")?;
+        for (r, c, val) in expected_ctx_vals {
+            assert_eq!(ds.cell(CellCoord::new(r, c, 0)).and_then(Cell::active_number), Some(val), "grid.ctx.paste_transpose mismatch at ({r},{c})");
+        }
+    }
+
+    // Undo cleanly with Cmd+Z.
+    driver.press_egui_key(Key::Z, cmd_mod);
+    {
+        let ds = driver.state().app.document().data_sheet(&SheetId::from("ds-pt")).ok_or("ds-pt")?;
+        for (r, c, _) in expected_ctx_vals {
+            assert_eq!(
+                ds.cell(CellCoord::new(r, c, 0)).map(|cell| &cell.value),
+                Some(&CellValue::Empty),
+                "Cmd+Z should revert context-menu pasted cell ({r},{c})"
+            );
+        }
+    }
+
+    // 3. Frozen sheet disables both `grid.ctx.paste_transpose` and `Edit › Paste Transpose`.
+    driver.state_mut().app.execute_command("sheet.freeze", json!({ "sheet_id": "ds-pt" })).map_err(|e| e.to_string())?;
+    driver.run_settled();
+    let cell_01_frozen = widget_center(&driver, "grid.cell.0.1.0")?;
+    driver.click_at_button(cell_01_frozen, curvebook_ui_egui::PointerButton::Secondary, KeyModifiers::default())?;
+    let pt_ctx_frozen = driver.frame_meta().find_by_widget_id("grid.ctx.paste_transpose").ok_or("missing frozen grid.ctx.paste_transpose")?;
+    assert!(!pt_ctx_frozen.enabled && pt_ctx_frozen.disabled_reason.is_some());
+    driver.press_egui_key(Key::Escape, Modifiers::NONE);
+
+    driver.click_widget_id("menu.edit")?;
+    let pt_menu_frozen = driver.frame_meta().find_by_widget_id("menu.table.pasteTranspose").ok_or("missing frozen menu.table.pasteTranspose")?;
+    assert!(!pt_menu_frozen.enabled);
+    Ok(())
+}

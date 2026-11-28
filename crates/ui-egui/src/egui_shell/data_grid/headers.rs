@@ -17,9 +17,9 @@ use super::GridInlineEditTarget;
 use super::inline_edit::begin_inline_edit;
 use super::mv_roles::render_mv_tier3_role_chip;
 use super::shared::{
-    AuxInlineTarget, CellTextStyle, GridDragOutcome, MultiGridCtx, MultiGridFrameState, SelectionFastLookup, archetype_badge, compute_visible_range,
-    is_multi_click_edit, paint_find_highlight, pressed_key_event_modifiers, record_meta_if_enabled, record_meta_with_unclipped_if_enabled,
-    render_ellipsized_text, set_grid_focus_active,
+    AuxInlineTarget, CellTextStyle, ColHeaderSortTarget, GridDragOutcome, MultiGridCtx, MultiGridFrameState, SelectionFastLookup, archetype_badge,
+    compute_visible_range, is_multi_click_edit, open_col_header_context_menu, paint_find_highlight, pressed_key_event_modifiers,
+    record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -390,7 +390,7 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
     if editing_row_factor {
         render_factor_title_editor(ui, mctx, fstate, rt_hdr_r, "grid.row_titles.band", "Row factor");
     } else {
-        let rt_sense = if row_factor_editable { Sense::click() } else { Sense::hover() };
+        let rt_sense = if blocked { Sense::hover() } else { Sense::click() };
         let rt_resp = ui.interact(rt_hdr_r, ui.make_persistent_id("grid.row_titles.band"), rt_sense);
         if row_factor_editable && rt_resp.hovered() {
             ui.painter().rect_filled(rt_hdr_r, CornerRadius::ZERO, tokens.hover_bg);
@@ -431,6 +431,10 @@ pub(super) fn render_multi_corner(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: 
             && let Some(rf) = row_factor.as_deref()
         {
             begin_factor_title_edit(ui, fstate, &ds.id, "grid.row_titles.band", FactorTitleTarget::RowFactor, rf);
+        } else if !blocked && rt_resp.secondary_clicked() {
+            let pos = rt_resp.interact_pointer_pos().unwrap_or_else(|| rt_resp.rect.center());
+            open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::RowTitle, rt_band_label);
+            ui.ctx().request_repaint();
         }
     }
 
@@ -546,6 +550,70 @@ pub(super) fn render_multi_column_headers(ui: &mut Ui, mctx: &MultiGridCtx<'_>, 
     });
 }
 
+fn render_multi_x_super_header(
+    hdr_ui: &mut Ui,
+    mctx: &MultiGridCtx<'_>,
+    fstate: &mut MultiGridFrameState<'_>,
+    x_tier1_r: Rect,
+    super_x: &'static str,
+    drag_outcome: &GridDragOutcome,
+) {
+    let geom = mctx.geom;
+    let tokens = mctx.tokens;
+    let blocked = mctx.blocked;
+    let x_tier1_clip = x_tier1_r.intersect(geom.col_header_rect);
+    if x_tier1_clip.width() <= 2.0 {
+        return;
+    }
+    let all_x_sel = geom.x_subcols > 0 && (0..geom.x_subcols).all(|sx| fstate.aux.x_full_subcol_selected(geom, sx));
+    let any_x_sel = geom.x_subcols > 0 && (0..geom.x_subcols).any(|sx| fstate.aux.x_contains_subcol(sx));
+    if all_x_sel || any_x_sel {
+        let fill = if mctx.pane_focused { tokens.active_bg } else { tokens.header_bg };
+        hdr_ui.painter().rect_filled(x_tier1_clip, 0.0, fill);
+    }
+    let t1_resp =
+        hdr_ui.interact(x_tier1_clip, hdr_ui.make_persistent_id("grid.col_super.x"), if blocked { Sense::hover() } else { Sense::click_and_drag() });
+    t1_resp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, !blocked, super_x.to_owned()));
+    record_meta_with_unclipped_if_enabled(
+        hdr_ui,
+        fstate.meta,
+        fstate.state.record_inspect_meta,
+        &t1_resp,
+        x_tier1_r,
+        FrameInspectEntryInput {
+            widget_id: "grid.col_super.x",
+            role: "columnheader",
+            label: super_x,
+            command_id: None,
+            value: None,
+            enabled: !blocked,
+            disabled_reason: blocked.then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    if !drag_outcome.suppress_click_this_frame && !drag_outcome.press_selected_x && t1_resp.clicked() && !blocked && geom.row_count > 0 {
+        let last_x_sub = geom.x_subcols.saturating_sub(1);
+        fstate.aux.selected_x_anchor = Some((0, 0));
+        fstate.aux.selected_x_cell = Some((geom.row_count - 1, last_x_sub));
+        super::shared::push_select_x_if_needed(mctx.app, geom.row_count - 1, last_x_sub, fstate.intents);
+        set_grid_focus_active(hdr_ui, true);
+        hdr_ui.ctx().request_repaint();
+    } else if !blocked && t1_resp.secondary_clicked() {
+        let pos = t1_resp.interact_pointer_pos().unwrap_or_else(|| t1_resp.rect.center());
+        open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::X { subcol: None }, super_x.to_owned());
+        hdr_ui.ctx().request_repaint();
+    }
+    let super_x_col = if (all_x_sel || any_x_sel) && mctx.pane_focused { tokens.text_strong } else { tokens.text_muted };
+    render_ellipsized_text(
+        hdr_ui,
+        x_tier1_clip.shrink2(vec2(4.0, 1.0)),
+        super_x,
+        CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), super_x_col, Align::Center),
+    );
+}
+
 fn render_multi_x_headers(
     hdr_ui: &mut Ui,
     mctx: &MultiGridCtx<'_>,
@@ -567,37 +635,8 @@ fn render_multi_x_headers(
     #[allow(clippy::cast_precision_loss)]
     let x_w = (geom.x_subcols as f32) * geom.subcol_w;
     let x_tier1_r = Rect::from_min_max(pos2(x_x0, y1), pos2(x_x0 + x_w, y2));
-    let x_tier1_clip = x_tier1_r.intersect(hdr_rect);
     let super_x = if matches!(ds.archetype, TableArchetype::Survival(_)) { "Time" } else { "X" };
-    if x_tier1_clip.width() > 2.0 {
-        let all_x_sel = geom.x_subcols > 0 && (0..geom.x_subcols).all(|sx| fstate.aux.x_full_subcol_selected(geom, sx));
-        let any_x_sel = geom.x_subcols > 0 && (0..geom.x_subcols).any(|sx| fstate.aux.x_contains_subcol(sx));
-        if all_x_sel || any_x_sel {
-            let fill = if mctx.pane_focused { tokens.active_bg } else { tokens.header_bg };
-            hdr_ui.painter().rect_filled(x_tier1_clip, 0.0, fill);
-        }
-        let t1_resp = hdr_ui.interact(
-            x_tier1_clip,
-            hdr_ui.make_persistent_id("grid.col_super.x"),
-            if blocked { Sense::hover() } else { Sense::click_and_drag() },
-        );
-        t1_resp.widget_info(move || WidgetInfo::labeled(egui::Role::ColumnHeader, !blocked, super_x.to_owned()));
-        if !drag_outcome.suppress_click_this_frame && !drag_outcome.press_selected_x && t1_resp.clicked() && !blocked && geom.row_count > 0 {
-            let last_x_sub = geom.x_subcols.saturating_sub(1);
-            fstate.aux.selected_x_anchor = Some((0, 0));
-            fstate.aux.selected_x_cell = Some((geom.row_count - 1, last_x_sub));
-            super::shared::push_select_x_if_needed(mctx.app, geom.row_count - 1, last_x_sub, fstate.intents);
-            set_grid_focus_active(hdr_ui, true);
-            hdr_ui.ctx().request_repaint();
-        }
-        let super_x_col = if (all_x_sel || any_x_sel) && mctx.pane_focused { tokens.text_strong } else { tokens.text_muted };
-        render_ellipsized_text(
-            hdr_ui,
-            x_tier1_clip.shrink2(vec2(4.0, 1.0)),
-            super_x,
-            CellTextStyle::plain(FontId::proportional(tokens.metrics.font_ui_small_pt), super_x_col, Align::Center),
-        );
-    }
+    render_multi_x_super_header(hdr_ui, mctx, fstate, x_tier1_r, super_x, drag_outcome);
 
     for sx in 0..geom.x_subcols {
         if !vis_flat.contains(&sx) {
@@ -674,6 +713,11 @@ fn render_multi_x_headers(
                     set_grid_focus_active(hdr_ui, true);
                     hdr_ui.ctx().request_repaint();
                 }
+            } else if !blocked && resp.secondary_clicked() {
+                let pos = resp.interact_pointer_pos().unwrap_or_else(|| resp.rect.center());
+                let label = if x_title.trim().is_empty() { super_x.to_owned() } else { x_title };
+                open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::X { subcol: None }, label);
+                hdr_ui.ctx().request_repaint();
             }
         }
 
@@ -718,6 +762,10 @@ fn render_multi_x_headers(
                 fstate.aux.selected_x_cell = Some((geom.row_count - 1, sx));
                 super::shared::push_select_x_if_needed(mctx.app, geom.row_count - 1, sx, fstate.intents);
                 set_grid_focus_active(hdr_ui, true);
+                hdr_ui.ctx().request_repaint();
+            } else if !blocked && sresp.secondary_clicked() {
+                let pos = sresp.interact_pointer_pos().unwrap_or_else(|| sresp.rect.center());
+                open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::X { subcol: Some(sx) }, x_sub_lbl);
                 hdr_ui.ctx().request_repaint();
             }
         }
@@ -900,6 +948,13 @@ fn render_data_col_tier1_super_header(
             hdr_ui.ctx().request_repaint();
         }
     }
+    if !blocked && s_resp.secondary_clicked() {
+        let pos = s_resp.interact_pointer_pos().unwrap_or_else(|| s_resp.rect.center());
+        let title = data_column_title(&ds.archetype, col);
+        let label = if title.trim().is_empty() { super_lbl } else { title };
+        open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::Column { col, subcol: None }, label);
+        hdr_ui.ctx().request_repaint();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -982,6 +1037,11 @@ fn render_data_col_tier2_title(
             set_grid_focus_active(hdr_ui, true);
             hdr_ui.ctx().request_repaint();
         }
+    } else if !blocked && resp.secondary_clicked() {
+        let pos = resp.interact_pointer_pos().unwrap_or_else(|| resp.rect.center());
+        let label = if col_title.trim().is_empty() { default_column_label(col) } else { col_title };
+        open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::Column { col, subcol: None }, label);
+        hdr_ui.ctx().request_repaint();
     }
 }
 
@@ -1104,6 +1164,12 @@ fn render_subcolumn_tier3_cells(
                 set_grid_focus_active(hdr_ui, true);
                 hdr_ui.ctx().request_repaint();
             }
+        } else if !blocked && sresp.secondary_clicked() {
+            let pos = sresp.interact_pointer_pos().unwrap_or_else(|| sresp.rect.center());
+            let col_title = data_column_title(&ds.archetype, col);
+            let label = if col_title.trim().is_empty() { sub_lbl } else { format!("{col_title} ({sub_lbl})") };
+            open_col_header_context_menu(fstate, pos, ColHeaderSortTarget::Column { col, subcol: Some(subcol) }, label);
+            hdr_ui.ctx().request_repaint();
         }
         if subcol + 1 < span_subs {
             hdr_ui.painter().line_segment([pos2(sx1, y3), pos2(sx1, y4)], Stroke::new(1.0, tokens.divider));

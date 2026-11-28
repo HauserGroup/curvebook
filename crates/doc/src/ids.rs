@@ -188,6 +188,12 @@ impl RectPt {
     }
 }
 
+/// Maximum number of [`FloatingNote`] callouts permitted on a single sheet.
+pub const MAX_FLOATING_NOTES_PER_SHEET: usize = 64;
+
+/// Maximum UTF-8 byte length of a [`FloatingNote::body_markdown`] payload (64 KiB).
+pub const MAX_FLOATING_NOTE_BODY_BYTES: usize = 65_536;
+
 /// Collapsible rich-text sticky note attachable to any sheet in a project
 /// (`docs/implementation/data-tables-and-transforms.md` §3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -230,8 +236,16 @@ impl FloatingNote {
         }
         Ok(())
     }
-    /// Default warm pastel note fill with high black-text contrast.
+    /// Default warm pastel yellow note fill (`#FFF7CC`) with high black-text contrast.
     pub const DEFAULT_FILL: Rgba8 = Rgba8::rgb(0xFF, 0xF7, 0xCC);
+    /// Soft pastel blue note fill preset (`#DBEAFE`) with high black-text contrast.
+    pub const BLUE_FILL: Rgba8 = Rgba8::rgb(0xDB, 0xEA, 0xFE);
+    /// Soft pastel green note fill preset (`#DCFCE7`) with high black-text contrast.
+    pub const GREEN_FILL: Rgba8 = Rgba8::rgb(0xDC, 0xFC, 0xE7);
+    /// Soft pastel red note fill preset (`#FEE2E2`) with high black-text contrast.
+    pub const RED_FILL: Rgba8 = Rgba8::rgb(0xFE, 0xE2, 0xE2);
+    /// Soft neutral gray note fill preset (`#F1F5F9`) with high black-text contrast.
+    pub const GRAY_FILL: Rgba8 = Rgba8::rgb(0xF1, 0xF5, 0xF9);
 
     /// Construct an expanded `FloatingNote` with [`Self::DEFAULT_FILL`] background.
     #[must_use]

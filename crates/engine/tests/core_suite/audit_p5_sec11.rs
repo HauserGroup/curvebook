@@ -426,7 +426,7 @@ fn fa_sec11_07_methods_report_formats_hook_source_without_debug_prose() -> TestR
 #[test]
 fn fa_sec11_08_all_sheet_schemas_publish_additional_properties_false_and_reject_unknown_keys() -> TestResult {
     let sheet_specs: Vec<_> = cmd::registry().specs().filter(|s| s.id.starts_with("sheet.")).collect();
-    assert_eq!(sheet_specs.len(), 12);
+    assert_eq!(sheet_specs.len(), 15);
     for spec in &sheet_specs {
         assert_eq!((spec.input_schema)().get("additionalProperties"), Some(&json!(false)), "`{}`", spec.id);
     }
@@ -455,6 +455,9 @@ fn fa_sec11_08_all_sheet_schemas_publish_additional_properties_false_and_reject_
         ("sheet.select", json!({ "sheet_id": "s1", "bogus": 1 })),
         ("sheet.extractResultTab", json!({ "result_sheet_id": "r1", "bogus": 1 })),
         ("sheet.clearOrigin", json!({ "sheet_id": "s1", "bogus": 1 })),
+        ("sheet.addFloatingNote", json!({ "sheet_id": "s1", "bogus": 1 })),
+        ("sheet.updateFloatingNote", json!({ "sheet_id": "s1", "note_id": "note-1", "minimized": true, "bogus": 1 })),
+        ("sheet.deleteFloatingNote", json!({ "sheet_id": "s1", "note_id": "note-1", "bogus": 1 })),
     ];
     assert_eq!(payloads.len(), sheet_specs.len());
     for (cmd_id, params) in payloads {

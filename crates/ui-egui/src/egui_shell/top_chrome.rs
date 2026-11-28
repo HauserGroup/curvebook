@@ -1910,6 +1910,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     },
                 ));
             }
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
         Tier2SheetContext::DataMultipleVariables => {
             actions.push(make_ui_action(
@@ -1960,6 +1963,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
         Tier2SheetContext::ResultSheet => {
             actions.push(make_ui_action(
@@ -2031,6 +2037,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     },
                 ));
             }
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2095,6 +2104,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2159,6 +2171,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                     primary: false,
                 },
             ));
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
         }
         Tier2SheetContext::InfoSheet => {
             let info_opt = doc.active_sheet_id.as_ref().and_then(|id| doc.info_sheet(id));
@@ -2192,6 +2207,9 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                 },
                 can_new_graph,
             ));
+            if let Some(note_act) = make_add_floating_note_action(app, modal_enabled) {
+                actions.push(note_act);
+            }
             let mut chain_analyze = make_ui_action(
                 app,
                 Tier2ActionInput {
@@ -2210,6 +2228,38 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
     }
 
     actions
+}
+
+fn make_add_floating_note_action(app: &UiApp, modal_enabled: bool) -> Option<Tier2ActionSpec> {
+    let doc = app.document();
+    let active_id = doc.active_sheet_id.as_ref()?;
+    let _section = doc.sheet_section(active_id)?;
+    let frozen = doc.data_sheet(active_id).is_some_and(|ds| ds.frozen);
+    let disabled_reason = if !modal_enabled {
+        Some("modal dialog is active")
+    } else if frozen {
+        Some("Data sheet is frozen (read-only).")
+    } else {
+        None
+    };
+    let mut act = make_engine_action(
+        app,
+        Tier2ActionInput {
+            widget_id: "toolbar.add_floating_note",
+            label: tr(&app.locale, "toolbar.add_note"),
+            command_id: "sheet.addFloatingNote",
+            params: json!({ "sheet_id": active_id.as_str() }),
+            enabled: modal_enabled,
+            disabled_reason,
+            primary: false,
+        },
+        !frozen,
+    );
+    if act.tooltip.is_empty() {
+        act.tooltip = String::from("Add a floating note to the active sheet.");
+    }
+    act.rank = ActionRank::Overflow;
+    Some(act)
 }
 
 fn can_analyze_active(app: &UiApp) -> bool {

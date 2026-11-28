@@ -17,8 +17,10 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
             if command_id == "project.open" && app.session.is_dirty() && params.get("force").and_then(serde_json::Value::as_bool) != Some(true) {
                 return Err(EngineError::with_code(ErrorCode::Conflict, "unsaved changes exist; save or discard before opening another project"));
             }
-            if matches!(command_id.as_str(), "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze")
-                && params.get("sheet_id").is_none()
+            if matches!(
+                command_id.as_str(),
+                "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze" | "sheet.addFloatingNote"
+            ) && params.get("sheet_id").is_none()
                 && let Some(active_id) = app.session.document().active_sheet_id.as_ref()
                 && let Some(obj) = params.as_object_mut()
             {
@@ -81,6 +83,18 @@ pub(super) fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Resul
                 if let Some(target_sheet_id) = crate::interaction::resolve_figure_sheet_for_shortcut(app) {
                     return apply_wave4_grid_wizard_intent(app, UiIntent::CanvasPaste { target_sheet_id, anchor_pt: None });
                 }
+            }
+            if command_id == "table.pasteTranspose" {
+                return apply_wave4_grid_wizard_intent(app, UiIntent::GridPasteTransposeFromClipboard { start_coord: None });
+            }
+            if matches!(command_id.as_str(), "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles") {
+                let explicit_scope = crate::control_io::host_routing::sort_rows_has_explicit_scope(Some(&params));
+                if !explicit_scope && let Some(reason) = crate::menus::tooltips::sort_rows_disabled_reason(app.session.document()) {
+                    return Err(EngineError::with_code(ErrorCode::Conflict, reason));
+                }
+                let sort_params = crate::control_io::host_routing::build_sort_rows_params(app, &command_id, Some(&params));
+                let outcome = app.execute_session_ui_cmd("table.sortRows", sort_params)?;
+                return Ok(UiIntentOutcome::Engine { command_id: String::from("table.sortRows"), outcome });
             }
             let result = dispatch_ui_command_as_ui(app, &command_id, &params)?;
             Ok(UiIntentOutcome::Ui { command_id, result })
@@ -544,6 +558,7 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::GridCopySelection
         | UiIntent::GridCutSelection
         | UiIntent::GridPasteFromClipboard { .. }
+        | UiIntent::GridPasteTransposeFromClipboard { .. }
         | UiIntent::PasteXCellText { .. }
         | UiIntent::WorkspaceCopy { .. }
         | UiIntent::WorkspaceCopyForSlides { .. }
@@ -931,7 +946,8 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         }
         UiIntent::GridCopySelection => execute_grid_clipboard_copy(app, false),
         UiIntent::GridCutSelection => execute_grid_clipboard_copy(app, true),
-        UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste(app, start_coord),
+        UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste_with_transpose(app, start_coord, false),
+        UiIntent::GridPasteTransposeFromClipboard { start_coord } => execute_grid_clipboard_paste_with_transpose(app, start_coord, true),
         UiIntent::PasteXCellText { sheet_id, x_row, x_subcol, text } => {
             let res = crate::grid_view::paste_text_into_active_x_cell(app, &sheet_id, x_row, x_subcol, &text)?;
             Ok(UiIntentOutcome::Ui { command_id: String::from("table.paste"), result: Some(res) })
@@ -1075,7 +1091,11 @@ fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOut
     Ok(UiIntentOutcome::ShellUpdated)
 }
 
-fn execute_grid_clipboard_paste(app: &mut UiApp, start_coord: Option<curvebook_tools::GridCellCoord>) -> Result<UiIntentOutcome, EngineError> {
+fn execute_grid_clipboard_paste_with_transpose(
+    app: &mut UiApp,
+    start_coord: Option<curvebook_tools::GridCellCoord>,
+    transpose: bool,
+) -> Result<UiIntentOutcome, EngineError> {
     let Some(ds_id) = app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned() else {
         return Ok(UiIntentOutcome::ShellUpdated);
     };
@@ -1109,8 +1129,9 @@ fn execute_grid_clipboard_paste(app: &mut UiApp, start_coord: Option<curvebook_t
     {
         obj.insert(String::from("delimiter"), serde_json::json!("\t"));
     }
-    let outcome = app.execute_session_ui_cmd("table.paste", paste_params)?;
-    Ok(UiIntentOutcome::Engine { command_id: String::from("table.paste"), outcome })
+    let cmd_id = if transpose { "table.pasteTranspose" } else { "table.paste" };
+    let outcome = app.execute_session_ui_cmd(cmd_id, paste_params)?;
+    Ok(UiIntentOutcome::Engine { command_id: String::from(cmd_id), outcome })
 }
 
 fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {

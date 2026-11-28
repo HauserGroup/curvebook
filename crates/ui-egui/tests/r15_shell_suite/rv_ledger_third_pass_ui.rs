@@ -29,7 +29,7 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 
 #[test]
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
-    assert_eq!((UI_COMMANDS.len(), catalog_len()), (65, 1081));
+    assert_eq!((UI_COMMANDS.len(), catalog_len()), (68, 1104));
     assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+Shift+P"));
     let ep_i18n = CATALOG.iter().find(|e| e.key == "cmd.ui.editParams.open").ok_or("missing cmd.ui.editParams.open")?;
     assert_eq!(ep_i18n.translations.len(), LOCALES.len());

@@ -36,8 +36,8 @@ Binding rules for **CurveBook** (crate prefix `curvebook-*`, repo root `curveboo
 
 Keep generated artifacts synced with the typed registries (never hand-edit generated files or use positional tuples; [docs/pitfalls.md](docs/pitfalls.md)):
 
-- **Engine commands:** `crates/engine/src/cmd/mod.rs` (`cmd::registry()`, `116` commands) -> regenerate [docs/commands.md](docs/commands.md) with `cargo xtask commands`.
-- **UI commands:** `crates/ui-egui/src/menus/ui_commands.rs` (`UI_COMMANDS`, `65` entries) -> regenerate `crates/mcp/src/ui_catalog.rs` with `cargo xtask ui-commands`.
+- **Engine commands:** `crates/engine/src/cmd/mod.rs` (`cmd::registry()`, `121` commands) -> regenerate [docs/commands.md](docs/commands.md) with `cargo xtask commands`.
+- **UI commands:** `crates/ui-egui/src/menus/ui_commands.rs` (`UI_COMMANDS`, `68` entries) -> regenerate `crates/mcp/src/ui_catalog.rs` with `cargo xtask ui-commands`.
 
 Before adding or editing commands, read [docs/extending.md](docs/extending.md) and [docs/command-ids.md](docs/command-ids.md).
 

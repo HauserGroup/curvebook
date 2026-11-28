@@ -1852,7 +1852,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 65);
+        assert_eq!(UI_COMMANDS.len(), 68);
         for required in [
             "ui.export.pzfx.open",
             "ui.navigator.toggle",

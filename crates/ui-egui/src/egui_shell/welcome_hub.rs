@@ -11,9 +11,10 @@ use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent, doc_sheet_title};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 use crate::tr;
-use crate::workspace_nav::{SAMPLE_FIXTURES, SampleFixtureDescriptor, instantiate_sample_fixture};
+use crate::workspace_nav::{SAMPLE_FIXTURES, SampleFixtureDescriptor, instantiate_sample_fixture, sample_fixture_instructional_note};
 
 /// Ordered data archetypes selectable inside the 3-pane Welcome & Workspace Hub (`§8.1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -159,6 +160,7 @@ pub struct WelcomeSchemaDraft {
     pub auto_info: bool,
     pub entry_mode_sample: bool,
     pub selected_sample_index: usize,
+    pub include_sample_notes: bool,
     pub x_mode_kind: usize,
     pub x_title: String,
     pub y_subcolumn_kind: usize,
@@ -180,6 +182,8 @@ pub struct WelcomeSchemaDraft {
     pub clone_clear_column_titles: bool,
     pub clone_clear_row_titles: bool,
     pub clone_rerun_analyses: bool,
+    pub clone_override_replicates: bool,
+    pub clone_override_replicates_count: usize,
 }
 
 impl Default for WelcomeSchemaDraft {
@@ -195,6 +199,7 @@ impl Default for WelcomeSchemaDraft {
             auto_info: true,
             entry_mode_sample: false,
             selected_sample_index: 0,
+            include_sample_notes: false,
             x_mode_kind: 0,
             x_title: String::from("X"),
             y_subcolumn_kind: 0,
@@ -216,6 +221,8 @@ impl Default for WelcomeSchemaDraft {
             clone_clear_column_titles: false,
             clone_clear_row_titles: false,
             clone_rerun_analyses: true,
+            clone_override_replicates: false,
+            clone_override_replicates_count: 3,
         }
     }
 }
@@ -321,6 +328,7 @@ struct CheckToggleSpec<'a> {
     label: &'a str,
     checked: bool,
     enabled: bool,
+    disabled_reason: Option<&'a str>,
     z_layer: ZLayer,
 }
 
@@ -452,12 +460,98 @@ pub fn render_welcome_hub(
     report
 }
 
+fn source_sheet_replicate_count(ds: &DataSheet) -> Option<(usize, std::ops::RangeInclusive<usize>)> {
+    match &ds.archetype {
+        TableArchetype::Xy(t) => Some((t.y_subcolumn_mode.subcolumn_count().clamp(1, 256), 1..=256)),
+        TableArchetype::Grouped(t) => Some((t.subcolumn_mode.subcolumn_count().clamp(1, 256), 1..=256)),
+        TableArchetype::Nested(t) => {
+            let units = t.groups.first().map_or(3, |g| g.biological_unit_count()).clamp(2, 64);
+            Some((units, 2..=64))
+        }
+        TableArchetype::Column(_)
+        | TableArchetype::Contingency(_)
+        | TableArchetype::Survival(_)
+        | TableArchetype::PartsOfWhole(_)
+        | TableArchetype::MultipleVariables(_) => None,
+    }
+}
+
+fn clone_override_replicates_capability(ds: &DataSheet, clear_y_values: bool) -> Result<std::ops::RangeInclusive<usize>, &'static str> {
+    match &ds.archetype {
+        TableArchetype::Xy(t) => {
+            if t.y_subcolumn_mode.is_pre_summarized() && !clear_y_values {
+                Err("Enable Clear Y response cells to convert pre-summarized subcolumns into raw replicates")
+            } else {
+                Ok(1..=256)
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            if t.subcolumn_mode.is_pre_summarized() && !clear_y_values {
+                Err("Enable Clear Y response cells to convert pre-summarized subcolumns into raw replicates")
+            } else {
+                Ok(1..=256)
+            }
+        }
+        TableArchetype::Nested(_) => Ok(2..=64),
+        TableArchetype::Column(_)
+        | TableArchetype::Contingency(_)
+        | TableArchetype::Survival(_)
+        | TableArchetype::PartsOfWhole(_)
+        | TableArchetype::MultipleVariables(_) => Err("Replicate subcolumn overrides only apply to XY, Grouped, and Nested tables"),
+    }
+}
+
+fn sync_clone_replicates_for_source(schema: &mut WelcomeSchemaDraft, ds: &DataSheet) {
+    if let Some((count, _range)) = source_sheet_replicate_count(ds) {
+        schema.clone_override_replicates_count = count;
+    }
+    if clone_override_replicates_capability(ds, schema.clone_clear_values).is_err() {
+        schema.clone_override_replicates = false;
+    }
+}
+
+fn format_clone_pipeline_summary(doc: &ProjectDocument, schema: &WelcomeSchemaDraft, locale: &str) -> String {
+    let override_suffix = schema
+        .clone_source_sheet_id
+        .as_ref()
+        .and_then(|id| doc.data_sheet(id))
+        .and_then(|ds| clone_override_replicates_capability(ds, schema.clone_clear_values).ok())
+        .filter(|_| schema.clone_override_replicates)
+        .map(|range| {
+            let reps = schema.clone_override_replicates_count.clamp(*range.start(), *range.end());
+            format!(" • {}: {}", tr_or_fallback(locale, "welcome.clone.replicates_count", "Replicates"), reps)
+        })
+        .unwrap_or_default();
+    format!(
+        "Links: {} • Data: {} • Analyses: {}{}",
+        if schema.clone_include_downstream { "Preserve" } else { "Table only" },
+        if schema.clone_clear_values { "Clear" } else { "Copy" },
+        if schema.clone_rerun_analyses { "Re-run" } else { "Deferred" },
+        override_suffix,
+    )
+}
+
 fn ensure_clone_source_default(app: &UiApp, state: &mut WelcomeHubEguiState) {
     let doc = app.document();
     let valid_existing = state.schema.clone_source_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some());
     if !valid_existing {
         let active_ds = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
-        state.schema.clone_source_sheet_id = active_ds.or_else(|| doc.data_sheets.first()).map(|ds| ds.id.clone());
+        let chosen = active_ds.or_else(|| doc.data_sheets.first());
+        state.schema.clone_source_sheet_id = chosen.map(|ds| ds.id.clone());
+        if let Some(ds) = chosen {
+            sync_clone_replicates_for_source(&mut state.schema, ds);
+        } else {
+            state.schema.clone_override_replicates = false;
+        }
+    } else if let Some(ds) = state.schema.clone_source_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)) {
+        match clone_override_replicates_capability(ds, state.schema.clone_clear_values) {
+            Ok(range) => {
+                state.schema.clone_override_replicates_count = state.schema.clone_override_replicates_count.clamp(*range.start(), *range.end());
+            }
+            Err(_) => {
+                state.schema.clone_override_replicates = false;
+            }
+        }
     }
 }
 
@@ -773,6 +867,23 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
             if let Some(chosen) = fixtures.get(sel_idx) {
                 render_plain_clipped_label(ui, chosen.summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
             }
+            ui.add_space(4.0);
+            if render_check_toggle(
+                ui,
+                tokens,
+                cx.meta,
+                CheckToggleSpec {
+                    widget_id: "welcome.toggle.sample_notes",
+                    label: tr_or_fallback(locale, "welcome.toggle.sample_notes", "Include instructional note"),
+                    checked: cx.state.schema.include_sample_notes,
+                    enabled,
+                    disabled_reason: None,
+                    z_layer,
+                },
+            ) && enabled
+            {
+                cx.state.schema.include_sample_notes = !cx.state.schema.include_sample_notes;
+            }
         }
         if let Some(err_msg) = cx.state.sample_error.as_deref() {
             ui.add_space(4.0);
@@ -817,6 +928,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
             label: tr(locale, "welcome.toggle.auto_graph"),
             checked: cx.state.schema.auto_graph,
             enabled,
+            disabled_reason: None,
             z_layer,
         },
     ) && enabled
@@ -832,6 +944,7 @@ fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arc
             label: tr(locale, "welcome.toggle.auto_info"),
             checked: cx.state.schema.auto_info,
             enabled,
+            disabled_reason: None,
             z_layer,
         },
     ) && enabled
@@ -1431,8 +1544,10 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
                 z_layer,
             },
         ) && enabled
+            && state.schema.clone_source_sheet_id.as_ref() != Some(&ds.id)
         {
             state.schema.clone_source_sheet_id = Some(ds.id.clone());
+            sync_clone_replicates_for_source(&mut state.schema, ds);
         }
         ui.add_space(2.0);
     }
@@ -1454,12 +1569,7 @@ fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>
     );
 
     ui.add_space(6.0);
-    let summary = format!(
-        "Links: {} • Data: {} • Analyses: {}",
-        if state.schema.clone_include_downstream { "Preserve" } else { "Table only" },
-        if state.schema.clone_clear_values { "Clear" } else { "Copy" },
-        if state.schema.clone_rerun_analyses { "Re-run" } else { "Deferred" },
-    );
+    let summary = format_clone_pipeline_summary(app.document(), &state.schema, locale);
     render_plain_clipped_label(ui, &summary, FontId::proportional(tokens.metrics.font_ui_small_pt), tokens.text_muted);
     ui.add_space(4.0);
 
@@ -1809,6 +1919,15 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
         }
         WelcomeLeftMode::ClonePipeline => {
             if let Some(ref src_id) = state.schema.clone_source_sheet_id {
+                let override_replicates = app
+                    .document()
+                    .data_sheet(src_id)
+                    .and_then(|ds| clone_override_replicates_capability(ds, state.schema.clone_clear_values).ok())
+                    .filter(|_| state.schema.clone_override_replicates)
+                    .map(|range| state.schema.clone_override_replicates_count.clamp(*range.start(), *range.end()));
+                if override_replicates.is_none() {
+                    state.schema.clone_override_replicates = false;
+                }
                 let mut params = json!({
                     "sheet_id": src_id.as_str(),
                     "keep_x_values": state.schema.clone_keep_x,
@@ -1820,11 +1939,14 @@ fn dispatch_welcome_primary_action(app: &UiApp, state: &mut WelcomeHubEguiState,
                     "clone_layouts": state.schema.clone_include_downstream && state.schema.clone_layouts,
                     "clear_results": !state.schema.clone_rerun_analyses,
                 });
-                let title_trim = state.schema.title.trim();
-                if !title_trim.is_empty()
-                    && let Some(map) = params.as_object_mut()
-                {
-                    map.insert(String::from("title"), json!(title_trim));
+                if let Some(map) = params.as_object_mut() {
+                    if let Some(reps) = override_replicates {
+                        map.insert(String::from("override_replicates"), json!(reps));
+                    }
+                    let title_trim = state.schema.title.trim();
+                    if !title_trim.is_empty() {
+                        map.insert(String::from("title"), json!(title_trim));
+                    }
                 }
                 intents.push_engine("sheet.clonePipeline", params);
                 intents.push(UiIntent::SetLauncherOpen { open: false });
@@ -1875,7 +1997,7 @@ fn render_clone_options_submodal(
     let locale = &app.locale;
     let screen = ui.ctx().content_rect();
     let modal_w = (screen.width() - 24.0).clamp(260.0, 420.0);
-    let modal_h = (screen.height() - 24.0).clamp(240.0, 350.0);
+    let modal_h = (screen.height() - 24.0).clamp(240.0, 420.0);
     let modal_rect = Rect::from_center_size(screen.center(), Vec2::new(modal_w, modal_h));
     let mut modal_rect_out = None;
 
@@ -1915,6 +2037,7 @@ fn render_clone_options_submodal(
                         label: tr(locale, "welcome.clone.analyses"),
                         checked: state.schema.clone_include_downstream,
                         enabled,
+                        disabled_reason: None,
                         z_layer: z,
                     },
                 ) && enabled
@@ -1931,6 +2054,7 @@ fn render_clone_options_submodal(
                         label: tr(locale, "welcome.clone.graphs"),
                         checked: state.schema.clone_graphs,
                         enabled: enabled && state.schema.clone_include_downstream,
+                        disabled_reason: None,
                         z_layer: z,
                     },
                 ) && enabled
@@ -1948,6 +2072,7 @@ fn render_clone_options_submodal(
                         label: tr(locale, "welcome.clone.layouts"),
                         checked: state.schema.clone_layouts,
                         enabled: enabled && state.schema.clone_include_downstream,
+                        disabled_reason: None,
                         z_layer: z,
                     },
                 ) && enabled
@@ -2010,6 +2135,7 @@ fn render_clone_options_submodal(
                         label: tr(locale, "welcome.clone.keep_x"),
                         checked: state.schema.clone_keep_x,
                         enabled,
+                        disabled_reason: None,
                         z_layer: z,
                     },
                 ) && enabled
@@ -2026,6 +2152,7 @@ fn render_clone_options_submodal(
                         label: "Re-run analyses immediately",
                         checked: state.schema.clone_rerun_analyses,
                         enabled: enabled && state.schema.clone_include_downstream,
+                        disabled_reason: None,
                         z_layer: z,
                     },
                 ) && enabled
@@ -2033,6 +2160,50 @@ fn render_clone_options_submodal(
                 {
                     state.schema.clone_rerun_analyses = !state.schema.clone_rerun_analyses;
                 }
+
+                let override_cap = match state.schema.clone_source_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) {
+                    Some(ds) => clone_override_replicates_capability(ds, state.schema.clone_clear_values),
+                    None => Err("Select a Data table to clone"),
+                };
+                let (override_allowed, override_range, override_disabled_reason) = match override_cap {
+                    Ok(range) => (true, range, (!enabled).then_some("Blocked by modal")),
+                    Err(reason) => {
+                        state.schema.clone_override_replicates = false;
+                        (false, 1..=256, Some(reason))
+                    }
+                };
+                let override_checkbox_enabled = enabled && override_allowed;
+                if render_check_toggle(
+                    ui,
+                    tokens,
+                    meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.override_replicates",
+                        label: tr_or_fallback(locale, "welcome.clone.override_replicates", "Override replicate subcolumns"),
+                        checked: state.schema.clone_override_replicates,
+                        enabled: override_checkbox_enabled,
+                        disabled_reason: override_disabled_reason,
+                        z_layer: z,
+                    },
+                ) && override_checkbox_enabled
+                {
+                    state.schema.clone_override_replicates = !state.schema.clone_override_replicates;
+                }
+
+                let stepper_enabled = override_checkbox_enabled && state.schema.clone_override_replicates;
+                state.schema.clone_override_replicates_count = render_usize_stepper(
+                    ui,
+                    tokens,
+                    meta,
+                    StepperSpec {
+                        widget_id: "welcome.clone.override_replicates_count",
+                        label: tr_or_fallback(locale, "welcome.clone.replicates_count", "Replicates"),
+                        value: state.schema.clone_override_replicates_count.clamp(*override_range.start(), *override_range.end()),
+                        range: override_range,
+                        enabled: stepper_enabled,
+                        z_layer: z,
+                    },
+                );
 
                 ui.add_space(8.0);
                 ui.horizontal(|ui| {
@@ -2191,6 +2362,22 @@ pub fn build_sample_creation_intent(
     auto_graph: bool,
     auto_info: bool,
 ) -> Result<UiIntent, String> {
+    build_sample_creation_intent_with_options(app, fixture_id, title_override, auto_graph, auto_info, false)
+}
+
+/// Build an atomic [`UiIntent::EngineCommandGroup`] instantiating sample fixture `fixture_id`,
+/// optionally appending a clean-room instructional [`curvebook_doc::FloatingNote`] via `sheet.addFloatingNote`.
+///
+/// # Errors
+/// Returns an error string if `fixture_id` is unknown or cannot be constructed.
+pub fn build_sample_creation_intent_with_options(
+    app: &UiApp,
+    fixture_id: &str,
+    title_override: Option<&str>,
+    auto_graph: bool,
+    auto_info: bool,
+    include_sample_notes: bool,
+) -> Result<UiIntent, String> {
     let doc = app.document();
     let new_sid = next_unique_sheet_id(doc, "data");
     let ds = instantiate_sample_fixture(fixture_id, new_sid.clone()).map_err(|e| e.to_string())?;
@@ -2249,6 +2436,16 @@ pub fn build_sample_creation_intent(
     }
     let mut commands = vec![(String::from("sheet.createData"), create_obj)];
     collect_sample_population_commands(new_sid.as_str(), &ds.archetype, &mut commands);
+    if include_sample_notes && let Some(note) = sample_fixture_instructional_note(fixture_id) {
+        commands.push((
+            String::from("sheet.addFloatingNote"),
+            json!({
+                "sheet_id": new_sid.as_str(),
+                "body_markdown": note,
+                "bounds_pt": { "x": 24.0, "y": 24.0, "width": 260.0, "height": 116.0 },
+            }),
+        ));
+    }
     Ok(UiIntent::EngineCommandGroup { commands })
 }
 
@@ -2276,7 +2473,8 @@ fn dispatch_sample_creation_from(
     let Some(fx) = fixtures.get(schema.selected_sample_index.min(fixtures.len().saturating_sub(1))) else {
         return Err(tr(&app.locale, "welcome.sample.unavailable").to_owned());
     };
-    match build_sample_creation_intent(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info) {
+    match build_sample_creation_intent_with_options(app, fx.id, Some(&schema.title), schema.auto_graph, schema.auto_info, schema.include_sample_notes)
+    {
         Ok(intent) => {
             intents.push(intent);
             Ok(())
@@ -2844,7 +3042,7 @@ fn render_check_toggle(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspe
             checked: spec.checked,
             is_radio: false,
             enabled: spec.enabled,
-            disabled_reason: None,
+            disabled_reason: (!spec.enabled).then_some(spec.disabled_reason).flatten(),
             font_size: 11.5,
             row_height: 22.0,
             z_layer: spec.z_layer,
@@ -3040,5 +3238,142 @@ mod sample_error_tests {
             assert_eq!(dispatch_sample_creation(&app, arch, &schema, &mut intents), Ok(()));
             assert!(matches!(intents.intents().first(), Some(UiIntent::EngineCommandGroup { .. })));
         }
+    }
+
+    #[test]
+    fn sample_notes_toggle_appends_floating_note_command_only_when_enabled() {
+        let app = UiApp::new();
+        for fx in SAMPLE_FIXTURES {
+            let without = build_sample_creation_intent_with_options(&app, fx.id, None, false, false, false).expect("build without notes");
+            match without {
+                UiIntent::EngineCommandGroup { commands } => {
+                    assert!(!commands.iter().any(|(cmd, _)| cmd == "sheet.addFloatingNote"), "{}: unexpected note", fx.id);
+                }
+                other => panic!("expected EngineCommandGroup, got {other:?}"),
+            }
+
+            let with_note = build_sample_creation_intent_with_options(&app, fx.id, None, false, false, true).expect("build with notes");
+            match with_note {
+                UiIntent::EngineCommandGroup { commands } => {
+                    let expected_note = sample_fixture_instructional_note(fx.id).expect("instructional note");
+                    let (cmd, params) = commands.last().expect("note command");
+                    assert_eq!(cmd, "sheet.addFloatingNote");
+                    assert_eq!(params["sheet_id"], json!("data-1"));
+                    assert_eq!(params["body_markdown"], json!(expected_note));
+                    assert_eq!(params["bounds_pt"], json!({ "x": 24.0, "y": 24.0, "width": 260.0, "height": 116.0 }));
+                }
+                other => panic!("expected EngineCommandGroup, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn clone_override_replicates_capabilities_sync_summary_and_dispatch() {
+        let mut doc = ProjectDocument::new("Clone Test").unwrap();
+        let xy = DataSheet::new("xy-4", "XY 4 Reps", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(4), 2, 5).unwrap())).unwrap();
+        let col =
+            DataSheet::new("col-1", "Column", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 5).unwrap())).unwrap();
+        let grp_sum =
+            DataSheet::new("grp-sum", "Grouped MeanSDN", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::MeanSdN, 2, 3).unwrap())).unwrap();
+        let nested = DataSheet::new("nest-5", "Nested 5 Units", TableArchetype::Nested(curvebook_doc::NestedTable::new(2, 5, 4).unwrap())).unwrap();
+        doc.data_sheets.extend([xy, col, grp_sum, nested]);
+        doc.active_sheet_id = Some(SheetId::new("xy-4"));
+        let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        app.sync_views();
+
+        let mut state = WelcomeHubEguiState { left_mode: WelcomeLeftMode::ClonePipeline, ..Default::default() };
+        ensure_clone_source_default(&app, &mut state);
+        assert_eq!(state.schema.clone_source_sheet_id.as_ref().map(SheetId::as_str), Some("xy-4"));
+        assert_eq!(state.schema.clone_override_replicates_count, 4);
+
+        state.schema.clone_override_replicates = true;
+        state.schema.clone_override_replicates_count = 6;
+        let summary = format_clone_pipeline_summary(app.document(), &state.schema, "en");
+        assert!(summary.contains("Replicates: 6"), "summary={summary}");
+
+        let mut intents = PendingUiIntents::new();
+        dispatch_welcome_primary_action(&app, &mut state, &mut intents);
+        let cp = intents
+            .intents()
+            .iter()
+            .find_map(|i| match i {
+                UiIntent::EngineCommand { command_id, params } if command_id == "sheet.clonePipeline" => Some(params),
+                _ => None,
+            })
+            .expect("clonePipeline intent");
+        assert_eq!(cp["override_replicates"], json!(6));
+
+        // Column table rejects override and forces clone_override_replicates = false.
+        let col_ds = app.document().data_sheet(&SheetId::new("col-1")).unwrap();
+        state.schema.clone_source_sheet_id = Some(col_ds.id.clone());
+        sync_clone_replicates_for_source(&mut state.schema, col_ds);
+        assert!(!state.schema.clone_override_replicates);
+        assert!(clone_override_replicates_capability(col_ds, true).is_err());
+
+        // Pre-summarized Grouped table requires clear_y_values == true.
+        let grp_ds = app.document().data_sheet(&SheetId::new("grp-sum")).unwrap();
+        assert!(clone_override_replicates_capability(grp_ds, false).is_err());
+        assert_eq!(clone_override_replicates_capability(grp_ds, true), Ok(1..=256));
+
+        // Nested table initializes from biological unit count and clamps to 2..=64.
+        let nest_ds = app.document().data_sheet(&SheetId::new("nest-5")).unwrap();
+        state.schema.clone_source_sheet_id = Some(nest_ds.id.clone());
+        sync_clone_replicates_for_source(&mut state.schema, nest_ds);
+        assert_eq!(state.schema.clone_override_replicates_count, 5);
+        assert_eq!(clone_override_replicates_capability(nest_ds, false), Ok(2..=64));
+    }
+
+    #[test]
+    fn welcome_hub_renders_sample_notes_toggle_and_clone_override_submodal_controls() {
+        let mut doc = ProjectDocument::new("Submodal Render").unwrap();
+        let grp_sum =
+            DataSheet::new("grp-sum", "Grouped MeanSDN", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::MeanSdN, 2, 3).unwrap())).unwrap();
+        doc.data_sheets.push(grp_sum);
+        doc.active_sheet_id = Some(SheetId::new("grp-sum"));
+        let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        app.sync_views();
+
+        let tokens = Tokens::default();
+        let ctx = egui::Context::default();
+        let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1100.0, 640.0));
+
+        // 1. Sample mode shows welcome.toggle.sample_notes.
+        let mut sample_state =
+            WelcomeHubEguiState { left_mode: WelcomeLeftMode::NewTableArchetype(WelcomeArchetypeChoice::Xy), ..Default::default() };
+        sample_state.schema.entry_mode_sample = true;
+        let mut meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::new();
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            let _ = render_welcome_hub(ui, &app, &mut sample_state, &tokens, true, &mut meta, &mut intents);
+        });
+        out.textures_delta.clear();
+        assert!(meta.find_by_widget_id("welcome.toggle.sample_notes").is_some());
+
+        // 2. Clone Options submodal disables override on pre-summarized Grouped when clear_values == false, enables when true.
+        let mut clone_state = WelcomeHubEguiState { left_mode: WelcomeLeftMode::ClonePipeline, clone_options_open: true, ..Default::default() };
+        clone_state.schema.clone_source_sheet_id = Some(SheetId::new("grp-sum"));
+        clone_state.schema.clone_clear_values = false;
+        clone_state.schema.clone_override_replicates = true;
+        let mut meta_dis = FrameInspectMeta::default();
+        let mut intents_dis = PendingUiIntents::new();
+        let mut out_dis = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            let _ = render_welcome_hub(ui, &app, &mut clone_state, &tokens, true, &mut meta_dis, &mut intents_dis);
+        });
+        out_dis.textures_delta.clear();
+        let ov_dis = meta_dis.find_by_widget_id("welcome.clone.override_replicates").expect("override checkbox");
+        assert!(!ov_dis.enabled);
+        assert!(ov_dis.disabled_reason.as_deref().is_some_and(|r| !r.is_empty()));
+        assert!(!clone_state.schema.clone_override_replicates);
+        assert!(meta_dis.find_by_widget_id("welcome.clone.override_replicates_count.inc").is_some());
+
+        clone_state.schema.clone_clear_values = true;
+        let mut meta_en = FrameInspectMeta::default();
+        let mut intents_en = PendingUiIntents::new();
+        let mut out_en = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), ..Default::default() }, |ui| {
+            let _ = render_welcome_hub(ui, &app, &mut clone_state, &tokens, true, &mut meta_en, &mut intents_en);
+        });
+        out_en.textures_delta.clear();
+        let ov_en = meta_en.find_by_widget_id("welcome.clone.override_replicates").expect("override checkbox");
+        assert!(ov_en.enabled);
     }
 }

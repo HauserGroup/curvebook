@@ -1,12 +1,13 @@
 //! Data-table cell, title, exclusion, paste/link, CSV/project import, and archetype commands (Wave 9B).
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
     AnalysisKind, BaselineOperation, Cell, CellCoord, CellExclusionNote, CellValue, ColumnEqualsFilter, DataSetColumn, DataSheet, GraphKind,
     GraphSpec, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_PROJECT_CELLS, MAX_SHEET_CELLS,
     MultipleVariablesTable, NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SubcolumnMode,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode,
     format_linked_paste_tsv_cell, validate_project_cells, validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, try_export_result_sheet_tidy_csv};
@@ -19,9 +20,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::helpers::{
-    always_enabled, bad_input, column_subcolumn_count, ensure_sheet_not_frozen, has_data_or_result_sheet, has_data_sheet, has_multivar_sheet,
-    has_nested_sheet, parse_sheet_id, prune_shortened_series_overrides, require_data_sheet, require_unfrozen_data_sheet_mut,
-    shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, x_subcolumn_count,
+    always_enabled, bad_input, bad_input_ptr, column_subcolumn_count, ensure_sheet_not_frozen, has_data_or_result_sheet, has_data_sheet,
+    has_multivar_sheet, has_nested_sheet, parse_sheet_id, prune_shortened_series_overrides, remap_point_overrides_on_permute_rows,
+    require_data_sheet, require_unfrozen_data_sheet_mut, shift_point_overrides_on_insert_rows, snapshot_active_series_lengths, x_subcolumn_count,
 };
 use super::params::{command_schema, deserialize_strict, parse_params};
 use super::project::recalculate_dirty_with_links;
@@ -42,7 +43,7 @@ use simulate::{
     run_simulate_distributions, run_simulate_xy,
 };
 
-/// Registered command specifications for the `table` group (30 commands).
+/// Registered command specifications for the `table` group.
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
     SPECS
@@ -183,6 +184,28 @@ static SPECS: &[CommandSpec] = &command_specs!(
         input_schema: command_schema::<PasteParams>,
         enabled: has_data_sheet,
         run: run_paste,
+    },
+    {
+        id: "table.pasteTranspose",
+        label: "Paste Transpose",
+        menu_path: "Edit/Paste Transpose",
+        summary: "Paste delimited clipboard text or a 2D cell grid transposed (swapping rows and columns) into a table.",
+        beginner: "Paste tabular data into a table with rows and columns swapped while preserving exclusions and filter options.",
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: command_schema::<PasteTransposeParams>,
+        enabled: has_data_sheet,
+        run: run_paste_transpose,
+    },
+    {
+        id: "table.sortRows",
+        label: "Sort Rows",
+        menu_path: "Data/Sort Rows",
+        summary: "Stably sort rows of a data table ascending or descending by a column, X/time column, or row titles.",
+        beginner: "Reorder rows in a data table by a column, X/time values, or row titles while keeping exclusions, well origins, and graph overrides aligned.",
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: command_schema::<SortRowsParams>,
+        enabled: has_data_sheet,
+        run: run_sort_rows,
     },
     {
         id: "table.pasteLink",
@@ -2395,10 +2418,68 @@ fn apply_paste_payload(
     Ok(report)
 }
 
-fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
-    let p: PasteParams = parse_params(&command_schema::<PasteParams>(), raw)?;
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PasteTransposePlacementFields {
+    /// Target anchor coordinate.
+    anchor: Option<FlexibleCoordInput>,
+    /// Anchor row index (default 0).
+    start_row: Option<usize>,
+    /// Anchor column index (default 0).
+    start_col: Option<usize>,
+    /// Anchor subcolumn index (default 0).
+    start_subcol: Option<usize>,
+    /// Placement mode: overwrite, insert_rows, append_rows, append_columns.
+    mode: Option<String>,
+    /// Propagate source titles to target headers.
+    propagate_title_header: Option<bool>,
+    /// Skip empty runs when placing cells.
+    skip_contiguous_blanks: Option<bool>,
+}
+
+impl PasteTransposePlacementFields {
+    fn into_transposed_placement(self) -> PlacementFields {
+        PlacementFields {
+            anchor: self.anchor,
+            start_row: self.start_row,
+            start_col: self.start_col,
+            start_subcol: self.start_subcol,
+            mode: self.mode,
+            propagate_title_header: self.propagate_title_header,
+            skip_contiguous_blanks: self.skip_contiguous_blanks,
+            transpose: Some(true),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PasteTransposeParams {
+    /// Target data sheet identifier.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Delimited clipboard text (TSV/CSV).
+    text: Option<String>,
+    /// 2D array of pasted cell values.
+    #[schemars(with = "Option<Vec<Vec<CellValueSchema>>>")]
+    rows: Option<Vec<Vec<Value>>>,
+    /// Column delimiter (`auto`, `,`, `\\t`/`tab`, `;`, or single character).
+    delimiter: Option<String>,
+    /// Decimal separator (`.`, `,`, `dot`, `comma`, `period`, or `auto`).
+    decimal_separator: Option<String>,
+    /// Infer European comma decimal separator when ambiguous.
+    normalize_decimal: Option<bool>,
+    /// Optional import filter specification.
+    #[schemars(with = "Option<ImportFilterSchema>")]
+    filter: Option<Value>,
+    #[serde(flatten)]
+    placement: PasteTransposePlacementFields,
+}
+
+fn run_paste_common(ctx: &mut Ctx<'_>, command_id: &'static str, p: PasteParams, force_transposed: bool) -> Result<CommandOutcome, EngineError> {
     let filter = parse_import_filter_val(p.filter.as_ref())?;
-    let placement = p.placement.to_placement_spec(false)?;
+    let mut placement = p.placement.to_placement_spec(false)?;
+    if force_transposed {
+        placement.transpose = true;
+    }
     let spec = ImportLinkSpec { source: LinkSource::Clipboard, filter, placement };
     let raw_id = p.sheet_id.clone();
 
@@ -2421,7 +2502,9 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
             let payload = ImportSourcePayload::DelimitedText { text: &tsv, delimiter: '\t', decimal_separator: '.' };
             apply_paste_payload(ds, &spec, payload, &opts, other_project_cells)?
         } else {
-            return Err(bad_input("table.paste requires `text` or `rows`").with_remediation("Supply delimited `text` or a 2D `rows` array."));
+            return Err(
+                bad_input(format!("{command_id} requires `text` or `rows`")).with_remediation("Supply delimited `text` or a 2D `rows` array.")
+            );
         };
 
         ds.linked_regions.truncate(existing_links);
@@ -2445,14 +2528,493 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
         }
         Ok(report)
     })?;
-    Ok(CommandOutcome::mutated(
-        "table.paste",
-        "pasted table data",
+    let payload = if force_transposed {
         json!({
             "sheet_id": id.as_str(),
             "rows_placed": report.rows_placed,
             "cols_placed": report.cols_placed,
             "target_range": &report.target_range,
+            "transposed": true,
+            "recalculated_sheets": recalc.recalculated_sheets,
+            "refreshed_links": recalc.refreshed_links,
+        })
+    } else {
+        json!({
+            "sheet_id": id.as_str(),
+            "rows_placed": report.rows_placed,
+            "cols_placed": report.cols_placed,
+            "target_range": &report.target_range,
+            "recalculated_sheets": recalc.recalculated_sheets,
+            "refreshed_links": recalc.refreshed_links,
+        })
+    };
+    let message = if force_transposed { "pasted transposed table data" } else { "pasted table data" };
+    Ok(CommandOutcome::mutated(command_id, message, payload))
+}
+
+fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: PasteParams = parse_params(&command_schema::<PasteParams>(), raw)?;
+    run_paste_common(ctx, "table.paste", p, false)
+}
+
+fn run_paste_transpose(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: PasteTransposeParams = parse_params(&command_schema::<PasteTransposeParams>(), raw)?;
+    let paste_params = PasteParams {
+        sheet_id: p.sheet_id,
+        text: p.text,
+        rows: p.rows,
+        delimiter: p.delimiter,
+        decimal_separator: p.decimal_separator,
+        normalize_decimal: p.normalize_decimal,
+        filter: p.filter,
+        placement: p.placement.into_transposed_placement(),
+    };
+    run_paste_common(ctx, "table.pasteTranspose", paste_params, true)
+}
+
+// ---------------------------------------------------------------------------
+// 12b. table.sortRows
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct SortRowsParams {
+    /// Target data sheet identifier.
+    #[schemars(length(min = 1))]
+    sheet_id: String,
+    /// Sort key source: `column` (default), `x`, or `row_title`.
+    by: Option<String>,
+    /// Zero-based data column index when `by` is `column` (default 0).
+    col: Option<usize>,
+    /// Optional zero-based subcolumn index (omit on multi-replicate columns to sort by mean of finite cells; uses subcol 0 on pre-summarized modes).
+    subcol: Option<usize>,
+    /// Sort direction: `asc` (default) or `desc`.
+    direction: Option<String>,
+    /// Placement of empty or NaN sort keys: `last` (default) or `first`.
+    empty_placement: Option<String>,
+    /// Optional inclusive zero-based start row of the range to sort (default 0).
+    row_start: Option<usize>,
+    /// Optional inclusive zero-based end row of the range to sort (default last row).
+    row_end: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortTarget {
+    Column,
+    X,
+    RowTitle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyPlacement {
+    Last,
+    First,
+}
+
+#[derive(Debug, Clone)]
+enum SortKey {
+    Empty,
+    Number(f64),
+    Text(String),
+}
+
+fn parse_sort_target(raw: Option<&str>) -> Result<SortTarget, EngineError> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("column") => Ok(SortTarget::Column),
+        Some("x") => Ok(SortTarget::X),
+        Some("row_title") => Ok(SortTarget::RowTitle),
+        Some(other) => Err(bad_input_ptr("/by", format!("unsupported sort `by` target `{other}` (expected `column`, `x`, or `row_title`)"))
+            .with_remediation("Use `column`, `x`, or `row_title`.")),
+    }
+}
+
+fn parse_sort_direction(raw: Option<&str>) -> Result<SortDirection, EngineError> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("asc" | "ascending") => Ok(SortDirection::Asc),
+        Some("desc" | "descending") => Ok(SortDirection::Desc),
+        Some(other) => Err(bad_input_ptr("/direction", format!("unsupported sort `direction` `{other}` (expected `asc` or `desc`)"))
+            .with_remediation("Use `asc` or `desc`.")),
+    }
+}
+
+fn parse_empty_placement(raw: Option<&str>) -> Result<EmptyPlacement, EngineError> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        None | Some("last") => Ok(EmptyPlacement::Last),
+        Some("first") => Ok(EmptyPlacement::First),
+        Some(other) => Err(bad_input_ptr("/empty_placement", format!("unsupported `empty_placement` `{other}` (expected `last` or `first`)"))
+            .with_remediation("Use `last` or `first`.")),
+    }
+}
+
+fn validate_sort_target(
+    ds: &DataSheet,
+    target: SortTarget,
+    col: Option<usize>,
+    subcol: Option<usize>,
+) -> Result<(usize, Option<usize>), EngineError> {
+    match target {
+        SortTarget::RowTitle => Ok((0, None)),
+        SortTarget::X => {
+            if !matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)) {
+                return Err(bad_input_ptr("/by", "sorting by `x` requires an XY or Survival data sheet")
+                    .with_remediation("Use `by: \"column\"` or `by: \"row_title\"` on this table archetype."));
+            }
+            if col.is_some_and(|c| c != 0) {
+                return Err(bad_input_ptr("/col", "`col` must be omitted or 0 when sorting by `x`"));
+            }
+            let width = match &ds.archetype {
+                TableArchetype::Xy(xy) => match &xy.x_mode {
+                    XColumnMode::GeneratedSequence { .. } => 1,
+                    _ => xy.x_mode.subcolumn_count().max(1),
+                },
+                TableArchetype::Survival(_) => 1,
+                _ => 0,
+            };
+            if let Some(sc) = subcol
+                && sc >= width
+            {
+                return Err(bad_input_ptr("/subcol", format!("X/time subcolumn {sc} out of range (width {width})")));
+            }
+            Ok((0, subcol))
+        }
+        SortTarget::Column => {
+            let col_idx = col.unwrap_or(0);
+            let cols = ds.archetype.column_count();
+            if col_idx >= cols {
+                return Err(bad_input_ptr("/col", format!("column {col_idx} out of range (column count {cols})")));
+            }
+            let width = column_subcolumn_count(&ds.archetype, col_idx);
+            if let Some(sc) = subcol
+                && sc >= width
+            {
+                return Err(bad_input_ptr("/subcol", format!("subcolumn {sc} out of range on column {col_idx} (width {width})")));
+            }
+            Ok((col_idx, subcol))
+        }
+    }
+}
+
+fn resolve_sort_row_bounds(total_rows: usize, row_start: Option<usize>, row_end: Option<usize>) -> Result<Option<(usize, usize)>, EngineError> {
+    if total_rows == 0 {
+        if row_start.is_some() {
+            return Err(bad_input_ptr("/row_start", "row_start out of bounds for empty table"));
+        }
+        if row_end.is_some() {
+            return Err(bad_input_ptr("/row_end", "row_end out of bounds for empty table"));
+        }
+        return Ok(None);
+    }
+    let start = row_start.unwrap_or(0);
+    let end = row_end.unwrap_or(total_rows - 1);
+    if start >= total_rows {
+        return Err(bad_input_ptr("/row_start", format!("row_start {start} out of range (row count {total_rows})")));
+    }
+    if end >= total_rows {
+        return Err(bad_input_ptr("/row_end", format!("row_end {end} out of range (row count {total_rows})")));
+    }
+    if start > end {
+        return Err(bad_input_ptr("/row_start", format!("row_start ({start}) must be <= row_end ({end})")));
+    }
+    Ok(Some((start, end)))
+}
+
+fn ensure_rows_outside_linked_regions(ds: &DataSheet, r_start: usize, r_end: usize) -> Result<(), EngineError> {
+    for region in &ds.linked_regions {
+        let bounds = normalize_range_bounds(region.target_range);
+        if bounds.min_row <= r_end && r_start <= bounds.max_row {
+            return Err(linked_region_conflict_error(&ds.id, region, "sort rows overlapping", None));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_sort_f64(v: f64) -> SortKey {
+    if v.is_finite() { SortKey::Number(if v == 0.0 { 0.0 } else { v }) } else { SortKey::Empty }
+}
+
+fn sort_key_from_cell(cell: &Cell) -> SortKey {
+    // Excluded cells retain their underlying value for sorting.
+    match &cell.value {
+        CellValue::Empty => SortKey::Empty,
+        CellValue::Number(v) => normalize_sort_f64(*v),
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() { SortKey::Empty } else { SortKey::Text(trimmed.to_owned()) }
+        }
+    }
+}
+
+fn sort_key_from_replicates(cells: &[Cell]) -> SortKey {
+    let nums: Vec<f64> = cells.iter().filter_map(|c| c.value.finite_f64()).collect();
+    if !nums.is_empty() {
+        return curvebook_math::sum::mean(&nums).ok().map_or(SortKey::Empty, normalize_sort_f64);
+    }
+    for cell in cells {
+        if let CellValue::Text(s) = &cell.value {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return SortKey::Text(trimmed.to_owned());
+            }
+        }
+    }
+    SortKey::Empty
+}
+
+fn extract_row_title_key(arch: &TableArchetype, row: usize) -> SortKey {
+    let raw = match arch {
+        TableArchetype::Xy(t) => t.row_titles.get(row),
+        TableArchetype::Column(t) => t.row_titles.get(row),
+        TableArchetype::Grouped(t) => t.row_titles.get(row),
+        TableArchetype::Contingency(t) => t.row_titles.get(row),
+        TableArchetype::Survival(t) => t.row_titles.get(row),
+        TableArchetype::PartsOfWhole(t) => t.slice_labels.get(row),
+        TableArchetype::MultipleVariables(t) => t.row_titles.get(row),
+        TableArchetype::Nested(t) => t.row_titles.get(row),
+    };
+    match raw.map(|s| s.trim()) {
+        Some(s) if !s.is_empty() => SortKey::Text(s.to_owned()),
+        _ => SortKey::Empty,
+    }
+}
+
+fn extract_x_sort_key(arch: &TableArchetype, subcol: Option<usize>, row: usize) -> SortKey {
+    match arch {
+        TableArchetype::Xy(xy) => match &xy.x_mode {
+            XColumnMode::GeneratedSequence { .. } => xy.raw_x_value_at(row).map_or(SortKey::Empty, normalize_sort_f64),
+            XColumnMode::DateOrElapsedTime { .. } => xy.x_cells.get(row).and_then(|r| r.first()).map_or(SortKey::Empty, sort_key_from_cell),
+            XColumnMode::Numbers { subcolumn_mode } => {
+                if let Some(sc) = subcol {
+                    xy.x_cells.get(row).and_then(|r| r.get(sc)).map_or(SortKey::Empty, sort_key_from_cell)
+                } else if matches!(subcolumn_mode, SubcolumnMode::RawReplicates(_)) {
+                    xy.x_cells.get(row).map_or(SortKey::Empty, |r| sort_key_from_replicates(r))
+                } else {
+                    xy.x_cells.get(row).and_then(|r| r.first()).map_or(SortKey::Empty, sort_key_from_cell)
+                }
+            }
+        },
+        TableArchetype::Survival(sv) => sv.times.get(row).map_or(SortKey::Empty, sort_key_from_cell),
+        _ => SortKey::Empty,
+    }
+}
+
+fn extract_column_sort_key(arch: &TableArchetype, col: usize, subcol: Option<usize>, row: usize) -> SortKey {
+    if let Some(sc) = subcol {
+        return arch.data_cell(CellCoord::new(row, col, sc)).map_or(SortKey::Empty, sort_key_from_cell);
+    }
+    match arch {
+        TableArchetype::Xy(t) if matches!(t.y_subcolumn_mode, SubcolumnMode::RawReplicates(_)) => {
+            t.data_sets.get(col).and_then(|ds| ds.cells.get(row)).map_or(SortKey::Empty, |r| sort_key_from_replicates(r))
+        }
+        TableArchetype::Grouped(t) if matches!(t.subcolumn_mode, SubcolumnMode::RawReplicates(_)) => {
+            t.data_sets.get(col).and_then(|ds| ds.cells.get(row)).map_or(SortKey::Empty, |r| sort_key_from_replicates(r))
+        }
+        TableArchetype::Nested(t) => t.groups.get(col).and_then(|g| g.cells.get(row)).map_or(SortKey::Empty, |r| sort_key_from_replicates(r)),
+        _ => arch.data_cell(CellCoord::new(row, col, 0)).map_or(SortKey::Empty, sort_key_from_cell),
+    }
+}
+
+fn take_ascii_digits<I: Iterator<Item = char>>(iter: &mut std::iter::Peekable<I>) -> String {
+    let mut s = String::new();
+    while let Some(&ch) = iter.peek() {
+        if ch.is_ascii_digit() {
+            s.push(ch);
+            let _ = iter.next();
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn natural_case_insensitive_cmp_str(a: &str, b: &str) -> Ordering {
+    let mut ia = a.chars().peekable();
+    let mut ib = b.chars().peekable();
+    loop {
+        match (ia.peek(), ib.peek()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(&ca), Some(&cb)) if ca.is_ascii_digit() && cb.is_ascii_digit() => {
+                let na = take_ascii_digits(&mut ia);
+                let nb = take_ascii_digits(&mut ib);
+                let sa = na.trim_start_matches('0');
+                let sb = nb.trim_start_matches('0');
+                let ord = sa.len().cmp(&sb.len()).then_with(|| sa.cmp(sb));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            (Some(&ca), Some(&cb)) => {
+                let _ = ia.next();
+                let _ = ib.next();
+                let ord = ca.to_ascii_lowercase().cmp(&cb.to_ascii_lowercase());
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+        }
+    }
+}
+
+fn compare_sort_keys(a: &SortKey, b: &SortKey, direction: SortDirection, empty: EmptyPlacement) -> Ordering {
+    match (a, b) {
+        (SortKey::Empty, SortKey::Empty) => Ordering::Equal,
+        (SortKey::Empty, _) => match empty {
+            EmptyPlacement::Last => Ordering::Greater,
+            EmptyPlacement::First => Ordering::Less,
+        },
+        (_, SortKey::Empty) => match empty {
+            EmptyPlacement::Last => Ordering::Less,
+            EmptyPlacement::First => Ordering::Greater,
+        },
+        _ => {
+            let asc = match (a, b) {
+                (SortKey::Number(x), SortKey::Number(y)) => x.total_cmp(y),
+                (SortKey::Number(_), SortKey::Text(_)) => Ordering::Less,
+                (SortKey::Text(_), SortKey::Number(_)) => Ordering::Greater,
+                (SortKey::Text(x), SortKey::Text(y)) => natural_case_insensitive_cmp_str(x, y),
+                _ => Ordering::Equal,
+            };
+            match direction {
+                SortDirection::Asc => asc,
+                SortDirection::Desc => asc.reverse(),
+            }
+        }
+    }
+}
+
+fn compute_sort_permutation(
+    arch: &TableArchetype,
+    target: SortTarget,
+    col: usize,
+    subcol: Option<usize>,
+    direction: SortDirection,
+    empty: EmptyPlacement,
+    range: (usize, usize),
+) -> (Vec<usize>, bool) {
+    let total_rows = arch.row_count();
+    let (r_start, r_end) = range;
+    let keys: Vec<SortKey> = (r_start..=r_end)
+        .map(|row| match target {
+            SortTarget::RowTitle => extract_row_title_key(arch, row),
+            SortTarget::X => extract_x_sort_key(arch, subcol, row),
+            SortTarget::Column => extract_column_sort_key(arch, col, subcol, row),
+        })
+        .collect();
+    let mut slice_perm: Vec<usize> = (r_start..=r_end).collect();
+    slice_perm.sort_by(|&a, &b| {
+        let ka = keys.get(a.saturating_sub(r_start)).unwrap_or(&SortKey::Empty);
+        let kb = keys.get(b.saturating_sub(r_start)).unwrap_or(&SortKey::Empty);
+        compare_sort_keys(ka, kb, direction, empty)
+    });
+    let mut perm: Vec<usize> = (0..total_rows).collect();
+    for (offset, &old_row) in slice_perm.iter().enumerate() {
+        if let Some(slot) = perm.get_mut(r_start.saturating_add(offset)) {
+            *slot = old_row;
+        }
+    }
+    let changed = perm.iter().enumerate().any(|(new_row, &old_row)| new_row != old_row);
+    (perm, changed)
+}
+
+fn run_sort_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: SortRowsParams = parse_params(&command_schema::<SortRowsParams>(), raw)?;
+    let target = parse_sort_target(p.by.as_deref())?;
+    let direction = parse_sort_direction(p.direction.as_deref())?;
+    let empty_placement = parse_empty_placement(p.empty_placement.as_deref())?;
+    let sheet_id = parse_sheet_id(&p.sheet_id)?;
+
+    let (perm, rows_sorted, changed) = {
+        let ds = require_data_sheet(&ctx.session.doc, &sheet_id)?;
+        ensure_sheet_not_frozen(ds)?;
+        let (col, subcol) = validate_sort_target(ds, target, p.col, p.subcol)?;
+        let Some((r_start, r_end)) = resolve_sort_row_bounds(ds.archetype.row_count(), p.row_start, p.row_end)? else {
+            return Ok(CommandOutcome::read_only(
+                "table.sortRows",
+                "no rows to sort",
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "rows_sorted": 0_usize,
+                    "changed": false,
+                    "direction": direction.as_str(),
+                    "recalculated_sheets": 0_usize,
+                    "refreshed_links": 0_usize,
+                }),
+            ));
+        };
+        ensure_rows_outside_linked_regions(ds, r_start, r_end)?;
+        let rows_sorted = r_end - r_start + 1;
+        let (perm, changed) = compute_sort_permutation(&ds.archetype, target, col, subcol, direction, empty_placement, (r_start, r_end));
+        (perm, rows_sorted, changed)
+    };
+
+    if !changed {
+        return Ok(CommandOutcome::read_only(
+            "table.sortRows",
+            "rows already in sorted order",
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "rows_sorted": rows_sorted,
+                "changed": false,
+                "direction": direction.as_str(),
+                "recalculated_sheets": 0_usize,
+                "refreshed_links": 0_usize,
+            }),
+        ));
+    }
+
+    let mut inv_perm = vec![0usize; perm.len()];
+    for (new_row, &old_row) in perm.iter().enumerate() {
+        if let Some(slot) = inv_perm.get_mut(old_row) {
+            *slot = new_row;
+        }
+    }
+
+    let raw_id = p.sheet_id.clone();
+    let (id, (), recalc) = mutate_doc_data_sheet_and_recalc(ctx, &raw_id, false, |doc, id| {
+        let info_snapshot = doc.data_sheet(id).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
+        let extra_x_cells = doc.data_sheet(id).map_or(0, |ds| match &ds.archetype {
+            TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) && xy.x_cells.first().map_or(0, Vec::len) == 0 => {
+                xy.row_count()
+            }
+            _ => 0,
+        });
+        if extra_x_cells > 0 {
+            let total_cells = doc.total_allocated_cells()?;
+            validate_project_cells(total_cells, extra_x_cells)?;
+        }
+        {
+            let ds = require_unfrozen_data_sheet_mut(doc, id)?;
+            ds.permute_rows(&perm)?;
+            evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
+        }
+        remap_point_overrides_on_permute_rows(doc, id, &inv_perm);
+        Ok(())
+    })?;
+
+    Ok(CommandOutcome::mutated(
+        "table.sortRows",
+        "sorted table rows",
+        json!({
+            "sheet_id": id.as_str(),
+            "rows_sorted": rows_sorted,
+            "changed": true,
+            "direction": direction.as_str(),
             "recalculated_sheets": recalc.recalculated_sheets,
             "refreshed_links": recalc.refreshed_links,
         }),

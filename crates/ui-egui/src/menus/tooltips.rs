@@ -93,6 +93,60 @@ pub fn toolbar_caption_command_id(caption: &str) -> Option<&'static str> {
     }
 }
 
+/// Return an actionable disabled reason if `ds` cannot currently be sorted via `table.sortRows`.
+#[must_use]
+pub(crate) fn sort_rows_disabled_reason_for_sheet(ds: &curvebook_doc::DataSheet) -> Option<&'static str> {
+    if ds.frozen {
+        return Some("Data sheet is frozen (read-only).");
+    }
+    let row_count = ds.archetype.row_count();
+    if row_count < 2 {
+        return Some("At least 2 rows are required to sort.");
+    }
+    if ds.linked_regions.iter().any(|r| {
+        let r_lo = r.target_range.start.row.min(r.target_range.end.row);
+        r_lo < row_count
+    }) {
+        return Some("Cannot sort rows overlapping a linked data region.");
+    }
+    None
+}
+
+/// Return an actionable disabled reason if the active sheet cannot currently be sorted via `table.sortRows`.
+#[must_use]
+pub(crate) fn sort_rows_disabled_reason(doc: &curvebook_doc::ProjectDocument) -> Option<&'static str> {
+    let Some(active_id) = doc.active_sheet_id.as_ref() else {
+        return Some("Select a Data table first");
+    };
+    let Some(ds) = doc.data_sheet(active_id) else {
+        return Some("Select a Data table first");
+    };
+    sort_rows_disabled_reason_for_sheet(ds)
+}
+
+/// Whether `sheet.addFloatingNote` is enabled on the current document (any active sheet except a frozen `DataSheet`).
+#[must_use]
+pub(crate) fn can_add_floating_note(doc: &curvebook_doc::ProjectDocument) -> bool {
+    let Some(active_id) = doc.active_sheet_id.as_ref() else {
+        return false;
+    };
+    if doc.sheet_section(active_id).is_none() {
+        return false;
+    }
+    !doc.data_sheet(active_id).is_some_and(|ds| ds.frozen)
+}
+
+fn engine_command_ui_enabled(doc: &curvebook_doc::ProjectDocument, command_id: &str) -> bool {
+    match command_id {
+        "table.pasteTranspose" => doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| !ds.frozen),
+        "table.sortRows" => {
+            doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| sort_rows_disabled_reason_for_sheet(ds).is_none())
+        }
+        "sheet.addFloatingNote" => can_add_floating_note(doc),
+        _ => true,
+    }
+}
+
 /// Look up rich tooltip metadata for `command_id` against the current `app` session, shortcuts, and locale.
 #[must_use]
 pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> {
@@ -106,7 +160,7 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
             summary: spec.summary,
             beginner: spec.beginner,
             menu_path: spec.menu_path,
-            enabled: (spec.enabled)(&app.session),
+            enabled: (spec.enabled)(&app.session) && engine_command_ui_enabled(app.document(), spec.id),
             read_only: spec.effects.read_only_hint(),
             destructive: spec.effects.destructive_hint(),
             needs_consent: spec.effects.needs_consent(),
@@ -124,7 +178,7 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
             beginner: spec.beginner,
             menu_path,
             enabled: ui_command_enabled(app, spec.id),
-            read_only: true,
+            read_only: !matches!(spec.id, "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles"),
             destructive: false,
             needs_consent: false,
         }
@@ -188,6 +242,9 @@ pub(crate) fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.table.convertArchetype.open" => ("menu.data", "Data/Convert Table Format"),
         "ui.table.randomizeGroups" => ("menu.data", "Data/Randomize Groups Dialog"),
         "ui.table.randomSampleRows" => ("menu.data", "Data/Random Sample Rows Dialog"),
+        "ui.table.sortRowsAsc" => ("menu.data", "Data/Sort Rows/Sort Rows Ascending"),
+        "ui.table.sortRowsDesc" => ("menu.data", "Data/Sort Rows/Sort Rows Descending"),
+        "ui.table.sortByRowTitles" => ("menu.data", "Data/Sort Rows/Sort by Row Titles"),
         "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog"),
         "ui.table.openFormulaBar" => ("menu.data", "Data/Open Formula Bar"),
         "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason"),
@@ -231,6 +288,9 @@ pub(crate) fn ui_command_enabled_for_doc(doc: &curvebook_doc::ProjectDocument, i
             .iter()
             .any(|rs| matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Clustering { .. }))),
         "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_))),
+        "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles" => {
+            doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| sort_rows_disabled_reason_for_sheet(ds).is_none())
+        }
         "ui.table.convertArchetype.open"
         | "ui.table.randomSampleRows"
         | "ui.grid.excludeWithReason"
@@ -283,6 +343,27 @@ pub(crate) fn command_disabled_reason_for_app(app: &UiApp, command_id: &str) -> 
         }
         "ui.result.appendClusterColumn" => "Run a Clustering analysis first",
         "ui.table.openFormulaBar" => "Create a Multiple Variables data table first",
+        "table.pasteTranspose" => {
+            if doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| ds.frozen) {
+                "Data sheet is frozen (read-only)."
+            } else {
+                "Select an unfrozen Data table first"
+            }
+        }
+        "sheet.addFloatingNote" => {
+            if doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)).is_some_and(|ds| ds.frozen) {
+                "Data sheet is frozen (read-only)."
+            } else {
+                "Open or select a sheet first"
+            }
+        }
+        "table.sortRows" | "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles" => {
+            if doc.active_sheet_id.is_none() {
+                "Select a Data table first"
+            } else {
+                sort_rows_disabled_reason(doc).unwrap_or("Select a Data table with at least 2 rows first")
+            }
+        }
         "ui.analyze.open" => i18n::tr(&app.locale, "nav.disabled_need_data"),
         "ui.formatPoints.open"
         | "ui.changeGraphType.open"
@@ -410,7 +491,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert!(seen.len() >= 60 && seen.len() <= 106, "expected curated menu size, got {}", seen.len());
+        assert!(seen.len() >= 60 && seen.len() <= 120, "expected curated menu size, got {}", seen.len());
         Ok(())
     }
 }

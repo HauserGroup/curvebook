@@ -624,6 +624,40 @@ impl DataSheet {
         }
     }
 
+    /// Permute rows according to `perm` (`new_row` receives old row `perm[new_row]`) across both
+    /// the table archetype and sheet-level row-indexed metadata (`exclusion_notes` and
+    /// `plate_well_origins`), enforcing freeze guards and re-sorting metadata by [`CellCoord`].
+    pub fn permute_rows(&mut self, perm: &[usize]) -> Result<(), DocError> {
+        self.ensure_mutable()?;
+        self.archetype.permute_rows(perm)?;
+        if perm.iter().enumerate().all(|(new_row, &old_row)| new_row == old_row) {
+            return Ok(());
+        }
+        let mut inv_perm = vec![0usize; perm.len()];
+        for (new_row, &old_row) in perm.iter().enumerate() {
+            if let Some(slot) = inv_perm.get_mut(old_row) {
+                *slot = new_row;
+            }
+        }
+        if !self.exclusion_notes.is_empty() {
+            for note in &mut self.exclusion_notes {
+                if let Some(&new_row) = inv_perm.get(note.coord.row) {
+                    note.coord.row = new_row;
+                }
+            }
+            self.exclusion_notes.sort_by_key(|n| n.coord);
+        }
+        if !self.plate_well_origins.is_empty() {
+            for origin in &mut self.plate_well_origins {
+                if let Some(&new_row) = inv_perm.get(origin.coord.row) {
+                    origin.coord.row = new_row;
+                }
+            }
+            self.plate_well_origins.sort_by_key(|o| o.coord);
+        }
+        Ok(())
+    }
+
     /// Extract a 2D slice of cells `[row][flat_subcol]` across inclusive `range` (`start ..= end`),
     /// clamped safely against sheet dimensions and preserving raw values and `excluded` masks
     /// losslessly for cross-table `Paste Link`.

@@ -575,6 +575,86 @@ pub fn dialog_ui_command_for_engine_cmd(cmd_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Return whether `overrides` specifies an explicit target sheet or row-range scope for row sorting
+/// (so callers targeting a non-active sheet or a row slice outside a linked region are validated by
+/// `table.sortRows` itself rather than rejected by the active-sheet full-table guard).
+#[must_use]
+pub(crate) fn sort_rows_has_explicit_scope(overrides: Option<&Value>) -> bool {
+    overrides.and_then(Value::as_object).is_some_and(|o| {
+        o.get("sheet_id").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()) || o.get("row_start").is_some() || o.get("row_end").is_some()
+    })
+}
+
+/// Build `table.sortRows` JSON parameters for `ui.table.sortRowsAsc`, `ui.table.sortRowsDesc`,
+/// `ui.table.sortByRowTitles`, or `table.sortRows`, emitting strictly the schema keys accepted by
+/// `table.sortRows` (`sheet_id`, `by`, `col`, `subcol`, `direction`, `empty_placement`,
+/// `row_start`, `row_end`).
+#[must_use]
+pub fn build_sort_rows_params(app: &UiApp, command_id: &str, overrides: Option<&Value>) -> Value {
+    let doc = app.document();
+    let ov_obj = overrides.and_then(Value::as_object);
+    let mut out = Map::new();
+
+    let resolved_sheet_id = ov_obj
+        .and_then(|o| o.get("sheet_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or_else(|| active_data_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc)).map(|id| id.as_str().to_owned()));
+
+    let target_ds = resolved_sheet_id.as_deref().and_then(|s| SheetId::try_new(s).ok()).and_then(|sid| doc.data_sheet(&sid));
+    if let Some(ref sid_str) = resolved_sheet_id {
+        out.insert(String::from("sheet_id"), Value::String(sid_str.clone()));
+    }
+
+    let explicit_by = ov_obj.and_then(|o| o.get("by")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let has_x_col = target_ds.is_some_and(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)));
+    let active_on_x = target_ds.is_some_and(|ds| has_x_col && app.grid.active_x_cell_for_sheet(&ds.id).is_some());
+
+    let by = if let Some(b) = explicit_by {
+        b
+    } else if command_id == "ui.table.sortByRowTitles" {
+        "row_title"
+    } else if active_on_x {
+        "x"
+    } else {
+        "column"
+    };
+    out.insert(String::from("by"), Value::String(by.to_owned()));
+
+    if by == "column" {
+        let explicit_col = ov_obj.and_then(|o| o.get("col")).and_then(Value::as_u64);
+        let col_u64 = explicit_col.unwrap_or_else(|| {
+            let active_col = target_ds.and_then(|ds| app.grid.active_cell_for_sheet(&ds.id)).map_or(0, |c| c.col);
+            let max_col = target_ds.map_or(0, |ds| ds.archetype.column_count().saturating_sub(1));
+            active_col.min(max_col) as u64
+        });
+        out.insert(String::from("col"), json!(col_u64));
+    }
+    if matches!(by, "column" | "x")
+        && let Some(subcol) = ov_obj.and_then(|o| o.get("subcol")).and_then(Value::as_u64)
+    {
+        out.insert(String::from("subcol"), json!(subcol));
+    }
+
+    let default_dir = if command_id == "ui.table.sortRowsDesc" { "desc" } else { "asc" };
+    let direction = ov_obj.and_then(|o| o.get("direction")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).unwrap_or(default_dir);
+    out.insert(String::from("direction"), Value::String(direction.to_owned()));
+
+    if let Some(ep) = ov_obj.and_then(|o| o.get("empty_placement")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        out.insert(String::from("empty_placement"), Value::String(ep.to_owned()));
+    }
+    if let Some(rs) = ov_obj.and_then(|o| o.get("row_start")).and_then(Value::as_u64) {
+        out.insert(String::from("row_start"), json!(rs));
+    }
+    if let Some(re) = ov_obj.and_then(|o| o.get("row_end")).and_then(Value::as_u64) {
+        out.insert(String::from("row_end"), json!(re));
+    }
+
+    Value::Object(out)
+}
+
 /// Build contextual default parameters for menu/toolbar/palette commands (always returns a JSON object, never `Value::Null`).
 #[must_use]
 pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
@@ -595,7 +675,14 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
     match command_id {
         "sheet.createData" => json!({ "kind": "xy", "title": "Data Table", "auto_family": true }),
         "sheet.rename" => json!({ "sheet_id": active_sheet, "title": "Renamed Sheet" }),
-        "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.clonePipeline" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
+        "sheet.duplicate"
+        | "sheet.duplicateFamily"
+        | "sheet.clonePipeline"
+        | "sheet.delete"
+        | "sheet.freeze"
+        | "sheet.unfreeze"
+        | "sheet.select"
+        | "sheet.addFloatingNote" => {
             json!({ "sheet_id": active_sheet })
         }
         "sheet.extractResultTab" => json!({ "result_sheet_id": result_str }),
@@ -626,6 +713,10 @@ pub fn contextual_command_params(app: &UiApp, command_id: &str) -> Value {
             }
         }
         "ui.grid.excludeWithReason" => json!({ "sheet_id": active_sheet.or(data_str) }),
+        "table.pasteTranspose" => json!({ "sheet_id": active_data_sheet_id(doc).as_ref().map(SheetId::as_str).or(data_str) }),
+        "table.sortRows" | "ui.table.sortRowsAsc" | "ui.table.sortRowsDesc" | "ui.table.sortByRowTitles" => {
+            build_sort_rows_params(app, command_id, None)
+        }
         "table.exclusionAuditReport" | "table.exportCsv" => json!({ "sheet_id": data_str }),
         "export.svg" | "graph.exportSvg" | "export.pdf" | "graph.exportPdf" | "export.png" | "graph.exportPng" | "export.tiff"
         | "graph.exportEmf" | "layout.exportEmf" | "ui.print.open" | "file.print" => json!({ "sheet_id": render_str }),

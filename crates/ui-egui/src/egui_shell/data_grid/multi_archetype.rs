@@ -12,6 +12,7 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::grid_view::linked_region_for_cell;
+use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
 use super::super::ui_kit::{ActionMenuEntry, ActionMenuItem, ActionMenuSpec, TooltipSpec, action_menu_popup, show_tooltip_for_control};
@@ -22,13 +23,13 @@ use super::linked_regions::{open_link_popover, render_link_provenance_strip, ren
 use super::mv_roles::{active_mv_formula_operands, render_mv_role_menu_popup};
 use super::shared::LinkedEdgePaint;
 use super::shared::{
-    AuxInlineTarget, CellTextStyle, ContextCellTarget, ContextMenuState, GridDragOutcome, MultiGridAuxState, MultiGridCtx, MultiGridFrameState,
-    MultiGridGeom, SelectionFastLookup, alt_row_fill, any_pointer_click_in, apply_pending_scroll_target, clamp_multi_scroll, compute_multi_geom,
-    compute_multi_scrollbar_rects, compute_visible_range, ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel,
-    initial_edit_text_for_cell, is_linked_region_broken, is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker,
-    paint_find_highlight, paint_linked_perimeter_edges, paint_scrollbar_corner_cap, paint_selection_perimeter_overlay,
-    prepare_grid_drag_and_autoscroll, record_meta_if_enabled, record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active,
-    table_display_decimals,
+    AuxInlineTarget, CellTextStyle, ColHeaderSortTarget, ContextCellTarget, ContextMenuState, GridContextMenuKind, GridDragOutcome,
+    MultiGridAuxState, MultiGridCtx, MultiGridFrameState, MultiGridGeom, SelectionFastLookup, alt_row_fill, any_pointer_click_in,
+    apply_pending_scroll_target, clamp_multi_scroll, compute_multi_geom, compute_multi_scrollbar_rects, compute_visible_range,
+    ensure_solid_scrollbar_style, format_cell_into_with_decimals, forward_frozen_wheel, initial_edit_text_for_cell, is_linked_region_broken,
+    is_multi_click_edit, link_border_color32, multi_text_style, paint_exclusion_corner_marker, paint_find_highlight, paint_linked_perimeter_edges,
+    paint_scrollbar_corner_cap, paint_selection_perimeter_overlay, prepare_grid_drag_and_autoscroll, record_meta_if_enabled,
+    record_meta_with_unclipped_if_enabled, render_ellipsized_text, set_grid_focus_active, table_display_decimals,
 };
 use super::shortcuts::{
     clear_x_clipboard_cache, copy_x_range_to_clipboard, first_linked_region_in_selection, handle_multi_keyboard_shortcuts,
@@ -301,7 +302,7 @@ fn render_multi_gutter_body(
                     && !blocked
                     && let Some(pos) = resp.interact_pointer_pos()
                 {
-                    fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: None });
+                    fstate.state.context_menu = Some(ContextMenuState { pos, kind: GridContextMenuKind::RowCell { row, cell: None } });
                 }
             }
 
@@ -396,7 +397,7 @@ fn render_multi_gutter_body(
                             && !blocked
                             && let Some(pos) = resp.interact_pointer_pos()
                         {
-                            fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: None });
+                            fstate.state.context_menu = Some(ContextMenuState { pos, kind: GridContextMenuKind::RowCell { row, cell: None } });
                         }
                     }
                 }
@@ -757,7 +758,10 @@ fn render_single_multi_x_cell(
             super::shared::push_select_x_if_needed(app, xr, xs, fstate.intents);
         }
         body_ui.ctx().request_repaint();
-        fstate.state.context_menu = Some(ContextMenuState { pos, row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) });
+        fstate.state.context_menu = Some(ContextMenuState {
+            pos,
+            kind: GridContextMenuKind::RowCell { row, cell: Some(ContextCellTarget { is_x: true, row, col: 0, subcol }) },
+        });
     }
     interacted
 }
@@ -1045,8 +1049,10 @@ fn handle_multi_data_cell_interactions(
         }
         fstate.state.context_menu = Some(ContextMenuState {
             pos,
-            row: coord.row,
-            cell: Some(ContextCellTarget { is_x: false, row: coord.row, col: coord.col, subcol: coord.subcol }),
+            kind: GridContextMenuKind::RowCell {
+                row: coord.row,
+                cell: Some(ContextCellTarget { is_x: false, row: coord.row, col: coord.col, subcol: coord.subcol }),
+            },
         });
     }
     interacted
@@ -1110,11 +1116,17 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     let ds = mctx.ds;
     let tokens = mctx.tokens;
     let Some(ctx_menu) = fstate.state.context_menu.clone() else { return };
-    let (pos, row, cell_ctx) = (ctx_menu.pos, ctx_menu.row, ctx_menu.cell);
     if mctx.blocked {
         fstate.state.context_menu = None;
         return;
     }
+    let (pos, row, cell_ctx) = match ctx_menu.kind {
+        GridContextMenuKind::RowCell { row, cell } => (ctx_menu.pos, row, cell),
+        GridContextMenuKind::ColumnHeader { target, header_label } => {
+            render_col_header_context_menu_popup(ui, mctx, fstate, ctx_menu.pos, target, &header_label);
+            return;
+        }
+    };
     let selected_x_bounds = fstate.aux.selected_x_bounds();
     let record_inspect_meta = fstate.state.record_inspect_meta;
     let mut close_menu = false;
@@ -1166,8 +1178,9 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     };
 
     let header_title = format!("Row {} Actions", row + 1);
+    let paste_transpose_lbl = tr(mctx.locale, "grid.ctx.paste_transpose");
     type GridCtxItemTuple<'a> = (&'a str, &'a str, Option<&'a str>, bool, Option<&'a str>);
-    let items: [GridCtxItemTuple<'_>; 9] = [
+    let items: [GridCtxItemTuple<'_>; 10] = [
         (
             "grid.ctx.style_points",
             "Style Selected Points on Graph",
@@ -1212,6 +1225,13 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         ("grid.ctx.cut", "Cut Selection", Some("edit.cut"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
         ("grid.ctx.copy", "Copy Selection", Some("edit.copy"), true, None),
         ("grid.ctx.paste", "Paste Here", Some("edit.paste"), !ds.frozen, ds.frozen.then_some("Data sheet is frozen (read-only).")),
+        (
+            "grid.ctx.paste_transpose",
+            paste_transpose_lbl,
+            Some("table.pasteTranspose"),
+            !ds.frozen,
+            ds.frozen.then_some("Data sheet is frozen (read-only)."),
+        ),
         ("grid.ctx.duplicate_column", "Duplicate Column", Some("table.paste"), dup_enabled, dup_disabled_reason),
     ];
 
@@ -1237,107 +1257,12 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
         && let Some((wid, _, _, enabled, _)) = items.get(item_idx)
         && *enabled
     {
-        match *wid {
-            "grid.ctx.style_points" => {
-                if let Some(g) = linked_graph {
-                    let points: Vec<serde_json::Value> = if let Some(tgt) = cell_ctx
-                        && !tgt.is_x
-                        && tgt.col < g.spec.series.len()
-                    {
-                        vec![json!({ "series_index": tgt.col, "point_index": row })]
-                    } else if !g.spec.series.is_empty() {
-                        vec![json!({ "series_index": 0, "point_index": row })]
-                    } else {
-                        Vec::new()
-                    };
-                    intents.push_ui("ui.formatPoints.open", json!({ "sheet_id": g.id.as_str(), "points": points }));
-                }
-            }
-            "grid.ctx.show_row_titles" => {
-                if let Some(g) = linked_graph {
-                    let text = row_title_or_default(ds, row);
-                    #[allow(clippy::cast_precision_loss)]
-                    let x_pt = 72.0 + f64::from((row % 3) as u32) * 124.0;
-                    #[allow(clippy::cast_precision_loss)]
-                    let y_pt = 48.0 + f64::from((row / 3) as u32) * 30.0;
-                    intents.push_engine(
-                        "graph.addAnnotation",
-                        json!({
-                            "sheet_id": g.id.as_str(),
-                            "kind": "text",
-                            "text": text,
-                            "x_pt": x_pt,
-                            "y_pt": y_pt,
-                        }),
-                    );
-                }
-            }
-            "grid.ctx.reset_style" => {
-                if let Some(g) = linked_graph
-                    && !row_override_points.is_empty()
-                {
-                    intents.push_engine(
-                        "graph.formatSelectedPoints",
-                        json!({
-                            "sheet_id": g.id.as_str(),
-                            "mode": "clear",
-                            "points": row_override_points,
-                        }),
-                    );
-                }
-            }
-            "grid.ctx.exclude" => {
-                if let Some(reg) = handle_grid_ctx_exclude(app, ds, row, cell_ctx, selected_x_bounds, intents) {
-                    linked_guard_to_open = Some(reg);
-                }
-            }
-            "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
-            "grid.ctx.cut" => {
-                if let Some(reg) = handle_grid_ctx_cut(ui, app, ds, cell_ctx, selected_x_bounds, intents) {
-                    linked_guard_to_open = Some(reg);
-                }
-            }
-            "grid.ctx.copy" => {
-                if let Some(tgt) = cell_ctx
-                    && tgt.is_x
-                {
-                    if let Some((r0, r1, s0, s1)) = selected_x_bounds
-                        && (r0..=r1).contains(&tgt.row)
-                        && (s0..=s1).contains(&tgt.subcol)
-                    {
-                        copy_x_range_to_clipboard(ui, app, ds, r0, r1, s0, s1);
-                    } else {
-                        copy_x_range_to_clipboard(ui, app, ds, tgt.row, tgt.row, tgt.subcol, tgt.subcol);
-                    }
-                } else if let Some((xr0, xr1, xs0, xs1)) = selected_x_bounds {
-                    copy_x_range_to_clipboard(ui, app, ds, xr0, xr1, xs0, xs1);
-                } else {
-                    clear_x_clipboard_cache(ui);
-                    intents.push(UiIntent::GridCopySelection);
-                }
-            }
-            "grid.ctx.paste" => {
-                if let Some(tgt) = cell_ctx
-                    && tgt.is_x
-                {
-                    if let Some(clip) = read_clipboard_text_for_x_paste(ui, app) {
-                        push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, intents);
-                    }
-                } else if let Some((xr0, _, xs0, _)) = selected_x_bounds {
-                    if let Some(clip) = read_clipboard_text_for_x_paste(ui, app) {
-                        push_x_cell_text_paste_intents(app, ds, xr0, xs0, &clip, intents);
-                    }
-                } else {
-                    intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.active_cell_for_sheet(&ds.id) });
-                }
-            }
-            "grid.ctx.duplicate_column" => {
-                if let Some(intent) = build_duplicate_column_intent(app, ds, cell_ctx) {
-                    intents.push(intent);
-                }
-            }
-            _ => {}
-        }
+        linked_guard_to_open = dispatch_row_context_menu_click(
+            ui,
+            wid,
+            &RowCtxDispatch { app, ds, row, cell_ctx, selected_x_bounds, linked_graph, row_override_points: &row_override_points },
+            intents,
+        );
         close_menu = true;
     }
 
@@ -1347,6 +1272,209 @@ fn render_row_context_menu_popup(ui: &mut Ui, mctx: &MultiGridCtx<'_>, fstate: &
     if let Some(reg) = linked_guard_to_open {
         open_link_popover(fstate.state, &reg, mctx.locale);
         ui.ctx().request_repaint();
+    }
+}
+
+struct RowCtxDispatch<'a> {
+    app: &'a UiApp,
+    ds: &'a DataSheet,
+    row: usize,
+    cell_ctx: Option<ContextCellTarget>,
+    selected_x_bounds: Option<(usize, usize, usize, usize)>,
+    linked_graph: Option<&'a curvebook_doc::GraphSheet>,
+    row_override_points: &'a [serde_json::Value],
+}
+
+fn dispatch_row_context_menu_click(ui: &Ui, wid: &str, d: &RowCtxDispatch<'_>, intents: &mut PendingUiIntents) -> Option<LinkedDataRegion> {
+    let &RowCtxDispatch { app, ds, row, cell_ctx, selected_x_bounds, linked_graph, row_override_points } = d;
+    match wid {
+        "grid.ctx.style_points" => {
+            if let Some(g) = linked_graph {
+                let points: Vec<serde_json::Value> = if let Some(tgt) = cell_ctx
+                    && !tgt.is_x
+                    && tgt.col < g.spec.series.len()
+                {
+                    vec![json!({ "series_index": tgt.col, "point_index": row })]
+                } else if !g.spec.series.is_empty() {
+                    vec![json!({ "series_index": 0, "point_index": row })]
+                } else {
+                    Vec::new()
+                };
+                intents.push_ui("ui.formatPoints.open", json!({ "sheet_id": g.id.as_str(), "points": points }));
+            }
+        }
+        "grid.ctx.show_row_titles" => {
+            if let Some(g) = linked_graph {
+                let text = row_title_or_default(ds, row);
+                #[allow(clippy::cast_precision_loss)]
+                let x_pt = 72.0 + f64::from((row % 3) as u32) * 124.0;
+                #[allow(clippy::cast_precision_loss)]
+                let y_pt = 48.0 + f64::from((row / 3) as u32) * 30.0;
+                intents.push_engine(
+                    "graph.addAnnotation",
+                    json!({
+                        "sheet_id": g.id.as_str(),
+                        "kind": "text",
+                        "text": text,
+                        "x_pt": x_pt,
+                        "y_pt": y_pt,
+                    }),
+                );
+            }
+        }
+        "grid.ctx.reset_style" => {
+            if let Some(g) = linked_graph
+                && !row_override_points.is_empty()
+            {
+                intents.push_engine(
+                    "graph.formatSelectedPoints",
+                    json!({
+                        "sheet_id": g.id.as_str(),
+                        "mode": "clear",
+                        "points": row_override_points,
+                    }),
+                );
+            }
+        }
+        "grid.ctx.exclude" => {
+            return handle_grid_ctx_exclude(app, ds, row, cell_ctx, selected_x_bounds, intents);
+        }
+        "grid.ctx.exclude_reason" => intents.push_ui("ui.grid.excludeWithReason", json!({ "sheet_id": ds.id.as_str() })),
+        "grid.ctx.cut" => {
+            return handle_grid_ctx_cut(ui, app, ds, cell_ctx, selected_x_bounds, intents);
+        }
+        "grid.ctx.copy" => {
+            if let Some(tgt) = cell_ctx
+                && tgt.is_x
+            {
+                if let Some((r0, r1, s0, s1)) = selected_x_bounds
+                    && (r0..=r1).contains(&tgt.row)
+                    && (s0..=s1).contains(&tgt.subcol)
+                {
+                    copy_x_range_to_clipboard(ui, app, ds, r0, r1, s0, s1);
+                } else {
+                    copy_x_range_to_clipboard(ui, app, ds, tgt.row, tgt.row, tgt.subcol, tgt.subcol);
+                }
+            } else if let Some((xr0, xr1, xs0, xs1)) = selected_x_bounds {
+                copy_x_range_to_clipboard(ui, app, ds, xr0, xr1, xs0, xs1);
+            } else {
+                clear_x_clipboard_cache(ui);
+                intents.push(UiIntent::GridCopySelection);
+            }
+        }
+        "grid.ctx.paste" => {
+            if let Some(tgt) = cell_ctx
+                && tgt.is_x
+            {
+                if let Some(clip) = read_clipboard_text_for_x_paste(ui, app) {
+                    push_x_cell_text_paste_intents(app, ds, tgt.row, tgt.subcol, &clip, intents);
+                }
+            } else if let Some((xr0, _, xs0, _)) = selected_x_bounds {
+                if let Some(clip) = read_clipboard_text_for_x_paste(ui, app) {
+                    push_x_cell_text_paste_intents(app, ds, xr0, xs0, &clip, intents);
+                }
+            } else {
+                intents.push(UiIntent::GridPasteFromClipboard { start_coord: app.grid.active_cell_for_sheet(&ds.id) });
+            }
+        }
+        "grid.ctx.paste_transpose" => {
+            let start_coord = cell_ctx
+                .filter(|t| !t.is_x)
+                .map(|t| GridCellCoord::new(t.row, t.col, t.subcol))
+                .or_else(|| app.grid.active_cell_for_sheet(&ds.id))
+                .or(Some(GridCellCoord::new(row, 0, 0)));
+            intents.push(UiIntent::GridPasteTransposeFromClipboard { start_coord });
+        }
+        "grid.ctx.duplicate_column" => {
+            if let Some(intent) = build_duplicate_column_intent(app, ds, cell_ctx) {
+                intents.push(intent);
+            }
+        }
+        _ => {}
+    }
+    None
+}
+
+fn render_col_header_context_menu_popup(
+    ui: &mut Ui,
+    mctx: &MultiGridCtx<'_>,
+    fstate: &mut MultiGridFrameState<'_>,
+    pos: egui::Pos2,
+    target: ColHeaderSortTarget,
+    header_label: &str,
+) {
+    let ds = mctx.ds;
+    let tokens = mctx.tokens;
+    let record_inspect_meta = fstate.state.record_inspect_meta;
+    let meta = &mut *fstate.meta;
+    let intents = &mut *fstate.intents;
+
+    let disabled_reason = crate::menus::tooltips::sort_rows_disabled_reason_for_sheet(ds);
+    let sort_enabled = disabled_reason.is_none();
+    let sort_asc_lbl = tr(mctx.locale, "grid.col_hdr.sort_asc");
+    let sort_desc_lbl = tr(mctx.locale, "grid.col_hdr.sort_desc");
+
+    let entries = [
+        ActionMenuEntry::Header(header_label),
+        ActionMenuEntry::Separator,
+        ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("grid.col_hdr.sort_asc", sort_asc_lbl)
+                .command_id(Some("table.sortRows"))
+                .enabled(sort_enabled)
+                .disabled_reason(disabled_reason),
+        ),
+        ActionMenuEntry::Item(
+            ActionMenuItem::menu_item("grid.col_hdr.sort_desc", sort_desc_lbl)
+                .command_id(Some("table.sortRows"))
+                .enabled(sort_enabled)
+                .disabled_reason(disabled_reason),
+        ),
+    ];
+
+    let out = action_menu_popup(
+        ui.ctx(),
+        tokens,
+        record_inspect_meta.then_some(meta),
+        ActionMenuSpec::context(Id::unique(("grid_col_hdr_ctx_menu", ds.id.as_str())), "popup.grid.col_hdr_ctx", header_label, pos),
+        &entries,
+    );
+
+    let mut close_menu = false;
+    if let Some(hit) = out.clicked_entry
+        && sort_enabled
+        && let Some(direction) = match hit {
+            2 => Some("asc"),
+            3 => Some("desc"),
+            _ => None,
+        }
+    {
+        let mut params = serde_json::Map::new();
+        params.insert(String::from("sheet_id"), json!(ds.id.as_str()));
+        match target {
+            ColHeaderSortTarget::X { subcol } => {
+                params.insert(String::from("by"), json!("x"));
+                if let Some(sc) = subcol {
+                    params.insert(String::from("subcol"), json!(sc));
+                }
+            }
+            ColHeaderSortTarget::RowTitle => {
+                params.insert(String::from("by"), json!("row_title"));
+            }
+            ColHeaderSortTarget::Column { col, subcol } => {
+                params.insert(String::from("by"), json!("column"));
+                params.insert(String::from("col"), json!(col));
+                if let Some(sc) = subcol {
+                    params.insert(String::from("subcol"), json!(sc));
+                }
+            }
+        }
+        params.insert(String::from("direction"), json!(direction));
+        intents.push_engine("table.sortRows", serde_json::Value::Object(params));
+        close_menu = true;
+    }
+
+    if close_menu || out.dismissed {
+        fstate.state.context_menu = None;
     }
 }
 
