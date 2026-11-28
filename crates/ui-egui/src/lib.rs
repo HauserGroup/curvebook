@@ -681,6 +681,7 @@ impl UiApp {
         let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_as_ui(command_id, params)
         })?;
+        self.surface_figure_export_warnings(command_id, &outcome.warnings);
         self.surface_pzfx_export_status(command_id, &outcome);
         Ok(outcome)
     }

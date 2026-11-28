@@ -12,14 +12,16 @@
 //! Command Palette) and **Export All Data Tables…**, comparing every imported table and every
 //! exported file against a fresh headless `curvebook_engine::Session`.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
 use crate::human_wf_common::workflow_run::{LiveEditExpectation, LiveEditTarget, ReferenceSpec, WorkflowRun};
 use crate::human_wf_common::{TestRes, ensure};
-use curvebook_doc::{AnalysisKind, CellCoord, CellValue, DataSheet, OneWayAnovaSpec};
+use curvebook_doc::{AnalysisKind, CellCoord, CellValue, DataSheet, GraphKind, NonlinearFitSpec, OneWayAnovaSpec, ResultStatus, SheetId};
 use curvebook_engine::Session;
 use curvebook_format::zip::ZipWriter;
+use curvebook_testkit::wf_datasets::dose_response_4pl;
 use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, CsvExportTargetKind};
 use curvebook_ui_egui::inspect_ui_tree;
 use curvebook_ui_egui::os_integration::NativeFileDialogKind;
@@ -1426,4 +1428,330 @@ fn s7_human_file_export_pzfx_preflight_modal_roundtrip_and_skip_prompt() -> Test
     }
 
     Ok(())
+}
+
+/// Five-stage `WorkflowRun` human-path verification (`R19.5`) that exporting a graph whose
+/// regression overlay is pending recalculation via the interactive `ExportFigure` dialog:
+/// 1. Omits the pending fitted curve from the exported SVG (matching a graph without an overlay),
+/// 2. Surfaces the structured `pending_regression_result` warning in both `CommandOutcome` and
+///    the rendered shell status footer (`status.figure_export_warning`, dismissible on click and
+///    isolated from `status_banner`), and
+/// 3. Clears the warning banner automatically and renders the fitted curve on a subsequent clean
+///    export after **Analyze › Recalculate All**, followed by `D1` reference verification and
+///    upstream live-edit propagation.
+#[test]
+fn human_export_figure_pending_fit_warning_omits_curve_and_clears_on_clean_export() -> TestRes {
+    let dir = temp_dir("pending-fit-export-warning")?;
+    let fx = dose_response_4pl();
+    let mut run = WorkflowRun::start("EXPORT-PENDING-FIT-WARNING");
+
+    // Stage 1 (Create): empty UiApp -> create XY dose-response table + linked GraphSheet via Welcome Hub.
+    let graphs_before: BTreeSet<SheetId> = run.document().graph_sheets.iter().map(|g| g.id.clone()).collect();
+    let xy_id = run.create_table_via_welcome("welcome.arch.xy", "Dose Response", &["welcome.stepper.cols.dec", "welcome.subcol.raw"])?;
+    let graph_id = run
+        .document()
+        .graph_sheets
+        .iter()
+        .find(|g| !graphs_before.contains(&g.id) && g.spec.primary_source_sheet_id == xy_id)
+        .map(|g| g.id.clone())
+        .ok_or("EXPORT-PENDING-FIT-WARNING: missing auto-created XY GraphSheet")?;
+
+    // Stage 2 (Enter): populate dose-response XY table via synthesized GUI input + clipboard paste.
+    run.enter_column_title(0, "Agonist_A")?;
+    run.enter_column_title(1, "Agonist_B")?;
+    let data_tsv: String = fx
+        .rows
+        .iter()
+        .map(|row| {
+            let mut cols = vec![format!("{}", row.x)];
+            for series in &row.series_replicates {
+                for &v in series {
+                    cols.push(format!("{v}"));
+                }
+            }
+            cols.join("\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    run.click("grid.xcell.0.0")?;
+    run.paste_clipboard(&data_tsv)?;
+
+    // Stage 3 (Configure): run 4PL nonlinear fit, attach regression overlay to graph, then clone the
+    // pipeline with "Re-run analyses immediately" unchecked so the cloned fit is genuinely pending (`Dirty`).
+    let fit_id = run.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    run.select_sheet(&fit_id)?;
+    run.open_cmd_t()?;
+    run.click("fit.tab.model")?;
+    run.click("fit.eq.item.log_agonist_vs_response_4pl")?;
+    run.commit_modal_ok()?;
+    ensure(
+        run.document().result_sheet(&fit_id).is_some_and(|r| r.status == ResultStatus::UpToDate && !r.fitted_curves.is_empty()),
+        "EXPORT-PENDING-FIT-WARNING: initial 4PL fit must be UpToDate with fitted curves",
+    )?;
+
+    run.select_sheet(&graph_id)?;
+    run.click("toolbar.format_graph")?;
+    run.click("format_graph.overlay.attach.0")?;
+    run.commit_modal_ok()?;
+    ensure(
+        run.document()
+            .graph_sheet(&graph_id)
+            .and_then(|g| g.spec.series.first())
+            .and_then(|s| s.regression_overlay.as_ref())
+            .is_some_and(|ov| ov.result_sheet_id == fit_id),
+        "EXPORT-PENDING-FIT-WARNING: expected regression overlay attached to original XY graph",
+    )?;
+
+    // Clone pipeline through Welcome Hub keeping copied data while deferring analysis recalculation.
+    let data_before_clone: BTreeSet<SheetId> = run.document().data_sheets.iter().map(|d| d.id.clone()).collect();
+    let results_before_clone: BTreeSet<SheetId> = run.document().result_sheets.iter().map(|r| r.id.clone()).collect();
+    let graphs_before_clone: BTreeSet<SheetId> = run.document().graph_sheets.iter().map(|g| g.id.clone()).collect();
+
+    run.click("toolbar.home")?;
+    run.click("welcome.mode.clone")?;
+    run.click(&format!("welcome.clone.source.{}", xy_id.as_str()))?;
+    run.click("welcome.btn.clone_options")?;
+    run.click("welcome.clone.copy_data")?;
+    run.click("welcome.clone.rerun_analyses")?;
+    run.click("welcome.clone_modal.apply")?;
+    run.click("welcome.btn.create")?;
+
+    let cloned_xy_id = run
+        .document()
+        .data_sheets
+        .iter()
+        .find(|d| !data_before_clone.contains(&d.id))
+        .map(|d| d.id.clone())
+        .ok_or("EXPORT-PENDING-FIT-WARNING: missing cloned XY DataSheet")?;
+    let cloned_fit_id = run
+        .document()
+        .result_sheets
+        .iter()
+        .find(|r| !results_before_clone.contains(&r.id))
+        .map(|r| r.id.clone())
+        .ok_or("EXPORT-PENDING-FIT-WARNING: missing cloned ResultSheet")?;
+    let cloned_graph_id = run
+        .document()
+        .graph_sheets
+        .iter()
+        .find(|g| !graphs_before_clone.contains(&g.id))
+        .map(|g| g.id.clone())
+        .ok_or("EXPORT-PENDING-FIT-WARNING: missing cloned GraphSheet")?;
+
+    ensure(
+        run.document().result_sheet(&cloned_fit_id).is_some_and(|r| r.status == ResultStatus::Dirty),
+        format!(
+            "EXPORT-PENDING-FIT-WARNING: cloned fit `{}` must start pending (Dirty), got {:?}",
+            cloned_fit_id.as_str(),
+            run.document().result_sheet(&cloned_fit_id).map(|r| &r.status)
+        ),
+    )?;
+    ensure(
+        run.document()
+            .graph_sheet(&cloned_graph_id)
+            .and_then(|g| g.spec.series.first())
+            .and_then(|s| s.regression_overlay.as_ref())
+            .is_some_and(|ov| ov.result_sheet_id == cloned_fit_id),
+        "EXPORT-PENDING-FIT-WARNING: cloned graph must reference the pending cloned fit overlay",
+    )?;
+
+    // Open interactive desktop ExportFigure dialog on the cloned graph and export SVG while pending.
+    run.select_sheet(&cloned_graph_id)?;
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.figure.open")?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::ExportFigure { sheet_id } if *sheet_id == cloned_graph_id),
+        format!("EXPORT-PENDING-FIT-WARNING: expected ExportFigure dialog for `{}`, got {:?}", cloned_graph_id.as_str(), run.active_dialog()),
+    )?;
+    run.click("export.fmt.svg")?;
+    run.commit_modal_ok()?;
+    ensure(
+        matches!(run.active_dialog(), ActiveDialog::None),
+        format!("EXPORT-PENDING-FIT-WARNING: ExportFigure must close after Export, got {:?}", run.active_dialog()),
+    )?;
+
+    let pending_svg = {
+        let out = run.last_engine_outcome("graph.exportSvg").ok_or("EXPORT-PENDING-FIT-WARNING: missing graph.exportSvg outcome")?;
+        ensure(
+            out.payload["sheet_id"].as_str() == Some(cloned_graph_id.as_str()),
+            format!("EXPORT-PENDING-FIT-WARNING: unexpected exported sheet_id: {}", out.payload),
+        )?;
+        let payload_warnings = out.payload["warnings"].as_array().ok_or("EXPORT-PENDING-FIT-WARNING: missing payload.warnings array")?;
+        ensure(
+            payload_warnings.iter().any(|w| w["code"] == json!("pending_regression_result")),
+            format!("EXPORT-PENDING-FIT-WARNING: payload warnings missing pending_regression_result: {payload_warnings:?}"),
+        )?;
+        ensure(
+            out.warnings.iter().any(|w| w.contains("pending_regression_result") && w.contains(cloned_fit_id.as_str())),
+            format!("EXPORT-PENDING-FIT-WARNING: CommandOutcome warnings missing pending_regression_result: {:?}", out.warnings),
+        )?;
+        let svg = out.payload["svg"].as_str().ok_or("EXPORT-PENDING-FIT-WARNING: missing exported SVG string")?.to_owned();
+        curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("EXPORT-PENDING-FIT-WARNING: invalid pending SVG: {e}"))?;
+        svg
+    };
+
+    // Warning must surface cleanly in the shell footer (`status.figure_export_warning`) and stay
+    // isolated from `status_banner`.
+    let notice = run.app().canvas_dialogs.figure_export_warning.clone();
+    ensure(
+        notice.as_deref().is_some_and(|w| w.contains("pending_regression_result")),
+        format!("EXPORT-PENDING-FIT-WARNING: figure_export_warning missing pending_regression_result: {notice:?}"),
+    )?;
+    ensure(
+        run.app().canvas_dialogs.status_banner.is_none(),
+        format!("EXPORT-PENDING-FIT-WARNING: export warning must not leak into status_banner: {:?}", run.app().canvas_dialogs.status_banner),
+    )?;
+    let chip = run
+        .frame_meta()
+        .find_by_widget_id("status.figure_export_warning")
+        .ok_or("EXPORT-PENDING-FIT-WARNING: status.figure_export_warning chip not rendered")?;
+    let chip_text = chip.full_label.clone().unwrap_or_else(|| chip.label.clone());
+    ensure(
+        chip.enabled && chip_text.contains("pending_regression_result"),
+        format!("EXPORT-PENDING-FIT-WARNING: footer warning chip text mismatch: enabled={}, text={chip_text:?}", chip.enabled),
+    )?;
+
+    // Clicking the footer warning chip dismisses it.
+    run.click("status.figure_export_warning")?;
+    ensure(run.app().canvas_dialogs.figure_export_warning.is_none(), "EXPORT-PENDING-FIT-WARNING: clicking footer warning chip must dismiss it")?;
+    ensure(
+        run.frame_meta().find_by_widget_id("status.figure_export_warning").is_none(),
+        "EXPORT-PENDING-FIT-WARNING: dismissed warning chip must not render",
+    )?;
+
+    // Re-export via ExportFigure (PDF format) while still pending so the warning surfaces again
+    // across formats, ready to test automatic clearing on clean export.
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.figure.open")?;
+    run.click("export.fmt.pdf")?;
+    run.commit_modal_ok()?;
+    let pdf_out = run.last_engine_outcome("graph.exportPdf").ok_or("EXPORT-PENDING-FIT-WARNING: missing graph.exportPdf outcome")?;
+    ensure(
+        pdf_out.warnings.iter().any(|w| w.contains("pending_regression_result")),
+        format!("EXPORT-PENDING-FIT-WARNING: PDF export missing pending_regression_result warning: {:?}", pdf_out.warnings),
+    )?;
+    ensure(
+        run.app().canvas_dialogs.figure_export_warning.as_deref().is_some_and(|w| w.contains("pending_regression_result")),
+        "EXPORT-PENDING-FIT-WARNING: PDF export with pending fit must re-surface figure_export_warning",
+    )?;
+
+    // Snapshot the pending document (stripped of overlay on a copy) via archive round-trip so a
+    // fresh headless Session oracle verifies that the pending export omitted the fitted curve.
+    let mut no_overlay_doc = run.document().clone();
+    if let Some(gs) = no_overlay_doc.graph_sheet_mut(&cloned_graph_id) {
+        for s in &mut gs.spec.series {
+            s.regression_overlay = None;
+        }
+    }
+    let no_overlay_snap = dir.path().join("no_overlay_oracle.curvebook");
+    curvebook_format::archive::save_project_file(&no_overlay_snap, &no_overlay_doc)
+        .map_err(|e| format!("failed to save no-overlay oracle snapshot: {e}"))?;
+    let mut no_overlay_oracle = Session::new();
+    no_overlay_oracle
+        .execute("project.open", json!({ "path": no_overlay_snap.to_string_lossy() }))
+        .map_err(|e| format!("failed to open no-overlay oracle: {e}"))?;
+    let no_overlay_svg = no_overlay_oracle
+        .execute("graph.exportSvg", json!({ "sheet_id": cloned_graph_id.as_str() }))
+        .map_err(|e| format!("no-overlay oracle exportSvg failed: {e}"))?
+        .payload["svg"]
+        .as_str()
+        .ok_or("no-overlay oracle missing svg")?
+        .to_owned();
+    ensure(
+        pending_svg == no_overlay_svg,
+        "EXPORT-PENDING-FIT-WARNING: pending-fit exported SVG must match a graph with no regression overlay (fitted curve omitted)",
+    )?;
+
+    // Recalculate all pending sheets through the GUI menu (`Analyze > Recalculate All`).
+    run.open_menu_and_click("menu.analyze", &[], "menu.project.recalculate")?;
+    ensure(
+        run.document().result_sheet(&cloned_fit_id).is_some_and(|r| r.status == ResultStatus::UpToDate && !r.fitted_curves.is_empty()),
+        format!("EXPORT-PENDING-FIT-WARNING: Analyze > Recalculate All must bring `{}` UpToDate with fitted curves", cloned_fit_id.as_str()),
+    )?;
+
+    // Re-export the cloned graph via interactive ExportFigure SVG dialog now that the fit is current:
+    // warning banner must clear automatically and the exported SVG must include the fitted curve.
+    run.select_sheet(&cloned_graph_id)?;
+    run.open_menu_and_click("menu.file", &["menu.file.export"], "menu.ui.export.figure.open")?;
+    run.click("export.fmt.svg")?;
+    run.commit_modal_ok()?;
+
+    let clean_svg = {
+        let out = run.last_engine_outcome("graph.exportSvg").ok_or("EXPORT-PENDING-FIT-WARNING: missing clean graph.exportSvg outcome")?;
+        ensure(out.warnings.is_empty(), format!("EXPORT-PENDING-FIT-WARNING: clean export emitted unexpected warnings: {:?}", out.warnings))?;
+        ensure(
+            out.payload["warnings"].as_array().is_some_and(Vec::is_empty),
+            format!("EXPORT-PENDING-FIT-WARNING: clean export payload.warnings must be empty: {}", out.payload),
+        )?;
+        let svg = out.payload["svg"].as_str().ok_or("EXPORT-PENDING-FIT-WARNING: missing clean SVG string")?.to_owned();
+        curvebook_svg::validate_svg_structure(&svg).map_err(|e| format!("EXPORT-PENDING-FIT-WARNING: invalid clean SVG: {e}"))?;
+        svg
+    };
+    ensure(
+        run.app().canvas_dialogs.figure_export_warning.is_none(),
+        format!(
+            "EXPORT-PENDING-FIT-WARNING: clean export must clear prior figure_export_warning, got {:?}",
+            run.app().canvas_dialogs.figure_export_warning
+        ),
+    )?;
+    ensure(
+        run.frame_meta().find_by_widget_id("status.figure_export_warning").is_none(),
+        "EXPORT-PENDING-FIT-WARNING: status.figure_export_warning chip must not render after clean export",
+    )?;
+    ensure(
+        clean_svg != pending_svg,
+        "EXPORT-PENDING-FIT-WARNING: clean export with UpToDate fit must differ from pending export (fitted curve now drawn)",
+    )?;
+
+    // Cross-check clean exported SVG byte-for-byte against a fresh headless Session oracle.
+    let clean_snap = dir.path().join("clean_oracle.curvebook");
+    curvebook_format::archive::save_project_file(&clean_snap, run.document()).map_err(|e| format!("failed to save clean oracle snapshot: {e}"))?;
+    let mut clean_oracle = Session::new();
+    clean_oracle.execute("project.open", json!({ "path": clean_snap.to_string_lossy() })).map_err(|e| format!("failed to open clean oracle: {e}"))?;
+    let oracle_clean_svg = clean_oracle
+        .execute("graph.exportSvg", json!({ "sheet_id": cloned_graph_id.as_str() }))
+        .map_err(|e| format!("clean oracle exportSvg failed: {e}"))?
+        .payload["svg"]
+        .as_str()
+        .ok_or("clean oracle missing svg")?
+        .to_owned();
+    ensure(clean_svg == oracle_clean_svg, "EXPORT-PENDING-FIT-WARNING: clean GUI ExportFigure SVG must match headless oracle byte-for-byte")?;
+
+    // Stage 4 (Verify): D1 reference verification of the recalculated 4PL fit & graph overlay.
+    let ref_sheet = fx.to_data_sheet("ref-r19-5-xy").map_err(|e| e.to_string())?;
+    let nl_kind =
+        serde_json::to_value(AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))).map_err(|e| e.to_string())?;
+    let expected_fit_id = cloned_fit_id.clone();
+    run.verify_reference(
+        ReferenceSpec::for_result(cloned_fit_id.clone(), move |sess| {
+            sess.execute("analysis.run", json!({ "source_sheet_id": "ref-r19-5-xy", "sheet_id": "ref-r19-5-fit", "kind": nl_kind }))
+                .map_err(|e| e.to_string())?;
+            sess.execute("graph.create", json!({ "sheet_id": "ref-r19-5-g", "data_sheet_id": "ref-r19-5-xy", "kind": GraphKind::Xy }))
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .with_reference_sheet(ref_sheet)?
+        .ref_result_id(SheetId::new("ref-r19-5-fit"))
+        .with_graph(cloned_graph_id.clone())
+        .ref_graph_id(SheetId::new("ref-r19-5-g"))
+        .scalar("LogEC50", Some(0), 1e-4, 1e-4)
+        .scalar("HillSlope", Some(0), 1e-4, 1e-4)
+        .scalar("R2", None, 1e-6, 1e-6)
+        .check_graph(move |gui_gs, _ref_gs| {
+            ensure(
+                gui_gs.spec.series.first().and_then(|s| s.regression_overlay.as_ref()).is_some_and(|ov| ov.result_sheet_id == expected_fit_id),
+                "EXPORT-PENDING-FIT-WARNING: verified graph must keep regression overlay linked to cloned fit",
+            )
+        }),
+    )?;
+
+    // Stage 5 (LiveEdit): live-edit upstream XY cell on cloned sheet and verify fit + graph update.
+    run.live_edit_all(
+        LiveEditTarget::sheet_grid_cell(cloned_xy_id, 4, 0, 0, "45.0"),
+        vec![
+            LiveEditExpectation::scalar_changed(cloned_fit_id.clone(), "LogEC50", Some(0), 1e-4),
+            LiveEditExpectation::scalar_changed(cloned_fit_id, "R2", None, 1e-5),
+            LiveEditExpectation::graph_svg_changed(cloned_graph_id),
+        ],
+    )?;
+
+    run.finish()
 }
