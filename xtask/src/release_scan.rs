@@ -673,6 +673,14 @@ fn str_trim<'a>(m: &'a serde_json::Map<String, serde_json::Value>, k: &str) -> O
     m.get(k).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty())
 }
 
+fn is_valid_cyclonedx_serial_number(s: &str) -> bool {
+    let Some(uuid) = s.strip_prefix("urn:uuid:") else {
+        return false;
+    };
+    let parts: Vec<&str> = uuid.split('-').collect();
+    parts.len() == 5 && parts.iter().map(|p| p.len()).eq([8, 4, 4, 4, 12]) && parts.iter().all(|p| p.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str, expected_version: Option<&str>) -> Result<(), String> {
     let val: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("`{asset_name}`: invalid CycloneDX JSON: {e}"))?;
     let obj = val.as_object().ok_or_else(|| format!("`{asset_name}`: CycloneDX SBOM root must be a JSON object"))?;
@@ -681,6 +689,9 @@ fn validate_cyclonedx_sbom_json(asset_name: &str, text: &str, expected_version: 
     }
     if str_trim(obj, "specVersion").is_none() {
         return Err(format!("`{asset_name}`: CycloneDX SBOM is missing non-empty `specVersion`"));
+    }
+    if !str_trim(obj, "serialNumber").is_some_and(is_valid_cyclonedx_serial_number) {
+        return Err(format!("`{asset_name}`: CycloneDX SBOM is missing valid `serialNumber` (`urn:uuid:...`) required by `actions/attest`"));
     }
     let components = obj
         .get("components")
@@ -1333,7 +1344,7 @@ mod tests {
 
         let sbom = |fmt: &str, name: &str, ver: &str, cli_n: &str, cli_v: &str| {
             format!(
-                r#"{{"bomFormat":"{fmt}","specVersion":"1.5","metadata":{{"component":{{"name":"{name}","version":"{ver}"}}}},"components":[{{"name":"{cli_n}","version":"{cli_v}"}}]}}"#
+                r#"{{"bomFormat":"{fmt}","specVersion":"1.5","serialNumber":"urn:uuid:01234567-89ab-5cde-8f01-23456789abcd","metadata":{{"component":{{"name":"{name}","version":"{ver}"}}}},"components":[{{"name":"{cli_n}","version":"{cli_v}"}}]}}"#
             )
         };
         assert!(
@@ -1349,8 +1360,10 @@ mod tests {
             ("[]".into(), Some("0.1.0"), "must be a JSON object"),
             (sbom("SPDX", "curvebook", "0.1.0", "curvebook-cli", "0.1.0"), Some("0.1.0"), "bomFormat"),
             (r#"{"bomFormat":"CycloneDX","components":[{"name":"serde"}]}"#.into(), Some("0.1.0"), "specVersion"),
-            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[]}"#.into(), Some("0.1.0"), "empty `components`"),
-            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"curvebook-cli"}]}"#.into(), Some("0.1.0"), "metadata.component"),
+            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","components":[{"name":"serde"}]}"#.into(), Some("0.1.0"), "serialNumber"),
+            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"not-a-uuid","components":[{"name":"serde"}]}"#.into(), Some("0.1.0"), "serialNumber"),
+            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:01234567-89ab-5cde-8f01-23456789abcd","components":[]}"#.into(), Some("0.1.0"), "empty `components`"),
+            (r#"{"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:01234567-89ab-5cde-8f01-23456789abcd","components":[{"name":"curvebook-cli"}]}"#.into(), Some("0.1.0"), "metadata.component"),
             (sbom("CycloneDX", "other", "0.1.0", "curvebook-cli", "0.1.0"), Some("0.1.0"), "metadata.component.name"),
             (sbom("CycloneDX", "curvebook", "bad", "curvebook-cli", "bad"), None, "not valid SemVer"),
             (sbom("CycloneDX", "curvebook", "0.2.0", "curvebook-cli", "0.2.0"), None, "SBOM filename version"),
@@ -1432,7 +1445,7 @@ mod tests {
 
         let (ver, dmg_b, x64_b, arm_b) = ("0.1.0-beta.1", b"DMG\n", b"MSIx64\n", b"MSIarm\n");
         let tgz = build_minimal_clean_tar_gz("cb/README.txt", b"CurveBook FreeBSD\n");
-        let sbom = serde_json::to_vec(&serde_json::json!({"bomFormat":"CycloneDX","specVersion":"1.5","metadata":{"component":{"name":"curvebook","version":ver}},"components":[{"name":"curvebook-cli","version":ver},{"name":"serde","version":"1.0.219"}]})).unwrap();
+        let sbom = serde_json::to_vec(&serde_json::json!({"bomFormat":"CycloneDX","specVersion":"1.5","serialNumber":"urn:uuid:01234567-89ab-5cde-8f01-23456789abcd","metadata":{"component":{"name":"curvebook","version":ver}},"components":[{"name":"curvebook-cli","version":ver},{"name":"serde","version":"1.0.219"}]})).unwrap();
         let (dmg_n, x64_n, arm_n) = (
             format!("curvebook-{ver}-macos-universal.dmg"),
             format!("curvebook-{ver}-windows-x64.msi"),
