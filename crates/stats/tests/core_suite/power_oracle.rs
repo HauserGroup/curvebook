@@ -2,11 +2,12 @@
 //! Decision D1 Numerical Verification Oracle Suite for `curvebook_stats::power`.
 //!
 //! Reference provenance:
-//! - Exact noncentral-t, noncentral-F, and noncentral-chi2 distributions (`curvebook_math::dist::noncentral`).
-//! - Published analytical power & sample-size benchmarks (Cohen 1988 *Statistical Power Analysis
-//!   for the Behavioral Sciences*; Fleiss 1981 *Statistical Methods for Rates and Proportions*;
-//!   R `pwr` package conventions for `pwr.t.test`, `pwr.t2n.test`, `pwr.anova.test`,
-//!   `pwr.2p.test`, `pwr.r.test`, `pwr.chisq.test`, and `pwr.f2.test`).
+//! - Independent base `R 4.5.2 (2025-10-31)` `stats::power.t.test`, `stats::power.anova.test`,
+//!   `stats::power.prop.test`, and base-R noncentral distribution inversion via `pt`/`qt`,
+//!   `pf`/`qf`, `pchisq`/`qchisq`, `pnorm`/`qnorm` + `uniroot` (`crates/stats/tests/reference/stats_extended_oracles.R`, 2026-11-27).
+//! - Published analytical power & sample-size benchmarks: Cohen (1988) *Statistical Power Analysis
+//!   for the Behavioral Sciences* (2nd ed., Lawrence Erlbaum); Fleiss (1981) *Statistical Methods
+//!   for Rates and Proportions* (2nd ed., Wiley); Fisher (1921) *Metron* 1:3–32.
 
 use curvebook_math::dist::{f_isf, ncf_sf};
 use curvebook_stats::power::{
@@ -16,18 +17,18 @@ use curvebook_stats::power::{
 
 #[test]
 fn oracle_unpaired_t_equal_and_unequal_allocation() {
-    // Cohen's d = 0.5, alpha = 0.05, power = 0.80, two-sided:
-    // R pwr.t.test(d = 0.5, sig.level = 0.05, power = 0.80, type = "two.sample") -> n = 63.76561
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::power.t.test(delta=0.5, sd=1, sig.level=0.05, power=0.80, type="two.sample", strict=TRUE)`
+    // -> n = 63.765610170785; at n = 64 -> power = 0.801459557922.
     let req = PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80);
     let res = solve_power(&req).unwrap();
 
-    assert!((res.continuous_n - 63.765_611).abs() < 1e-4, "continuous_n = {}", res.continuous_n);
+    assert!((res.continuous_n - 63.765_610_170_785).abs() < 1e-6, "continuous_n = {}", res.continuous_n);
     assert_eq!(res.n_per_group, 64);
     assert_eq!(res.n_group2, Some(64));
     assert_eq!(res.total_n, 128);
     assert_eq!(res.actual_df, Some(126.0));
     assert!((res.power_at_continuous_n - 0.80).abs() < 1e-10);
-    assert!((res.achieved_power - 0.801_459_5).abs() < 1e-5, "achieved_power = {}", res.achieved_power);
+    assert!((res.achieved_power - 0.801_459_557_922).abs() < 1e-8, "achieved_power = {}", res.achieved_power);
 
     // Raw means and pooled SD yield identical output.
     let raw_req = PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
@@ -38,13 +39,15 @@ fn oracle_unpaired_t_equal_and_unequal_allocation() {
     assert!((raw_res.raw_effect_size.unwrap() - 2.0).abs() < 1e-12);
 
     // Unequal allocation k = n2 / n1 = 2.0:
+    // R 4.5.2 `pt`/`qt` + `uniroot`: n1 = 47.741920295168, pow(48, 96) = 0.802139549668.
     let k2_req = PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80).with_allocation_ratio(2.0);
     let k2_res = solve_power(&k2_req).unwrap();
+    assert!((k2_res.continuous_n - 47.741_920_295_168).abs() < 1e-6, "k2 continuous_n = {}", k2_res.continuous_n);
     assert_eq!(k2_res.n_per_group, 48);
     assert_eq!(k2_res.n_group2, Some(96));
     assert_eq!(k2_res.total_n, 144);
     assert!(k2_res.total_n > res.total_n);
-    assert!(k2_res.achieved_power >= 0.80);
+    assert!((k2_res.achieved_power - 0.802_139_549_668).abs() < 1e-8, "k2 achieved_power = {}", k2_res.achieved_power);
 
     // Explicit (n1 = 48, n2 = 96) in Power mode matches k2_res.achieved_power exactly.
     let explicit_req = PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
@@ -55,9 +58,9 @@ fn oracle_unpaired_t_equal_and_unequal_allocation() {
     let explicit_res = solve_power(&explicit_req).unwrap();
     assert!((explicit_res.achieved_power - k2_res.achieved_power).abs() < 1e-12);
 
-    // One-sided unpaired t (d = 0.5 -> continuous n ~ 50.15, ceil n = 51).
+    // One-sided unpaired t: R 4.5.2 `stats::power.t.test(..., alternative="one.sided", tol=1e-12)` -> n = 50.150783386857.
     let onesided_pos = solve_power(&req.clone().with_tail(TailMode::ONE_SIDED_GREATER)).unwrap();
-    assert!((onesided_pos.continuous_n - 50.150_8).abs() < 1e-3, "n = {}", onesided_pos.continuous_n);
+    assert!((onesided_pos.continuous_n - 50.150_783_386_857).abs() < 1e-8, "n = {}", onesided_pos.continuous_n);
     assert_eq!(onesided_pos.n_per_group, 51);
     assert!(onesided_pos.achieved_power >= 0.80);
 
@@ -69,9 +72,9 @@ fn oracle_unpaired_t_equal_and_unequal_allocation() {
 
 #[test]
 fn oracle_paired_t_correlation_reduction_and_identity() {
-    // Paired t with dz = 0.5 -> n ~ 33.367, ceil n = 34.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::power.t.test(delta=0.5, sd=1, sig.level=0.05, power=0.80, type="paired", strict=TRUE)` -> n = 33.367129103907.
     let dz_res = solve_power(&PowerAnalysisRequest::paired_t(0.5, 0.05, 0.80)).unwrap();
-    assert!((dz_res.continuous_n - 33.367_13).abs() < 1e-4, "n = {}", dz_res.continuous_n);
+    assert!((dz_res.continuous_n - 33.367_129_103_907).abs() < 1e-6, "n = {}", dz_res.continuous_n);
     assert_eq!(dz_res.n_per_group, 34);
     assert_eq!(dz_res.n_group2, None);
     assert_eq!(dz_res.total_n, 34);
@@ -106,26 +109,26 @@ fn oracle_paired_t_correlation_reduction_and_identity() {
 
 #[test]
 fn oracle_one_sample_t_and_one_way_anova() {
-    // One-sample t: d = 0.5, alpha = 0.05, power = 0.80, two-sided -> n ~ 33.367, ceil 34.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::power.t.test(..., type="one.sample", strict=TRUE, tol=1e-12)` -> n = 33.367128953319; one.sided -> 26.137503805969.
     let res_1s = solve_power(&PowerAnalysisRequest::one_sample_t(0.5, 0.05, 0.80)).unwrap();
-    assert!((res_1s.continuous_n - 33.367_13).abs() < 1e-4);
+    assert!((res_1s.continuous_n - 33.367_128_953_319).abs() < 1e-7);
     assert_eq!(res_1s.n_per_group, 34);
     assert_eq!(res_1s.total_n, 34);
 
-    // One-sample t one-sided greater: n ~ 26.1375, ceil 27.
     let res_1s_gt = solve_power(&PowerAnalysisRequest::one_sample_t(0.5, 0.05, 0.80).with_tail(TailMode::ONE_SIDED_GREATER)).unwrap();
-    assert!((res_1s_gt.continuous_n - 26.137_5).abs() < 1e-3);
+    assert!((res_1s_gt.continuous_n - 26.137_503_805_969).abs() < 1e-7);
     assert_eq!(res_1s_gt.n_per_group, 27);
 
-    // One-way ANOVA: k = 4, f = 0.25, alpha = 0.05, power = 0.80 -> n ~ 44.599, ceil 45 per group, total 180.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::power.anova.test(groups=4, between.var=var(c(10,10,12,12)), within.var=16, sig.level=0.05, power=0.80)`
+    // -> n = 44.599299121050; at n = 45 -> power = 0.803986913098.
     let anova_res = solve_power(&PowerAnalysisRequest::one_way_anova(4, 0.25, 0.05, 0.80)).unwrap();
-    assert!((anova_res.continuous_n - 44.599_27).abs() < 1e-4, "n = {}", anova_res.continuous_n);
+    assert!((anova_res.continuous_n - 44.599_299_121_050).abs() < 1e-4, "n = {}", anova_res.continuous_n);
     assert_eq!(anova_res.n_per_group, 45);
     assert_eq!(anova_res.n_group2, None);
     assert_eq!(anova_res.total_n, 180);
     assert_eq!(anova_res.numerator_df, Some(3.0));
     assert_eq!(anova_res.actual_df, Some(176.0));
-    assert!(anova_res.achieved_power >= 0.80 && anova_res.achieved_power < 0.81);
+    assert!((anova_res.achieved_power - 0.803_986_913_098).abs() < 1e-7, "anova achieved_power = {}", anova_res.achieved_power);
 
     // One-way ANOVA from group means [10, 10, 12, 12] and within_sd = 4.0 -> f = 0.25.
     let anova_means = solve_power(
@@ -140,13 +143,14 @@ fn oracle_one_sample_t_and_one_way_anova() {
 
 #[test]
 fn oracle_two_proportions() {
-    // 1. Two proportions: p1 = 0.50, p2 = 0.30, alpha = 0.05, power = 0.80, two-sided.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::power.prop.test(p1=0.50, p2=0.30, sig.level=0.05, power=0.80, strict=TRUE)`
+    // -> n = 92.998697561870; at n = 93 -> power = 0.800005574784.
     let prop_pooled = solve_power(&PowerAnalysisRequest::two_proportions(0.50, 0.30, 0.05, 0.80)).unwrap();
-    assert!((prop_pooled.continuous_n - 92.998).abs() < 1e-2, "n = {}", prop_pooled.continuous_n);
+    assert!((prop_pooled.continuous_n - 92.998_697_561_870).abs() < 1e-4, "n = {}", prop_pooled.continuous_n);
     assert_eq!(prop_pooled.n_per_group, 93);
     assert_eq!(prop_pooled.n_group2, Some(93));
     assert_eq!(prop_pooled.total_n, 186);
-    assert!(prop_pooled.achieved_power >= 0.80);
+    assert!((prop_pooled.achieved_power - 0.800_005_574_784).abs() < 1e-6, "prop achieved_power = {}", prop_pooled.achieved_power);
 
     // Continuity-corrected Fleiss formula -> ceil 103 per group.
     let prop_cc = solve_power(&PowerAnalysisRequest::two_proportions(0.50, 0.30, 0.05, 0.80).with_continuity_correction(true)).unwrap();
@@ -176,17 +180,18 @@ fn oracle_two_proportions() {
 
 #[test]
 fn oracle_correlation() {
-    // 2. Correlation: r = 0.3, alpha = 0.05, power = 0.80, two-sided -> n = 85.
+    // D1 Provenance: R 4.5.2 (2025-10-31) Fisher-z `pnorm`/`qnorm` + `uniroot`:
+    // FisherZ n = 84.927610442036, power(85) = 0.800346249900; FisherZWithTCrit n = 84.073637744296.
     let corr_fz = solve_power(&PowerAnalysisRequest::correlation(0.3, 0.05, 0.80)).unwrap();
-    assert!((corr_fz.continuous_n - 84.9278).abs() < 1e-3, "fz n = {}", corr_fz.continuous_n);
+    assert!((corr_fz.continuous_n - 84.927_610_442_036).abs() < 1e-4, "fz n = {}", corr_fz.continuous_n);
     assert_eq!(corr_fz.n_per_group, 85);
     assert_eq!(corr_fz.actual_df, Some(83.0));
-    assert!(corr_fz.achieved_power >= 0.80);
+    assert!((corr_fz.achieved_power - 0.800_346_249_900).abs() < 1e-7, "fz pow = {}", corr_fz.achieved_power);
 
-    let corr_pwr =
+    let corr_fzt =
         solve_power(&PowerAnalysisRequest::correlation(0.3, 0.05, 0.80).with_correlation_method(CorrelationPowerMethod::FisherZWithTCrit)).unwrap();
-    assert!((corr_pwr.continuous_n - 84.0736).abs() < 1e-3, "pwr.r n = {}", corr_pwr.continuous_n);
-    assert_eq!(corr_pwr.n_per_group, 85);
+    assert!((corr_fzt.continuous_n - 84.073_637_744_296).abs() < 1e-4, "FisherZWithTCrit n = {}", corr_fzt.continuous_n);
+    assert_eq!(corr_fzt.n_per_group, 85);
 
     let corr_t =
         solve_power(&PowerAnalysisRequest::correlation(0.3, 0.05, 0.80).with_correlation_method(CorrelationPowerMethod::ExactTTransform)).unwrap();
@@ -224,21 +229,23 @@ fn oracle_correlation() {
 
 #[test]
 fn oracle_chi_square_and_regression() {
-    // 3. Chi-square: w = 0.3, df = 3, alpha = 0.05, power = 0.80 -> n ~ 121.139, ceil 122.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `pchisq`/`qchisq` + `uniroot`:
+    // w = 0.3, df = 3, alpha = 0.05, power = 0.80 -> n = 121.139592112592, power(122) = 0.803086922547.
     let chi2_res = solve_power(&PowerAnalysisRequest::chi_square(0.3, 3.0, 0.05, 0.80)).unwrap();
-    assert!((chi2_res.continuous_n - 121.139).abs() < 1e-2, "chi2 n = {}", chi2_res.continuous_n);
+    assert!((chi2_res.continuous_n - 121.139_592_112_592).abs() < 1e-5, "chi2 n = {}", chi2_res.continuous_n);
     assert_eq!(chi2_res.n_per_group, 122);
     assert_eq!(chi2_res.total_n, 122);
     assert_eq!(chi2_res.actual_df, Some(3.0));
-    assert!(chi2_res.achieved_power >= 0.80);
+    assert!((chi2_res.achieved_power - 0.803_086_922_547).abs() < 1e-7, "chi2 pow = {}", chi2_res.achieved_power);
 
-    // 4. Simple linear regression (u = 1): f2 = 0.15, alpha = 0.05, power = 0.80 -> n ~ 54.324, ceil 55.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `pf`/`qf` + `uniroot`:
+    // f^2 = 0.15, u = 1, alpha = 0.05, power = 0.80 -> n = 54.314989186876, power(55) = 0.805082588698.
     let reg_res = solve_power(&PowerAnalysisRequest::simple_linear_regression(0.15, 0.05, 0.80)).unwrap();
-    assert!((reg_res.continuous_n - 54.324).abs() < 1e-2, "reg n = {}", reg_res.continuous_n);
+    assert!((reg_res.continuous_n - 54.314_989_186_876).abs() < 1e-4, "reg n = {}", reg_res.continuous_n);
     assert_eq!(reg_res.n_per_group, 55);
     assert_eq!(reg_res.numerator_df, Some(1.0));
     assert_eq!(reg_res.actual_df, Some(53.0));
-    assert!(reg_res.achieved_power >= 0.80);
+    assert!((reg_res.achieved_power - 0.805_082_588_698).abs() < 1e-7, "reg pow = {}", reg_res.achieved_power);
 
     // Verify F(1, n-2, lambda = n * f2) identity with t-test formulation to < 1e-11:
     let f_crit = f_isf(0.05, 1.0, 53.0).unwrap();

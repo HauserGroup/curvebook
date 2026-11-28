@@ -196,18 +196,19 @@ fn oracle_descriptive_quantiles_ratios_median_ci_and_exclusions() {
 
 #[test]
 fn oracle_normality_shapiro_wilk_lognormality_and_outliers() {
-    // D1 Provenance: R 4.5.2 (2025-10-31), stats::shapiro.test on right-skewed n = 25 lognormal-like sample, 2026-11-13
+    // D1 Provenance: R 4.5.2 (2025-10-31), stats::shapiro.test on right-skewed n = 25 lognormal-like sample,
+    // verified 2026-11-27 (`crates/stats/tests/reference/stats_extended_oracles.R`).
     let skewed_25 = [0.1, 0.1, 0.1, 0.2, 0.2, 0.2, 0.3, 0.4, 0.5, 0.5, 0.6, 0.7, 0.8, 1.0, 1.1, 1.3, 1.5, 1.8, 2.1, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0];
     let sw_r = shapiro_wilk(&skewed_25, 0.05).unwrap();
-    assert_approx_eq(sw_r.statistic, 0.811_948_922_926_847, 1e-10, 1e-10, "R shapiro skewed_25 W");
-    assert_approx_eq(sw_r.p_value, 0.000_362_169_511_169, 1e-5, 5e-3, "R shapiro skewed_25 p");
+    assert_approx_eq(sw_r.statistic, 0.811_948_922_926_847_3, 1e-11, 1e-11, "R shapiro skewed_25 W");
+    assert_approx_eq(sw_r.p_value, 3.621_695_111_690_284_6e-4, 1e-10, 1e-8, "R shapiro skewed_25 p");
     assert!(!sw_r.passed);
 
-    // D1 Provenance: R 4.5.2 (2025-10-31), stats::shapiro.test(x_norm), date 2026-11-13
+    // D1 Provenance: R 4.5.2 (2025-10-31), stats::shapiro.test(x_norm), verified 2026-11-27
     let x_norm = [10.2, 9.8, 10.5, 11.1, 9.4, 10.0, 10.7, 9.9, 10.3, 10.1, 9.6, 10.8];
     let sw_n = shapiro_wilk(&x_norm, 0.05).unwrap();
-    assert_approx_eq(sw_n.statistic, 0.985_296_635_279_895, 1e-4, 1e-4, "R shapiro W");
-    assert_approx_eq(sw_n.p_value, 0.996_882_906_945_392, 5e-3, 0.0, "R shapiro p");
+    assert_approx_eq(sw_n.statistic, 0.985_296_635_279_895_1, 1e-11, 1e-11, "R shapiro W");
+    assert_approx_eq(sw_n.p_value, 0.996_882_906_945_392_4, 1e-9, 1e-9, "R shapiro p");
     assert!(sw_n.passed);
 
     // D1 Provenance: Shapiro & Wilk (1965) / Royston (1995 AS R94); R 4.5.2 stats::shapiro.test
@@ -249,9 +250,15 @@ fn oracle_normality_shapiro_wilk_lognormality_and_outliers() {
     assert_eq!(g_iter.cleaned_values.len(), x_norm.len());
 
     // ROUT Q=1% catches multiple masked outliers without false positives on core
+    // D1 Provenance: R 4.5.2 (2025-10-31) Cauchy IRLS + Type-7 P_68.27 RSDR + `2 * pt(-t, df=13)`, 2026-11-27
     let r_res = rout_outliers(&with_two_outliers, 1.0).unwrap();
     assert_eq!(r_res.outliers.len(), 2);
-    assert!((r_res.robust_center - 10.2).abs() < 0.3);
+    assert_approx_eq(r_res.robust_center, 10.174_278_356_590, 1e-10, 1e-10, "ROUT robust_center");
+    assert_approx_eq(r_res.rsdr, 0.666_926_991_799, 1e-10, 1e-10, "ROUT RSDR");
+    assert_approx_eq(r_res.outliers[0].score, 37.224_046_932_708, 1e-9, 1e-9, "ROUT outlier 35.0 t");
+    assert_approx_eq(r_res.outliers[0].threshold_or_p, 1.355_018_595_292e-14, 1e-16, 1e-8, "ROUT outlier 35.0 raw p");
+    assert_approx_eq(r_res.outliers[1].score, 47.719_948_412_297, 1e-9, 1e-9, "ROUT outlier 42.0 t");
+    assert_approx_eq(r_res.outliers[1].threshold_or_p, 5.484_769_502_126e-16, 1e-18, 1e-8, "ROUT outlier 42.0 raw p");
 }
 
 // ============================================================================
@@ -592,13 +599,18 @@ fn oracle_unbalanced_one_way_welch_bf_effect_sizes_and_rm_sphericity() {
     assert_approx_eq(uv.brown_forsythe_df2, 13.266_938_969_106_556, 1e-9, 1e-9, "BF df2");
     assert_approx_eq(uv.brown_forsythe_p, 5.731_166e-9, 1e-12, 1e-5, "BF p");
 
-    // Analytical omega^2 = (SS_b - df_b * MS_w) / (SS_tot + MS_w)
-    let expected_omega2 = (ow.ss_between - 3.0 * ow.ms_within) / (ow.ss_total + ow.ms_within);
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::aov` + `stats::pf(..., ncp=...)` + `uniroot`
+    // (Olejnik & Algina 2003; Steiger 2004 Eq. 16 population variance explained omega^2/eta^2 CI), 2026-11-27
     let eff = compute_anova_effect_sizes(ow.ss_between, ow.ss_within, ow.ss_total, 3.0, 16.0, conf_95());
-    assert_approx_eq(eff.omega_squared, expected_omega2, 1e-12, 0.0, "omega^2");
-    assert_approx_eq(eff.eta_squared, ow.r_squared, 1e-12, 0.0, "eta^2 == R^2");
+    assert_approx_eq(eff.omega_squared, 0.928_807_890_978, 1e-10, 1e-10, "omega^2");
+    assert_approx_eq(eff.eta_squared, 0.942_842_855_901, 1e-10, 1e-10, "eta^2 == R^2");
+    assert_approx_eq(eff.cohens_f, 4.061_480_729_143, 1e-10, 1e-10, "Cohen's f");
     let e_ci = eff.eta_squared_ci.unwrap();
-    assert!(e_ci.0 < eff.eta_squared && eff.eta_squared < e_ci.1);
+    assert_approx_eq(e_ci.0, 0.839_156_816_295, 1e-6, 1e-6, "Steiger noncentral-F pop variance CI lo");
+    assert_approx_eq(e_ci.1, 0.960_584_375_757, 1e-6, 1e-6, "Steiger noncentral-F pop variance CI hi");
+    let f_ci = eff.cohens_f_ci.unwrap();
+    assert_approx_eq(f_ci.0, 2.284_126_923_035, 1e-5, 1e-5, "Steiger Cohen's f CI lo");
+    assert_approx_eq(f_ci.1, 4.936_663_834_718, 1e-5, 1e-5, "Steiger Cohen's f CI hi");
     assert!(variance_homogeneity_tests(&[&ctrl, &low, &high, &mid]).unwrap().brown_forsythe_p > 0.1);
 
     // RM One-Way ANOVA & Sphericity (R aov + exact covariance contrast eigenvalues)
@@ -645,7 +657,7 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
     assert_approx_eq(kw.h_statistic, 10.258_273_381_294_973, 1e-10, 1e-10, "KW exact H with ties");
     assert_approx_eq(kw.p_value, 37.0 / 63_063.0, 1e-12, 1e-12, "KW exact conditional permutation p");
 
-    // Dunn pairwise comparisons with ties (exact tie sum from g1..g3)
+    // Dunn pairwise comparisons with ties (D1 Provenance: R 4.5.2 `rank` + `2*pnorm(-abs(z))` + `p.adjust`, 2026-11-27)
     // Ties: 14.3 (x2), 15.0 (x2), 18.5 (x2), 19.0 (x2) -> 4 pairs -> sum(t^3-t) = 4*(8-2) = 24
     let tie_sum = 24.0;
     let labels = [(0, String::from("G1")), (1, String::from("G2")), (2, String::from("G3"))];
@@ -665,12 +677,17 @@ fn oracle_kruskal_wallis_dunn_and_friedman_with_ties() {
     )
     .unwrap();
     assert_eq!(dunn_bonf.len(), 3);
-    // Pair 0-1 (G1 vs G2): signed (mean_rank_G1 - mean_rank_G2) = -9.0, z = -3.193405975853791
-    assert_approx_eq(dunn_bonf[0].statistic, -3.193_405_975_853_791, 1e-10, 1e-10, "Dunn G1-G2 z");
-    assert_approx_eq(dunn_bonf[0].raw_p, 0.001_406_051_181_546, 1e-10, 1e-10, "Dunn G1-G2 raw_p");
-    assert_approx_eq(dunn_bonf[0].adjusted_p_or_q, 0.004_218_153_544_639, 1e-10, 1e-10, "Dunn G1-G2 Bonf");
-    assert_approx_eq(dunn_bonf[1].raw_p, 0.070_358_349_013_086, 1e-10, 1e-10, "Dunn G1-G3 raw_p");
-    assert_approx_eq(dunn_bonf[2].raw_p, 0.166_416_868_049_653, 1e-10, 1e-10, "Dunn G2-G3 raw_p");
+    // R 4.5.2 per-pair Dunn oracles (se = 2.818307496150 for all equal-n pairs):
+    assert_approx_eq(dunn_bonf[0].se_diff, 2.818_307_496_150, 1e-10, 1e-10, "Dunn G1-G2 se");
+    assert_approx_eq(dunn_bonf[0].statistic, -3.193_405_975_854, 1e-10, 1e-10, "Dunn G1-G2 z");
+    assert_approx_eq(dunn_bonf[0].raw_p, 1.406_051_181_546e-3, 1e-10, 1e-10, "Dunn G1-G2 raw_p");
+    assert_approx_eq(dunn_bonf[0].adjusted_p_or_q, 4.218_153_544_639e-3, 1e-10, 1e-10, "Dunn G1-G2 Bonf");
+    assert_approx_eq(dunn_bonf[1].statistic, -1.809_596_719_650, 1e-10, 1e-10, "Dunn G1-G3 z");
+    assert_approx_eq(dunn_bonf[1].raw_p, 7.035_834_901_309e-2, 1e-10, 1e-10, "Dunn G1-G3 raw_p");
+    assert_approx_eq(dunn_bonf[1].adjusted_p_or_q, 2.110_750_470_393e-1, 1e-10, 1e-10, "Dunn G1-G3 Bonf");
+    assert_approx_eq(dunn_bonf[2].statistic, 1.383_809_256_203, 1e-10, 1e-10, "Dunn G2-G3 z");
+    assert_approx_eq(dunn_bonf[2].raw_p, 1.664_168_680_497e-1, 1e-10, 1e-10, "Dunn G2-G3 raw_p");
+    assert_approx_eq(dunn_bonf[2].adjusted_p_or_q, 4.992_506_041_490e-1, 1e-10, 1e-10, "Dunn G2-G3 Bonf");
 
     let dunn_sidak = compare_dunn_ranks(
         &labels,
@@ -1143,8 +1160,11 @@ fn oracle_contingency_fisher_chi2_mcnemar_kappa_and_ratios() {
     let rd_ci = ratios.rd_newcombe_ci.unwrap();
     assert_approx_eq(rd_ci.0, 0.140_517_901_892_704, 1e-10, 1e-10, "Newcombe RD lo");
     assert_approx_eq(rd_ci.1, 0.657_266_667_343_524, 1e-10, 1e-10, "Newcombe RD hi");
+    // D1 Provenance: R 4.5.2 (2025-10-31) exact Fisher noncentral hypergeometric `lchoose` + `uniroot`
+    // (Baptista & Pike 1977), verified 2026-11-27 (`crates/stats/tests/reference/stats_extended_oracles.R`).
     let bp_ci = baptista_pike_or_ci(14, 6, 5, 15, conf_95()).unwrap();
-    assert!(bp_ci.0 > 1.0 && bp_ci.0 < 7.0 && bp_ci.1 > 7.0);
+    assert_approx_eq(bp_ci.0, 1.489_289_241_422, 1e-7, 1e-7, "Baptista-Pike OR CI lo");
+    assert_approx_eq(bp_ci.1, 31.301_093_258_306, 1e-7, 1e-7, "Baptista-Pike OR CI hi");
 
     // Cohen's kappa (unweighted & quadratic) & Fleiss' kappa
     let k_mat = vec![vec![20, 3, 1], vec![2, 18, 2], vec![0, 3, 16]];

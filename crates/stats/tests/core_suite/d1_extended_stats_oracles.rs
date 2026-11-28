@@ -26,11 +26,29 @@
 //!   `summarize_column`) against `R 4.5.2 stats::t.test` and independent Python
 //!   Simpson quadrature on the Student-*t* PDF (Bland & Altman 1996; Lam, Hung &
 //!   Perrier 1985; Casella & Berger 2002; Bullen 2003).
+//! - Remaining base-R `4.5.2` statistical oracles (`Brown–Forsythe F*` with
+//!   Satterthwaite df, ANOVA $\omega^2$ & Steiger noncentral-*F* CIs, `mean_ci`
+//!   vs `t.test`, `Dunn` unequal-`n` tied pairs, `Fisher LSD`, `Newman–Keuls`
+//!   with step-down clamping, `Tamhane T2`, `multiple_row_t_tests`, `paired_sign_test`
+//!   vs `binom.test`, `baptista_pike_or_ci` via `uniroot`, fixed-centre Lloyd `k-means`,
+//!   Hyndman–Fan Type-6 quantiles, exact `binom.test`, column ROUT RSDR/$p$,
+//!   `norm.qq` Blom convention, published Royston 1995 AS R94 `n = 25` lognormal
+//!   vector, Altman 1998 Tramèr NNT, and NIST `GEAR.DAT` Bartlett/Levene/ANOVA).
 //!
 //! D1 Provenance:
-//! - `R 4.5.2 (2025-10-31)` via `crates/stats/tests/reference/stats_extended_oracles.R` (2026-11-23).
+//! - `R 4.5.2 (2025-10-31)` via `crates/stats/tests/reference/stats_extended_oracles.R` (2026-11-23; extended 2026-11-27).
 //! - `R 4.5.2 (2025-10-31)` `stats::t.test` cross-checked by independent Python 3 Simpson quadrature on the Student-*t* PDF (2026-11-26) for harmonic and quadratic mean CIs.
 //! - `SciPy 1.18.1` + `statsmodels 0.15.0` via `crates/stats/tests/reference/scipy_statsmodels_oracles.py` (2026-11-23).
+//! - NIST/SEMATECH e-Handbook of Statistical Methods `GEAR.DAT` (§§1.3.5.4, 1.3.5.7, 1.3.5.10; Bartlett 1937; Levene 1960; Brown & Forsythe 1974a,b).
+//! - Royston, P. (1995), Remark AS R94, *Applied Statistics* 44(4):547–551 (doi:10.2307/2986146).
+//! - Altman, D. G. (1998), Confidence intervals for the number needed to treat, *BMJ* 317(7168):1309–1312 (doi:10.1136/bmj.317.7168.1309).
+//! - Baptista, J., & Pike, M. C. (1977), Algorithm AS 115, *Applied Statistics* 26(2):214–220 (doi:10.2307/2347041).
+//! - Hyndman, R. J., & Fan, Y. (1996), *American Statistician* 50(4):361–365 (doi:10.1080/00031305.1996.10473566).
+//! - Blom, G. (1958), *Statistical Estimates and Transformed Beta-Variables*, Almqvist & Wiksell.
+//! - Motulsky, H. J., & Brown, R. E. (2006), *BMC Bioinformatics* 7:123 (doi:10.1186/1471-2105-7-123).
+//! - Lloyd, S. P. (1982), *IEEE Trans Inform Theory* 28(2):129–137 (doi:10.1109/tit.1982.1056489).
+//! - Dixon, W. J., & Mood, A. M. (1946), *JASA* 41(236):557–566; Conover, W. J. (1999), *Practical Nonparametric Statistics* (3rd ed.), Wiley.
+//! - Tamhane, A. C. (1979), *JASA* 74(366):471–480; Newman (1939) & Keuls (1952); Dunn, O. J. (1964), *Technometrics* 6(3):241–252.
 //! - Bland & Altman (1996), *BMJ* 312(7038):1079 (doi:10.1136/bmj.312.7038.1079);
 //!   Lam, Hung & Perrier (1985), *J Pharm Sci* 74(2):229–231 (doi:10.1002/jps.2600740229);
 //!   Casella & Berger (2002), *Statistical Inference* (2nd ed.), Duxbury, §9.2.1;
@@ -56,13 +74,21 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use curvebook_doc::KappaWeighting;
+use curvebook_doc::{KappaWeighting, MultiplicityMethod, MultiplicitySpec};
 use curvebook_math::ConfidenceLevel;
-use curvebook_stats::anova::ordinary_one_way_anova;
-use curvebook_stats::categorical::cohens_kappa;
-use curvebook_stats::column::{anderson_darling, dagostino_pearson_k2, grubbs_outliers, lilliefors_ks, summarize_column};
-use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, adjust_two_stage_bky, compare_groups_with_procedure};
-use curvebook_stats::two_group::{bland_altman, ks_two_sample, levene_variance_test, paired_t_test, unpaired_t_test};
+use curvebook_stats::anova::{kruskal_wallis_test, ordinary_one_way_anova, unequal_variance_one_way_anova, variance_homogeneity_tests};
+use curvebook_stats::categorical::{NntKind, altman_nnt_from_rd, baptista_pike_or_ci, cohens_kappa, exact_binomial_test};
+use curvebook_stats::column::{
+    anderson_darling, dagostino_pearson_k2, grubbs_outliers, lilliefors_ks, qq_expected_quantiles, rout_outliers, shapiro_wilk, summarize_column,
+};
+use curvebook_stats::common::quantile_type6_sorted;
+use curvebook_stats::multiplicity::{
+    GroupComparisonInput, MultiplicityProcedure, adjust_two_stage_bky, compare_dunn_ranks, compare_groups_with_procedure,
+};
+use curvebook_stats::multivariate::{KMeansAlgorithm, kmeans_with_centers};
+use curvebook_stats::two_group::{
+    bland_altman, ks_two_sample, levene_variance_test, multiple_row_t_tests, paired_sign_test, paired_t_test, unpaired_t_test,
+};
 use curvebook_testkit::assert_approx_eq;
 
 fn conf_95() -> ConfidenceLevel {
@@ -527,4 +553,628 @@ fn oracle_harmonic_and_quadratic_mean_cis() {
 
     let single = summarize_column("One", &[42.0], 0, conf_95(), None).unwrap();
     assert_eq!((single.harmonic_mean, single.harmonic_mean_ci, single.quadratic_mean, single.quadratic_mean_ci), (Some(42.0), None, 42.0, None));
+}
+
+// ============================================================================
+// 8. Brown-Forsythe F* with Satterthwaite df (heteroscedastic & balanced)
+// ============================================================================
+
+#[test]
+fn oracle_brown_forsythe_f_star_and_satterthwaite_df() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::oneway.test(..., var.equal=FALSE)` &
+    // Brown & Forsythe (1974b) `F*` + Satterthwaite df + `stats::pf(..., lower.tail=FALSE)`, 2026-11-27.
+    let g1 = [10.2, 10.8, 9.9, 11.1, 10.5, 10.3];
+    let g2 = [12.1, 14.8, 11.2, 15.6, 13.4, 16.2, 12.9, 14.1];
+    let g3 = [18.5, 22.0, 16.4, 24.1, 19.8];
+    let g4 = [25.0, 25.4, 24.8, 25.7, 25.1, 25.5, 24.9];
+    let het_inputs = vec![group_input(0, "G1", &g1), group_input(1, "G2", &g2), group_input(2, "G3", &g3), group_input(3, "G4", &g4)];
+    let uv = unequal_variance_one_way_anova(&het_inputs).unwrap();
+    assert_approx_eq(uv.welch_w, 1_383.102_180_147_434, 1e-8, 1e-9, "het Welch W");
+    assert_approx_eq(uv.welch_df1, 3.0, 1e-12, 0.0, "het Welch df1");
+    assert_approx_eq(uv.welch_df2, 10.124_470_300_778, 1e-9, 1e-9, "het Welch df2");
+    assert_approx_eq(uv.welch_p, 1.597_405_155_454e-13, 1e-16, 1e-6, "het Welch p");
+    assert_approx_eq(uv.brown_forsythe_f_star, 89.887_067_108_391, 1e-9, 1e-9, "het BF F*");
+    assert_approx_eq(uv.brown_forsythe_df1, 3.0, 1e-12, 0.0, "het BF df1");
+    assert_approx_eq(uv.brown_forsythe_df2, 6.597_953_665_105, 1e-9, 1e-9, "het BF Satterthwaite df2");
+    assert_approx_eq(uv.brown_forsythe_p, 1.004_349_798_359e-5, 1e-11, 1e-7, "het BF p");
+
+    // Balanced design (equal n = 5): Brown-Forsythe F* identically equals ordinary ANOVA F,
+    // while Satterthwaite df2 < N - k reflects heteroscedasticity.
+    let b1 = [10.0, 10.2, 9.8, 10.1, 9.9];
+    let b2 = [12.0, 14.5, 11.2, 13.8, 12.5];
+    let b3 = [15.0, 19.0, 14.2, 17.8, 16.0];
+    let b4 = [20.0, 20.5, 19.7, 20.3, 19.5];
+    let ow_bal = ordinary_one_way_anova(&[("G1", &b1[..]), ("G2", &b2[..]), ("G3", &b3[..]), ("G4", &b4[..])], conf_95()).unwrap();
+    let bal_inputs = vec![group_input(0, "G1", &b1), group_input(1, "G2", &b2), group_input(2, "G3", &b3), group_input(3, "G4", &b4)];
+    let uv_bal = unequal_variance_one_way_anova(&bal_inputs).unwrap();
+    assert_approx_eq(ow_bal.f_statistic, 63.891_708_967_851, 1e-9, 1e-9, "bal ordinary ANOVA F");
+    assert_approx_eq(uv_bal.brown_forsythe_f_star, ow_bal.f_statistic, 1e-11, 1e-11, "balanced BF F* == ordinary F");
+    assert_approx_eq(uv_bal.brown_forsythe_df2, 7.504_177_420_178, 1e-9, 1e-9, "bal BF Satterthwaite df2");
+    assert_approx_eq(uv_bal.brown_forsythe_p, 1.071_966_073_042e-5, 1e-11, 1e-7, "bal BF p");
+}
+
+// ============================================================================
+// 9. Column mean_ci vs stats::t.test (+ sd_ci & geometric_mean_ci)
+// ============================================================================
+
+#[test]
+fn oracle_mean_sd_and_geometric_mean_cis_vs_r_t_test() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::t.test(x, conf.level=...)`,
+    // `exp(t.test(log(x), conf.level=...)$conf.int)`, and `qchisq` SD CI, 2026-11-27.
+    let pk = [2.4, 3.1, 3.8, 4.2, 5.0, 6.5, 8.2, 11.4];
+    for (pct, exp_m_lo, exp_m_hi, exp_g_lo, exp_g_hi, exp_sd_lo, exp_sd_hi) in [
+        (90.0, 3.561_433_184_763, 7.588_566_815_237, 3.503_450_870_992, 6.995_293_488_079, 2.120_530_474_945, 5.402_352_448_374),
+        (95.0, 3.061_866_519_700, 8.088_133_480_300, 3.215_455_714_623, 7.621_833_182_835, 1.987_532_664_251, 6.118_160_802_589),
+        (99.0, 1.855_733_130_265, 9.294_266_869_735, 2.613_961_597_476, 9.375_679_844_461, 1.766_190_954_657, 7.996_375_006_932),
+    ] {
+        let conf = ConfidenceLevel::from_percent(pct).unwrap();
+        let s = summarize_column("PK", &pk, 0, conf, None).unwrap();
+        assert_approx_eq(s.mean, 5.575, 1e-12, 0.0, "pk mean");
+        let mci = s.mean_ci.expect("mean_ci");
+        assert_approx_eq(mci.0, exp_m_lo, 1e-10, 1e-10, &format!("mean_ci({pct}%) lo"));
+        assert_approx_eq(mci.1, exp_m_hi, 1e-10, 1e-10, &format!("mean_ci({pct}%) hi"));
+        let gci = s.geometric_mean_ci.expect("geometric_mean_ci");
+        assert_approx_eq(gci.0, exp_g_lo, 1e-10, 1e-10, &format!("gmean_ci({pct}%) lo"));
+        assert_approx_eq(gci.1, exp_g_hi, 1e-10, 1e-10, &format!("gmean_ci({pct}%) hi"));
+        let sdci = s.sd_ci.expect("sd_ci");
+        assert_approx_eq(sdci.0, exp_sd_lo, 1e-10, 1e-10, &format!("sd_ci({pct}%) lo"));
+        assert_approx_eq(sdci.1, exp_sd_hi, 1e-10, 1e-10, &format!("sd_ci({pct}%) hi"));
+    }
+
+    let signed = [-4.5, -1.2, 0.0, 2.3, 3.8, 5.1, -6.0];
+    let sg = summarize_column("Signed", &signed, 0, conf_95(), None).unwrap();
+    let sg_mci = sg.mean_ci.expect("signed mean_ci");
+    assert_approx_eq(sg.mean, -0.071_428_571_429, 1e-11, 1e-11, "signed mean");
+    assert_approx_eq(sg_mci.0, -3.910_639_275_919, 1e-10, 1e-10, "signed mean_ci lo");
+    assert_approx_eq(sg_mci.1, 3.767_782_133_061, 1e-10, 1e-10, "signed mean_ci hi");
+}
+
+// ============================================================================
+// 10. Dunn unequal-n tied per-pair R 4.5.2 provenance
+// ============================================================================
+
+#[test]
+fn oracle_dunn_unequal_n_ties_r_provenance() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `rank(..., ties.method="average")` +
+    // `2*pnorm(-abs(z))` + `p.adjust(..., "bonferroni" / "holm")` + Šídák, 2026-11-27.
+    let g0 = [4.0, 5.0, 5.0, 6.0, 7.0];
+    let g1 = [7.0, 8.0, 8.0, 8.0, 9.0, 10.0, 11.0];
+    let g2 = [5.0, 6.0, 9.0, 12.0];
+    let g3 = [11.0, 12.0, 13.0, 14.0, 14.0, 16.0];
+    let kw = kruskal_wallis_test(&[&g0, &g1, &g2, &g3]).unwrap();
+    let labels = [(0, "G0".to_owned()), (1, "G1".to_owned()), (2, "G2".to_owned()), (3, "G3".to_owned())];
+    let ns = [5_usize, 7, 4, 6];
+    let tie_sum = 84.0; // verified in R: sum(tab^3 - tab) == 84
+
+    let mk_spec =
+        |method| MultiplicitySpec { method, threshold: 0.05, report_confidence_intervals: false, control_column: None, selected_pairs: None };
+    let d_bonf = compare_dunn_ranks(&labels, &ns, &kw.group_mean_ranks, kw.total_n, tie_sum, &mk_spec(MultiplicityMethod::Bonferroni)).unwrap();
+    let d_sid = compare_dunn_ranks(&labels, &ns, &kw.group_mean_ranks, kw.total_n, tie_sum, &mk_spec(MultiplicityMethod::Sidak)).unwrap();
+    assert_eq!(d_bonf.len(), 6);
+
+    let expected: &[(f64, f64, f64, f64, f64, f64)] = &[
+        // (diff, se, z, raw_p, bonf_p, sidak_p)
+        (-7.357_142_857_143, 3.787_196_475_344, -1.942_635_642_233, 5.206_019_726_234e-2, 3.123_611_835_740e-1, 2.744_212_507_784e-1),
+        (-5.625_000_000_000, 4.338_778_629_983, -1.296_447_797_804, 1.948_212_537_709e-1, 1.000_000_000_000e0, 7.275_079_629_774e-1),
+        (-15.166_666_666_667, 3.916_489_357_689, -3.872_515_735_781, 1.077_177_189_973e-4, 6.463_063_139_839e-4, 6.461_322_923_743e-4),
+        (1.732_142_857_143, 4.053_951_628_908, 0.427_272_699_751, 6.691_807_148_758e-1, 1.000_000_000_000e0, 9.986_891_744_043e-1),
+        (-7.809_523_809_524, 3.598_390_292_674, -2.170_282_591_475, 2.998_544_459_024e-2, 1.799_126_675_415e-1, 1.669_529_969_039e-1),
+        (-9.541_666_666_667, 4.174_991_683_292, -2.285_433_694_360, 2.228_741_018_913e-2, 1.337_244_611_348e-1, 1.264_912_790_277e-1),
+    ];
+    for (idx, &(exp_d, exp_se, exp_z, exp_rp, exp_b, exp_s)) in expected.iter().enumerate() {
+        assert_approx_eq(d_bonf[idx].mean_diff, exp_d, 1e-10, 1e-10, &format!("Dunn[{idx}] diff"));
+        assert_approx_eq(d_bonf[idx].se_diff, exp_se, 1e-10, 1e-10, &format!("Dunn[{idx}] se"));
+        assert_approx_eq(d_bonf[idx].statistic, exp_z, 1e-10, 1e-10, &format!("Dunn[{idx}] z"));
+        assert_approx_eq(d_bonf[idx].raw_p, exp_rp, 1e-11, 1e-9, &format!("Dunn[{idx}] raw_p"));
+        assert_approx_eq(d_bonf[idx].adjusted_p_or_q, exp_b, 1e-11, 1e-9, &format!("Dunn[{idx}] Bonf"));
+        assert_approx_eq(d_sid[idx].adjusted_p_or_q, exp_s, 1e-11, 1e-9, &format!("Dunn[{idx}] Sidak"));
+    }
+}
+
+// ============================================================================
+// 11. Fisher LSD, Newman-Keuls (+ step-down clamping), Tamhane T2, Multiple Row t-tests
+// ============================================================================
+
+#[test]
+fn oracle_fisher_lsd_newman_keuls_tamhane_t2_and_multiple_row_t_tests() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `aov`/`pt`/`qt`, 2D studentized-range quadrature +
+    // step-down coherence, `t.test(var.equal=F)` + Šídák, and `p.adjust`, 2026-11-27.
+
+    // 11a. Fisher LSD on Ctrl/Low/High/Mid (MSE = 0.3075, df = 16)
+    let ctrl = [10.2, 11.4, 9.8, 10.6, 11.0];
+    let low = [14.1, 15.3, 13.8, 14.9, 14.4];
+    let high = [18.2, 19.0, 17.6, 18.8, 18.4];
+    let mid = [12.0, 12.6, 11.5, 12.3, 12.1];
+    let ow = ordinary_one_way_anova(&[("Ctrl", &ctrl[..]), ("Low", &low[..]), ("High", &high[..]), ("Mid", &mid[..])], conf_95()).unwrap();
+    let clhm = vec![group_input(0, "Ctrl", &ctrl), group_input(1, "Low", &low), group_input(2, "High", &high), group_input(3, "Mid", &mid)];
+    let lsd = compare_groups_with_procedure(&clhm, ow.ms_within, ow.df_within, MultiplicityProcedure::FisherLsd, 0.05, true).unwrap();
+    let lsd_exp: &[(f64, f64, f64, f64, f64)] = &[
+        (-3.9, -11.120_185_995_988, 6.149_877_639_348e-9, -4.643_479_530_823, -3.156_520_469_177),
+        (-7.8, -22.240_371_991_976, 1.850_611_015_499e-13, -8.543_479_530_823, -7.056_520_469_177),
+        (-1.5, -4.276_994_613_842, 5.777_158_022_807e-4, -2.243_479_530_823, -0.756_520_469_177),
+        (-3.9, -11.120_185_995_988, 6.149_877_639_348e-9, -4.643_479_530_823, -3.156_520_469_177),
+        (2.4, 6.843_191_382_146, 3.950_590_344_981e-6, 1.656_520_469_177, 3.143_479_530_823),
+        (6.3, 17.963_377_378_134, 4.977_732_240_679e-12, 5.556_520_469_177, 7.043_479_530_823),
+    ];
+    for (i, &(d, t, p, lo, hi)) in lsd_exp.iter().enumerate() {
+        assert_approx_eq(lsd[i].mean_diff, d, 1e-12, 1e-12, &format!("LSD[{i}] diff"));
+        assert_approx_eq(lsd[i].statistic, t, 1e-9, 1e-9, &format!("LSD[{i}] t"));
+        assert_approx_eq(lsd[i].raw_p, p, 1e-15, 1e-8, &format!("LSD[{i}] raw_p"));
+        assert_approx_eq(lsd[i].adjusted_p_or_q, p, 1e-15, 1e-8, &format!("LSD[{i}] adj_p == raw_p"));
+        let ci = lsd[i].ci.expect("LSD CI");
+        assert_approx_eq(ci.0, lo, 1e-9, 1e-9, &format!("LSD[{i}] ci lo"));
+        assert_approx_eq(ci.1, hi, 1e-9, 1e-9, &format!("LSD[{i}] ci hi"));
+    }
+
+    // 11b. Student-Newman-Keuls: balanced 4-group + unequal-n step-down clamping
+    let s0 = [8.0, 9.5, 10.0, 10.5, 12.0];
+    let s1 = [9.5, 10.5, 11.5, 12.0, 13.0];
+    let s2 = [10.5, 12.0, 12.8, 13.2, 14.5];
+    let s3 = [12.2, 13.4, 14.0, 14.8, 16.1];
+    let ow_snk = ordinary_one_way_anova(&[("G0", &s0[..]), ("G1", &s1[..]), ("G2", &s2[..]), ("G3", &s3[..])], conf_95()).unwrap();
+    let snk_in = vec![group_input(0, "G0", &s0), group_input(1, "G1", &s1), group_input(2, "G2", &s2), group_input(3, "G3", &s3)];
+    let snk = compare_groups_with_procedure(&snk_in, ow_snk.ms_within, ow_snk.df_within, MultiplicityProcedure::NewmanKeuls, 0.05, true).unwrap();
+    let snk_exp: &[(f64, f64, f64)] = &[
+        (2.018_599_470_321, 1.727_002_355_832e-1, 1.727_002_355_832e-1),
+        (4.037_198_940_642, 1.146_813_832_621e-2, 2.922_047_828_711e-2),
+        (6.366_352_175_627, 3.622_715_022_767e-4, 1.849_370_139_613e-3),
+        (2.018_599_470_321, 1.727_002_355_832e-1, 1.727_002_355_832e-1),
+        (4.347_752_705_306, 7.259_820_468_061e-3, 1.880_859_690_271e-2),
+        (2.329_153_234_985, 1.190_627_156_612e-1, 1.190_627_156_612e-1),
+    ];
+    for (i, &(q, rp, ap)) in snk_exp.iter().enumerate() {
+        assert!(snk[i].ci.is_none(), "Newman-Keuls does not define simultaneous CIs");
+        assert_approx_eq(snk[i].statistic, q, 1e-9, 1e-9, &format!("SNK[{i}] q"));
+        assert_approx_eq(snk[i].raw_p, rp, 1e-10, 1e-7, &format!("SNK[{i}] raw_p"));
+        assert_approx_eq(snk[i].adjusted_p_or_q, ap, 1e-10, 1e-7, &format!("SNK[{i}] adj_p"));
+    }
+
+    // Unequal-n step-down clamping: inner pair (1,2) has raw_p = 2.67e-5 but enclosing span (0,3) has p = 0.075227!
+    let snk_clamp_in = vec![
+        GroupComparisonInput { index: 0, label: "G0".into(), n: 2.0, mean: 10.0, sd: 2.0 },
+        GroupComparisonInput { index: 1, label: "G1".into(), n: 20.0, mean: 11.0, sd: 2.0 },
+        GroupComparisonInput { index: 2, label: "G2".into(), n: 20.0, mean: 14.0, sd: 2.0 },
+        GroupComparisonInput { index: 3, label: "G3".into(), n: 2.0, mean: 15.0, sd: 2.0 },
+    ];
+    let snk_c = compare_groups_with_procedure(&snk_clamp_in, 4.0, 40.0, MultiplicityProcedure::NewmanKeuls, 0.05, false).unwrap();
+    // Pair index 3 is (1,2): raw_p = 2.6719e-5, clamped up to enclosing span (0,3) p = 0.07522735970622
+    assert_approx_eq(snk_c[3].statistic, 6.708_203_932_499, 1e-9, 1e-9, "SNK_clamp (1,2) q");
+    assert_approx_eq(snk_c[3].raw_p, 2.671_916_346_911e-5, 1e-10, 1e-6, "SNK_clamp (1,2) raw_p");
+    assert_approx_eq(snk_c[3].adjusted_p_or_q, 7.522_735_970_622e-2, 1e-8, 1e-6, "SNK_clamp (1,2) clamped adj_p");
+    assert!(!snk_c[3].significant, "clamped inner pair must not be declared significant");
+    assert_approx_eq(snk_c[2].adjusted_p_or_q, 7.522_735_970_622e-2, 1e-8, 1e-6, "SNK_clamp (0,3) outer adj_p");
+
+    // 11c. Tamhane T2 on heteroscedastic `het` dataset
+    let g1 = [10.2, 10.8, 9.9, 11.1, 10.5, 10.3];
+    let g2 = [12.1, 14.8, 11.2, 15.6, 13.4, 16.2, 12.9, 14.1];
+    let g3 = [18.5, 22.0, 16.4, 24.1, 19.8];
+    let g4 = [25.0, 25.4, 24.8, 25.7, 25.1, 25.5, 24.9];
+    let het_in = vec![group_input(0, "G1", &g1), group_input(1, "G2", &g2), group_input(2, "G3", &g3), group_input(3, "G4", &g4)];
+    let t2 = compare_groups_with_procedure(&het_in, 0.0, 1.0, MultiplicityProcedure::TamhaneT2, 0.05, true).unwrap();
+    let t2_exp: &[(f64, f64, f64, f64, f64, f64)] = &[
+        (-5.244_734_605_970, 8.146_636_829_720, 7.344_572_343_353e-4, 4.398_659_913_940e-3, -5.502_491_142_508, -1.139_175_524_159),
+        (-7.170_003_562_507, 4.138_739_889_497, 1.757_625_896_248e-3, 1.049_952_509_744e-2, -16.058_434_589_064, -3.328_232_077_602),
+        (-67.742_802_188_293, 9.429_979_187_019, 5.359_979_207_033e-14, 3.217_426_325_364e-13, -15.453_416_642_646, -14.013_250_024_021),
+        (-4.329_528_572_906, 5.678_651_507_584, 5.602_342_781_658e-3, 3.314_676_500_696e-2, -12.171_309_913_937, -0.573_690_086_063),
+        (-18.369_316_551_836, 7.609_346_396_973, 1.407_134_166_476e-7, 8.442_802_031_938e-7, -13.598_789_652_734, -9.226_210_347_266),
+        (-3.743_318_072_488, 4.072_198_222_085, 1.942_853_597_925e-2, 1.110_537_480_615e-1, -11.450_450_669_534, 1.370_450_669_534),
+    ];
+    for (i, &(t, df, rp, ap, lo, hi)) in t2_exp.iter().enumerate() {
+        assert_approx_eq(t2[i].statistic, t, 1e-9, 1e-9, &format!("T2[{i}] t"));
+        assert_approx_eq(t2[i].df, df, 1e-9, 1e-9, &format!("T2[{i}] df"));
+        assert_approx_eq(t2[i].raw_p, rp, 1e-15, 1e-8, &format!("T2[{i}] raw_p"));
+        assert_approx_eq(t2[i].adjusted_p_or_q, ap, 1e-15, 1e-3, &format!("T2[{i}] adj_p"));
+        let ci = t2[i].ci.expect("T2 CI");
+        assert_approx_eq(ci.0, lo, 1e-8, 1e-8, &format!("T2[{i}] ci lo"));
+        assert_approx_eq(ci.1, hi, 1e-8, 1e-8, &format!("T2[{i}] ci hi"));
+    }
+
+    // 11d. Multiple row t-tests (6 rows, Student & Welch across Bonf/Holm/BH/BY)
+    let mr_a = vec![
+        vec![10.0, 10.5, 11.0, 10.2, 10.4],
+        vec![5.0, 5.2, 4.9, 5.1, 5.3],
+        vec![20.0, 20.4, 19.6, 20.1, 19.9],
+        vec![12.0, 12.8, 11.5, 12.4, 12.1],
+        vec![8.0, 8.6, 7.5, 8.2, 8.1],
+        vec![15.0, 15.2, 14.9, 15.1, 14.8],
+    ];
+    let mr_b = vec![
+        vec![10.1, 10.6, 10.9, 10.3, 10.5],
+        vec![8.1, 8.5, 7.9, 8.2, 8.3],
+        vec![19.7, 20.5, 19.9, 20.2, 20.1],
+        vec![14.5, 15.2, 13.9, 14.8, 14.1],
+        vec![9.2, 9.8, 8.9, 9.5, 9.0],
+        vec![15.9, 16.4, 15.6, 16.0, 15.7],
+    ];
+    let lbls: Vec<String> = (0..6).map(|i| format!("Gene{i}")).collect();
+    let stu_holm = multiple_row_t_tests(&lbls, &mr_a, &mr_b, false, MultiplicityProcedure::HolmBonferroni, 0.05).unwrap();
+    let stu_bh = multiple_row_t_tests(&lbls, &mr_a, &mr_b, false, MultiplicityProcedure::BenjaminiHochbergFdr, 0.05).unwrap();
+    let stu_by = multiple_row_t_tests(&lbls, &mr_a, &mr_b, false, MultiplicityProcedure::BenjaminiYekutieliFdr, 0.05).unwrap();
+    let stu_exp: &[(f64, f64, f64, f64, f64)] = &[
+        (-0.277_350_098_113, 7.885_433_926_808e-1, 1.0, 7.885_433_926_808e-1, 1.0),
+        (-25.311_394_008_760, 6.357_486_835_863e-9, 3.814_492_101_518e-8, 3.814_492_101_518e-8, 9.345_505_648_719e-8),
+        (-0.425_195_202_762, 6.819_005_668_180e-1, 1.0, 7.885_433_926_808e-1, 1.0),
+        (-7.341_232_920_116, 8.061_616_168_694e-5, 4.030_808_084_347e-4, 2.418_484_850_608e-4, 5.925_287_883_990e-4),
+        (-4.948_716_593_054, 1.122_693_000_882e-3, 3.368_079_002_645e-3, 1.684_039_501_322e-3, 4.125_896_778_240e-3),
+        (-5.889_696_476_913, 3.659_733_145_130e-4, 1.463_893_258_052e-3, 7.319_466_290_260e-4, 1.793_269_241_114e-3),
+    ];
+    for (i, &(t, rp, holm, bh, by)) in stu_exp.iter().enumerate() {
+        assert_approx_eq(stu_holm[i].statistic, t, 1e-9, 1e-9, &format!("Student row[{i}] t"));
+        assert_approx_eq(stu_holm[i].raw_p, rp, 1e-13, 1e-8, &format!("Student row[{i}] raw_p"));
+        assert_approx_eq(stu_holm[i].adjusted_p_or_q, holm, 1e-13, 1e-8, &format!("Student row[{i}] holm"));
+        assert_approx_eq(stu_bh[i].adjusted_p_or_q, bh, 1e-13, 1e-8, &format!("Student row[{i}] BH"));
+        assert_approx_eq(stu_by[i].adjusted_p_or_q, by, 1e-13, 1e-8, &format!("Student row[{i}] BY"));
+    }
+
+    let wel_holm = multiple_row_t_tests(&lbls, &mr_a, &mr_b, true, MultiplicityProcedure::HolmBonferroni, 0.05).unwrap();
+    let wel_bh = multiple_row_t_tests(&lbls, &mr_a, &mr_b, true, MultiplicityProcedure::BenjaminiHochbergFdr, 0.05).unwrap();
+    let wel_exp: &[(f64, f64, f64, f64)] = &[
+        (7.650_691_630_571, 7.888_573_290_422e-1, 1.0, 7.888_573_290_422e-1),
+        (7.200_000_000_000, 2.661_875_681_650e-8, 1.597_125_408_990e-7, 1.597_125_408_990e-7),
+        (7.987_507_170_629, 6.819_177_000_849e-1, 1.0, 7.888_573_290_422e-1),
+        (7.945_687_146_882, 8.346_757_304_909e-5, 4.173_378_652_455e-4, 2.504_027_191_473e-4),
+        (7.963_148_924_409, 1.138_045_189_467e-3, 4.424_451_527_879e-3, 1.707_067_784_201e-3),
+        (5.933_426_350_409, 1.106_112_881_970e-3, 4.424_451_527_879e-3, 1.707_067_784_201e-3),
+    ];
+    for (i, &(df, rp, holm, bh)) in wel_exp.iter().enumerate() {
+        assert_approx_eq(wel_holm[i].df, df, 1e-9, 1e-9, &format!("Welch row[{i}] df"));
+        assert_approx_eq(wel_holm[i].raw_p, rp, 1e-13, 1e-8, &format!("Welch row[{i}] raw_p"));
+        assert_approx_eq(wel_holm[i].adjusted_p_or_q, holm, 1e-13, 1e-8, &format!("Welch row[{i}] holm"));
+        assert_approx_eq(wel_bh[i].adjusted_p_or_q, bh, 1e-13, 1e-8, &format!("Welch row[{i}] BH"));
+    }
+}
+
+// ============================================================================
+// 12. Paired sign test & exact_binomial_test vs stats::binom.test
+// ============================================================================
+
+#[test]
+fn oracle_paired_sign_test_and_exact_binomial_test_vs_r_binom_test() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::binom.test`, `stats::pbinom`,
+    // `stats::prop.test(..., correct=FALSE)`, 2026-11-27.
+    let sign_a = [12.5, 14.1, 11.8, 15.0, 13.2, 16.4, 10.9, 14.8, 13.5, 12.0, 15.2, 14.0, 11.5];
+    let sign_b = [10.2, 13.0, 12.1, 12.5, 13.2, 14.0, 9.5, 12.2, 11.9, 12.0, 13.0, 11.8, 10.1];
+    let s2 = paired_sign_test(&sign_a, &sign_b, true, conf_95()).unwrap();
+    assert_eq!((s2.n_total, s2.n_positive, s2.n_negative, s2.n_ties, s2.n_nonzero), (13, 10, 1, 2, 11));
+    assert_approx_eq(s2.p_value, 0.011_718_75, 1e-13, 1e-13, "sign_test 2-sided binom.test p");
+    assert_approx_eq(s2.median_difference, 1.6, 1e-12, 0.0, "sign_test median diff");
+    let mci = s2.ci.expect("sign_test median CI");
+    assert_approx_eq(mci.0, 0.0, 1e-12, 0.0, "sign_test median CI lo");
+    assert_approx_eq(mci.1, 2.4, 1e-12, 0.0, "sign_test median CI hi");
+    assert_approx_eq(s2.ci_actual_confidence_percent.unwrap(), 97.753_906_25, 1e-10, 1e-10, "sign_test actual conf%");
+
+    let s1 = paired_sign_test(&sign_a, &sign_b, false, conf_95()).unwrap();
+    assert_approx_eq(s1.p_value, 0.005_859_375, 1e-13, 1e-13, "sign_test 1-sided binom.test p");
+
+    // Exact binomial test across symmetric, asymmetric, and boundary (k = 0, k = n) cases.
+    struct BinomCase {
+        k: u64,
+        n: u64,
+        p0: f64,
+        p_lo: f64,
+        p_hi: f64,
+        p_sterne: f64,
+        p_2tail: f64,
+        cp: (f64, f64),
+        wilson: (f64, f64),
+        ac: (f64, f64),
+    }
+    let cases = [
+        BinomCase {
+            k: 18,
+            n: 25,
+            p0: 0.50,
+            p_lo: 0.992_683_351_039_886,
+            p_hi: 0.021_642_625_331_879,
+            p_sterne: 0.043_285_250_663_757,
+            p_2tail: 0.043_285_250_663_757,
+            cp: (0.506_123_178_194, 0.879_283_311_496),
+            wilson: (0.524_233_948_096, 0.857_161_461_490),
+            ac: (0.522_013_251_842, 0.859_382_157_745),
+        },
+        BinomCase {
+            k: 7,
+            n: 20,
+            p0: 0.20,
+            p_lo: 0.967_857_336_919_125,
+            p_hi: 0.086_692_513_567_400,
+            p_sterne: 0.098_221_728_613_469,
+            p_2tail: 0.173_385_027_134_801,
+            cp: (0.153_909_204_785, 0.592_188_534_533),
+            wilson: (0.181_191_824_101, 0.567_145_723_315),
+            ac: (0.179_926_361_438, 0.568_411_185_978),
+        },
+        BinomCase {
+            k: 2,
+            n: 15,
+            p0: 0.35,
+            p_lo: 0.061_734_095_365_285,
+            p_hi: 0.985_821_215_407_943,
+            p_sterne: 0.103_927_933_303_477,
+            p_2tail: 0.123_468_190_730_570,
+            cp: (0.016_575_913_440, 0.404_602_696_603),
+            wilson: (0.037_361_259_103, 0.378_819_828_323),
+            ac: (0.024_793_793_461, 0.391_387_293_965),
+        },
+        BinomCase {
+            k: 0,
+            n: 12,
+            p0: 0.25,
+            p_lo: 0.031_676_352_024_078,
+            p_hi: 1.0,
+            p_sterne: 0.045_929_133_892_059,
+            p_2tail: 0.063_352_704_048_157,
+            cp: (0.0, 0.264_648_469_397),
+            wilson: (0.0, 0.242_494_006_655),
+            ac: (0.0, 0.281_985_321_888),
+        },
+        BinomCase {
+            k: 12,
+            n: 12,
+            p0: 0.80,
+            p_lo: 1.0,
+            p_hi: 0.068_719_476_736_000,
+            p_sterne: 0.141_274_976_256_000,
+            p_2tail: 0.137_438_953_472_000,
+            cp: (0.735_351_530_603, 1.0),
+            wilson: (0.757_505_993_345, 1.0),
+            ac: (0.718_014_678_112, 1.0),
+        },
+    ];
+    for c in &cases {
+        let r = exact_binomial_test(c.k, c.n, c.p0, conf_95()).unwrap();
+        let tag = format!("binom({},{},{})", c.k, c.n, c.p0);
+        assert_approx_eq(r.p_value_lower, c.p_lo, 1e-11, 1e-11, &format!("{tag} p_lo"));
+        assert_approx_eq(r.p_value_upper, c.p_hi, 1e-11, 1e-11, &format!("{tag} p_hi"));
+        assert_approx_eq(r.p_value_sterne, c.p_sterne, 1e-11, 1e-11, &format!("{tag} p_sterne"));
+        assert_approx_eq(r.p_value_doubled_tail, c.p_2tail, 1e-11, 1e-11, &format!("{tag} p_2tail"));
+        assert_approx_eq(r.clopper_pearson_ci.0, c.cp.0, 1e-10, 1e-10, &format!("{tag} CP lo"));
+        assert_approx_eq(r.clopper_pearson_ci.1, c.cp.1, 1e-10, 1e-10, &format!("{tag} CP hi"));
+        assert_approx_eq(r.wilson_ci.0, c.wilson.0, 1e-10, 1e-10, &format!("{tag} Wilson lo"));
+        assert_approx_eq(r.wilson_ci.1, c.wilson.1, 1e-10, 1e-10, &format!("{tag} Wilson hi"));
+        assert_approx_eq(r.agresti_coull_ci.0, c.ac.0, 1e-10, 1e-10, &format!("{tag} AC lo"));
+        assert_approx_eq(r.agresti_coull_ci.1, c.ac.1, 1e-10, 1e-10, &format!("{tag} AC hi"));
+    }
+}
+
+// ============================================================================
+// 13. Baptista-Pike (1977) root-finding oracle, Lloyd k-means, Type-6 quantiles
+// ============================================================================
+
+#[test]
+fn oracle_baptista_pike_lloyd_kmeans_and_type6_quantiles() {
+    // 13a. Baptista-Pike exact conditional OR CI via R 4.5.2 `lchoose` + `uniroot`, 2026-11-27.
+    let conf_99 = ConfidenceLevel::from_percent(99.0).unwrap();
+    let bp1 = baptista_pike_or_ci(14, 6, 5, 15, conf_95()).unwrap();
+    assert_approx_eq(bp1.0, 1.489_289_241_422, 1e-7, 1e-7, "BP (14,6,5,15) 95% lo");
+    assert_approx_eq(bp1.1, 31.301_093_258_306, 1e-7, 1e-7, "BP (14,6,5,15) 95% hi");
+
+    let bp2 = baptista_pike_or_ci(12, 8, 4, 16, conf_99).unwrap();
+    assert_approx_eq(bp2.0, 0.911_507_734_779, 1e-7, 1e-7, "BP (12,8,4,16) 99% lo");
+    assert_approx_eq(bp2.1, 44.890_241_941_400, 1e-7, 1e-7, "BP (12,8,4,16) 99% hi");
+
+    let bp3 = baptista_pike_or_ci(8, 2, 3, 12, conf_95()).unwrap();
+    assert_approx_eq(bp3.0, 2.009_263_806_747, 1e-7, 1e-7, "BP (8,2,3,12) 95% lo");
+    assert_approx_eq(bp3.1, 134.548_892_629_473, 1e-6, 1e-7, "BP (8,2,3,12) 95% hi");
+
+    let bp_zero_a = baptista_pike_or_ci(0, 10, 5, 10, conf_95()).unwrap();
+    assert_eq!(bp_zero_a.0, 0.0);
+    assert_approx_eq(bp_zero_a.1, 1.141_344_086_592, 1e-7, 1e-7, "BP (0,10,5,10) 95% hi");
+
+    let bp_zero_b = baptista_pike_or_ci(10, 0, 5, 10, conf_95()).unwrap();
+    assert_approx_eq(bp_zero_b.0, 3.021_900_135_585, 1e-7, 1e-7, "BP (10,0,5,10) 95% lo");
+    assert!(bp_zero_b.1.is_infinite() && bp_zero_b.1.is_sign_positive());
+
+    // 13b. Fixed-centre Lloyd k-means vs R 4.5.2 `stats::kmeans(x, centers=init, algorithm="Lloyd")`.
+    let km_x = vec![
+        vec![0.2, 0.5],
+        vec![0.8, 0.1],
+        vec![1.1, 0.9],
+        vec![0.4, 1.3],
+        vec![1.5, 0.4],
+        vec![5.2, 4.8],
+        vec![5.9, 5.5],
+        vec![4.6, 5.3],
+        vec![6.1, 4.9],
+        vec![5.4, 6.0],
+        vec![1.0, 6.2],
+        vec![1.6, 5.8],
+        vec![0.7, 6.9],
+        vec![2.0, 6.5],
+        vec![1.3, 7.1],
+    ];
+    let km_init = vec![vec![0.0, 0.0], vec![3.0, 3.0], vec![2.5, 6.0]];
+    let km = kmeans_with_centers(&km_x, &km_init, KMeansAlgorithm::Lloyd, 100).unwrap();
+    assert_eq!(km.assignments, vec![0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2]);
+    assert_approx_eq(km.wcss, 6.452, 1e-11, 1e-11, "Lloyd tot.withinss");
+    let exp_centers = [(0.80, 0.64), (5.44, 5.30), (1.32, 6.50)];
+    for (i, &(cx, cy)) in exp_centers.iter().enumerate() {
+        assert_approx_eq(km.centroids[i][0], cx, 1e-12, 1e-12, &format!("Lloyd center[{i}].x"));
+        assert_approx_eq(km.centroids[i][1], cy, 1e-12, 1e-12, &format!("Lloyd center[{i}].y"));
+    }
+
+    // 13c. Hyndman-Fan Type-6 quantiles vs R 4.5.2 `stats::quantile(x, probs, type = 6)`.
+    let probs = [0.0, 0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95, 1.0];
+    let q_cases: &[(&str, &[f64], [f64; 9])] = &[
+        ("odd7", &[2.1, 4.5, 5.0, 7.2, 9.8, 12.4, 18.0], [2.1, 2.1, 2.1, 4.5, 7.2, 12.4, 18.0, 18.0, 18.0]),
+        ("even8", &[2.4, 3.1, 3.8, 4.2, 5.0, 6.5, 8.2, 11.4], [2.4, 2.4, 2.4, 3.275, 4.6, 7.775, 11.4, 11.4, 11.4]),
+        ("small4", &[10.0, 20.0, 35.0, 80.0], [10.0, 10.0, 10.0, 12.5, 27.5, 68.75, 80.0, 80.0, 80.0]),
+        ("tied9", &[1.0, 2.0, 2.0, 2.0, 5.0, 7.0, 7.0, 9.0, 15.0], [1.0, 1.0, 1.0, 2.0, 5.0, 8.0, 15.0, 15.0, 15.0]),
+        (
+            "n15",
+            &[1.2, 2.5, 3.1, 4.0, 5.5, 6.2, 7.8, 9.1, 10.4, 12.0, 14.5, 16.8, 19.2, 22.0, 27.5],
+            [1.2, 1.2, 1.98, 4.0, 9.1, 16.8, 24.2, 27.5, 27.5],
+        ),
+    ];
+    for &(label, sorted, expected) in q_cases {
+        for (&p, &exp_q) in probs.iter().zip(expected.iter()) {
+            let act = quantile_type6_sorted(sorted, p).unwrap();
+            assert_approx_eq(act, exp_q, 1e-12, 1e-12, &format!("Type6 {label} p={p}"));
+        }
+        let col = summarize_column(label, sorted, 0, conf_95(), None).unwrap();
+        assert_approx_eq(col.q1, expected[3], 1e-12, 1e-12, &format!("summarize {label} q1"));
+        assert_approx_eq(col.median, expected[4], 1e-12, 1e-12, &format!("summarize {label} median"));
+        assert_approx_eq(col.q3, expected[5], 1e-12, 1e-12, &format!("summarize {label} q3"));
+    }
+}
+
+// ============================================================================
+// 14. Column ROUT RSDR/p & norm.qq Blom (1958) convention check
+// ============================================================================
+
+#[test]
+fn oracle_column_rout_rsdr_p_and_norm_qq_blom_convention() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) Cauchy IRLS + Type-7 P_68.27 RSDR + `2*pt(-t, df=n-1)`
+    // and Blom (1958) `qnorm((1:n - 3/8)/(n + 1/4))`, 2026-11-27.
+    let x_rout2 = [50.1, 49.4, 51.2, 50.8, 48.9, 50.5, 49.7, 51.0, 50.3, 49.6, 88.0, 12.5];
+    let r2 = rout_outliers(&x_rout2, 1.0).unwrap();
+    assert_eq!(r2.outliers.len(), 2);
+    assert_approx_eq(r2.robust_center, 50.172_977_088_291, 1e-10, 1e-10, "ROUT2 center");
+    assert_approx_eq(r2.rsdr, 1.013_388_866_301, 1e-10, 1e-10, "ROUT2 RSDR");
+    // Sorted ascending by |residual|: 12.5 (|r|=37.673) then 88.0 (|r|=37.827)
+    assert_eq!(r2.outliers[0].index, 11);
+    assert_approx_eq(r2.outliers[0].score, 37.175_242_733_641, 1e-9, 1e-9, "ROUT2 outlier 12.5 t");
+    assert_approx_eq(r2.outliers[0].threshold_or_p, 6.438_337_415_381e-13, 1e-16, 1e-8, "ROUT2 outlier 12.5 raw p");
+    assert_eq!(r2.outliers[1].index, 10);
+    assert_approx_eq(r2.outliers[1].score, 37.327_253_307_805, 1e-9, 1e-9, "ROUT2 outlier 88.0 t");
+    assert_approx_eq(r2.outliers[1].threshold_or_p, 6.157_732_778_918e-13, 1e-16, 1e-8, "ROUT2 outlier 88.0 raw p");
+
+    // Normal & lognormal Q-Q expected quantiles (n = 8 matches R `qqnorm` because R ppoints(n<=10) uses a = 3/8)
+    let qq8 = [2.4, 3.1, 3.8, 4.2, 5.0, 6.5, 8.2, 11.4];
+    let qn8 = qq_expected_quantiles(&qq8, false).unwrap();
+    let exp_qn8 = [
+        1.263_700_670_633,
+        3.012_344_261_375,
+        4.153_765_030_460,
+        5.116_557_083_193,
+        6.033_442_916_807,
+        6.996_234_969_540,
+        8.137_655_738_625,
+        9.886_299_329_367,
+    ];
+    for (i, (&(exp_q, obs), &r_q)) in qn8.iter().zip(exp_qn8.iter()).enumerate() {
+        assert_approx_eq(exp_q, r_q, 1e-9, 1e-9, &format!("QQ8 normal[{i}]"));
+        assert_approx_eq(obs, qq8[i], 1e-14, 0.0, &format!("QQ8 obs[{i}]"));
+    }
+    let qln8 = qq_expected_quantiles(&qq8, true).unwrap();
+    let exp_qln8 = [
+        0.859_210_500_097,
+        1.159_465_749_992,
+        1.355_456_276_632,
+        1.520_774_909_841,
+        1.678_211_100_128,
+        1.843_529_733_336,
+        2.039_520_259_976,
+        2.339_775_509_871,
+    ];
+    for (i, (&(exp_q, _), &r_q)) in qln8.iter().zip(exp_qln8.iter()).enumerate() {
+        assert_approx_eq(exp_q, r_q, 1e-9, 1e-9, &format!("QQ8 lognormal[{i}]"));
+    }
+
+    // At n = 15 (> 10), CurveBook explicitly keeps Blom (1958) a = 3/8 (distinct from R ppoints a = 1/2: 9.8893 / 15.3907).
+    let qq15 = [10.1, 10.8, 11.2, 11.5, 11.9, 12.0, 12.3, 12.5, 12.7, 13.0, 13.4, 13.8, 14.1, 14.7, 15.6];
+    let qn15 = qq_expected_quantiles(&qq15, false).unwrap();
+    assert_approx_eq(qn15[0].0, 10.031_089_425_514, 1e-9, 1e-9, "QQ15 Blom first");
+    assert_approx_eq(qn15[7].0, 12.640_000_000_000, 1e-9, 1e-9, "QQ15 Blom center");
+    assert_approx_eq(qn15[14].0, 15.248_910_574_486, 1e-9, 1e-9, "QQ15 Blom last");
+    assert!((qn15[0].0 - 9.889_302_710_358).abs() > 0.1, "QQ15 must follow Blom a=3/8, not Hazen a=1/2");
+}
+
+// ============================================================================
+// 15. Published Benchmarks: Royston (1995 AS R94) n=25 & Altman (1998) Tramèr NNT
+// ============================================================================
+
+#[test]
+fn oracle_published_royston_1995_and_altman_1998_tramer_nnt() {
+    // 15a. Royston, P. (1995) Remark AS R94 (Appl Stat 44(4):547-551) n = 25 lognormal example:
+    // Published: W = 0.83467, p = 0.000914; R 4.5.2 `stats::shapiro.test` exact:
+    //   W = 0.8346662753181682, p = 9.1349048181297036e-4.
+    let royston_25 = [
+        0.139, 0.157, 0.175, 0.256, 0.344, 0.413, 0.503, 0.577, 0.614, 0.655, 0.954, 1.392, 1.557, 1.648, 1.690, 1.994, 2.174, 2.206, 3.245, 3.510,
+        3.571, 4.354, 4.980, 6.084, 8.351,
+    ];
+    let sw = shapiro_wilk(&royston_25, 0.05).unwrap();
+    assert_approx_eq(sw.statistic, 0.834_666_275_318_168_2, 1e-11, 1e-11, "Royston 1995 n=25 W");
+    assert_approx_eq(sw.p_value, 9.134_904_818_129_704e-4, 1e-10, 1e-8, "Royston 1995 n=25 p");
+    assert!(!sw.passed);
+
+    // 15b. Altman, D. G. (1998) BMJ 317:1309-1312 Tramèr et al. benchmark (ondansetron vs droperidol):
+    // ARR = -0.08, 95% CI [-0.27, +0.11] -> NNTH = 12.5, 95% CI = NNTH 3.7 to Inf to NNTB 9.1.
+    let (kind, nnt_val, pt_label, ci_label, ci_bounds) = altman_nnt_from_rd(-0.08, -0.27, 0.11);
+    assert_eq!(kind, NntKind::Harm);
+    assert_approx_eq(nnt_val.unwrap(), 12.5, 1e-12, 0.0, "Altman 1998 Tramèr NNTH");
+    assert_eq!(pt_label, "NNTH 12.50");
+    assert!(ci_bounds.is_none(), "CI spanning zero has disjoint NNT rays (no finite single interval)");
+    assert_eq!(ci_label, "NNTH 3.70 to ∞ to NNTB 9.09");
+
+    // Finite-interval benefit benchmark (ARR = +0.15, 95% CI [+0.05, +0.25] -> NNTB 6.67, CI [4.00, 20.00]).
+    let (b_kind, b_val, b_pt, b_ci_lbl, b_bounds) = altman_nnt_from_rd(0.15, 0.05, 0.25);
+    assert_eq!(b_kind, NntKind::Benefit);
+    assert_approx_eq(b_val.unwrap(), 1.0 / 0.15, 1e-12, 1e-12, "Altman NNTB point");
+    assert_eq!(b_pt, "NNTB 6.67");
+    let (b_lo, b_hi) = b_bounds.expect("strictly positive RD CI yields finite NNTB bounds");
+    assert_approx_eq(b_lo, 4.0, 1e-12, 0.0, "Altman NNTB CI lo");
+    assert_approx_eq(b_hi, 20.0, 1e-12, 0.0, "Altman NNTB CI hi");
+    assert_eq!(b_ci_lbl, "NNTB 4.00 to 20.00");
+}
+
+// ============================================================================
+// 16. NIST Engineering Statistics Handbook `GEAR.DAT` Worked Examples
+// ============================================================================
+
+#[test]
+fn oracle_nist_gear_dat_levene_bartlett_and_anova() {
+    // D1 Provenance: Public-domain NIST/SEMATECH e-Handbook `assets/datasets/nist/GEAR.DAT`
+    // (100 gear diameter measurements across 10 batches), verified against NIST §§1.3.5.4 / 1.3.5.7 / 1.3.5.10
+    // (NIST float32 Dataplot prints Levene W = 1.705910, Bartlett T = 20.78580, ANOVA F = 2.2969)
+    // and exact double-precision base R 4.5.2 (`bartlett.test`, `anova(lm(...))`, `aov`), 2026-11-27.
+    const GEAR_DAT: &str = include_str!("../../../../assets/datasets/nist/GEAR.DAT");
+    let mut batches: Vec<Vec<f64>> = vec![Vec::new(); 10];
+    for line in GEAR_DAT.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let mut parts = trimmed.split_whitespace();
+        let val: f64 = parts.next().expect("diameter").parse().expect("f64 diameter");
+        let batch_idx: usize = parts.next().expect("batch").parse().expect("usize batch");
+        assert!((1..=10).contains(&batch_idx), "unexpected batch id {batch_idx}");
+        batches[batch_idx - 1].push(val);
+    }
+    assert!(batches.iter().all(|b| b.len() == 10), "GEAR.DAT must contain 10 batches x 10 observations");
+
+    let slices: Vec<&[f64]> = batches.iter().map(Vec::as_slice).collect();
+    let labeled: Vec<(&str, &[f64])> = ["Batch1", "Batch2", "Batch3", "Batch4", "Batch5", "Batch6", "Batch7", "Batch8", "Batch9", "Batch10"]
+        .into_iter()
+        .zip(slices.iter().copied())
+        .collect();
+
+    // 1. Bartlett's test & Brown-Forsythe (median Levene) via `variance_homogeneity_tests`
+    let vh = variance_homogeneity_tests(&slices).unwrap();
+    assert_approx_eq(vh.bartlett_chi2, 20.785_873_428_065, 1e-9, 1e-9, "GEAR.DAT Bartlett T (R 4.5.2)");
+    assert_approx_eq(vh.bartlett_chi2, 20.785_80, 1e-4, 1e-5, "GEAR.DAT Bartlett T (NIST §1.3.5.7)");
+    assert_approx_eq(vh.bartlett_df, 9.0, 1e-15, 0.0, "GEAR.DAT Bartlett df");
+    assert_approx_eq(vh.bartlett_p, 1.363_586_327_806e-2, 1e-10, 1e-10, "GEAR.DAT Bartlett p");
+
+    assert_approx_eq(vh.brown_forsythe_f, 1.705_917_693_001, 1e-9, 1e-9, "GEAR.DAT Levene median W (R 4.5.2)");
+    assert_approx_eq(vh.brown_forsythe_f, 1.705_910, 1e-5, 1e-5, "GEAR.DAT Levene median W (NIST §1.3.5.10)");
+    assert_approx_eq(vh.brown_forsythe_df1, 9.0, 1e-15, 0.0, "GEAR.DAT Levene df1");
+    assert_approx_eq(vh.brown_forsythe_df2, 90.0, 1e-15, 0.0, "GEAR.DAT Levene df2");
+    assert_approx_eq(vh.brown_forsythe_p, 9.908_297_555_220e-2, 1e-10, 1e-10, "GEAR.DAT Levene median p");
+
+    // 2. Direct `levene_variance_test` (median-centered and mean-centered)
+    let lev_med = levene_variance_test(&slices, true).unwrap();
+    assert_approx_eq(lev_med.f_statistic, 1.705_917_693_001, 1e-9, 1e-9, "GEAR.DAT levene_variance_test(median) W");
+    assert_approx_eq(lev_med.p_value, 9.908_297_555_220e-2, 1e-10, 1e-10, "GEAR.DAT levene_variance_test(median) p");
+
+    let lev_mean = levene_variance_test(&slices, false).unwrap();
+    assert_approx_eq(lev_mean.f_statistic, 2.159_459_856_473, 1e-9, 1e-9, "GEAR.DAT levene_variance_test(mean) W");
+    assert_approx_eq(lev_mean.p_value, 3.223_682_655_978e-2, 1e-10, 1e-10, "GEAR.DAT levene_variance_test(mean) p");
+
+    // 3. Ordinary one-way ANOVA (NIST §1.3.5.4: F = 2.2969)
+    let aov = ordinary_one_way_anova(&labeled, conf_95()).unwrap();
+    assert_approx_eq(aov.f_statistic, 2.296_912_413_359, 1e-9, 1e-9, "GEAR.DAT ANOVA F (R 4.5.2)");
+    assert_approx_eq(aov.df_between, 9.0, 1e-15, 0.0, "GEAR.DAT ANOVA df1");
+    assert_approx_eq(aov.df_within, 90.0, 1e-15, 0.0, "GEAR.DAT ANOVA df2");
+    assert_approx_eq(aov.p_value, 2.266_081_927_864e-2, 1e-10, 1e-10, "GEAR.DAT ANOVA p");
 }

@@ -7,7 +7,8 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CiBound, ConstantValue, DataSheet, FitMethod, HookSource, InfoSheet, LinearRegressionSpec,
-    ModelComparisonSpec, NonlinearFitSpec, ParameterRule, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, WeightingSource, XyTable,
+    ModelComparisonSpec, NonlinearFitSpec, ParameterRule, ParameterScope, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, WeightingSource,
+    XyTable,
 };
 use curvebook_fit::{
     DataPoint, DatasetSeries, DemingOptions, FitError, FitStatus, HookContext, ModelComparisonOutcome, NonlinearFitResult, ParameterNote,
@@ -1086,4 +1087,270 @@ fn issue_74_linear_dose_response_derived_transforms_and_relative_square_irls_sco
     for (j, s) in score.iter().enumerate() {
         assert!(s.abs() < 1e-6, "IRLS score component {j} = {s:.3e} exceeds 1e-6");
     }
+}
+
+#[test]
+fn r_4_5_2_noisy_model_comparison_oracles_competition_ki_rat43_global_shared_and_schild() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::nls(..., algorithm="port")` + `stats::anova`
+    // (`crates/fit/tests/reference/d1_extended_fit_oracles.R`, 2026-11-27), plus public-domain
+    // NIST StRD `Rat43` benchmark (certified 4-parameter Richards RSS = 8786.4049080).
+
+    // 1. Noisy competition_ki: 1-site (`one_site_fit_ki`) vs 2-site (`two_sites_fit_ki`) extra-SS F
+    let (hot_c, hot_kd) = (2.4_f64, 0.8_f64);
+    let shift = (1.0 + hot_c / hot_kd).log10();
+    let log_comp: Vec<f64> = (-24..=-6).map(|i| i as f64 * 0.5).collect();
+    let err_ki = [11.0, -14.0, 9.0, -8.0, 12.0, -10.0, 7.0, -13.0, 10.0, -9.0, 11.0, -12.0, 8.0, -7.0, 13.0, -11.0, 9.0, -10.0, 6.0];
+    let y_ki2: Vec<f64> = log_comp
+        .iter()
+        .zip(err_ki)
+        .map(|(&x, e)| {
+            150.0
+                + 1050.0 * (0.42 / (1.0 + 10_f64.powf(x - (5e-10_f64.log10() + shift))) + 0.58 / (1.0 + 10_f64.powf(x - (2e-7_f64.log10() + shift))))
+                + e
+        })
+        .collect();
+    let mut info = InfoSheet::new_preseeded("info-ki-cmp", "Assay Conditions").unwrap();
+    info.set_constant("HotConc_nM", ConstantValue::Number(hot_c), None).unwrap();
+    info.set_constant("HotKd_nM", ConstantValue::Number(hot_kd), None).unwrap();
+    let infos = [info];
+    let hooks = HookContext { info_sheets: &infos, ..HookContext::default() };
+    let ds_ki = [series_xy(0, "NoisyComp", &log_comp, &y_ki2)];
+
+    let m_ki1 = get_builtin_model("one_site_fit_ki").unwrap();
+    let cfg_ki1 = cfg_rules(vec![
+        rule_hook(
+            "HotConc_nM",
+            HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-ki-cmp")), constant_name: "HotConc_nM".to_owned() },
+        ),
+        rule_hook("HotKd_nM", HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-ki-cmp")), constant_name: "HotKd_nM".to_owned() }),
+        rule_local_bounds("Bottom", Some(150.0), None, None),
+        rule_local_bounds("Top", Some(1200.0), None, None),
+        rule_local_bounds("LogKi", Some(-8.0), None, None),
+    ]);
+    let fit_ki1 = fit_nonlinear(m_ki1.as_ref(), &ds_ki, &hooks, &cfg_ki1).unwrap();
+    assert_converged(&fit_ki1, "noisy one_site_fit_ki");
+    assert_eq!(fit_ki1.df, 16);
+    assert_approx_eq(fit_ki1.rss, 183_251.254_502_846, 1e-2, 1e-6, "ki 1-site RSS");
+    assert_params_approx(
+        &fit_ki1,
+        0,
+        &[("Bottom", 204.582_944_222, 1e-3, 1e-5), ("Top", 1_110.753_613_781, 1e-3, 1e-5), ("LogKi", -7.559_837_051, 1e-4, 1e-5)],
+        "noisy ki1",
+    );
+
+    let m_ki2 = get_builtin_model("two_sites_fit_ki").unwrap();
+    let cfg_ki2 = SolverConfig {
+        parameter_rules: vec![
+            rule_hook("HotNM", HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-ki-cmp")), constant_name: "HotConc_nM".to_owned() }),
+            rule_hook(
+                "HotKdNMHi",
+                HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-ki-cmp")), constant_name: "HotKd_nM".to_owned() },
+            ),
+            rule_hook(
+                "HotKdNMLo",
+                HookSource::InfoConstant { info_sheet_id: Some(SheetId::new("info-ki-cmp")), constant_name: "HotKd_nM".to_owned() },
+            ),
+            rule_local_bounds("Bottom", Some(150.0), None, None),
+            rule_local_bounds("Top", Some(1200.0), None, None),
+            rule_local_bounds("FractionHi", Some(0.4), Some(0.0), Some(1.0)),
+            rule_local_bounds("LogKiHi", Some(-9.3), None, None),
+            rule_local_bounds("LogKiLo", Some(-6.7), None, None),
+        ],
+        max_iters: 2000,
+        ..SolverConfig::default()
+    };
+    let (fit_ki2, cmp_ki) = compare_models(
+        &fit_ki1,
+        m_ki2.as_ref(),
+        &ds_ki,
+        &hooks,
+        &cfg_ki2,
+        &ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: "two_sites_fit_ki".to_owned() },
+    )
+    .unwrap();
+    assert_converged(&fit_ki2, "noisy two_sites_fit_ki");
+    assert_eq!(fit_ki2.df, 14);
+    assert_approx_eq(fit_ki2.rss, 1_969.190_602_302, 1e-3, 1e-6, "ki 2-site RSS");
+    assert_params_approx(
+        &fit_ki2,
+        0,
+        &[
+            ("Bottom", 150.738_485_393, 1e-3, 1e-5),
+            ("Top", 1_201.229_445_293, 1e-3, 1e-5),
+            ("FractionHi", 0.419_486_178, 1e-4, 1e-5),
+            ("LogKiHi", -9.317_129_206, 1e-4, 1e-5),
+            ("LogKiLo", -6.703_582_882, 1e-4, 1e-5),
+        ],
+        "noisy ki2",
+    );
+    let ModelComparisonOutcome::ExtraSumOfSquaresF(f_ki) = cmp_ki else { panic!("expected ExtraSumOfSquaresF") };
+    assert_eq!((f_ki.df_num, f_ki.df_den), (2, 14));
+    assert_approx_eq(f_ki.f_stat, 644.414_230_812, 1e-3, 1e-6, "competition_ki F");
+    assert_approx_eq(f_ki.p_value, 1.654_571_679_759e-14, 1e-16, 1e-4, "competition_ki p");
+    assert!(f_ki.preferred_complex_model);
+
+    // 2. extra_ss_f & AICc on published NIST StRD `Rat43` (4PL `Bottom=0` vs 5PL `Bottom=0`)
+    let rat_x: Vec<f64> = (1..=15).map(|i| i as f64).collect();
+    let rat_y = [16.08, 33.83, 65.80, 97.20, 191.55, 326.20, 386.87, 520.53, 590.03, 651.92, 724.93, 699.56, 689.96, 637.56, 717.41];
+    let ds_rat = [series_xy(0, "NIST_Rat43", &rat_x, &rat_y)];
+    let m4pl = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let m5pl = get_builtin_model("log_agonist_vs_response_5pl").unwrap();
+    let cfg_r4 = cfg_rules(vec![
+        rule_const("Bottom", 0.0),
+        rule_local_bounds("Top", Some(700.0), Some(1.0), None),
+        rule_local_bounds("LogEC50", Some(6.5), None, None),
+        rule_local_bounds("HillSlope", Some(0.3), Some(1e-4), None),
+    ]);
+    let cfg_r5 = SolverConfig {
+        parameter_rules: vec![
+            rule_const("Bottom", 0.0),
+            rule_local_bounds("Top", Some(700.0), Some(1.0), None),
+            rule_local_bounds("LogEC50", Some(6.5), None, None),
+            rule_local_bounds("HillSlope", Some(0.4), Some(1e-4), None),
+            rule_local_bounds("S", Some(0.5), Some(1e-4), Some(100.0)),
+        ],
+        max_iters: 2000,
+        ..SolverConfig::default()
+    };
+    let fit_r4 = fit_with(m4pl.as_ref(), &ds_rat, &cfg_r4);
+    assert_converged(&fit_r4, "Rat43 4PL");
+    assert_eq!(fit_r4.df, 12);
+    assert_approx_eq(fit_r4.rss, 8_929.882_972_483, 1e-3, 1e-6, "Rat43 4PL RSS");
+    let (fit_r5, cmp_rat_f) = compare_models(
+        &fit_r4,
+        m5pl.as_ref(),
+        &ds_rat,
+        &HookContext::default(),
+        &cfg_r5,
+        &ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: "log_agonist_vs_response_5pl".to_owned() },
+    )
+    .unwrap();
+    assert_converged(&fit_r5, "Rat43 5PL");
+    assert_eq!(fit_r5.df, 11);
+    assert_approx_eq(fit_r5.rss, 8_786.404_907_967, 1e-3, 1e-6, "Rat43 5PL certified NIST RSS");
+    assert_params_approx(
+        &fit_r5,
+        0,
+        &[
+            ("Top", 699.641_490_690, 1e-2, 1e-5),
+            ("LogEC50", 6.478_769_090, 1e-4, 1e-5),
+            ("HillSlope", 0.329_902_985, 1e-4, 1e-4),
+            ("S", 0.781_708_516, 1e-3, 1e-4),
+        ],
+        "Rat43 5PL",
+    );
+    let ModelComparisonOutcome::ExtraSumOfSquaresF(f_rat) = cmp_rat_f else { panic!("expected ExtraSumOfSquaresF") };
+    assert_eq!((f_rat.df_num, f_rat.df_den), (1, 11));
+    assert_approx_eq(f_rat.f_stat, 0.179_625_082_865, 1e-5, 1e-5, "Rat43 4PL vs 5PL F");
+    assert_approx_eq(f_rat.p_value, 6.798_646_991_547e-1, 1e-5, 1e-5, "Rat43 4PL vs 5PL p");
+    assert!(!f_rat.preferred_complex_model);
+
+    let (_, cmp_rat_aicc) = compare_models(
+        &fit_r4,
+        m5pl.as_ref(),
+        &ds_rat,
+        &HookContext::default(),
+        &cfg_r5,
+        &ModelComparisonSpec::Aicc { alternative_equation_id: "log_agonist_vs_response_5pl".to_owned() },
+    )
+    .unwrap();
+    let ModelComparisonOutcome::Aicc(aicc_rat) = cmp_rat_aicc else { panic!("expected Aicc") };
+    assert_approx_eq(aicc_rat.aicc_a, 107.836_625_515, 1e-4, 1e-5, "Rat43 4PL AICc");
+    assert_approx_eq(aicc_rat.aicc_b, 112.260_327_286, 1e-4, 1e-5, "Rat43 5PL AICc");
+    assert_eq!(aicc_rat.preferred_index, 0);
+
+    // 3. Noisy global_shared 3-curve one_phase_decay vs independent fit (extra-SS F)
+    let t_gs: Vec<f64> = (0..=10).map(|i| i as f64 * 1.5).collect();
+    let n_gs = [0.4, -0.5, 0.3, -0.2, 0.4, -0.3, 0.2, -0.4, 0.3, -0.2, 0.0];
+    let curves_gs: Vec<DatasetSeries> = [130.0_f64, 85.0, 48.0]
+        .iter()
+        .enumerate()
+        .map(|(ds_i, &y0)| {
+            let y: Vec<f64> =
+                t_gs.iter().zip(n_gs).map(|(&ti, e)| 7.5 + (y0 - 7.5) * (-0.32 * ti).exp() + if ds_i % 2 == 0 { e } else { -e }).collect();
+            series_xy(ds_i, &format!("Curve{ds_i}"), &t_gs, &y)
+        })
+        .collect();
+    let m_dec = get_builtin_model("one_phase_decay").unwrap();
+    let cfg_sh = cfg_rules(vec![rule_local("Y0"), rule_shared("Plateau"), rule_shared_bounds("K", None, Some(1e-5), None)]);
+    let cfg_in = cfg_rules(vec![rule_local("Y0"), rule_local("Plateau"), rule_local_bounds("K", None, Some(1e-5), None)]);
+    let fit_gs_sh = fit_with(m_dec.as_ref(), &curves_gs, &cfg_sh);
+    let fit_gs_in = fit_with(m_dec.as_ref(), &curves_gs, &cfg_in);
+    assert_eq!((fit_gs_sh.df, fit_gs_in.df), (28, 24));
+    assert_approx_eq(fit_gs_sh.rss, 3.280_715_191_234, 1e-5, 1e-5, "global_shared RSS");
+    assert_approx_eq(fit_gs_in.rss, 3.178_629_705_770, 1e-5, 1e-5, "independent 3-curve RSS");
+    assert_approx_eq(find_param_ds(&fit_gs_sh, 0, "Plateau").estimate, 7.502_877_898_205, 1e-5, 1e-5, "shared Plateau est");
+    assert_approx_eq(find_param_ds(&fit_gs_sh, 0, "Plateau").se, 0.104_097_539_444, 1e-4, 1e-4, "shared Plateau SE");
+    assert_approx_eq(find_param_ds(&fit_gs_sh, 0, "K").estimate, 0.320_410_639_003, 1e-6, 1e-5, "shared K est");
+    assert_approx_eq(find_param_ds(&fit_gs_sh, 0, "K").se, 0.001_635_913_587, 1e-5, 1e-4, "shared K SE");
+    let f_gs = compare_models_f_test(fit_gs_sh.rss, fit_gs_sh.df, fit_gs_in.rss, fit_gs_in.df, 0.05).unwrap();
+    assert_eq!((f_gs.df_num, f_gs.df_den), (4, 24));
+    assert_approx_eq(f_gs.f_stat, 0.192_697_158_676, 1e-5, 1e-5, "global_shared vs indep F");
+    assert_approx_eq(f_gs.p_value, 9.398_414_473_949e-1, 1e-5, 1e-5, "global_shared vs indep p");
+    assert!(!f_gs.preferred_complex_model);
+
+    // 4. Noisy 4-curve Gaddum/Schild (`SchildSlope = 1` vs `SchildSlope` free) extra-SS F
+    let log_ag: Vec<f64> = (-20..=-7).map(|i| i as f64 * 0.5).collect();
+    let ant_c = [0.0_f64, 1e-8, 1e-7, 1e-6];
+    let base_sh_e = [0.7, -0.6, 0.5, -0.8, 0.6, -0.5, 0.8, -0.7, 0.4, -0.6, 0.5, -0.4, 0.6, -0.5];
+    let sh_scales = [1.0, -1.0, 0.9, -0.8];
+    let sh_cols: Vec<Vec<f64>> = ant_c
+        .iter()
+        .zip(sh_scales)
+        .map(|(&b, sc)| {
+            let log_dr = if b > 0.0 { (1.0 + (b * 10_f64.powf(8.2)).powf(1.35)).log10() } else { 0.0 };
+            log_ag.iter().zip(base_sh_e).map(|(&x, e)| 8.0 + 94.0 / (1.0 + 10_f64.powf((-7.8 + log_dr - x) * 1.15)) + e * sc).collect()
+        })
+        .collect();
+    let ant_labels = ["0.0 M", "1e-8 M", "1e-7 M", "1e-6 M"];
+    let ds_sh: Vec<DatasetSeries> = ant_labels.iter().enumerate().map(|(i, lbl)| series_xy(i, lbl, &log_ag, &sh_cols[i])).collect();
+    let m_sh = get_builtin_model("ec50_shift_gaddum_schild").unwrap();
+    let common_sh_rules = |schild_rule: ParameterRule| SolverConfig {
+        parameter_rules: vec![
+            rule_shared_bounds("Bottom", Some(8.0), None, None),
+            rule_shared_bounds("Top", Some(102.0), None, None),
+            rule_shared_bounds("LogEC50", Some(-7.8), None, None),
+            rule_shared_bounds("HillSlope", Some(1.15), Some(0.1), Some(5.0)),
+            rule_shared_bounds("pA2", Some(8.2), None, None),
+            schild_rule,
+            ParameterRule {
+                name: "AntagConc".to_owned(),
+                scope: ParameterScope::ColumnTitleConstant,
+                initial_override: None,
+                lower_bound: None,
+                upper_bound: None,
+            },
+        ],
+        max_iters: 2000,
+        ..SolverConfig::default()
+    };
+    let fit_sh_u = fit_nonlinear(m_sh.as_ref(), &ds_sh, &HookContext::default(), &common_sh_rules(rule_const("SchildSlope", 1.0))).unwrap();
+    let fit_sh_f = fit_nonlinear(
+        m_sh.as_ref(),
+        &ds_sh,
+        &HookContext::default(),
+        &common_sh_rules(rule_shared_bounds("SchildSlope", Some(1.3), Some(0.1), Some(5.0))),
+    )
+    .unwrap();
+    assert_eq!((fit_sh_u.df, fit_sh_f.df), (51, 50));
+    assert_approx_eq(fit_sh_u.rss, 1_366.052_589_841, 1e-3, 1e-6, "Schild unity RSS");
+    assert_approx_eq(fit_sh_f.rss, 17.285_707_497, 1e-4, 1e-6, "Schild free RSS");
+    assert_params_approx(
+        &fit_sh_f,
+        0,
+        &[
+            ("Bottom", 8.011_371_571, 1e-4, 1e-5),
+            ("Top", 102.012_617_038, 1e-4, 1e-5),
+            ("LogEC50", -7.800_110_032, 1e-4, 1e-5),
+            ("HillSlope", 1.149_334_757, 1e-4, 1e-5),
+            ("pA2", 8.202_020_076, 1e-4, 1e-5),
+            ("SchildSlope", 1.349_104_812, 1e-4, 1e-5),
+        ],
+        "noisy Schild free",
+    );
+    let f_sh = compare_models_f_test(fit_sh_u.rss, fit_sh_u.df, fit_sh_f.rss, fit_sh_f.df, 0.05).unwrap();
+    assert_eq!((f_sh.df_num, f_sh.df_den), (1, 50));
+    assert_approx_eq(f_sh.f_stat, 3_901.393_340_638, 1e-2, 1e-5, "Schild unity vs free F");
+    assert_approx_eq(f_sh.p_value, 4.059_154_105_024e-49, 1e-51, 1e-4, "Schild unity vs free p");
+    assert!(f_sh.preferred_complex_model);
 }

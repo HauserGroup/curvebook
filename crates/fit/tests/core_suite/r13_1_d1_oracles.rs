@@ -144,6 +144,155 @@ fn r13_1_4pl_replicate_rout_outlier_and_inverse_ci_r_oracle() {
 }
 
 #[test]
+fn r13_1_4pl_inverse_interpolation_uniroot_edge_cases_r_oracle() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::nls` + `stats::uniroot` delta-method band crossing
+    // (`crates/fit/tests/reference/d1_extended_fit_oracles.R`, 2026-11-27).
+    // Covers: near-top-plateau asymmetric CI / half-open PI & CI, near-bottom-plateau open lower CI/PI,
+    // out-of-X-range extrapolation notes, AboveTopPlateau / BelowBottomPlateau NaN + open bounds,
+    // and decreasing 4PL inhibitor (`log_inhibitor_vs_response_4pl`).
+    let mut xy = XyTable::new(SubcolumnMode::RawReplicates(3), 1, 15).unwrap();
+    let xs = [-9.0, -8.0, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+    let noise_mat = [
+        [-0.6, 0.2, 0.4],
+        [0.5, -0.4, -0.1],
+        [-0.3, 0.5, -0.2],
+        [0.4, 120.0, -0.3], // eliminated by ROUT Q=1%
+        [-0.5, 0.3, 0.2],
+        [0.3, -0.5, 0.2],
+        [-0.2, 0.4, -0.2],
+        [0.4, -0.3, -0.1],
+    ];
+    for (row, &x) in xs.iter().enumerate() {
+        xy.set_x_cell(row, Cell::number(x)).unwrap();
+        let y0 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.2 - x) * 1.1));
+        for (subcol, &eps) in noise_mat[row].iter().enumerate() {
+            xy.data_sets[0].cells[row][subcol] = Cell::number(y0 + eps);
+        }
+    }
+    // 7 single-replicate edge-case unknown rows (rows 8..15):
+    let edge_ys = [99.20, 99.65, 99.90, 10.30, 10.05, 105.0, 5.0];
+    for (k, &yv) in edge_ys.iter().enumerate() {
+        xy.data_sets[0].cells[8 + k][0] = Cell::number(yv);
+    }
+    let sheet = DataSheet::new("assay-edge", "4PL Edge Assay", TableArchetype::Xy(xy)).unwrap();
+    let mut nl = nl_fast("log_agonist_vs_response_4pl");
+    nl.method = FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 };
+    nl.interpolate_unknowns = true;
+    let res = exec_nl(&sheet, nl);
+    assert_eq!(res.status, ResultStatus::UpToDate);
+
+    let tab = find_tab(&res, "nonlinear_interpolated_replicates");
+    assert_eq!(tab.rows.len(), edge_ys.len());
+
+    let assert_bound = |cell: &curvebook_doc::ResultCell, exp_lo: Option<f64>, exp_hi: Option<f64>, tol: f64, lbl: &str| match cell {
+        curvebook_doc::ResultCell::ConfidenceInterval { lower, upper } => {
+            match (lower, exp_lo) {
+                (curvebook_doc::CiBound::Finite(a), Some(e)) => assert_close(*a, e, tol, &format!("{lbl} lo")),
+                (curvebook_doc::CiBound::Open, None) => {}
+                other => panic!("{lbl} lo mismatch: {other:?}"),
+            }
+            match (upper, exp_hi) {
+                (curvebook_doc::CiBound::Finite(a), Some(e)) => assert_close(*a, e, tol, &format!("{lbl} hi")),
+                (curvebook_doc::CiBound::Open, None) => {}
+                other => panic!("{lbl} hi mismatch: {other:?}"),
+            }
+        }
+        other => panic!("{lbl}: expected ConfidenceInterval cell, got {other:?}"),
+    };
+    let has_footnote_for = |row_1based: usize, needle: &str| -> bool {
+        let prefix = format!("row {row_1based}, replicate 1");
+        tab.footnotes.iter().any(|f| f.contains(&prefix) && f.contains(needle))
+    };
+
+    // Row 0: Y = 99.20 -> in-range, strongly asymmetric finite CI, half-open upper PI.
+    assert_close(cell_num(&tab.rows[0][1]), -4.339_099_565_047, 5e-5, "y=99.20 x_hat");
+    assert_bound(&tab.rows[0][2], Some(-4.482_046_856_425), Some(-4.084_167_824_457), 5e-4, "y=99.20 CI");
+    assert_bound(&tab.rows[0][3], Some(-4.634_604_462_587), None, 5e-4, "y=99.20 PI");
+
+    // Row 1: Y = 99.65 -> in-range near top plateau, half-open upper CI & PI.
+    assert_close(cell_num(&tab.rows[1][1]), -4.012_029_004_208, 1e-4, "y=99.65 x_hat");
+    assert_bound(&tab.rows[1][2], Some(-4.294_086_736_996), None, 5e-4, "y=99.65 CI");
+    assert_bound(&tab.rows[1][3], Some(-4.511_221_542_098), None, 5e-4, "y=99.65 PI");
+
+    // Row 2 (table row 11): Y = 99.90 -> extrapolated ABOVE measured X range [-9, -4], half-open upper CI & PI.
+    assert_close(cell_num(&tab.rows[2][1]), -3.522_673_462_472, 5e-4, "y=99.90 x_hat");
+    assert_bound(&tab.rows[2][2], Some(-4.133_825_384_196), None, 5e-4, "y=99.90 CI");
+    assert_bound(&tab.rows[2][3], Some(-4.422_293_522_654), None, 5e-4, "y=99.90 PI");
+    assert!(has_footnote_for(11, "Extrapolated above"), "expected above-range footnote, got {:?}", tab.footnotes);
+
+    // Row 3 (table row 12): Y = 10.30 -> near bottom plateau, half-open lower CI & PI.
+    assert_close(cell_num(&tab.rows[3][1]), -8.445_753_413_592, 1e-4, "y=10.30 x_hat");
+    assert_bound(&tab.rows[3][2], None, Some(-8.164_160_662_917), 5e-4, "y=10.30 CI");
+    assert_bound(&tab.rows[3][3], None, Some(-7.910_580_359_981), 5e-4, "y=10.30 PI");
+
+    // Row 4 (table row 13): Y = 10.05 -> extrapolated BELOW measured X range [-9, -4], half-open lower CI & PI.
+    assert_close(cell_num(&tab.rows[4][1]), -9.122_781_169_738, 5e-4, "y=10.05 x_hat");
+    assert_bound(&tab.rows[4][2], None, Some(-8.358_646_195_336), 5e-4, "y=10.05 CI");
+    assert_bound(&tab.rows[4][3], None, Some(-8.005_515_653_211), 5e-4, "y=10.05 PI");
+    assert!(has_footnote_for(13, "Extrapolated below"), "expected below-range footnote, got {:?}", tab.footnotes);
+
+    // Row 5 & 6 (table rows 14 & 15): AboveTopPlateau (105.0) and BelowBottomPlateau (5.0) -> Empty/NaN estimate, Unavailable CI/PI, explicit footnote tag.
+    for (row_idx, row_1based, expected_tag) in [(5, 14, "AboveTopPlateau"), (6, 15, "BelowBottomPlateau")] {
+        assert!(
+            matches!(tab.rows[row_idx][1], curvebook_doc::ResultCell::Empty)
+                || matches!(tab.rows[row_idx][1], curvebook_doc::ResultCell::Number { value, .. } if value.is_nan()),
+            "plateau violation row {row_idx} must not emit finite X_hat: {:?}",
+            tab.rows[row_idx][1]
+        );
+        for col_idx in [2, 3] {
+            assert!(
+                matches!(
+                    tab.rows[row_idx][col_idx],
+                    curvebook_doc::ResultCell::ConfidenceInterval {
+                        lower: curvebook_doc::CiBound::Unavailable,
+                        upper: curvebook_doc::CiBound::Unavailable
+                    }
+                ),
+                "{expected_tag} col {col_idx} expected Unavailable bounds, got {:?}",
+                tab.rows[row_idx][col_idx]
+            );
+        }
+        assert!(has_footnote_for(row_1based, expected_tag), "expected {expected_tag} footnote, got {:?}", tab.footnotes);
+    }
+
+    // Decreasing 4PL inhibitor (`log_inhibitor_vs_response_4pl`) interior + near-top open-lower CI/PI.
+    let x_inh = [-10.0, -9.5, -9.0, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+    let e_inh = [0.4, -0.5, 0.3, -0.4, 0.5, -0.6, 0.4, -0.5, 0.6, -0.3, 0.4, -0.3];
+    let mut xy_inh = XyTable::new(SubcolumnMode::Single, 1, 14).unwrap();
+    for (r, (&x, &e)) in x_inh.iter().zip(e_inh.iter()).enumerate() {
+        xy_inh.set_x_cell(r, Cell::number(x)).unwrap();
+        let y = 12.0 + 86.0 / (1.0 + 10.0_f64.powf((x - (-7.1)) * 1.25)) + e;
+        xy_inh.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    xy_inh.data_sets[0].cells[12][0] = Cell::number(55.0);
+    xy_inh.data_sets[0].cells[13][0] = Cell::number(97.5);
+    let sheet_inh = DataSheet::new("inh-edge", "4PL Inhibitor Edge", TableArchetype::Xy(xy_inh)).unwrap();
+    let mut nl_inh = nl_fast("log_inhibitor_vs_response_4pl");
+    nl_inh.interpolate_unknowns = true;
+    let res_inh = exec_nl(&sheet_inh, nl_inh);
+    let itab = find_tab(&res_inh, "nonlinear_interpolated");
+    assert_eq!(itab.rows.len(), 2);
+    assert_close(cell_num(&itab.rows[0][1]), -7.101_152_635_291, 5e-5, "inhibitor y=55 x_hat");
+    assert_ci_cell(&itab.rows[0][2], (-7.116_464_093_482, -7.085_836_329_347), 1e-4, 0.0, "inhibitor y=55 CI");
+    assert_ci_cell(&itab.rows[0][3], (-7.126_587_381_108, -7.075_712_490_529), 1e-4, 0.0, "inhibitor y=55 PI");
+    assert_close(cell_num(&itab.rows[1][1]), -8.872_878_166_856, 2e-4, "inhibitor y=97.5 x_hat");
+    match (&itab.rows[1][2], &itab.rows[1][3]) {
+        (
+            curvebook_doc::ResultCell::ConfidenceInterval { lower: ci_l, upper: ci_u },
+            curvebook_doc::ResultCell::ConfidenceInterval { lower: pi_l, upper: pi_u },
+        ) => {
+            assert_eq!(*ci_l, curvebook_doc::CiBound::Open, "inhibitor y=97.5 CI lo must be Open");
+            assert_eq!(*pi_l, curvebook_doc::CiBound::Open, "inhibitor y=97.5 PI lo must be Open");
+            let curvebook_doc::CiBound::Finite(ch) = *ci_u else { panic!("expected finite CI hi") };
+            let curvebook_doc::CiBound::Finite(ph) = *pi_u else { panic!("expected finite PI hi") };
+            assert_close(ch, -8.619_654_796_886, 5e-4, "inhibitor y=97.5 CI hi");
+            assert_close(ph, -8.424_767_902_800, 5e-4, "inhibitor y=97.5 PI hi");
+        }
+        other => panic!("expected CI/PI cells for inhibitor y=97.5, got {other:?}"),
+    }
+}
+
+#[test]
 fn r13_1_sparse_4pl_identifiability_recovery_r_oracle() {
     let xa = [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0];
     let ya = [0.6, 2.8, 22.1, 74.5, 96.2, 99.7];

@@ -607,19 +607,30 @@ fn r35_4_anova_effect_sizes_multiway_cohens_f_inf_and_kw_eps2() {
     assert!(multi.eta_squared_ci.is_none(), "multi-way eta_squared_ci must be None, got {:?}", multi.eta_squared_ci);
     assert!(multi.partial_eta_squared_ci.is_none(), "6-arg multi-way partial_eta_squared_ci without N must be None");
 
-    // With explicit `total_n` (`compute_anova_effect_sizes_for_n`), Steiger (2004) partial-eta^2 CI uses true N,
-    // not `df1 + df2 + 1 = 27`, while keeping `eta_squared_ci = None` for multi-way designs.
+    // With explicit `total_n` (`compute_anova_effect_sizes_for_n`), Steiger (2004, Eq. 16) noncentral-F CI
+    // uses true N (not `df1 + df2 + 1 = 27`), while keeping `eta_squared_ci = None` for multi-way designs.
+    // D1 Provenance: R 4.5.2 (2025-10-31) `stats::pf(5.0, 2, 24, ncp = ...)` + `uniroot`
+    // (`crates/stats/tests/reference/stats_extended_oracles.R`, 2026-11-27):
+    //   ncp_95 = [0.333956831416, 26.719969435289], omega^2 = 0.131147540984, partial_eta^2 = 0.294117647059.
     let multi_n30 = compute_anova_effect_sizes_for_n(25.0, 60.0, 150.0, 2.0, 24.0, 30, ConfidenceLevel::DEFAULT_95);
     assert!(multi_n30.eta_squared_ci.is_none());
+    assert_approx_eq(multi_n30.omega_squared, 0.131_147_540_984, 1e-10, 1e-10, "Steiger N=30 omega^2");
     let (p_lo30, p_hi30) = multi_n30.partial_eta_squared_ci.unwrap();
-    assert_approx_eq(p_lo30, 0.011_009_188_030_756, 1e-6, 5e-5, "Steiger N=30 lo");
-    assert_approx_eq(p_hi30, 0.471_085_759_284_659, 1e-6, 5e-5, "Steiger N=30 hi");
+    assert_approx_eq(p_lo30, 0.011_009_339_575, 1e-6, 5e-5, "Steiger N=30 partial_eta^2 CI lo");
+    assert_approx_eq(p_hi30, 0.471_085_751_655, 1e-6, 5e-5, "Steiger N=30 partial_eta^2 CI hi");
+    let (f_lo30, f_hi30) = multi_n30.cohens_f_ci.unwrap();
+    assert_approx_eq(f_lo30, 0.105_507_792_985, 1e-5, 5e-5, "Steiger N=30 Cohen's f CI lo");
+    assert_approx_eq(f_hi30, 0.943_750_839_916, 1e-5, 5e-5, "Steiger N=30 Cohen's f CI hi");
 
     let multi_n36 = compute_anova_effect_sizes_for_n(25.0, 60.0, 150.0, 2.0, 24.0, 36, ConfidenceLevel::DEFAULT_95);
     assert!(multi_n36.eta_squared_ci.is_none());
+    assert_approx_eq(multi_n36.omega_squared, 0.131_147_540_984, 1e-10, 1e-10, "Steiger N=36 omega^2");
     let (p_lo36, p_hi36) = multi_n36.partial_eta_squared_ci.unwrap();
-    assert_approx_eq(p_lo36, 0.009_191_314_696_754_7, 1e-6, 5e-5, "Steiger N=36 lo");
-    assert_approx_eq(p_hi36, 0.426_020_128_451_388, 1e-6, 5e-5, "Steiger N=36 hi");
+    assert_approx_eq(p_lo36, 0.009_191_314_697, 1e-6, 5e-5, "Steiger N=36 partial_eta^2 CI lo");
+    assert_approx_eq(p_hi36, 0.426_020_128_451, 1e-6, 5e-5, "Steiger N=36 partial_eta^2 CI hi");
+    let (f_lo36, f_hi36) = multi_n36.cohens_f_ci.unwrap();
+    assert_approx_eq(f_lo36, 0.096_314_997_017, 1e-5, 5e-5, "Steiger N=36 Cohen's f CI lo");
+    assert_approx_eq(f_hi36, 0.861_522_706_144, 1e-5, 5e-5, "Steiger N=36 Cohen's f CI hi");
 
     // 2. Cohen's f when partial_eta^2 == 1.0 (SS_error == 0, SS_effect > 0) must be +infinity, not 0.0.
     let perfect = compute_anova_effect_sizes(40.0, 0.0, 40.0, 2.0, 15.0, ConfidenceLevel::DEFAULT_95);

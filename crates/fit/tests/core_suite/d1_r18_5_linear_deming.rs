@@ -293,3 +293,51 @@ fn d1_r18_5_duplicate_pair_repeatability_sd_matches_r_4_5_2() {
     let big = duplicate_pair_repeatability_sd(&[(1e200, 1e200 + 2e190), (0.0, 2e190)]).unwrap();
     assert!(big.is_finite() && big > 0.0);
 }
+
+#[test]
+fn d1_compare_linear_lines_ancova_matches_r_4_5_2_lm_anova() {
+    // D1 Provenance: R 4.5.2 (2025-10-31) `anova(lm(y ~ x + g), lm(y ~ x * g))`,
+    // `anova(lm(y ~ x), lm(y ~ x + g))`, and `anova(lm(y ~ 0 + x), lm(y ~ 0 + x:g))`
+    // (`crates/fit/tests/reference/d1_extended_fit_oracles.R`, 2026-11-27).
+    let x1 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+    let x2 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
+    let x3 = [2.0, 3.0, 4.0, 5.0, 6.0];
+
+    // 1. 3 groups with significantly different slopes -> elevations test omitted (None).
+    let g1 = xy_pts(&x1, &[3.1, 4.9, 7.2, 9.0, 11.3, 12.9]);
+    let g2 = xy_pts(&x2, &[5.2, 8.1, 10.8, 14.1, 17.0, 19.8, 23.2]);
+    let g3 = xy_pts(&x3, &[4.5, 5.9, 7.4, 8.8, 10.4]);
+    let cmp_diff = compare_linear_lines(&[&g1, &g2, &g3], false).unwrap();
+    assert!(cmp_diff.slopes_significantly_different);
+    assert_eq!(cmp_diff.df_slopes, (2, 12));
+    assert_approx_eq(cmp_diff.f_slopes, 403.724_135_945_412, 1e-9, 1e-10, "ANCOVA diff slopes F");
+    assert_approx_eq(cmp_diff.p_slopes, 9.861_845_946_873e-12, 1e-15, 1e-8, "ANCOVA diff slopes p");
+    assert!(cmp_diff.f_intercepts.is_none() && cmp_diff.p_intercepts.is_none());
+
+    // 2. 3 parallel groups with different elevations -> slopes NS, elevations highly significant.
+    let p1 = xy_pts(&x1, &[2.2, 4.0, 6.1, 7.9, 10.2, 11.9]);
+    let p2 = xy_pts(&x2, &[5.1, 7.2, 9.0, 11.3, 13.0, 15.1, 17.2]);
+    let p3 = xy_pts(&x3, &[8.8, 10.9, 12.7, 14.9, 16.8]);
+    let cmp_par = compare_linear_lines(&[&p1, &p2, &p3], false).unwrap();
+    assert!(!cmp_par.slopes_significantly_different);
+    assert_eq!(cmp_par.df_slopes, (2, 12));
+    assert_approx_eq(cmp_par.f_slopes, 0.467_400_999_409, 1e-10, 1e-10, "ANCOVA parallel slopes F");
+    assert_approx_eq(cmp_par.p_slopes, 6.375_713_095_968e-1, 1e-10, 1e-10, "ANCOVA parallel slopes p");
+    assert_eq!(cmp_par.df_intercepts, Some((2, 14)));
+    assert_approx_eq(cmp_par.f_intercepts.unwrap(), 2_339.131_065_396_016, 1e-8, 1e-10, "ANCOVA parallel elev F");
+    assert_approx_eq(cmp_par.p_intercepts.unwrap(), 2.104_846_305_576e-18, 1e-22, 1e-7, "ANCOVA parallel elev p");
+    assert_eq!(cmp_par.intercepts_significantly_different, Some(true));
+    assert_approx_eq(cmp_par.pooled_slope, 1.991_891_891_892, 1e-11, 1e-11, "ANCOVA pooled slope");
+
+    // 3. Forced through origin (3 groups): `anova(lm(y ~ 0 + x), lm(y ~ 0 + x:g))`
+    let o1 = xy_pts(&x1, &[2.1, 3.9, 6.2, 8.0, 10.1, 11.8]);
+    let o2 = xy_pts(&x2, &[2.8, 5.7, 8.4, 11.3, 14.1, 16.8, 19.7]);
+    let o3 = xy_pts(&x3, &[3.0, 4.6, 6.1, 7.4, 9.1]);
+    let cmp_orig = compare_linear_lines(&[&o1, &o2, &o3], true).unwrap();
+    assert!(cmp_orig.slopes_significantly_different);
+    assert_eq!(cmp_orig.df_slopes, (2, 15));
+    assert_approx_eq(cmp_orig.f_slopes, 4_670.547_402_514_94, 1e-8, 1e-10, "ANCOVA origin slopes F");
+    assert_approx_eq(cmp_orig.p_slopes, 1.090_121_334_062e-21, 1e-25, 1e-7, "ANCOVA origin slopes p");
+    assert_approx_eq(cmp_orig.pooled_slope, 2.216_199_376_947, 1e-11, 1e-11, "ANCOVA origin pooled slope");
+    assert!(cmp_orig.f_intercepts.is_none());
+}

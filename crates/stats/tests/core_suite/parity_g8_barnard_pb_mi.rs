@@ -5,10 +5,14 @@
 //!
 //! Reference provenance (clean-room Decision D1):
 //! - Suissa, S., & Shuster, J. J. (1985), *Journal of the Royal Statistical Society: Series A*, 148(4), 317–327
-//!   (exact 2x2 combinatorial sums over S = s verified in Python 3.13 stdlib `math` 2026-11-13).
+//!   (exact 2x2 unconditional nuisance maximization independently verified in both `R 4.5.2 (2025-10-31)`
+//!   `stats::dbinom` + `stats::optimize` via `crates/stats/tests/reference/stats_extended_oracles.R` 2026-11-27
+//!   and Python 3.13 stdlib `math` 2026-11-13).
 //! - Boschloo (1970); Barnard (1945/1947) CSM convexity-symmetry-maximum ordering.
 //! - Passing, H., & Bablok, W. (1983), *Journal of Clinical Chemistry and Clinical Biochemistry*, 21(11), 709–720
-//!   (rank CIs and CUSUM Kolmogorov supremum test; exact slope/CI/CUSUM benchmark verified in Python 3.13 stdlib 2026-11-13).
+//!   (rank CIs, `K` shift offset, and CUSUM Kolmogorov supremum test independently verified in both
+//!   `R 4.5.2 (2025-10-31)` via `crates/stats/tests/reference/stats_extended_oracles.R` 2026-11-27 and
+//!   Python 3.13 stdlib 2026-11-13).
 //! - Rubin, D. B. (1987), *Multiple Imputation for Nonresponse in Surveys*; Barnard, J., & Rubin, D. B. (1999), *Biometrika*, 86(4), 948–955;
 //!   van Buuren, S. & Groothuis-Oudshoorn, K. (2011), *Journal of Statistical Software*, 45(3), 1–67
 //!   (Rubin/Barnard-Rubin *t*/df/CI oracle verified in R 4.5.2 `pt`/`qt` 2026-11-13).
@@ -161,6 +165,24 @@ fn passing_bablok_k_offset_symmetry_permutation_and_nonlinear_cusum() {
     assert_approx_eq(pb_quad.cusum_statistic, 9.0 / 36.0_f64.sqrt(), 1e-9, 1e-9, "quadratic CUSUM statistic H / sqrt(L + l)");
     assert_approx_eq(pb_quad.cusum_p_value, 0.022_217_962_616_525_1, 1e-9, 1e-9, "quadratic CUSUM P");
     assert!(pb_quad.cusum_p_value < 0.05 && !pb_quad.linearity_passed);
+
+    // D1 Provenance: R 4.5.2 (2025-10-31) Passing & Bablok (1983) non-zero K = 1 offset oracle
+    // (`crates/stats/tests/reference/stats_extended_oracles.R`, 2026-11-27).
+    let pb_kpos = passing_bablok_regression(
+        &[1.0, 2.0, 3.0, 4.5, 5.0, 6.0, 7.5, 9.0, 11.0, 13.0],
+        &[2.1, 4.5, 5.8, 11.2, 9.0, 12.4, 15.1, 18.3, 22.5, 26.2],
+        conf,
+    )
+    .unwrap();
+    assert_eq!((pb_kpos.n, pb_kpos.valid_slopes, pb_kpos.k_offset), (10, 45, 1));
+    assert_approx_eq(pb_kpos.slope, 2.018_181_818_182, 1e-11, 1e-11, "PB_Kpos slope");
+    assert_approx_eq(pb_kpos.slope_ci.0, 1.85, 1e-11, 1e-11, "PB_Kpos slope CI lo");
+    assert_approx_eq(pb_kpos.slope_ci.1, 2.133_333_333_333, 1e-11, 1e-11, "PB_Kpos slope CI hi");
+    assert_approx_eq(pb_kpos.intercept, 0.109_090_909_091, 1e-11, 1e-11, "PB_Kpos intercept");
+    assert_approx_eq(pb_kpos.intercept_ci.0, -0.75, 1e-10, 1e-10, "PB_Kpos intercept CI lo");
+    assert_approx_eq(pb_kpos.intercept_ci.1, 1.262_5, 1e-10, 1e-10, "PB_Kpos intercept CI hi");
+    assert_approx_eq(pb_kpos.cusum_h, 2.0, 1e-11, 1e-11, "PB_Kpos CUSUM H");
+    assert_approx_eq(pb_kpos.cusum_p_value, 0.818_621_174_471, 1e-9, 1e-9, "PB_Kpos CUSUM P");
 
     assert!(passing_bablok_regression(&[1.0, 2.0], &[3.0, 4.0], conf).is_err());
     assert!(passing_bablok_regression(&[1.0, 2.0, 3.0], &[1.0, f64::NAN, 3.0], conf).is_err());

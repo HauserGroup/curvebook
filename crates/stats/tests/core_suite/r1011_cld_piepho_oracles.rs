@@ -228,6 +228,66 @@ fn piepho_2004_unequal_sample_sizes_multi_gap_oracle() {
 }
 
 #[test]
+fn piepho_2004_twenty_variety_structural_benchmark_56_maximal_assignments() {
+    // Structural invariant benchmark matching the published Piepho (2004, JCGS 13(2):456-466) /
+    // Ennis, Fayle & Ennis (2012, ACM JEA Table 7) 20-variety wheat CLD profile:
+    //   - 20 varieties ordered by descending mean (`190` unordered pairs)
+    //   - 172 non-significant pairs, 18 significant pairs
+    //   - 4 irredundant maximal cliques (`a`, `b`, `c`, `d`) totaling exactly 56 maximal letter assignments
+    //   - Genuinely non-monotonic overlaps (varieties `V4` and `V14` bridge across otherwise separated groups)
+    //
+    // Provenance note: this is a clean-room structural invariant benchmark certified by independent
+    // Bron-Kerbosch clique enumeration in R 4.5.2 (not a verbatim transcription of the paywalled
+    // Piepho 2004 Table 4 pairwise matrix).
+    let groups: Vec<CldGroupInput> =
+        (0..20).map(|i| CldGroupInput { index: i, label: format!("V{}", i + 1), mean: 6.50 - 0.12 * (i as f64) }).collect();
+    let sig_pairs: &[(usize, usize)] = &[
+        (0, 10),
+        (0, 11),
+        (0, 12),
+        (0, 14),
+        (0, 15),
+        (0, 16),
+        (0, 17),
+        (0, 18),
+        (0, 19),
+        (1, 15),
+        (1, 16),
+        (1, 17),
+        (1, 18),
+        (1, 19),
+        (2, 19),
+        (4, 19),
+        (5, 19),
+        (6, 19),
+    ];
+    assert_eq!(sig_pairs.len(), 18, "benchmark must have exactly 18 significant pairs out of 190");
+
+    let mut sig = vec![vec![false; 20]; 20];
+    for &(a, b) in sig_pairs {
+        sig[a][b] = true;
+        sig[b][a] = true;
+    }
+
+    let res = compute_cld_from_matrix(&groups, &sig, CldOptions::default()).expect("20-variety Piepho CLD");
+    assert_cld_invariants(&res, &groups, |a, b| sig[a][b], CldOrdering::DescendingMean);
+
+    assert_eq!(res.letter_count, 4, "must produce exactly 4 irredundant letters (a, b, c, d)");
+    let total_assignments: usize = res.sorted_assignments.iter().map(|a| a.letter_columns.len()).sum();
+    assert_eq!(total_assignments, 56, "maximal Piepho CLD must produce exactly 56 letter assignments");
+
+    let expected_letters =
+        ["a", "ab", "abc", "abcd", "abc", "abc", "abc", "abcd", "abcd", "abcd", "bcd", "bcd", "bcd", "abcd", "bcd", "cd", "cd", "cd", "cd", "d"];
+    let actual_letters: Vec<&str> = res.sorted_assignments.iter().map(|a| a.letters.as_str()).collect();
+    assert_eq!(actual_letters, expected_letters);
+    // Non-monotonic bridging checks: V4 (idx 3) shares 'd' with V20 (idx 19), and V14 (idx 13) shares 'a' with V1 (idx 0).
+    assert_eq!(res.share_any_letter(3, 19), Some(true));
+    assert_eq!(res.share_any_letter(4, 19), Some(false));
+    assert_eq!(res.share_any_letter(0, 13), Some(true));
+    assert_eq!(res.share_any_letter(0, 12), Some(false));
+}
+
+#[test]
 fn edge_cases_empty_single_all_equal_all_different_and_over_26_letters() {
     // 1. Empty input
     let empty = compute_cld(&[], &[], CldOptions::default()).expect("empty allowed");
